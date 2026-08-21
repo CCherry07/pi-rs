@@ -1,0 +1,367 @@
+use async_trait::async_trait;
+use pi_agent::AgentOptions;
+use pi_core::{ModelId, ProviderId};
+use pi_plugin_bash::BashPlugin;
+use pi_plugin_edit::EditPlugin;
+use pi_plugin_find::FindPlugin;
+use pi_plugin_grep::GrepPlugin;
+use pi_plugin_hashline_edit::HashlineEditPlugin;
+use pi_plugin_ls::LsPlugin;
+use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
+use pi_plugin_openai::{OpenAiCompatibleConfig, OpenAiCompatiblePlugin};
+use pi_plugin_read::ReadPlugin;
+use pi_plugin_skills::{SkillLoaderOptions, SkillsPlugin};
+use pi_plugin_write::WritePlugin;
+use pi_resources::ResourceLoaderOptions;
+use pi_runtime::{PiRuntime, RuntimeError, SystemPrompt};
+use pi_session::{
+    AgentSession, AgentSessionOptions, AgentSessionRuntimeFactory, AgentSessionRuntimeRequest,
+    AgentSessionRuntimeTarget, InitialModelRequest, ModelRuntimeServices, PluginBundle,
+    PluginBundleSet, PluginManifest, PreparedAgentSession, SessionError,
+};
+
+use crate::config::AppConfig;
+use crate::project_trust::ProjectTrustService;
+
+#[derive(Clone)]
+pub struct AppSessionFactory {
+    config: AppConfig,
+    project_trust: ProjectTrustService,
+}
+
+impl AppSessionFactory {
+    pub fn new(config: AppConfig, project_trust: ProjectTrustService) -> Self {
+        Self {
+            config,
+            project_trust,
+        }
+    }
+}
+
+#[async_trait]
+impl AgentSessionRuntimeFactory for AppSessionFactory {
+    async fn prepare(
+        &self,
+        request: AgentSessionRuntimeRequest,
+    ) -> Result<PreparedAgentSession, SessionError> {
+        let (path, create, cwd, reused_log) = match request.target {
+            AgentSessionRuntimeTarget::Create { cwd, path } => (path, true, cwd, None),
+            AgentSessionRuntimeTarget::Open { path } => {
+                let (_, document) = pi_session::SessionLog::open(&path)?;
+                (path, false, document.header.cwd, None)
+            }
+            AgentSessionRuntimeTarget::Reuse { log } => {
+                let document = log.load()?;
+                (
+                    log.path().to_path_buf(),
+                    false,
+                    document.header.cwd,
+                    Some(log),
+                )
+            }
+        };
+        let mut config = self.config.clone();
+        config.cwd = cwd;
+        config.trust_project = self
+            .project_trust
+            .resolve(&config.cwd)
+            .await
+            .map_err(|error| SessionError::Runtime(error.to_string()))?;
+        let bundles = built_in_plugin_bundles(&config)?;
+        let runtime = build_runtime_with_bundles(&config, &bundles)?;
+        let session_plugins = bundles
+            .session_plugins()
+            .map_err(|error| RuntimeError::Build(error.to_string()))?;
+        let session_options = AgentSessionOptions::default()
+            .plugins(session_plugins)
+            .initial_model(initial_model_request(&config));
+        if create {
+            AgentSession::prepare_create_with_options(runtime, path, session_options).await
+        } else if let Some(log) = reused_log {
+            AgentSession::prepare_reuse_with_options(runtime, log, session_options).await
+        } else {
+            AgentSession::prepare_open_with_options(runtime, path, session_options).await
+        }
+    }
+}
+
+#[cfg(test)]
+fn build_runtime(config: &AppConfig) -> Result<PiRuntime, RuntimeError> {
+    let bundles = built_in_plugin_bundles(config)?;
+    build_runtime_with_bundles(config, &bundles)
+}
+
+fn built_in_plugin_bundles(config: &AppConfig) -> Result<PluginBundleSet, RuntimeError> {
+    let provider_config = config
+        .api_key
+        .as_ref()
+        .map_or_else(
+            || OpenAiCompatibleConfig::without_api_key(&config.base_url),
+            |api_key| OpenAiCompatibleConfig::new(&config.base_url, api_key),
+        )
+        .provider_id(config.provider.clone());
+    let mut skill_options = SkillLoaderOptions::new(&config.cwd, &config.agent_dir);
+    skill_options.project_trusted = config.trust_project;
+    if let Some(home) = std::env::var_os("HOME") {
+        skill_options
+            .additional_paths
+            .push(std::path::PathBuf::from(home).join(".agents/skills"));
+    }
+    let mut model_options = ModelsPluginOptions::for_agent_dir(&config.agent_dir);
+    if let Some(api_key) = &config.api_key {
+        model_options = model_options.runtime_api_key(config.provider.clone(), api_key.clone());
+    }
+
+    let version = env!("CARGO_PKG_VERSION");
+    let provider_bundle_id = format!("{}-provider", config.provider);
+    let provider = PluginBundle::new(PluginManifest::new(provider_bundle_id.as_str(), version))
+        .try_provider_plugin({
+            let provider_config = provider_config.clone();
+            move || OpenAiCompatiblePlugin::new(provider_config.clone())
+        });
+    let models = PluginBundle::new(PluginManifest::new("models", version)).try_provider_plugin({
+        let model_options = model_options.clone();
+        move || ModelsPlugin::load(model_options.clone())
+    });
+    let skills = PluginBundle::new(PluginManifest::new("skills", version)).agent_plugin({
+        let skill_options = skill_options.clone();
+        move || SkillsPlugin::load(skill_options.clone())
+    });
+
+    let bundles = PluginBundleSet::new()
+        .bundle(provider.map_err(bundle_build_error)?)
+        .bundle(models.map_err(bundle_build_error)?)
+        .bundle(skills.map_err(bundle_build_error)?)
+        .bundle(
+            PluginBundle::new(PluginManifest::new("read", version))
+                .agent_plugin(|| ReadPlugin)
+                .map_err(bundle_build_error)?,
+        )
+        .bundle(
+            PluginBundle::new(PluginManifest::new("grep-tool", version))
+                .agent_plugin(|| GrepPlugin)
+                .map_err(bundle_build_error)?,
+        )
+        .bundle(
+            PluginBundle::new(PluginManifest::new("find-tool", version))
+                .agent_plugin(|| FindPlugin)
+                .map_err(bundle_build_error)?,
+        )
+        .bundle(
+            PluginBundle::new(PluginManifest::new("ls-tool", version))
+                .agent_plugin(|| LsPlugin)
+                .map_err(bundle_build_error)?,
+        )
+        .bundle(
+            PluginBundle::new(PluginManifest::new("write-tool", version))
+                .agent_plugin(|| WritePlugin)
+                .map_err(bundle_build_error)?,
+        )
+        .bundle(
+            PluginBundle::new(PluginManifest::new("edit-tool", version))
+                .agent_plugin(|| EditPlugin)
+                .map_err(bundle_build_error)?,
+        )
+        .bundle(
+            PluginBundle::new(PluginManifest::new("hashline-edit-tool", version))
+                .agent_plugin(|| HashlineEditPlugin)
+                .map_err(bundle_build_error)?,
+        )
+        .bundle(
+            PluginBundle::new(PluginManifest::new("bash-tool", version))
+                .agent_plugin(|| BashPlugin)
+                .map_err(bundle_build_error)?,
+        );
+    // Validate metadata and ordering before any runtime factory is invoked.
+    bundles.validate().map_err(bundle_build_error)?;
+    Ok(bundles)
+}
+
+fn build_runtime_with_bundles(
+    config: &AppConfig,
+    bundles: &PluginBundleSet,
+) -> Result<PiRuntime, RuntimeError> {
+    let mut resources = ResourceLoaderOptions::new(&config.cwd, &config.agent_dir);
+    resources.project_trusted = config.trust_project;
+
+    let builder = bundles
+        .install_runtime(PiRuntime::builder())
+        .map_err(bundle_build_error)?;
+    let runtime = builder
+        .agent_options(AgentOptions {
+            provider_id: ProviderId::new(config.provider.clone()),
+            model_id: ModelId::new(config.model.as_deref().unwrap_or(&config.fallback_model)),
+            active_tools: vec![
+                "read".into(),
+                "grep".into(),
+                "find".into(),
+                "ls".into(),
+                "write".into(),
+                "edit".into(),
+                "hashline_edit".into(),
+                "bash".into(),
+            ],
+            cwd: config.cwd.clone(),
+            max_tool_iterations: 50,
+            ..AgentOptions::default()
+        })
+        .system_prompt(SystemPrompt::Pi(Box::default()))
+        .resources(resources)
+        .build()?;
+
+    ModelRuntimeServices::new(&runtime)
+        .select_initial_model(initial_model_request(config))
+        .map_err(|error| RuntimeError::Build(error.to_string()))?;
+
+    Ok(runtime)
+}
+
+fn bundle_build_error(error: impl std::fmt::Display) -> RuntimeError {
+    RuntimeError::Build(error.to_string())
+}
+
+fn initial_model_request(config: &AppConfig) -> InitialModelRequest {
+    config
+        .model
+        .as_ref()
+        .map_or_else(InitialModelRequest::default, |model| InitialModelRequest {
+            requested_provider: config.requested_provider.clone().map(ProviderId::new),
+            requested_model: Some(model.clone()),
+            session_model: None,
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app_config(agent_dir: &std::path::Path, model: Option<&str>) -> AppConfig {
+        AppConfig {
+            cwd: agent_dir.to_path_buf(),
+            agent_dir: agent_dir.to_path_buf(),
+            session_path: agent_dir.join("session.jsonl"),
+            model: model.map(str::to_string),
+            fallback_model: "gpt-4o-mini".to_string(),
+            base_url: "https://fallback.example/v1".to_string(),
+            api_key: None,
+            provider: "openai-compatible".to_string(),
+            requested_provider: None,
+            trust_project: true,
+            trust_override: None,
+        }
+    }
+
+    #[test]
+    fn models_json_catalog_owns_the_initial_provider_and_model() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("models.json"),
+            r#"{
+              "providers": {
+                "catalog-provider": {
+                  "baseUrl": "https://catalog.example/v1",
+                  "api": "openai-completions",
+                  "models": [
+                    { "id": "catalog-first", "name": "Catalog First" },
+                    { "id": "catalog-requested", "name": "Catalog Requested" }
+                  ]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let runtime = build_runtime(&app_config(directory.path(), None)).unwrap();
+        let state = runtime.agent().state();
+
+        assert_eq!(state.provider_id.as_str(), "catalog-provider");
+        assert_eq!(state.model_id.as_str(), "catalog-first");
+    }
+
+    #[test]
+    fn requested_model_id_resolves_to_its_models_json_provider() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("models.json"),
+            r#"{
+              "providers": {
+                "catalog-provider": {
+                  "baseUrl": "https://catalog.example/v1",
+                  "api": "openai-completions",
+                  "models": [
+                    { "id": "catalog-first" },
+                    { "id": "catalog-requested" }
+                  ]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let runtime =
+            build_runtime(&app_config(directory.path(), Some("catalog-requested"))).unwrap();
+        let state = runtime.agent().state();
+
+        assert_eq!(state.provider_id.as_str(), "catalog-provider");
+        assert_eq!(state.model_id.as_str(), "catalog-requested");
+    }
+
+    #[test]
+    fn missing_models_json_keeps_the_cli_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let runtime = build_runtime(&app_config(directory.path(), None)).unwrap();
+        let state = runtime.agent().state();
+
+        assert_eq!(state.provider_id.as_str(), "openai-compatible");
+        assert_eq!(state.model_id.as_str(), "gpt-4o-mini");
+    }
+
+    #[tokio::test]
+    async fn explicit_model_wins_over_the_model_saved_in_a_resumed_session() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("models.json"),
+            r#"{
+              "providers": {
+                "catalog-provider": {
+                  "baseUrl": "https://catalog.example/v1",
+                  "api": "openai-completions",
+                  "models": [
+                    { "id": "alpha" },
+                    { "id": "beta" }
+                  ]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let path = directory.path().join("resume.jsonl");
+
+        let original = AgentSession::create(
+            build_runtime(&app_config(directory.path(), None)).unwrap(),
+            &path,
+        )
+        .await
+        .unwrap();
+        original
+            .set_model(ProviderId::new("catalog-provider"), ModelId::new("beta"))
+            .unwrap();
+        original.log().materialize().unwrap();
+        original.shutdown().await;
+
+        let config = app_config(directory.path(), Some("alpha"));
+        let resumed = AgentSession::open_with_options(
+            build_runtime(&config).unwrap(),
+            &path,
+            AgentSessionOptions::default().initial_model(initial_model_request(&config)),
+        )
+        .await
+        .unwrap();
+        let state = resumed.runtime().agent().state();
+
+        assert_eq!(state.provider_id.as_str(), "catalog-provider");
+        assert_eq!(state.model_id.as_str(), "alpha");
+        resumed.shutdown().await;
+    }
+}

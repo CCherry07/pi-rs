@@ -1,0 +1,70 @@
+[workspace]
+members = [
+    "apps/pi-cli",
+    "crates/pi-core",
+    "crates/pi-agent",
+    "crates/pi-runtime",
+    "crates/pi-provider",
+    "crates/pi-prompt",
+    "crates/pi-resources",
+    "crates/pi-session",
+    "crates/pi-shell",
+    "crates/pi-agent-md",
+    "e2e",
+    "plugins/features/pi-plugin-skills",
+    "plugins/providers/pi-plugin-models",
+    "plugins/providers/pi-plugin-faux-provider",
+    "plugins/providers/pi-plugin-openai",
+    "crates/pi-tool-support",
+    "plugins/tools/pi-plugin-read",
+    "plugins/tools/pi-plugin-write",
+    "plugins/tools/pi-plugin-edit",
+    "plugins/tools/pi-plugin-hashline-edit",
+    "plugins/tools/pi-plugin-bash",
+    "plugins/tools/pi-plugin-grep",
+    "plugins/tools/pi-plugin-find",
+    "plugins/tools/pi-plugin-ls",
+    "plugins/tools/pi-plugin-test-tools",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+async-trait = "0.1.89"
+futures = "0.3.31"
+garde = { version = "0.22.0", features = ["derive"] }
+schemars = "1.2.1"
+serde = { version = "1.0.219", features = ["derive", "rc"] }
+serde_json = "1.0.143"
+thiserror = "2.0.16"
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = "0.7.16"
+dotenvy = "0.15"
+
+pi-core = { path = "crates/pi-core" }
+pi-agent = { path = "crates/pi-agent" }
+pi-runtime = { path = "crates/pi-runtime" }
+pi-provider = { path = "crates/pi-provider" }
+pi-prompt = { path = "crates/pi-prompt" }
+pi-resources = { path = "crates/pi-resources" }
+pi-session = { path = "crates/pi-session" }
+pi-shell = { path = "crates/pi-shell" }
+pi-agent-md = { path = "crates/pi-agent-md" }
+pi-plugin-skills = { path = "plugins/features/pi-plugin-skills" }
+pi-plugin-models = { path = "plugins/providers/pi-plugin-models" }
+pi-plugin-faux-provider = { path = "plugins/providers/pi-plugin-faux-provider" }
+pi-plugin-openai = { path = "plugins/providers/pi-plugin-openai" }
+pi-tool-support = { path = "crates/pi-tool-support" }
+pi-plugin-read = { path = "plugins/tools/pi-plugin-read" }
+pi-plugin-write = { path = "plugins/tools/pi-plugin-write" }
+pi-plugin-edit = { path = "plugins/tools/pi-plugin-edit" }
+pi-plugin-hashline-edit = { path = "plugins/tools/pi-plugin-hashline-edit" }
+pi-plugin-bash = { path = "plugins/tools/pi-plugin-bash" }
+pi-plugin-grep = { path = "plugins/tools/pi-plugin-grep" }
+pi-plugin-find = { path = "plugins/tools/pi-plugin-find" }
+pi-plugin-ls = { path = "plugins/tools/pi-plugin-ls" }
+pi-plugin-test-tools = { path = "plugins/tools/pi-plugin-test-tools" }

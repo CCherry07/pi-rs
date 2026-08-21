@@ -1,0 +1,17 @@
+[package]
+name = "pi-provider"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-stream = "0.3.6"
+async-trait.workspace = true
+futures.workspace = true
+pi-core.workspace = true
+reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

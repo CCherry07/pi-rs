@@ -1,0 +1,15 @@
+[package]
+name = "pi-tool-support"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pi-core.workspace = true
+serde_json.workspace = true
+tempfile = "3.21.0"
+unicode-normalization = "0.1.24"
+url = "2.5.8"
+xxhash-rust = { version = "0.8.15", features = ["xxh32"] }

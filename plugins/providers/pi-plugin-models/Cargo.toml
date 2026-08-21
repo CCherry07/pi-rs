@@ -1,0 +1,24 @@
+[package]
+name = "pi-plugin-models"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+garde.workspace = true
+pi-core.workspace = true
+pi-plugin-openai.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process"] }
+
+[dev-dependencies]
+futures.workspace = true
+pi-agent.workspace = true
+pi-runtime.workspace = true
+tempfile = "3.21.0"
