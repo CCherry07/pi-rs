@@ -145,6 +145,16 @@ impl FrozenRegistries {
         specs
     }
 
+    pub fn all_tool_specs(&self) -> Vec<crate::ToolSpec> {
+        let mut specs = self
+            .tools
+            .values()
+            .map(|(_, tool)| tool.spec())
+            .collect::<Vec<_>>();
+        specs.sort_by(|left, right| left.name.cmp(&right.name));
+        specs
+    }
+
     pub fn provider(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
         self.models.provider(id)
     }

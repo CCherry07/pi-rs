@@ -117,12 +117,12 @@ fn code_block_background(appearance: TerminalAppearance) -> Color {
     markdown_theme(appearance).code_background()
 }
 
-fn markdown_theme(appearance: TerminalAppearance) -> pi_agent_md::MarkdownTheme {
+fn markdown_theme(appearance: TerminalAppearance) -> pi_md::MarkdownTheme {
     let appearance = match appearance {
-        TerminalAppearance::Light => pi_agent_md::Appearance::Light,
-        TerminalAppearance::Dark => pi_agent_md::Appearance::Dark,
+        TerminalAppearance::Light => pi_md::Appearance::Light,
+        TerminalAppearance::Dark => pi_md::Appearance::Dark,
     };
-    pi_agent_md::MarkdownTheme::new(appearance)
+    pi_md::MarkdownTheme::new(appearance)
 }
 
 #[derive(Clone, Debug)]
@@ -751,9 +751,7 @@ impl App {
             AgentEvent::MessageStart { message } => match message {
                 Message::User(user) => {
                     self.transcript
-                        .push(TranscriptItem::User(user_message_display_text(
-                            &user.content,
-                        )));
+                        .push(TranscriptItem::User(user_text(&user.content)));
                 }
                 Message::Assistant(_) => {
                     self.awaiting_assistant = false;
@@ -3012,7 +3010,7 @@ fn render_assistant_markdown(
     terminal_appearance: TerminalAppearance,
     animation_frame: usize,
 ) -> Vec<Line<'static>> {
-    let mut lines = pi_agent_md::render(text, streaming, markdown_theme(terminal_appearance)).lines;
+    let mut lines = pi_md::render(text, streaming, markdown_theme(terminal_appearance)).lines;
     while lines.first().is_some_and(markdown_line_is_blank) {
         lines.remove(0);
     }
@@ -3335,27 +3333,6 @@ fn command_suggestions(input: &str, command_specs: &[CommandSpec]) -> Vec<Comman
     suggestions
 }
 
-fn user_message_display_text(content: &[ContentBlock]) -> String {
-    let text = user_text(content);
-    collapse_skill_invocation(&text).unwrap_or(text)
-}
-
-fn collapse_skill_invocation(text: &str) -> Option<String> {
-    let rest = text.strip_prefix("<skill name=\"")?;
-    let (name, rest) = rest.split_once("\" location=\"")?;
-    let (_, body) = rest.split_once("\">\n")?;
-    let (_, trailing) = body.split_once("\n</skill>")?;
-    let mut display = format!("/skill:{name}");
-    if !trailing.is_empty() {
-        let arguments = trailing.strip_prefix("\n\n")?.trim();
-        if !arguments.is_empty() {
-            display.push(' ');
-            display.push_str(arguments);
-        }
-    }
-    Some(display)
-}
-
 fn user_text(content: &[ContentBlock]) -> String {
     content
         .iter()
@@ -3374,15 +3351,17 @@ fn push_history_entry(transcript: &mut Vec<TranscriptItem>, entry: &SessionEntry
 }
 
 fn push_history_message(transcript: &mut Vec<TranscriptItem>, message: &pi_session::AgentMessage) {
-    if let Some(message) = message.as_standard() {
-        match message {
+    if let Some(standard) = message.as_standard() {
+        match standard {
             Message::User(user) => {
-                transcript.push(TranscriptItem::User(user_message_display_text(
-                    &user.content,
-                )));
+                let display = message
+                    .display_text()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| user_text(&user.content));
+                transcript.push(TranscriptItem::User(display));
             }
             Message::Assistant(assistant) => {
-                let text = assistant_text(message).unwrap_or_default();
+                let text = assistant_text(standard).unwrap_or_default();
                 let error = assistant_error(assistant);
                 if !text.trim().is_empty() || error.is_some() {
                     transcript.push(TranscriptItem::Assistant {
@@ -4124,7 +4103,7 @@ mod tests {
     }
 
     #[test]
-    fn skill_user_message_displays_as_the_original_command() {
+    fn legacy_skill_message_without_display_metadata_is_not_rewritten_by_the_tui() {
         let expanded = concat!(
             "<skill name=\"ask-matt\" location=\"/skills/ask-matt/SKILL.md\">\n",
             "References are relative to /skills/ask-matt.\n\n",
@@ -4142,14 +4121,31 @@ mod tests {
         )));
         assert_eq!(
             live.transcript,
-            vec![TranscriptItem::User("/skill:ask-matt hi".to_string())]
+            vec![TranscriptItem::User(expanded.to_string())]
         );
 
         let mut restored = Vec::new();
         push_history_message(&mut restored, &pi_session::AgentMessage::from(message));
+        assert_eq!(restored, vec![TranscriptItem::User(expanded.to_string())]);
+    }
+
+    #[test]
+    fn transformed_user_message_displays_the_original_command_after_resume() {
+        let message = pi_session::AgentMessage::with_display_text(
+            Message::User(pi_core::UserMessage::text(
+                "Run the private review prompt for accessibility",
+                0,
+            )),
+            "/review accessibility",
+        )
+        .unwrap();
+        let mut transcript = Vec::new();
+
+        push_history_message(&mut transcript, &message);
+
         assert_eq!(
-            restored,
-            vec![TranscriptItem::User("/skill:ask-matt hi".to_string())]
+            transcript,
+            vec![TranscriptItem::User("/review accessibility".to_string())]
         );
     }
 

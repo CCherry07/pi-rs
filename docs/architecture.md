@@ -10,8 +10,8 @@ prompt -> provider stream -> assistant message -> tool calls -> tool results -> 
 ```
 
 HTTP providers, production tools, model/resource discovery, resumable sessions, compaction,
-project trust, and terminal presentation are outer modules around that core. Native
-dynamic-library loading and live operation replay remain open product boundaries.
+project trust, native dynamic-library loading, and terminal presentation are outer modules around
+that core. Live operation replay and remote native-plugin distribution remain open product seams.
 
 ## Workspace
 
@@ -23,6 +23,10 @@ crates/pi-provider              vendor-neutral HTTP transport and SSE decoding
 crates/pi-prompt                pure Pi-style system prompt assembly
 crates/pi-resources             generic system/append prompts and project context discovery
 crates/pi-session               Pi v4 session tree, storage backends, and runtime adapter
+apps/pi-md                     TUI-owned Markdown parsing, streaming repair, highlighting, and Ratatui rendering
+crates/pi-plugin-sdk            native plugin author interface and descriptor types
+crates/pi-plugin-macros         agent/provider/session native export macros
+crates/pi-plugin-loader         manifest discovery, compatibility checks, and factory adapters
 plugins/providers/pi-plugin-faux-provider deterministic test provider
 plugins/providers/pi-plugin-openai        OpenAI protocol, provider, registration, and examples
 plugins/providers/pi-plugin-models        models.json catalog, routing, and request-time config
@@ -51,7 +55,14 @@ plugins/providers/pi-plugin-models
                      -> pi-core + pi-plugin-openai (credential-blind catalog and routing)
 other plugins/*      -> pi-core
 pi-runtime           -> pi-core + pi-agent + pi-prompt
+apps/pi-cli          -> pi-md + product runtimes and plugins
+apps/pi-md           -> Ratatui presentation dependencies only
 ```
+
+`apps/pi-md` is a private frontend library module rather than a reusable core crate. It owns the
+Ratatui-specific Markdown adapter used by `pi-cli`; no crate under `crates/` or plugin may depend on
+it. Keeping parsing, streaming repair, highlighting, and rendering behind its small `render`
+interface gives the TUI locality without moving terminal presentation into the core layers.
 
 ## Plugin-first rules
 
@@ -65,8 +76,8 @@ pi-runtime           -> pi-core + pi-agent + pi-prompt
 8. `context` runs before every provider request and chains message replacements without mutating the persisted transcript.
 9. `tool_call` chains argument patches and may block; patched arguments are revalidated. `tool_result` chains result patches. Legacy before/after tool hooks remain compatible.
 10. Lifecycle events are delivered through independent plugin methods (`agent_start/end`, `turn_start/end`, `message_start/update/end`, and `tool_execution_start/update/end`) in registration order; observer errors do not fail the run.
-11. A static native plugin is trusted in-process code; the trait is not a sandbox boundary.
-12. Registered slash commands own both their `CommandSpec` and execution. A `TransformInput` result then passes through `input` hooks in registration order before the agent run; `Handled` stops the submission.
+11. A native plugin is trusted in-process code; the loader and trait interfaces are not a sandbox.
+12. Registered slash commands own both their `CommandSpec` and execution. A `TransformInput` result then passes through `input` hooks in registration order before the agent run; `Handled` stops the submission. Text preprocessing retains both the product-facing submitted text and the effective model text rather than requiring a frontend to reverse an expansion.
 13. `before_provider_request` runs after a concrete provider has serialized its final wire payload and before transport. Replacements chain in provider-plugin order; hook errors fail the provider request instead of sending a payload that skipped a requested mutation.
 
 ## Runtime generations and reload
@@ -75,15 +86,18 @@ pi-runtime           -> pi-core + pi-agent + pi-prompt
 
 `reload()` prepares the complete next generation off to the side, validates it against the current provider and active-tool selection, waits for the active run to settle, and then swaps one `Arc<AgentRuntime>`. A failed factory, duplicate registration, or incompatible provider/tool selection leaves the prior generation untouched. Each agent run captures one generation before invoking hooks or resolving providers and tools, so a run cannot observe a mixture of old and new plugin state.
 
-Use `agent_plugin_factory` / `try_agent_plugin_factory` for reloadable agent plugins and `provider_plugin_factory` / `try_provider_plugin_factory` for providers, catalogs, routing overlays, and request hooks. Their pinned `agent_plugin` / `provider_plugin` and `*_arc` forms intentionally reuse an instance, primarily for stateless plugins and externally observed fixtures. A future native-library adapter belongs behind the same fallible factory seams; it should not mutate live registries in place.
+Use `agent_plugin_factory` / `try_agent_plugin_factory` for reloadable agent plugins and `provider_plugin_factory` / `try_provider_plugin_factory` for providers, catalogs, routing overlays, and request hooks. Their pinned `agent_plugin` / `provider_plugin` and `*_arc` forms intentionally reuse an instance, primarily for stateless plugins and externally observed fixtures. `pi-plugin-loader` adapts version-locked dynamic libraries through the existing type-erased fallible factory seams and never mutates live registries in place.
 
 Product wiring installs agent, provider, and session plugins through their three independent factory
 seams. `AgentSessionRuntime` owns cross-system atomicity: its factory prepares the complete runtime
-and session plugin generations before shutting down or replacing the current session. Package
-metadata, artifact identity, and native-library lifetime belong to a future loader and must not be
-modeled as a fourth runtime plugin or a cross-lifecycle bundle. Such a loader should resolve each
-package into separately ordered agent, provider, and session factories and reuse the existing
-generation publication model.
+and session plugin generations before shutting down or replacing the current session.
+`pi-plugin-loader` discovers global manifests and trusted project manifests, resolves explicit
+`--plugin` paths, verifies a C-layout descriptor before resolving an exact-build Rust constructor,
+and partitions packages into separately ordered agent, provider, and session factories. It snapshots
+each dynamic library by content hash before loading, so rebuilt artifacts receive a distinct path
+while unchanged content reuses one process-pinned handle. Libraries remain pinned for the process
+lifetime because plugin code may retain worker threads. Package metadata and artifact lifetime are
+loader concerns rather than a fourth lifecycle or cross-lifecycle bundle.
 
 `ModelsPlugin` is a provider plugin loaded after the base protocol provider. It loads one immutable, credential-blind `models.json` snapshot per generation, uses derived structural validation before compiling inheritance and overrides into runtime metadata, contributes `ModelSpec` values, and installs provider overlays. `models_json_schema()` exposes the same Rust definitions as JSON Schema for editors and standalone tooling. Environment variables, shell-command values, credentials, and configured headers resolve only when a request is sent. A failed parse, validation, or active-provider compatibility check prevents publication of the new generation, so `/reload` retains the complete prior provider/catalog pair.
 
@@ -104,13 +118,13 @@ wins, and writes are locked and key-sorted. Resolution order is an explicit
 decision cache, the persisted nearest-ancestor decision, global `defaultProjectTrust`, then the
 interactive selector. Non-interactive `ask` resolves to untrusted.
 
-Trust-requiring resources are the current cwd's `.pi/settings.json`, `extensions`, `skills`,
+Trust-requiring resources are the current cwd's `.pi/settings.json`, `extensions`, `plugins`, `skills`,
 `prompts`, `themes`, `SYSTEM.md`, and `APPEND_SYSTEM.md`, plus `.agents/skills` found from cwd toward
 the repository root. The user-level `~/.agents/skills` root is always trusted. The current runtime
-uses the decision to gate project `.pi` prompt files and project skill roots; future project
-settings, packages, and native plugins must consume this same service rather than add local trust
-flags. As in Pi, `AGENTS.override.md`, `AGENTS.md`, and `CLAUDE.md` context discovery is not gated by
-project trust, and trust is not a tool sandbox.
+uses the decision to gate project `.pi` prompt files, project skill roots, and native plugin
+manifests; future project settings and packages must consume this same service rather than add
+local trust flags. As in Pi, `AGENTS.override.md`, `AGENTS.md`, and `CLAUDE.md` context discovery is
+not gated by project trust, and trust is not a tool sandbox.
 
 Filesystem tool paths follow Pi's `resolveToCwd` behavior. Relative paths resolve from the active
 cwd, while absolute paths, `~` paths, `file://` URLs, and parent-relative paths may address files
@@ -204,6 +218,15 @@ empty session in the resume list. Existing/opened logs remain immediately durabl
 log cannot be forked. Whole-session reload reuses the in-memory log so reloading plugins and
 resources does not accidentally create or discard an unsaved session.
 
+Command and input-hook transformations preserve two text views. The effective text remains the
+standard user-message content used by Agent, provider projection, replay, and recovery. When it
+differs, the submitted product-facing text is stored in the user message's namespaced
+`piRs.displayText` extension and projected into product events, transcript history, and queue
+snapshots. Pi v4 readers that ignore unknown fields continue to see the effective message, while
+pi_rs resume and queue recovery do not expose private expanded prompts. Frontends do not parse or
+reverse plugin-specific prompt formats; messages written before this metadata existed display their
+persisted content as-is.
+
 `AgentSession::create` and `AgentSession::open` adapt the v4 tree to `PiRuntime`. Configuration
 changes are v4 entries, completed messages are persisted on `message_end`, and pi_rs-only prompt
 snapshots/resource diagnostics use reserved `customType` values rather than extending the v4 entry
@@ -284,7 +307,7 @@ The workspace includes an end-to-end test where two delay tools complete in reve
 ## Next milestones
 
 1. Connect the recovery reducer to crash/deferred operation replay above the v4 session backend.
-2. Design a version-locked native dynamic plugin adapter behind the fallible generation factory
-   seam without introducing mutable live registries.
-3. Continue current-Pi conformance at product boundaries with deterministic regressions before
+2. Add signed, content-addressed native-plugin packaging and remote distribution on top of the
+   version-locked local loader.
+3. Continue current-Pi conformance at product seams with deterministic regressions before
    adding broader provider and terminal compatibility coverage.

@@ -1,0 +1,24 @@
+[package]
+name = "pi-plugin-sdk"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+build = "build.rs"
+
+[features]
+default = []
+agent = []
+provider = []
+session = ["dep:pi-session"]
+
+[dependencies]
+async-trait.workspace = true
+pi-core.workspace = true
+pi-plugin-macros.workspace = true
+pi-session = { workspace = true, optional = true }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

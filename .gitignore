@@ -1,8 +1,9 @@
 target/
+legacy/
+
 .env
 .env.*
 !.env.example
 !.env.openai.example
 e2e/sessions/*.jsonl
 dist/
-legacy

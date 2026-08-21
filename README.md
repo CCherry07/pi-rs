@@ -10,7 +10,7 @@ This is more than an agent-loop library port. The interactive TUI, one-shot outp
 stream, session restore, context compaction, and plugin reload all run on the same product runtime.
 
 > Status: the repository contains a usable product baseline. Current work continues on Pi
-> conformance, crash-recovery orchestration, and native dynamic plugin loading.
+> conformance, crash-recovery orchestration, and native plugin distribution.
 
 ## Features
 
@@ -21,6 +21,8 @@ stream, session restore, context compaction, and plugin reload all run on the sa
   with `--json`.
 - **Plugin-first runtime**: narrow `AgentPlugin`, `ProviderPlugin`, and `SessionPlugin` lifecycles;
   plugins are built as immutable generations and reloaded atomically, with rollback on failure.
+- **Native plugins**: version-locked Rust `cdylib` plugins load from global manifests, trusted
+  project manifests, or repeated `--plugin` paths without adding another runtime lifecycle.
 - **Models and providers**: OpenAI-compatible APIs plus a `models.json` catalog for endpoints,
   request parameters, headers, credentials, and model metadata.
 - **Production tools**: `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`, `find`, and `ls`.
@@ -29,7 +31,7 @@ stream, session restore, context compaction, and plugin reload all run on the sa
 - **Pi v4 sessions**: lazy first-response persistence, `/resume`, durable queues, branch/tree
   semantics, compaction, context repair, and recovery reduction.
 - **Project trust**: nearest-ancestor decisions persisted in `<agent-dir>/trust.json`, shared by
-  project prompts, skills, and future project plugins.
+  project prompts, skills, and native plugins.
 
 ## Quick start
 
@@ -135,6 +137,8 @@ Default layout:
 ├── SYSTEM.md            # Optional global system prompt
 ├── APPEND_SYSTEM.md     # Optional global appended prompt
 ├── skills/              # Global skills
+├── plugins/             # Installed native plugin manifests and platform artifacts
+├── plugin-data/         # Persistent per-plugin data
 └── sessions/            # Pi v4 JSONL sessions
 
 ~/.agents/skills/        # Always-trusted user skill root
@@ -149,6 +153,7 @@ project/
 └── .pi/
     ├── SYSTEM.md
     ├── APPEND_SYSTEM.md
+    ├── plugins/          # Trusted project-native plugins
     └── skills/
 ```
 
@@ -213,7 +218,8 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 | `crates/pi-session` | Pi v4 JSONL, tree/branch state, compaction, recovery reducer, and session runtime |
 | `crates/pi-provider` | Provider-neutral HTTP transport and SSE |
 | `crates/pi-prompt` / `pi-resources` | System prompt and project context discovery |
-| `crates/pi-agent-md` | Markdown parsing, streaming repair, syntax highlighting, and Ratatui rendering |
+| `apps/pi-md` | TUI-owned Markdown parsing, streaming repair, syntax highlighting, and Ratatui rendering |
+| `crates/pi-plugin-sdk` / `pi-plugin-loader` | Native author interface, compatibility checks, discovery, and factory adapters |
 | `plugins/` | Skills, provider catalog, and independent production tool plugins |
 | `legacy/pi` | Current TypeScript Pi behavioral oracle |
 | `e2e` | Deterministic full-agent tests and an example project |
@@ -254,7 +260,6 @@ The current artifact is unsigned and not notarized. See
 ## Open boundaries
 
 - Connect the recovery reducer to complete post-crash operation replay orchestration.
-- Add version-locked native dynamic plugin discovery and loading behind the existing factory seam.
+- Add signed, content-addressed native plugin installation and remote distribution.
 - Continue using `legacy/pi` as the oracle for user-visible behavior and cross-platform terminal
   conformance.
-

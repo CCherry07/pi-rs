@@ -14,6 +14,7 @@
 .counter-panel__control-stack {
   display: grid;
   justify-items: center;
+  gap: 16px;
 }
 
 .counter-controls {
@@ -112,7 +113,6 @@
   position: relative;
   z-index: 1;
   min-width: 2ch;
-  margin-bottom: -1px;
   padding: 7px 12px;
   border: 1px solid var(--accent-border);
   border-radius: 8px;

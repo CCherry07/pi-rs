@@ -133,7 +133,7 @@ pub enum SubmitOutcome {
 struct PendingSessionMessage {
     kind: Option<QueueKind>,
     run_id: Option<String>,
-    text: String,
+    display_text: String,
     message: Message,
     target: ProvisionedEntry,
 }
@@ -160,9 +160,9 @@ impl SessionActivity {
         let mut snapshot = QueueSnapshot::default();
         for item in items {
             match item.kind {
-                Some(QueueKind::Steer) => snapshot.steering.push(item.text.clone()),
+                Some(QueueKind::Steer) => snapshot.steering.push(item.display_text.clone()),
                 Some(QueueKind::FollowUp | QueueKind::NextRun) => {
-                    snapshot.follow_up.push(item.text.clone());
+                    snapshot.follow_up.push(item.display_text.clone());
                 }
                 None => {}
             }
@@ -596,7 +596,11 @@ impl AgentSession {
             PreparedTextSubmission::Handled => return Ok(SubmitOutcome::Handled),
             PreparedTextSubmission::Agent(prepared) => prepared,
         };
-        let run_id = self.begin_run(prepared.generation(), prepared.text())?;
+        let run_id = self.begin_run(
+            prepared.generation(),
+            prepared.display_text(),
+            prepared.text(),
+        )?;
         let result = match prepared.run().await {
             Ok(recorded) => self.finish_prompt_locked(recorded).await,
             Err(error) => Err(SessionError::from(error)),
@@ -781,11 +785,21 @@ impl AgentSession {
         }
     }
 
-    fn begin_run(&self, generation: u64, text: &str) -> Result<String, SessionError> {
+    fn begin_run(
+        &self,
+        generation: u64,
+        display_text: &str,
+        text: &str,
+    ) -> Result<String, SessionError> {
         let message = Message::User(UserMessage::text(text, now_ms()));
+        let session_message = if display_text == text {
+            AgentMessage::from(message.clone())
+        } else {
+            AgentMessage::with_display_text(message.clone(), display_text)?
+        };
         let target = ProvisionedEntry {
             id: next_unique_id("entry"),
-            entry: SessionEntry::message(message.clone()),
+            entry: SessionEntry::message(session_message.clone()),
         };
         let run_id = next_unique_id("run");
         let mut activity = self
@@ -801,7 +815,7 @@ impl AgentSession {
             record: LaneRecordEntry::OperationStarted {
                 source_leaf_id: self.log.leaf_id(),
                 intent: OperationIntent::Run {
-                    original_prompt: vec![AgentMessage::from(message.clone())],
+                    original_prompt: vec![session_message],
                     initial_messages: vec![target.clone()],
                     system_prompt_override: None,
                     resume_data: None,
@@ -814,7 +828,7 @@ impl AgentSession {
             pending: vec![PendingSessionMessage {
                 kind: None,
                 run_id: Some(run_id.clone()),
-                text: text.to_string(),
+                display_text: display_text.to_string(),
                 message,
                 target,
             }],
@@ -836,17 +850,26 @@ impl AgentSession {
             let run = activity.active_run.as_ref().ok_or(SessionError::Busy)?;
             (run.id.clone(), run.generation)
         };
-        let (generation, text) = match self.runtime.process_queued_text(text).await? {
+        let (generation, display_text, text) = match self.runtime.process_queued_text(text).await? {
             QueuedTextOutcome::Handled => return Ok(SubmitOutcome::Handled),
-            QueuedTextOutcome::Message { generation, text } => (generation, text),
+            QueuedTextOutcome::Message {
+                generation,
+                display_text,
+                text,
+            } => (generation, display_text, text),
         };
         if generation != expected.1 {
             return Err(SessionError::Busy);
         }
         let message = Message::User(UserMessage::text(&text, now_ms()));
+        let session_message = if display_text == text {
+            AgentMessage::from(message.clone())
+        } else {
+            AgentMessage::with_display_text(message.clone(), &display_text)?
+        };
         let target = ProvisionedEntry {
             id: next_unique_id("entry"),
-            entry: SessionEntry::message(message.clone()),
+            entry: SessionEntry::message(session_message),
         };
         let entry_id = target.id.clone();
         let mut activity = self
@@ -869,7 +892,7 @@ impl AgentSession {
         run.pending.push(PendingSessionMessage {
             kind: Some(kind),
             run_id: Some(run.id.clone()),
-            text,
+            display_text,
             message: message.clone(),
             target,
         });
@@ -1588,6 +1611,7 @@ impl AgentSession {
                 let agent = agent.clone();
                 let activity = Arc::clone(&activity);
                 async move {
+                    let display_text = product_display_text(&activity, &event);
                     let (persisted_entry, queue_snapshot) =
                         if let AgentEvent::MessageEnd { message } = &event {
                             let mut activity = activity
@@ -1596,7 +1620,7 @@ impl AgentSession {
                             let matched = activity.active_run.as_ref().and_then(|run| {
                                 run.pending
                                     .iter()
-                                    .position(|pending| pending.message == *message)
+                                    .position(|pending| pending_message_matches(pending, message))
                             });
                             if let Some(index) = matched {
                                 let run = activity
@@ -1626,7 +1650,10 @@ impl AgentSession {
                         log.materialize()
                             .map_err(|error| EventError(error.to_string()))?;
                     }
-                    events.publish_agent(event, agent.state());
+                    events.publish_agent(
+                        project_product_user_event(event, display_text.as_deref()),
+                        agent.state(),
+                    );
                     if let Some(snapshot) = queue_snapshot {
                         events.publish_queue(snapshot);
                     }
@@ -1639,6 +1666,66 @@ impl AgentSession {
                 }
             },
         ));
+    }
+}
+
+fn pending_message_matches(pending: &PendingSessionMessage, message: &Message) -> bool {
+    match (&pending.message, message) {
+        (Message::User(expected), Message::User(actual)) => expected.content == actual.content,
+        _ => pending.message == *message,
+    }
+}
+
+fn product_display_text(
+    activity: &Arc<std::sync::Mutex<SessionActivity>>,
+    event: &AgentEvent,
+) -> Option<String> {
+    let message = match event {
+        AgentEvent::MessageStart {
+            message: message @ Message::User(_),
+        }
+        | AgentEvent::MessageEnd {
+            message: message @ Message::User(_),
+        } => message,
+        _ => return None,
+    };
+    let activity = activity
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    activity
+        .active_run
+        .as_ref()?
+        .pending
+        .iter()
+        .find(|pending| pending_message_matches(pending, message))
+        .map(|pending| pending.display_text.clone())
+}
+
+fn project_product_user_event(event: AgentEvent, display_text: Option<&str>) -> AgentEvent {
+    let Some(display_text) = display_text else {
+        return event;
+    };
+    let display_message = |message: Message| match message {
+        Message::User(user) => {
+            let mut displayed = UserMessage::text(display_text, user.timestamp_ms);
+            displayed.content.extend(
+                user.content
+                    .iter()
+                    .filter(|block| matches!(block, ContentBlock::Image(_)))
+                    .cloned(),
+            );
+            Message::User(displayed)
+        }
+        other => other,
+    };
+    match event {
+        AgentEvent::MessageStart { message } => AgentEvent::MessageStart {
+            message: display_message(message),
+        },
+        AgentEvent::MessageEnd { message } => AgentEvent::MessageEnd {
+            message: display_message(message),
+        },
+        other => other,
     }
 }
 
@@ -1690,7 +1777,11 @@ fn recover_pending_queue(document: &SessionDocument) -> Vec<PendingSessionMessag
             Some(PendingSessionMessage {
                 kind: Some(*queue),
                 run_id: run_id.clone(),
-                text,
+                display_text: message_entry
+                    .message
+                    .display_text()
+                    .unwrap_or(&text)
+                    .to_string(),
                 message,
                 target: target.clone(),
             })
@@ -1851,7 +1942,9 @@ mod tests {
     use async_trait::async_trait;
     use pi_agent::{AgentLoopStop, AgentOptions};
     use pi_core::{
-        ContentBlock, Message, PluginId, ResponseMetadata, StreamEvent, Usage, UserMessage,
+        AgentPlugin, Command, CommandContext, CommandError, CommandOutcome, CommandSpec,
+        ContentBlock, Message, PluginId, RegisterContext, ResponseMetadata, StreamEvent, Usage,
+        UserMessage,
     };
     use pi_plugin_faux_provider::{FauxProviderPlugin, FauxTurn};
     use pi_plugin_test_tools::TestToolsPlugin;
@@ -1902,6 +1995,170 @@ mod tests {
             .system_prompt(SystemPrompt::Pi(Box::default()))
             .build()
             .unwrap()
+    }
+
+    struct ExpandingCommandPlugin;
+
+    #[async_trait]
+    impl AgentPlugin for ExpandingCommandPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("expanding-command")
+        }
+
+        fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+            context.register_command(Arc::new(ExpandingCommand))
+        }
+    }
+
+    struct ExpandingCommand;
+
+    #[async_trait]
+    impl Command for ExpandingCommand {
+        fn spec(&self) -> CommandSpec {
+            CommandSpec {
+                name: "review".to_string(),
+                description: "Expand a review request".to_string(),
+                argument_hint: Some("[focus]".to_string()),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _context: CommandContext,
+            arguments: String,
+        ) -> Result<CommandOutcome, CommandError> {
+            Ok(CommandOutcome::TransformInput(format!(
+                "Run the private review prompt for {}",
+                arguments.trim()
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn transformed_command_persists_model_text_and_original_display_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let runtime = PiRuntime::builder()
+            .agent_plugin(ExpandingCommandPlugin)
+            .provider_plugin(FauxProviderPlugin::scripted([FauxTurn::Text(
+                "done".to_string(),
+            )]))
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("faux"),
+                model_id: ModelId::new("test"),
+                ..AgentOptions::default()
+            })
+            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .build()
+            .unwrap();
+        let session = AgentSession::create(runtime, &path).await.unwrap();
+
+        session.submit("/review accessibility").await.unwrap();
+
+        let (_, document) = SessionLog::open(&path).unwrap();
+        let user = document
+            .messages()
+            .into_iter()
+            .find(|message| message.role() == "user")
+            .unwrap();
+        assert!(matches!(
+            user.as_standard(),
+            Some(Message::User(message))
+                if matches!(&message.content[0], ContentBlock::Text(text)
+                    if text.text == "Run the private review prompt for accessibility")
+        ));
+        assert_eq!(user.display_text(), Some("/review accessibility"));
+    }
+
+    #[tokio::test]
+    async fn transformed_command_publishes_the_original_text_to_product_frontends() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = PiRuntime::builder()
+            .agent_plugin(ExpandingCommandPlugin)
+            .provider_plugin(FauxProviderPlugin::scripted([FauxTurn::Text(
+                "done".to_string(),
+            )]))
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("faux"),
+                model_id: ModelId::new("test"),
+                ..AgentOptions::default()
+            })
+            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .build()
+            .unwrap();
+        let session = AgentSession::create(runtime, directory.path().join("session.jsonl"))
+            .await
+            .unwrap();
+        let mut subscription = session.subscribe();
+
+        session.submit("/review accessibility").await.unwrap();
+
+        let displayed = std::iter::from_fn(|| subscription.events.try_recv().ok()).find_map(
+            |event| match event.event {
+                crate::AgentSessionEvent::Agent(event) => match *event {
+                    AgentEvent::MessageStart {
+                        message: Message::User(user),
+                    } => Some(
+                        user.content
+                            .iter()
+                            .filter_map(|block| match block {
+                                ContentBlock::Text(text) => Some(text.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                    _ => None,
+                },
+                _ => None,
+            },
+        );
+        assert_eq!(displayed.as_deref(), Some("/review accessibility"));
+    }
+
+    #[tokio::test]
+    async fn queued_command_restores_the_original_text_after_process_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("queued-command.jsonl");
+        let runtime = PiRuntime::builder()
+            .agent_plugin(ExpandingCommandPlugin)
+            .provider_plugin(FauxProviderPlugin::scripted([FauxTurn::WaitForAbort]))
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("faux"),
+                model_id: ModelId::new("test"),
+                ..AgentOptions::default()
+            })
+            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .build()
+            .unwrap();
+        let session = Arc::new(AgentSession::create(runtime, &path).await.unwrap());
+        let running = {
+            let session = Arc::clone(&session);
+            tokio::spawn(async move { session.submit("first").await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !session.snapshot().agent.is_running {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        session.steer("/review accessibility").await.unwrap();
+        assert_eq!(
+            session.snapshot().queue.steering,
+            vec!["/review accessibility".to_string()]
+        );
+        session.abort();
+        running.await.unwrap().unwrap();
+        session.shutdown().await;
+        drop(session);
+
+        let reopened = AgentSession::open(faux_runtime([]), &path).await.unwrap();
+        assert_eq!(
+            reopened.snapshot().queue.follow_up,
+            vec!["/review accessibility".to_string()]
+        );
     }
 
     #[tokio::test]

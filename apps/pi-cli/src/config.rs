@@ -56,6 +56,10 @@ pub struct Cli {
     #[arg(long, env = "PI_AGENT_DIR")]
     pub agent_dir: Option<PathBuf>,
 
+    /// Load a native plugin from a dynamic library or pi-plugin.toml. May be repeated.
+    #[arg(long = "plugin", value_name = "PATH")]
+    pub native_plugins: Vec<PathBuf>,
+
     /// Trust project-local settings and resources without prompting.
     #[arg(short = 'a', long, conflicts_with = "no_approve")]
     pub approve: bool,
@@ -78,6 +82,7 @@ pub struct AppConfig {
     pub requested_provider: Option<String>,
     pub trust_project: bool,
     pub trust_override: Option<bool>,
+    pub native_plugins: Vec<PathBuf>,
 }
 
 impl AppConfig {
@@ -121,6 +126,7 @@ impl AppConfig {
                 .approve
                 .then_some(true)
                 .or(cli.no_approve.then_some(false)),
+            native_plugins: cli.native_plugins.clone(),
         })
     }
 }
@@ -152,6 +158,7 @@ fn default_agent_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     use clap::{CommandFactory, Parser};
 
@@ -200,6 +207,7 @@ mod tests {
             api_key: None,
             provider: None,
             agent_dir: Some(directory.path().join("agent")),
+            native_plugins: Vec::new(),
             approve: false,
             no_approve: false,
         };
@@ -219,5 +227,24 @@ mod tests {
                 .no_approve
         );
         assert_eq!(normalize_pi_arg(OsString::from("-na")), "--no-approve");
+    }
+
+    #[test]
+    fn native_plugin_paths_preserve_cli_order() {
+        let cli = Cli::try_parse_from([
+            "pi",
+            "--plugin",
+            "first/pi-plugin.toml",
+            "--plugin",
+            "second/plugin.dylib",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.native_plugins,
+            [
+                PathBuf::from("first/pi-plugin.toml"),
+                PathBuf::from("second/plugin.dylib")
+            ]
+        );
     }
 }

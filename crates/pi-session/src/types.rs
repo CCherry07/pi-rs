@@ -83,6 +83,44 @@ impl AgentMessage {
             AgentMessageKind::Custom { value, .. } => Some(value),
         }
     }
+
+    /// Creates a standard user message whose model-facing content differs
+    /// from the text the user submitted through the product interface.
+    pub fn with_display_text(
+        message: Message,
+        display_text: impl Into<String>,
+    ) -> Result<Self, SessionError> {
+        if !matches!(message, Message::User(_)) {
+            return Err(SessionError::InvalidPayload(
+                "display text can only annotate a user message".to_string(),
+            ));
+        }
+        let mut value = serde_json::to_value(message)
+            .map_err(|error| SessionError::InvalidPayload(error.to_string()))?;
+        let object = value.as_object_mut().ok_or_else(|| {
+            SessionError::InvalidPayload("standard user message must be an object".to_string())
+        })?;
+        object.insert(
+            "piRs".to_string(),
+            serde_json::json!({"displayText": display_text.into()}),
+        );
+        Self::custom(value)
+    }
+
+    /// Returns product-facing text preserved by pi_rs preprocessing.
+    pub fn display_text(&self) -> Option<&str> {
+        match &self.0 {
+            AgentMessageKind::Standard {
+                original: Some(Value::Object(object)),
+                ..
+            } => object
+                .get("piRs")
+                .and_then(Value::as_object)
+                .and_then(|metadata| metadata.get("displayText"))
+                .and_then(Value::as_str),
+            _ => None,
+        }
+    }
 }
 
 impl PartialEq for AgentMessage {

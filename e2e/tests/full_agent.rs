@@ -218,7 +218,7 @@ fn copy_project(source: &std::path::Path, destination: &std::path::Path) {
     std::fs::create_dir_all(destination).unwrap();
     for entry in std::fs::read_dir(source).unwrap().filter_map(Result::ok) {
         let name = entry.file_name();
-        if name == "node_modules" || name == "dist" || name == ".agents" {
+        if name == "node_modules" || name == "dist" || name == ".agents" || name == "target" {
             continue;
         }
         let target = destination.join(&name);

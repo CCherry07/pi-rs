@@ -32,3 +32,16 @@ If you are developing a production application, we recommend enabling type-aware
 ```
 
 See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+
+## Native pi plugin
+
+This fixture includes a project-local Rust AgentPlugin under
+`.pi/plugins/frontend-workflow`. Build it before starting `pi` in this directory:
+
+```bash
+cargo test --manifest-path .pi/plugins/frontend-workflow/Cargo.toml
+cargo build --manifest-path .pi/plugins/frontend-workflow/Cargo.toml
+```
+
+After project trust is approved, `pi` discovers its manifest automatically. The plugin registers
+`/frontend-check [focus]` and injects the configured lint/build requirements at generation time.

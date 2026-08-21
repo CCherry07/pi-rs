@@ -6,6 +6,7 @@ use pi_plugin_edit::EditPlugin;
 use pi_plugin_find::FindPlugin;
 use pi_plugin_grep::GrepPlugin;
 use pi_plugin_hashline_edit::HashlineEditPlugin;
+use pi_plugin_loader::{NativePluginLoader, NativePluginLoaderOptions, NativePlugins};
 use pi_plugin_ls::LsPlugin;
 use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
 use pi_plugin_openai::{OpenAiCompatibleConfig, OpenAiCompatiblePlugin};
@@ -67,9 +68,15 @@ impl AgentSessionRuntimeFactory for AppSessionFactory {
             .resolve(&config.cwd)
             .await
             .map_err(|error| SessionError::Runtime(error.to_string()))?;
-        let runtime = build_runtime(&config)?;
+        let mut native_options = NativePluginLoaderOptions::new(&config.cwd, &config.agent_dir);
+        native_options.project_trusted = config.trust_project;
+        native_options.explicit_paths = config.native_plugins.clone();
+        let native_plugins = NativePluginLoader::new(native_options)
+            .discover()
+            .map_err(|error| SessionError::Runtime(error.to_string()))?;
+        let runtime = build_runtime(&config, &native_plugins)?;
         let session_options = AgentSessionOptions::default()
-            .plugins(SessionPlugins::new())
+            .plugins(native_plugins.apply_session(SessionPlugins::new()))
             .initial_model(initial_model_request(&config));
         if create {
             AgentSession::prepare_create_with_options(runtime, path, session_options).await
@@ -81,7 +88,10 @@ impl AgentSessionRuntimeFactory for AppSessionFactory {
     }
 }
 
-fn build_runtime(config: &AppConfig) -> Result<PiRuntime, RuntimeError> {
+fn build_runtime(
+    config: &AppConfig,
+    native_plugins: &NativePlugins,
+) -> Result<PiRuntime, RuntimeError> {
     let provider_config = config
         .api_key
         .as_ref()
@@ -123,6 +133,7 @@ fn build_runtime(config: &AppConfig) -> Result<PiRuntime, RuntimeError> {
         .agent_plugin_factory(|| EditPlugin)
         .agent_plugin_factory(|| HashlineEditPlugin)
         .agent_plugin_factory(|| BashPlugin);
+    let builder = native_plugins.apply_runtime(builder);
 
     let mut resources = ResourceLoaderOptions::new(&config.cwd, &config.agent_dir);
     resources.project_trusted = config.trust_project;
@@ -148,6 +159,18 @@ fn build_runtime(config: &AppConfig) -> Result<PiRuntime, RuntimeError> {
         .system_prompt(SystemPrompt::Pi(Box::default()))
         .resources(resources)
         .build()?;
+
+    let mut active_tools = runtime.active_tools();
+    let mut seen = active_tools
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    for spec in runtime.tool_specs() {
+        if seen.insert(spec.name.clone()) {
+            active_tools.push(spec.name);
+        }
+    }
+    runtime.set_active_tools(active_tools)?;
 
     ModelRuntimeServices::new(&runtime)
         .select_initial_model(initial_model_request(config))
@@ -184,6 +207,7 @@ mod tests {
             requested_provider: None,
             trust_project: true,
             trust_override: None,
+            native_plugins: Vec::new(),
         }
     }
 
@@ -207,7 +231,11 @@ mod tests {
         )
         .unwrap();
 
-        let runtime = build_runtime(&app_config(directory.path(), None)).unwrap();
+        let runtime = build_runtime(
+            &app_config(directory.path(), None),
+            &NativePlugins::default(),
+        )
+        .unwrap();
         let state = runtime.agent().state();
 
         assert_eq!(state.provider_id.as_str(), "catalog-provider");
@@ -234,8 +262,11 @@ mod tests {
         )
         .unwrap();
 
-        let runtime =
-            build_runtime(&app_config(directory.path(), Some("catalog-requested"))).unwrap();
+        let runtime = build_runtime(
+            &app_config(directory.path(), Some("catalog-requested")),
+            &NativePlugins::default(),
+        )
+        .unwrap();
         let state = runtime.agent().state();
 
         assert_eq!(state.provider_id.as_str(), "catalog-provider");
@@ -246,7 +277,11 @@ mod tests {
     fn missing_models_json_keeps_the_cli_fallback() {
         let directory = tempfile::tempdir().unwrap();
 
-        let runtime = build_runtime(&app_config(directory.path(), None)).unwrap();
+        let runtime = build_runtime(
+            &app_config(directory.path(), None),
+            &NativePlugins::default(),
+        )
+        .unwrap();
         let state = runtime.agent().state();
 
         assert_eq!(state.provider_id.as_str(), "openai-compatible");
@@ -275,7 +310,11 @@ mod tests {
         let path = directory.path().join("resume.jsonl");
 
         let original = AgentSession::create(
-            build_runtime(&app_config(directory.path(), None)).unwrap(),
+            build_runtime(
+                &app_config(directory.path(), None),
+                &NativePlugins::default(),
+            )
+            .unwrap(),
             &path,
         )
         .await
@@ -288,7 +327,7 @@ mod tests {
 
         let config = app_config(directory.path(), Some("alpha"));
         let resumed = AgentSession::open_with_options(
-            build_runtime(&config).unwrap(),
+            build_runtime(&config, &NativePlugins::default()).unwrap(),
             &path,
             AgentSessionOptions::default().initial_model(initial_model_request(&config)),
         )

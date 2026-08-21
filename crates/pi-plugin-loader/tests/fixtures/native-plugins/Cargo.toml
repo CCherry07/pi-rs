@@ -1,0 +1,3 @@
+[workspace]
+members = ["agent", "provider", "session"]
+resolver = "2"

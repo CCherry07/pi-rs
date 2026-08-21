@@ -14,6 +14,8 @@ claiming Pi compatibility; do not implement from memory or from an older Pi shap
 
 - A generation-based runtime registers agent/tool/command, provider/catalog, and session plugin
   systems and rebuilds factory-backed plugins on reload.
+- Version-locked native agent/provider/session plugins are exported through `pi-plugin-sdk`, loaded
+  from manifests or explicit paths, and adapted into those same generation factories.
 - Skills, `models.json`, project resources, OpenAI-compatible routing, production filesystem/shell
   tools, and deterministic faux-provider fixtures are integrated.
 - Pi-compatible project trust persists nearest-ancestor decisions, prompts interactively, and
@@ -33,6 +35,9 @@ claiming Pi compatibility; do not implement from memory or from an older Pi shap
 - **CLI/TUI changes:** read [`apps/pi-cli/README.md`](apps/pi-cli/README.md) and the focused tests in
   `apps/pi-cli/src/tui.rs` before changing terminal modes, input behavior, commands, transcript
   rendering, scrolling, selection, or status presentation.
+- **Native plugins:** read [`crates/pi-plugin-sdk/README.md`](crates/pi-plugin-sdk/README.md) before
+  changing export macros, descriptors, manifests, compatibility checks, discovery, or library
+  lifetime.
 - **Historical status:** treat `docs/incomplete-handoff.md` as a historical snapshot. Derive current
   status from code and tests instead of copying its milestone or test counts.
 
@@ -57,8 +62,9 @@ claiming Pi compatibility; do not implement from memory or from an older Pi shap
 - Every product plugin must be reloadable through a factory-backed next generation. Prepare and
   validate the complete generation before swapping it; a failed reload keeps the previous
   generation intact. Never mutate live registries in place.
-- Native dynamic-library loading, when added, belongs behind the existing fallible generation
-  factory seams rather than introducing a second runtime model.
+- Native dynamic-library loading stays behind the existing fallible generation factory seams. A
+  dynamic library exports exactly one agent, provider, or session plugin; package metadata and
+  pinned-library lifetime remain loader concerns rather than a fourth lifecycle.
 - Provider plugins own provider implementations, routing overlays, and their model catalog entries.
   Keep the frozen `ModelRuntime` as the generation-local query surface; do not reintroduce a
   separate model-plugin lifecycle for catalog registration alone.
@@ -101,19 +107,20 @@ claiming Pi compatibility; do not implement from memory or from an older Pi shap
 
 ## Open boundaries
 
-- Future project settings, packages, and native plugins must use the existing project trust service
-  before loading. Match Pi by leaving `AGENTS.md`/`CLAUDE.md` context discovery independent of
-  trust; trust gates project `.pi` resources and project skills, not tool execution.
+- Project native plugins use the existing project trust service before loading; future project
+  settings and packages must consume that same decision. Match Pi by leaving
+  `AGENTS.md`/`CLAUDE.md` context discovery independent of trust; trust gates project `.pi`
+  resources and project skills, not tool execution.
 - Filesystem tools follow Pi path semantics: resolve relative paths from cwd, expand `~`, and allow
   absolute or parent-relative paths outside cwd. Operating-system permissions are the boundary;
   do not introduce a `readable_roots` sandbox as part of project trust.
 - The reducer reconstructs interrupted session state, but full operation replay/recovery execution
   orchestration is still separate from the live runtime.
-- Factory-backed reload is implemented; version-locked native plugin discovery/loading is not.
-- Native plugin work: inspect Farm's loader and lifetime model under
+- Native plugin packaging is local and version-locked; signed content-addressed installation and a
+  remote registry are not implemented. Inspect Farm's loader and lifetime model under
   `legacy/farm/crates/node/src/plugin_adapters/rust_plugin_adapter` and its build/distribution
-  conventions under `legacy/farm/packages/plugin-tools` before choosing the ABI, manifest/version
-  checks, or unload boundary, then adapt those patterns behind the existing generation factories.
+  conventions under `legacy/farm/packages/plugin-tools` before changing the ABI, manifest/version
+  checks, or unload seam.
 
 ## Change workflow
 

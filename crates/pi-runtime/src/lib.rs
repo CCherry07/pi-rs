@@ -74,7 +74,11 @@ pub enum TextSubmissionOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueuedTextOutcome {
     Handled,
-    Message { generation: u64, text: String },
+    Message {
+        generation: u64,
+        display_text: String,
+        text: String,
+    },
 }
 
 /// A text submission whose command and input-hook preprocessing has completed
@@ -88,6 +92,7 @@ pub struct PreparedRuntimePrompt {
     runtime: PiRuntime,
     _reload_guard: tokio::sync::OwnedMutexGuard<()>,
     generation: u64,
+    display_text: String,
     text: String,
 }
 
@@ -98,6 +103,10 @@ impl PreparedRuntimePrompt {
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    pub fn display_text(&self) -> &str {
+        &self.display_text
     }
 
     pub async fn run(self) -> Result<RuntimePromptOutcome, RuntimeError> {
@@ -558,6 +567,10 @@ impl PiRuntime {
         self.agent.runtime().registries().command_specs()
     }
 
+    pub fn tool_specs(&self) -> Vec<pi_core::ToolSpec> {
+        self.agent.runtime().registries().all_tool_specs()
+    }
+
     /// Runs input hooks directly. Full text submissions dispatch registered
     /// commands before entering this hook chain.
     pub async fn process_input(
@@ -771,6 +784,7 @@ impl PiRuntime {
     ) -> Result<PreparedTextSubmission, RuntimeError> {
         let reload_guard = Arc::clone(&self.reload_lock).lock_owned().await;
         let mut text = text.into();
+        let display_text = text.clone();
         let runtime = self.agent.runtime();
         if let Some((name, arguments)) = parse_command(&text)
             && let Some(command) = runtime.registries().command(name)
@@ -802,6 +816,7 @@ impl PiRuntime {
             runtime: self.clone(),
             _reload_guard: reload_guard,
             generation: runtime.generation(),
+            display_text,
             text,
         }))
     }
@@ -814,6 +829,7 @@ impl PiRuntime {
         text: impl Into<String>,
     ) -> Result<QueuedTextOutcome, RuntimeError> {
         let mut text = text.into();
+        let display_text = text.clone();
         let runtime = self.agent.runtime();
         if let Some((name, arguments)) = parse_command(&text)
             && let Some(command) = runtime.registries().command(name)
@@ -843,6 +859,7 @@ impl PiRuntime {
         };
         Ok(QueuedTextOutcome::Message {
             generation: runtime.generation(),
+            display_text,
             text,
         })
     }
@@ -1397,6 +1414,56 @@ mod tests {
                 if matches!(&user.content[0], ContentBlock::Text(text)
                     if text.text == "7|input")
         ));
+    }
+
+    #[tokio::test]
+    async fn prepared_command_retains_the_original_input_for_product_presentation() {
+        let runtime = PiRuntime::builder()
+            .agent_plugin(GenerationPlugin {
+                value: 7,
+                duplicate_command: false,
+            })
+            .agent_plugin(SuffixInputPlugin)
+            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .build()
+            .unwrap();
+
+        let PreparedTextSubmission::Agent(prepared) = runtime
+            .prepare_text_submission("/generation focus")
+            .await
+            .unwrap()
+        else {
+            panic!("expected an agent submission");
+        };
+
+        assert_eq!(prepared.display_text(), "/generation focus");
+        assert_eq!(prepared.text(), "7|input");
+    }
+
+    #[tokio::test]
+    async fn queued_command_retains_the_original_input_for_product_presentation() {
+        let runtime = PiRuntime::builder()
+            .agent_plugin(GenerationPlugin {
+                value: 7,
+                duplicate_command: false,
+            })
+            .agent_plugin(SuffixInputPlugin)
+            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .build()
+            .unwrap();
+
+        let QueuedTextOutcome::Message {
+            display_text, text, ..
+        } = runtime
+            .process_queued_text("/generation focus")
+            .await
+            .unwrap()
+        else {
+            panic!("expected a queued message");
+        };
+
+        assert_eq!(display_text, "/generation focus");
+        assert_eq!(text, "7|input");
     }
 
     #[tokio::test]

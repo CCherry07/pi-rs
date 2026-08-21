@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 const TRUST_REQUIRING_PI_RESOURCES: &[&str] = &[
     "settings.json",
     "extensions",
+    "plugins",
     "skills",
     "prompts",
     "themes",
@@ -513,6 +514,14 @@ mod tests {
         fs::create_dir_all(root.path().join(".pi")).unwrap();
         assert!(!has_trust_requiring_project_resources(root.path()).unwrap());
         fs::write(root.path().join(".pi/settings.json"), "{}").unwrap();
+        assert!(has_trust_requiring_project_resources(root.path()).unwrap());
+    }
+
+    #[test]
+    fn native_plugin_directory_requires_trust() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".pi/plugins/example")).unwrap();
+
         assert!(has_trust_requiring_project_resources(root.path()).unwrap());
     }
 

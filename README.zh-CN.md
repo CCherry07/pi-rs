@@ -10,7 +10,7 @@ Trust，以及可恢复的 Pi v4 会话。
 压缩和插件热重载共享同一套产品运行时。
 
 > 当前状态：已经形成可运行的产品基线，仍在持续补齐 Pi conformance、崩溃恢复编排和
-> 原生动态插件加载。
+> 原生插件分发。
 
 ## 主要能力
 
@@ -19,6 +19,8 @@ Trust，以及可恢复的 Pi v4 会话。
 - **三种运行模式**：交互 TUI、`--print` 单次输出、`--json` NDJSON 产品事件流。
 - **插件优先**：`AgentPlugin`、`ProviderPlugin`、`SessionPlugin` 三套窄生命周期；插件按
   generation 构建并原子 reload，失败时保留上一代。
+- **原生插件**：版本锁定的 Rust `cdylib` 可从全局 manifest、可信项目 manifest 或重复
+  `--plugin` 路径加载，并复用现有三套 generation 生命周期。
 - **模型与 Provider**：支持 OpenAI-compatible API；`models.json` 统一管理模型目录、
   endpoint、请求参数、headers 和凭据解析。
 - **内置工具**：`read`、`write`、`edit`、`hashline_edit`、`bash`、`grep`、`find`、`ls`。
@@ -27,7 +29,7 @@ Trust，以及可恢复的 Pi v4 会话。
 - **Pi v4 会话**：支持延迟首次落盘、`/resume`、队列、分支/树语义、压缩、上下文修复和
   recovery reduction。
 - **项目 Trust**：使用 `<agent-dir>/trust.json` 保存最近祖先决策，统一控制项目 prompt、
-  skills 和未来项目插件的加载。
+  skills 和原生插件的加载。
 
 ## 快速开始
 
@@ -131,6 +133,8 @@ TUI 中使用 `/model` 查看和切换当前 generation 注册的模型。修改
 ├── SYSTEM.md            # 全局系统 prompt（可选）
 ├── APPEND_SYSTEM.md     # 全局追加 prompt（可选）
 ├── skills/              # 全局 Skills
+├── plugins/             # 已安装原生插件 manifest 与当前平台产物
+├── plugin-data/         # 插件持久数据
 └── sessions/            # Pi v4 JSONL 会话
 
 ~/.agents/skills/        # 始终可信的用户 Skills 根目录
@@ -145,6 +149,7 @@ project/
 └── .pi/
     ├── SYSTEM.md
     ├── APPEND_SYSTEM.md
+    ├── plugins/          # 可信项目原生插件
     └── skills/
 ```
 
@@ -205,7 +210,8 @@ project/
 | `crates/pi-session` | Pi v4 JSONL、树/分支、压缩、恢复 reducer 和 session runtime |
 | `crates/pi-provider` | Provider-neutral HTTP transport 与 SSE |
 | `crates/pi-prompt` / `pi-resources` | 系统 prompt 和项目上下文发现 |
-| `crates/pi-agent-md` | Markdown 解析、streaming mend、语法高亮和 Ratatui 渲染 |
+| `apps/pi-md` | TUI 所有的 Markdown 解析、streaming mend、语法高亮和 Ratatui 渲染 |
+| `crates/pi-plugin-sdk` / `pi-plugin-loader` | 原生插件作者 interface、兼容校验、发现与 factory adapter |
 | `plugins/` | Skills、Provider catalog 和独立生产工具插件 |
 | `legacy/pi` | 当前 TypeScript Pi 行为参照 |
 | `e2e` | deterministic 全链路测试与示例项目 |
@@ -245,5 +251,5 @@ deterministic faux provider。
 ## 尚未完成的边界
 
 - 将 recovery reducer 接入完整的崩溃后 operation replay 执行编排；
-- 在现有 factory seam 后实现版本锁定的原生动态插件发现与加载；
+- 增加带签名、内容寻址的原生插件安装与远端分发；
 - 继续以 `legacy/pi` 为 oracle 补齐用户可见行为和跨平台终端兼容。

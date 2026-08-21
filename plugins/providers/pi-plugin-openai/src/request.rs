@@ -3,10 +3,14 @@ use serde_json::{Value, json};
 
 pub(crate) fn request_body(request: &ProviderRequest) -> Value {
     let mut messages = Vec::new();
+    let mut pending_tool_images = Vec::new();
     if !request.system_prompt.is_empty() {
         messages.push(json!({"role":"system", "content":request.system_prompt}));
     }
     for message in &request.messages {
+        if !matches!(message, Message::ToolResult(_)) {
+            flush_tool_images(&mut messages, &mut pending_tool_images);
+        }
         match message {
             Message::User(message) => messages.push(json!({
                 "role":"user", "content":user_content(&message.content)
@@ -35,21 +39,11 @@ pub(crate) fn request_body(request: &ProviderRequest) -> Value {
                     "role":"tool", "tool_call_id":message.tool_call_id.as_str(),
                     "content":blocks_text(&message.content)
                 }));
-                let images = message
-                    .content
-                    .iter()
-                    .filter_map(image_part)
-                    .collect::<Vec<_>>();
-                if !images.is_empty() {
-                    let mut parts = vec![json!({
-                        "type":"text", "text":"Attached image(s) from tool result:"
-                    })];
-                    parts.extend(images);
-                    messages.push(json!({"role":"user", "content":parts}));
-                }
+                pending_tool_images.extend(message.content.iter().filter_map(image_part));
             }
         }
     }
+    flush_tool_images(&mut messages, &mut pending_tool_images);
     let tools = request
         .tools
         .iter()
@@ -76,6 +70,17 @@ pub(crate) fn request_body(request: &ProviderRequest) -> Value {
         body.extend(request.sampling_params.clone());
     }
     body
+}
+
+fn flush_tool_images(messages: &mut Vec<Value>, images: &mut Vec<Value>) {
+    if images.is_empty() {
+        return;
+    }
+    let mut parts = vec![json!({
+        "type":"text", "text":"Attached image(s) from tool result:"
+    })];
+    parts.append(images);
+    messages.push(json!({"role":"user", "content":parts}));
 }
 
 fn user_content(blocks: &[ContentBlock]) -> Value {
@@ -122,7 +127,7 @@ fn blocks_text(blocks: &[ContentBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_core::{ImageContent, ModelId, ToolCallId, ToolResultMessage, Usage};
+    use pi_core::{ImageContent, ModelId, TextContent, ToolCallId, ToolResultMessage, Usage};
     use std::sync::Arc;
 
     #[test]
@@ -160,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_tool_image_to_follow_up_user_message() {
+    fn defers_tool_images_until_every_result_in_the_batch_is_serialized() {
         let request = ProviderRequest {
             model: ModelId::new("gpt"),
             system_prompt: String::new(),
@@ -169,23 +174,36 @@ mod tests {
             max_output_tokens: None,
             headers: Default::default(),
             sampling_params: Default::default(),
-            messages: vec![Message::ToolResult(Arc::new(ToolResultMessage {
-                tool_call_id: ToolCallId::new("c"),
-                tool_name: "read".to_string(),
-                content: vec![ContentBlock::Image(ImageContent {
-                    data: "YWJj".to_string(),
-                    mime_type: "image/png".to_string(),
-                })],
-                details: None,
-                usage: Some(Usage::default()),
-                added_tool_names: None,
-                is_error: false,
-                timestamp_ms: 0,
-            }))],
+            messages: vec![
+                Message::ToolResult(Arc::new(ToolResultMessage {
+                    tool_call_id: ToolCallId::new("image"),
+                    tool_name: "read".to_string(),
+                    content: vec![ContentBlock::Image(ImageContent {
+                        data: "YWJj".to_string(),
+                        mime_type: "image/png".to_string(),
+                    })],
+                    details: None,
+                    usage: Some(Usage::default()),
+                    added_tool_names: None,
+                    is_error: false,
+                    timestamp_ms: 0,
+                })),
+                Message::ToolResult(Arc::new(ToolResultMessage {
+                    tool_call_id: ToolCallId::new("text"),
+                    tool_name: "bash".to_string(),
+                    content: vec![ContentBlock::Text(TextContent::new("passed"))],
+                    details: None,
+                    usage: Some(Usage::default()),
+                    added_tool_names: None,
+                    is_error: false,
+                    timestamp_ms: 0,
+                })),
+            ],
         };
         let body = request_body(&request);
         assert_eq!(body["messages"][0]["role"], "tool");
-        assert_eq!(body["messages"][1]["role"], "user");
-        assert_eq!(body["messages"][1]["content"][1]["type"], "image_url");
+        assert_eq!(body["messages"][1]["role"], "tool");
+        assert_eq!(body["messages"][2]["role"], "user");
+        assert_eq!(body["messages"][2]["content"][1]["type"], "image_url");
     }
 }

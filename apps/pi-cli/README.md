@@ -19,6 +19,9 @@ cargo run -p pi-cli -- --json "list the Rust crates"
 # Shell shorthand (works without provider credentials)
 cargo run -p pi-cli -- --print '!git status --short'
 cargo run -p pi-cli -- --print '!!git status --short'
+
+# Load a development native plugin; repeat --plugin to preserve plugin order
+cargo run -p pi-cli -- --plugin /path/to/plugin.dylib
 ```
 
 Project-local `.pi` prompts and skills, plus ancestor `.agents/skills`, use the
@@ -30,6 +33,12 @@ Use `--approve`/`-a` or `--no-approve`/`-na` for a run-local override, and set
 Global resources remain available from `--agent-dir`, `PI_AGENT_DIR`,
 `~/.pi/agent`, and `~/.agents/skills`. Like Pi, `AGENTS.md` and `CLAUDE.md`
 context discovery is independent of project trust.
+
+Native plugin manifests below `<agent-dir>/plugins` are always considered. Project manifests below
+`<cwd>/.pi/plugins` are opened only after the same project-trust decision succeeds. `--plugin`
+accepts a dynamic library, `pi-plugin.toml`, or a package directory; see
+[`crates/pi-plugin-sdk/README.md`](../../crates/pi-plugin-sdk/README.md) for the author interface and
+manifest format.
 
 Interactive keys:
 

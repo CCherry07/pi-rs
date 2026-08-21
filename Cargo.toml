@@ -9,7 +9,10 @@ members = [
     "crates/pi-resources",
     "crates/pi-session",
     "crates/pi-shell",
-    "crates/pi-agent-md",
+    "apps/pi-md",
+    "crates/pi-plugin-macros",
+    "crates/pi-plugin-sdk",
+    "crates/pi-plugin-loader",
     "e2e",
     "plugins/features/pi-plugin-skills",
     "plugins/providers/pi-plugin-models",
@@ -44,6 +47,8 @@ thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7.16"
 dotenvy = "0.15"
+libloading = "0.8.9"
+toml = "0.8.23"
 
 pi-core = { path = "crates/pi-core" }
 pi-agent = { path = "crates/pi-agent" }
@@ -53,7 +58,10 @@ pi-prompt = { path = "crates/pi-prompt" }
 pi-resources = { path = "crates/pi-resources" }
 pi-session = { path = "crates/pi-session" }
 pi-shell = { path = "crates/pi-shell" }
-pi-agent-md = { path = "crates/pi-agent-md" }
+pi-md = { path = "apps/pi-md" }
+pi-plugin-macros = { path = "crates/pi-plugin-macros" }
+pi-plugin-sdk = { path = "crates/pi-plugin-sdk" }
+pi-plugin-loader = { path = "crates/pi-plugin-loader" }
 pi-plugin-skills = { path = "plugins/features/pi-plugin-skills" }
 pi-plugin-models = { path = "plugins/providers/pi-plugin-models" }
 pi-plugin-faux-provider = { path = "plugins/providers/pi-plugin-faux-provider" }
