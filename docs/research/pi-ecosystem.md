@@ -158,8 +158,9 @@ npm/git 安装和跨 harness Skills 已形成实际分发生态；仓库还有 t
 
 ## 6. 对 `pi_rs` 的直接启示
 
-1. `PluginBundle` 最接近 Pi Package：它应该负责聚合同一产品包的 agent/provider/session 贡献与
-   resources；不应把三种窄生命周期重新合并成一个巨大 trait。
+1. Pi Package 是分发概念，不应映射成第四种运行时插件或跨生命周期 wrapper。未来的
+   manifest/loader 可以从一个包解析出彼此独立的 agent/provider/session factories；完整
+   generation preparation 负责跨生命周期的原子切换。
 2. Pi 真正成熟的是“资源发现和 Extension surface”，不是复杂依赖求解。因此 `pi_rs` 先做
    manifest、来源/provenance、发现、factory 构建和原子 generation reload，比先做拓扑排序更贴近 Pi。
 3. Provider 应继续拥有 catalog、auth 和 request routing；`models.json` 是配置 overlay，完整自定义

@@ -225,7 +225,7 @@ impl PiRuntimeBuilder {
 
     /// Registers a type-erased, fallible agent plugin factory.
     ///
-    /// Product-level plugin packages use this seam to retain generation-local
+    /// Dynamic plugin adapters use this seam to retain generation-local
     /// reconstruction without exposing the runtime's internal source type.
     pub fn try_agent_plugin_arc_factory<F, E>(mut self, factory: F) -> Self
     where

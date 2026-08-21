@@ -357,8 +357,8 @@ impl SessionPlugins {
 
     /// Registers a type-erased, fallible session plugin factory.
     ///
-    /// Product-level plugin packages use this seam so the session lifecycle
-    /// contribution is rebuilt with every session-plugin generation.
+    /// Dynamic plugin adapters use this seam so the session plugin is rebuilt
+    /// with every session-plugin generation.
     pub fn try_plugin_arc_factory<F, E>(mut self, factory: F) -> Self
     where
         F: Fn() -> Result<Arc<dyn SessionPlugin>, E> + Send + Sync + 'static,

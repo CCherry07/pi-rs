@@ -77,7 +77,13 @@ pi-runtime           -> pi-core + pi-agent + pi-prompt
 
 Use `agent_plugin_factory` / `try_agent_plugin_factory` for reloadable agent plugins and `provider_plugin_factory` / `try_provider_plugin_factory` for providers, catalogs, routing overlays, and request hooks. Their pinned `agent_plugin` / `provider_plugin` and `*_arc` forms intentionally reuse an instance, primarily for stateless plugins and externally observed fixtures. A future native-library adapter belongs behind the same fallible factory seams; it should not mutate live registries in place.
 
-Product wiring groups those three independent plugin systems with `PluginBundle` in `pi-session`, the first layer that can legally depend on `AgentPlugin`, `ProviderPlugin`, and `SessionPlugin` without reversing an inward dependency. A bundle has one manifest and up to one factory-backed contribution for each plugin system. Every loaded contribution must report the bundle ID, so package identity and registry ownership cannot drift apart. `PluginBundleSet` validates the host interface version and duplicate package identities, then installs bundles in explicit insertion order through the existing runtime and session factory seams. It does not resolve dependencies, load native libraries, or scan the filesystem; a future discovery adapter should produce an already ordered bundle set and reuse the same generation publication model.
+Product wiring installs agent, provider, and session plugins through their three independent factory
+seams. `AgentSessionRuntime` owns cross-system atomicity: its factory prepares the complete runtime
+and session plugin generations before shutting down or replacing the current session. Package
+metadata, artifact identity, and native-library lifetime belong to a future loader and must not be
+modeled as a fourth runtime plugin or a cross-lifecycle bundle. Such a loader should resolve each
+package into separately ordered agent, provider, and session factories and reuse the existing
+generation publication model.
 
 `ModelsPlugin` is a provider plugin loaded after the base protocol provider. It loads one immutable, credential-blind `models.json` snapshot per generation, uses derived structural validation before compiling inheritance and overrides into runtime metadata, contributes `ModelSpec` values, and installs provider overlays. `models_json_schema()` exposes the same Rust definitions as JSON Schema for editors and standalone tooling. Environment variables, shell-command values, credentials, and configured headers resolve only when a request is sent. A failed parse, validation, or active-provider compatibility check prevents publication of the new generation, so `/reload` retains the complete prior provider/catalog pair.
 
@@ -125,9 +131,10 @@ policy for the current cwd; generation rebuild/restart applies the changed resou
 - `Tool`: publishes `ToolSpec` and executes validated JSON arguments with an `AbortSignal` and `ToolUpdateSink`.
 - `AgentPlugin`: registers tools/commands and participates in input, lifecycle, context, and tool hooks.
 - `ProviderPlugin`: registers providers, routing overlays, and model metadata and may implement `before_provider_request` without implementing a provider.
+- `SessionPlugin`: participates only in session lifecycle hooks and is rebuilt by `SessionPlugins`.
 - `PluginDriver`: is the only component that invokes plugin hooks.
 - `ProviderPluginDriver`: validates, registers, and invokes the ordered provider plugin set for one runtime generation.
-- `PluginBundle` / `PluginBundleSet`: bind package metadata to reloadable agent, provider, and session contribution factories and install them in explicit product order.
+- `SessionPluginDriver`: validates and invokes the ordered session plugin set for one session generation.
 - `ModelRuntime`: is the immutable, generation-local model catalog and provider resolver.
 - `AbortHandle` / `AbortSignal`: provide cooperative cancellation without exposing Tokio types in public signatures.
 

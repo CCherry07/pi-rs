@@ -110,6 +110,10 @@ claiming Pi compatibility; do not implement from memory or from an older Pi shap
 - The reducer reconstructs interrupted session state, but full operation replay/recovery execution
   orchestration is still separate from the live runtime.
 - Factory-backed reload is implemented; version-locked native plugin discovery/loading is not.
+- Native plugin work: inspect Farm's loader and lifetime model under
+  `legacy/farm/crates/node/src/plugin_adapters/rust_plugin_adapter` and its build/distribution
+  conventions under `legacy/farm/packages/plugin-tools` before choosing the ABI, manifest/version
+  checks, or unload boundary, then adapt those patterns behind the existing generation factories.
 
 ## Change workflow
 

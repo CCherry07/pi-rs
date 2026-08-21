@@ -16,8 +16,8 @@ use pi_resources::ResourceLoaderOptions;
 use pi_runtime::{PiRuntime, RuntimeError, SystemPrompt};
 use pi_session::{
     AgentSession, AgentSessionOptions, AgentSessionRuntimeFactory, AgentSessionRuntimeRequest,
-    AgentSessionRuntimeTarget, InitialModelRequest, ModelRuntimeServices, PluginBundle,
-    PluginBundleSet, PluginManifest, PreparedAgentSession, SessionError,
+    AgentSessionRuntimeTarget, InitialModelRequest, ModelRuntimeServices, PreparedAgentSession,
+    SessionError, SessionPlugins,
 };
 
 use crate::config::AppConfig;
@@ -67,13 +67,9 @@ impl AgentSessionRuntimeFactory for AppSessionFactory {
             .resolve(&config.cwd)
             .await
             .map_err(|error| SessionError::Runtime(error.to_string()))?;
-        let bundles = built_in_plugin_bundles(&config)?;
-        let runtime = build_runtime_with_bundles(&config, &bundles)?;
-        let session_plugins = bundles
-            .session_plugins()
-            .map_err(|error| RuntimeError::Build(error.to_string()))?;
+        let runtime = build_runtime(&config)?;
         let session_options = AgentSessionOptions::default()
-            .plugins(session_plugins)
+            .plugins(SessionPlugins::new())
             .initial_model(initial_model_request(&config));
         if create {
             AgentSession::prepare_create_with_options(runtime, path, session_options).await
@@ -85,13 +81,7 @@ impl AgentSessionRuntimeFactory for AppSessionFactory {
     }
 }
 
-#[cfg(test)]
 fn build_runtime(config: &AppConfig) -> Result<PiRuntime, RuntimeError> {
-    let bundles = built_in_plugin_bundles(config)?;
-    build_runtime_with_bundles(config, &bundles)
-}
-
-fn built_in_plugin_bundles(config: &AppConfig) -> Result<PluginBundleSet, RuntimeError> {
     let provider_config = config
         .api_key
         .as_ref()
@@ -112,81 +102,31 @@ fn built_in_plugin_bundles(config: &AppConfig) -> Result<PluginBundleSet, Runtim
         model_options = model_options.runtime_api_key(config.provider.clone(), api_key.clone());
     }
 
-    let version = env!("CARGO_PKG_VERSION");
-    let provider_bundle_id = format!("{}-provider", config.provider);
-    let provider = PluginBundle::new(PluginManifest::new(provider_bundle_id.as_str(), version))
-        .try_provider_plugin({
+    let builder = PiRuntime::builder()
+        .try_provider_plugin_factory({
             let provider_config = provider_config.clone();
             move || OpenAiCompatiblePlugin::new(provider_config.clone())
-        });
-    let models = PluginBundle::new(PluginManifest::new("models", version)).try_provider_plugin({
-        let model_options = model_options.clone();
-        move || ModelsPlugin::load(model_options.clone())
-    });
-    let skills = PluginBundle::new(PluginManifest::new("skills", version)).agent_plugin({
-        let skill_options = skill_options.clone();
-        move || SkillsPlugin::load(skill_options.clone())
-    });
+        })
+        .try_provider_plugin_factory({
+            let model_options = model_options.clone();
+            move || ModelsPlugin::load(model_options.clone())
+        })
+        .agent_plugin_factory({
+            let skill_options = skill_options.clone();
+            move || SkillsPlugin::load(skill_options.clone())
+        })
+        .agent_plugin_factory(|| ReadPlugin)
+        .agent_plugin_factory(|| GrepPlugin)
+        .agent_plugin_factory(|| FindPlugin)
+        .agent_plugin_factory(|| LsPlugin)
+        .agent_plugin_factory(|| WritePlugin)
+        .agent_plugin_factory(|| EditPlugin)
+        .agent_plugin_factory(|| HashlineEditPlugin)
+        .agent_plugin_factory(|| BashPlugin);
 
-    let bundles = PluginBundleSet::new()
-        .bundle(provider.map_err(bundle_build_error)?)
-        .bundle(models.map_err(bundle_build_error)?)
-        .bundle(skills.map_err(bundle_build_error)?)
-        .bundle(
-            PluginBundle::new(PluginManifest::new("read", version))
-                .agent_plugin(|| ReadPlugin)
-                .map_err(bundle_build_error)?,
-        )
-        .bundle(
-            PluginBundle::new(PluginManifest::new("grep-tool", version))
-                .agent_plugin(|| GrepPlugin)
-                .map_err(bundle_build_error)?,
-        )
-        .bundle(
-            PluginBundle::new(PluginManifest::new("find-tool", version))
-                .agent_plugin(|| FindPlugin)
-                .map_err(bundle_build_error)?,
-        )
-        .bundle(
-            PluginBundle::new(PluginManifest::new("ls-tool", version))
-                .agent_plugin(|| LsPlugin)
-                .map_err(bundle_build_error)?,
-        )
-        .bundle(
-            PluginBundle::new(PluginManifest::new("write-tool", version))
-                .agent_plugin(|| WritePlugin)
-                .map_err(bundle_build_error)?,
-        )
-        .bundle(
-            PluginBundle::new(PluginManifest::new("edit-tool", version))
-                .agent_plugin(|| EditPlugin)
-                .map_err(bundle_build_error)?,
-        )
-        .bundle(
-            PluginBundle::new(PluginManifest::new("hashline-edit-tool", version))
-                .agent_plugin(|| HashlineEditPlugin)
-                .map_err(bundle_build_error)?,
-        )
-        .bundle(
-            PluginBundle::new(PluginManifest::new("bash-tool", version))
-                .agent_plugin(|| BashPlugin)
-                .map_err(bundle_build_error)?,
-        );
-    // Validate metadata and ordering before any runtime factory is invoked.
-    bundles.validate().map_err(bundle_build_error)?;
-    Ok(bundles)
-}
-
-fn build_runtime_with_bundles(
-    config: &AppConfig,
-    bundles: &PluginBundleSet,
-) -> Result<PiRuntime, RuntimeError> {
     let mut resources = ResourceLoaderOptions::new(&config.cwd, &config.agent_dir);
     resources.project_trusted = config.trust_project;
 
-    let builder = bundles
-        .install_runtime(PiRuntime::builder())
-        .map_err(bundle_build_error)?;
     let runtime = builder
         .agent_options(AgentOptions {
             provider_id: ProviderId::new(config.provider.clone()),
@@ -214,10 +154,6 @@ fn build_runtime_with_bundles(
         .map_err(|error| RuntimeError::Build(error.to_string()))?;
 
     Ok(runtime)
-}
-
-fn bundle_build_error(error: impl std::fmt::Display) -> RuntimeError {
-    RuntimeError::Build(error.to_string())
 }
 
 fn initial_model_request(config: &AppConfig) -> InitialModelRequest {

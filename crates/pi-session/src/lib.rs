@@ -15,7 +15,6 @@ mod event;
 mod jsonl;
 mod memory;
 mod model_runtime_services;
-mod plugin_bundle;
 mod reducer;
 mod repo;
 mod session;
@@ -48,10 +47,6 @@ pub use memory::{InMemorySession, InMemorySessionRepo};
 pub use model_runtime_services::{
     InitialModelRequest, InitialModelResolveError, InitialModelResolver, InitialModelSelection,
     InitialModelSource, ModelRuntimeServices,
-};
-pub use plugin_bundle::{
-    PLUGIN_HOST_API_VERSION, PluginBundle, PluginBundleError, PluginBundleLoadError,
-    PluginBundleSet, PluginCapability, PluginManifest,
 };
 pub use reducer::*;
 pub use repo::{JsonlSessionRepo, list_jsonl_session_metadata, load_jsonl_session};
