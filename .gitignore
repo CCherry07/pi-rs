@@ -1,5 +1,7 @@
 target/
 legacy/
+node_modules/
+packages/pi/pi-napi.*.node
 
 .env
 .env.*

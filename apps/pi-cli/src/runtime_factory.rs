@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use pi_agent::AgentOptions;
 use pi_core::{ModelId, ProviderId};
+use pi_js_plugin::{JsGenerationRequest, JsHostMode, JsPluginGeneration, JsPluginHost};
 use pi_plugin_bash::BashPlugin;
 use pi_plugin_edit::EditPlugin;
 use pi_plugin_find::FindPlugin;
@@ -31,6 +34,8 @@ use crate::project_trust::ProjectTrustService;
 pub struct AppSessionFactory {
     config: AppConfig,
     project_trust: ProjectTrustService,
+    js_plugin_host: Option<Arc<dyn JsPluginHost>>,
+    js_host_mode: JsHostMode,
 }
 
 impl AppSessionFactory {
@@ -38,7 +43,15 @@ impl AppSessionFactory {
         Self {
             config,
             project_trust,
+            js_plugin_host: None,
+            js_host_mode: JsHostMode::Print,
         }
+    }
+
+    pub fn with_js_plugin_host(mut self, host: Arc<dyn JsPluginHost>, mode: JsHostMode) -> Self {
+        self.js_plugin_host = Some(host);
+        self.js_host_mode = mode;
+        self
     }
 }
 
@@ -78,9 +91,37 @@ impl AgentSessionRuntimeFactory for AppSessionFactory {
         let native_plugins = NativePluginLoader::new(native_options)
             .discover()
             .map_err(|error| SessionError::Runtime(error.to_string()))?;
-        let runtime = build_runtime(&config, &native_plugins)?;
+        let js_generation = if let Some(host) = &self.js_plugin_host {
+            let manifest = host
+                .prepare_generation(JsGenerationRequest {
+                    cwd: config.cwd.clone(),
+                    agent_dir: config.agent_dir.clone(),
+                    project_trusted: config.trust_project,
+                    explicit_paths: config.extensions.clone(),
+                    discover_extensions: config.discover_extensions,
+                    mode: self.js_host_mode,
+                })
+                .await
+                .map_err(|error| SessionError::Runtime(error.to_string()))?;
+            Some(
+                JsPluginGeneration::prepare_with_host(manifest, Arc::clone(host))
+                    .map_err(|error| SessionError::Runtime(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let runtime = build_runtime(&config, &native_plugins, js_generation.as_ref())?;
+        let mut session_plugins = native_plugins.apply_session(SessionPlugins::new());
+        if let Some(js_generation) = &js_generation {
+            for plugin in js_generation.session_plugins() {
+                session_plugins = session_plugins.try_plugin_arc_factory({
+                    let plugin = Arc::clone(&plugin);
+                    move || Ok::<_, String>(Arc::clone(&plugin))
+                });
+            }
+        }
         let session_options = AgentSessionOptions::default()
-            .plugins(native_plugins.apply_session(SessionPlugins::new()))
+            .plugins(session_plugins)
             .initial_model(initial_model_request(&config));
         let prepared = if create {
             AgentSession::prepare_create_with_options(runtime, path, session_options).await
@@ -145,6 +186,7 @@ async fn prepare_native_packages(
 fn build_runtime(
     config: &AppConfig,
     native_plugins: &NativePlugins,
+    js_generation: Option<&JsPluginGeneration>,
 ) -> Result<PiRuntime, RuntimeError> {
     let provider_config = config
         .api_key
@@ -187,7 +229,21 @@ fn build_runtime(
         .agent_plugin_factory(|| EditPlugin)
         .agent_plugin_factory(|| HashlineEditPlugin)
         .agent_plugin_factory(|| BashPlugin);
-    let builder = native_plugins.apply_runtime(builder);
+    let mut builder = native_plugins.apply_runtime(builder);
+    if let Some(js_generation) = js_generation {
+        for plugin in js_generation.agent_plugins() {
+            builder = builder.try_agent_plugin_arc_factory({
+                let plugin = Arc::clone(&plugin);
+                move || Ok::<_, String>(Arc::clone(&plugin))
+            });
+        }
+        for plugin in js_generation.provider_plugins() {
+            builder = builder.try_provider_plugin_arc_factory({
+                let plugin = Arc::clone(&plugin);
+                move || Ok::<_, String>(Arc::clone(&plugin))
+            });
+        }
+    }
 
     let mut resources = ResourceLoaderOptions::new(&config.cwd, &config.agent_dir);
     resources.project_trusted = config.trust_project;
@@ -246,7 +302,56 @@ fn initial_model_request(config: &AppConfig) -> InitialModelRequest {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingJsHost {
+        generation: AtomicUsize,
+        requests: Mutex<Vec<JsGenerationRequest>>,
+        retired: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl pi_js_plugin::JsCallbackDispatcher for RecordingJsHost {
+        async fn invoke(
+            &self,
+            _invocation: pi_js_plugin::JsInvocation,
+        ) -> Result<serde_json::Value, pi_js_plugin::JsCallbackError> {
+            Ok(serde_json::json!({ "action": "continue" }))
+        }
+
+        fn retire_generation(&self, generation_id: &str) {
+            self.retired.lock().unwrap().push(generation_id.to_string());
+        }
+    }
+
+    #[async_trait]
+    impl JsPluginHost for RecordingJsHost {
+        async fn prepare_generation(
+            &self,
+            request: JsGenerationRequest,
+        ) -> Result<pi_js_plugin::JsGenerationManifest, pi_js_plugin::JsCallbackError> {
+            self.requests.lock().unwrap().push(request);
+            let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(pi_js_plugin::JsGenerationManifest {
+                generation_id: format!("js-{generation}"),
+                agent_plugins: vec![pi_js_plugin::JsAgentPluginManifest {
+                    id: "reload-fixture".to_string(),
+                    tools: Vec::new(),
+                    commands: Vec::new(),
+                    hooks: vec![pi_js_plugin::JsHookManifest {
+                        name: "input".to_string(),
+                        callback_id: format!("input-{generation}"),
+                    }],
+                }],
+                provider_plugins: Vec::new(),
+                session_plugins: Vec::new(),
+            })
+        }
+    }
 
     fn write_local_plugin_package(root: &std::path::Path) -> std::path::PathBuf {
         let package = root.join("local-plugin");
@@ -284,6 +389,8 @@ command = "fixture-command"
             trust_project: true,
             trust_override: None,
             native_plugins: Vec::new(),
+            extensions: Vec::new(),
+            discover_extensions: true,
         }
     }
 
@@ -310,6 +417,7 @@ command = "fixture-command"
         let runtime = build_runtime(
             &app_config(directory.path(), None),
             &NativePlugins::default(),
+            None,
         )
         .unwrap();
         let state = runtime.agent().state();
@@ -341,6 +449,7 @@ command = "fixture-command"
         let runtime = build_runtime(
             &app_config(directory.path(), Some("catalog-requested")),
             &NativePlugins::default(),
+            None,
         )
         .unwrap();
         let state = runtime.agent().state();
@@ -356,6 +465,7 @@ command = "fixture-command"
         let runtime = build_runtime(
             &app_config(directory.path(), None),
             &NativePlugins::default(),
+            None,
         )
         .unwrap();
         let state = runtime.agent().state();
@@ -445,6 +555,46 @@ command = "fixture-command"
     }
 
     #[tokio::test]
+    async fn whole_session_reload_prepares_a_fresh_javascript_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent_dir = directory.path().join("agent");
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let mut config = app_config(&agent_dir, None);
+        config.cwd = project.clone();
+        config.session_path = agent_dir.join("reload.jsonl");
+        config.trust_override = Some(true);
+        let (trust, _) = ProjectTrustService::new(&agent_dir, Some(true), false).unwrap();
+        let host = Arc::new(RecordingJsHost::default());
+        let factory = AppSessionFactory::new(config.clone(), trust)
+            .with_js_plugin_host(host.clone(), JsHostMode::Tui);
+        let runtime = pi_session::AgentSessionRuntime::create(
+            factory,
+            AgentSessionRuntimeTarget::create(&project, &config.session_path),
+        )
+        .await
+        .unwrap();
+
+        runtime.reload().await.unwrap();
+        assert_eq!(*host.retired.lock().unwrap(), ["js-1"]);
+        runtime.shutdown().await.unwrap();
+
+        assert_eq!(host.generation.load(Ordering::SeqCst), 2);
+        let requests = host.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.mode == JsHostMode::Tui)
+        );
+        assert!(requests.iter().all(|request| request.cwd == project));
+        drop(requests);
+        drop(runtime);
+        assert_eq!(*host.retired.lock().unwrap(), ["js-1", "js-2"]);
+    }
+
+    #[tokio::test]
     async fn explicit_model_wins_over_the_model_saved_in_a_resumed_session() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -469,6 +619,7 @@ command = "fixture-command"
             build_runtime(
                 &app_config(directory.path(), None),
                 &NativePlugins::default(),
+                None,
             )
             .unwrap(),
             &path,
@@ -483,7 +634,7 @@ command = "fixture-command"
 
         let config = app_config(directory.path(), Some("alpha"));
         let resumed = AgentSession::open_with_options(
-            build_runtime(&config, &NativePlugins::default()).unwrap(),
+            build_runtime(&config, &NativePlugins::default(), None).unwrap(),
             &path,
             AgentSessionOptions::default().initial_model(initial_model_request(&config)),
         )

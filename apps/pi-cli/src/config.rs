@@ -63,6 +63,14 @@ pub struct Cli {
     #[arg(long = "plugin", value_name = "PATH")]
     pub native_plugins: Vec<PathBuf>,
 
+    /// Load a JavaScript or TypeScript extension. May be repeated.
+    #[arg(short = 'e', long = "extension", value_name = "PATH")]
+    pub extensions: Vec<PathBuf>,
+
+    /// Disable automatic JavaScript/TypeScript extension discovery.
+    #[arg(long)]
+    pub no_extensions: bool,
+
     /// Trust project-local settings and resources without prompting.
     #[arg(short = 'a', long, conflicts_with = "no_approve", global = true)]
     pub approve: bool,
@@ -135,6 +143,8 @@ pub struct AppConfig {
     pub trust_project: bool,
     pub trust_override: Option<bool>,
     pub native_plugins: Vec<PathBuf>,
+    pub extensions: Vec<PathBuf>,
+    pub discover_extensions: bool,
 }
 
 impl AppConfig {
@@ -179,6 +189,8 @@ impl AppConfig {
                 .then_some(true)
                 .or(cli.no_approve.then_some(false)),
             native_plugins: cli.native_plugins.clone(),
+            extensions: cli.extensions.clone(),
+            discover_extensions: !cli.no_extensions,
         })
     }
 }
@@ -186,6 +198,14 @@ impl AppConfig {
 impl Cli {
     pub fn parse_pi() -> Self {
         Self::parse_from(std::env::args_os().map(normalize_pi_arg))
+    }
+
+    pub fn try_parse_pi_from(arguments: Vec<String>) -> Result<Self, clap::Error> {
+        Self::try_parse_from(
+            std::iter::once(OsString::from("pi"))
+                .chain(arguments.into_iter().map(OsString::from))
+                .map(normalize_pi_arg),
+        )
     }
 
     pub fn fullscreen_enabled(&self) -> bool {
@@ -196,6 +216,8 @@ impl Cli {
 fn normalize_pi_arg(argument: OsString) -> OsString {
     if argument == "-na" {
         OsString::from("--no-approve")
+    } else if argument == "-ne" {
+        OsString::from("--no-extensions")
     } else {
         argument
     }
@@ -261,6 +283,8 @@ mod tests {
             provider: None,
             agent_dir: Some(directory.path().join("agent")),
             native_plugins: Vec::new(),
+            extensions: Vec::new(),
+            no_extensions: false,
             approve: false,
             no_approve: false,
         };
@@ -299,6 +323,26 @@ mod tests {
                 PathBuf::from("second/plugin.dylib")
             ]
         );
+    }
+
+    #[test]
+    fn javascript_extension_paths_and_discovery_flags_match_pi_cli_shape() {
+        let cli = Cli::try_parse_from([
+            "pi",
+            "-e",
+            "first.ts",
+            "--extension",
+            "second.js",
+            "--no-extensions",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.extensions,
+            [PathBuf::from("first.ts"), PathBuf::from("second.js")]
+        );
+        assert!(cli.no_extensions);
+        assert_eq!(normalize_pi_arg(OsString::from("-ne")), "--no-extensions");
     }
 
     #[test]

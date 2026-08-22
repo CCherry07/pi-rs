@@ -1602,7 +1602,7 @@ impl AgentSession {
     fn attach_agent_bridge(&self) {
         let log = self.log.clone();
         let events = Arc::clone(&self.events);
-        let agent = self.runtime.agent().clone();
+        let agent = self.runtime.agent().downgrade();
         let activity = Arc::clone(&self.activity);
         self.runtime.agent().subscribe(Arc::new(
             move |event: AgentEvent, _signal: pi_core::AbortSignal| {
@@ -1650,9 +1650,12 @@ impl AgentSession {
                         log.materialize()
                             .map_err(|error| EventError(error.to_string()))?;
                     }
+                    let Some(agent_state) = agent.state() else {
+                        return Ok(());
+                    };
                     events.publish_agent(
                         project_product_user_event(event, display_text.as_deref()),
-                        agent.state(),
+                        agent_state,
                     );
                     if let Some(snapshot) = queue_snapshot {
                         events.publish_queue(snapshot);

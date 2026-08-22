@@ -11,8 +11,9 @@ prompt -> provider stream -> assistant message -> tool calls -> tool results -> 
 
 HTTP providers, production tools, model/resource discovery, resumable sessions, compaction,
 project trust, native dynamic-library loading, and terminal presentation are outer modules around
-that core. Live operation replay and signed/OCI native-plugin distribution remain open product
-seams.
+that core. A Node/NAPI host adds Pi-compatible JavaScript and TypeScript extensions without moving
+terminal or session ownership out of Rust. Live operation replay and signed/OCI native-plugin
+distribution remain open product seams.
 
 ## Workspace
 
@@ -29,6 +30,9 @@ crates/pi-plugin-sdk            native plugin author interface and descriptor ty
 crates/pi-plugin-macros         agent/provider/session native export macros
 crates/pi-plugin-loader         manifest discovery, compatibility checks, and factory adapters
 crates/pi-plugin-manager        package intent/lock, Registry resolution, CAS, and activation
+crates/pi-js-plugin             typed JS manifest protocol and three Rust lifecycle adapters
+bindings/pi-napi                NAPI-RS boundary between Node callbacks and the Rust product
+packages/pi                     Node launcher, Pi extension discovery, jiti loader, callback host
 plugins/providers/pi-plugin-faux-provider deterministic test provider
 plugins/providers/pi-plugin-openai        OpenAI protocol, provider, registration, and examples
 plugins/providers/pi-plugin-models        models.json catalog, routing, and request-time config
@@ -60,6 +64,9 @@ pi-runtime           -> pi-core + pi-agent + pi-prompt
 apps/pi-cli          -> pi-md + product runtimes and plugins
 apps/pi-md           -> Ratatui presentation dependencies only
 pi-plugin-manager    -> HTTP + filesystem package source adapters
+pi-js-plugin         -> pi-core + pi-session (no Node or terminal dependency)
+bindings/pi-napi     -> pi-js-plugin + apps/pi-cli + NAPI-RS
+packages/pi          -> Node + jiti + platform pi-napi artifact
 ```
 
 `apps/pi-md` is a private frontend library module rather than a reusable core crate. It owns the
@@ -127,6 +134,53 @@ The current static Registry is signed-data-ready transport only: SHA-256 proves 
 integrity but not publisher identity. Publisher signatures, Git repository and OCI adapters,
 package update/rollback commands, and store garbage collection remain explicit package-manager
 milestones.
+
+## NAPI-hosted Pi extensions
+
+The JavaScript extension path deliberately has one product runtime, not a Node sidecar protocol and
+not a fourth plugin lifecycle. Node is the executable launcher and JavaScript VM. It loads one
+platform `.node` artifact; the NAPI export calls `pi_cli::run_with_js_host`, so terminal setup,
+Ratatui rendering, trust, providers, tools, sessions, and product events remain owned by Rust in
+`apps/pi-cli`. `crates/pi-js-plugin` contains only semantic wire values and adapters and therefore
+has no NAPI, Node, Jiti, or terminal dependency.
+
+`packages/pi` itself is authored in TypeScript, executed directly with `tsx` for development and
+compiled by `tsc` into publishable JavaScript plus declarations under `packages/pi/dist`. Zod owns
+runtime validation at the untyped Node seams: Rust host operations, generation manifests, dynamic
+extension registrations/results, package extension declarations, and native binding exports.
+TypeScript protocol types are inferred from those schemas so runtime checks and static interfaces
+cannot drift independently.
+
+The boundary uses four generation-scoped operations encoded as JSON: `prepareGeneration`,
+`invoke`, `cancel`, and `retireGeneration`. `prepareGeneration` discovers trusted project
+extensions, global extensions, and explicit `-e` paths in current Pi order, then loads TS/JS with
+Jiti `moduleCache: false`. JavaScript functions stay in a Node-owned callback table; Rust stores
+only opaque generation and callback IDs. `invoke` crosses a weak NAPI threadsafe function and
+awaits the JavaScript Promise without blocking either the Node event loop or Tokio. Rust aborts send
+`cancel`, which aborts the callback's `AbortController`; retirement aborts all remaining work and
+drops every callback for that generation. The weak TSFN lets Node exit once the exported `runPi`
+Promise settles.
+
+One JavaScript source may contribute to all three systems, but the manifest partitions it into
+separate agent, provider, and session plugin adapters. No `PluginBundle` is reintroduced. Manifest
+validation rejects unknown hooks, duplicate lifecycle IDs, duplicate callback IDs, invalid tool
+schemas, and later ordinary registry collisions before a candidate is published. Tool prompt
+metadata and execution mode become ordinary `ToolSpec` fields; hook replacement and cancellation
+semantics continue through the existing typed drivers.
+
+`AppSessionFactory` asks the Node host for a fresh callback generation on initial construction,
+new/resumed sessions, and `/reload`, alongside native plugins, resources, models, and session
+plugins. The existing whole-session transaction prepares all of them before swap. A failed import,
+factory, manifest, or registry build drops the candidate (retiring its Node callbacks) and keeps the
+old Rust and JavaScript generations active. Executable JavaScript is never serialized into Pi v4
+sessions.
+
+This is compatibility by explicit capability, not an unsafe claim that every Pi TUI API is already
+portable. The current bridge supports registered tools and commands, the Rust agent lifecycle
+hooks, `before_provider_request`, and the ten session hooks. APIs that require a bidirectional UI,
+renderer, dynamic-provider stream, resource contribution, or tool-progress channel throw during
+registration/use rather than silently doing nothing. JavaScript extensions are trusted in-process
+Node code and share the process and OS authority of the product.
 
 `ModelsPlugin` is a provider plugin loaded after the base protocol provider. It loads one immutable, credential-blind `models.json` snapshot per generation, uses derived structural validation before compiling inheritance and overrides into runtime metadata, contributes `ModelSpec` values, and installs provider overlays. `models_json_schema()` exposes the same Rust definitions as JSON Schema for editors and standalone tooling. Environment variables, shell-command values, credentials, and configured headers resolve only when a request is sent. A failed parse, validation, or active-provider compatibility check prevents publication of the new generation, so `/reload` retains the complete prior provider/catalog pair.
 

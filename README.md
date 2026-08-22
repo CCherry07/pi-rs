@@ -24,6 +24,8 @@ stream, session restore, context compaction, and plugin reload all run on the sa
 - **Native plugins**: version-locked Rust `cdylib` plugins load from global manifests, trusted
   project manifests, or repeated `--plugin` paths; local/HTTP/GitHub packages and static registries
   install through exact locks and a content-addressed store.
+- **Pi JS/TS extensions**: an optional Node 20 + NAPI-RS launcher discovers and reloads Pi-style
+  extensions while the Rust runtime and Ratatui product remain authoritative.
 - **Models and providers**: OpenAI-compatible APIs plus a `models.json` catalog for endpoints,
   request parameters, headers, credentials, and model metadata.
 - **Production tools**: `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`, `find`, and `ls`.
@@ -36,7 +38,7 @@ stream, session restore, context compaction, and plugin reload all run on the sa
 
 ## Quick start
 
-Rust 1.85 or newer is required.
+Rust 1.98 or newer is required. The repository pins Rust 1.98.0 through `rust-toolchain.toml`.
 
 ```bash
 git clone <your-repository-url>
@@ -82,6 +84,23 @@ Show all CLI options:
 ```bash
 cargo run -p pi-cli -- --help
 ```
+
+To run Pi-compatible JavaScript or TypeScript extensions, build the optional Node host:
+
+```bash
+cd packages/pi
+npm install
+npm run build:native
+npm start -- --cwd /path/to/project
+
+# Or load an exact extension path
+npm start -- --no-extensions -e /path/to/extension.ts
+```
+
+It discovers trusted project `.pi/extensions`, global `<agent-dir>/extensions`, and explicit `-e`
+paths in Pi order. `/reload` rebuilds JavaScript callbacks in the same atomic product-generation
+transaction as Rust plugins, models, resources, and sessions. See
+[packages/pi/README.md](packages/pi/README.md) for the supported extension API and explicit gaps.
 
 ## Model configuration
 
@@ -253,6 +272,8 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 | `apps/pi-md` | TUI-owned Markdown parsing, streaming repair, syntax highlighting, and Ratatui rendering |
 | `crates/pi-plugin-sdk` / `pi-plugin-loader` | Native author interface, compatibility checks, discovery, and factory adapters |
 | `crates/pi-plugin-manager` | Package intent/lock, static Registry resolution, target selection, and CAS installation |
+| `crates/pi-js-plugin` / `bindings/pi-napi` | Typed JS lifecycle adapters and the Node/NAPI boundary |
+| `packages/pi` | Node launcher, Pi extension discovery, Jiti loader, and callback generations |
 | `plugins/` | Skills, provider catalog, and independent production tool plugins |
 | `legacy/pi` | Current TypeScript Pi behavioral oracle |
 | `e2e` | Deterministic full-agent tests and an example project |

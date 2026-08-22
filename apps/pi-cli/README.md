@@ -32,6 +32,28 @@ cargo run -p pi-cli -- plugin install registry:frontend-check@^1 \
   --registry https://plugins.example/index.json
 ```
 
+Pi-compatible JavaScript and TypeScript extensions use the Node/NAPI launcher rather than the
+standalone Rust binary:
+
+```bash
+cd packages/pi
+npm install
+npm run build:native
+
+# Discovers trusted <cwd>/.pi/extensions and <agent-dir>/extensions
+npm start -- --cwd /path/to/project
+
+# Explicit extension paths preserve argument order; -ne disables discovery
+npm start -- -ne -e /path/to/extension.ts
+```
+
+The Node launcher still calls this app library, so TUI/fullscreen ownership remains in
+`apps/pi-cli` and every frontend mode uses the same `AgentSessionRuntime`. `/reload` atomically
+rebuilds JS callbacks together with Rust/native plugins, models, resources, and session plugins.
+See [`packages/pi/README.md`](../../packages/pi/README.md) for the supported Pi API surface and
+current explicit limitations. Passing `--extension` to the standalone `cargo run -p pi-cli` entry
+does not create a JavaScript VM; use the Node launcher for those paths.
+
 Project-local `.pi` prompts and skills, plus ancestor `.agents/skills`, use the
 same trust policy as Pi. Decisions are inherited from the nearest saved
 ancestor in `<agent-dir>/trust.json`. Interactive runs prompt when needed;

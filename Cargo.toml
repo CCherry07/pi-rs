@@ -14,6 +14,8 @@ members = [
     "crates/pi-plugin-sdk",
     "crates/pi-plugin-loader",
     "crates/pi-plugin-manager",
+    "crates/pi-js-plugin",
+    "bindings/pi-napi",
     "e2e",
     "plugins/features/pi-plugin-skills",
     "plugins/providers/pi-plugin-models",
@@ -34,7 +36,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.98"
 license = "MIT"
 
 [workspace.dependencies]
@@ -64,6 +66,7 @@ pi-plugin-macros = { path = "crates/pi-plugin-macros" }
 pi-plugin-sdk = { path = "crates/pi-plugin-sdk" }
 pi-plugin-loader = { path = "crates/pi-plugin-loader" }
 pi-plugin-manager = { path = "crates/pi-plugin-manager" }
+pi-js-plugin = { path = "crates/pi-js-plugin" }
 pi-plugin-skills = { path = "plugins/features/pi-plugin-skills" }
 pi-plugin-models = { path = "plugins/providers/pi-plugin-models" }
 pi-plugin-faux-provider = { path = "plugins/providers/pi-plugin-faux-provider" }

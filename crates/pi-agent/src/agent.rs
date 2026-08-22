@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use pi_core::{
     AbortHandle, AssistantMessage, BeforeAgentStartEvent, FrozenRegistries, Message, ModelId,
@@ -138,6 +138,19 @@ pub struct Agent {
     inner: Arc<AgentInner>,
 }
 
+/// Non-owning agent handle for listeners that are stored by the agent itself.
+/// Using this in callbacks avoids an `Agent -> listener -> Agent` reference cycle.
+#[derive(Clone)]
+pub struct WeakAgent {
+    inner: Weak<AgentInner>,
+}
+
+impl WeakAgent {
+    pub fn state(&self) -> Option<AgentStateSnapshot> {
+        self.inner.upgrade().map(|inner| Agent { inner }.state())
+    }
+}
+
 /// Immutable plugin/runtime dependencies captured once by each agent run.
 ///
 /// A new value can be installed between runs so registries and plugin hooks
@@ -228,6 +241,12 @@ impl AgentMessageQueues for QueueAdapter {
 }
 
 impl Agent {
+    pub fn downgrade(&self) -> WeakAgent {
+        WeakAgent {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+
     pub fn new(
         options: AgentOptions,
         registries: Arc<FrozenRegistries>,

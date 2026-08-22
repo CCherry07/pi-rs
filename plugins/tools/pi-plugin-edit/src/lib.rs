@@ -74,17 +74,17 @@ impl Tool for EditTool {
         let object = input
             .as_object_mut()
             .ok_or_else(|| invalid("arguments must be an object"))?;
-        if let Some(Value::String(raw)) = object.get("edits").cloned() {
-            if let Ok(parsed) = serde_json::from_str::<Value>(&raw) {
-                object.insert(
-                    "edits".to_string(),
-                    if parsed.is_object() {
-                        Value::Array(vec![parsed])
-                    } else {
-                        parsed
-                    },
-                );
-            }
+        if let Some(Value::String(raw)) = object.get("edits").cloned()
+            && let Ok(parsed) = serde_json::from_str::<Value>(&raw)
+        {
+            object.insert(
+                "edits".to_string(),
+                if parsed.is_object() {
+                    Value::Array(vec![parsed])
+                } else {
+                    parsed
+                },
+            );
         }
         if object.get("edits").is_some_and(Value::is_object) {
             let edit = object.remove("edits").unwrap();

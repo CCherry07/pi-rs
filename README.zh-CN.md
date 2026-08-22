@@ -22,6 +22,8 @@ Trust，以及可恢复的 Pi v4 会话。
 - **原生插件**：版本锁定的 Rust `cdylib` 可从全局 manifest、可信项目 manifest 或重复
   `--plugin` 路径加载；本地/HTTP/GitHub package 与静态 Registry 通过精确 lock 和内容
   寻址仓库安装。
+- **Pi JS/TS extensions**：可选的 Node 20 + NAPI-RS 启动层负责发现和 reload Pi 风格
+  extension，Rust runtime 与 Ratatui 产品仍是唯一权威实现。
 - **模型与 Provider**：支持 OpenAI-compatible API；`models.json` 统一管理模型目录、
   endpoint、请求参数、headers 和凭据解析。
 - **内置工具**：`read`、`write`、`edit`、`hashline_edit`、`bash`、`grep`、`find`、`ls`。
@@ -34,7 +36,7 @@ Trust，以及可恢复的 Pi v4 会话。
 
 ## 快速开始
 
-要求 Rust 1.85 或更新版本。
+要求 Rust 1.98 或更新版本。仓库通过 `rust-toolchain.toml` 固定使用 Rust 1.98.0。
 
 ```bash
 git clone <your-repository-url>
@@ -80,6 +82,23 @@ cargo run -p pi-cli -- --cwd /path/to/project
 ```bash
 cargo run -p pi-cli -- --help
 ```
+
+需要运行 Pi 兼容 JavaScript/TypeScript extension 时，构建可选 Node host：
+
+```bash
+cd packages/pi
+npm install
+npm run build:native
+npm start -- --cwd /path/to/project
+
+# 或加载明确的 extension 路径
+npm start -- --no-extensions -e /path/to/extension.ts
+```
+
+它按 Pi 顺序发现可信项目的 `.pi/extensions`、全局 `<agent-dir>/extensions` 与显式 `-e`
+路径。`/reload` 会在同一个产品 generation 事务中一起重建 JavaScript callbacks、Rust
+插件、模型、资源和 session plugins。支持范围与明确未支持项见
+[packages/pi/README.md](packages/pi/README.md)。
 
 ## 配置模型
 
@@ -244,6 +263,8 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 | `apps/pi-md` | TUI 所有的 Markdown 解析、streaming mend、语法高亮和 Ratatui 渲染 |
 | `crates/pi-plugin-sdk` / `pi-plugin-loader` | 原生插件作者 interface、兼容校验、发现与 factory adapter |
 | `crates/pi-plugin-manager` | Package intent/lock、静态 Registry、target 选择和 CAS 安装 |
+| `crates/pi-js-plugin` / `bindings/pi-napi` | 强类型 JS lifecycle adapter 与 Node/NAPI 边界 |
+| `packages/pi` | Node 启动层、Pi extension 发现、Jiti loader 和 callback generations |
 | `plugins/` | Skills、Provider catalog 和独立生产工具插件 |
 | `legacy/pi` | 当前 TypeScript Pi 行为参照 |
 | `e2e` | deterministic 全链路测试与示例项目 |

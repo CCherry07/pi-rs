@@ -1,0 +1,44 @@
+{
+  "name": "@pi-rs/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "pi": "dist/bin/pi.js",
+    "pi-rs": "dist/bin/pi.js"
+  },
+  "files": [
+    "dist/bin",
+    "dist/src",
+    "README.md",
+    "pi-napi.*.node"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:native": "tsx ./scripts/build-native.ts",
+    "build:native:release": "tsx ./scripts/build-native.ts --release",
+    "check": "tsc --noEmit",
+    "prepack": "npm run build",
+    "test": "tsx --test ./test/*.test.ts",
+    "test:native": "npm run build && tsx --test ./test/*.smoke.ts",
+    "start": "tsx ./bin/pi.ts"
+  },
+  "dependencies": {
+    "jiti": "2.7.0",
+    "zod": "4.1.11"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

@@ -9,7 +9,7 @@ use pi_core::AbortSignal;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 
-const DEFAULT_REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_REMOTE_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_LOCAL_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_REQUEST_HEADERS: usize = 100;
 pub const REQUEST_TIMEOUT_ENV: &str = "PI_HTTP_REQUEST_TIMEOUT_SECS";
@@ -244,4 +244,19 @@ pub async fn collect_body_limited(
         bytes.extend_from_slice(&chunk);
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_REMOTE_TIMEOUT, ReqwestTransport};
+    use std::time::Duration;
+
+    #[test]
+    fn remote_provider_default_idle_timeout_matches_pi() {
+        assert_eq!(DEFAULT_REMOTE_TIMEOUT, Duration::from_secs(300));
+        assert_eq!(
+            ReqwestTransport::new().timeout_for("https://api.example.test/v1/chat/completions"),
+            Some(Duration::from_secs(300))
+        );
+    }
 }

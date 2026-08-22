@@ -910,8 +910,6 @@ fn file_modified_at(path: &Path) -> Result<f64, SessionError> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
-
     use pi_core::{Message, UserMessage};
 
     use super::*;
