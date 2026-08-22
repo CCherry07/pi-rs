@@ -14,7 +14,7 @@ serde_json.workspace = true
 serde_yaml = "0.9.34"
 
 [dev-dependencies]
-pi-plugin-faux-provider.workspace = true
+pi-test-support.workspace = true
 pi-runtime.workspace = true
 tempfile = "3.21.0"
 tokio.workspace = true

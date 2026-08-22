@@ -7,13 +7,13 @@ use pi_core::{
     ModelId, PluginContext, PluginError, PluginId, ProviderId, ToolCall, ToolCallEvent,
     ToolCallPatch, ToolExecutionEndEvent, ToolResultEvent, ToolResultPatch, UserMessage,
 };
-use pi_plugin_faux_provider::{FauxProviderPlugin, FauxTurn};
 use pi_plugin_read::ReadPlugin;
 use pi_plugin_skills::{SkillLoaderOptions, SkillsPlugin};
 use pi_plugin_write::WritePlugin;
 use pi_resources::ResourceLoaderOptions;
 use pi_runtime::{PiRuntime, SystemPrompt};
 use pi_session::AgentSession;
+use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::json;
 
 #[derive(Clone)]
@@ -108,20 +108,20 @@ async fn full_agent_prompt_tools_plugins_resources_and_session() {
     copy_project(&fixture, &cwd);
     std::fs::create_dir_all(&agent_dir).unwrap();
 
-    let faux = FauxProviderPlugin::scripted([
-        FauxTurn::ToolCalls(vec![ToolCall::new(
+    let scripted = ScriptedProviderPlugin::scripted([
+        ScriptedTurn::ToolCalls(vec![ToolCall::new(
             "write-1",
             "write",
             json!({"path":"result.txt","content":"model content"}),
         )]),
-        FauxTurn::ToolCalls(vec![ToolCall::new(
+        ScriptedTurn::ToolCalls(vec![ToolCall::new(
             "read-1",
             "read",
             json!({"path":"result.txt"}),
         )]),
-        FauxTurn::Text("verified".to_string()),
+        ScriptedTurn::Text("verified".to_string()),
     ]);
-    let provider = faux.provider();
+    let provider = scripted.provider();
     let events = Arc::new(Mutex::new(Vec::new()));
     let runtime = PiRuntime::builder()
         .agent_plugin(AuditPlugin {
@@ -133,9 +133,9 @@ async fn full_agent_prompt_tools_plugins_resources_and_session() {
             let options = SkillLoaderOptions::new(&cwd, &agent_dir);
             move || SkillsPlugin::load(options.clone())
         })
-        .provider_plugin(faux)
+        .provider_plugin(scripted)
         .agent_options(AgentOptions {
-            provider_id: ProviderId::new("faux"),
+            provider_id: ProviderId::new("scripted"),
             model_id: ModelId::new("test"),
             active_tools: vec!["read".to_string(), "write".to_string()],
             cwd: cwd.clone(),

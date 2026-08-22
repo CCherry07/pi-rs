@@ -1079,8 +1079,8 @@ mod tests {
         ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent,
         ToolResultPatch, TurnEndEvent, TurnStartEvent, Usage, UserMessage,
     };
-    use pi_plugin_faux_provider::{FauxProviderPlugin, FauxTurn};
-    use pi_plugin_test_tools::TestToolsPlugin;
+    use pi_test_support::TestToolsPlugin;
+    use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
     use serde_json::json;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1140,8 +1140,8 @@ mod tests {
     #[test]
     fn duplicate_provider_plugin_ids_fail_runtime_construction() {
         let error = match PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([]))
-            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .build()
         {
             Ok(_) => panic!("duplicate provider plugin IDs must fail"),
@@ -1157,7 +1157,7 @@ mod tests {
         let runtime = PiRuntime::builder()
             .provider_plugin_factory(move || {
                 builds_for_factory.fetch_add(1, Ordering::SeqCst);
-                FauxProviderPlugin::scripted([])
+                ScriptedProviderPlugin::scripted([])
             })
             .build()
             .unwrap();
@@ -1165,13 +1165,13 @@ mod tests {
         assert_eq!(builds.load(Ordering::SeqCst), 1);
         assert_eq!(
             runtime.provider_plugin_order(),
-            vec![PluginId::new("faux-provider")]
+            vec![PluginId::new("scripted-provider")]
         );
         let report = runtime.reload().await.unwrap();
         assert_eq!(builds.load(Ordering::SeqCst), 2);
         assert_eq!(
             report.provider_plugin_order,
-            vec![PluginId::new("faux-provider")]
+            vec![PluginId::new("scripted-provider")]
         );
     }
 
@@ -1265,7 +1265,12 @@ mod tests {
         }
 
         fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
-            context.register_model(ModelSpec::new("faux", "test", self.name.clone(), "faux"))
+            context.register_model(ModelSpec::new(
+                "scripted",
+                "test",
+                self.name.clone(),
+                "scripted",
+            ))
         }
     }
 
@@ -1274,7 +1279,7 @@ mod tests {
         let builds = Arc::new(AtomicUsize::new(0));
         let builds_for_factory = Arc::clone(&builds);
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .provider_plugin_factory(move || GenerationCatalogPlugin {
                 name: format!(
                     "generation-{}",
@@ -1290,7 +1295,7 @@ mod tests {
         assert_eq!(
             report.provider_plugin_order,
             vec![
-                PluginId::new("faux-provider"),
+                PluginId::new("scripted-provider"),
                 PluginId::new("generation-models")
             ]
         );
@@ -1393,15 +1398,15 @@ mod tests {
 
     #[tokio::test]
     async fn command_transforms_continue_through_input_hooks() {
-        let faux = FauxProviderPlugin::scripted([FauxTurn::Text("done".to_string())]);
-        let provider = faux.provider();
+        let scripted = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".to_string())]);
+        let provider = scripted.provider();
         let runtime = PiRuntime::builder()
             .agent_plugin(GenerationPlugin {
                 value: 7,
                 duplicate_command: false,
             })
             .agent_plugin(SuffixInputPlugin)
-            .provider_plugin(faux)
+            .provider_plugin(scripted)
             .build()
             .unwrap();
 
@@ -1424,7 +1429,7 @@ mod tests {
                 duplicate_command: false,
             })
             .agent_plugin(SuffixInputPlugin)
-            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .build()
             .unwrap();
 
@@ -1448,7 +1453,7 @@ mod tests {
                 duplicate_command: false,
             })
             .agent_plugin(SuffixInputPlugin)
-            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .build()
             .unwrap();
 
@@ -1471,7 +1476,7 @@ mod tests {
         let builds = Arc::new(AtomicUsize::new(0));
         let builds_for_factory = Arc::clone(&builds);
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .agent_plugin_factory(move || GenerationPlugin {
                 value: builds_for_factory.fetch_add(1, Ordering::SeqCst) + 1,
                 duplicate_command: false,
@@ -1493,7 +1498,7 @@ mod tests {
         let builds = Arc::new(AtomicUsize::new(0));
         let builds_for_factory = Arc::clone(&builds);
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .agent_plugin_factory(move || {
                 let value = builds_for_factory.fetch_add(1, Ordering::SeqCst) + 1;
                 GenerationPlugin {
@@ -1516,7 +1521,7 @@ mod tests {
         let builds = Arc::new(AtomicUsize::new(0));
         let builds_for_factory = Arc::clone(&builds);
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .try_agent_plugin_factory(move || {
                 let value = builds_for_factory.fetch_add(1, Ordering::SeqCst) + 1;
                 if value > 1 {
@@ -1580,10 +1585,10 @@ mod tests {
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let builds = Arc::new(AtomicUsize::new(0));
-        let faux = FauxProviderPlugin::scripted([FauxTurn::Text("done".to_string())]);
-        let provider = faux.provider();
+        let scripted = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".to_string())]);
+        let provider = scripted.provider();
         let runtime = PiRuntime::builder()
-            .provider_plugin(faux)
+            .provider_plugin(scripted)
             .agent_plugin_factory({
                 let entered = Arc::clone(&entered);
                 let release = Arc::clone(&release);
@@ -1672,7 +1677,7 @@ mod tests {
     async fn before_agent_start_failure_restores_idle_without_mutating_transcript() {
         let runtime = PiRuntime::builder()
             .agent_plugin(FailingPromptHook)
-            .provider_plugin(FauxProviderPlugin::scripted([FauxTurn::Text(
+            .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
                 "unused".to_string(),
             )]))
             .build()
@@ -1686,11 +1691,11 @@ mod tests {
 
     #[tokio::test]
     async fn before_agent_start_chains_prompt_per_run_without_mutating_base() {
-        let faux = FauxProviderPlugin::scripted([
-            FauxTurn::Text("one".to_string()),
-            FauxTurn::Text("two".to_string()),
+        let scripted = ScriptedProviderPlugin::scripted([
+            ScriptedTurn::Text("one".to_string()),
+            ScriptedTurn::Text("two".to_string()),
         ]);
-        let provider = faux.provider();
+        let provider = scripted.provider();
         let runtime = PiRuntime::builder()
             .agent_plugin(PromptHookPlugin {
                 id: "prompt-a",
@@ -1702,7 +1707,7 @@ mod tests {
                 suffix: "|b",
                 inject: None,
             })
-            .provider_plugin(faux)
+            .provider_plugin(scripted)
             .agent_options(AgentOptions {
                 system_prompt: "base".to_string(),
                 ..AgentOptions::default()
@@ -1856,22 +1861,22 @@ mod tests {
     #[tokio::test]
     async fn plugin_lifecycle_context_tool_call_and_tool_result_hooks_work() {
         let captured = Arc::new(Mutex::new(Vec::new()));
-        let faux = FauxProviderPlugin::scripted([
-            FauxTurn::ToolCalls(vec![ToolCall::new(
+        let scripted = ScriptedProviderPlugin::scripted([
+            ScriptedTurn::ToolCalls(vec![ToolCall::new(
                 "echo-1",
                 "echo",
                 json!({"text":"original"}),
             )]),
-            FauxTurn::Text("done".to_string()),
+            ScriptedTurn::Text("done".to_string()),
         ]);
-        let provider = faux.provider();
+        let provider = scripted.provider();
         let runtime = PiRuntime::builder()
             .agent_plugin(LifecyclePlugin {
                 events: Arc::clone(&captured),
             })
             .agent_plugin(ContextToolHookPlugin)
             .agent_plugin(TestToolsPlugin::new())
-            .provider_plugin(faux)
+            .provider_plugin(scripted)
             .agent_options(AgentOptions {
                 active_tools: vec!["echo".to_string()],
                 ..AgentOptions::default()
@@ -1913,17 +1918,17 @@ mod tests {
     #[tokio::test]
     async fn full_plugin_first_tool_loop_preserves_result_order() {
         let test_tools = TestToolsPlugin::new();
-        let faux_plugin = FauxProviderPlugin::scripted([
-            FauxTurn::ToolCalls(vec![
+        let scripted_plugin = ScriptedProviderPlugin::scripted([
+            ScriptedTurn::ToolCalls(vec![
                 ToolCall::new("call-1", "delay", json!({"value": "one", "delayMs": 80})),
                 ToolCall::new("call-2", "delay", json!({"value": "two", "delayMs": 10})),
             ]),
-            FauxTurn::Text("done".to_string()),
+            ScriptedTurn::Text("done".to_string()),
         ]);
-        let provider = faux_plugin.provider();
+        let provider = scripted_plugin.provider();
         let runtime = PiRuntime::builder()
             .agent_plugin(test_tools.clone())
-            .provider_plugin(faux_plugin)
+            .provider_plugin(scripted_plugin)
             .agent_options(AgentOptions {
                 active_tools: vec!["delay".to_string()],
                 ..AgentOptions::default()
@@ -1988,13 +1993,13 @@ mod tests {
     async fn max_tool_iterations_stops_with_balanced_lifecycle() {
         let runtime = PiRuntime::builder()
             .agent_plugin(TestToolsPlugin::new())
-            .provider_plugin(FauxProviderPlugin::scripted([
-                FauxTurn::ToolCalls(vec![ToolCall::new(
+            .provider_plugin(ScriptedProviderPlugin::scripted([
+                ScriptedTurn::ToolCalls(vec![ToolCall::new(
                     "echo-1",
                     "echo",
                     json!({"text": "one"}),
                 )]),
-                FauxTurn::ToolCalls(vec![ToolCall::new(
+                ScriptedTurn::ToolCalls(vec![ToolCall::new(
                     "echo-2",
                     "echo",
                     json!({"text": "two"}),
@@ -2056,8 +2061,8 @@ mod tests {
         let test_tools = TestToolsPlugin::new();
         let runtime = PiRuntime::builder()
             .agent_plugin(test_tools.clone())
-            .provider_plugin(FauxProviderPlugin::scripted([
-                FauxTurn::ToolCalls(vec![
+            .provider_plugin(ScriptedProviderPlugin::scripted([
+                ScriptedTurn::ToolCalls(vec![
                     ToolCall::new(
                         "call-1",
                         "sequential_delay",
@@ -2065,7 +2070,7 @@ mod tests {
                     ),
                     ToolCall::new("call-2", "delay", json!({"value": "two", "delayMs": 1})),
                 ]),
-                FauxTurn::Text("done".to_string()),
+                ScriptedTurn::Text("done".to_string()),
             ]))
             .agent_options(AgentOptions {
                 active_tools: vec!["sequential_delay".to_string(), "delay".to_string()],
@@ -2081,12 +2086,12 @@ mod tests {
     #[tokio::test]
     async fn malformed_provider_stream_finishes_with_error_lifecycle() {
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([FauxTurn::Events(vec![
-                pi_core::StreamEvent::TextDelta {
+            .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Events(
+                vec![pi_core::StreamEvent::TextDelta {
                     content_index: 0,
                     delta: "invalid".to_string(),
-                },
-            ])]))
+                }],
+            )]))
             .build()
             .unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -2131,12 +2136,12 @@ mod tests {
     async fn unknown_and_failed_tools_become_error_results() {
         let runtime = PiRuntime::builder()
             .agent_plugin(TestToolsPlugin::new())
-            .provider_plugin(FauxProviderPlugin::scripted([
-                FauxTurn::ToolCalls(vec![
+            .provider_plugin(ScriptedProviderPlugin::scripted([
+                ScriptedTurn::ToolCalls(vec![
                     ToolCall::new("missing-1", "missing", json!({})),
                     ToolCall::new("fail-1", "fail", json!({})),
                 ]),
-                FauxTurn::Text("recovered".to_string()),
+                ScriptedTurn::Text("recovered".to_string()),
             ]))
             .agent_options(AgentOptions {
                 active_tools: vec!["fail".to_string()],
@@ -2163,7 +2168,9 @@ mod tests {
     #[tokio::test]
     async fn aborting_provider_wait_emits_aborted_message_and_settles() {
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([FauxTurn::WaitForAbort]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([
+                ScriptedTurn::WaitForAbort,
+            ]))
             .build()
             .unwrap();
         let runner = runtime.clone();
@@ -2211,7 +2218,7 @@ mod tests {
     #[tokio::test]
     async fn agent_remains_running_until_agent_end_listener_settles() {
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([FauxTurn::Text(
+            .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
                 "done".to_string(),
             )]))
             .build()
@@ -2293,13 +2300,13 @@ mod tests {
             .agent_plugin(TestToolsPlugin::new())
             .agent_plugin(BlockEchoPlugin)
             .agent_plugin(PatchToolResultPlugin)
-            .provider_plugin(FauxProviderPlugin::scripted([
-                FauxTurn::ToolCalls(vec![ToolCall::new(
+            .provider_plugin(ScriptedProviderPlugin::scripted([
+                ScriptedTurn::ToolCalls(vec![ToolCall::new(
                     "echo-1",
                     "echo",
                     json!({"text": "original"}),
                 )]),
-                FauxTurn::Text("done".to_string()),
+                ScriptedTurn::Text("done".to_string()),
             ]))
             .agent_options(AgentOptions {
                 active_tools: vec!["echo".to_string()],
@@ -2330,13 +2337,13 @@ mod tests {
         let runtime = PiRuntime::builder()
             .agent_plugin(TestToolsPlugin::new())
             .agent_plugin(PatchToolResultPlugin)
-            .provider_plugin(FauxProviderPlugin::scripted([
-                FauxTurn::ToolCalls(vec![ToolCall::new(
+            .provider_plugin(ScriptedProviderPlugin::scripted([
+                ScriptedTurn::ToolCalls(vec![ToolCall::new(
                     "echo-1",
                     "echo",
                     json!({"text": "original"}),
                 )]),
-                FauxTurn::Text("done".to_string()),
+                ScriptedTurn::Text("done".to_string()),
             ]))
             .agent_options(AgentOptions {
                 active_tools: vec!["echo".to_string()],
@@ -2366,9 +2373,9 @@ mod tests {
     async fn queued_tool_update_precedes_execution_end() {
         let runtime = PiRuntime::builder()
             .agent_plugin(TestToolsPlugin::new())
-            .provider_plugin(FauxProviderPlugin::scripted([
-                FauxTurn::ToolCalls(vec![ToolCall::new("update-1", "update", json!({}))]),
-                FauxTurn::Text("done".to_string()),
+            .provider_plugin(ScriptedProviderPlugin::scripted([
+                ScriptedTurn::ToolCalls(vec![ToolCall::new("update-1", "update", json!({}))]),
+                ScriptedTurn::Text("done".to_string()),
             ]))
             .agent_options(AgentOptions {
                 active_tools: vec!["update".to_string()],
@@ -2410,9 +2417,9 @@ mod tests {
     async fn aborting_running_tool_settles_batch() {
         let runtime = PiRuntime::builder()
             .agent_plugin(TestToolsPlugin::new())
-            .provider_plugin(FauxProviderPlugin::scripted([
-                FauxTurn::ToolCalls(vec![ToolCall::new("wait-1", "wait_for_abort", json!({}))]),
-                FauxTurn::Text("must not be requested".to_string()),
+            .provider_plugin(ScriptedProviderPlugin::scripted([
+                ScriptedTurn::ToolCalls(vec![ToolCall::new("wait-1", "wait_for_abort", json!({}))]),
+                ScriptedTurn::Text("must not be requested".to_string()),
             ]))
             .agent_options(AgentOptions {
                 active_tools: vec!["wait_for_abort".to_string()],
@@ -2456,9 +2463,9 @@ mod tests {
     #[tokio::test]
     async fn follow_up_after_text_turn_keeps_run_alive() {
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([
-                FauxTurn::Text("first".to_string()),
-                FauxTurn::Text("second".to_string()),
+            .provider_plugin(ScriptedProviderPlugin::scripted([
+                ScriptedTurn::Text("first".to_string()),
+                ScriptedTurn::Text("second".to_string()),
             ]))
             .build()
             .unwrap();
@@ -2490,9 +2497,9 @@ mod tests {
     #[tokio::test]
     async fn steering_after_text_turn_keeps_run_alive() {
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([
-                FauxTurn::Text("first".to_string()),
-                FauxTurn::Text("second".to_string()),
+            .provider_plugin(ScriptedProviderPlugin::scripted([
+                ScriptedTurn::Text("first".to_string()),
+                ScriptedTurn::Text("second".to_string()),
             ]))
             .build()
             .unwrap();

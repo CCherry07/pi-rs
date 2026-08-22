@@ -305,8 +305,8 @@ mod tests {
 
     use pi_agent::AgentOptions;
     use pi_core::{ModelId, PluginId, ProviderId};
-    use pi_plugin_faux_provider::FauxProviderPlugin;
     use pi_runtime::PiRuntime;
+    use pi_test_support::ScriptedProviderPlugin;
     use tokio::sync::Notify;
 
     use super::*;
@@ -429,9 +429,9 @@ mod tests {
                 }
             };
             let runtime = PiRuntime::builder()
-                .provider_plugin(FauxProviderPlugin::scripted([]))
+                .provider_plugin(ScriptedProviderPlugin::scripted([]))
                 .agent_options(AgentOptions {
-                    provider_id: ProviderId::new("faux"),
+                    provider_id: ProviderId::new("scripted"),
                     model_id: ModelId::new("test"),
                     cwd,
                     ..AgentOptions::default()

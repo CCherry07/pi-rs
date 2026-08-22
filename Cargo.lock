@@ -1848,8 +1848,6 @@ dependencies = [
  "async-trait",
  "futures",
  "pi-core",
- "pi-plugin-faux-provider",
- "pi-plugin-test-tools",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
@@ -1923,7 +1921,6 @@ dependencies = [
  "pi-core",
  "pi-plugin-bash",
  "pi-plugin-edit",
- "pi-plugin-faux-provider",
  "pi-plugin-find",
  "pi-plugin-grep",
  "pi-plugin-ls",
@@ -1934,6 +1931,7 @@ dependencies = [
  "pi-resources",
  "pi-runtime",
  "pi-session",
+ "pi-test-support",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2002,16 +2000,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "unicode-normalization",
-]
-
-[[package]]
-name = "pi-plugin-faux-provider"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "pi-core",
- "tokio",
 ]
 
 [[package]]
@@ -2181,22 +2169,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "pi-core",
- "pi-plugin-faux-provider",
  "pi-runtime",
+ "pi-test-support",
  "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "pi-plugin-test-tools"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "pi-core",
- "serde_json",
  "tokio",
 ]
 
@@ -2249,12 +2227,11 @@ dependencies = [
  "futures",
  "pi-agent",
  "pi-core",
- "pi-plugin-faux-provider",
  "pi-plugin-read",
- "pi-plugin-test-tools",
  "pi-plugin-write",
  "pi-prompt",
  "pi-resources",
+ "pi-test-support",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
@@ -2268,12 +2245,11 @@ dependencies = [
  "async-trait",
  "pi-agent",
  "pi-core",
- "pi-plugin-faux-provider",
- "pi-plugin-test-tools",
  "pi-prompt",
  "pi-resources",
  "pi-runtime",
  "pi-shell",
+ "pi-test-support",
  "serde",
  "serde_json",
  "sha2",
@@ -2290,6 +2266,17 @@ dependencies = [
  "pi-core",
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "pi-test-support"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "pi-core",
+ "serde_json",
  "tokio",
 ]
 

@@ -434,7 +434,12 @@ mod tests {
     use pi_core::{ModelId, ProviderId, ToolCallId};
 
     fn metadata() -> ResponseMetadata {
-        ResponseMetadata::new(ProviderId::new("faux"), ModelId::new("test"), "faux", 1)
+        ResponseMetadata::new(
+            ProviderId::new("scripted"),
+            ModelId::new("test"),
+            "scripted",
+            1,
+        )
     }
 
     #[test]

@@ -12,7 +12,3 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 pi-core.workspace = true
-
-[dev-dependencies]
-pi-plugin-faux-provider.workspace = true
-pi-plugin-test-tools.workspace = true

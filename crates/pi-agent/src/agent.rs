@@ -99,7 +99,7 @@ impl Default for AgentOptions {
     fn default() -> Self {
         Self {
             system_prompt: String::new(),
-            provider_id: ProviderId::new("faux"),
+            provider_id: ProviderId::new("scripted"),
             model_id: ModelId::new("test"),
             thinking_level: ThinkingLevel::Off,
             active_tools: Vec::new(),

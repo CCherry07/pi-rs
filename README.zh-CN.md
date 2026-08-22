@@ -282,7 +282,7 @@ git diff --check
 ```
 
 真实 Provider 测试不要把 API key 写入源码、日志或 fixtures。默认验证路径使用
-deterministic faux provider。
+`pi-test-support` 中的 deterministic scripted provider。
 
 ## Apple Silicon 打包
 

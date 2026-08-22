@@ -39,7 +39,7 @@ Use `legacy/pi` as the oracle for intentional Pi compatibility.
   provider routing overlays, headers, request parameters, and request-time credential expansion.
 - Initial model policy covering explicit selection, restorable session models, catalog defaults,
   and runtime fallback.
-- Deterministic faux provider and ignored opt-in real-network coverage.
+- Deterministic scripted-provider test support and ignored opt-in real-network coverage.
 
 ### Tools and resources
 
@@ -171,5 +171,5 @@ cargo clippy --workspace --all-targets -- -D warnings
 git diff --check
 ```
 
-Use deterministic faux-provider tests by default. Keep real credentials out of source, fixtures,
+Use deterministic scripted-provider tests by default. Keep real credentials out of source, fixtures,
 logs, session samples, and distribution artifacts.

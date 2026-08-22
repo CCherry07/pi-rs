@@ -292,7 +292,7 @@ git diff --check
 ```
 
 Never put real provider credentials in source, logs, or fixtures. The default validation path uses
-the deterministic faux provider.
+the deterministic scripted provider in `pi-test-support`.
 
 ## Apple Silicon packaging
 

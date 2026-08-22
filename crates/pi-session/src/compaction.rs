@@ -976,8 +976,8 @@ mod tests {
     fn assistant(text: &str, total_tokens: u64) -> AgentMessage {
         Message::assistant(AssistantMessage {
             content: vec![ContentBlock::Text(TextContent::new(text))],
-            api: "faux".to_string(),
-            provider: ProviderId::new("faux"),
+            api: "scripted".to_string(),
+            provider: ProviderId::new("scripted"),
             model: ModelId::new("test"),
             response_model: None,
             response_id: None,

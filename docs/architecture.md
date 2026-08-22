@@ -33,13 +33,12 @@ crates/pi-plugin-manager        package intent/lock, Registry resolution, CAS, a
 crates/pi-js-plugin             typed JS manifest protocol and three Rust lifecycle adapters
 bindings/pi-napi                NAPI-RS boundary between Node callbacks and the Rust product
 packages/pi                     Node launcher, Pi extension discovery, jiti loader, callback host
-plugins/providers/pi-plugin-faux-provider deterministic test provider
+crates/pi-test-support          deterministic scripted providers and tools for tests
 plugins/providers/pi-plugin-openai        OpenAI protocol, provider, registration, and examples
 plugins/providers/pi-plugin-models        models.json catalog, routing, and request-time config
 crates/pi-tool-support           shared path validation, argument, and truncation helpers
 plugins/tools/pi-plugin-{read,write,edit,hashline-edit,bash,grep,find,ls}
                                 one production tool per plugin crate
-plugins/tools/pi-plugin-test-tools    deterministic test tools
 e2e/                            deterministic full-agent and ignored real-network E2E
 apps/pi-cli/src/project_trust.rs product trust policy, persistence, and TUI request broker
 ```

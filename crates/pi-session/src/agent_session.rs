@@ -1949,9 +1949,9 @@ mod tests {
         ContentBlock, Message, PluginId, RegisterContext, ResponseMetadata, StreamEvent, Usage,
         UserMessage,
     };
-    use pi_plugin_faux_provider::{FauxProviderPlugin, FauxTurn};
-    use pi_plugin_test_tools::TestToolsPlugin;
     use pi_runtime::SystemPrompt;
+    use pi_test_support::TestToolsPlugin;
+    use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 
     use super::*;
     use crate::{
@@ -1962,10 +1962,10 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn text_turn_with_usage(text: &str, total_tokens: u64) -> FauxTurn {
-        FauxTurn::Events(vec![
+    fn text_turn_with_usage(text: &str, total_tokens: u64) -> ScriptedTurn {
+        ScriptedTurn::Events(vec![
             StreamEvent::Start {
-                metadata: ResponseMetadata::new("faux".into(), "test".into(), "faux", 0),
+                metadata: ResponseMetadata::new("scripted".into(), "test".into(), "scripted", 0),
             },
             StreamEvent::TextStart { content_index: 0 },
             StreamEvent::TextDelta {
@@ -1987,11 +1987,11 @@ mod tests {
         ])
     }
 
-    fn faux_runtime(turns: impl IntoIterator<Item = FauxTurn>) -> PiRuntime {
+    fn scripted_runtime(turns: impl IntoIterator<Item = ScriptedTurn>) -> PiRuntime {
         PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted(turns))
+            .provider_plugin(ScriptedProviderPlugin::scripted(turns))
             .agent_options(AgentOptions {
-                provider_id: ProviderId::new("faux"),
+                provider_id: ProviderId::new("scripted"),
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
@@ -2043,11 +2043,11 @@ mod tests {
         let path = directory.path().join("session.jsonl");
         let runtime = PiRuntime::builder()
             .agent_plugin(ExpandingCommandPlugin)
-            .provider_plugin(FauxProviderPlugin::scripted([FauxTurn::Text(
+            .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
                 "done".to_string(),
             )]))
             .agent_options(AgentOptions {
-                provider_id: ProviderId::new("faux"),
+                provider_id: ProviderId::new("scripted"),
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
@@ -2078,11 +2078,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let runtime = PiRuntime::builder()
             .agent_plugin(ExpandingCommandPlugin)
-            .provider_plugin(FauxProviderPlugin::scripted([FauxTurn::Text(
+            .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
                 "done".to_string(),
             )]))
             .agent_options(AgentOptions {
-                provider_id: ProviderId::new("faux"),
+                provider_id: ProviderId::new("scripted"),
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
@@ -2125,9 +2125,11 @@ mod tests {
         let path = directory.path().join("queued-command.jsonl");
         let runtime = PiRuntime::builder()
             .agent_plugin(ExpandingCommandPlugin)
-            .provider_plugin(FauxProviderPlugin::scripted([FauxTurn::WaitForAbort]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([
+                ScriptedTurn::WaitForAbort,
+            ]))
             .agent_options(AgentOptions {
-                provider_id: ProviderId::new("faux"),
+                provider_id: ProviderId::new("scripted"),
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
@@ -2157,7 +2159,9 @@ mod tests {
         session.shutdown().await;
         drop(session);
 
-        let reopened = AgentSession::open(faux_runtime([]), &path).await.unwrap();
+        let reopened = AgentSession::open(scripted_runtime([]), &path)
+            .await
+            .unwrap();
         assert_eq!(
             reopened.snapshot().queue.follow_up,
             vec!["/review accessibility".to_string()]
@@ -2169,7 +2173,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sessions/session.jsonl");
         let session = AgentSession::create(
-            faux_runtime([FauxTurn::Text("first answer".to_string())]),
+            scripted_runtime([ScriptedTurn::Text("first answer".to_string())]),
             &path,
         )
         .await
@@ -2311,11 +2315,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([FauxTurn::Text(
+            .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
                 "done".to_string(),
             )]))
             .agent_options(AgentOptions {
-                provider_id: ProviderId::new("faux"),
+                provider_id: ProviderId::new("scripted"),
                 model_id: ModelId::new("test"),
                 thinking_level: ThinkingLevel::High,
                 ..AgentOptions::default()
@@ -2349,7 +2353,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("queued-session.jsonl");
         let session = Arc::new(
-            AgentSession::create(faux_runtime([FauxTurn::WaitForAbort]), &path)
+            AgentSession::create(scripted_runtime([ScriptedTurn::WaitForAbort]), &path)
                 .await
                 .unwrap(),
         );
@@ -2402,7 +2406,9 @@ mod tests {
         session.shutdown().await;
         drop(session);
 
-        let reopened = AgentSession::open(faux_runtime([]), &path).await.unwrap();
+        let reopened = AgentSession::open(scripted_runtime([]), &path)
+            .await
+            .unwrap();
         assert_eq!(
             reopened.snapshot().queue.follow_up,
             vec!["keep this draft".to_string()]
@@ -2429,9 +2435,9 @@ mod tests {
         let path = directory.path().join("session.jsonl");
         let runtime = PiRuntime::builder()
             .agent_plugin(TestToolsPlugin::new())
-            .provider_plugin(FauxProviderPlugin::scripted([
-                FauxTurn::Text("first answer".to_string()),
-                FauxTurn::Text("abandoned answer".to_string()),
+            .provider_plugin(ScriptedProviderPlugin::scripted([
+                ScriptedTurn::Text("first answer".to_string()),
+                ScriptedTurn::Text("abandoned answer".to_string()),
             ]))
             .agent_options(AgentOptions {
                 active_tools: vec!["echo".to_string()],
@@ -2468,7 +2474,7 @@ mod tests {
         drop(session);
         let runtime = PiRuntime::builder()
             .agent_plugin(TestToolsPlugin::new())
-            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .agent_options(AgentOptions {
                 active_tools: vec!["echo".to_string()],
                 cwd: directory.path().to_path_buf(),
@@ -2489,7 +2495,7 @@ mod tests {
     async fn compaction_uses_persisted_retained_tail() {
         let directory = tempfile::tempdir().unwrap();
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .build()
             .unwrap();
         let session = AgentSession::create(runtime, directory.path().join("session.jsonl"))
@@ -2520,7 +2526,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .agent_options(AgentOptions {
                 cwd: directory.path().to_path_buf(),
                 ..AgentOptions::default()
@@ -2587,7 +2593,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .build()
             .unwrap();
         let builds = Arc::new(AtomicUsize::new(0));
@@ -2641,7 +2647,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .build()
             .unwrap();
         let contexts = Arc::new(Mutex::new(Vec::new()));
@@ -2702,15 +2708,15 @@ mod tests {
     #[tokio::test]
     async fn manual_compaction_uses_an_isolated_tool_free_completion() {
         let directory = tempfile::tempdir().unwrap();
-        let provider_plugin = FauxProviderPlugin::scripted([
-            FauxTurn::Text("answer".to_string()),
-            FauxTurn::Text("## Original Request\nKeep going".to_string()),
+        let provider_plugin = ScriptedProviderPlugin::scripted([
+            ScriptedTurn::Text("answer".to_string()),
+            ScriptedTurn::Text("## Original Request\nKeep going".to_string()),
         ]);
         let provider = provider_plugin.provider();
         let runtime = PiRuntime::builder()
             .provider_plugin(provider_plugin)
             .agent_options(AgentOptions {
-                provider_id: ProviderId::new("faux"),
+                provider_id: ProviderId::new("scripted"),
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
@@ -2754,15 +2760,15 @@ mod tests {
     #[tokio::test]
     async fn threshold_compaction_runs_after_a_completed_turn() {
         let directory = tempfile::tempdir().unwrap();
-        let provider_plugin = FauxProviderPlugin::scripted([
+        let provider_plugin = ScriptedProviderPlugin::scripted([
             text_turn_with_usage("large answer", 200),
-            FauxTurn::Text("threshold summary".to_string()),
+            ScriptedTurn::Text("threshold summary".to_string()),
         ]);
         let provider = provider_plugin.provider();
         let runtime = PiRuntime::builder()
             .provider_plugin(provider_plugin)
             .agent_options(AgentOptions {
-                provider_id: ProviderId::new("faux"),
+                provider_id: ProviderId::new("scripted"),
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
@@ -2798,16 +2804,16 @@ mod tests {
     #[tokio::test]
     async fn overflow_compaction_drops_the_failed_assistant_and_retries_once() {
         let directory = tempfile::tempdir().unwrap();
-        let provider_plugin = FauxProviderPlugin::scripted([
-            FauxTurn::Error("context window token length exceeded".to_string()),
-            FauxTurn::Text("overflow summary".to_string()),
-            FauxTurn::Text("recovered answer".to_string()),
+        let provider_plugin = ScriptedProviderPlugin::scripted([
+            ScriptedTurn::Error("context window token length exceeded".to_string()),
+            ScriptedTurn::Text("overflow summary".to_string()),
+            ScriptedTurn::Text("recovered answer".to_string()),
         ]);
         let provider = provider_plugin.provider();
         let runtime = PiRuntime::builder()
             .provider_plugin(provider_plugin)
             .agent_options(AgentOptions {
-                provider_id: ProviderId::new("faux"),
+                provider_id: ProviderId::new("scripted"),
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
@@ -2849,15 +2855,15 @@ mod tests {
     #[tokio::test]
     async fn manual_compaction_can_be_aborted_without_waiting_for_the_operation_gate() {
         let directory = tempfile::tempdir().unwrap();
-        let provider_plugin = FauxProviderPlugin::scripted([
-            FauxTurn::Text("answer".to_string()),
-            FauxTurn::WaitForAbort,
+        let provider_plugin = ScriptedProviderPlugin::scripted([
+            ScriptedTurn::Text("answer".to_string()),
+            ScriptedTurn::WaitForAbort,
         ]);
         let provider = provider_plugin.provider();
         let runtime = PiRuntime::builder()
             .provider_plugin(provider_plugin)
             .agent_options(AgentOptions {
-                provider_id: ProviderId::new("faux"),
+                provider_id: ProviderId::new("scripted"),
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })

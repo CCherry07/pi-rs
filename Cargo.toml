@@ -15,11 +15,11 @@ members = [
     "crates/pi-plugin-loader",
     "crates/pi-plugin-manager",
     "crates/pi-js-plugin",
+    "crates/pi-test-support",
     "bindings/pi-napi",
     "e2e",
     "plugins/features/pi-plugin-skills",
     "plugins/providers/pi-plugin-models",
-    "plugins/providers/pi-plugin-faux-provider",
     "plugins/providers/pi-plugin-openai",
     "crates/pi-tool-support",
     "plugins/tools/pi-plugin-read",
@@ -30,7 +30,6 @@ members = [
     "plugins/tools/pi-plugin-grep",
     "plugins/tools/pi-plugin-find",
     "plugins/tools/pi-plugin-ls",
-    "plugins/tools/pi-plugin-test-tools",
 ]
 resolver = "2"
 
@@ -67,9 +66,9 @@ pi-plugin-sdk = { path = "crates/pi-plugin-sdk" }
 pi-plugin-loader = { path = "crates/pi-plugin-loader" }
 pi-plugin-manager = { path = "crates/pi-plugin-manager" }
 pi-js-plugin = { path = "crates/pi-js-plugin" }
+pi-test-support = { path = "crates/pi-test-support" }
 pi-plugin-skills = { path = "plugins/features/pi-plugin-skills" }
 pi-plugin-models = { path = "plugins/providers/pi-plugin-models" }
-pi-plugin-faux-provider = { path = "plugins/providers/pi-plugin-faux-provider" }
 pi-plugin-openai = { path = "plugins/providers/pi-plugin-openai" }
 pi-tool-support = { path = "crates/pi-tool-support" }
 pi-plugin-read = { path = "plugins/tools/pi-plugin-read" }
@@ -80,4 +79,3 @@ pi-plugin-bash = { path = "plugins/tools/pi-plugin-bash" }
 pi-plugin-grep = { path = "plugins/tools/pi-plugin-grep" }
 pi-plugin-find = { path = "plugins/tools/pi-plugin-find" }
 pi-plugin-ls = { path = "plugins/tools/pi-plugin-ls" }
-pi-plugin-test-tools = { path = "plugins/tools/pi-plugin-test-tools" }

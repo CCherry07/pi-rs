@@ -431,8 +431,8 @@ fn escape_xml(value: &str) -> String {
 mod tests {
     use super::*;
     use pi_core::{AbortHandle, ModelId, ProviderId, RunId};
-    use pi_plugin_faux_provider::FauxProviderPlugin;
     use pi_runtime::{PiRuntime, SystemPrompt};
+    use pi_test_support::ScriptedProviderPlugin;
 
     #[tokio::test]
     async fn command_registry_expands_explicit_skill_invocation() {
@@ -616,7 +616,7 @@ mod tests {
         .unwrap();
         let options = SkillLoaderOptions::new(&cwd, &agent_dir);
         let runtime = PiRuntime::builder()
-            .provider_plugin(FauxProviderPlugin::scripted([]))
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .agent_plugin_factory(move || SkillsPlugin::load(options.clone()))
             .system_prompt(SystemPrompt::Pi(Box::default()))
             .build()

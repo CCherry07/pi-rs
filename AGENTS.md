@@ -17,7 +17,7 @@ claiming Pi compatibility; do not implement from memory or from an older Pi shap
 - Version-locked native agent/provider/session plugins are exported through `pi-plugin-sdk`, loaded
   from manifests or explicit paths, and adapted into those same generation factories.
 - Skills, `models.json`, project resources, OpenAI-compatible routing, production filesystem/shell
-  tools, and deterministic faux-provider fixtures are integrated.
+  tools, and deterministic scripted-provider test support are integrated.
 - Pi-compatible project trust persists nearest-ancestor decisions, prompts interactively, and
   gates project `.pi` resources and project skill roots before generation construction.
 - Pi v4 sessions support resume, queues, branching, compaction, context repair, recovery reduction,
@@ -142,4 +142,4 @@ claiming Pi compatibility; do not implement from memory or from an older Pi shap
    ```
 
 For real-provider checks, keep credentials out of source, logs, fixtures, and distribution
-artifacts. Deterministic faux-provider tests remain the default validation path.
+artifacts. Deterministic scripted-provider tests remain the default validation path.

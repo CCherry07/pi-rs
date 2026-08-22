@@ -22,6 +22,5 @@ tokio.workspace = true
 uuid = { version = "1.18.1", features = ["v7"] }
 
 [dev-dependencies]
-pi-plugin-faux-provider.workspace = true
-pi-plugin-test-tools.workspace = true
+pi-test-support.workspace = true
 tempfile = "3.21.0"
