@@ -8,6 +8,9 @@ use pi_plugin_grep::GrepPlugin;
 use pi_plugin_hashline_edit::HashlineEditPlugin;
 use pi_plugin_loader::{NativePluginLoader, NativePluginLoaderOptions, NativePlugins};
 use pi_plugin_ls::LsPlugin;
+use pi_plugin_manager::{
+    InstallScope, PluginManager, PluginManagerOptions, PreparedPluginReconcile,
+};
 use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
 use pi_plugin_openai::{OpenAiCompatibleConfig, OpenAiCompatiblePlugin};
 use pi_plugin_read::ReadPlugin;
@@ -68,6 +71,7 @@ impl AgentSessionRuntimeFactory for AppSessionFactory {
             .resolve(&config.cwd)
             .await
             .map_err(|error| SessionError::Runtime(error.to_string()))?;
+        let package_reconciliations = prepare_native_packages(&config).await?;
         let mut native_options = NativePluginLoaderOptions::new(&config.cwd, &config.agent_dir);
         native_options.project_trusted = config.trust_project;
         native_options.explicit_paths = config.native_plugins.clone();
@@ -78,14 +82,64 @@ impl AgentSessionRuntimeFactory for AppSessionFactory {
         let session_options = AgentSessionOptions::default()
             .plugins(native_plugins.apply_session(SessionPlugins::new()))
             .initial_model(initial_model_request(&config));
-        if create {
+        let prepared = if create {
             AgentSession::prepare_create_with_options(runtime, path, session_options).await
         } else if let Some(log) = reused_log {
             AgentSession::prepare_reuse_with_options(runtime, log, session_options).await
         } else {
             AgentSession::prepare_open_with_options(runtime, path, session_options).await
+        };
+        match prepared {
+            Ok(prepared) => {
+                for reconciliation in package_reconciliations {
+                    reconciliation.commit();
+                }
+                Ok(prepared)
+            }
+            Err(error) => {
+                let mut rollback_errors = Vec::new();
+                for reconciliation in package_reconciliations.into_iter().rev() {
+                    if let Err(rollback_error) = reconciliation.rollback() {
+                        rollback_errors.push(rollback_error.to_string());
+                    }
+                }
+                if rollback_errors.is_empty() {
+                    Err(error)
+                } else {
+                    Err(SessionError::Runtime(format!(
+                        "{error}; native package rollback failed: {}",
+                        rollback_errors.join("; ")
+                    )))
+                }
+            }
         }
     }
+}
+
+async fn prepare_native_packages(
+    config: &AppConfig,
+) -> Result<Vec<PreparedPluginReconcile>, SessionError> {
+    let mut options = PluginManagerOptions::new(&config.cwd, &config.agent_dir);
+    options.registry = std::env::var("PI_PLUGIN_REGISTRY")
+        .ok()
+        .filter(|registry| !registry.trim().is_empty());
+    let manager =
+        PluginManager::new(options).map_err(|error| SessionError::Runtime(error.to_string()))?;
+    let mut prepared = vec![
+        manager
+            .prepare_reconcile(InstallScope::Global)
+            .await
+            .map_err(|error| SessionError::Runtime(error.to_string()))?,
+    ];
+    if config.trust_project {
+        prepared.push(
+            manager
+                .prepare_reconcile(InstallScope::Project)
+                .await
+                .map_err(|error| SessionError::Runtime(error.to_string()))?,
+        );
+    }
+    Ok(prepared)
 }
 
 fn build_runtime(
@@ -194,6 +248,28 @@ fn initial_model_request(config: &AppConfig) -> InitialModelRequest {
 mod tests {
     use super::*;
 
+    fn write_local_plugin_package(root: &std::path::Path) -> std::path::PathBuf {
+        let package = root.join("local-plugin");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("plugin.dylib"), b"native plugin fixture").unwrap();
+        std::fs::write(
+            package.join("pi-plugin.toml"),
+            r#"schema = 1
+
+[plugin]
+id = "local-plugin"
+version = "1.0.0"
+kind = "agent"
+artifact = "plugin.dylib"
+
+[options]
+command = "fixture-command"
+"#,
+        )
+        .unwrap();
+        package
+    }
+
     fn app_config(agent_dir: &std::path::Path, model: Option<&str>) -> AppConfig {
         AppConfig {
             cwd: agent_dir.to_path_buf(),
@@ -286,6 +362,86 @@ mod tests {
 
         assert_eq!(state.provider_id.as_str(), "openai-compatible");
         assert_eq!(state.model_id.as_str(), "gpt-4o-mini");
+    }
+
+    #[tokio::test]
+    async fn trusted_project_packages_prepare_transactionally_before_runtime_loading() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let agent_dir = root.path().join("agent");
+        let package = write_local_plugin_package(root.path());
+        std::fs::create_dir_all(project.join(".pi")).unwrap();
+        std::fs::write(
+            project.join(".pi/plugins.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": 1,
+                "plugins": [{
+                    "id": "local-plugin",
+                    "source": package.display().to_string(),
+                    "version": "*",
+                    "options": {"command": "project-command"}
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut config = app_config(&agent_dir, None);
+        config.cwd = project.clone();
+        config.trust_project = true;
+        let activation = project.join(".pi/plugins/installed/0000-local-plugin");
+        let lock_path = project.join(".pi/plugins.lock");
+
+        {
+            let prepared = prepare_native_packages(&config).await.unwrap();
+            assert!(activation.join("plugin.dylib").is_file());
+            assert!(lock_path.is_file());
+            let manifest = std::fs::read_to_string(activation.join("pi-plugin.toml")).unwrap();
+            assert!(manifest.contains("command = \"project-command\""));
+            drop(prepared);
+        }
+        assert!(!activation.exists());
+        assert!(!lock_path.exists());
+
+        for reconciliation in prepare_native_packages(&config).await.unwrap() {
+            reconciliation.commit();
+        }
+        assert!(activation.join("plugin.dylib").is_file());
+        let lock: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(lock_path).unwrap()).unwrap();
+        assert!(lock["intent_sha256"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn untrusted_project_package_intent_is_not_reconciled() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let agent_dir = root.path().join("agent");
+        let package = write_local_plugin_package(root.path());
+        std::fs::create_dir_all(project.join(".pi")).unwrap();
+        std::fs::write(
+            project.join(".pi/plugins.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": 1,
+                "plugins": [{
+                    "id": "local-plugin",
+                    "source": package.display().to_string(),
+                    "version": "*",
+                    "options": {}
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut config = app_config(&agent_dir, None);
+        config.cwd = project.clone();
+        config.trust_project = false;
+
+        for reconciliation in prepare_native_packages(&config).await.unwrap() {
+            reconciliation.commit();
+        }
+
+        assert!(!project.join(".pi/plugins.lock").exists());
+        assert!(!project.join(".pi/plugins/installed").exists());
     }
 
     #[tokio::test]

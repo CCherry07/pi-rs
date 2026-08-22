@@ -1787,6 +1787,7 @@ dependencies = [
  "pi-plugin-hashline-edit",
  "pi-plugin-loader",
  "pi-plugin-ls",
+ "pi-plugin-manager",
  "pi-plugin-models",
  "pi-plugin-openai",
  "pi-plugin-read",
@@ -1974,6 +1975,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "pi-plugin-manager"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "futures",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml",
+ "url",
 ]
 
 [[package]]
@@ -2715,6 +2734,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "serde"

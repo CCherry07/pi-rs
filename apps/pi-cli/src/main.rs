@@ -1,6 +1,7 @@
 mod clipboard;
 mod config;
 mod output;
+mod plugin_commands;
 mod project_trust;
 mod runtime_factory;
 mod transcript_selection;
@@ -9,9 +10,10 @@ mod tui;
 use std::io::{IsTerminal, Read};
 use std::sync::Arc;
 
-use config::{AppConfig, Cli};
+use config::{AppConfig, Cli, CliCommand};
 use pi_session::{AgentSessionRuntime, AgentSessionRuntimeTarget, SessionLog};
-use project_trust::{ProjectTrustEvaluation, ProjectTrustService};
+use project_trust::{ProjectTrustEvaluation, ProjectTrustPromptRequest, ProjectTrustService};
+use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() {
@@ -25,6 +27,9 @@ async fn main() {
 async fn run() -> Result<(), String> {
     let cli = Cli::parse_pi();
     let mut config = AppConfig::resolve(&cli)?;
+    if let Some(CliCommand::Plugin { command }) = &cli.command {
+        return plugin_commands::run(&cli, &config, command).await;
+    }
     if config.session_path.exists() {
         let (_, document) =
             SessionLog::open(&config.session_path).map_err(|error| error.to_string())?;
@@ -37,28 +42,9 @@ async fn run() -> Result<(), String> {
     }
     let input = resolve_input(&cli)?;
     let interactive = !cli.print && !cli.json && std::io::stdin().is_terminal();
-    let (project_trust, trust_requests) =
-        ProjectTrustService::new(&config.agent_dir, config.trust_override, interactive)
-            .map_err(|error| error.to_string())?;
-    config.trust_project = match project_trust
-        .evaluate(&config.cwd)
-        .map_err(|error| error.to_string())?
-    {
-        ProjectTrustEvaluation::Known(trusted) => trusted,
-        ProjectTrustEvaluation::Ask(options) => {
-            let selected =
-                tui::select_project_trust(cli.fullscreen_enabled(), &config.cwd, &options).await?;
-            selected
-                .and_then(|index| options.get(index))
-                .map(|option| project_trust.apply_option(&config.cwd, option))
-                .transpose()
-                .map_err(|error| error.to_string())?
-                .unwrap_or(false)
-        }
-    };
-    project_trust
-        .remember(&config.cwd, config.trust_project)
-        .map_err(|error| error.to_string())?;
+    let (project_trust, trust_requests, trusted) =
+        resolve_project_trust(&cli, &config, interactive).await?;
+    config.trust_project = trusted;
     let target = if config.session_path.exists() {
         AgentSessionRuntimeTarget::open(&config.session_path)
     } else {
@@ -92,6 +78,43 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|error| error.to_string())?;
     result
+}
+
+pub(crate) async fn resolve_project_trust(
+    cli: &Cli,
+    config: &AppConfig,
+    interactive: bool,
+) -> Result<
+    (
+        ProjectTrustService,
+        mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
+        bool,
+    ),
+    String,
+> {
+    let (project_trust, trust_requests) =
+        ProjectTrustService::new(&config.agent_dir, config.trust_override, interactive)
+            .map_err(|error| error.to_string())?;
+    let trusted = match project_trust
+        .evaluate(&config.cwd)
+        .map_err(|error| error.to_string())?
+    {
+        ProjectTrustEvaluation::Known(trusted) => trusted,
+        ProjectTrustEvaluation::Ask(options) => {
+            let selected =
+                tui::select_project_trust(cli.fullscreen_enabled(), &config.cwd, &options).await?;
+            selected
+                .and_then(|index| options.get(index))
+                .map(|option| project_trust.apply_option(&config.cwd, option))
+                .transpose()
+                .map_err(|error| error.to_string())?
+                .unwrap_or(false)
+        }
+    };
+    project_trust
+        .remember(&config.cwd, trusted)
+        .map_err(|error| error.to_string())?;
+    Ok((project_trust, trust_requests, trusted))
 }
 
 fn resolve_input(cli: &Cli) -> Result<Option<String>, String> {

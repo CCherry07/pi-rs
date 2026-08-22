@@ -795,6 +795,12 @@ fn discover_manifests_at_depth(
         })?;
         let path = entry.path();
         if path.is_dir() {
+            if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+            {
+                continue;
+            }
             discover_manifests_at_depth(&path, depth + 1, manifests)?;
         } else if path
             .file_name()
@@ -859,6 +865,50 @@ artifact = "../outside.dylib"
             resolve_manifest(&manifest),
             Err(NativePluginError::InvalidArtifactPath { .. })
         ));
+    }
+
+    #[test]
+    fn package_manifest_rejects_runtime_plugin_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("plugin.dylib"), b"fixture").unwrap();
+        std::fs::write(
+            package.join("pi-plugin.toml"),
+            r#"schema = 1
+[plugin]
+id = "example"
+version = "1.0.0"
+kind = "agent"
+artifact = "plugin.dylib"
+
+[dependencies]
+shared = "^1"
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            resolve_manifest(&package.join("pi-plugin.toml")),
+            Err(NativePluginError::ManifestParse { .. })
+        ));
+    }
+
+    #[test]
+    fn discovery_ignores_hidden_transaction_directories() {
+        let root = tempfile::tempdir().unwrap();
+        for directory in ["installed/0000-live", ".installed-backup/0000-old"] {
+            let directory = root.path().join(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("pi-plugin.toml"), "fixture").unwrap();
+        }
+
+        let manifests = discover_manifests(root.path()).unwrap();
+
+        assert_eq!(
+            manifests,
+            [root.path().join("installed/0000-live/pi-plugin.toml")]
+        );
     }
 
     #[test]

@@ -20,7 +20,8 @@ Trust，以及可恢复的 Pi v4 会话。
 - **插件优先**：`AgentPlugin`、`ProviderPlugin`、`SessionPlugin` 三套窄生命周期；插件按
   generation 构建并原子 reload，失败时保留上一代。
 - **原生插件**：版本锁定的 Rust `cdylib` 可从全局 manifest、可信项目 manifest 或重复
-  `--plugin` 路径加载，并复用现有三套 generation 生命周期。
+  `--plugin` 路径加载；本地/HTTP/GitHub package 与静态 Registry 通过精确 lock 和内容
+  寻址仓库安装。
 - **模型与 Provider**：支持 OpenAI-compatible API；`models.json` 统一管理模型目录、
   endpoint、请求参数、headers 和凭据解析。
 - **内置工具**：`read`、`write`、`edit`、`hashline_edit`、`bash`、`grep`、`find`、`ls`。
@@ -133,7 +134,11 @@ TUI 中使用 `/model` 查看和切换当前 generation 注册的模型。修改
 ├── SYSTEM.md            # 全局系统 prompt（可选）
 ├── APPEND_SYSTEM.md     # 全局追加 prompt（可选）
 ├── skills/              # 全局 Skills
-├── plugins/             # 已安装原生插件 manifest 与当前平台产物
+├── plugins.json         # 有序的原生插件意图
+├── plugins.lock         # 当前 target 的精确解析与安装记录
+├── plugins/
+│   ├── store/sha256/    # 以 digest 命名的不可变 CAS blob
+│   └── installed/       # 当前有序的原生插件激活视图
 ├── plugin-data/         # 插件持久数据
 └── sessions/            # Pi v4 JSONL 会话
 
@@ -149,7 +154,11 @@ project/
 └── .pi/
     ├── SYSTEM.md
     ├── APPEND_SYSTEM.md
-    ├── plugins/          # 可信项目原生插件
+    ├── plugins.json      # 可共享的项目插件意图
+    ├── plugins.lock      # 项目精确解析结果
+    ├── plugins/
+    │   ├── store/sha256/ # 本地不可变 CAS blob，应忽略于版本控制
+    │   └── installed/    # 当前有序的项目插件激活视图
     └── skills/
 ```
 
@@ -168,6 +177,28 @@ project/
 
 > Project Trust 不是文件系统沙箱。与 Pi 一样，文件工具支持 cwd 相对路径、绝对路径、
 > `~`、`file://` 和越过 cwd 的父级路径；实际边界是运行进程的操作系统权限。
+
+## Native Plugin Package
+
+```bash
+pi plugin install ./path/to/package
+pi plugin install https://example.com/pi-plugin-release.json
+pi plugin install registry:frontend-check@^1 \
+  --registry https://plugins.example/index.json
+pi plugin list
+pi plugin sync --registry https://plugins.example/index.json
+pi plugin remove frontend-check
+```
+
+传入 `-l` 会管理可信当前项目的 `.pi/plugins.json` 与 `.pi/plugins.lock`，否则管理全局
+Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校验 artifact SHA-256、
+写入 lock，并把不可变 CAS package 激活给现有 native loader。发布清单与静态 Registry 格式见
+[crates/pi-plugin-manager/README.md](crates/pi-plugin-manager/README.md)。当前 SHA-256 只提供
+完整性，不证明发布者身份；签名与 OCI source 仍是后续里程碑。
+
+正常启动会自动同步全局 intent 与可信项目 intent，运行中的 session 可通过 `/reload` 做
+同样的同步。已锁定版本保持不变；修改后的 options 与重新编译的本地 artifact 会以事务
+方式生效，如果下一代 generation 加载失败则恢复原状态。
 
 ## TUI 命令
 
@@ -212,6 +243,7 @@ project/
 | `crates/pi-prompt` / `pi-resources` | 系统 prompt 和项目上下文发现 |
 | `apps/pi-md` | TUI 所有的 Markdown 解析、streaming mend、语法高亮和 Ratatui 渲染 |
 | `crates/pi-plugin-sdk` / `pi-plugin-loader` | 原生插件作者 interface、兼容校验、发现与 factory adapter |
+| `crates/pi-plugin-manager` | Package intent/lock、静态 Registry、target 选择和 CAS 安装 |
 | `plugins/` | Skills、Provider catalog 和独立生产工具插件 |
 | `legacy/pi` | 当前 TypeScript Pi 行为参照 |
 | `e2e` | deterministic 全链路测试与示例项目 |

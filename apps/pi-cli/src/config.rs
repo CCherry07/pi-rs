@@ -1,11 +1,14 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "pi", version, about = "Pi coding agent for the terminal")]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+
     /// Initial prompt. With --print, runs once and exits.
     #[arg(value_name = "PROMPT", trailing_var_arg = true)]
     pub prompt: Vec<String>,
@@ -26,7 +29,7 @@ pub struct Cli {
     #[arg(long)]
     pub no_fullscreen: bool,
 
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", global = true)]
     pub cwd: PathBuf,
 
     /// Open an exact JSONL session path; creates it when absent.
@@ -53,7 +56,7 @@ pub struct Cli {
     pub provider: Option<String>,
 
     /// Root for global skills and sessions (default: PI_AGENT_DIR or ~/.pi/agent).
-    #[arg(long, env = "PI_AGENT_DIR")]
+    #[arg(long, env = "PI_AGENT_DIR", global = true)]
     pub agent_dir: Option<PathBuf>,
 
     /// Load a native plugin from a dynamic library or pi-plugin.toml. May be repeated.
@@ -61,12 +64,61 @@ pub struct Cli {
     pub native_plugins: Vec<PathBuf>,
 
     /// Trust project-local settings and resources without prompting.
-    #[arg(short = 'a', long, conflicts_with = "no_approve")]
+    #[arg(short = 'a', long, conflicts_with = "no_approve", global = true)]
     pub approve: bool,
 
     /// Do not trust project-local settings or resources.
-    #[arg(long, conflicts_with = "approve")]
+    #[arg(long, conflicts_with = "approve", global = true)]
     pub no_approve: bool,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum CliCommand {
+    /// Install and manage native plugins.
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum PluginCommand {
+    /// Resolve, verify, and install a native plugin package.
+    Install {
+        /// Local package path, release manifest URL, GitHub release, or registry source.
+        source: String,
+        /// Install into the current project's .pi directory.
+        #[arg(short = 'l', long = "local")]
+        local: bool,
+        /// Semver requirement applied to the requested plugin.
+        #[arg(long)]
+        version: Option<String>,
+        /// Static registry index URL; also read from PI_PLUGIN_REGISTRY.
+        #[arg(long, env = "PI_PLUGIN_REGISTRY")]
+        registry: Option<String>,
+    },
+    /// List plugins recorded in plugins.lock.
+    List {
+        /// List the current project's plugins instead of global plugins.
+        #[arg(short = 'l', long = "local")]
+        local: bool,
+    },
+    /// Reconcile plugins.json into plugins.lock and the local package store.
+    Sync {
+        /// Reconcile the current project's plugins instead of global plugins.
+        #[arg(short = 'l', long = "local")]
+        local: bool,
+        /// Static registry index URL; also read from PI_PLUGIN_REGISTRY.
+        #[arg(long, env = "PI_PLUGIN_REGISTRY")]
+        registry: Option<String>,
+    },
+    /// Remove an installed plugin.
+    Remove {
+        id: String,
+        /// Remove from the current project's .pi directory.
+        #[arg(short = 'l', long = "local")]
+        local: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -162,7 +214,7 @@ mod tests {
 
     use clap::{CommandFactory, Parser};
 
-    use super::{AppConfig, Cli, normalize_pi_arg};
+    use super::{AppConfig, Cli, CliCommand, PluginCommand, normalize_pi_arg};
 
     #[test]
     fn help_never_renders_the_api_key_value() {
@@ -195,6 +247,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let session_path = directory.path().join("agent/sessions/new.jsonl");
         let cli = Cli {
+            command: None,
             prompt: Vec::new(),
             print: false,
             json: false,
@@ -246,5 +299,32 @@ mod tests {
                 PathBuf::from("second/plugin.dylib")
             ]
         );
+    }
+
+    #[test]
+    fn native_plugin_package_commands_parse_without_becoming_prompts() {
+        let cli = Cli::try_parse_from([
+            "pi",
+            "plugin",
+            "install",
+            "registry:frontend-check@^1",
+            "--registry",
+            "https://plugins.example/index.json",
+            "--local",
+            "--approve",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(CliCommand::Plugin {
+                command: PluginCommand::Install {
+                    local: true,
+                    registry: Some(ref registry),
+                    ..
+                }
+            }) if registry == "https://plugins.example/index.json"
+        ));
+        assert!(cli.approve);
+        assert!(cli.prompt.is_empty());
     }
 }

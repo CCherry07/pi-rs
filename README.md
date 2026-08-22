@@ -22,7 +22,8 @@ stream, session restore, context compaction, and plugin reload all run on the sa
 - **Plugin-first runtime**: narrow `AgentPlugin`, `ProviderPlugin`, and `SessionPlugin` lifecycles;
   plugins are built as immutable generations and reloaded atomically, with rollback on failure.
 - **Native plugins**: version-locked Rust `cdylib` plugins load from global manifests, trusted
-  project manifests, or repeated `--plugin` paths without adding another runtime lifecycle.
+  project manifests, or repeated `--plugin` paths; local/HTTP/GitHub packages and static registries
+  install through exact locks and a content-addressed store.
 - **Models and providers**: OpenAI-compatible APIs plus a `models.json` catalog for endpoints,
   request parameters, headers, credentials, and model metadata.
 - **Production tools**: `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`, `find`, and `ls`.
@@ -137,7 +138,11 @@ Default layout:
 ├── SYSTEM.md            # Optional global system prompt
 ├── APPEND_SYSTEM.md     # Optional global appended prompt
 ├── skills/              # Global skills
-├── plugins/             # Installed native plugin manifests and platform artifacts
+├── plugins.json         # Ordered native plugin intent
+├── plugins.lock         # Exact target-specific resolution and install record
+├── plugins/
+│   ├── store/sha256/    # Immutable CAS blobs named by digest
+│   └── installed/       # Current ordered native plugin activation view
 ├── plugin-data/         # Persistent per-plugin data
 └── sessions/            # Pi v4 JSONL sessions
 
@@ -153,7 +158,11 @@ project/
 └── .pi/
     ├── SYSTEM.md
     ├── APPEND_SYSTEM.md
-    ├── plugins/          # Trusted project-native plugins
+    ├── plugins.json      # Shareable project plugin intent
+    ├── plugins.lock      # Exact project resolution
+    ├── plugins/
+    │   ├── store/sha256/ # Local immutable CAS blobs; ignore in version control
+    │   └── installed/    # Current ordered project plugin activation view
     └── skills/
 ```
 
@@ -174,6 +183,29 @@ Supported values are `ask`, `always`, and `never`.
 > Project trust is not a filesystem sandbox. Like Pi, filesystem tools accept cwd-relative paths,
 > absolute paths, `~`, `file://`, and parent-relative paths outside cwd. The process and operating
 > system permissions are the actual boundary.
+
+## Native plugin packages
+
+```bash
+pi plugin install ./path/to/package
+pi plugin install https://example.com/pi-plugin-release.json
+pi plugin install registry:frontend-check@^1 \
+  --registry https://plugins.example/index.json
+pi plugin list
+pi plugin sync --registry https://plugins.example/index.json
+pi plugin remove frontend-check
+```
+
+Pass `-l` to manage the trusted current project's `.pi/plugins.json` and `.pi/plugins.lock` instead
+of global agent state. The manager selects the exact host target, preserves declared plugin order,
+verifies artifact SHA-256, writes the lock, and activates immutable CAS entries for the existing
+native loader. See [crates/pi-plugin-manager/README.md](crates/pi-plugin-manager/README.md) for
+release and static Registry formats. SHA-256 currently provides integrity, not publisher
+authentication; signatures and OCI sources remain a later milestone.
+
+Normal startup automatically reconciles global intent and trusted project intent; `/reload` does
+the same for a running session. Locked versions remain pinned, while edited options and rebuilt
+local artifacts are applied transactionally and rolled back if the next generation fails to load.
 
 ## TUI commands
 
@@ -220,6 +252,7 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 | `crates/pi-prompt` / `pi-resources` | System prompt and project context discovery |
 | `apps/pi-md` | TUI-owned Markdown parsing, streaming repair, syntax highlighting, and Ratatui rendering |
 | `crates/pi-plugin-sdk` / `pi-plugin-loader` | Native author interface, compatibility checks, discovery, and factory adapters |
+| `crates/pi-plugin-manager` | Package intent/lock, static Registry resolution, target selection, and CAS installation |
 | `plugins/` | Skills, provider catalog, and independent production tool plugins |
 | `legacy/pi` | Current TypeScript Pi behavioral oracle |
 | `e2e` | Deterministic full-agent tests and an example project |

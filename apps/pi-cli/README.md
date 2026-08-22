@@ -22,6 +22,14 @@ cargo run -p pi-cli -- --print '!!git status --short'
 
 # Load a development native plugin; repeat --plugin to preserve plugin order
 cargo run -p pi-cli -- --plugin /path/to/plugin.dylib
+
+# Install a local or remote native plugin package
+cargo run -p pi-cli -- plugin install /path/to/package
+cargo run -p pi-cli -- plugin install https://example.com/pi-plugin-release.json
+
+# Resolve a plugin from a static Registry
+cargo run -p pi-cli -- plugin install registry:frontend-check@^1 \
+  --registry https://plugins.example/index.json
 ```
 
 Project-local `.pi` prompts and skills, plus ancestor `.agents/skills`, use the
@@ -39,6 +47,18 @@ Native plugin manifests below `<agent-dir>/plugins` are always considered. Proje
 accepts a dynamic library, `pi-plugin.toml`, or a package directory; see
 [`crates/pi-plugin-sdk/README.md`](../../crates/pi-plugin-sdk/README.md) for the author interface and
 manifest format.
+
+`pi plugin install/list/remove/sync` manages global `<agent-dir>/plugins.json` and `plugins.lock`.
+Pass `-l` to use the trusted project's `.pi/plugins.json` and `.pi/plugins.lock`. Installed artifacts
+live as immutable blobs under `plugins/store/sha256`, and `plugins/installed` exposes the current
+ordered activation view to the loader. Static Registry, release, and lock schemas are documented in
+[`crates/pi-plugin-manager/README.md`](../../crates/pi-plugin-manager/README.md).
+
+Startup automatically reconciles global `plugins.json` and trusted project intent before native
+plugins load; `/reload` performs the same transaction for an active session. Existing lock versions
+remain pinned, so this repairs activation and applies edited options or rebuilt local artifacts
+without turning startup into an implicit package update. `pi plugin sync` remains available for an
+explicit forced reconciliation.
 
 Interactive keys:
 

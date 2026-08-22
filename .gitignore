@@ -7,3 +7,7 @@ legacy/
 !.env.openai.example
 e2e/sessions/*.jsonl
 dist/
+**/.pi/plugins/store/
+**/.pi/plugins/installed/
+**/.pi/plugins/.installed-*/
+**/.pi/plugins.lock.guard

@@ -13,6 +13,8 @@ const TRUST_REQUIRING_PI_RESOURCES: &[&str] = &[
     "settings.json",
     "extensions",
     "plugins",
+    "plugins.json",
+    "plugins.lock",
     "skills",
     "prompts",
     "themes",
@@ -523,6 +525,17 @@ mod tests {
         fs::create_dir_all(root.path().join(".pi/plugins/example")).unwrap();
 
         assert!(has_trust_requiring_project_resources(root.path()).unwrap());
+    }
+
+    #[test]
+    fn native_plugin_install_state_requires_trust() {
+        for resource in ["plugins.json", "plugins.lock"] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join(".pi").join(resource);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "{}").unwrap();
+            assert!(has_trust_requiring_project_resources(root.path()).unwrap());
+        }
     }
 
     #[test]

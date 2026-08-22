@@ -13,6 +13,7 @@ members = [
     "crates/pi-plugin-macros",
     "crates/pi-plugin-sdk",
     "crates/pi-plugin-loader",
+    "crates/pi-plugin-manager",
     "e2e",
     "plugins/features/pi-plugin-skills",
     "plugins/providers/pi-plugin-models",
@@ -62,6 +63,7 @@ pi-md = { path = "apps/pi-md" }
 pi-plugin-macros = { path = "crates/pi-plugin-macros" }
 pi-plugin-sdk = { path = "crates/pi-plugin-sdk" }
 pi-plugin-loader = { path = "crates/pi-plugin-loader" }
+pi-plugin-manager = { path = "crates/pi-plugin-manager" }
 pi-plugin-skills = { path = "plugins/features/pi-plugin-skills" }
 pi-plugin-models = { path = "plugins/providers/pi-plugin-models" }
 pi-plugin-faux-provider = { path = "plugins/providers/pi-plugin-faux-provider" }

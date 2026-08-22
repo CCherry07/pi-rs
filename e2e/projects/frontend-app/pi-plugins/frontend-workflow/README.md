@@ -11,10 +11,13 @@ cargo test
 cargo build
 ```
 
-Then start `pi` from the `frontend-app` project and approve project resources. The plugin is found
-automatically below `.pi/plugins`:
+Or, from the `frontend-app` directory, build and install it into the project's managed plugin
+activation view:
 
 ```bash
+cargo build --manifest-path pi-plugins/frontend-workflow/Cargo.toml
+../../../target/debug/pi --approve \
+  plugin install --local pi-plugins/frontend-workflow
 ../../../target/debug/pi --approve
 ```
 
@@ -22,12 +25,14 @@ For explicit-path development without trusting other project resources:
 
 ```bash
 ../../../target/debug/pi --no-approve \
-  --plugin .pi/plugins/frontend-workflow/pi-plugin.toml
+  --plugin pi-plugins/frontend-workflow/pi-plugin.toml
 ```
 
 Type `/frontend-check accessibility` to transform the command into a focused review request. After
-changing Rust code, rebuild the plugin and run `/reload`; the host snapshots the new artifact by
-content hash and publishes it only if the next generation initializes successfully.
+changing Rust code, rebuild the plugin and run `/reload` in an active session. The automatic
+reconcile detects the rebuilt local artifact, snapshots it by content hash, and publishes it only
+if the next generation initializes successfully. An explicit `pi plugin sync --local` is still
+available when a forced package reconciliation is useful.
 
 `review_paths` and `ignore_paths` in the manifest bound what the model may inspect for this command.
 The default fixture scope excludes `.pi/`, so verification does not recursively review the native

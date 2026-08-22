@@ -126,6 +126,8 @@ Every factory call creates a fresh instance. Runtime and session reload continue
 fallible generation factories: a constructor, registration, or validation failure leaves the active
 generation unchanged.
 
-Remote publishing, signatures, content-addressed package installation, and registry commands are a
-separate distribution milestone; this crate currently provides the author interface and
-local/package loading contract.
+`pi-plugin-manager` adds local and HTTP/GitHub Release installation, static Registry resolution,
+exact target selection, dependency locking, SHA-256 verification, and a content-addressed package
+store. See [`../pi-plugin-manager/README.md`](../pi-plugin-manager/README.md) for the release and
+Registry formats. Publisher signatures, Git repository sources, OCI artifacts, update, rollback,
+and store garbage collection remain later distribution milestones.

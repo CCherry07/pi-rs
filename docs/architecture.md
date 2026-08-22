@@ -11,7 +11,8 @@ prompt -> provider stream -> assistant message -> tool calls -> tool results -> 
 
 HTTP providers, production tools, model/resource discovery, resumable sessions, compaction,
 project trust, native dynamic-library loading, and terminal presentation are outer modules around
-that core. Live operation replay and remote native-plugin distribution remain open product seams.
+that core. Live operation replay and signed/OCI native-plugin distribution remain open product
+seams.
 
 ## Workspace
 
@@ -27,6 +28,7 @@ apps/pi-md                     TUI-owned Markdown parsing, streaming repair, hig
 crates/pi-plugin-sdk            native plugin author interface and descriptor types
 crates/pi-plugin-macros         agent/provider/session native export macros
 crates/pi-plugin-loader         manifest discovery, compatibility checks, and factory adapters
+crates/pi-plugin-manager        package intent/lock, Registry resolution, CAS, and activation
 plugins/providers/pi-plugin-faux-provider deterministic test provider
 plugins/providers/pi-plugin-openai        OpenAI protocol, provider, registration, and examples
 plugins/providers/pi-plugin-models        models.json catalog, routing, and request-time config
@@ -57,6 +59,7 @@ other plugins/*      -> pi-core
 pi-runtime           -> pi-core + pi-agent + pi-prompt
 apps/pi-cli          -> pi-md + product runtimes and plugins
 apps/pi-md           -> Ratatui presentation dependencies only
+pi-plugin-manager    -> HTTP + filesystem package source adapters
 ```
 
 `apps/pi-md` is a private frontend library module rather than a reusable core crate. It owns the
@@ -99,6 +102,32 @@ while unchanged content reuses one process-pinned handle. Libraries remain pinne
 lifetime because plugin code may retain worker threads. Package metadata and artifact lifetime are
 loader concerns rather than a fourth lifecycle or cross-lifecycle bundle.
 
+Native package distribution is a separate deep module at `pi-plugin-manager`. Editable
+`plugins.json` contains ordered intent; target-specific `plugins.lock` is the exact resolution and
+durable installation record. Its intent digest lets startup and `/reload` avoid remote work when
+the editable intent is unchanged, while local package roots are also checked for rebuilt artifacts
+or changed manifest defaults. Local packages, direct HTTP/GitHub Release manifests, and a static
+HTTP Registry resolve into immutable `plugins/store/sha256/<digest>` blob files. Automatic reconcile
+reuses versions already selected by the lock; changing intent does not implicitly upgrade unrelated
+packages. The manager verifies artifact SHA-256, selects the exact Rust target triple, preserves the
+explicit `plugins.json` array order, and replaces a generated `plugins/installed` activation view.
+Native plugin manifests do not declare runtime plugin dependencies: Rust crate dependencies remain
+build-time concerns, and hook registration order remains consumer policy rather than a package graph.
+
+`AppSessionFactory` prepares global package state and, after trust resolution, trusted project
+package state before native discovery. The manager holds a package-state guard and retains the
+previous lock and activation view until the complete runtime and session generation prepares
+successfully. Failed native loading or plugin initialization therefore rolls package activation
+back together with the generation; success commits the prepared package state. The same factory is
+used for initial sessions and `/reload`. The loader consumes only the local activation view and does
+not know about networks, semver, registries, install commands, or package transactions. This
+distribution layer does not introduce a fourth plugin lifecycle or mutable runtime registries.
+
+The current static Registry is signed-data-ready transport only: SHA-256 proves downloaded content
+integrity but not publisher identity. Publisher signatures, Git repository and OCI adapters,
+package update/rollback commands, and store garbage collection remain explicit package-manager
+milestones.
+
 `ModelsPlugin` is a provider plugin loaded after the base protocol provider. It loads one immutable, credential-blind `models.json` snapshot per generation, uses derived structural validation before compiling inheritance and overrides into runtime metadata, contributes `ModelSpec` values, and installs provider overlays. `models_json_schema()` exposes the same Rust definitions as JSON Schema for editors and standalone tooling. Environment variables, shell-command values, credentials, and configured headers resolve only when a request is sent. A failed parse, validation, or active-provider compatibility check prevents publication of the new generation, so `/reload` retains the complete prior provider/catalog pair.
 
 Initial selection is a separate product policy in `pi-session`. `ModelRuntimeServices` adapts the
@@ -118,8 +147,9 @@ wins, and writes are locked and key-sorted. Resolution order is an explicit
 decision cache, the persisted nearest-ancestor decision, global `defaultProjectTrust`, then the
 interactive selector. Non-interactive `ask` resolves to untrusted.
 
-Trust-requiring resources are the current cwd's `.pi/settings.json`, `extensions`, `plugins`, `skills`,
-`prompts`, `themes`, `SYSTEM.md`, and `APPEND_SYSTEM.md`, plus `.agents/skills` found from cwd toward
+Trust-requiring resources are the current cwd's `.pi/settings.json`, `extensions`, `plugins`,
+`plugins.json`, `plugins.lock`, `skills`, `prompts`, `themes`, `SYSTEM.md`, and
+`APPEND_SYSTEM.md`, plus `.agents/skills` found from cwd toward
 the repository root. The user-level `~/.agents/skills` root is always trusted. The current runtime
 uses the decision to gate project `.pi` prompt files, project skill roots, and native plugin
 manifests; future project settings and packages must consume this same service rather than add
@@ -307,7 +337,7 @@ The workspace includes an end-to-end test where two delay tools complete in reve
 ## Next milestones
 
 1. Connect the recovery reducer to crash/deferred operation replay above the v4 session backend.
-2. Add signed, content-addressed native-plugin packaging and remote distribution on top of the
-   version-locked local loader.
+2. Add publisher signatures, Git/OCI sources, update/rollback, and CAS garbage collection to the
+   native package manager.
 3. Continue current-Pi conformance at product seams with deterministic regressions before
    adding broader provider and terminal compatibility coverage.

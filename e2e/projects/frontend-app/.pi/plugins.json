@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "plugins": [
+    {
+      "id": "frontend-workflow",
+      "source": "path:/Users/cherry/Documents/pi_rs/e2e/projects/frontend-app/pi-plugins/frontend-workflow",
+      "version": "*",
+      "options": {
+        "checks": ["pnpm lint", "pnpm build"]
+      }
+    }
+  ]
+}
