@@ -1,3 +1,17 @@
 # Changelog
 
+## 0.1.0 (2026-08-23)
+
+
+### Features
+
+* add native plugin package management ([62662fa](https://github.com/CCherry07/pi_rs/commit/62662fa005fdba21adafda05eceec40d0e0b0bab))
+* add native plugin support and refine TUI integration ([db705fa](https://github.com/CCherry07/pi_rs/commit/db705fa0f016aca77a1649663c1cf1477844784a))
+* add README ([3d57d71](https://github.com/CCherry07/pi_rs/commit/3d57d71e6747ad4ccb8f5bb4a3bb703278047c7d))
+* add TypeScript extension host ([ec41d26](https://github.com/CCherry07/pi_rs/commit/ec41d2655a3a14819a4bb8c6c3c66eaf04c2d531))
+* establish Pi-compatible Rust agent baseline ([12d6b9a](https://github.com/CCherry07/pi_rs/commit/12d6b9a05e4d676c009b5e026aa1c823c951ff0c))
+* restructure frontend and automate releases ([3b0ec73](https://github.com/CCherry07/pi_rs/commit/3b0ec73b4bb653304aba3b8f4f3be8954509d61b))
+
+## Changelog
+
 Release Please maintains this file from Conventional Commits merged into `main`.
