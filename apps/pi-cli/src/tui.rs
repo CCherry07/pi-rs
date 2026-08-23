@@ -1630,6 +1630,7 @@ mod tests {
     use super::*;
     use pi_session::{AgentSessionRuntimeRequest, AgentSessionRuntimeTarget, PiApplication};
     use ratatui::backend::TestBackend;
+    use ratatui::{TerminalOptions, Viewport};
 
     #[derive(Default)]
     struct RecordingClipboard {
@@ -1941,14 +1942,17 @@ mod tests {
 
     #[test]
     fn polished_layout_renders_semantic_regions() {
-        let screen = render_app(&demo_app(), 100, 32);
+        let mut app = demo_app();
+        app.cwd = "/workspace/pi_rs".to_string();
+        let expected_cwd = compact_path(&app.cwd);
+        let screen = render_app(&app, 100, 32);
         if std::env::var_os("PI_PRINT_TUI_TEST").is_some() {
             println!("{screen}");
         }
         assert!(screen.contains('›'));
         assert!(screen.contains('•'));
         assert!(screen.contains("gpt-5.6-sol high"));
-        assert!(screen.contains("~/Documents/pi_rs"));
+        assert!(screen.contains(&expected_cwd));
         assert!(screen.contains("Ran cargo test -p pi-runtime"));
         assert!(screen.contains("1 queued"));
         assert!(screen.contains("tokens 12.4k"));
@@ -2580,7 +2584,13 @@ mod tests {
             let mut output = Vec::new();
             {
                 let backend = CrosstermBackend::new(&mut output);
-                let mut terminal = Terminal::new(backend).unwrap();
+                let mut terminal = Terminal::with_options(
+                    backend,
+                    TerminalOptions {
+                        viewport: Viewport::Fixed(Rect::new(0, 0, 100, 32)),
+                    },
+                )
+                .unwrap();
                 let palette = UiPalette::from_background(Some(RgbColor::new(0, 0, 0)));
                 terminal.draw(|frame| draw(frame, &app, palette)).unwrap();
             }
