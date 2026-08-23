@@ -43,9 +43,11 @@ use termina::{Event as TerminaEvent, PlatformTerminal, Terminal as _};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::clipboard::{ClipboardWriter, SystemClipboard};
+use crate::config::AuthCommand;
 use crate::output::{assistant_text, shell_command};
 use crate::project_trust::{ProjectTrustOption, ProjectTrustPromptRequest, ProjectTrustService};
 use crate::transcript_selection::{TranscriptSelection, TranscriptSurface};
+use crate::{auth, auth::AuthProviderInfo};
 
 mod components;
 mod controller;
@@ -88,6 +90,15 @@ impl TerminalSession {
         }
         self.active = false;
         restore_terminal(&mut self.terminal, self.fullscreen)
+    }
+
+    fn resume(&mut self) -> io::Result<()> {
+        if self.active {
+            return Ok(());
+        }
+        self.terminal = setup_terminal(self.fullscreen)?;
+        self.active = true;
+        Ok(())
     }
 }
 
@@ -548,6 +559,20 @@ enum BottomPaneView {
     Resume,
     Tree,
     Fork,
+    Login,
+    Logout,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthOperation {
+    Login,
+    Logout,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthRequest {
+    operation: AuthOperation,
+    provider: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -600,6 +625,8 @@ struct App {
     session_choices: Vec<SessionChoice>,
     tree_choices: Vec<SessionEntryChoice>,
     fork_choices: Vec<SessionEntryChoice>,
+    login_providers: Vec<AuthProviderInfo>,
+    logout_providers: Vec<AuthProviderInfo>,
     command_palette: RefCell<SelectionList>,
     dismissed_completion: Option<String>,
     view_stack: Vec<BottomPaneView>,
@@ -623,6 +650,7 @@ struct App {
     scroll_input: ScrollInputNormalizer,
     transcript_selection: Option<TranscriptSelection>,
     trust_prompt: Option<TrustPromptState>,
+    pending_auth: Option<AuthRequest>,
     epoch: u64,
     quit: bool,
 }
@@ -696,10 +724,12 @@ impl App {
             status: status.to_string(),
             queue: snapshot.queue.clone(),
             command_specs: session.runtime().command_specs(),
-            model_specs: session.runtime().models(),
+            model_specs: session.runtime().available_models(),
             session_choices,
             tree_choices,
             fork_choices,
+            login_providers: Vec::new(),
+            logout_providers: Vec::new(),
             command_palette: RefCell::new(SelectionList::default()),
             dismissed_completion: None,
             view_stack: Vec::new(),
@@ -723,6 +753,7 @@ impl App {
             scroll_input: ScrollInputNormalizer::for_terminal(),
             transcript_selection: None,
             trust_prompt: None,
+            pending_auth: None,
             epoch: 1,
             quit: false,
         }
@@ -821,6 +852,12 @@ impl App {
     fn pop_bottom_view(&mut self) {
         self.view_stack.pop();
         self.view_selection.get_mut().reset();
+    }
+
+    fn refresh_auth_choices(&mut self, agent_dir: &Path) -> Result<(), String> {
+        self.login_providers = auth::login_provider_catalog(agent_dir)?;
+        self.logout_providers = auth::logout_provider_catalog(agent_dir)?;
+        Ok(())
     }
 
     fn has_active_animation(&self) -> bool {
@@ -1173,16 +1210,18 @@ pub(crate) async fn run(
     initial_prompt: Option<String>,
     project_trust: ProjectTrustService,
     trust_requests: tokio::sync::mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
+    agent_dir: PathBuf,
 ) -> Result<(), String> {
     let palette = UiPalette::detect();
     let mut terminal = TerminalSession::new(fullscreen).map_err(|error| error.to_string())?;
     let result = run_loop(
-        terminal.terminal_mut(),
+        &mut terminal,
         session_handle,
         initial_prompt,
         palette,
         project_trust,
         trust_requests,
+        agent_dir,
     )
     .await;
     terminal.finish().map_err(|error| error.to_string())?;
@@ -1204,18 +1243,31 @@ fn render_tui_frame(
     ))
 }
 
+fn app_for_session(
+    session: &AgentSession,
+    snapshot: &AgentSessionSnapshot,
+    agent_dir: &Path,
+) -> App {
+    let mut app = App::new(session, snapshot);
+    if let Err(error) = app.refresh_auth_choices(agent_dir) {
+        app.status = format!("Could not read provider credentials: {error}");
+    }
+    app
+}
+
 async fn run_loop(
-    terminal: &mut TuiTerminal,
+    terminal: &mut TerminalSession,
     session_handle: PiSession,
     initial_prompt: Option<String>,
     palette: UiPalette,
     project_trust: ProjectTrustService,
     mut trust_requests: tokio::sync::mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
+    agent_dir: PathBuf,
 ) -> Result<(), String> {
     let mut session_changes = session_handle.subscribe();
     let mut session = session_handle.current();
     let mut subscription = session.subscribe();
-    let mut app = App::new(&session, &subscription.snapshot);
+    let mut app = app_for_session(&session, &subscription.snapshot, &agent_dir);
     let (effect_sender, mut effect_receiver) = tokio::sync::mpsc::unbounded_channel();
     if let Some(prompt) = initial_prompt {
         app.input_history.record(&prompt);
@@ -1235,7 +1287,9 @@ async fn run_loop(
     let mut clipboard = SystemClipboard::default();
     let mut animation_tick = tokio::time::interval(ACTIVITY_ANIMATION_INTERVAL);
     animation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let (mut surface, mut transcript_viewport_height) = render_tui_frame(terminal, &app, palette)?;
+    let mut generation_status_override = None;
+    let (mut surface, mut transcript_viewport_height) =
+        render_tui_frame(terminal.terminal_mut(), &app, palette)?;
     let mut last_frame_at = Instant::now();
     let mut redraw_pending = false;
     while !app.quit {
@@ -1245,7 +1299,7 @@ async fn run_loop(
         tokio::select! {
             _ = tokio::time::sleep_until(next_frame_at.into()), if redraw_pending => {
                 (surface, transcript_viewport_height) =
-                    render_tui_frame(terminal, &app, palette)?;
+                    render_tui_frame(terminal.terminal_mut(), &app, palette)?;
                 last_frame_at = Instant::now();
                 redraw_pending = false;
                 continue;
@@ -1318,7 +1372,7 @@ async fn run_loop(
                     let tools_expanded = app.tools_expanded;
                     let scroll_from_bottom = app.scroll_from_bottom;
                     let trust_prompt = app.trust_prompt.take();
-                    let mut recovered = App::new(&session, &snapshot);
+                    let mut recovered = app_for_session(&session, &snapshot, &agent_dir);
                     recovered.input = input;
                     recovered.input_history = input_history;
                     recovered.epoch = epoch;
@@ -1339,7 +1393,7 @@ async fn run_loop(
                     let status = app.status.clone();
                     let epoch = app.epoch;
                     let tools_expanded = app.tools_expanded;
-                    let mut refreshed = App::new(&session, &session.snapshot());
+                    let mut refreshed = app_for_session(&session, &session.snapshot(), &agent_dir);
                     refreshed.epoch = epoch;
                     refreshed.tools_expanded = tools_expanded;
                     refreshed.status = status;
@@ -1363,10 +1417,36 @@ async fn run_loop(
                 subscription = session.subscribe();
                 let next_epoch = app.epoch.saturating_add(1);
                 let tools_expanded = app.tools_expanded;
-                app = App::new(&session, &subscription.snapshot);
+                app = app_for_session(&session, &subscription.snapshot, &agent_dir);
                 app.epoch = next_epoch;
                 app.tools_expanded = tools_expanded;
-                app.status = "Session generation replaced".to_string();
+                app.status = generation_status_override
+                    .take()
+                    .unwrap_or_else(|| "Session generation replaced".to_string());
+            }
+        }
+        if let Some(request) = app.pending_auth.take() {
+            drop(events);
+            let result = run_auth_request(terminal, &agent_dir, &request).await;
+            events = EventStream::new();
+            match result {
+                Ok(status) => match session_handle.reload().await {
+                    Ok(()) => {
+                        let status = match app.refresh_auth_choices(&agent_dir) {
+                            Ok(()) => status,
+                            Err(error) => {
+                                format!("Credential changed, but catalog refresh failed: {error}")
+                            }
+                        };
+                        generation_status_override = Some(status.clone());
+                        app.status = status;
+                    }
+                    Err(error) => {
+                        app.status =
+                            format!("Credential changed, but session reload failed: {error}");
+                    }
+                },
+                Err(error) => app.status = format!("Authentication error: {error}"),
             }
         }
         redraw_pending = true;
@@ -1374,6 +1454,47 @@ async fn run_loop(
     session.abort();
     session.abort_shell();
     Ok(())
+}
+
+async fn run_auth_request(
+    terminal: &mut TerminalSession,
+    agent_dir: &Path,
+    request: &AuthRequest,
+) -> Result<String, String> {
+    if let Err(error) = terminal.restore() {
+        let _ = terminal.resume();
+        return Err(format!("failed to suspend the TUI: {error}"));
+    }
+    let command = match request.operation {
+        AuthOperation::Login => AuthCommand::Login {
+            provider: Some(request.provider.clone()),
+            api_key: false,
+            oauth: false,
+            oauth_token: false,
+            token: None,
+            refresh_token: None,
+            expires: None,
+        },
+        AuthOperation::Logout => AuthCommand::Logout {
+            provider: request.provider.clone(),
+        },
+    };
+    let auth_result = auth::run(agent_dir, &command).await;
+    let resume_result = terminal.resume().map_err(|error| error.to_string());
+    match (auth_result, resume_result) {
+        (Err(auth_error), Err(resume_error)) => Err(format!(
+            "{auth_error}; additionally failed to restore the TUI: {resume_error}"
+        )),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(format!("failed to restore the TUI: {error}")),
+        (Ok(()), Ok(())) => Ok(match request.operation {
+            AuthOperation::Login => format!("Configured authentication for {}", request.provider),
+            AuthOperation::Logout => format!(
+                "Removed stored credential for {} · environment and models.json credentials are unchanged",
+                request.provider
+            ),
+        }),
+    }
 }
 
 // Input routing and effects live in `tui/controller.rs`.
@@ -1389,6 +1510,12 @@ fn command_suggestions(input: &str, command_specs: &[CommandSpec]) -> Vec<Comman
         ("/resume", "list or open sessions", Some("[query|path]")),
         ("/reload", "reload all plugins/resources", None),
         ("/trust", "change trust for this project", None),
+        (
+            "/login",
+            "configure provider authentication",
+            Some("[provider]"),
+        ),
+        ("/logout", "remove provider authentication", None),
         (
             "/model",
             "list or change model",
@@ -1691,6 +1818,8 @@ mod tests {
             session_choices: Vec::new(),
             tree_choices: Vec::new(),
             fork_choices: Vec::new(),
+            login_providers: Vec::new(),
+            logout_providers: Vec::new(),
             command_palette: RefCell::new(SelectionList::default()),
             dismissed_completion: None,
             view_stack: Vec::new(),
@@ -1714,6 +1843,7 @@ mod tests {
             scroll_input: ScrollInputNormalizer::with_events_per_tick(1),
             transcript_selection: None,
             trust_prompt: None,
+            pending_auth: None,
             epoch: 1,
             quit: false,
         }
@@ -3442,6 +3572,90 @@ mod tests {
         assert!(!screen.contains("draft that must survive"));
         app.pop_bottom_view();
         assert_eq!(app.input.text(), "draft that must survive");
+    }
+
+    #[test]
+    fn login_and_logout_commands_open_provider_specific_pickers() {
+        let mut app = demo_app();
+        app.login_providers = vec![
+            AuthProviderInfo {
+                id: "anthropic".to_string(),
+                supports_oauth: true,
+                stored_kind: Some("oauth"),
+            },
+            AuthProviderInfo {
+                id: "private-gateway".to_string(),
+                supports_oauth: false,
+                stored_kind: None,
+            },
+        ];
+        app.logout_providers = vec![app.login_providers[0].clone()];
+
+        assert!(activate_bottom_view_for_command(&mut app, "/login"));
+        assert_eq!(app.active_bottom_view(), Some(BottomPaneView::Login));
+        let login = render_app(&app, 90, 20);
+        assert!(login.contains("Select provider to configure"));
+        assert!(login.contains("anthropic"));
+        assert!(login.contains("OAuth or API key · oauth configured"));
+        assert!(login.contains("private-gateway"));
+        assert!(login.contains("API key · unconfigured"));
+
+        app.pop_bottom_view();
+        assert!(activate_bottom_view_for_command(&mut app, "/logout"));
+        assert_eq!(app.active_bottom_view(), Some(BottomPaneView::Logout));
+        let logout = render_app(&app, 90, 20);
+        assert!(logout.contains("Select provider to log out"));
+        assert!(logout.contains("stored oauth"));
+    }
+
+    #[test]
+    fn auth_commands_only_queue_known_or_stored_providers() {
+        let mut app = demo_app();
+        app.login_providers = vec![AuthProviderInfo {
+            id: "openai-codex".to_string(),
+            supports_oauth: true,
+            stored_kind: None,
+        }];
+        app.logout_providers = vec![AuthProviderInfo {
+            id: "anthropic".to_string(),
+            supports_oauth: true,
+            stored_kind: Some("oauth"),
+        }];
+
+        assert_eq!(
+            auth_request_for_input(&app, "/login OPENAI-CODEX").unwrap(),
+            Some(AuthRequest {
+                operation: AuthOperation::Login,
+                provider: "openai-codex".to_string(),
+            })
+        );
+        assert_eq!(
+            auth_request_for_input(&app, "/logout anthropic").unwrap(),
+            Some(AuthRequest {
+                operation: AuthOperation::Logout,
+                provider: "anthropic".to_string(),
+            })
+        );
+        assert_eq!(
+            auth_request_for_input(&app, "/logout openai-codex").unwrap_err(),
+            "No stored credential for openai-codex"
+        );
+        assert_eq!(auth_request_for_input(&app, "/login").unwrap(), None);
+    }
+
+    #[test]
+    fn auth_commands_are_discoverable_from_completion_and_help() {
+        let suggestions = command_suggestions("/log", &[]);
+        assert_eq!(
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.invocation.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/login", "/logout"]
+        );
+        let help = builtin_help_text();
+        assert!(help.contains("`/login [provider]`"));
+        assert!(help.contains("`/logout`"));
     }
 
     #[test]

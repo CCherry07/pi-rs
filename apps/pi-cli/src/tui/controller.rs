@@ -157,6 +157,8 @@ pub(super) fn handle_bottom_pane_view_key(
         BottomPaneView::Resume => app.session_choices.len(),
         BottomPaneView::Tree => app.tree_choices.len(),
         BottomPaneView::Fork => app.fork_choices.len(),
+        BottomPaneView::Login => app.login_providers.len(),
+        BottomPaneView::Logout => app.logout_providers.len(),
     };
     app.view_selection.get_mut().reconcile_len(item_count);
     match key.code {
@@ -193,6 +195,14 @@ pub(super) fn handle_bottom_pane_view_key(
                     .fork_choices
                     .get(selected)
                     .map(|choice| format!("/fork {}", choice.id)),
+                BottomPaneView::Login => app
+                    .login_providers
+                    .get(selected)
+                    .map(|provider| format!("/login {}", provider.id)),
+                BottomPaneView::Logout => app
+                    .logout_providers
+                    .get(selected)
+                    .map(|provider| format!("/logout {}", provider.id)),
             };
             if let Some(command) = command {
                 app.pop_bottom_view();
@@ -449,6 +459,27 @@ pub(super) fn submit_editor(
     if activate_bottom_view_for_command(app, &input) {
         return;
     }
+    match auth_request_for_input(app, &input) {
+        Ok(Some(request)) => {
+            let provider = request.provider.clone();
+            let operation = request.operation;
+            app.input.clear();
+            app.command_palette.get_mut().reset();
+            app.pending_auth = Some(request);
+            app.status = match operation {
+                AuthOperation::Login => format!("Configure authentication for {provider}"),
+                AuthOperation::Logout => format!("Remove stored credential for {provider}"),
+            };
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            app.input.clear();
+            app.command_palette.get_mut().reset();
+            app.status = error;
+            return;
+        }
+    }
     if input == "/quit" {
         app.quit = true;
         return;
@@ -498,6 +529,34 @@ pub(super) fn submit_editor(
 }
 
 pub(super) fn activate_bottom_view_for_command(app: &mut App, input: &str) -> bool {
+    if input == "/login" {
+        app.input.clear();
+        app.command_palette.get_mut().reset();
+        if app.login_providers.is_empty() {
+            app.status = "No login providers available".to_string();
+            return true;
+        }
+        app.push_bottom_view(BottomPaneView::Login);
+        app.view_selection
+            .get_mut()
+            .reconcile_len(app.login_providers.len());
+        app.status = "Select provider to configure".to_string();
+        return true;
+    }
+    if input == "/logout" {
+        app.input.clear();
+        app.command_palette.get_mut().reset();
+        if app.logout_providers.is_empty() {
+            app.status = "No stored credentials to remove · environment variables and models.json config are unchanged".to_string();
+            return true;
+        }
+        app.push_bottom_view(BottomPaneView::Logout);
+        app.view_selection
+            .get_mut()
+            .reconcile_len(app.logout_providers.len());
+        app.status = "Select provider to log out".to_string();
+        return true;
+    }
     if input == "/model" {
         app.input.clear();
         app.command_palette.get_mut().reset();
@@ -584,6 +643,40 @@ pub(super) fn activate_bottom_view_for_command(app: &mut App, input: &str) -> bo
         return true;
     }
     false
+}
+
+pub(super) fn auth_request_for_input(
+    app: &App,
+    input: &str,
+) -> Result<Option<AuthRequest>, String> {
+    let (operation, providers, argument) = if let Some(argument) = command_argument(input, "/login")
+    {
+        (AuthOperation::Login, &app.login_providers, argument)
+    } else if let Some(argument) = command_argument(input, "/logout") {
+        (AuthOperation::Logout, &app.logout_providers, argument)
+    } else {
+        return Ok(None);
+    };
+    if argument.is_empty() {
+        return Ok(None);
+    }
+    let provider = providers
+        .iter()
+        .find(|provider| provider.id.eq_ignore_ascii_case(argument))
+        .ok_or_else(|| match operation {
+            AuthOperation::Login => format!("Unknown login provider: {argument}"),
+            AuthOperation::Logout => format!("No stored credential for {argument}"),
+        })?;
+    Ok(Some(AuthRequest {
+        operation,
+        provider: provider.id.clone(),
+    }))
+}
+
+fn command_argument<'a>(input: &'a str, command: &str) -> Option<&'a str> {
+    let input = input.trim();
+    let rest = input.strip_prefix(command)?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
 }
 
 pub(super) fn move_command_selection(app: &mut App, delta: i8) {
@@ -747,6 +840,8 @@ pub(super) fn builtin_help_text() -> String {
         ("/resume [query|path]", "list or open sessions"),
         ("/reload", "reload all plugins and resources"),
         ("/trust", "change trust for this project"),
+        ("/login [provider]", "configure provider authentication"),
+        ("/logout", "remove a stored provider credential"),
         ("/model [provider/model|id]", "list or change model"),
         ("/thinking <level>", "change the thinking level"),
         ("/compact [instructions]", "compact the context"),
@@ -972,7 +1067,7 @@ pub(super) async fn run_effect(
     }
     if input == "/model" {
         let state = session.runtime().agent().state();
-        let models = session.runtime().models();
+        let models = session.runtime().available_models();
         if models.is_empty() {
             return Ok(format!(
                 "Current model: {}/{} · no catalog models loaded",
@@ -1000,14 +1095,22 @@ pub(super) async fn run_effect(
             return Err("usage: /model <provider/model|model-id>".to_string());
         }
         let current_provider = session.runtime().agent().state().provider_id;
-        let resolved = session
-            .runtime()
-            .resolve_model_reference(&current_provider, model);
+        let runtime = session.runtime();
+        let registered = runtime.resolve_model_reference(&current_provider, model);
+        if let Some(registered) = &registered
+            && !runtime.provider_is_available(&registered.provider)
+        {
+            return Err(format!(
+                "provider {} is not configured for this generation",
+                registered.provider
+            ));
+        }
+        let resolved = runtime.resolve_available_model_reference(&current_provider, model);
         let (provider, model_id) = if let Some(model) = resolved {
             (model.provider, model.id)
         } else if let Some((provider, model_id)) = model.split_once('/') {
             let provider = ProviderId::new(provider);
-            if session.runtime().has_provider(&provider) {
+            if session.runtime().provider_is_available(&provider) {
                 (provider, ModelId::new(model_id))
             } else {
                 (current_provider, ModelId::new(model))

@@ -28,7 +28,7 @@ pub use message::{
 pub use model::{
     ModelCost, ModelCostTier, ModelInput, ModelSpec, ResponseMetadata, StopReason, ThinkingLevel,
 };
-pub use model_runtime::ModelRuntime;
+pub use model_runtime::{ModelRuntime, ProviderStatus};
 pub use plugin::{
     AgentEndEvent, AgentPlugin, AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch,
     ContextEvent, ContextPatch, InputContext, InputEvent, InputPatch, MessageEndEvent,
@@ -37,7 +37,10 @@ pub use plugin::{
     ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch,
     TurnEndEvent, TurnStartEvent,
 };
-pub use provider::{Provider, ProviderCallContext, ProviderError, ProviderRequest, ProviderStream};
+pub use provider::{
+    Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderRequest,
+    ProviderStream,
+};
 pub use provider_plugin::{
     BeforeProviderRequestEvent, ProviderPlugin, ProviderPluginContext, ProviderPluginDriver,
     ProviderRegisterContext,

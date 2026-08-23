@@ -19,6 +19,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 dotenvy.workspace = true
 futures.workspace = true
 fs2 = "0.4.3"
+rpassword = "7.4"
 pi-agent.workspace = true
 pi-md.workspace = true
 pi-core.workspace = true
@@ -29,7 +30,9 @@ pi-resources.workspace = true
 pi-runtime.workspace = true
 pi-session.workspace = true
 pi-plugin-openai.workspace = true
+pi-plugin-xai.workspace = true
 pi-plugin-models.workspace = true
+pi-plugin-anthropic.workspace = true
 pi-plugin-skills.workspace = true
 pi-plugin-read.workspace = true
 pi-plugin-write.workspace = true

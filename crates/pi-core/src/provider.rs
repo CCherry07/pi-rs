@@ -131,9 +131,28 @@ pub enum ProviderError {
     Failure(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderAvailability {
+    Available,
+    MissingCredentials,
+}
+
+impl ProviderAvailability {
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Available)
+    }
+}
+
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn id(&self) -> ProviderId;
+
+    /// Credential-blind availability for the current immutable generation.
+    /// Providers with request-time credential resolution should override this
+    /// when they can determine configuration without resolving secret values.
+    fn availability(&self) -> ProviderAvailability {
+        ProviderAvailability::Available
+    }
 
     async fn stream(
         &self,

@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 async-trait.workspace = true
 base64 = "0.22.1"
+image = { version = "0.25.8", default-features = false, features = ["bmp", "png"] }
 pi-core.workspace = true
 pi-tool-support.workspace = true
 serde_json.workspace = true

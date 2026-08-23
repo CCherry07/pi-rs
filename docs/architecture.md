@@ -23,7 +23,7 @@ distribution remain open product seams.
 crates/pi-core                  contracts, registries, plugin drivers, ModelRuntime
 crates/pi-agent                 Agent façade, AgentLoop, StreamAssembler, ToolScheduler
 crates/pi-runtime               plugin registration and Agent construction
-crates/pi-provider              vendor-neutral HTTP transport and SSE decoding
+crates/pi-provider              vendor-neutral HTTP transport and SSE framing
 crates/pi-prompt                pure Pi-style system prompt assembly
 crates/pi-resources             generic system/append prompts and project context discovery
 crates/pi-session               Pi v4 storage plus PiApplication/PiSession product runtime
@@ -36,7 +36,9 @@ crates/pi-js-plugin             typed JS manifest protocol and three Rust lifecy
 bindings/pi-napi                NAPI-RS boundary between Node callbacks and the Rust product
 packages/pi                     Node launcher, Pi extension discovery, jiti loader, and callback host
 crates/pi-test-support          deterministic scripted providers and tools for tests
-plugins/providers/pi-plugin-openai        OpenAI protocol, provider, registration, and examples
+plugins/providers/pi-plugin-openai        OpenAI provider plus reusable Responses wire support
+plugins/providers/pi-plugin-anthropic     Anthropic Messages, Claude Code mode, provider, and catalog
+plugins/providers/pi-plugin-xai           xAI Responses provider and Grok catalog
 plugins/providers/pi-plugin-models        models.json catalog, routing, and request-time config
 crates/pi-tool-support           shared path validation, argument, and truncation helpers
 plugins/tools/pi-plugin-{read,write,edit,hashline-edit,bash,grep,find,ls}
@@ -54,6 +56,8 @@ pi-prompt            -> standard library only
 pi-resources         -> pi-prompt
 pi-session           -> pi-core + pi-prompt + pi-resources + pi-runtime
 pi-plugin-openai     -> pi-core + pi-provider
+pi-plugin-anthropic  -> pi-core + pi-provider
+pi-plugin-xai        -> pi-core + pi-provider + pi-plugin-openai::responses
 pi-tool-support      -> pi-core
 production tools     -> pi-core + pi-tool-support
 plugins/features/pi-plugin-skills
@@ -258,6 +262,10 @@ Node code and share the process and OS authority of the product.
 
 `ModelsPlugin` is a provider plugin loaded after the base protocol provider. It loads one immutable, credential-blind `models.json` snapshot per generation, uses derived structural validation before compiling inheritance and overrides into runtime metadata, contributes `ModelSpec` values, and installs provider overlays. `models_json_schema()` exposes the same Rust definitions as JSON Schema for editors and standalone tooling. Environment variables, shell-command values, credentials, and configured headers resolve only when a request is sent. A failed parse, validation, or active-provider compatibility check prevents publication of the new generation, so `/reload` retains the complete prior provider/catalog pair.
 
+The independent `pi-plugin-anthropic` provider owns Anthropic Messages projection/SSE parsing, credential precedence, Claude Code request mode, browser PKCE authorization-code exchange/refresh, and its Claude catalog as one deep vendor Module. Claude Code mode preserves thinking signatures and applies OAuth identity headers, the required system identity, and bidirectional canonical tool-name mapping. `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, and Pi-compatible `<agent-dir>/auth.json` credentials are supported; explicit CLI credentials win, followed by environment credentials and stored credentials. The CLI owns secure credential persistence through `pi auth login/logout/status`: writes use a sibling lock, atomic replacement, and Unix mode `0600`, while status never emits secrets. A shared Anthropic-compatible protocol crate is intentionally deferred until another real provider Adapter, such as Kimi Coding, proves the common Interface.
+
+The built-in `openai-codex` plugin is installed in every product generation rather than only when Codex is initially selected. It owns the explicit Pi-compatible model catalog, Codex Device OAuth/refresh, and a Codex Responses Adapter. Reusable OpenAI Responses message/tool projection and SSE adaptation live directly in `pi-plugin-openai::responses`; the separate `pi-plugin-xai` provider depends on that plugin crate while retaining its own lifecycle, credentials, headers, payload policy, OAuth device flow, refresh, and Grok catalog. xAI exposes the current Grok 4.5/4.6 Responses models, resolves `XAI_API_KEY` or Pi-compatible stored credentials when rebuilding a generation, supports explicit xAI Device OAuth through `pi auth login xai --oauth`, and proactively refreshes stored xAI OAuth credentials before application startup. Anthropic and OpenAI Codex stored OAuth credentials use the same startup refresh transaction. `pi auth login` without a provider builds its selector from built-ins, validated JSONC `models.json` provider IDs, and existing stored credentials; unknown third-party providers receive API-key auth unless a future provider-owned OAuth capability declares otherwise. Device authorization validates xAI HTTPS verification URLs before invoking the platform browser Adapter; token polling and refresh remain provider-owned while locked atomic `auth.json` persistence remains CLI-owned. At generation construction the Codex plugin credential-blindly probes Codex CLI credentials from `~/.codex/auth.json` and `~/.config/codex/auth.json`; a valid access-token JWT with `chatgpt_account_id` makes the provider selectable. Requests use the ChatGPT Codex Responses endpoint and its required bearer, account, beta, originator, and user-agent headers. This reuse does not write or refresh Codex CLI credentials and is not Pi's `/login` flow. The catalog supplies context windows, output limits, input modalities, reasoning support, and costs; it is not remote discovery. `ModelRuntime` keeps the complete registered catalog distinct from its credential-blind available view and exposes provider availability diagnostics. Providers report whether the current immutable generation has enough configuration to be selectable without resolving secret values. Initial selection and `/model` consume the available view, while restore and diagnostics can still inspect registered models. `AgentSession` derives compaction limits from the active generation's current `ModelSpec`, so model switches immediately change threshold and overflow decisions. An explicit session context-window option remains an embedding override.
+
 Initial selection is a separate product policy in `pi-session`. `ModelRuntimeServices` adapts the
 model portion of an assembled `PiRuntime` generation, while `InitialModelResolver` resolves an
 explicit request, a restorable session model, the catalog default, or the runtime fallback in that
@@ -358,6 +366,10 @@ Callers may apply additional entry transforms and register projectors keyed by `
 Pi's agent-level message union is extensible, `SessionContext` preserves both standard and custom
 roles losslessly, including unknown wire fields. `provider_messages()` applies the same projection as
 Pi's `convertToLlm`, including branch/compaction wrappers and bash/custom messages.
+Interactive bash execution keeps the last 2,000 lines or 50KB in the session message. When that
+tail is truncated, `pi-shell` streams the complete combined output to a temporary file and persists
+its `fullOutputPath`, so restored context and NDJSON frontends can expose the same continuation
+handle without placing the complete output in provider context.
 
 `validate_record_log()` and `reduce_lane_state()` mirror the newest Harness recovery reducer. They
 reject contradictory operation, attempt, queue, tool, provisioned-entry, and deferred-handle logs,

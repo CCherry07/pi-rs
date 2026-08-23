@@ -5,8 +5,8 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use pi_core::{
-    AbortSignal, Provider, ProviderCallContext, ProviderError, ProviderId, ProviderRequest,
-    ProviderStream, ResponseMetadata, StreamEvent,
+    AbortSignal, Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderId,
+    ProviderRequest, ProviderStream, ResponseMetadata, StreamEvent,
 };
 use pi_provider::{
     HttpTransport, ReqwestTransport, SseDecoder, TransportError, collect_body_limited,
@@ -70,6 +70,14 @@ impl OpenAiCompatibleProvider {
 impl Provider for OpenAiCompatibleProvider {
     fn id(&self) -> ProviderId {
         self.config.provider_id.clone()
+    }
+
+    fn availability(&self) -> ProviderAvailability {
+        if self.config.api_key.is_some() {
+            ProviderAvailability::Available
+        } else {
+            ProviderAvailability::MissingCredentials
+        }
     }
 
     async fn stream(

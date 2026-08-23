@@ -26,8 +26,9 @@ stream, session restore, context compaction, and plugin reload all run on the sa
   install through exact locks and a content-addressed store.
 - **Pi JS/TS extensions**: an optional Node 20 + NAPI-RS launcher discovers and reloads Pi-style
   extensions while the Rust runtime and Ratatui product remain authoritative.
-- **Models and providers**: OpenAI-compatible APIs plus a `models.json` catalog for endpoints,
-  request parameters, headers, credentials, and model metadata.
+- **Models and providers**: OpenAI-compatible APIs, built-in OpenAI Codex, Anthropic/Claude Code,
+  and xAI Grok providers, plus a `models.json` catalog for endpoints, request parameters, headers,
+  credentials, and model metadata.
 - **Production tools**: `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`, `find`, and `ls`.
 - **Skills and resources**: global and project skill discovery, `/skill:<name>` commands, and
   generation-time system prompt contributions.
@@ -75,6 +76,84 @@ printf 'explain this project' | cargo run -p pi-cli -- --print
 cargo run -p pi-cli -- --print '!git status --short'
 cargo run -p pi-cli -- --print '!!git status --short'
 
+# Start with Anthropic API credentials
+export ANTHROPIC_API_KEY="..."
+cargo run -p pi-cli -- --provider anthropic --model claude-sonnet-4-6
+
+# Or use an existing Claude Pro/Max OAuth access token with Claude Code request shaping
+export ANTHROPIC_OAUTH_TOKEN="sk-ant-oat-..."
+cargo run -p pi-cli -- --provider anthropic --model claude-sonnet-4-6
+
+# Start with xAI Grok (uses XAI_API_KEY)
+export XAI_API_KEY="..."
+cargo run -p pi-cli -- --provider xai --model grok-4.6
+```
+
+The built-in Anthropic provider also accepts `ANTHROPIC_AUTH_TOKEN` (bearer auth), with precedence
+over `ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, and `<agent-dir>/auth.json`. Explicit `--api-key`
+has highest priority. OAuth credentials stored in Pi-compatible `auth.json` use Claude Code identity
+headers, system identity, tool-name mapping, and reasoning-signature replay. Interactive `/login`
+and `/logout` use the same credential store and rebuild the active session generation after a
+change, while supported OAuth credentials refresh automatically before expiry.
+
+Credential management commands write Pi-compatible `<agent-dir>/auth.json` using a hidden prompt,
+file locking, atomic replacement, and mode `0600` on Unix:
+
+```bash
+# Configure any provider interactively; the selector includes models.json providers
+pi auth login
+
+# Browser/subscription OAuth for built-in providers
+pi auth login anthropic --oauth
+pi auth login openai-codex --oauth
+pi auth login xai --oauth
+
+# Prompt for an API key without echo
+pi auth login anthropic --api-key
+pi auth login xai --api-key
+
+# Store an existing OAuth access token when importing credentials
+pi auth login anthropic --oauth-token
+pi auth login openai-codex --oauth-token
+pi auth login xai --oauth-token
+
+# Authorize with an xAI/Grok subscription in the browser
+pi auth login xai --oauth
+
+# Inspect metadata without printing secrets, or remove a credential
+pi auth status
+pi auth logout anthropic
+```
+
+The hidden `--token` option is available for automation but should be avoided interactively because
+command-line arguments may be visible in shell history or process listings.
+
+Credentials may also be persisted in Pi's `<agent-dir>/auth.json` format:
+
+```json
+{
+  "anthropic": {
+    "type": "oauth",
+    "access": "sk-ant-oat-...",
+    "refresh": "...",
+    "expires": 0
+  },
+  "xai": {
+    "type": "api_key",
+    "key": "xai-..."
+  }
+}
+```
+
+Stored OAuth credentials for Anthropic, OpenAI Codex, and xAI are refreshed automatically shortly
+before expiry. After changing credentials from another process while the TUI is running, use `/reload` to rebuild the provider
+generation.
+
+The built-in xAI provider uses `https://api.x.ai/v1/responses` and exposes the current Grok 4.5
+and Grok 4.6 catalog. Without `XAI_API_KEY`, these models remain registered for diagnostics but are
+hidden from the available-model selector.
+
+```bash
 # Start in a specific project
 cargo run -p pi-cli -- --cwd /path/to/project
 ```

@@ -515,6 +515,22 @@ impl PiRuntime {
         self.agent.runtime().registries().model_specs()
     }
 
+    pub fn available_models(&self) -> Vec<ModelSpec> {
+        self.agent
+            .runtime()
+            .registries()
+            .model_runtime()
+            .available_models()
+    }
+
+    pub fn provider_statuses(&self) -> Vec<pi_core::ProviderStatus> {
+        self.agent
+            .runtime()
+            .registries()
+            .model_runtime()
+            .provider_statuses()
+    }
+
     pub fn model(&self, provider: &ProviderId, model: &ModelId) -> Option<ModelSpec> {
         self.agent
             .runtime()
@@ -533,6 +549,26 @@ impl PiRuntime {
             .registries()
             .model_runtime()
             .resolve_reference(current_provider, reference)
+    }
+
+    pub fn resolve_available_model_reference(
+        &self,
+        current_provider: &ProviderId,
+        reference: &str,
+    ) -> Option<ModelSpec> {
+        self.agent
+            .runtime()
+            .registries()
+            .model_runtime()
+            .resolve_available_reference(current_provider, reference)
+    }
+
+    pub fn provider_is_available(&self, provider: &ProviderId) -> bool {
+        self.agent
+            .runtime()
+            .registries()
+            .provider(provider)
+            .is_some_and(|provider| provider.availability().is_available())
     }
 
     pub fn has_provider(&self, provider: &ProviderId) -> bool {

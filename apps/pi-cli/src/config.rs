@@ -47,7 +47,8 @@ pub(crate) struct Cli {
     )]
     pub(crate) base_url: String,
 
-    #[arg(long, env = "OPENAI_API_KEY", hide_env_values = true)]
+    /// API key override. The default OpenAI-compatible provider also reads OPENAI_API_KEY.
+    #[arg(long, hide_env_values = true)]
     pub(crate) api_key: Option<String>,
 
     /// Provider override paired with --model. Defaults to openai-compatible
@@ -82,11 +83,46 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Clone, Subcommand)]
 pub(crate) enum CliCommand {
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// Install and manage native plugins.
     Plugin {
         #[command(subcommand)]
         command: PluginCommand,
     },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub(crate) enum AuthCommand {
+    /// Store an API key or an existing OAuth access token.
+    Login {
+        /// Provider ID. Omit it to select from built-in and models.json providers.
+        provider: Option<String>,
+        /// Store an API key. When omitted, the secret is prompted without echo.
+        #[arg(long, conflicts_with = "oauth_token")]
+        api_key: bool,
+        /// Run the provider's browser/device OAuth flow.
+        #[arg(long, conflicts_with_all = ["api_key", "oauth_token", "token"])]
+        oauth: bool,
+        /// Store an existing OAuth access token. Currently supported by anthropic.
+        #[arg(long, conflicts_with_all = ["api_key", "oauth"])]
+        oauth_token: bool,
+        /// Secret value. Prefer the hidden prompt to avoid shell history and process listings.
+        #[arg(long, hide = true)]
+        token: Option<String>,
+        /// OAuth refresh token, retained for future automatic refresh support.
+        #[arg(long, hide = true, requires = "oauth_token")]
+        refresh_token: Option<String>,
+        /// OAuth expiry as Unix epoch milliseconds.
+        #[arg(long, requires = "oauth_token")]
+        expires: Option<f64>,
+    },
+    /// Remove a stored provider credential.
+    Logout { provider: String },
+    /// Show configured credential types without printing secrets.
+    Status { provider: Option<String> },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -161,11 +197,23 @@ impl AppConfig {
                 .join("sessions")
                 .join(format!("{}.jsonl", uuid::Uuid::now_v7()))
         });
-        let api_key = cli.api_key.clone().filter(|key| !key.trim().is_empty());
         let requested_provider = cli
             .provider
             .clone()
             .filter(|provider| !provider.trim().is_empty());
+        let provider = requested_provider
+            .clone()
+            .unwrap_or_else(|| "openai-compatible".to_string());
+        let api_key = cli
+            .api_key
+            .clone()
+            .filter(|key| !key.trim().is_empty())
+            .or_else(|| {
+                (provider == "openai-compatible")
+                    .then(|| std::env::var("OPENAI_API_KEY").ok())
+                    .flatten()
+                    .filter(|key| !key.trim().is_empty())
+            });
         let fallback_model = std::env::var("OPENAI_MODEL")
             .ok()
             .filter(|model| !model.trim().is_empty())
@@ -178,9 +226,7 @@ impl AppConfig {
             fallback_model,
             base_url: cli.base_url.clone(),
             api_key,
-            provider: requested_provider
-                .clone()
-                .unwrap_or_else(|| "openai-compatible".to_string()),
+            provider,
             requested_provider,
             trust_override: cli
                 .approve
@@ -234,7 +280,7 @@ mod tests {
 
     use clap::{CommandFactory, Parser};
 
-    use super::{AppConfig, Cli, CliCommand, PluginCommand, normalize_pi_arg};
+    use super::{AppConfig, AuthCommand, Cli, CliCommand, PluginCommand, normalize_pi_arg};
 
     #[test]
     fn help_never_renders_the_api_key_value() {
@@ -341,6 +387,44 @@ mod tests {
         );
         assert!(cli.no_extensions);
         assert_eq!(normalize_pi_arg(OsString::from("-ne")), "--no-extensions");
+    }
+
+    #[test]
+    fn auth_commands_parse_without_becoming_prompts() {
+        let login = Cli::try_parse_from([
+            "pi",
+            "auth",
+            "login",
+            "anthropic",
+            "--oauth-token",
+            "--refresh-token",
+            "refresh",
+            "--expires",
+            "123",
+        ])
+        .unwrap();
+        assert!(matches!(
+            login.command,
+            Some(CliCommand::Auth {
+                command: AuthCommand::Login {
+                    ref provider,
+                    oauth: false,
+                    oauth_token: true,
+                    ref refresh_token,
+                    expires: Some(123.0),
+                    ..
+                }
+            }) if provider.as_deref() == Some("anthropic") && refresh_token.as_deref() == Some("refresh")
+        ));
+        assert!(login.prompt.is_empty());
+
+        let logout = Cli::try_parse_from(["pi", "auth", "logout", "xai"]).unwrap();
+        assert!(matches!(
+            logout.command,
+            Some(CliCommand::Auth {
+                command: AuthCommand::Logout { ref provider }
+            }) if provider == "xai"
+        ));
     }
 
     #[test]

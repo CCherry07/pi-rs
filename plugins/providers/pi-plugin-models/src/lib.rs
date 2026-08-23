@@ -86,6 +86,14 @@ impl ModelsPlugin {
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()
     }
+
+    /// Returns configured provider IDs from the validated models.json snapshot.
+    pub fn provider_ids(&self) -> Vec<ProviderId> {
+        self.providers
+            .iter()
+            .map(|provider| provider.id.clone())
+            .collect()
+    }
 }
 
 impl ProviderPlugin for ModelsPlugin {

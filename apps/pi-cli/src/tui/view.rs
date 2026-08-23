@@ -160,6 +160,8 @@ pub(super) fn ui_areas(root: Rect, app: &App) -> UiAreas {
             BottomPaneView::Resume => app.session_choices.len(),
             BottomPaneView::Tree => app.tree_choices.len(),
             BottomPaneView::Fork => app.fork_choices.len(),
+            BottomPaneView::Login => app.login_providers.len(),
+            BottomPaneView::Logout => app.logout_providers.len(),
         };
         let desired_view_height = u16::try_from(item_count.clamp(1, 10))
             .unwrap_or(10)
@@ -334,6 +336,16 @@ pub(super) fn draw_bottom_pane_view(
             "Choose a user message to edit and continue from",
             app.fork_choices.len(),
         ),
+        BottomPaneView::Login => (
+            "Select provider to configure",
+            "API keys use a hidden prompt; OAuth opens the browser",
+            app.login_providers.len(),
+        ),
+        BottomPaneView::Logout => (
+            "Select provider to log out",
+            "Only credentials stored in auth.json are removed",
+            app.logout_providers.len(),
+        ),
     };
     let body_height = u16::try_from(item_count.clamp(1, 10))
         .unwrap_or(10)
@@ -455,6 +467,37 @@ pub(super) fn draw_bottom_pane_view(
                 )
             })
             .collect(),
+        BottomPaneView::Login => app
+            .login_providers
+            .iter()
+            .enumerate()
+            .map(|(index, provider)| {
+                let methods = if provider.supports_oauth {
+                    "OAuth or API key"
+                } else {
+                    "API key"
+                };
+                let description = provider
+                    .stored_kind
+                    .map(|kind| format!("{methods} · {kind} configured"))
+                    .unwrap_or_else(|| format!("{methods} · unconfigured"));
+                picker_row(index, selected, &provider.id, &description, body.width)
+            })
+            .collect(),
+        BottomPaneView::Logout => app
+            .logout_providers
+            .iter()
+            .enumerate()
+            .map(|(index, provider)| {
+                picker_row(
+                    index,
+                    selected,
+                    &provider.id,
+                    &format!("stored {}", provider.stored_kind.unwrap_or("credential")),
+                    body.width,
+                )
+            })
+            .collect(),
     };
     if rows.is_empty() {
         let message = match view {
@@ -463,6 +506,8 @@ pub(super) fn draw_bottom_pane_view(
             BottomPaneView::Resume => "  No resumable sessions",
             BottomPaneView::Tree => "  No entries in session",
             BottomPaneView::Fork => "  No user messages to fork from",
+            BottomPaneView::Login => "  No login providers available",
+            BottomPaneView::Logout => "  No stored credentials to remove",
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(

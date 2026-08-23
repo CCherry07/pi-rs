@@ -247,7 +247,7 @@ impl<'a> ModelRuntimeServices<'a> {
     pub fn resolver(&self) -> InitialModelResolver {
         let state = self.runtime.agent().state();
         InitialModelResolver::new(
-            self.runtime.models(),
+            self.runtime.available_models(),
             SessionModel {
                 provider: state.provider_id,
                 model_id: state.model_id,

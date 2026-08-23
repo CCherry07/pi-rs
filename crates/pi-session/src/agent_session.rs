@@ -476,6 +476,16 @@ impl AgentSession {
         &self.runtime
     }
 
+    /// Returns the context window used by compaction for the active model.
+    pub fn active_context_window(&self) -> Option<u64> {
+        let state = self.runtime.agent().state();
+        self.context_window.or_else(|| {
+            self.runtime
+                .model(&state.provider_id, &state.model_id)
+                .map(|model| model.context_window)
+        })
+    }
+
     pub fn log(&self) -> &SessionLog {
         &self.log
     }
@@ -740,6 +750,7 @@ impl AgentSession {
             "exitCode": result.exit_code,
             "cancelled": result.cancelled,
             "truncated": result.truncated,
+            "fullOutputPath": result.full_output_path,
             "timestamp": now_ms(),
             "excludeFromContext": options.exclude_from_context,
         }))?;
@@ -1308,7 +1319,7 @@ impl AgentSession {
     }
 
     async fn maybe_threshold_compact_locked(&self) {
-        let Some(context_window) = self.context_window else {
+        let Some(context_window) = self.active_context_window() else {
             return;
         };
         let Ok(document) = self.log.load() else {
@@ -1342,7 +1353,7 @@ impl AgentSession {
         if explicit_context_error {
             return true;
         }
-        let Some(context_window) = self.context_window else {
+        let Some(context_window) = self.active_context_window() else {
             return false;
         };
         message.stop_reason == StopReason::Length
@@ -2703,6 +2714,50 @@ mod tests {
                 "compact:1:extension summary:true".to_string(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn active_context_window_tracks_catalog_model_switches() {
+        struct Catalog;
+
+        impl pi_core::ProviderPlugin for Catalog {
+            fn id(&self) -> pi_core::PluginId {
+                pi_core::PluginId::new("catalog")
+            }
+
+            fn register(
+                &self,
+                context: &mut pi_core::ProviderRegisterContext<'_>,
+            ) -> pi_core::Result<()> {
+                let mut small = pi_core::ModelSpec::new("scripted", "small", "Small", "test");
+                small.context_window = 100;
+                context.register_model(small)?;
+                let mut large = pi_core::ModelSpec::new("scripted", "large", "Large", "test");
+                large.context_window = 1_000;
+                context.register_model(large)
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
+            .provider_plugin(Catalog)
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("small"),
+                ..AgentOptions::default()
+            })
+            .build()
+            .unwrap();
+        let session = AgentSession::create(runtime, directory.path().join("session.jsonl"))
+            .await
+            .unwrap();
+
+        assert_eq!(session.active_context_window(), Some(100));
+        session
+            .set_model(ProviderId::new("scripted"), ModelId::new("large"))
+            .unwrap();
+        assert_eq!(session.active_context_window(), Some(1_000));
     }
 
     #[tokio::test]

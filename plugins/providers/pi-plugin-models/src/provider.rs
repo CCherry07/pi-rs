@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_core::{
-    AbortSignal, ModelId, Provider, ProviderCallContext, ProviderError, ProviderId,
-    ProviderRequest, ProviderStream,
+    AbortSignal, ModelId, Provider, ProviderAvailability, ProviderCallContext, ProviderError,
+    ProviderId, ProviderRequest, ProviderStream,
 };
 use pi_plugin_openai::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
 
@@ -158,6 +158,21 @@ impl ModelsJsonProvider {
 impl Provider for ModelsJsonProvider {
     fn id(&self) -> ProviderId {
         self.configured.id.clone()
+    }
+
+    fn availability(&self) -> ProviderAvailability {
+        if self.configured.runtime_api_key.is_some()
+            || self.configured.api_key.is_some()
+            || !self.configured.auth_header
+            || self
+                .fallback
+                .as_ref()
+                .is_some_and(|provider| provider.availability().is_available())
+        {
+            ProviderAvailability::Available
+        } else {
+            ProviderAvailability::MissingCredentials
+        }
     }
 
     async fn stream(

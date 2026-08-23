@@ -164,7 +164,8 @@ fn event_json(event: RevisionedAgentSessionEvent) -> Value {
         } => {
             json!({"type":"bash_execution_end","id":id,"result":result.map(|result| json!({
                 "output":result.output,"exitCode":result.exit_code,"cancelled":result.cancelled,
-                "timedOut":result.timed_out,"truncated":result.truncated
+                "timedOut":result.timed_out,"truncated":result.truncated,
+                "fullOutputPath":result.full_output_path
             })),"error":error_message})
         }
         _ => json!({"type":"unknown"}),

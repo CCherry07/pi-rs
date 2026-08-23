@@ -1,9 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{ModelId, ModelSpec, PluginId, Provider, ProviderId};
+use crate::{ModelId, ModelSpec, PluginId, Provider, ProviderAvailability, ProviderId};
 
 type ModelKey = (ProviderId, ModelId);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderStatus {
+    pub provider: ProviderId,
+    pub availability: ProviderAvailability,
+}
 
 /// Read-only provider and model snapshot for one runtime generation.
 pub struct ModelRuntime {
@@ -57,6 +63,41 @@ impl ModelRuntime {
                 .then_with(|| left.id.cmp(&right.id))
         });
         models
+    }
+
+    pub fn available_models(&self) -> Vec<ModelSpec> {
+        self.models()
+            .into_iter()
+            .filter(|model| self.model_is_available(model))
+            .collect()
+    }
+
+    pub fn resolve_available_reference(
+        &self,
+        current_provider: &ProviderId,
+        reference: &str,
+    ) -> Option<ModelSpec> {
+        let model = self.resolve_reference(current_provider, reference)?;
+        self.model_is_available(&model).then_some(model)
+    }
+
+    fn model_is_available(&self, model: &ModelSpec) -> bool {
+        self.providers
+            .get(&model.provider)
+            .is_some_and(|(_, provider)| provider.availability().is_available())
+    }
+
+    pub fn provider_statuses(&self) -> Vec<ProviderStatus> {
+        let mut statuses = self
+            .providers
+            .iter()
+            .map(|(provider, (_, implementation))| ProviderStatus {
+                provider: provider.clone(),
+                availability: implementation.availability(),
+            })
+            .collect::<Vec<_>>();
+        statuses.sort_by(|left, right| left.provider.cmp(&right.provider));
+        statuses
     }
 
     /// Resolves an id, `provider/id`, or unique display name against this

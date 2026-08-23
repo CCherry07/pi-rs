@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use pi_agent::AgentOptions;
 use pi_core::{ModelId, ProviderId};
 use pi_js_plugin::{JsGenerationRequest, JsHostMode, JsPluginGeneration, JsPluginHost};
+use pi_plugin_anthropic::AnthropicPlugin;
 use pi_plugin_bash::BashPlugin;
 use pi_plugin_edit::EditPlugin;
 use pi_plugin_find::FindPlugin;
@@ -15,10 +16,11 @@ use pi_plugin_manager::{
     InstallScope, PluginManager, PluginManagerOptions, PreparedPluginReconcile,
 };
 use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
-use pi_plugin_openai::{OpenAiCompatibleConfig, OpenAiCompatiblePlugin};
+use pi_plugin_openai::{OpenAiCodexPlugin, OpenAiCompatibleConfig, OpenAiCompatiblePlugin};
 use pi_plugin_read::ReadPlugin;
 use pi_plugin_skills::{SkillLoaderOptions, SkillsPlugin};
 use pi_plugin_write::WritePlugin;
+use pi_plugin_xai::XAiPlugin;
 use pi_resources::ResourceLoaderOptions;
 use pi_runtime::{PiRuntime, RuntimeError, SystemPrompt};
 use pi_session::{
@@ -27,6 +29,7 @@ use pi_session::{
     SessionError, SessionPlugins,
 };
 
+use crate::auth::{StoredCredential, read_stored_credential};
 use crate::config::AppConfig;
 use crate::project_trust::ProjectTrustService;
 
@@ -199,8 +202,37 @@ fn build_runtime(
     native_plugins: &NativePlugins,
     js_generation: Option<&JsPluginGeneration>,
 ) -> Result<PiRuntime, RuntimeError> {
-    let provider_config = config
-        .api_key
+    build_runtime_with_codex_credentials(
+        config,
+        project_trusted,
+        native_plugins,
+        js_generation,
+        None,
+    )
+}
+
+fn build_runtime_with_codex_credentials(
+    config: &AppConfig,
+    project_trusted: bool,
+    native_plugins: &NativePlugins,
+    js_generation: Option<&JsPluginGeneration>,
+    codex_credentials: Option<pi_plugin_openai::CodexCredentials>,
+) -> Result<PiRuntime, RuntimeError> {
+    let stored_anthropic =
+        read_stored_credential(&config.agent_dir, "anthropic").map_err(RuntimeError::Build)?;
+    let stored_xai =
+        read_stored_credential(&config.agent_dir, "xai").map_err(RuntimeError::Build)?;
+    let stored_codex =
+        read_stored_credential(&config.agent_dir, "openai-codex").map_err(RuntimeError::Build)?;
+    let stored_compatible =
+        read_stored_credential(&config.agent_dir, &config.provider).map_err(RuntimeError::Build)?;
+    let effective_api_key = config.api_key.clone().or_else(|| {
+        stored_compatible
+            .as_ref()
+            .and_then(StoredCredential::secret)
+            .map(str::to_string)
+    });
+    let provider_config = effective_api_key
         .as_ref()
         .map_or_else(
             || OpenAiCompatibleConfig::without_api_key(&config.base_url),
@@ -215,15 +247,82 @@ fn build_runtime(
             .push(std::path::PathBuf::from(home).join(".agents/skills"));
     }
     let mut model_options = ModelsPluginOptions::for_agent_dir(&config.agent_dir);
-    if let Some(api_key) = &config.api_key {
+    if let Some(api_key) = &effective_api_key {
         model_options = model_options.runtime_api_key(config.provider.clone(), api_key.clone());
     }
 
-    let builder = PiRuntime::builder()
-        .try_provider_plugin_factory({
+    let builder = PiRuntime::builder();
+    let codex_credentials = codex_credentials.unwrap_or_else(|| {
+        stored_codex
+            .as_ref()
+            .and_then(StoredCredential::secret)
+            .map(pi_plugin_openai::CodexCredentials::from_access_token)
+            .unwrap_or_else(pi_plugin_openai::CodexCredentials::discover)
+    });
+    let builder = if config.provider == "openai-codex" {
+        let credentials = codex_credentials.clone();
+        builder.provider_plugin_factory(move || OpenAiCodexPlugin::new(credentials.clone()))
+    } else if config.provider == "xai" {
+        let api_key = config.api_key.clone();
+        let selected_xai = stored_xai.clone();
+        builder.provider_plugin_factory(move || match &api_key {
+            Some(api_key) => XAiPlugin::new(Some(api_key.clone())),
+            None => XAiPlugin::from_stored(
+                selected_xai
+                    .as_ref()
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_string),
+            ),
+        })
+    } else if config.provider == "anthropic" {
+        builder
+    } else {
+        builder.try_provider_plugin_factory({
             let provider_config = provider_config.clone();
             move || OpenAiCompatiblePlugin::new(provider_config.clone())
         })
+    };
+    let builder = if config.provider == "anthropic" {
+        let api_key = config.api_key.clone();
+        builder.provider_plugin_factory(move || match &api_key {
+            Some(api_key) => AnthropicPlugin::with_api_key(api_key.clone()),
+            None => {
+                AnthropicPlugin::from_stored(stored_anthropic.as_ref().and_then(|credential| {
+                    credential
+                        .secret()
+                        .map(|secret| (secret, credential.is_oauth()))
+                }))
+            }
+        })
+    } else {
+        let stored_anthropic = stored_anthropic.clone();
+        builder.provider_plugin_factory(move || {
+            AnthropicPlugin::from_stored(stored_anthropic.as_ref().and_then(|credential| {
+                credential
+                    .secret()
+                    .map(|secret| (secret, credential.is_oauth()))
+            }))
+        })
+    };
+    let builder = if config.provider == "openai-codex" {
+        builder
+    } else {
+        builder.provider_plugin_factory(move || OpenAiCodexPlugin::new(codex_credentials.clone()))
+    };
+    let builder = if config.provider == "xai" {
+        builder
+    } else {
+        let stored_xai = stored_xai.clone();
+        builder.provider_plugin_factory(move || {
+            XAiPlugin::from_stored(
+                stored_xai
+                    .as_ref()
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_string),
+            )
+        })
+    };
+    let builder = builder
         .try_provider_plugin_factory({
             let model_options = model_options.clone();
             move || ModelsPlugin::load(model_options.clone())
@@ -386,6 +485,18 @@ command = "fixture-command"
         package
     }
 
+    fn jwt(account_id: &str) -> String {
+        use base64::Engine;
+
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "https://api.openai.com/auth": {"chatgpt_account_id": account_id}
+            })
+            .to_string(),
+        );
+        format!("header.{payload}.signature")
+    }
+
     fn app_config(agent_dir: &std::path::Path, model: Option<&str>) -> AppConfig {
         AppConfig {
             cwd: agent_dir.to_path_buf(),
@@ -402,6 +513,162 @@ command = "fixture-command"
             extensions: Vec::new(),
             discover_extensions: true,
         }
+    }
+
+    #[test]
+    fn codex_catalog_is_registered_even_when_another_provider_is_selected() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = app_config(directory.path(), None);
+
+        let runtime = build_runtime_with_codex_credentials(
+            &config,
+            false,
+            &NativePlugins::default(),
+            None,
+            Some(pi_plugin_openai::CodexCredentials::default()),
+        )
+        .unwrap();
+
+        assert!(
+            runtime
+                .model(&ProviderId::new("openai-codex"), &ModelId::new("gpt-5.5"))
+                .is_some()
+        );
+        assert!(runtime.available_models().is_empty());
+    }
+
+    #[test]
+    fn xai_catalog_is_registered_but_unavailable_without_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = app_config(directory.path(), None);
+
+        let runtime = build_runtime_with_codex_credentials(
+            &config,
+            false,
+            &NativePlugins::default(),
+            None,
+            Some(pi_plugin_openai::CodexCredentials::default()),
+        )
+        .unwrap();
+
+        let model = runtime
+            .model(&ProviderId::new("xai"), &ModelId::new("grok-4.6"))
+            .unwrap();
+        assert_eq!(model.context_window, 500_000);
+        assert!(
+            runtime
+                .available_models()
+                .iter()
+                .all(|model| model.provider != ProviderId::new("xai"))
+        );
+    }
+
+    #[test]
+    fn explicit_xai_selection_uses_cli_credentials_without_duplicate_registration() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = app_config(directory.path(), Some("grok-4.6"));
+        config.provider = "xai".to_string();
+        config.requested_provider = Some("xai".to_string());
+        config.api_key = Some("xai-test-token".to_string());
+
+        let runtime = build_runtime_with_codex_credentials(
+            &config,
+            false,
+            &NativePlugins::default(),
+            None,
+            Some(pi_plugin_openai::CodexCredentials::default()),
+        )
+        .unwrap();
+
+        assert_eq!(runtime.agent().state().provider_id.as_str(), "xai");
+        assert_eq!(runtime.agent().state().model_id.as_str(), "grok-4.6");
+        assert!(runtime.available_models().iter().any(|model| {
+            model.provider == ProviderId::new("xai") && model.id == ModelId::new("grok-4.6")
+        }));
+    }
+
+    #[test]
+    fn anthropic_catalog_is_registered_and_cli_credentials_select_claude() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = app_config(directory.path(), Some("claude-sonnet-4-6"));
+        config.provider = "anthropic".to_string();
+        config.requested_provider = Some("anthropic".to_string());
+        config.api_key = Some("anthropic-test-token".to_string());
+
+        let runtime = build_runtime_with_codex_credentials(
+            &config,
+            false,
+            &NativePlugins::default(),
+            None,
+            Some(pi_plugin_openai::CodexCredentials::default()),
+        )
+        .unwrap();
+
+        assert_eq!(runtime.agent().state().provider_id.as_str(), "anthropic");
+        assert_eq!(
+            runtime.agent().state().model_id.as_str(),
+            "claude-sonnet-4-6"
+        );
+    }
+
+    #[test]
+    fn stored_codex_oauth_credential_makes_the_catalog_available() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("auth.json"),
+            serde_json::json!({
+                "openai-codex": {
+                    "type": "oauth",
+                    "access": jwt("acct-stored"),
+                    "refresh": "refresh-token",
+                    "expires": 4_102_444_800_000_f64,
+                    "accountId": "acct-stored"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut config = app_config(directory.path(), Some("gpt-5.5"));
+        config.provider = "openai-codex".to_string();
+        config.requested_provider = Some("openai-codex".to_string());
+
+        let runtime = build_runtime_with_codex_credentials(
+            &config,
+            false,
+            &NativePlugins::default(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(runtime.agent().state().provider_id.as_str(), "openai-codex");
+        assert!(runtime.available_models().iter().any(|model| {
+            model.provider == ProviderId::new("openai-codex") && model.id == ModelId::new("gpt-5.5")
+        }));
+    }
+
+    #[test]
+    fn openai_codex_provider_loads_its_builtin_model_catalog() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = app_config(directory.path(), Some("gpt-5.5"));
+        config.provider = "openai-codex".to_string();
+        config.requested_provider = Some("openai-codex".to_string());
+        config.base_url = "https://chatgpt.com/backend-api".to_string();
+
+        let runtime = build_runtime_with_codex_credentials(
+            &config,
+            false,
+            &NativePlugins::default(),
+            None,
+            Some(pi_plugin_openai::CodexCredentials::default()),
+        )
+        .unwrap();
+
+        let model = runtime
+            .model(&ProviderId::new("openai-codex"), &ModelId::new("gpt-5.5"))
+            .unwrap();
+        assert_eq!(model.context_window, 272_000);
+        assert_eq!(runtime.agent().state().model_id.as_str(), "gpt-5.5");
     }
 
     #[test]
@@ -474,11 +741,12 @@ command = "fixture-command"
     fn missing_models_json_keeps_the_cli_fallback() {
         let directory = tempfile::tempdir().unwrap();
 
-        let runtime = build_runtime(
+        let runtime = build_runtime_with_codex_credentials(
             &app_config(directory.path(), None),
             true,
             &NativePlugins::default(),
             None,
+            Some(pi_plugin_openai::CodexCredentials::default()),
         )
         .unwrap();
         let state = runtime.agent().state();

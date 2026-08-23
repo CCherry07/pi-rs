@@ -1,5 +1,6 @@
 #![warn(unreachable_pub)]
 
+mod auth;
 mod clipboard;
 mod config;
 mod output;
@@ -102,6 +103,12 @@ async fn run(cli: Cli, js_host: Option<Arc<dyn JsPluginHost>>) -> Result<(), Str
         );
     }
     let mut config = AppConfig::resolve(&cli)?;
+    if !matches!(cli.command, Some(CliCommand::Auth { .. })) {
+        auth::refresh_oauth_if_needed(&config.agent_dir).await?;
+    }
+    if let Some(CliCommand::Auth { command }) = &cli.command {
+        return auth::run(&config.agent_dir, command).await;
+    }
     if let Some(CliCommand::Plugin { command }) = &cli.command {
         return plugin_commands::run(&cli, &config, command).await;
     }
@@ -121,6 +128,7 @@ async fn run(cli: Cli, js_host: Option<Arc<dyn JsPluginHost>>) -> Result<(), Str
     let cli_mode = CLIMode::resolve(&cli, input, stdin_is_terminal)?;
     let trust = resolve_project_trust(&cli, &config, cli_mode.is_interactive()).await?;
     let cwd = config.cwd.clone();
+    let agent_dir = config.agent_dir.clone();
     let session_path = config.session_path.clone();
     let mut factory = session_factory::ProductSessionFactory::new(config, trust.service.clone());
     if let Some(js_host) = js_host {
@@ -139,6 +147,7 @@ async fn run(cli: Cli, js_host: Option<Arc<dyn JsPluginHost>>) -> Result<(), Str
         cli.fullscreen_enabled(),
         trust.service,
         trust.requests,
+        agent_dir,
     )
     .await;
     let shutdown = application
@@ -154,6 +163,7 @@ async fn run_cli(
     fullscreen: bool,
     project_trust: ProjectTrustService,
     trust_requests: mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
+    agent_dir: std::path::PathBuf,
 ) -> Result<(), String> {
     match mode {
         CLIMode::Json { input } => output::run_json(session, input).await,
@@ -165,6 +175,7 @@ async fn run_cli(
                 initial_prompt,
                 project_trust,
                 trust_requests,
+                agent_dir,
             )
             .await
         }
