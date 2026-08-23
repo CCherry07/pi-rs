@@ -3402,7 +3402,7 @@ mod tests {
             println!("{screen}");
         }
 
-        assert!(screen.contains(">_ pi (v0.1.0)"));
+        assert!(screen.contains(&format!(">_ pi (v{})", env!("CARGO_PKG_VERSION"))));
         assert!(screen.contains("model:"));
         assert!(screen.contains("directory:"));
         assert!(screen.contains("gpt-5.6-sol high  /model to change"));
@@ -3429,7 +3429,7 @@ mod tests {
 
         let screen = render_app(&app, 80, 30);
 
-        assert!(screen.contains(">_ pi (v0.1.0)"));
+        assert!(screen.contains(&format!(">_ pi (v{})", env!("CARGO_PKG_VERSION"))));
         assert!(screen.contains("Tip: type / for commands or ! for shell"));
         assert!(screen.contains("hi"));
         assert!(screen.contains("Hi! How can I help?"));

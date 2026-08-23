@@ -19,16 +19,6 @@
           "jsonpath": "$.workspace.package.version"
         },
         {
-          "type": "toml",
-          "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name == 'pi-cli')].version"
-        },
-        {
-          "type": "toml",
-          "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name == 'pi-napi')].version"
-        },
-        {
           "type": "json",
           "path": "packages/pi/package.json",
           "jsonpath": "$.version"

@@ -1,10 +1,33 @@
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+function packageVersion(): string {
+  let directory = dirname(fileURLToPath(import.meta.url));
+  for (;;) {
+    const parent = dirname(directory);
+    const manifestPath = join(directory, "package.json");
+    try {
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+        name?: unknown;
+        version?: unknown;
+      };
+      if (manifest.name === "@pi-rs/cli" && typeof manifest.version === "string") {
+        return manifest.version;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (parent === directory) return "0.0.0";
+    directory = parent;
+  }
+}
 
 /** Runtime exports commonly imported by Pi extensions. Type-only imports are
  * erased by jiti; this shim contains only runtime-neutral helpers. */
 export const CONFIG_DIR_NAME = ".pi";
-export const VERSION = "0.1.0";
+export const VERSION = packageVersion();
 
 export function defineTool<T>(tool: T): T {
   return tool;

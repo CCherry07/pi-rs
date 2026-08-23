@@ -33,6 +33,7 @@ const sourcePackagePath = join(packageDirectory, "package.json");
 const releaseDirectory = join(workspaceDirectory, "dist", "release");
 const npmDirectory = join(workspaceDirectory, "dist", "npm");
 const npmRegistry = "https://registry.npmjs.org";
+const workspaceVersionPackages = ["pi-cli", "pi-napi"] as const;
 
 const packageManifestSchema = z.looseObject({
   name: z.string().min(1),
@@ -116,6 +117,41 @@ function assertWorkspaceVersion(packagePath: string): void {
   if (!/^version\.workspace\s*=\s*true$/m.test(contents)) {
     throw new Error(`${packagePath} must inherit version.workspace`);
   }
+}
+
+export function synchronizeCargoLockWorkspaceVersions(
+  contents: string,
+  version: string,
+): string {
+  const sections = contents.split(/(?=^\[\[package\]\]\r?$)/m);
+  for (const packageName of workspaceVersionPackages) {
+    const matches = sections.filter((section) =>
+      new RegExp(`^name = "${packageName}"\\r?$`, "m").test(section),
+    );
+    if (matches.length !== 1) {
+      throw new Error(
+        `Cargo.lock must contain exactly one ${packageName} package, found ${matches.length}`,
+      );
+    }
+    const section = matches[0];
+    if (!section) throw new Error(`Cargo.lock package ${packageName} disappeared`);
+    const updated = section.replace(
+      /^version = "[^"]+"(\r?)$/m,
+      `version = "${version}"$1`,
+    );
+    if (updated === section && !new RegExp(`^version = "${version}"\\r?$`, "m").test(section)) {
+      throw new Error(`Cargo.lock package ${packageName} has no version`);
+    }
+    sections[sections.indexOf(section)] = updated;
+  }
+  return sections.join("");
+}
+
+function synchronizeWorkspaceCargoLock(version: string): void {
+  const lockPath = join(workspaceDirectory, "Cargo.lock");
+  const contents = readFileSync(lockPath, "utf8");
+  const synchronized = synchronizeCargoLockWorkspaceVersions(contents, version);
+  if (synchronized !== contents) writeFileSync(lockPath, synchronized);
 }
 
 export function validateReleaseConfiguration(tag?: string): ReleaseConfiguration {
@@ -248,6 +284,7 @@ function cargoBuild(
   profile: "debug" | "release",
   packages: string[],
 ): void {
+  synchronizeWorkspaceCargoLock(workspaceVersion());
   const arguments_ = ["build", "--locked", "--target", target.rustTarget];
   if (profile === "release") arguments_.push("--release");
   for (const packageName of packages) arguments_.push("-p", packageName);

@@ -7,14 +7,42 @@ import {
   assertPublishedPackageMatches,
   publishPackageDirectories,
   releaseMatrix,
+  synchronizeCargoLockWorkspaceVersions,
   validateReleaseConfiguration,
 } from "../scripts/release.js";
+import { VERSION } from "../src/compat-api.js";
 import { supportedNativeTargets } from "../src/native-target.js";
 
 test("release configuration keeps Cargo and npm product versions together", () => {
-  const configuration = validateReleaseConfiguration("v0.1.0");
-  assert.equal(configuration.version, "0.1.0");
+  const configuration = validateReleaseConfiguration();
+  assert.doesNotThrow(() => validateReleaseConfiguration(`v${configuration.version}`));
   assert.equal(configuration.packageManifest.version, configuration.version);
+  assert.equal(VERSION, configuration.version);
+});
+
+test("release builds synchronize inherited workspace versions in Cargo.lock", () => {
+  const lock = `version = 4
+
+[[package]]
+name = "pi-cli"
+version = "0.1.0"
+dependencies = []
+
+[[package]]
+name = "pi-napi"
+version = "0.1.0"
+dependencies = []
+
+[[package]]
+name = "third-party"
+version = "0.1.0"
+`;
+
+  const synchronized = synchronizeCargoLockWorkspaceVersions(lock, "0.2.1");
+
+  assert.match(synchronized, /name = "pi-cli"\nversion = "0\.2\.1"/);
+  assert.match(synchronized, /name = "pi-napi"\nversion = "0\.2\.1"/);
+  assert.match(synchronized, /name = "third-party"\nversion = "0\.1\.0"/);
 });
 
 test("release matrix has one native runner per supported target", () => {
@@ -71,15 +99,18 @@ test("Release Please owns version PRs and dispatches the product release workflo
       };
     };
   };
+  const manifest = JSON.parse(
+    readFileSync(new URL("../../../.release-please-manifest.json", import.meta.url), "utf8"),
+  ) as Record<string, string>;
   const product = config.packages["."];
   assert.equal(product.draft, true);
-  assert.equal(product["initial-version"], validateReleaseConfiguration().version);
+  assert.equal(product["initial-version"], "0.1.0");
+  assert.equal(manifest["."], validateReleaseConfiguration().version);
   assert.equal(product["force-tag-creation"], true);
   assert.deepEqual(
     new Set(product["extra-files"].map((entry) => entry.path)),
     new Set([
       "Cargo.toml",
-      "Cargo.lock",
       "packages/pi/package.json",
       "packages/pi/package-lock.json",
     ]),

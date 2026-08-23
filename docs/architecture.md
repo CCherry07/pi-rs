@@ -181,12 +181,15 @@ identity to that Interface; target naming, package layout, checksums, publicatio
 tests do not live in workflow YAML.
 
 Release Please is a version/changelog Adapter, not a second Release Module. Its release PR updates
-the authoritative Cargo version, the two inherited Cargo.lock package entries, the npm manifest and
-lockfile, and `CHANGELOG.md` as one change. Merging that PR creates a forced `v<version>` tag and a
-draft GitHub Release, then `.github/workflows/release-please.yml` explicitly dispatches the native
-release workflow. The explicit dispatch is required because a tag created with `GITHUB_TOKEN` does
-not recursively start another workflow. The draft becomes public only after every npm tarball is
-published and verified from the public registry.
+the authoritative Cargo version, the npm manifest and lockfile, and `CHANGELOG.md` as one change.
+Cargo's generated lockfile does not have a stable key that Release Please's generic TOML updater can
+address, so the Release Module synchronizes only the inherited `pi-cli` and `pi-napi` lock entries
+before each `--locked` native build; third-party dependency resolution remains unchanged. Merging
+the release PR creates a forced `v<version>` tag and a draft GitHub Release, then
+`.github/workflows/release-please.yml` explicitly dispatches the native release workflow. The
+explicit dispatch is required because a tag created with `GITHUB_TOKEN` does not recursively start
+another workflow. The draft becomes public only after every npm tarball is published and verified
+from the public registry.
 
 `packages/pi/src/native-target.ts` is the one target vocabulary shared by release tooling and the
 Node loader. Supported artifacts currently cover macOS arm64/x64, Linux glibc arm64/x64, and

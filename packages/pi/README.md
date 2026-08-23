@@ -82,8 +82,10 @@ tarball integrity. GitHub archives are the Rust-only delivery channel and do not
 JavaScript VM. The npm channel provides the Node host and JS/TS extension support.
 
 Release Please maintains a Conventional-Commit release PR that updates Cargo/npm versions and the
-changelog together. Merging it creates a draft GitHub Release and explicitly dispatches the native
-release workflow; successful npm publication and registry verification publish that draft.
+changelog together. Before a locked native build, the Release Module synchronizes the generated
+`Cargo.lock` entries for the two crates that inherit the product version. Merging the PR creates a
+draft GitHub Release and explicitly dispatches the native release workflow; successful npm
+publication and registry verification publish that draft.
 
 The `@pi-rs` packages must configure npm Trusted Publishing for this repository,
 `.github/workflows/release.yml`, and the protected `npm-publish` environment. The workflow uses only
