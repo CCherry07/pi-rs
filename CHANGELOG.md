@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/CCherry07/pi_rs/compare/v0.2.0...v0.2.1) (2026-08-23)
+
+
+### Bug Fixes
+
+* make releases version independent ([7dec46f](https://github.com/CCherry07/pi_rs/commit/7dec46fe10e526d78f1741ab0df9bf036e4a43b5))
+
 ## [0.2.0](https://github.com/CCherry07/pi_rs/compare/v0.1.0...v0.2.0) (2026-08-23)
 
 
