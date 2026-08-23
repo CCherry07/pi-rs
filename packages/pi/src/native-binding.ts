@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 
 import { z } from "zod";
 
+import { currentNativeTarget, nativePackageName } from "./native-target.js";
+
 export interface NativeBinding {
   runPi(arguments_: string[], dispatch: (operation: string) => Promise<string>): Promise<void>;
 }
@@ -34,10 +36,8 @@ function developmentLibraryName(): string {
   return "libpi_napi.so";
 }
 
-function candidatePaths(): string[] {
-  const platformArtifact = `pi-napi.${process.platform}-${process.arch}.node`;
+function candidatePaths(platformArtifact: string): string[] {
   return [
-    process.env.PI_RS_NATIVE_BINDING,
     join(packageDirectory, platformArtifact),
     join(workspaceDirectory, "bindings/pi-napi", platformArtifact),
     join(workspaceDirectory, "target/release", developmentLibraryName()),
@@ -68,11 +68,41 @@ function loadDynamicLibrary(path: string): NativeBinding {
 }
 
 export function loadNativeBinding(): NativeBinding {
-  const candidates = candidatePaths();
+  const override = process.env.PI_RS_NATIVE_BINDING;
+  if (override) {
+    if (!existsSync(override)) {
+      throw new Error(`PI_RS_NATIVE_BINDING does not exist: ${override}`);
+    }
+    return loadDynamicLibrary(override);
+  }
+
+  const target = currentNativeTarget();
+  const platformArtifact = `pi-napi.${target.napiSuffix}.node`;
+  const candidates = candidatePaths(platformArtifact);
   for (const candidate of candidates) {
     if (existsSync(candidate)) return loadDynamicLibrary(candidate);
   }
-  throw new Error(
-    `Cannot find the pi_rs NAPI binding. Run \"cargo build -p pi-napi\" or set PI_RS_NATIVE_BINDING. Checked:\n${candidates.join("\n")}`,
-  );
+
+  const platformPackage = nativePackageName("@pi-rs/cli", target);
+  let resolvedPackage: string;
+  try {
+    resolvedPackage = require.resolve(platformPackage);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Cannot find the pi_rs NAPI binding for ${target.rustTarget}. ` +
+        `Install ${platformPackage} through @pi-rs/cli's optional dependencies, ` +
+        `run \"npm run build:native\", or set PI_RS_NATIVE_BINDING. Checked:\n` +
+        `${candidates.join("\n")}\n${platformPackage}: ${message}`,
+      { cause: error },
+    );
+  }
+
+  try {
+    return parseNativeBinding(require(platformPackage) as unknown, resolvedPackage);
+  } catch (error) {
+    throw new Error(`Cannot load the native package ${platformPackage} (${resolvedPackage})`, {
+      cause: error,
+    });
+  }
 }

@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use pi_core::{AgentEvent, ContentBlock, Message};
 use pi_session::{
-    AgentSession, AgentSessionEvent, RevisionedAgentSessionEvent, ShellExecutionOptions,
-    SubmitOutcome,
+    AgentSessionEvent, PiSession, RevisionedAgentSessionEvent, ShellExecutionOptions, SubmitOutcome,
 };
 use serde_json::{Value, json};
 
-pub async fn run_print(session: Arc<AgentSession>, input: String) -> Result<(), String> {
+pub(crate) async fn run_print(session_handle: PiSession, input: String) -> Result<(), String> {
+    let session = session_handle.current();
     if let Some((command, excluded)) = shell_command(&input) {
         let result = session
             .execute_shell(
@@ -47,7 +47,8 @@ pub async fn run_print(session: Arc<AgentSession>, input: String) -> Result<(), 
     Ok(())
 }
 
-pub async fn run_json(session: Arc<AgentSession>, input: String) -> Result<(), String> {
+pub(crate) async fn run_json(session_handle: PiSession, input: String) -> Result<(), String> {
+    let session = session_handle.current();
     let mut subscription = session.subscribe();
     emit(json!({"type":"snapshot","snapshot": snapshot_json(&subscription.snapshot)}));
     let worker = {
@@ -217,7 +218,7 @@ fn agent_event_json(event: AgentEvent) -> Value {
     }
 }
 
-pub fn assistant_text(message: &Message) -> Option<String> {
+pub(crate) fn assistant_text(message: &Message) -> Option<String> {
     let Message::Assistant(message) = message else {
         return None;
     };
@@ -234,7 +235,7 @@ pub fn assistant_text(message: &Message) -> Option<String> {
     )
 }
 
-pub fn shell_command(input: &str) -> Option<(String, bool)> {
+pub(crate) fn shell_command(input: &str) -> Option<(String, bool)> {
     let excluded = input.starts_with("!!");
     let command = if excluded {
         input.strip_prefix("!!")?

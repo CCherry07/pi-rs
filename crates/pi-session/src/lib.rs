@@ -9,6 +9,7 @@
 
 mod agent_session;
 mod agent_session_runtime;
+mod application;
 mod compaction;
 mod context;
 mod event;
@@ -31,6 +32,7 @@ pub use agent_session_runtime::{
     AgentSessionReplacement, AgentSessionRuntime, AgentSessionRuntimeError,
     AgentSessionRuntimeFactory, AgentSessionRuntimeRequest, AgentSessionRuntimeTarget,
 };
+pub use application::{PiApplication, PiApplicationError, PiSession};
 pub use compaction::*;
 pub use context::{
     ContextEntryTransform, CustomEntryContextMessageProjector, SessionContext,

@@ -1,25 +1,23 @@
 # pi_rs Node host / Node 宿主
 
 `@pi-rs/cli` is the Node launcher for Pi-compatible JavaScript and TypeScript extensions. Node owns
-extension discovery, `jiti` module loading, and callback execution; the NAPI-RS addon runs the same
-Rust `AgentSessionRuntime`, providers, tools, session store, and Ratatui UI as `pi-cli`.
+extension discovery, `jiti` module loading, and callback execution; every CLI mode is delegated
+through NAPI to the same Rust runtime. Interactive launches use the Ratatui frontend in `pi-cli`,
+while print, JSON, plugin-management, and piped-input modes use their matching Rust paths.
 
-`@pi-rs/cli` 是 Pi 兼容 JavaScript/TypeScript extension 的 Node 启动层。Node 负责发现、
-`jiti` 加载和执行回调；NAPI-RS addon 内仍运行与 `pi-cli` 相同的 Rust
-`AgentSessionRuntime`、Provider、工具、会话存储与 Ratatui UI。
+`@pi-rs/cli` 是 Pi 兼容 JavaScript/TypeScript extension 的 Node 启动层。Node 负责 extension
+发现、`jiti` 加载和回调执行；所有 CLI 模式都通过 NAPI 进入同一个 Rust runtime。交互模式使用
+`pi-cli` 的 Ratatui 前端，print、JSON、插件管理和管道输入使用各自对应的 Rust 路径。
 
 ## Develop / 开发运行
 
 Node 20+ and Rust 1.98+ are required. The repository pins Rust 1.98.0 through its root
-`rust-toolchain.toml`.
+`rust-toolchain.toml`. The Node host is authored in TypeScript; development commands use `tsx`, and
+`npm run build` emits publishable JavaScript and declarations under `dist/`.
 
-需要 Node 20+ 和 Rust 1.98+；仓库通过根目录的 `rust-toolchain.toml` 固定 Rust 1.98.0。
-
-The Node host is authored in TypeScript. Development commands run the `.ts` sources through `tsx`;
-`npm run build` emits the publishable JavaScript and declarations under `dist/`.
-
-Node 宿主使用 TypeScript 编写。开发命令通过 `tsx` 直接运行 `.ts` 源码；`npm run build` 会把
-用于发布的 JavaScript 和声明文件生成到 `dist/`。
+需要 Node 20+ 和 Rust 1.98+；仓库通过根目录的 `rust-toolchain.toml` 固定 Rust 1.98.0。Node
+宿主使用 TypeScript 编写，开发命令通过 `tsx` 运行，`npm run build` 会把发布用 JavaScript 和
+声明文件生成到 `dist/`。
 
 ```bash
 cd packages/pi
@@ -28,7 +26,7 @@ npm run check
 npm run build
 npm run build:native
 
-# Fullscreen TUI, with automatic extension discovery
+# Interactive Ratatui frontend with automatic extension discovery
 npm start -- --cwd /path/to/project
 
 # Load an exact extension and disable discovery
@@ -38,13 +36,64 @@ npm start -- --no-extensions -e /path/to/extension.ts
 npm start -- --print "summarize this repository"
 ```
 
-Development builds create `pi-napi.<platform>-<arch>.node` in this package. A release artifact can
-be built with `npm run build:native:release`. `PI_RS_NATIVE_BINDING` may point at an exact `.node`,
-`.dylib`, `.so`, or `.dll` during development.
+Development builds create `pi-napi.<platform>-<arch>-<abi>.node` in this package (macOS has no ABI
+suffix). A release artifact can be built with `npm run build:native:release`.
+`PI_RS_NATIVE_BINDING` may point at an exact `.node`, `.dylib`, `.so`, or `.dll` during development.
 
-开发构建会在本目录生成 `pi-napi.<platform>-<arch>.node`；`npm run build:native:release`
-生成 release binding。开发时也可以用 `PI_RS_NATIVE_BINDING` 指向明确的 `.node`、`.dylib`、
-`.so` 或 `.dll`。
+开发构建会在本目录生成带平台、架构和 Linux/Windows ABI 后缀的 `.node`；
+`npm run build:native:release` 生成 release binding。开发时也可以用
+`PI_RS_NATIVE_BINDING` 指向明确的 `.node`、`.dylib`、`.so` 或 `.dll`。
+
+## Distribution / 发布
+
+Published npm installations use a small JavaScript root package plus one exact-version native
+optional package selected for the current OS, CPU, and Linux libc. The root package never embeds
+all native binaries. Supported target definitions are shared by the loader and release tooling, so
+an unsupported runtime fails with the exact missing platform package instead of a generic `dlopen`
+error.
+
+发布后的 npm 安装由一个轻量 JavaScript 根包和一个匹配当前 OS、CPU、Linux libc 的原生可选
+包组成；根包不会携带全部平台二进制。loader 与发布工具共享同一份 target 定义，不支持的
+runtime 会直接报告所需的平台包。
+
+Release commands run through one Module:
+
+```bash
+# Validate Cargo/npm versions and target coverage
+npm run release:check
+
+# Build the standalone archive and NAPI artifact for this native host
+npm run release:dist -- --target aarch64-apple-darwin
+
+# After all CI target artifacts have been collected
+npm run release:assemble -- --artifacts dist/release
+npm run release:verify -- --npm-dir dist/npm
+
+# Protected workflow only: publish the verified tarballs, then verify npm itself
+npm run release:publish -- --npm-dir dist/npm
+npm run release:verify-published -- --npm-dir dist/npm
+```
+
+`release:publish` publishes every platform package before `@pi-rs/cli`; it is intended only for the
+protected release workflow. It publishes the `.tgz` files produced and smoke-tested by
+`release:assemble`, not a newly packed directory. `release:verify-published` then requires every npm
+package to have the expected identity, platform selectors, optional dependency matrix, and exact
+tarball integrity. GitHub archives are the Rust-only delivery channel and do not provide a
+JavaScript VM. The npm channel provides the Node host and JS/TS extension support.
+
+Release Please maintains a Conventional-Commit release PR that updates Cargo/npm versions and the
+changelog together. Merging it creates a draft GitHub Release and explicitly dispatches the native
+release workflow; successful npm publication and registry verification publish that draft.
+
+The `@pi-rs` packages must configure npm Trusted Publishing for this repository,
+`.github/workflows/release.yml`, and the protected `npm-publish` environment. The workflow uses only
+the short-lived OIDC identity—no `NPM_TOKEN` or `NODE_AUTH_TOKEN` secret—and npm records provenance
+automatically.
+
+Release Please 会维护 Conventional Commit 驱动的 release PR，并一次性同步 Cargo/npm 版本与
+changelog。合并后先创建 draft GitHub Release，再显式触发多平台构建；所有 npm 包发布并从
+registry 校验成功后，GitHub Release 才会公开。npm 发布只使用 Trusted Publishing 的短期
+OIDC 身份，不保存长期 npm token。
 
 ## Discovery and reload / 发现与重载
 

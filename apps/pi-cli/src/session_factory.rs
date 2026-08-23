@@ -31,15 +31,15 @@ use crate::config::AppConfig;
 use crate::project_trust::ProjectTrustService;
 
 #[derive(Clone)]
-pub struct AppSessionFactory {
+pub(crate) struct ProductSessionFactory {
     config: AppConfig,
     project_trust: ProjectTrustService,
     js_plugin_host: Option<Arc<dyn JsPluginHost>>,
     js_host_mode: JsHostMode,
 }
 
-impl AppSessionFactory {
-    pub fn new(config: AppConfig, project_trust: ProjectTrustService) -> Self {
+impl ProductSessionFactory {
+    pub(crate) fn new(config: AppConfig, project_trust: ProjectTrustService) -> Self {
         Self {
             config,
             project_trust,
@@ -48,7 +48,11 @@ impl AppSessionFactory {
         }
     }
 
-    pub fn with_js_plugin_host(mut self, host: Arc<dyn JsPluginHost>, mode: JsHostMode) -> Self {
+    pub(crate) fn with_js_plugin_host(
+        mut self,
+        host: Arc<dyn JsPluginHost>,
+        mode: JsHostMode,
+    ) -> Self {
         self.js_plugin_host = Some(host);
         self.js_host_mode = mode;
         self
@@ -56,7 +60,7 @@ impl AppSessionFactory {
 }
 
 #[async_trait]
-impl AgentSessionRuntimeFactory for AppSessionFactory {
+impl AgentSessionRuntimeFactory for ProductSessionFactory {
     async fn prepare(
         &self,
         request: AgentSessionRuntimeRequest,
@@ -79,14 +83,14 @@ impl AgentSessionRuntimeFactory for AppSessionFactory {
         };
         let mut config = self.config.clone();
         config.cwd = cwd;
-        config.trust_project = self
+        let project_trusted = self
             .project_trust
             .resolve(&config.cwd)
             .await
             .map_err(|error| SessionError::Runtime(error.to_string()))?;
-        let package_reconciliations = prepare_native_packages(&config).await?;
+        let package_reconciliations = prepare_native_packages(&config, project_trusted).await?;
         let mut native_options = NativePluginLoaderOptions::new(&config.cwd, &config.agent_dir);
-        native_options.project_trusted = config.trust_project;
+        native_options.project_trusted = project_trusted;
         native_options.explicit_paths = config.native_plugins.clone();
         let native_plugins = NativePluginLoader::new(native_options)
             .discover()
@@ -96,7 +100,7 @@ impl AgentSessionRuntimeFactory for AppSessionFactory {
                 .prepare_generation(JsGenerationRequest {
                     cwd: config.cwd.clone(),
                     agent_dir: config.agent_dir.clone(),
-                    project_trusted: config.trust_project,
+                    project_trusted,
                     explicit_paths: config.extensions.clone(),
                     discover_extensions: config.discover_extensions,
                     mode: self.js_host_mode,
@@ -110,7 +114,12 @@ impl AgentSessionRuntimeFactory for AppSessionFactory {
         } else {
             None
         };
-        let runtime = build_runtime(&config, &native_plugins, js_generation.as_ref())?;
+        let runtime = build_runtime(
+            &config,
+            project_trusted,
+            &native_plugins,
+            js_generation.as_ref(),
+        )?;
         let mut session_plugins = native_plugins.apply_session(SessionPlugins::new());
         if let Some(js_generation) = &js_generation {
             for plugin in js_generation.session_plugins() {
@@ -159,6 +168,7 @@ impl AgentSessionRuntimeFactory for AppSessionFactory {
 
 async fn prepare_native_packages(
     config: &AppConfig,
+    project_trusted: bool,
 ) -> Result<Vec<PreparedPluginReconcile>, SessionError> {
     let mut options = PluginManagerOptions::new(&config.cwd, &config.agent_dir);
     options.registry = std::env::var("PI_PLUGIN_REGISTRY")
@@ -172,7 +182,7 @@ async fn prepare_native_packages(
             .await
             .map_err(|error| SessionError::Runtime(error.to_string()))?,
     ];
-    if config.trust_project {
+    if project_trusted {
         prepared.push(
             manager
                 .prepare_reconcile(InstallScope::Project)
@@ -185,6 +195,7 @@ async fn prepare_native_packages(
 
 fn build_runtime(
     config: &AppConfig,
+    project_trusted: bool,
     native_plugins: &NativePlugins,
     js_generation: Option<&JsPluginGeneration>,
 ) -> Result<PiRuntime, RuntimeError> {
@@ -197,7 +208,7 @@ fn build_runtime(
         )
         .provider_id(config.provider.clone());
     let mut skill_options = SkillLoaderOptions::new(&config.cwd, &config.agent_dir);
-    skill_options.project_trusted = config.trust_project;
+    skill_options.project_trusted = project_trusted;
     if let Some(home) = std::env::var_os("HOME") {
         skill_options
             .additional_paths
@@ -246,7 +257,7 @@ fn build_runtime(
     }
 
     let mut resources = ResourceLoaderOptions::new(&config.cwd, &config.agent_dir);
-    resources.project_trusted = config.trust_project;
+    resources.project_trusted = project_trusted;
 
     let runtime = builder
         .agent_options(AgentOptions {
@@ -263,7 +274,7 @@ fn build_runtime(
                 "bash".into(),
             ],
             cwd: config.cwd.clone(),
-            max_tool_iterations: 50,
+            max_tool_iterations: 100,
             ..AgentOptions::default()
         })
         .system_prompt(SystemPrompt::Pi(Box::default()))
@@ -386,7 +397,6 @@ command = "fixture-command"
             api_key: None,
             provider: "openai-compatible".to_string(),
             requested_provider: None,
-            trust_project: true,
             trust_override: None,
             native_plugins: Vec::new(),
             extensions: Vec::new(),
@@ -416,6 +426,7 @@ command = "fixture-command"
 
         let runtime = build_runtime(
             &app_config(directory.path(), None),
+            true,
             &NativePlugins::default(),
             None,
         )
@@ -448,6 +459,7 @@ command = "fixture-command"
 
         let runtime = build_runtime(
             &app_config(directory.path(), Some("catalog-requested")),
+            true,
             &NativePlugins::default(),
             None,
         )
@@ -464,6 +476,7 @@ command = "fixture-command"
 
         let runtime = build_runtime(
             &app_config(directory.path(), None),
+            true,
             &NativePlugins::default(),
             None,
         )
@@ -497,12 +510,11 @@ command = "fixture-command"
         .unwrap();
         let mut config = app_config(&agent_dir, None);
         config.cwd = project.clone();
-        config.trust_project = true;
         let activation = project.join(".pi/plugins/installed/0000-local-plugin");
         let lock_path = project.join(".pi/plugins.lock");
 
         {
-            let prepared = prepare_native_packages(&config).await.unwrap();
+            let prepared = prepare_native_packages(&config, true).await.unwrap();
             assert!(activation.join("plugin.dylib").is_file());
             assert!(lock_path.is_file());
             let manifest = std::fs::read_to_string(activation.join("pi-plugin.toml")).unwrap();
@@ -512,7 +524,7 @@ command = "fixture-command"
         assert!(!activation.exists());
         assert!(!lock_path.exists());
 
-        for reconciliation in prepare_native_packages(&config).await.unwrap() {
+        for reconciliation in prepare_native_packages(&config, true).await.unwrap() {
             reconciliation.commit();
         }
         assert!(activation.join("plugin.dylib").is_file());
@@ -544,9 +556,8 @@ command = "fixture-command"
         .unwrap();
         let mut config = app_config(&agent_dir, None);
         config.cwd = project.clone();
-        config.trust_project = false;
 
-        for reconciliation in prepare_native_packages(&config).await.unwrap() {
+        for reconciliation in prepare_native_packages(&config, false).await.unwrap() {
             reconciliation.commit();
         }
 
@@ -567,7 +578,7 @@ command = "fixture-command"
         config.trust_override = Some(true);
         let (trust, _) = ProjectTrustService::new(&agent_dir, Some(true), false).unwrap();
         let host = Arc::new(RecordingJsHost::default());
-        let factory = AppSessionFactory::new(config.clone(), trust)
+        let factory = ProductSessionFactory::new(config.clone(), trust)
             .with_js_plugin_host(host.clone(), JsHostMode::Tui);
         let runtime = pi_session::AgentSessionRuntime::create(
             factory,
@@ -618,6 +629,7 @@ command = "fixture-command"
         let original = AgentSession::create(
             build_runtime(
                 &app_config(directory.path(), None),
+                true,
                 &NativePlugins::default(),
                 None,
             )
@@ -634,7 +646,7 @@ command = "fixture-command"
 
         let config = app_config(directory.path(), Some("alpha"));
         let resumed = AgentSession::open_with_options(
-            build_runtime(&config, &NativePlugins::default(), None).unwrap(),
+            build_runtime(&config, true, &NativePlugins::default(), None).unwrap(),
             &path,
             AgentSessionOptions::default().initial_model(initial_model_request(&config)),
         )

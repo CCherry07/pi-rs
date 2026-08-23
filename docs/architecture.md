@@ -2,8 +2,10 @@
 
 ## Scope
 
-The current product is a plugin-first Rust coding agent with a shared runtime behind interactive
-TUI, print, and NDJSON modes. Its core implements the deterministic:
+The current product is a plugin-first Rust coding agent with one `PiApplication` / `PiSession`
+Interface behind interactive TUI, print, and NDJSON modes. Both the standalone binary and the Node
+extension host delegate interactive terminal ownership to the Ratatui frontend in `apps/pi-cli`.
+Its core implements the deterministic:
 
 ```text
 prompt -> provider stream -> assistant message -> tool calls -> tool results -> next turn
@@ -11,8 +13,8 @@ prompt -> provider stream -> assistant message -> tool calls -> tool results -> 
 
 HTTP providers, production tools, model/resource discovery, resumable sessions, compaction,
 project trust, native dynamic-library loading, and terminal presentation are outer modules around
-that core. A Node/NAPI host adds Pi-compatible JavaScript and TypeScript extensions without moving
-terminal or session ownership out of Rust. Live operation replay and signed/OCI native-plugin
+that core. A Node/NAPI host adds Pi-compatible JavaScript and TypeScript extensions while Rust owns
+session/runtime and terminal presentation. Live operation replay and signed/OCI native-plugin
 distribution remain open product seams.
 
 ## Workspace
@@ -24,7 +26,7 @@ crates/pi-runtime               plugin registration and Agent construction
 crates/pi-provider              vendor-neutral HTTP transport and SSE decoding
 crates/pi-prompt                pure Pi-style system prompt assembly
 crates/pi-resources             generic system/append prompts and project context discovery
-crates/pi-session               Pi v4 session tree, storage backends, and runtime adapter
+crates/pi-session               Pi v4 storage plus PiApplication/PiSession product runtime
 apps/pi-md                     TUI-owned Markdown parsing, streaming repair, highlighting, and Ratatui rendering
 crates/pi-plugin-sdk            native plugin author interface and descriptor types
 crates/pi-plugin-macros         agent/provider/session native export macros
@@ -32,7 +34,7 @@ crates/pi-plugin-loader         manifest discovery, compatibility checks, and fa
 crates/pi-plugin-manager        package intent/lock, Registry resolution, CAS, and activation
 crates/pi-js-plugin             typed JS manifest protocol and three Rust lifecycle adapters
 bindings/pi-napi                NAPI-RS boundary between Node callbacks and the Rust product
-packages/pi                     Node launcher, Pi extension discovery, jiti loader, callback host
+packages/pi                     Node launcher, Pi extension discovery, jiti loader, and callback host
 crates/pi-test-support          deterministic scripted providers and tools for tests
 plugins/providers/pi-plugin-openai        OpenAI protocol, provider, registration, and examples
 plugins/providers/pi-plugin-models        models.json catalog, routing, and request-time config
@@ -71,7 +73,35 @@ packages/pi          -> Node + jiti + platform pi-napi artifact
 `apps/pi-md` is a private frontend library module rather than a reusable core crate. It owns the
 Ratatui-specific Markdown adapter used by `pi-cli`; no crate under `crates/` or plugin may depend on
 it. Keeping parsing, streaming repair, highlighting, and rendering behind its small `render`
-interface gives the TUI locality without moving terminal presentation into the core layers.
+interface gives the supported TUI locality without moving terminal presentation into the core
+layers.
+
+The standalone Rust TUI deliberately adopts the Codex CLI 0.149 interaction shell while retaining
+Pi runtime and command semantics. Its composer is persistent application state; command and skill
+completion renders directly below it, queued input previews render above it, and focused model or
+resume selectors temporarily replace the composer through a bottom-pane view stack. Closing a view
+restores the unchanged draft. The frontend follows a tui-realm-style model/message/module split:
+`tui.rs` owns the application model and event loop, semantic runtime notifications pass through
+`tui/message.rs` and `App::update`, `tui/controller.rs` owns input routing and effects, `tui/view.rs`
+owns layout/rendering, and `tui/components` owns stateful input/selector adapters. This is an internal
+terminal-presentation seam, not a new core/runtime message protocol. This is a presentation and input-
+routing choice, not a claim that Pi implements Codex-only accounts, usage limits, permissions, or
+remote services. Terminal styling, view routing, and selector state remain owned by `apps/pi-cli`.
+
+`packages/pi` does not own a terminal frontend. Its executable creates the JavaScript extension host
+and invokes the NAPI `runPi` entry; interactive, print, JSON, piped-input, and plugin-management
+arguments are forwarded unchanged. This keeps extension callbacks in Node without allowing Node and
+Rust to compete for raw mode, stdout, editor state, or transcript projection.
+
+All frontend adapters enter the product through two public session Modules. `PiApplication` owns the
+runtime factory, application shutdown, and a private table of active handles. `PiSession` is the
+cloneable per-frontend handle for current-session events and new/resume/fork/reload transitions.
+There is deliberately no public `SessionRegistry`: duplicate-path checks and handle bookkeeping are
+implementation details of `PiApplication`. `AgentSessionRuntime` remains the lower-level replacement
+transaction used inside each `PiSession`, rather than a type frontend adapters coordinate directly.
+The print and NDJSON Adapters pin `PiSession::current()` for one invocation; the longer-lived TUI
+also watches the handle's replacement stream. This keeps generation changes behind the same
+Interface while preventing a single in-flight submission from crossing generations.
 
 ## Plugin-first rules
 
@@ -98,8 +128,9 @@ interface gives the TUI locality without moving terminal presentation into the c
 Use `agent_plugin_factory` / `try_agent_plugin_factory` for reloadable agent plugins and `provider_plugin_factory` / `try_provider_plugin_factory` for providers, catalogs, routing overlays, and request hooks. Their pinned `agent_plugin` / `provider_plugin` and `*_arc` forms intentionally reuse an instance, primarily for stateless plugins and externally observed fixtures. `pi-plugin-loader` adapts version-locked dynamic libraries through the existing type-erased fallible factory seams and never mutates live registries in place.
 
 Product wiring installs agent, provider, and session plugins through their three independent factory
-seams. `AgentSessionRuntime` owns cross-system atomicity: its factory prepares the complete runtime
-and session plugin generations before shutting down or replacing the current session.
+seams. Each `PiSession` uses `AgentSessionRuntime` for cross-system atomicity: its factory prepares
+the complete runtime and session plugin generations before shutting down or replacing the current
+session.
 `pi-plugin-loader` discovers global manifests and trusted project manifests, resolves explicit
 `--plugin` paths, verifies a C-layout descriptor before resolving an exact-build Rust constructor,
 and partitions packages into separately ordered agent, provider, and session factories. It snapshots
@@ -120,9 +151,10 @@ explicit `plugins.json` array order, and replaces a generated `plugins/installed
 Native plugin manifests do not declare runtime plugin dependencies: Rust crate dependencies remain
 build-time concerns, and hook registration order remains consumer policy rather than a package graph.
 
-`AppSessionFactory` prepares global package state and, after trust resolution, trusted project
-package state before native discovery. The manager holds a package-state guard and retains the
-previous lock and activation view until the complete runtime and session generation prepares
+`ProductSessionFactory` in `apps/pi-cli/src/session_factory.rs` is the production Adapter at the
+session-construction Seam. It prepares global package state and, after trust resolution, trusted
+project package state before native discovery. The manager holds a package-state guard and retains
+the previous lock and activation view until the complete runtime and session generation prepares
 successfully. Failed native loading or plugin initialization therefore rolls package activation
 back together with the generation; success commits the prepared package state. The same factory is
 used for initial sessions and `/reload`. The loader consumes only the local activation view and does
@@ -134,14 +166,57 @@ integrity but not publisher identity. Publisher signatures, Git repository and O
 package update/rollback commands, and store garbage collection remain explicit package-manager
 milestones.
 
+## Product packaging and release
+
+Product distribution is an outer Release Module and does not add a runtime, session, frontend, or
+transport layer. `packages/pi/scripts/release.ts` is its command-line Interface: it validates the
+single product version, emits the CI matrix, builds one native target, assembles npm packages, and
+publishes already-verified tarballs before checking their exact registry metadata and integrity.
+`.github/workflows/release.yml` is a thin Adapter that supplies native runners and an npm OIDC
+identity to that Interface; target naming, package layout, checksums, publication order, and smoke
+tests do not live in workflow YAML.
+
+Release Please is a version/changelog Adapter, not a second Release Module. Its release PR updates
+the authoritative Cargo version, the two inherited Cargo.lock package entries, the npm manifest and
+lockfile, and `CHANGELOG.md` as one change. Merging that PR creates a forced `v<version>` tag and a
+draft GitHub Release, then `.github/workflows/release-please.yml` explicitly dispatches the native
+release workflow. The explicit dispatch is required because a tag created with `GITHUB_TOKEN` does
+not recursively start another workflow. The draft becomes public only after every npm tarball is
+published and verified from the public registry.
+
+`packages/pi/src/native-target.ts` is the one target vocabulary shared by release tooling and the
+Node loader. Supported artifacts currently cover macOS arm64/x64, Linux glibc arm64/x64, and
+Windows MSVC arm64/x64. A target is publishable only when the matrix builds it on a matching host
+and runs both the standalone binary smoke and the Node -> NAPI -> Rust smoke. Linux musl is a
+separate future target rather than an alias for glibc.
+
+One tag produces two delivery adapters from the same Rust product:
+
+- GitHub Release archives contain the standalone `pi` binary. They support TUI, print, NDJSON, and
+  native plugins, but no JavaScript VM or JS/TS extensions.
+- The `@pi-rs/cli` npm root contains only JavaScript and declarations. Exact-version optional
+  packages such as `@pi-rs/cli-darwin-arm64` and `@pi-rs/cli-linux-x64-gnu` each contain one NAPI
+  artifact selected by OS, CPU, and libc. Platform packages publish first and the root package
+  publishes last, so an incomplete native matrix is never advertised by a new root version.
+
+`[workspace.package].version` is authoritative for the Rust product; `pi-cli` and `pi-napi`
+inherit it, and the Release Module rejects a mismatching npm version or `v<version>` tag. Generated
+npm staging is distinct from the private source package, preventing a development `npm publish`
+from bypassing matrix validation. The protected workflow uses npm Trusted Publishing directly;
+there is no long-lived npm token, and npm attaches provenance to the OIDC publication. Application
+archives and NAPI artifacts receive SHA-256 files, the assembled sets receive `SHA256SUMS`, and npm
+registry `dist.integrity` must equal the SHA-512 of each locally verified tarball.
+Developer-ID/Authenticode signing and notarization remain release-hardening work rather than
+runtime concerns.
+
 ## NAPI-hosted Pi extensions
 
-The JavaScript extension path deliberately has one product runtime, not a Node sidecar protocol and
-not a fourth plugin lifecycle. Node is the executable launcher and JavaScript VM. It loads one
-platform `.node` artifact; the NAPI export calls `pi_cli::run_with_js_host`, so terminal setup,
-Ratatui rendering, trust, providers, tools, sessions, and product events remain owned by Rust in
-`apps/pi-cli`. `crates/pi-js-plugin` contains only semantic wire values and adapters and therefore
-has no NAPI, Node, Jiti, or terminal dependency.
+The JavaScript extension path deliberately has one Rust product runtime, not a Node sidecar protocol
+and not a fourth plugin lifecycle. Node is the executable launcher and JavaScript VM. It loads one
+platform `.node` artifact and invokes `runPi` for Ratatui, print, JSON, piped-input, and management
+modes. Extension callback generations remain in Node; provider, tool, trust, session, and terminal
+authority remain in Rust. `crates/pi-js-plugin` contains only semantic wire values and adapters and
+therefore has no NAPI, Node, Jiti, or terminal dependency.
 
 `packages/pi` itself is authored in TypeScript, executed directly with `tsx` for development and
 compiled by `tsc` into publishable JavaScript plus declarations under `packages/pi/dist`. Zod owns
@@ -167,7 +242,7 @@ schemas, and later ordinary registry collisions before a candidate is published.
 metadata and execution mode become ordinary `ToolSpec` fields; hook replacement and cancellation
 semantics continue through the existing typed drivers.
 
-`AppSessionFactory` asks the Node host for a fresh callback generation on initial construction,
+`ProductSessionFactory` asks the Node host for a fresh callback generation on initial construction,
 new/resumed sessions, and `/reload`, alongside native plugins, resources, models, and session
 plugins. The existing whole-session transaction prepares all of them before swap. A failed import,
 factory, manifest, or registry build drops the candidate (retiring its Node callbacks) and keeps the
@@ -348,16 +423,21 @@ generation is prepared before the old generation receives `session_shutdown(relo
 failure therefore leaves the old generation running. A successful reload commits the new
 generation and emits `session_start(reload)`.
 
-`AgentSessionRuntime` is the multi-session product-runtime module above `AgentSession`. It owns the
-current session and an injected `AgentSessionRuntimeFactory`, serializes replacement, dispatches
-`session_before_switch`, settles the active agent, prepares the complete next session, emits old
-`session_shutdown`, emits new `session_start`, and only then publishes the new handle through a
-Tokio watch channel. Cancellation performs no preparation. Preparation failure leaves the current
-session open, while successful replacement closes stale `AgentSession` handles so they reject
-later mutations. `new_session`, `switch_session`, and whole-session `reload` all share this
-transaction. Whole-session reload rebuilds runtime, provider, resource, feature, and session plugin
-state through one factory seam; fork and import can reuse the same replacement transaction when
-their storage operations are added.
+`PiApplication` is the multi-session product Module above `AgentSession`. It owns the injected
+`AgentSessionRuntimeFactory`, serializes application-level acquisition and shutdown, and keeps its
+active-session map private. Opening an already-active path reuses its `PiSession`; creating or
+switching to a path owned by another handle fails before any session lifecycle transition starts.
+Application shutdown drains and closes every managed handle.
+
+Each `PiSession` has one replaceable current `AgentSession`. Its internal `AgentSessionRuntime`
+serializes replacement, dispatches `session_before_switch` or `session_before_fork`, settles the
+active agent, prepares the complete next session, emits old `session_shutdown`, emits new
+`session_start`, and only then publishes the new generation through a Tokio watch channel.
+Cancellation performs no preparation. Preparation failure leaves the current session open, while a
+successful replacement closes stale `AgentSession` handles so they reject later mutations. New,
+resume, reload, and fork all use this transaction. Fork creates a Pi v4 branch copy before
+preparation and removes it if candidate preparation fails; import remains outside the live
+replacement path.
 
 ## Event ordering
 

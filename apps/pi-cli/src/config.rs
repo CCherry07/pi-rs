@@ -5,83 +5,83 @@ use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "pi", version, about = "Pi coding agent for the terminal")]
-pub struct Cli {
+pub(crate) struct Cli {
     #[command(subcommand)]
-    pub command: Option<CliCommand>,
+    pub(crate) command: Option<CliCommand>,
 
     /// Initial prompt. With --print, runs once and exits.
     #[arg(value_name = "PROMPT", trailing_var_arg = true)]
-    pub prompt: Vec<String>,
+    pub(crate) prompt: Vec<String>,
 
     /// Run one prompt and print only the final assistant text.
     #[arg(short = 'p', long)]
-    pub print: bool,
+    pub(crate) print: bool,
 
     /// Emit newline-delimited product events.
     #[arg(long)]
-    pub json: bool,
+    pub(crate) json: bool,
 
     /// Use the terminal alternate screen. This is the default.
     #[arg(long)]
-    pub fullscreen: bool,
+    pub(crate) fullscreen: bool,
 
     /// Use main-screen mode instead of the default alternate screen.
     #[arg(long)]
-    pub no_fullscreen: bool,
+    pub(crate) no_fullscreen: bool,
 
     #[arg(long, default_value = ".", global = true)]
-    pub cwd: PathBuf,
+    pub(crate) cwd: PathBuf,
 
     /// Open an exact JSONL session path; creates it when absent.
     #[arg(long)]
-    pub session: Option<PathBuf>,
+    pub(crate) session: Option<PathBuf>,
 
     /// Initial model override. When omitted, models.json owns catalog selection.
     #[arg(long)]
-    pub model: Option<String>,
+    pub(crate) model: Option<String>,
 
     #[arg(
         long,
         env = "OPENAI_BASE_URL",
         default_value = "https://api.openai.com/v1"
     )]
-    pub base_url: String,
+    pub(crate) base_url: String,
 
     #[arg(long, env = "OPENAI_API_KEY", hide_env_values = true)]
-    pub api_key: Option<String>,
+    pub(crate) api_key: Option<String>,
 
     /// Provider override paired with --model. Defaults to openai-compatible
     /// only when the registered model catalog cannot select a model.
     #[arg(long)]
-    pub provider: Option<String>,
+    pub(crate) provider: Option<String>,
 
     /// Root for global skills and sessions (default: PI_AGENT_DIR or ~/.pi/agent).
     #[arg(long, env = "PI_AGENT_DIR", global = true)]
-    pub agent_dir: Option<PathBuf>,
+    pub(crate) agent_dir: Option<PathBuf>,
 
     /// Load a native plugin from a dynamic library or pi-plugin.toml. May be repeated.
     #[arg(long = "plugin", value_name = "PATH")]
-    pub native_plugins: Vec<PathBuf>,
+    pub(crate) native_plugins: Vec<PathBuf>,
 
     /// Load a JavaScript or TypeScript extension. May be repeated.
     #[arg(short = 'e', long = "extension", value_name = "PATH")]
-    pub extensions: Vec<PathBuf>,
+    pub(crate) extensions: Vec<PathBuf>,
 
     /// Disable automatic JavaScript/TypeScript extension discovery.
     #[arg(long)]
-    pub no_extensions: bool,
+    pub(crate) no_extensions: bool,
 
     /// Trust project-local settings and resources without prompting.
     #[arg(short = 'a', long, conflicts_with = "no_approve", global = true)]
-    pub approve: bool,
+    pub(crate) approve: bool,
 
     /// Do not trust project-local settings or resources.
     #[arg(long, conflicts_with = "approve", global = true)]
-    pub no_approve: bool,
+    pub(crate) no_approve: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
-pub enum CliCommand {
+pub(crate) enum CliCommand {
     /// Install and manage native plugins.
     Plugin {
         #[command(subcommand)]
@@ -90,7 +90,7 @@ pub enum CliCommand {
 }
 
 #[derive(Debug, Clone, Subcommand)]
-pub enum PluginCommand {
+pub(crate) enum PluginCommand {
     /// Resolve, verify, and install a native plugin package.
     Install {
         /// Local package path, release manifest URL, GitHub release, or registry source.
@@ -130,25 +130,24 @@ pub enum PluginCommand {
 }
 
 #[derive(Debug, Clone)]
-pub struct AppConfig {
-    pub cwd: PathBuf,
-    pub agent_dir: PathBuf,
-    pub session_path: PathBuf,
-    pub model: Option<String>,
-    pub fallback_model: String,
-    pub base_url: String,
-    pub api_key: Option<String>,
-    pub provider: String,
-    pub requested_provider: Option<String>,
-    pub trust_project: bool,
-    pub trust_override: Option<bool>,
-    pub native_plugins: Vec<PathBuf>,
-    pub extensions: Vec<PathBuf>,
-    pub discover_extensions: bool,
+pub(crate) struct AppConfig {
+    pub(crate) cwd: PathBuf,
+    pub(crate) agent_dir: PathBuf,
+    pub(crate) session_path: PathBuf,
+    pub(crate) model: Option<String>,
+    pub(crate) fallback_model: String,
+    pub(crate) base_url: String,
+    pub(crate) api_key: Option<String>,
+    pub(crate) provider: String,
+    pub(crate) requested_provider: Option<String>,
+    pub(crate) trust_override: Option<bool>,
+    pub(crate) native_plugins: Vec<PathBuf>,
+    pub(crate) extensions: Vec<PathBuf>,
+    pub(crate) discover_extensions: bool,
 }
 
 impl AppConfig {
-    pub fn resolve(cli: &Cli) -> Result<Self, String> {
+    pub(crate) fn resolve(cli: &Cli) -> Result<Self, String> {
         let cwd = std::fs::canonicalize(&cli.cwd)
             .map_err(|error| format!("cannot access cwd {}: {error}", cli.cwd.display()))?;
         let agent_dir = cli
@@ -183,7 +182,6 @@ impl AppConfig {
                 .clone()
                 .unwrap_or_else(|| "openai-compatible".to_string()),
             requested_provider,
-            trust_project: false,
             trust_override: cli
                 .approve
                 .then_some(true)
@@ -196,11 +194,11 @@ impl AppConfig {
 }
 
 impl Cli {
-    pub fn parse_pi() -> Self {
+    pub(crate) fn parse_pi() -> Self {
         Self::parse_from(std::env::args_os().map(normalize_pi_arg))
     }
 
-    pub fn try_parse_pi_from(arguments: Vec<String>) -> Result<Self, clap::Error> {
+    pub(crate) fn try_parse_pi_from(arguments: Vec<String>) -> Result<Self, clap::Error> {
         Self::try_parse_from(
             std::iter::once(OsString::from("pi"))
                 .chain(arguments.into_iter().map(OsString::from))
@@ -208,7 +206,7 @@ impl Cli {
         )
     }
 
-    pub fn fullscreen_enabled(&self) -> bool {
+    pub(crate) fn fullscreen_enabled(&self) -> bool {
         self.fullscreen || !self.no_fullscreen
     }
 }

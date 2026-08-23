@@ -294,22 +294,28 @@ git diff --check
 Never put real provider credentials in source, logs, or fixtures. The default validation path uses
 the deterministic scripted provider in `pi-test-support`.
 
-## Apple Silicon packaging
+## Multi-platform packaging
 
-Build a release archive on an Apple Silicon Mac:
+Build the standalone archive and NAPI artifact for the target matching the current host:
 
 ```bash
-./scripts/package-macos-arm64.sh
+cd packages/pi && npm install && cd ../..
+./scripts/package-target.sh aarch64-apple-darwin
 ```
 
-Install the newest archive from `dist/`:
+macOS and Linux can install the newest matching archive from `dist/release/`:
 
 ```bash
 ./scripts/install-package.sh
 ```
 
-The current artifact is unsigned and not notarized. See
-[apps/pi-cli/README.md](apps/pi-cli/README.md#package-for-apple-silicon-macos) for packaging options.
+The release matrix covers macOS arm64/x64, Linux glibc arm64/x64, and Windows MSVC arm64/x64.
+GitHub archives are standalone Rust builds; npm uses a JavaScript root plus one OS/CPU/libc-specific
+NAPI optional package. Release Please maintains the version/changelog PR, while npm Trusted
+Publishing supplies short-lived OIDC authentication and automatic provenance. The current artifacts
+are checksummed and smoke-tested but unsigned and not notarized. See
+[apps/pi-cli/README.md](apps/pi-cli/README.md#multi-platform-packaging) for the Release Module
+Interface and artifact layout.
 
 ## Open boundaries
 

@@ -23,7 +23,7 @@ const TRUST_REQUIRING_PI_RESOURCES: &[&str] = &[
 ];
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum DefaultProjectTrust {
+enum DefaultProjectTrust {
     #[default]
     Ask,
     Always,
@@ -31,34 +31,34 @@ pub enum DefaultProjectTrust {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProjectTrustUpdate {
-    pub path: PathBuf,
-    pub decision: Option<bool>,
+struct ProjectTrustUpdate {
+    path: PathBuf,
+    decision: Option<bool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProjectTrustOption {
-    pub label: String,
-    pub trusted: bool,
-    pub updates: Vec<ProjectTrustUpdate>,
-    pub saved_path: Option<PathBuf>,
+pub(crate) struct ProjectTrustOption {
+    pub(crate) label: String,
+    trusted: bool,
+    updates: Vec<ProjectTrustUpdate>,
+    saved_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ProjectTrustEvaluation {
+pub(crate) enum ProjectTrustEvaluation {
     Known(bool),
     Ask(Vec<ProjectTrustOption>),
 }
 
 #[derive(Debug)]
-pub struct ProjectTrustPromptRequest {
-    pub cwd: PathBuf,
-    pub options: Vec<ProjectTrustOption>,
-    pub response: oneshot::Sender<Option<usize>>,
+pub(crate) struct ProjectTrustPromptRequest {
+    pub(crate) cwd: PathBuf,
+    pub(crate) options: Vec<ProjectTrustOption>,
+    pub(crate) response: oneshot::Sender<Option<usize>>,
 }
 
 #[derive(Debug, Error)]
-pub enum ProjectTrustError {
+pub(crate) enum ProjectTrustError {
     #[error("cannot access project path {path}: {source}")]
     Canonicalize {
         path: PathBuf,
@@ -76,7 +76,7 @@ pub enum ProjectTrustError {
 }
 
 #[derive(Clone)]
-pub struct ProjectTrustService {
+pub(crate) struct ProjectTrustService {
     store: ProjectTrustStore,
     trust_override: Option<bool>,
     default_trust: DefaultProjectTrust,
@@ -86,7 +86,7 @@ pub struct ProjectTrustService {
 }
 
 impl ProjectTrustService {
-    pub fn new(
+    pub(crate) fn new(
         agent_dir: &Path,
         trust_override: Option<bool>,
         interactive: bool,
@@ -105,7 +105,7 @@ impl ProjectTrustService {
         ))
     }
 
-    pub fn evaluate(&self, cwd: &Path) -> Result<ProjectTrustEvaluation, ProjectTrustError> {
+    pub(crate) fn evaluate(&self, cwd: &Path) -> Result<ProjectTrustEvaluation, ProjectTrustError> {
         let cwd = normalize_path(cwd)?;
         if let Some(decision) = self.trust_override {
             return Ok(ProjectTrustEvaluation::Known(decision));
@@ -136,7 +136,7 @@ impl ProjectTrustService {
         }
     }
 
-    pub fn remember(&self, cwd: &Path, trusted: bool) -> Result<(), ProjectTrustError> {
+    pub(crate) fn remember(&self, cwd: &Path, trusted: bool) -> Result<(), ProjectTrustError> {
         let cwd = normalize_path(cwd)?;
         self.decisions
             .lock()
@@ -145,7 +145,7 @@ impl ProjectTrustService {
         Ok(())
     }
 
-    pub fn apply_option(
+    pub(crate) fn apply_option(
         &self,
         cwd: &Path,
         option: &ProjectTrustOption,
@@ -157,11 +157,14 @@ impl ProjectTrustService {
         Ok(option.trusted)
     }
 
-    pub fn manual_options(&self, cwd: &Path) -> Result<Vec<ProjectTrustOption>, ProjectTrustError> {
+    pub(crate) fn manual_options(
+        &self,
+        cwd: &Path,
+    ) -> Result<Vec<ProjectTrustOption>, ProjectTrustError> {
         project_trust_options(cwd, false)
     }
 
-    pub async fn resolve(&self, cwd: &Path) -> Result<bool, ProjectTrustError> {
+    pub(crate) async fn resolve(&self, cwd: &Path) -> Result<bool, ProjectTrustError> {
         match self.evaluate(cwd)? {
             ProjectTrustEvaluation::Known(trusted) => {
                 self.remember(cwd, trusted)?;
@@ -329,7 +332,7 @@ fn write_trust_file(path: &Path, json: &str) -> Result<(), ProjectTrustError> {
         })
 }
 
-pub fn has_trust_requiring_project_resources(cwd: &Path) -> Result<bool, ProjectTrustError> {
+fn has_trust_requiring_project_resources(cwd: &Path) -> Result<bool, ProjectTrustError> {
     let cwd = normalize_path(cwd)?;
     if TRUST_REQUIRING_PI_RESOURCES
         .iter()

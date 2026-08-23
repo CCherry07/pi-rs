@@ -4,7 +4,11 @@ use pi_plugin_manager::{InstallScope, PluginManager, PluginManagerOptions};
 
 use crate::config::{AppConfig, Cli, PluginCommand};
 
-pub async fn run(cli: &Cli, config: &AppConfig, command: &PluginCommand) -> Result<(), String> {
+pub(crate) async fn run(
+    cli: &Cli,
+    config: &AppConfig,
+    command: &PluginCommand,
+) -> Result<(), String> {
     let local = match command {
         PluginCommand::Install { local, .. }
         | PluginCommand::List { local }
@@ -12,14 +16,13 @@ pub async fn run(cli: &Cli, config: &AppConfig, command: &PluginCommand) -> Resu
         | PluginCommand::Remove { local, .. } => *local,
     };
     if local {
-        let trusted = crate::resolve_project_trust(
+        let trust = crate::resolve_project_trust(
             cli,
             config,
             std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
         )
-        .await?
-        .2;
-        if !trusted {
+        .await?;
+        if !trust.trusted() {
             return Err(
                 "project-local plugin management requires a trusted project; pass --approve to trust it for this command"
                     .to_string(),

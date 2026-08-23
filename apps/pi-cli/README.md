@@ -1,7 +1,7 @@
 # pi CLI
 
-The product entry point for `pi_rs`. It uses the same `AgentSessionRuntime`
-for interactive, print, and NDJSON modes.
+The product entry point for `pi_rs`. Interactive, print, and NDJSON adapters all enter through
+`PiApplication` and a managed `PiSession`.
 
 ```bash
 # Interactive fullscreen TUI; ~/.pi/agent/models.json owns the default model
@@ -48,11 +48,34 @@ npm start -- -ne -e /path/to/extension.ts
 ```
 
 The Node launcher still calls this app library, so TUI/fullscreen ownership remains in
-`apps/pi-cli` and every frontend mode uses the same `AgentSessionRuntime`. `/reload` atomically
-rebuilds JS callbacks together with Rust/native plugins, models, resources, and session plugins.
+`apps/pi-cli`; every frontend mode uses the same `PiApplication` / `PiSession` Interface. The
+application keeps active-session bookkeeping private, while `/reload` atomically rebuilds JS
+callbacks together with Rust/native plugins, models, resources, and session plugins.
+Print and NDJSON pin the handle's current generation for their one-shot invocation; the TUI also
+observes session replacements for `/new`, `/resume`, `/fork`, and `/reload`.
+CLI startup stays in `lib.rs`; `session_factory.rs` is the production Adapter that assembles each
+complete runtime/session generation behind `PiApplication`.
 See [`packages/pi/README.md`](../../packages/pi/README.md) for the supported Pi API surface and
 current explicit limitations. Passing `--extension` to the standalone `cargo run -p pi-cli` entry
 does not create a JavaScript VM; use the Node launcher for those paths.
+
+The TUI implementation follows a tui-realm-style model/message/module split without handing terminal
+ownership to the framework. `tui.rs` owns `App`, terminal setup, and the async event loop;
+`tui/message.rs` defines semantic state-update messages; `tui/controller.rs` routes input and runs
+commands/effects; `tui/view.rs` owns layout and Ratatui rendering; and `tui/components` contains the
+stateful composer and selection-list modules. Runtime notifications are reduced through
+`App::update`, while terminal keys remain controller inputs. Stateful selectors use
+`tui-realm-stdlib::List` through the local selector seam. The multiline composer continues to use
+`ratatui-textarea`: tui-realm's standard `Textarea` is a read-only scrolling text component and
+cannot preserve Pi's cursor editing, undo, or newline behavior. Pi commands and runtime semantics
+remain authoritative; Codex-only account and service surfaces are not synthesized.
+
+Finalized transcript Markdown is cached by terminal width and appearance. Redraw requests are
+coalesced to the same 120 FPS ceiling used by Codex, and raw wheel-event density is normalized for
+common terminal emulators so trackpad and mouse scrolling do not enqueue redundant full renders.
+While a turn is waiting for output, the `Working` label uses a moving shimmer and shows compact
+elapsed time beside the interrupt hint. Inline code uses a clean accent foreground, while fenced
+code keeps a subtle full-width surface, language label, padding, and syntax highlighting.
 
 Project-local `.pi` prompts and skills, plus ancestor `.agents/skills`, use the
 same trust policy as Pi. Decisions are inherited from the nearest saved
@@ -90,36 +113,48 @@ Interactive keys:
 - `Up` / `Down`: select a matching slash command or skill; otherwise recall older/newer input
 - `Tab`: complete the selected slash command or skill
 - `PageUp` / `PageDown`: scroll the transcript
+- Mouse drag: select transcript text
+- `Cmd+C` / `Ctrl+Shift+C`: copy the selected transcript text
 - `Ctrl+End`: return to the latest transcript content
-- `Esc`: abort and restore undelivered queue items to the editor
-- `Ctrl+C`: clear the editor, or quit when it is empty
+- `Esc`: dismiss the active completion/view first; while work is active, interrupt and restore
+  undelivered queue items to the editor
+- `Ctrl+C`: dismiss a focused view, clear a non-empty editor, interrupt active work, or quit while
+  idle with an empty editor
+- `Ctrl+D`: quit while idle with an empty editor
 
 The TUI uses the terminal alternate screen by default. Pass `--no-fullscreen`
 to keep it on the main terminal screen; the existing `--fullscreen` flag is
 still accepted for compatibility.
 
 Interactive commands include `/new`, `/resume`, `/reload`, `/trust`, `/model`,
-`/thinking`, `/compact`, `/clear`, `/help`, and `/quit`. Plugin commands are
-read from the active runtime generation; discovered skills appear as
-`/skill:<name>`.
+`/thinking`, `/compact [instructions]`, `/fork`, `/clone`, `/tree`, `/name [name]`, `/session`,
+`/copy`, `/clear`, `/help`,
+and `/quit`. Plugin commands are read from the active runtime generation; discovered skills appear
+as `/skill:<name>`.
 
-## Package for Apple Silicon macOS
+## Multi-platform packaging
 
-Run the release packaging script on an Apple Silicon Mac:
+Install the Node release tooling once, then package the target matching the current host:
 
 ```bash
-./scripts/package-macos-arm64.sh
+cd packages/pi && npm install && cd ../..
+./scripts/package-target.sh aarch64-apple-darwin
 ```
 
-It performs a locked release build for `aarch64-apple-darwin`, verifies the
-binary architecture, strips debug symbols, and creates these ignored artifacts:
+The supported matrix is macOS arm64/x64, Linux glibc arm64/x64, and Windows MSVC arm64/x64. Each
+target is built on a matching CI runner rather than being advertised from an unexecuted
+cross-compile. A target build performs locked release builds for both `pi-cli` and `pi-napi`, runs a
+standalone shell smoke, strips supported native artifacts, and creates:
 
 ```text
-dist/pi-<version>-aarch64-apple-darwin.tar.gz
-dist/pi-<version>-aarch64-apple-darwin.tar.gz.sha256
+dist/release/pi-<version>-<rust-target>.tar.gz     # macOS/Linux
+dist/release/pi-<version>-<rust-target>.zip        # Windows
+dist/release/pi-napi.<platform-suffix>.node
+dist/release/*.sha256
 ```
 
-Install the newest package from `dist/` into `~/.local/bin`:
+`package-macos-arm64.sh` remains a compatibility Adapter for the Apple Silicon target. On macOS or
+Linux, install the newest archive matching the current host into `~/.local/bin`:
 
 ```bash
 ./scripts/install-package.sh
@@ -128,19 +163,23 @@ Install the newest package from `dist/` into `~/.local/bin`:
 You can also provide an archive explicitly or choose another destination:
 
 ```bash
-INSTALL_DIR=/usr/local/bin ./scripts/install-package.sh dist/pi-<version>-aarch64-apple-darwin.tar.gz
+INSTALL_DIR=/usr/local/bin ./scripts/install-package.sh \
+  dist/release/pi-<version>-<rust-target>.tar.gz
 ```
 
 The installer checks the host architecture, verifies the adjacent `.sha256`
 file when present, validates the packaged binary, and installs it atomically.
 
-The version comes from `apps/pi-cli/Cargo.toml`. For an alpha or otherwise
-custom artifact name, override it without changing the crate version:
+The authoritative product version is `[workspace.package].version` in the root `Cargo.toml`;
+`pi-cli` and `pi-napi` inherit it, while the release check requires the npm version and Git tag to
+match. Arbitrary artifact-version overrides are intentionally rejected.
 
-```bash
-PI_VERSION=0.1.0-alpha.1 ./scripts/package-macos-arm64.sh
-```
+After CI collects every target, `npm run release:assemble` creates one native npm package per target
+and a JavaScript-only `@pi-rs/cli` root package. Platform packages publish first and the root package
+last. Release Please owns the version/changelog PR and dispatches the tag workflow after creating a
+draft release. The protected `npm-publish` environment uses Trusted Publishing OIDC without an npm
+token; the draft release is published only after the workflow verifies all registry tarballs. See
+[`packages/pi/README.md`](../../packages/pi/README.md#distribution--发布).
 
-The package is currently unsigned and not notarized. Its included `README.txt`
-contains installation, provider configuration, and macOS quarantine guidance.
-Never include `.env` files or API keys in a distribution archive.
+The current artifacts use checksums and native smoke tests but are not Developer-ID/Authenticode
+signed or notarized. Never include `.env` files or API keys in a distribution archive.

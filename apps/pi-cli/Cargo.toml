@@ -1,6 +1,6 @@
 [package]
 name = "pi-cli"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -28,7 +28,6 @@ pi-js-plugin.workspace = true
 pi-resources.workspace = true
 pi-runtime.workspace = true
 pi-session.workspace = true
-pi-shell.workspace = true
 pi-plugin-openai.workspace = true
 pi-plugin-models.workspace = true
 pi-plugin-skills.workspace = true
@@ -47,7 +46,8 @@ serde_json.workspace = true
 termina = "0.3.3"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["signal"] }
-tui-widget-list = "0.15.3"
+tui-realm-stdlib = "4.1.0"
+tuirealm = { version = "4.1.0", default-features = false }
 unicode-width = "0.2"
 uuid = { version = "1.18.1", features = ["v7"] }
 

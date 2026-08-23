@@ -284,22 +284,27 @@ git diff --check
 真实 Provider 测试不要把 API key 写入源码、日志或 fixtures。默认验证路径使用
 `pi-test-support` 中的 deterministic scripted provider。
 
-## Apple Silicon 打包
+## 多平台打包
 
-在 Apple Silicon macOS 上生成 release 包：
+安装发布工具后，在与 target 匹配的宿主机上生成 standalone archive 与 NAPI artifact：
 
 ```bash
-./scripts/package-macos-arm64.sh
+cd packages/pi && npm install && cd ../..
+./scripts/package-target.sh aarch64-apple-darwin
 ```
 
-安装 `dist/` 中最新的包：
+macOS 与 Linux 可安装 `dist/release/` 中匹配当前宿主的最新 archive：
 
 ```bash
 ./scripts/install-package.sh
 ```
 
-当前产物未签名、未 notarize。更多打包参数见
-[apps/pi-cli/README.md](apps/pi-cli/README.md#package-for-apple-silicon-macos)。
+发布矩阵覆盖 macOS arm64/x64、Linux glibc arm64/x64 与 Windows MSVC arm64/x64。GitHub
+archive 是纯 Rust standalone 版本；npm 使用一个 JavaScript 根包和一个按 OS/CPU/libc 选择的
+NAPI 可选包。Release Please 维护版本/changelog PR，npm Trusted Publishing 使用短期 OIDC
+身份并自动生成 provenance，不保存长期 npm token。当前产物已有 checksum 和 native smoke
+test，但尚未签名或 notarize。发布 Interface 与产物布局见
+[apps/pi-cli/README.md](apps/pi-cli/README.md#multi-platform-packaging)。
 
 ## 尚未完成的边界
 

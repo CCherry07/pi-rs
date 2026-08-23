@@ -1,9 +1,11 @@
+#![warn(unreachable_pub)]
+
 mod clipboard;
 mod config;
 mod output;
 mod plugin_commands;
 mod project_trust;
-mod runtime_factory;
+mod session_factory;
 mod transcript_selection;
 mod tui;
 
@@ -12,9 +14,58 @@ use std::sync::Arc;
 
 use config::{AppConfig, Cli, CliCommand};
 use pi_js_plugin::{JsHostMode, JsPluginHost};
-use pi_session::{AgentSessionRuntime, AgentSessionRuntimeTarget, SessionLog};
+use pi_session::{PiApplication, PiSession, SessionLog};
 use project_trust::{ProjectTrustEvaluation, ProjectTrustPromptRequest, ProjectTrustService};
 use tokio::sync::mpsc;
+
+pub(crate) struct ResolvedProjectTrust {
+    service: ProjectTrustService,
+    requests: mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
+    trusted: bool,
+}
+
+impl ResolvedProjectTrust {
+    pub(crate) fn trusted(&self) -> bool {
+        self.trusted
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CLIMode {
+    Tui { initial_prompt: Option<String> },
+    Print { input: String },
+    Json { input: String },
+}
+
+impl CLIMode {
+    fn resolve(cli: &Cli, input: Option<String>, stdin_is_terminal: bool) -> Result<Self, String> {
+        if cli.json {
+            return input
+                .map(|input| Self::Json { input })
+                .ok_or_else(|| "--json requires a prompt or stdin".to_string());
+        }
+        if cli.print || !stdin_is_terminal {
+            return input
+                .map(|input| Self::Print { input })
+                .ok_or_else(|| "--print requires a prompt or stdin".to_string());
+        }
+        Ok(Self::Tui {
+            initial_prompt: input,
+        })
+    }
+
+    fn is_interactive(&self) -> bool {
+        matches!(self, Self::Tui { .. })
+    }
+
+    fn js_host_mode(&self) -> JsHostMode {
+        match self {
+            Self::Tui { .. } => JsHostMode::Tui,
+            Self::Print { .. } => JsHostMode::Print,
+            Self::Json { .. } => JsHostMode::Json,
+        }
+    }
+}
 
 /// Runs the product using the process argument vector and only native Rust plugins.
 pub async fn run_from_env() -> Result<(), String> {
@@ -54,7 +105,8 @@ async fn run(cli: Cli, js_host: Option<Arc<dyn JsPluginHost>>) -> Result<(), Str
     if let Some(CliCommand::Plugin { command }) = &cli.command {
         return plugin_commands::run(&cli, &config, command).await;
     }
-    if config.session_path.exists() {
+    let session_exists = config.session_path.exists();
+    if session_exists {
         let (_, document) =
             SessionLog::open(&config.session_path).map_err(|error| error.to_string())?;
         config.cwd = std::fs::canonicalize(&document.header.cwd).map_err(|error| {
@@ -64,67 +116,76 @@ async fn run(cli: Cli, js_host: Option<Arc<dyn JsPluginHost>>) -> Result<(), Str
             )
         })?;
     }
-    let input = resolve_input(&cli)?;
-    let interactive = !cli.print && !cli.json && std::io::stdin().is_terminal();
-    let (project_trust, trust_requests, trusted) =
-        resolve_project_trust(&cli, &config, interactive).await?;
-    config.trust_project = trusted;
-    let target = if config.session_path.exists() {
-        AgentSessionRuntimeTarget::open(&config.session_path)
-    } else {
-        AgentSessionRuntimeTarget::create(&config.cwd, &config.session_path)
-    };
-    let mut factory =
-        runtime_factory::AppSessionFactory::new(config.clone(), project_trust.clone());
+    let stdin_is_terminal = std::io::stdin().is_terminal();
+    let input = resolve_input(&cli, stdin_is_terminal)?;
+    let cli_mode = CLIMode::resolve(&cli, input, stdin_is_terminal)?;
+    let trust = resolve_project_trust(&cli, &config, cli_mode.is_interactive()).await?;
+    let cwd = config.cwd.clone();
+    let session_path = config.session_path.clone();
+    let mut factory = session_factory::ProductSessionFactory::new(config, trust.service.clone());
     if let Some(js_host) = js_host {
-        let mode = if cli.json {
-            JsHostMode::Json
-        } else if interactive {
-            JsHostMode::Tui
-        } else {
-            JsHostMode::Print
-        };
-        factory = factory.with_js_plugin_host(js_host, mode);
+        factory = factory.with_js_plugin_host(js_host, cli_mode.js_host_mode());
     }
-    let runtime = AgentSessionRuntime::create(factory, target)
-        .await
-        .map_err(|error| error.to_string())?;
-    let session = runtime.session();
-    let result = if cli.json {
-        let input = input.ok_or_else(|| "--json requires a prompt or stdin".to_string())?;
-        output::run_json(Arc::clone(&session), input).await
-    } else if cli.print || !interactive {
-        let input = input.ok_or_else(|| "print mode requires a prompt or stdin".to_string())?;
-        output::run_print(Arc::clone(&session), input).await
+    let application = PiApplication::new(factory);
+    let session = if session_exists {
+        application.open_session(&session_path).await
     } else {
-        tui::run(
-            runtime.clone(),
-            cli.fullscreen_enabled(),
-            input,
-            project_trust,
-            trust_requests,
-        )
-        .await
-    };
-    runtime
+        application.create_session(&cwd, &session_path).await
+    }
+    .map_err(|error| error.to_string())?;
+    let result = run_cli(
+        cli_mode,
+        session,
+        cli.fullscreen_enabled(),
+        trust.service,
+        trust.requests,
+    )
+    .await;
+    let shutdown = application
         .shutdown()
         .await
-        .map_err(|error| error.to_string())?;
-    result
+        .map_err(|error| error.to_string());
+    finish_run(result, shutdown)
+}
+
+async fn run_cli(
+    mode: CLIMode,
+    session: PiSession,
+    fullscreen: bool,
+    project_trust: ProjectTrustService,
+    trust_requests: mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
+) -> Result<(), String> {
+    match mode {
+        CLIMode::Json { input } => output::run_json(session, input).await,
+        CLIMode::Print { input } => output::run_print(session, input).await,
+        CLIMode::Tui { initial_prompt } => {
+            tui::run(
+                session,
+                fullscreen,
+                initial_prompt,
+                project_trust,
+                trust_requests,
+            )
+            .await
+        }
+    }
+}
+
+fn finish_run(result: Result<(), String>, shutdown: Result<(), String>) -> Result<(), String> {
+    match (result, shutdown) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(shutdown_error)) => Err(format!(
+            "{error}\napplication shutdown also failed: {shutdown_error}"
+        )),
+    }
 }
 
 pub(crate) async fn resolve_project_trust(
     cli: &Cli,
     config: &AppConfig,
     interactive: bool,
-) -> Result<
-    (
-        ProjectTrustService,
-        mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
-        bool,
-    ),
-    String,
-> {
+) -> Result<ResolvedProjectTrust, String> {
     let (project_trust, trust_requests) =
         ProjectTrustService::new(&config.agent_dir, config.trust_override, interactive)
             .map_err(|error| error.to_string())?;
@@ -147,14 +208,18 @@ pub(crate) async fn resolve_project_trust(
     project_trust
         .remember(&config.cwd, trusted)
         .map_err(|error| error.to_string())?;
-    Ok((project_trust, trust_requests, trusted))
+    Ok(ResolvedProjectTrust {
+        service: project_trust,
+        requests: trust_requests,
+        trusted,
+    })
 }
 
-fn resolve_input(cli: &Cli) -> Result<Option<String>, String> {
+fn resolve_input(cli: &Cli, stdin_is_terminal: bool) -> Result<Option<String>, String> {
     if !cli.prompt.is_empty() {
         return Ok(Some(cli.prompt.join(" ")));
     }
-    if !std::io::stdin().is_terminal() {
+    if !stdin_is_terminal {
         let mut input = String::new();
         std::io::stdin()
             .read_to_string(&mut input)
@@ -163,4 +228,81 @@ fn resolve_input(cli: &Cli) -> Result<Option<String>, String> {
         return Ok((!input.is_empty()).then_some(input));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CLIMode, Cli, JsHostMode, finish_run};
+
+    fn cli(arguments: &[&str]) -> Cli {
+        Cli::try_parse_pi_from(
+            arguments
+                .iter()
+                .map(|argument| (*argument).to_string())
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn resolves_each_frontend_through_one_mode_boundary() {
+        let tui = CLIMode::resolve(&cli(&[]), None, true).unwrap();
+        assert_eq!(
+            tui,
+            CLIMode::Tui {
+                initial_prompt: None
+            }
+        );
+        assert!(tui.is_interactive());
+        assert_eq!(tui.js_host_mode(), JsHostMode::Tui);
+
+        let print = CLIMode::resolve(&cli(&[]), Some("piped".to_string()), false).unwrap();
+        assert_eq!(
+            print,
+            CLIMode::Print {
+                input: "piped".to_string()
+            }
+        );
+        assert!(!print.is_interactive());
+        assert_eq!(print.js_host_mode(), JsHostMode::Print);
+
+        let json = CLIMode::resolve(
+            &cli(&["--print", "--json"]),
+            Some("prompt".to_string()),
+            true,
+        )
+        .unwrap();
+        assert_eq!(json.js_host_mode(), JsHostMode::Json);
+    }
+
+    #[test]
+    fn noninteractive_frontends_require_input_before_application_startup() {
+        assert_eq!(
+            CLIMode::resolve(&cli(&["--json"]), None, true),
+            Err("--json requires a prompt or stdin".to_string())
+        );
+        assert_eq!(
+            CLIMode::resolve(&cli(&["--print"]), None, true),
+            Err("--print requires a prompt or stdin".to_string())
+        );
+        assert_eq!(
+            CLIMode::resolve(&cli(&[]), None, false),
+            Err("--print requires a prompt or stdin".to_string())
+        );
+    }
+
+    #[test]
+    fn frontend_error_stays_primary_when_shutdown_also_fails() {
+        assert_eq!(
+            finish_run(
+                Err("frontend failed".to_string()),
+                Err("shutdown failed".to_string())
+            ),
+            Err("frontend failed\napplication shutdown also failed: shutdown failed".to_string())
+        );
+        assert_eq!(
+            finish_run(Ok(()), Err("shutdown failed".to_string())),
+            Err("shutdown failed".to_string())
+        );
+    }
 }

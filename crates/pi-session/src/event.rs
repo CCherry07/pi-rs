@@ -14,7 +14,7 @@ const DEFAULT_EVENT_CAPACITY: usize = 512;
 /// This is the Rust counterpart of Pi's `AgentSessionEvent`: core agent
 /// lifecycle events are combined with session-owned queue, compaction,
 /// persistence, and configuration events. Runtime replacement remains a
-/// separate concern of [`crate::AgentSessionRuntime`].
+/// separate concern of [`crate::PiSession`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum AgentSessionEvent {

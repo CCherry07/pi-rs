@@ -1,8 +1,15 @@
 {
   "name": "@pi-rs/cli",
   "version": "0.1.0",
+  "description": "Rust-powered Pi coding-agent CLI with a Node host for JavaScript extensions",
   "private": true,
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CCherry07/pi_rs.git",
+    "directory": "packages/pi"
+  },
   "bin": {
     "pi": "dist/bin/pi.js",
     "pi-rs": "dist/bin/pi.js"
@@ -10,8 +17,7 @@
   "files": [
     "dist/bin",
     "dist/src",
-    "README.md",
-    "pi-napi.*.node"
+    "README.md"
   ],
   "exports": {
     ".": {
@@ -20,11 +26,19 @@
     }
   },
   "scripts": {
-    "build": "tsc",
-    "build:native": "tsx ./scripts/build-native.ts",
-    "build:native:release": "tsx ./scripts/build-native.ts --release",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc",
+    "build:native": "tsx ./scripts/release.ts native",
+    "build:native:release": "tsx ./scripts/release.ts native --release",
     "check": "tsc --noEmit",
     "prepack": "npm run build",
+    "release:check": "tsx ./scripts/release.ts check",
+    "release:matrix": "tsx ./scripts/release.ts matrix",
+    "release:dist": "tsx ./scripts/release.ts dist",
+    "release:assemble": "tsx ./scripts/release.ts assemble",
+    "release:verify": "tsx ./scripts/release.ts verify",
+    "release:publish": "tsx ./scripts/release.ts publish",
+    "release:verify-published": "tsx ./scripts/release.ts verify-published",
     "test": "tsx --test ./test/*.test.ts",
     "test:native": "npm run build && tsx --test ./test/*.smoke.ts",
     "start": "tsx ./bin/pi.ts"

@@ -24,16 +24,15 @@ stars。这些数据能证明活跃度和传播规模，但不能证明每个社
 
 Pi 采用 monorepo 和同版本发布。主要层次如下：
 
-| 层次 | 官方包 | 主要职责 |
-|---|---|---|
-| 模型/API | `@earendil-works/pi-ai` | Provider、模型目录、认证/OAuth、流式调用、tool calling、thinking、图像与跨 Provider 上下文 |
-| Agent runtime | `@earendil-works/pi-agent-core` | 有状态 agent loop、消息与工具执行、steer/follow-up 队列、事件流、可替换 session backend |
-| 产品 | `@earendil-works/pi-coding-agent` | CLI/TUI、会话、压缩、资源发现、Extensions、Skills、Prompts、Themes、SDK、RPC |
-| 终端 UI | `@earendil-works/pi-tui` | 差分渲染、编辑器、Markdown、选择器、overlay、IME、图片和自定义组件 |
-| 可观测性 | `@earendil-works/pi-telemetry` | vendor-neutral telemetry contract、typed schema、adapter conformance |
-| 会话存储 | `@earendil-works/pi-session-backend-sqlite-node` | v4 lane session repository、迁移、物化视图、FTS、writer lease |
-| 远程化 | `@earendil-works/pi-protocol` / `pi-client` / `pi-server` | framed CBOR 协议、transport-neutral client、可嵌入 session server |
-| 评测 | `@earendil-works/pi-evals`（private） | 真实模型驱动的端到端行为评测、对比 prompts/tools/skills/models |
+| 层次          | 官方包                                           | 主要职责                                                                                   |
+| ------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| 模型/API      | `@earendil-works/pi-ai`                          | Provider、模型目录、认证/OAuth、流式调用、tool calling、thinking、图像与跨 Provider 上下文 |
+| Agent runtime | `@earendil-works/pi-agent-core`                  | 有状态 agent loop、消息与工具执行、steer/follow-up 队列、事件流、可替换 session backend    |
+| 产品          | `@earendil-works/pi-coding-agent`                | CLI/TUI、会话、压缩、资源发现、Extensions、Skills、Prompts、Themes、SDK、RPC               |
+| 终端 UI       | `@earendil-works/pi-tui`                         | 差分渲染、编辑器、Markdown、选择器、overlay、IME、图片和自定义组件                         |
+| 可观测性      | `@earendil-works/pi-telemetry`                   | vendor-neutral telemetry contract、typed schema、adapter conformance                       |
+| 会话存储      | `@earendil-works/pi-session-backend-sqlite-node` | v4 lane session repository、迁移、物化视图、FTS、writer lease                              |
+| 评测          | `@earendil-works/pi-evals`（private）            | 真实模型驱动的端到端行为评测、对比 prompts/tools/skills/models                             |
 
 产品入口仍是 coding-agent：默认工具、交互 TUI、会话树/分支/压缩、项目上下文和多种运行模式
 都在这一层；`pi-ai` 与 `pi-agent-core` 可以独立作为 SDK 使用。
@@ -121,9 +120,7 @@ Pi 提供由近到远的多层集成面：
 2. **同进程 SDK**：`createAgentSession()` 管单会话，`AgentSessionRuntime` 管 new/resume/fork/import
    等会话替换，并复用产品层 resource/model/session 行为；
 3. **子进程 RPC**：stdin/stdout JSONL，适合非 TypeScript 语言、IDE 和自定义 UI；
-4. **远程 session 协议**：`pi-protocol` 用 length-prefixed CBOR，`pi-client` 提供 transport-neutral
-   client，`pi-server` 提供需要宿主应用实现 service 的 server core；
-5. **底层库嵌入**：只使用 `pi-ai` 或 `pi-agent-core` 构建不同产品。
+4. **底层库嵌入**：只使用 `pi-ai` 或 `pi-agent-core` 构建不同产品。
 
 SDK 官方示例已有 13 个，从最小会话到自定义 model/prompt/skill/tool/extension/settings/session 和
 完整 runtime。远程 protocol/client/server 是独立于旧 RPC 的新方向，但官方明确标为 experimental：

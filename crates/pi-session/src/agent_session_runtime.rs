@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, watch};
 
 use crate::{
-    AgentSession, PreparedAgentSession, SessionBeforeSwitchEvent, SessionError, SessionLog,
+    AgentSession, ForkOptions, ForkPosition, PreparedAgentSession, SessionBeforeForkEvent,
+    SessionBeforeSwitchEvent, SessionError, SessionForkPosition, SessionHeader, SessionLog,
     SessionShutdownEvent, SessionShutdownReason, SessionStartEvent, SessionStartReason,
     SessionSwitchReason,
 };
@@ -226,6 +227,81 @@ impl AgentSessionRuntime {
         Ok(AgentSessionReplacement::Replaced)
     }
 
+    /// Forks the current session at a message and atomically switches to the fork.
+    /// `Before` is Pi's `/fork` behavior; `At` is `/clone`.
+    pub async fn fork_session(
+        &self,
+        entry_id: impl Into<String>,
+        position: ForkPosition,
+    ) -> Result<AgentSessionReplacement, AgentSessionRuntimeError> {
+        let _transition = self.transition_gate.lock().await;
+        self.ensure_open()?;
+        let current = self.session();
+        let entry_id = entry_id.into();
+        let plugin_position = match position {
+            ForkPosition::Before => SessionForkPosition::Before,
+            ForkPosition::At => SessionForkPosition::At,
+        };
+        let before = current
+            .session_plugin_driver()
+            .session_before_fork(&SessionBeforeForkEvent {
+                entry_id: entry_id.clone(),
+                position: plugin_position,
+            })
+            .await;
+        if before.is_some_and(|result| result.cancel) {
+            return Ok(AgentSessionReplacement::Cancelled);
+        }
+
+        let _session_transition = current.begin_replacement().await?;
+        let source = current.log().header();
+        let id = uuid::Uuid::now_v7().to_string();
+        let path = current
+            .log()
+            .path()
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(format!("{id}.jsonl"));
+        let mut header = SessionHeader::new(id, source.cwd);
+        header.parent_session_id = Some(source.id);
+        let fork = current.log().fork(
+            &path,
+            header,
+            &ForkOptions::Branch {
+                entry_id: Some(entry_id),
+                position: Some(position),
+            },
+        )?;
+        let previous_session_file = current.log().path().to_path_buf();
+        let start_event = SessionStartEvent {
+            reason: SessionStartReason::Fork,
+            previous_session_file: Some(previous_session_file),
+        };
+        let prepared = match self
+            .factory
+            .prepare(AgentSessionRuntimeRequest {
+                target: AgentSessionRuntimeTarget::reuse_log(fork),
+                start_event: start_event.clone(),
+            })
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let _ = std::fs::remove_file(&path);
+                return Err(error.into());
+            }
+        };
+        current
+            .shutdown_with(SessionShutdownEvent {
+                reason: SessionShutdownReason::Fork,
+                target_session_file: Some(path),
+            })
+            .await;
+        let next = Arc::new(prepared.activate(start_event).await);
+        self.current.send_replace(next);
+        Ok(AgentSessionReplacement::Replaced)
+    }
+
     /// Rebuilds the entire current session through the factory. This reloads
     /// runtime, provider, feature, resource, and session plugin generations as
     /// one product-level transition.
@@ -304,7 +380,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use pi_agent::AgentOptions;
-    use pi_core::{ModelId, PluginId, ProviderId};
+    use pi_core::{Message, ModelId, PluginId, ProviderId, UserMessage};
     use pi_runtime::PiRuntime;
     use pi_test_support::ScriptedProviderPlugin;
     use tokio::sync::Notify;
@@ -530,6 +606,44 @@ mod tests {
                 "shutdown:Resume",
                 "start:Resume",
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_copies_the_selected_branch_and_replaces_with_fork_lifecycle() {
+        let directory = tempfile::tempdir().unwrap();
+        let first_path = directory.path().join("first.jsonl");
+        let factory = TestFactory::new();
+        let runtime = AgentSessionRuntime::create(
+            factory.clone(),
+            AgentSessionRuntimeTarget::create(directory.path(), &first_path),
+        )
+        .await
+        .unwrap();
+        let first = runtime.session();
+        let user = first
+            .log()
+            .append_message(Message::User(UserMessage::text("fork here", 1)))
+            .unwrap();
+        first.log().materialize().unwrap();
+
+        let outcome = runtime
+            .fork_session(&user, ForkPosition::Before)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, AgentSessionReplacement::Replaced);
+        assert!(first.is_closed());
+        let fork = runtime.session();
+        assert_ne!(fork.log().path(), first_path);
+        assert_eq!(
+            fork.log().header().parent_session_id.as_deref(),
+            Some(first.log().header().id.as_str())
+        );
+        assert!(fork.log().get_entry(&user).is_none());
+        assert_eq!(
+            &factory.events()[2..],
+            ["prepare:Fork", "shutdown:Fork", "start:Fork"]
         );
     }
 

@@ -5,8 +5,8 @@ usage() {
   cat <<'EOF'
 Usage: ./scripts/install-package.sh [ARCHIVE]
 
-Install a packaged pi binary. If ARCHIVE is omitted, the newest matching
-archive in dist/ is used.
+Install a packaged pi binary on macOS or Linux. If ARCHIVE is omitted, the
+newest matching archive in dist/release/ is used.
 
 Environment:
   INSTALL_DIR   Destination directory (default: ~/.local/bin)
@@ -34,10 +34,16 @@ fi
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 INSTALL_DIR=${INSTALL_DIR:-"$HOME/.local/bin"}
 
-if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
-  echo "error: the available package requires Apple Silicon macOS" >&2
-  exit 1
-fi
+case "$(uname -s):$(uname -m)" in
+  Darwin:arm64) TARGET=aarch64-apple-darwin ;;
+  Darwin:x86_64) TARGET=x86_64-apple-darwin ;;
+  Linux:aarch64|Linux:arm64) TARGET=aarch64-unknown-linux-gnu ;;
+  Linux:x86_64) TARGET=x86_64-unknown-linux-gnu ;;
+  *)
+    echo "error: unsupported installer host: $(uname -s) $(uname -m)" >&2
+    exit 1
+    ;;
+esac
 
 if [ "$#" -eq 1 ]; then
   case "$1" in
@@ -45,10 +51,10 @@ if [ "$#" -eq 1 ]; then
     *) ARCHIVE=$(CDPATH= cd -- "$(dirname -- "$1")" && pwd)/$(basename -- "$1") ;;
   esac
 else
-  ARCHIVE=$(ls -t "$ROOT"/dist/pi-*-aarch64-apple-darwin.tar.gz 2>/dev/null | head -n 1 || true)
+  ARCHIVE=$(ls -t "$ROOT"/dist/release/pi-*-${TARGET}.tar.gz 2>/dev/null | head -n 1 || true)
   if [ -z "$ARCHIVE" ]; then
-    echo "error: no Apple Silicon package found in $ROOT/dist" >&2
-    echo "run ./scripts/package-macos-arm64.sh first, or pass an archive path" >&2
+    echo "error: no ${TARGET} package found in $ROOT/dist/release" >&2
+    echo "run ./scripts/package-target.sh $TARGET first, or pass an archive path" >&2
     exit 1
   fi
 fi
@@ -60,21 +66,21 @@ fi
 
 CHECKSUM="$ARCHIVE.sha256"
 if [ -f "$CHECKSUM" ]; then
-  if ! command -v shasum >/dev/null 2>&1; then
-    echo "error: shasum is required to verify $CHECKSUM" >&2
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$(dirname -- "$ARCHIVE")" && sha256sum -c "$(basename -- "$CHECKSUM")")
+  elif command -v shasum >/dev/null 2>&1; then
+    (cd "$(dirname -- "$ARCHIVE")" && shasum -a 256 -c "$(basename -- "$CHECKSUM")")
+  else
+    echo "error: sha256sum or shasum is required to verify $CHECKSUM" >&2
     exit 1
   fi
-  (
-    cd "$(dirname -- "$ARCHIVE")"
-    shasum -a 256 -c "$(basename -- "$CHECKSUM")"
-  )
 else
   echo "warning: checksum file not found; installing without verification" >&2
 fi
 
 PACKAGE=$(basename -- "$ARCHIVE" .tar.gz)
 case "$PACKAGE" in
-  pi-*-aarch64-apple-darwin) ;;
+  pi-*-${TARGET}) ;;
   *)
     echo "error: unsupported package name: $(basename -- "$ARCHIVE")" >&2
     exit 1
@@ -97,8 +103,12 @@ if [ ! -f "$BINARY" ]; then
   echo "error: package does not contain $PACKAGE/pi" >&2
   exit 1
 fi
-if ! file "$BINARY" | grep -q 'arm64'; then
-  echo "error: packaged binary is not Apple Silicon arm64" >&2
+case "$TARGET" in
+  aarch64-*) EXPECTED_ARCH='arm64|aarch64' ;;
+  x86_64-*) EXPECTED_ARCH='x86_64|x86-64' ;;
+esac
+if ! file "$BINARY" | grep -Eiq "$EXPECTED_ARCH"; then
+  echo "error: packaged binary architecture does not match $TARGET" >&2
   exit 1
 fi
 
@@ -109,8 +119,10 @@ chmod 755 "$INSTALL_TMP"
 mv -f "$INSTALL_TMP" "$INSTALL_DIR/pi"
 INSTALL_TMP=
 
-# A downloaded, unsigned archive may carry macOS's quarantine attribute.
-xattr -d com.apple.quarantine "$INSTALL_DIR/pi" 2>/dev/null || true
+if [ "$(uname -s)" = "Darwin" ]; then
+  # A downloaded, unsigned archive may carry macOS's quarantine attribute.
+  xattr -d com.apple.quarantine "$INSTALL_DIR/pi" 2>/dev/null || true
+fi
 
 printf 'Installed pi to %s\n' "$INSTALL_DIR/pi"
 case ":$PATH:" in

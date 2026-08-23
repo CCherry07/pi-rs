@@ -36,11 +36,10 @@ impl MarkdownTheme {
         self.appearance
     }
 
-    /// Solid terminal equivalent of the original Pi `inset` surface.
+    /// Subtle solid surface for fenced code in light and dark terminals.
     ///
-    /// GPUI paints some palette entries with alpha over its canvas. Ratatui
-    /// has no alpha channel, so those entries are pre-composited here; their
-    /// semantic ownership and resulting color remain inside this crate.
+    /// Ratatui has no alpha channel, so the colors are pre-composited here and
+    /// kept close to the surrounding transcript instead of forming a heavy panel.
     pub const fn code_background(self) -> Color {
         self.inset()
     }
@@ -84,8 +83,8 @@ impl MarkdownTheme {
 
     const fn inset(self) -> Color {
         match self.appearance {
-            Appearance::Light => Color::Rgb(232, 232, 236),
-            Appearance::Dark => Color::Rgb(16, 16, 17),
+            Appearance::Light => Color::Rgb(242, 242, 244),
+            Appearance::Dark => Color::Rgb(31, 31, 33),
         }
     }
 
@@ -100,13 +99,9 @@ impl MarkdownTheme {
 
     const fn inline_code_text(self) -> Color {
         match self.appearance {
-            Appearance::Light => Color::Rgb(154, 74, 0),
-            Appearance::Dark => Color::Rgb(255, 159, 10),
+            Appearance::Light => Color::Rgb(0, 113, 164),
+            Appearance::Dark => Color::Rgb(100, 210, 255),
         }
-    }
-
-    const fn code_wash(self) -> Color {
-        self.overlay()
     }
 
     const fn accent(self) -> Color {
@@ -354,7 +349,9 @@ impl Renderer {
                         "{CODE_BLOCK_HORIZONTAL_PADDING}{}{CODE_BLOCK_HORIZONTAL_PADDING}",
                         language.to_ascii_lowercase()
                     ),
-                    Style::default().fg(self.theme.ghost()),
+                    Style::default()
+                        .fg(self.theme.ghost())
+                        .add_modifier(Modifier::BOLD),
                 ))
                 .style(Style::default().bg(background)),
             );
@@ -486,7 +483,7 @@ fn inline_style(style: &InlineStyle, base: Style, theme: MarkdownTheme) -> Style
             .add_modifier(Modifier::UNDERLINED);
     }
     if style.code {
-        result = result.fg(theme.inline_code_text()).bg(theme.code_wash());
+        result = result.fg(theme.inline_code_text());
     }
     result
 }
@@ -661,6 +658,12 @@ mod tests {
 
         assert_eq!(horizontal_padding(language), (2, 2));
         assert_eq!(horizontal_padding(code), (2, 2));
+        assert!(
+            language.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
     }
 
     #[test]
@@ -678,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn ratatui_adapter_preserves_the_original_pi_markdown_palette() {
+    fn ratatui_adapter_uses_codex_style_code_treatment() {
         let rendered = render(
             concat!(
                 "# Heading\n\n",
@@ -717,8 +720,8 @@ mod tests {
             .flat_map(|line| &line.spans)
             .find(|span| span.content == "code")
             .expect("inline code span");
-        assert_eq!(inline_code.style.fg, Some(Color::Rgb(255, 159, 10)));
-        assert_eq!(inline_code.style.bg, Some(Color::Rgb(39, 39, 41)));
+        assert_eq!(inline_code.style.fg, Some(Color::Rgb(100, 210, 255)));
+        assert_eq!(inline_code.style.bg, None);
 
         let quote = rendered
             .lines
@@ -734,7 +737,7 @@ mod tests {
             .iter()
             .find(|line| line.to_string().contains("fn main"))
             .expect("code line");
-        assert_eq!(code.style.bg, Some(Color::Rgb(16, 16, 17)));
+        assert_eq!(code.style.bg, Some(Color::Rgb(31, 31, 33)));
         let keyword = code
             .spans
             .iter()
@@ -744,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn light_adapter_uses_the_original_pi_code_surface_and_tokens() {
+    fn light_adapter_uses_the_polished_code_surface_and_tokens() {
         let rendered = render(
             "```rust\nfn main() {}\n```",
             false,
@@ -756,7 +759,7 @@ mod tests {
             .find(|line| line.to_string().contains("fn main"))
             .expect("code line");
 
-        assert_eq!(code.style.bg, Some(Color::Rgb(232, 232, 236)));
+        assert_eq!(code.style.bg, Some(Color::Rgb(242, 242, 244)));
         let keyword = code
             .spans
             .iter()
