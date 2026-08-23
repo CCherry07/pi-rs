@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/CCherry07/pi_rs/compare/v0.1.0...v0.2.0) (2026-08-23)
+
+
+### Features
+
+* add provider authentication and Pi-aligned tools ([5f7fed2](https://github.com/CCherry07/pi_rs/commit/5f7fed209d671d0848607f788d49e38adc80761c))
+
 ## 0.1.0 (2026-08-23)
 
 

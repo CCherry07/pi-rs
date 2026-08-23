@@ -1,6 +1,6 @@
 {
   "name": "@pi-rs/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Rust-powered Pi coding-agent CLI with a Node host for JavaScript extensions",
   "private": true,
   "type": "module",
