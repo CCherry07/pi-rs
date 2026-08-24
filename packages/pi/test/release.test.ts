@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   assertPublishedPackageMatches,
+  parseSingleNpmViewOutput,
   publishPackageDirectories,
   releaseMatrix,
   synchronizeCargoLockWorkspaceVersions,
@@ -83,6 +84,37 @@ test("registry verification requires the exact staged tarball and selectors", ()
   assert.throws(
     () => assertPublishedPackageMatches(staged, published, "sha512-other"),
     /tarball integrity differs/,
+  );
+});
+
+test("registry verification accepts npm 12 singleton view results", () => {
+  const identity = "@pi-rs/cli-darwin-arm64@0.3.0";
+  const published = {
+    name: "@pi-rs/cli-darwin-arm64",
+    version: "0.3.0",
+    os: ["darwin"],
+    cpu: ["arm64"],
+    dist: {
+      integrity: "sha512-release",
+      tarball:
+        "https://registry.npmjs.org/@pi-rs/cli-darwin-arm64/-/cli-darwin-arm64-0.3.0.tgz",
+    },
+  };
+
+  const parsed = parseSingleNpmViewOutput(JSON.stringify([published]), identity);
+
+  assert.doesNotThrow(() =>
+    assertPublishedPackageMatches(published, parsed, "sha512-release"),
+  );
+  assert.deepEqual(parseSingleNpmViewOutput(JSON.stringify(published), identity), published);
+  assert.equal(parseSingleNpmViewOutput('["0.3.0"]', identity), "0.3.0");
+  assert.throws(
+    () => parseSingleNpmViewOutput("[]", identity),
+    /Expected exactly one npm metadata result.*received 0/,
+  );
+  assert.throws(
+    () => parseSingleNpmViewOutput('["0.3.0", "0.3.1"]', identity),
+    /Expected exactly one npm metadata result.*received 2/,
   );
 });
 

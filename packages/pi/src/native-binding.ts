@@ -5,7 +5,12 @@ import { fileURLToPath } from "node:url";
 
 import { z } from "zod";
 
-import { currentNativeTarget, nativePackageName } from "./native-target.js";
+import { VERSION } from "./compat-api.js";
+import {
+  currentNativeTarget,
+  nativePackageName,
+  type NativeTarget,
+} from "./native-target.js";
 
 export interface NativeBinding {
   runPi(arguments_: string[], dispatch: (operation: string) => Promise<string>): Promise<void>;
@@ -67,6 +72,33 @@ function loadDynamicLibrary(path: string): NativeBinding {
   return parseNativeBinding(loaded, path);
 }
 
+export function missingNativeBindingMessage(
+  target: NativeTarget,
+  platformPackage: string,
+  version: string,
+  candidates: string[],
+  resolutionMessage: string,
+): string {
+  const repairCommand =
+    `npm install --global @pi-rs/cli@${version} ${platformPackage}@${version} ` +
+    "--registry=https://registry.npmjs.org " +
+    "--@pi-rs:registry=https://registry.npmjs.org";
+  const npxCommand =
+    `npx --yes --package=@pi-rs/cli@${version} --package=${platformPackage}@${version} ` +
+    "--registry=https://registry.npmjs.org " +
+    "--@pi-rs:registry=https://registry.npmjs.org -- pi";
+  return (
+    `The native component for ${target.rustTarget} was not installed.\n\n` +
+    `Using npx, rerun with:\n  ${npxCommand}\n\n` +
+    `For a global installation, repair it with:\n  ${repairCommand}\n\n` +
+    "npm may have skipped the optional component, or a configured registry mirror may not " +
+    `contain ${platformPackage}@${version}. If your organization requires a private registry, ` +
+    "ask its administrator to mirror that package. For a source checkout, run " +
+    `\"npm run build:native\" or set PI_RS_NATIVE_BINDING. Checked:\n` +
+    `${candidates.join("\n")}\n${platformPackage}: ${resolutionMessage}`
+  );
+}
+
 export function loadNativeBinding(): NativeBinding {
   const override = process.env.PI_RS_NATIVE_BINDING;
   if (override) {
@@ -90,10 +122,7 @@ export function loadNativeBinding(): NativeBinding {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `Cannot find the pi_rs NAPI binding for ${target.rustTarget}. ` +
-        `Install ${platformPackage} through @pi-rs/cli's optional dependencies, ` +
-        `run \"npm run build:native\", or set PI_RS_NATIVE_BINDING. Checked:\n` +
-        `${candidates.join("\n")}\n${platformPackage}: ${message}`,
+      missingNativeBindingMessage(target, platformPackage, VERSION, candidates, message),
       { cause: error },
     );
   }

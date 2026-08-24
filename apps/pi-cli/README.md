@@ -41,7 +41,10 @@ pi
 ```
 
 The package selects a native optional dependency for the current OS, CPU, and Linux libc. Supported
-release targets are macOS arm64/x64, Linux glibc arm64/x64, and Windows MSVC arm64/x64.
+release targets are macOS arm64/x64, Linux glibc arm64/x64, and Windows MSVC arm64/x64. If npm
+skips that optional dependency, the launcher prints exact npx and global-install repair commands
+for the installed CLI version and platform, including the public registry override needed when a
+mirror is stale.
 
 ### Run from source
 

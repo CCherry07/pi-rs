@@ -44,7 +44,10 @@ pi
 The package selects a native optional dependency for the current OS, CPU, and Linux libc. Supported
 release targets are macOS arm64/x64, Linux glibc arm64/x64, and Windows MSVC arm64/x64. Both `pi`
 and `pi-rs` invoke the same installed launcher; `npm list --global` confirms which npm version is
-installed.
+installed. If npm skips the native optional dependency, the launcher prints exact npx and
+global-install repair commands for the installed CLI version and platform. This can happen when
+optional dependencies are disabled or a configured npm registry mirror has not synchronized the
+matching platform package.
 
 ### Run from source
 

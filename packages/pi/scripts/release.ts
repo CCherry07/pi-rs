@@ -229,6 +229,24 @@ function runCapture(
   };
 }
 
+export function parseSingleNpmViewOutput(stdout: string, identity: string): unknown {
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout) as unknown;
+  } catch (error) {
+    throw new Error(`Cannot parse npm metadata for ${identity}: ${stdout}`, {
+      cause: error,
+    });
+  }
+  if (!Array.isArray(value)) return value;
+  if (value.length !== 1) {
+    throw new Error(
+      `Expected exactly one npm metadata result for ${identity}, received ${value.length}`,
+    );
+  }
+  return value[0];
+}
+
 function run(
   command: string,
   arguments_: string[],
@@ -758,14 +776,7 @@ function packageIsPublished(name: string, version: string): boolean {
     `--registry=${npmRegistry}`,
   ]);
   if (result.status === 0) {
-    let publishedVersion: unknown;
-    try {
-      publishedVersion = JSON.parse(result.stdout) as unknown;
-    } catch (error) {
-      throw new Error(`Cannot parse npm metadata for ${name}@${version}: ${result.stdout}`, {
-        cause: error,
-      });
-    }
+    const publishedVersion = parseSingleNpmViewOutput(result.stdout, `${name}@${version}`);
     return publishedVersion === version;
   }
   const output = `${result.stdout}\n${result.stderr}`;
@@ -784,14 +795,7 @@ function publishedPackage(name: string, version: string): z.infer<typeof publish
     throw new Error(`Cannot query published package ${name}@${version}:\n${result.stderr}`);
   }
 
-  let value: unknown;
-  try {
-    value = JSON.parse(result.stdout) as unknown;
-  } catch (error) {
-    throw new Error(`Cannot parse npm metadata for ${name}@${version}: ${result.stdout}`, {
-      cause: error,
-    });
-  }
+  const value = parseSingleNpmViewOutput(result.stdout, `${name}@${version}`);
   const parsed = publishedPackageSchema.safeParse(value);
   if (!parsed.success) {
     throw new Error(
