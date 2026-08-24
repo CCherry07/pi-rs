@@ -10,6 +10,7 @@ import {
   releaseMatrix,
   synchronizeCargoLockWorkspaceVersions,
   validateReleaseConfiguration,
+  workspaceVersionPackageNames,
 } from "../scripts/release.js";
 import { VERSION } from "../src/compat-api.js";
 import { supportedNativeTargets } from "../src/native-target.js";
@@ -35,6 +36,11 @@ version = "0.1.0"
 dependencies = []
 
 [[package]]
+name = "pi-js-package-manager"
+version = "0.1.0"
+dependencies = []
+
+[[package]]
 name = "third-party"
 version = "0.1.0"
 `;
@@ -43,7 +49,18 @@ version = "0.1.0"
 
   assert.match(synchronized, /name = "pi-cli"\nversion = "0\.2\.1"/);
   assert.match(synchronized, /name = "pi-napi"\nversion = "0\.2\.1"/);
+  assert.match(
+    synchronized,
+    /name = "pi-js-package-manager"\nversion = "0\.2\.1"/,
+  );
   assert.match(synchronized, /name = "third-party"\nversion = "0\.1\.0"/);
+});
+
+test("release builds discover every crate inheriting the workspace version", () => {
+  assert.deepEqual(
+    new Set(workspaceVersionPackageNames()),
+    new Set(["pi-cli", "pi-js-package-manager", "pi-napi"]),
+  );
 });
 
 test("release matrix has one native runner per supported target", () => {
@@ -159,4 +176,7 @@ test("Release Please owns version PRs and dispatches the product release workflo
   assert.doesNotMatch(releaseWorkflow, /NPM_TOKEN|NODE_AUTH_TOKEN/);
   assert.match(releaseWorkflow, /release:verify-published/);
   assert.match(releasePleaseWorkflow, /gh workflow run release\.yml/);
+  assert.match(releasePleaseWorkflow, /if: always\(\)/);
+  assert.match(releasePleaseWorkflow, /git\/ref\/tags\/\$RELEASE_TAG/);
+  assert.match(releasePleaseWorkflow, /gh run list --workflow release\.yml --commit/);
 });

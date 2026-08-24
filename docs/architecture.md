@@ -187,10 +187,14 @@ tests do not live in workflow YAML.
 Release Please is a version/changelog Adapter, not a second Release Module. Its release PR updates
 the authoritative Cargo version, the npm manifest and lockfile, and `CHANGELOG.md` as one change.
 Cargo's generated lockfile does not have a stable key that Release Please's generic TOML updater can
-address, so the Release Module synchronizes only the inherited `pi-cli` and `pi-napi` lock entries
-before each `--locked` native build; third-party dependency resolution remains unchanged. Merging
-the release PR creates a forced `v<version>` tag and a draft GitHub Release, then
-`.github/workflows/release-please.yml` explicitly dispatches the native release workflow. The
+address, so the Release Module discovers every workspace member that inherits the workspace version
+through Cargo metadata and synchronizes only those lock entries before each `--locked` native build;
+third-party dependency resolution remains unchanged. CI performs the same normalization
+before its locked test and lint gates. Merging the release PR creates a forced `v<version>` tag and
+a draft GitHub Release, then `.github/workflows/release-please.yml` explicitly dispatches the native
+release workflow. The dispatch derives the version tag from the merged manifest, verifies that the
+tag targets the triggering commit, and skips an existing run. This both avoids duplicates and
+recovers when Release Please creates a tag but fails before exposing its action outputs. The
 explicit dispatch is required because a tag created with `GITHUB_TOKEN` does not recursively start
 another workflow. The draft becomes public only after every npm tarball is published and verified
 from the public registry.
@@ -210,8 +214,9 @@ One tag produces two delivery adapters from the same Rust product:
   artifact selected by OS, CPU, and libc. Platform packages publish first and the root package
   publishes last, so an incomplete native matrix is never advertised by a new root version.
 
-`[workspace.package].version` is authoritative for the Rust product; `pi-cli` and `pi-napi`
-inherit it, and the Release Module rejects a mismatching npm version or `v<version>` tag. Generated
+`[workspace.package].version` is authoritative for the Rust product; every product crate that
+declares `version.workspace = true` inherits it, and the Release Module rejects a mismatching npm
+version or `v<version>` tag. Generated
 npm staging is distinct from the private source package, preventing a development `npm publish`
 from bypassing matrix validation. The protected workflow uses npm Trusted Publishing directly;
 there is no long-lived npm token, and npm attaches provenance to the OIDC publication. Application

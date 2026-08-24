@@ -33,7 +33,6 @@ const sourcePackagePath = join(packageDirectory, "package.json");
 const releaseDirectory = join(workspaceDirectory, "dist", "release");
 const npmDirectory = join(workspaceDirectory, "dist", "npm");
 const npmRegistry = "https://registry.npmjs.org";
-const workspaceVersionPackages = ["pi-cli", "pi-napi"] as const;
 
 const packageManifestSchema = z.looseObject({
   name: z.string().min(1),
@@ -67,6 +66,15 @@ const publishedPackageSchema = stagedPackageSchema.extend({
     integrity: z.string().min(1),
     tarball: z.string().url(),
   }),
+});
+
+const cargoMetadataSchema = z.object({
+  packages: z.array(
+    z.object({
+      name: z.string().min(1),
+      manifest_path: z.string().min(1),
+    }),
+  ),
 });
 
 type PackageManifest = z.infer<typeof packageManifestSchema>;
@@ -119,12 +127,49 @@ function assertWorkspaceVersion(packagePath: string): void {
   }
 }
 
+export function workspaceVersionPackageNames(): string[] {
+  const result = runCapture("cargo", [
+    "metadata",
+    "--locked",
+    "--no-deps",
+    "--format-version",
+    "1",
+  ]);
+  if (result.status !== 0) {
+    throw new Error(`Cannot inspect Cargo workspace metadata:\n${result.stderr}`);
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(result.stdout) as unknown;
+  } catch (error) {
+    throw new Error(`Cannot parse Cargo workspace metadata: ${result.stdout}`, {
+      cause: error,
+    });
+  }
+  const parsed = cargoMetadataSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new Error(`Invalid Cargo workspace metadata: ${z.prettifyError(parsed.error)}`, {
+      cause: parsed.error,
+    });
+  }
+
+  return parsed.data.packages
+    .filter(({ manifest_path: manifestPath }) => {
+      const contents = readFileSync(manifestPath, "utf8");
+      return /^version\.workspace\s*=\s*true$/m.test(contents);
+    })
+    .map(({ name }) => name)
+    .sort();
+}
+
 export function synchronizeCargoLockWorkspaceVersions(
   contents: string,
   version: string,
+  packageNames = workspaceVersionPackageNames(),
 ): string {
   const sections = contents.split(/(?=^\[\[package\]\]\r?$)/m);
-  for (const packageName of workspaceVersionPackages) {
+  for (const packageName of packageNames) {
     const matches = sections.filter((section) =>
       new RegExp(`^name = "${packageName}"\\r?$`, "m").test(section),
     );
@@ -147,7 +192,7 @@ export function synchronizeCargoLockWorkspaceVersions(
   return sections.join("");
 }
 
-function synchronizeWorkspaceCargoLock(version: string): void {
+export function synchronizeWorkspaceCargoLock(version: string): void {
   const lockPath = join(workspaceDirectory, "Cargo.lock");
   const contents = readFileSync(lockPath, "utf8");
   const synchronized = synchronizeCargoLockWorkspaceVersions(contents, version);
@@ -892,6 +937,7 @@ function usage(): string {
     "",
     "Commands:",
     "  check [--tag vX.Y.Z]",
+    "  sync-lock",
     "  matrix",
     "  native [--release] [--target RUST_TARGET]",
     "  dist --target RUST_TARGET [--tag vX.Y.Z]",
@@ -909,6 +955,14 @@ export function main(arguments_ = process.argv.slice(2)): void {
     case "check": {
       const configuration = validateReleaseConfiguration(option(rest, "--tag"));
       process.stdout.write(`Release configuration is valid for v${configuration.version}\n`);
+      break;
+    }
+    case "sync-lock": {
+      const configuration = validateReleaseConfiguration();
+      synchronizeWorkspaceCargoLock(configuration.version);
+      process.stdout.write(
+        `Cargo.lock workspace packages are synchronized to ${configuration.version}\n`,
+      );
       break;
     }
     case "matrix":

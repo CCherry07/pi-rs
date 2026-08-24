@@ -2075,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "pi-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arboard",
  "async-trait",
@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "pi-js-package-manager"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "futures",
  "glob",
@@ -2208,7 +2208,7 @@ dependencies = [
 
 [[package]]
 name = "pi-napi"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "dotenvy",

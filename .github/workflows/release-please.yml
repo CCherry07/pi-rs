@@ -19,6 +19,10 @@ jobs:
   release-please:
     runs-on: ubuntu-22.04
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Open or update the release PR
         id: release
         uses: googleapis/release-please-action@v4
@@ -26,12 +30,27 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      # Tags created with GITHUB_TOKEN do not start another workflow. Dispatching
-      # explicitly keeps version/changelog work separate from native publication.
-      - name: Dispatch the native release workflow
-        if: steps.release.outputs.release_created == 'true'
+      # Tags created with GITHUB_TOKEN do not start another workflow. Deriving the
+      # tag from the merged manifest also recovers when Release Please creates the
+      # tag and then fails before publishing its action outputs.
+      - name: Dispatch the native release workflow when this commit was tagged
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
-        run: gh workflow run release.yml --ref main --field tag="$RELEASE_TAG"
+        run: |
+          set -euo pipefail
+          RELEASE_TAG="v$(jq -r '.["."]' .release-please-manifest.json)"
+          TAG_SHA="$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha' 2>/dev/null || true)"
+          if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+            echo "No release tag for this commit; skipping native release dispatch"
+            exit 0
+          fi
+
+          EXISTING_RUNS="$(gh run list --workflow release.yml --commit "$GITHUB_SHA" --limit 1 --json databaseId --jq 'length')"
+          if [ "$EXISTING_RUNS" != "0" ]; then
+            echo "Native release workflow already exists for $RELEASE_TAG; skipping duplicate dispatch"
+            exit 0
+          fi
+
+          gh workflow run release.yml --ref main --field tag="$RELEASE_TAG"

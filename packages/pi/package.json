@@ -33,6 +33,7 @@
     "check": "tsc --noEmit",
     "prepack": "npm run build",
     "release:check": "tsx ./scripts/release.ts check",
+    "release:sync-lock": "tsx ./scripts/release.ts sync-lock",
     "release:matrix": "tsx ./scripts/release.ts matrix",
     "release:dist": "tsx ./scripts/release.ts dist",
     "release:assemble": "tsx ./scripts/release.ts assemble",
