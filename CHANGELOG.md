@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/CCherry07/pi_rs/compare/v0.2.1...v0.3.0) (2026-08-24)
+
+
+### Features
+
+* **models:** support Pi models.json configuration ([8839680](https://github.com/CCherry07/pi_rs/commit/88396800a7ae4fca1bea3d7fb754522bea2b83c4))
+* **providers:** sync Google and Anthropic catalogs ([53685ac](https://github.com/CCherry07/pi_rs/commit/53685ac6e87e1e3556948c8c62be884c695fe50c))
+
+
+### Bug Fixes
+
+* **session:** preserve explicit custom model selections ([67b1cbf](https://github.com/CCherry07/pi_rs/commit/67b1cbfcdf86084f65eee3f2f9dc5a5676e6793b))
+
 ## [0.2.1](https://github.com/CCherry07/pi_rs/compare/v0.2.0...v0.2.1) (2026-08-23)
 
 
