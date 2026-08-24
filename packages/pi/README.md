@@ -1,157 +1,418 @@
-# pi_rs Node host / Node 宿主
+# pi CLI
 
-`@pi-rs/cli` is the Node launcher for Pi-compatible JavaScript and TypeScript extensions. Node owns
-extension discovery, `jiti` module loading, and callback execution; every CLI mode is delegated
-through NAPI to the same Rust runtime. Interactive launches use the Ratatui frontend in `pi-cli`,
-while print, JSON, plugin-management, and piped-input modes use their matching Rust paths.
+`pi` is the terminal coding-agent product built by `pi_rs`. It can inspect a repository, edit files,
+run commands, search code, manage long-running sessions, and work with multiple model providers from
+one interactive terminal interface.
 
-`@pi-rs/cli` 是 Pi 兼容 JavaScript/TypeScript extension 的 Node 启动层。Node 负责 extension
-发现、`jiti` 加载和回调执行；所有 CLI 模式都通过 NAPI 进入同一个 Rust runtime。交互模式使用
-`pi-cli` 的 Ratatui 前端，print、JSON、插件管理和管道输入使用各自对应的 Rust 路径。
+The CLI is a production Rust implementation that aims to match intentional, observable behavior in
+current Pi rather than only providing an agent-loop library. Its fullscreen TUI, one-shot output,
+NDJSON event stream, tools, sessions, model catalog, skills, and plugins all use the same runtime.
 
-## Develop / 开发运行
+## Product highlights
 
-Node 20+ and Rust 1.98+ are required. The repository pins Rust 1.98.0 through its root
-`rust-toolchain.toml`. The Node host is authored in TypeScript; development commands use `tsx`, and
-`npm run build` emits publishable JavaScript and declarations under `dist/`.
+- **Interactive coding workspace** — fullscreen Ratatui UI with streamed Markdown, syntax-highlighted
+  code, CJK/IME input, command completion, history, scrolling, mouse selection, and clipboard copy.
+- **Repository-aware agent** — built-in `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`,
+  `find`, and `ls` tools for understanding and changing real projects.
+- **Multiple providers and models** — built-in OpenAI-compatible, OpenAI Codex, Anthropic, and xAI
+  integrations, plus custom providers and models declared in `models.json`.
+- **Authentication in the product** — `/login` and `/logout` manage Pi-compatible credentials from
+  the TUI; browser/device OAuth and hidden API-key prompts are supported.
+- **Persistent Pi v4 sessions** — resume previous work, queue steering or follow-up messages, branch
+  from earlier messages, navigate the session tree, and compact long contexts.
+- **Plugin-first customization** — Rust native plugins, Pi-compatible JavaScript/TypeScript
+  extensions, skills, commands, provider hooks, and session lifecycle hooks.
+- **Project safety** — nearest-ancestor project-trust decisions gate project `.pi` resources,
+  extensions, skills, and native plugins before they load.
+- **Automation-friendly frontends** — use the same agent through the interactive TUI, final-text
+  `--print` output, or structured NDJSON `--json` events.
 
-需要 Node 20+ 和 Rust 1.98+；仓库通过根目录的 `rust-toolchain.toml` 固定 Rust 1.98.0。Node
-宿主使用 TypeScript 编写，开发命令通过 `tsx` 运行，`npm run build` 会把发布用 JavaScript 和
-声明文件生成到 `dist/`。
+## Install and start
+
+### npm package
+
+The npm package is the recommended installation when JavaScript/TypeScript extension support is
+needed. It requires Node.js 20 or newer and installs both `pi` and `pi-rs` commands.
+
+```bash
+npm install --global @pi-rs/cli
+npm list --global @pi-rs/cli --depth=0
+pi --version
+pi
+```
+
+The package selects a native optional dependency for the current OS, CPU, and Linux libc. Supported
+release targets are macOS arm64/x64, Linux glibc arm64/x64, and Windows MSVC arm64/x64. Both `pi`
+and `pi-rs` invoke the same installed launcher; `npm list --global` confirms which npm version is
+installed.
+
+### Run from source
+
+For repository contributors with access, the project pins Rust 1.98.0 through
+`rust-toolchain.toml`:
+
+```bash
+git clone https://github.com/CCherry07/pi_rs.git
+cd pi_rs
+cargo run -p pi-cli --
+```
+
+The standalone Rust binary does not embed a JavaScript VM. Use the npm/Node launcher when loading
+Pi-compatible JavaScript or TypeScript extensions.
+
+## First use
+
+Start the TUI in a project, configure a provider, and select an available model:
+
+```bash
+pi --cwd /path/to/project
+```
+
+Then run these commands inside the TUI:
+
+```text
+/login
+/model
+```
+
+`/login` opens a provider selector. API keys are read without echo; OAuth providers open their
+browser or device flow. Authentication temporarily switches out of the fullscreen UI and returns to
+the current session when complete. The session generation is rebuilt automatically so `/model`
+immediately reflects the new credentials.
+
+Authentication can also be managed before entering the TUI:
+
+```bash
+# Select a provider and authentication method interactively
+pi auth login
+
+# Start a browser/device OAuth flow directly
+pi auth login anthropic --oauth
+pi auth login openai-codex --oauth
+pi auth login xai --oauth
+
+# Prompt for an API key without echo
+pi auth login anthropic --api-key
+
+# Inspect credential metadata without printing secrets
+pi auth status
+
+# Remove only the stored credential for a provider
+pi auth logout anthropic
+```
+
+Credentials are stored in Pi-compatible `<agent-dir>/auth.json` with file locking, atomic
+replacement, and mode `0600` on Unix. `/logout` removes stored credentials only; environment
+variables and credentials declared in `models.json` remain unchanged.
+
+Environment variables are supported as an alternative, including `OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`, and `XAI_API_KEY`. Explicit
+`--api-key` takes precedence over stored credentials and provider environment variables for the
+selected run.
+
+## Product modes
+
+| Mode            | Command                         | Best for                                                    |
+| --------------- | ------------------------------- | ----------------------------------------------------------- |
+| Interactive TUI | `pi`                            | Daily coding, exploration, edits, and long-running sessions |
+| Main-screen TUI | `pi --no-fullscreen`            | Keeping output in the terminal scrollback                   |
+| Final text      | `pi --print "prompt"`           | Shell scripts and one-shot answers                          |
+| NDJSON events   | `pi --json "prompt"`            | Integrations that consume structured product events         |
+| Piped input     | `printf 'prompt' \| pi --print` | Unix pipelines and generated prompts                        |
+
+Shell shorthand works in every frontend and does not require provider credentials:
+
+```bash
+# Run a command and include its output in agent context
+pi --print '!git status --short'
+
+# Run a command without adding its output to agent context
+pi --print '!!cargo test -p pi-core'
+```
+
+## Interactive workflow
+
+While the agent is idle, `Enter` submits a new prompt. While it is working, `Enter` sends steering
+input into the active turn and `Alt+Enter` queues a follow-up for the next turn. Tool calls, provider
+errors, queued input, compaction, and session changes remain visible in the same transcript.
+
+Common commands:
+
+| Command                       | Purpose                                                               |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `/login [provider]`           | Configure OAuth or API-key authentication                             |
+| `/logout`                     | Select and remove a stored provider credential                        |
+| `/model [provider/model\|id]` | Inspect or change the active model                                    |
+| `/thinking <level>`           | Change reasoning depth for the active model                           |
+| `/new [path]`                 | Start a new session                                                   |
+| `/resume [query\|path]`       | Find and continue a previous session                                  |
+| `/compact [instructions]`     | Compact the current context, optionally with guidance                 |
+| `/fork`                       | Branch before a selected previous user message                        |
+| `/clone`                      | Clone the session at its current position                             |
+| `/tree`                       | Navigate the current session tree                                     |
+| `/name [name]`                | Show or set the session name                                          |
+| `/session`                    | Show session path, ID, messages, tokens, and cost                     |
+| `/reload`                     | Atomically rebuild plugins, models, resources, and session extensions |
+| `/trust`                      | Review or change trust for the current project                        |
+| `/copy`                       | Copy the last completed assistant response                            |
+| `/clear`                      | Clear the visible transcript without deleting the session             |
+| `/help`                       | Show the command list                                                 |
+| `/quit`                       | Exit the application                                                  |
+| `/skill:<name>`               | Invoke a discovered skill                                             |
+
+Plugin-provided commands are added to the same command palette as built-in commands and skills.
+
+Key bindings:
+
+| Key                      | Action                                                                 |
+| ------------------------ | ---------------------------------------------------------------------- |
+| `Enter`                  | Complete a selected command, submit while idle, or steer while running |
+| `Alt+Enter`              | Queue a follow-up message                                              |
+| `Ctrl+J`                 | Insert a newline                                                       |
+| `Up` / `Down`            | Select a command or browse input history                               |
+| `Tab`                    | Complete the selected command or skill                                 |
+| `PageUp` / `PageDown`    | Scroll the transcript                                                  |
+| `Ctrl+End`               | Jump back to the latest transcript content                             |
+| Mouse drag               | Select transcript text                                                 |
+| `Cmd+C` / `Ctrl+Shift+C` | Copy selected transcript text                                          |
+| `Esc`                    | Close a focused view or interrupt active work                          |
+| `Ctrl+C`                 | Close a view, clear the editor, interrupt work, or quit while idle     |
+| `Ctrl+D`                 | Quit while idle with an empty editor                                   |
+
+## Models and providers
+
+The default agent directory is `~/.pi/agent`. Override it with `PI_AGENT_DIR` or `--agent-dir`.
+Register custom providers and models in `<agent-dir>/models.json`:
+
+```jsonc
+{
+  // Comments are supported.
+  "providers": {
+    "openai-compatible": {
+      "api": "openai-completions",
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "$OPENAI_API_KEY",
+      "models": [
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o mini",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 128000,
+          "maxTokens": 16384
+        }
+      ]
+    }
+  }
+}
+```
+
+Environment references and shell-command values in model configuration are resolved only when a
+request is sent; credentials are not copied into the public model catalog. Initial model selection
+uses this priority:
+
+1. explicit `--model` / `--provider` arguments;
+2. the model restored from a session, if still available;
+3. the catalog default from `models.json`;
+4. the runtime fallback.
+
+After editing `models.json`, run `/reload`. A candidate generation is prepared and validated before
+it replaces the active generation, so invalid configuration leaves the current session working.
+
+## Sessions and context
+
+Sessions use the Pi v4 JSONL format. A new session exists in memory immediately, but its file is
+created only after the first assistant response completes. Quitting before that response, or using
+only shell shorthand, does not leave an empty resume entry.
+
+The product supports:
+
+- session discovery and `/resume`;
+- durable steering and follow-up queues;
+- branching with `/fork`, `/clone`, and `/tree`;
+- manual and automatic context compaction;
+- model and thinking-level restoration;
+- interrupted-state reduction and provider-context repair;
+- preservation of matching tool calls and tool results across persistence and replay.
+
+## Skills, resources, and project trust
+
+Global resources load from the agent directory. Project resources are discovered from the current
+project and its ancestors using Pi-compatible precedence.
+
+```text
+~/.pi/agent/
+├── auth.json
+├── models.json
+├── settings.json
+├── trust.json
+├── SYSTEM.md
+├── APPEND_SYSTEM.md
+├── skills/
+├── extensions/
+├── plugins.json
+├── plugins.lock
+└── plugins/
+
+<project>/.pi/
+├── skills/
+├── extensions/
+├── plugins.json
+├── plugins.lock
+└── plugins/
+```
+
+Project `.pi` resources are loaded only after the shared trust service approves the project.
+Interactive runs prompt when needed; `--print` and `--json` default to untrusted unless a stored
+decision or CLI flag decides otherwise. Use `--approve` / `-a` or `--no-approve` / `-na` for a
+run-local override.
+
+Like current Pi, `AGENTS.md` and `CLAUDE.md` context discovery is independent of project trust.
+Skills under `~/.agents/skills` are also supported.
+
+## Plugins and extensions
+
+### Pi JavaScript/TypeScript extensions
+
+The npm launcher discovers extensions in this order:
+
+1. trusted `<cwd>/.pi/extensions`;
+2. `<agent-dir>/extensions`;
+3. repeated `-e` / `--extension` paths.
+
+```bash
+# Installed npm launcher
+pi --cwd /path/to/project
+pi --no-extensions -e /path/to/extension.ts
+
+# Development launcher
+cd packages/pi
+npm ci
+npm run build:native
+npm start -- --cwd /path/to/project
+```
+
+Extensions can currently register tools, commands, agent hooks, `before_provider_request`, and
+session lifecycle hooks. Runtime-neutral helpers such as `defineTool`, `CONFIG_DIR_NAME`, `VERSION`,
+`getAgentDir`, and the built-in tool-result guards are available from current and legacy Pi package
+names. Capabilities that require a richer product bridge—such as JavaScript provider registration,
+custom TUI renderers, UI dialogs, and low-level response hooks—fail explicitly instead of being
+silently ignored. Extension code runs in the Node process as trusted code; it is not sandboxed.
+
+### Native Rust plugins
+
+Native plugins are version-locked dynamic libraries loaded from global manifests, trusted project
+manifests, or explicit `--plugin` paths.
+
+```bash
+pi --plugin /path/to/plugin.dylib
+pi plugin install /path/to/package
+pi plugin install https://example.com/pi-plugin-release.json
+pi plugin install registry:frontend-check@^1 \
+  --registry https://plugins.example/index.json
+pi plugin list
+pi plugin sync
+pi plugin remove <plugin-id>
+```
+
+Pass `-l` to plugin-management commands to operate on the trusted project's `.pi` configuration
+instead of the global agent directory. Repository contributors can find the native author API in
+`crates/pi-plugin-sdk/README.md` and package and registry formats in
+`crates/pi-plugin-manager/README.md`.
+
+## Development
+
+Development spans two layers: the Rust workspace owns the agent runtime and terminal product, while
+this package provides the TypeScript launcher and Pi-compatible JavaScript extension host. Node.js
+20 or newer is required; the repository pins Rust 1.98.0 through `rust-toolchain.toml`.
+
+Build the native bridge for the current machine, then start the complete Node-hosted product:
+
+```bash
+git clone https://github.com/CCherry07/pi_rs.git
+cd pi_rs/packages/pi
+npm ci
+npm run check
+npm test
+npm run build:native
+npm start -- --cwd ../..
+```
+
+`npm run build:native` compiles `pi-napi` for the current host and places the resulting `.node`
+binding in this package. Set `PI_RS_NATIVE_BINDING` to an exact `.node`, `.dylib`, `.so`, or `.dll`
+when testing a binding from another build location. Rebuild the binding after pulling Rust changes
+or changing the workspace version; an existing local `.node` file is not refreshed automatically.
+
+Useful package commands:
+
+| Command                        | Purpose                                                   |
+| ------------------------------ | --------------------------------------------------------- |
+| `npm start -- [pi arguments]`  | Run the TypeScript launcher against the local binding     |
+| `npm run check`                | Type-check the Node host without emitting files           |
+| `npm test`                     | Test discovery, loading, release logic, and host behavior |
+| `npm run test:native`          | Smoke-test the real Node → NAPI → Rust callback path      |
+| `npm run build`                | Emit publishable JavaScript and declarations to `dist/`   |
+| `npm run build:native`         | Build a debug native binding for the current host         |
+| `npm run build:native:release` | Build a release native binding for the current host       |
+
+To work on the standalone Rust CLI without the JavaScript host, run from the repository root:
+
+```bash
+cd ../..
+
+# Fullscreen TUI
+cargo run -p pi-cli --
+
+# One-shot and NDJSON modes
+cargo run -p pi-cli -- --print "summarize this repository"
+cargo run -p pi-cli -- --json "list the Rust crates"
+```
+
+Before submitting a change, run both Node checks and the workspace quality gates:
 
 ```bash
 cd packages/pi
-npm install
 npm run check
-npm run build
-npm run build:native
+npm test
 
-# Interactive Ratatui frontend with automatic extension discovery
-npm start -- --cwd /path/to/project
+cd ../..
 
-# Load an exact extension and disable discovery
-npm start -- --no-extensions -e /path/to/extension.ts
-
-# One-shot mode
-npm start -- --print "summarize this repository"
+cargo fmt --all -- --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+git diff --check
 ```
 
-Development builds create `pi-napi.<platform>-<arch>-<abi>.node` in this package (macOS has no ABI
-suffix). A release artifact can be built with `npm run build:native:release`.
-`PI_RS_NATIVE_BINDING` may point at an exact `.node`, `.dylib`, `.so`, or `.dll` during development.
+## Packaging and release
 
-开发构建会在本目录生成带平台、架构和 Linux/Windows ABI 后缀的 `.node`；
-`npm run build:native:release` 生成 release binding。开发时也可以用
-`PI_RS_NATIVE_BINDING` 指向明确的 `.node`、`.dylib`、`.so` 或 `.dll`。
-
-## Distribution / 发布
-
-Published npm installations use a small JavaScript root package plus one exact-version native
-optional package selected for the current OS, CPU, and Linux libc. The root package never embeds
-all native binaries. Supported target definitions are shared by the loader and release tooling, so
-an unsupported runtime fails with the exact missing platform package instead of a generic `dlopen`
-error.
-
-发布后的 npm 安装由一个轻量 JavaScript 根包和一个匹配当前 OS、CPU、Linux libc 的原生可选
-包组成；根包不会携带全部平台二进制。loader 与发布工具共享同一份 target 定义，不支持的
-runtime 会直接报告所需的平台包。
-
-Release commands run through one Module:
+Build a standalone archive and NAPI binding for the current target:
 
 ```bash
-# Validate Cargo/npm versions and target coverage
-npm run release:check
-
-# Build the standalone archive and NAPI artifact for this native host
-npm run release:dist -- --target aarch64-apple-darwin
-
-# After all CI target artifacts have been collected
-npm run release:assemble -- --artifacts dist/release
-npm run release:verify -- --npm-dir dist/npm
-
-# Protected workflow only: publish the verified tarballs, then verify npm itself
-npm run release:publish -- --npm-dir dist/npm
-npm run release:verify-published -- --npm-dir dist/npm
+cd packages/pi && npm ci && cd ../..
+./scripts/package-target.sh <rust-target>
 ```
 
-`release:publish` publishes every platform package before `@pi-rs/cli`; it is intended only for the
-protected release workflow. It publishes the `.tgz` files produced and smoke-tested by
-`release:assemble`, not a newly packed directory. `release:verify-published` then requires every npm
-package to have the expected identity, platform selectors, optional dependency matrix, and exact
-tarball integrity. GitHub archives are the Rust-only delivery channel and do not provide a
-JavaScript VM. The npm channel provides the Node host and JS/TS extension support.
-
-Release Please maintains a Conventional-Commit release PR that updates Cargo/npm versions and the
-changelog together. Before a locked native build, the Release Module synchronizes the generated
-`Cargo.lock` entries for the two crates that inherit the product version. Merging the PR creates a
-draft GitHub Release and explicitly dispatches the native release workflow; successful npm
-publication and registry verification publish that draft.
-
-The `@pi-rs` packages must configure npm Trusted Publishing for this repository,
-`.github/workflows/release.yml`, and the protected `npm-publish` environment. The workflow uses only
-the short-lived OIDC identity—no `NPM_TOKEN` or `NODE_AUTH_TOKEN` secret—and npm records provenance
-automatically.
-
-Release Please 会维护 Conventional Commit 驱动的 release PR，并一次性同步 Cargo/npm 版本与
-changelog。合并后先创建 draft GitHub Release，再显式触发多平台构建；所有 npm 包发布并从
-registry 校验成功后，GitHub Release 才会公开。npm 发布只使用 Trusted Publishing 的短期
-OIDC 身份，不保存长期 npm token。
-
-## Discovery and reload / 发现与重载
-
-Load order follows current Pi: trusted `<cwd>/.pi/extensions`, `<agent-dir>/extensions`, then
-repeated `-e/--extension` paths. Files may be `.ts`, `.js`, `.mts`, `.mjs`, `.cts`, or `.cjs`;
-directories may expose `index.*` or `package.json#pi.extensions`. Project-local discovery is gated
-by the shared project-trust service; explicit paths are an explicit user choice.
-
-加载顺序对齐当前 Pi：可信项目的 `<cwd>/.pi/extensions`、`<agent-dir>/extensions`、最后是重复
-传入的 `-e/--extension`。支持 TS/JS 文件、`index.*` 目录入口，以及
-`package.json#pi.extensions`。项目自动发现受统一 Project Trust 控制；显式路径视为用户的
-明确选择。
-
-`/reload` creates a new Node callback generation with `jiti` module caching disabled, converts each
-source into separate Rust `AgentPlugin`, `ProviderPlugin`, and `SessionPlugin` adapters, validates
-the entire candidate, and only then swaps the active session generation. Failed loading or
-registration leaves the old generation active. Retiring a generation aborts its active callbacks
-and releases all retained JavaScript functions.
-
-`/reload` 会关闭 `jiti` module cache，创建新的 Node callback generation；同一个源码会分别
-物化为 Rust `AgentPlugin`、`ProviderPlugin`、`SessionPlugin` adapter。完整候选代验证成功后
-才切换；失败继续使用旧代。旧代释放时会 abort 活跃回调并清空其 JavaScript function。
-
-## Compatibility surface / 兼容范围
-
-Supported today:
-
-- `registerTool`, including schema, prompt snippet/guidelines, execution mode, cancellation, and
-  final tool results;
-- `registerCommand` (normal Pi `void` handlers become handled commands; pi_rs additionally accepts
-  `{ action: "transform", text }`);
-- agent hooks backed by the Rust contract: `input`, `before_agent_start`, `agent_start/end`,
-  `turn_start/end`, `message_start/update/end`, `tool_execution_start/update/end`, `context`,
-  `tool_call`, and `tool_result`;
-- `before_provider_request` as the provider lifecycle hook;
-- all ten Rust/Pi session hooks from `session_start` through `session_tree`;
-- runtime-neutral imports `defineTool`, `CONFIG_DIR_NAME`, `VERSION`, `getAgentDir`, and the tool
-  event type guards from both current and legacy Pi package names.
-
-当前已支持工具、命令、Rust contract 已有的 agent hooks、Provider 的
-`before_provider_request`、全部十个 session hooks，以及常用的纯函数 runtime imports。
-
-Capabilities that need a richer product bridge fail explicitly instead of being ignored:
-`registerProvider`, shortcuts/flags, UI dialogs and action methods, custom renderers/Markdown
-transformers, resource/project-trust hooks, provider header/response hooks, model/thinking/bash
-events, tool progress callbacks, `prepareArguments`, image replacement, and custom message
-injection/replacement. JavaScript runs in-process with Node and is trusted code, not a sandbox.
-
-需要更丰富产品桥接的能力会明确报错，而不是静默失效：JS Provider 注册、快捷键/flag、UI
-与 action、定制 renderer、资源/Trust hooks、Provider header/response hooks、模型/思考/bash
-事件、工具进度、`prepareArguments`、图片替换和自定义消息注入。JavaScript 与 Node 同进程，
-属于可信代码，不是 sandbox。
-
-## Tests / 测试
+Target builds produce a standalone archive, a platform NAPI binding, and SHA-256 checksums under
+`dist/release/`. The target must match the current native host, for example
+`aarch64-apple-darwin` on Apple Silicon or `x86_64-unknown-linux-gnu` on x64 glibc Linux. On macOS
+or Linux, install a standalone archive with:
 
 ```bash
-npm test                 # TypeScript host discovery, loading, manifest and callback lifecycle
-npm run test:native      # real Node -> NAPI -> Rust session -> Node callback smoke test
+./scripts/install-package.sh
+
+# Or choose an exact archive and destination
+INSTALL_DIR=/usr/local/bin ./scripts/install-package.sh \
+  dist/release/pi-<version>-<rust-target>.tar.gz
 ```
+
+The npm release uses a small `@pi-rs/cli` root package plus exact-version native platform packages.
+Platform packages publish first and the root package publishes last. Release Please owns the
+version/changelog PR; the protected workflow publishes through npm Trusted Publishing OIDC and
+verifies every registry tarball before publishing the draft GitHub release. Trusted Publishing must
+be configured separately for the root package and all six platform packages, using repository
+`CCherry07/pi_rs`, workflow `release.yml`, and environment `npm-publish`. The complete pipeline is in
+`.github/workflows/release.yml`.
+
+Release artifacts currently use checksums and native smoke tests but are not
+Developer-ID/Authenticode signed or notarized. Never include `.env` files, API keys, or OAuth tokens
+in a distribution artifact.
