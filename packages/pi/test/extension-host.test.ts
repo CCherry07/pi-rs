@@ -17,6 +17,18 @@ test("rejects malformed host operations before dispatch", async () => {
     host.dispatch(JSON.stringify({ type: "invoke", invocation: { kind: "unknown" } })),
     /at invocation\.kind/,
   );
+  await assert.rejects(
+    host.dispatch(JSON.stringify({
+      type: "prepareGeneration",
+      request: {
+        cwd: "/legacy-node-discovery",
+        projectTrusted: true,
+        extensionPaths: [],
+        mode: "print",
+      },
+    })),
+    /Unrecognized key: "cwd"/,
+  );
 });
 
 test('loads a TypeScript Pi tool and retires its callback generation', async () => {
@@ -86,11 +98,8 @@ test('loads a TypeScript Pi tool and retires its callback generation', async () 
       JSON.stringify({
         type: 'prepareGeneration',
         request: {
-          cwd: root,
-          agentDir: join(root, 'agent'),
           projectTrusted: true,
-          explicitPaths: [],
-          discoverExtensions: true,
+          extensionPaths: [join(extensionDirectory, 'hello.ts')],
           mode: 'tui',
         },
       }),
@@ -157,4 +166,49 @@ test('loads a TypeScript Pi tool and retires its callback generation', async () 
 
   await host.dispatch(JSON.stringify({ type: 'retireGeneration', generationId: manifest.generationId }))
   await assert.rejects(host.dispatch(JSON.stringify({ type: 'invoke', invocation })), /generation is retired/)
+})
+
+test('provides host-owned pi-ai and typebox peer modules to managed extensions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-peers-'))
+  const extension = join(root, 'peer-extension.ts')
+  await writeFile(
+    extension,
+    `
+      import { StringEnum } from "@earendil-works/pi-ai";
+      import { Type } from "typebox";
+
+      export default function (pi: { registerTool(definition: unknown): void }) {
+        pi.registerTool({
+          name: "peer_modules",
+          description: "Verify host-owned peer modules",
+          parameters: Type.Object({ mode: StringEnum(["fast", "thorough"] as const) }),
+          async execute() {
+            return { content: [{ type: "text", text: "ok" }] };
+          }
+        });
+      }
+    `,
+  )
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(
+    await host.dispatch(
+      JSON.stringify({
+        type: 'prepareGeneration',
+        request: {
+          projectTrusted: true,
+          extensionPaths: [extension],
+          mode: 'print',
+        },
+      }),
+    ),
+  )
+
+  assert.deepEqual(manifest.agentPlugins[0]?.tools[0]?.parameters, {
+    type: 'object',
+    required: ['mode'],
+    properties: {
+      mode: { type: 'string', enum: ['fast', 'thorough'] },
+    },
+  })
 })

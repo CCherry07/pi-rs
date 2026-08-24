@@ -64,9 +64,9 @@ pub(crate) struct Cli {
     #[arg(long = "plugin", value_name = "PATH")]
     pub(crate) native_plugins: Vec<PathBuf>,
 
-    /// Load a JavaScript or TypeScript extension. May be repeated.
-    #[arg(short = 'e', long = "extension", value_name = "PATH")]
-    pub(crate) extensions: Vec<PathBuf>,
+    /// Load a local, npm, or git JavaScript/TypeScript extension source. May be repeated.
+    #[arg(short = 'e', long = "extension", value_name = "SOURCE")]
+    pub(crate) extensions: Vec<String>,
 
     /// Disable automatic JavaScript/TypeScript extension discovery.
     #[arg(long)]
@@ -91,6 +91,46 @@ pub(crate) enum CliCommand {
     Plugin {
         #[command(subcommand)]
         command: PluginCommand,
+    },
+    /// Install and configure a JavaScript extension package.
+    Install {
+        source: String,
+        /// Store the package in the current project's .pi directory.
+        #[arg(short = 'l', long = "local")]
+        local: bool,
+    },
+    /// Remove a configured JavaScript extension package.
+    #[command(alias = "uninstall")]
+    Remove {
+        source: String,
+        /// Remove the package from the current project's .pi directory.
+        #[arg(short = 'l', long = "local")]
+        local: bool,
+    },
+    /// List configured JavaScript extension packages.
+    List,
+    /// Update configured JavaScript extension packages.
+    Update {
+        /// Update the configured package matching this source.
+        source: Option<String>,
+        /// Update every configured extension package.
+        #[arg(long)]
+        extensions: bool,
+        /// Update one configured extension package.
+        #[arg(long = "extension", value_name = "SOURCE")]
+        extension: Option<String>,
+        /// Request a pi_rs self-update (not yet implemented).
+        #[arg(long = "self")]
+        self_update: bool,
+        /// Request a model catalog refresh (not handled by the JS package manager).
+        #[arg(long)]
+        models: bool,
+        /// Request all update targets (not yet implemented).
+        #[arg(long)]
+        all: bool,
+        /// Force a self-update check. Has no effect on extension updates.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -178,7 +218,7 @@ pub(crate) struct AppConfig {
     pub(crate) requested_provider: Option<String>,
     pub(crate) trust_override: Option<bool>,
     pub(crate) native_plugins: Vec<PathBuf>,
-    pub(crate) extensions: Vec<PathBuf>,
+    pub(crate) extensions: Vec<String>,
     pub(crate) discover_extensions: bool,
 }
 
@@ -376,14 +416,17 @@ mod tests {
             "-e",
             "first.ts",
             "--extension",
-            "second.js",
+            "npm:example-extension@1.0.0",
             "--no-extensions",
         ])
         .unwrap();
 
         assert_eq!(
             cli.extensions,
-            [PathBuf::from("first.ts"), PathBuf::from("second.js")]
+            [
+                "first.ts".to_string(),
+                "npm:example-extension@1.0.0".to_string()
+            ]
         );
         assert!(cli.no_extensions);
         assert_eq!(normalize_pi_arg(OsString::from("-ne")), "--no-extensions");
@@ -452,5 +495,41 @@ mod tests {
         ));
         assert!(cli.approve);
         assert!(cli.prompt.is_empty());
+    }
+
+    #[test]
+    fn javascript_package_commands_match_pi_cli_shape() {
+        let install =
+            Cli::try_parse_from(["pi", "install", "npm:example@^1", "--local", "--approve"])
+                .unwrap();
+        assert!(matches!(
+            install.command,
+            Some(CliCommand::Install {
+                ref source,
+                local: true
+            }) if source == "npm:example@^1"
+        ));
+        assert!(install.prompt.is_empty());
+
+        let remove = Cli::try_parse_from(["pi", "uninstall", "npm:example"]).unwrap();
+        assert!(matches!(remove.command, Some(CliCommand::Remove { .. })));
+
+        let update = Cli::try_parse_from([
+            "pi",
+            "update",
+            "--extension",
+            "git:github.com/example/pi-extension",
+        ])
+        .unwrap();
+        assert!(matches!(
+            update.command,
+            Some(CliCommand::Update {
+                extension: Some(ref source),
+                ..
+            }) if source == "git:github.com/example/pi-extension"
+        ));
+
+        let list = Cli::try_parse_from(["pi", "list", "--no-approve"]).unwrap();
+        assert!(matches!(list.command, Some(CliCommand::List)));
     }
 }

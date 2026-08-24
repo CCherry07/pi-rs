@@ -4,6 +4,7 @@ mod auth;
 mod clipboard;
 mod config;
 mod output;
+mod package_commands;
 mod plugin_commands;
 mod project_trust;
 mod session_factory;
@@ -111,6 +112,15 @@ async fn run(cli: Cli, js_host: Option<Arc<dyn JsPluginHost>>) -> Result<(), Str
     }
     if let Some(CliCommand::Plugin { command }) = &cli.command {
         return plugin_commands::run(&cli, &config, command).await;
+    }
+    if let Some(
+        command @ (CliCommand::Install { .. }
+        | CliCommand::Remove { .. }
+        | CliCommand::List
+        | CliCommand::Update { .. }),
+    ) = &cli.command
+    {
+        return package_commands::run(&cli, &config, command).await;
     }
     let session_exists = config.session_path.exists();
     if session_exists {

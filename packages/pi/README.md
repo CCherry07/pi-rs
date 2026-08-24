@@ -259,6 +259,7 @@ project and its ancestors using Pi-compatible precedence.
 └── plugins/
 
 <project>/.pi/
+├── settings.json
 ├── skills/
 ├── extensions/
 ├── plugins.json
@@ -278,11 +279,58 @@ Skills under `~/.agents/skills` are also supported.
 
 ### Pi JavaScript/TypeScript extensions
 
-The npm launcher discovers extensions in this order:
+The npm launcher calls the Rust `pi-js-package-manager`, which uses Pi's PackageManager discovery
+precedence:
 
-1. trusted `<cwd>/.pi/extensions`;
-2. `<agent-dir>/extensions`;
-3. repeated `-e` / `--extension` paths.
+1. repeated `-e` / `--extension` sources;
+2. local extension entries from trusted `<cwd>/.pi/settings.json`;
+3. trusted `<cwd>/.pi/extensions` auto-discovery;
+4. local extension entries from `<agent-dir>/settings.json`;
+5. `<agent-dir>/extensions` auto-discovery;
+6. extension resources from configured local, npm, or git packages.
+
+Settings may declare direct extension files/directories and distributable packages:
+
+```json
+{
+  "extensions": ["/path/to/extension.ts", "/path/to/extension-directory"],
+  "packages": [
+    "npm:@scope/pi-package@1.0.0",
+    "git:github.com/example/pi-package@v1",
+    {
+      "source": "npm:filtered-package",
+      "extensions": ["extensions/*.ts", "!extensions/legacy.ts"]
+    }
+  ]
+}
+```
+
+Package `package.json` files may declare entry points under `pi.extensions`; otherwise an
+`extensions/` convention directory is discovered. Missing npm/git packages are installed into the
+Pi-managed user, project, or temporary package root. `PI_OFFLINE=1` disables missing-package
+installation and temporary git refresh. `--no-extensions` disables settings, package, and automatic
+discovery while preserving explicit `-e` sources, including `npm:` and `git:` sources.
+
+Rust owns settings parsing, trust gating, source precedence, package filters, installation, and
+canonical-path deduplication. Node receives only the ordered extension paths and owns Jiti import
+plus JavaScript callback lifetimes.
+
+The Rust PackageManager also owns the Pi-compatible management commands:
+
+```bash
+pi install npm:example-extension
+pi install --local git:github.com/example/project-extension@v1 --approve
+pi list
+pi update --extensions
+pi update npm:example-extension
+pi remove npm:example-extension
+```
+
+User scope is the default; `--local` writes trusted `<cwd>/.pi/settings.json`. Exact npm versions
+remain pinned during updates. Ranges and unversioned npm packages update in batches per scope, and
+git packages reconcile their configured ref or upstream branch. Bare `pi update` is reserved for
+Pi self-update and is not implemented by pi_rs yet; use `--extensions` to update every configured
+JavaScript package.
 
 ```bash
 # Installed npm launcher
@@ -297,11 +345,14 @@ npm start -- --cwd /path/to/project
 ```
 
 Extensions can currently register tools, commands, agent hooks, `before_provider_request`, and
-session lifecycle hooks. Runtime-neutral helpers such as `defineTool`, `CONFIG_DIR_NAME`, `VERSION`,
-`getAgentDir`, and the built-in tool-result guards are available from current and legacy Pi package
-names. Capabilities that require a richer product bridge—such as JavaScript provider registration,
-custom TUI renderers, UI dialogs, and low-level response hooks—fail explicitly instead of being
-silently ignored. Extension code runs in the Node process as trusted code; it is not sandboxed.
+session lifecycle hooks. Managed installs intentionally leave Pi SDK and TypeBox peer dependencies
+to the host. Runtime-neutral helpers such as `defineTool`, `StringEnum`, `Type`, `CONFIG_DIR_NAME`,
+`VERSION`, `getAgentDir`, and the built-in tool-result guards are available through current and
+legacy `pi-ai` / `pi-coding-agent` package names; `typebox` and `@sinclair/typebox` resolve to the
+host's bundled runtime. Capabilities that require a richer product bridge—such as JavaScript
+provider registration, custom TUI renderers, UI dialogs, and low-level response hooks—fail
+explicitly instead of being silently ignored. Extension code runs in the Node process as trusted
+code; it is not sandboxed.
 
 ### Native Rust plugins
 

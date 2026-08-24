@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -42,13 +41,9 @@ pub struct JsGenerationManifest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JsGenerationRequest {
-    pub cwd: PathBuf,
-    pub agent_dir: PathBuf,
     pub project_trusted: bool,
     #[serde(default)]
-    pub explicit_paths: Vec<PathBuf>,
-    #[serde(default)]
-    pub discover_extensions: bool,
+    pub extension_paths: Vec<String>,
     pub mode: JsHostMode,
 }
 
@@ -76,7 +71,7 @@ pub enum JsHostOperation {
 
 #[cfg(test)]
 mod wire_tests {
-    use super::JsHostOperation;
+    use super::{JsGenerationRequest, JsHostMode, JsHostOperation};
 
     #[test]
     fn host_notification_fields_use_camel_case() {
@@ -93,6 +88,26 @@ mod wire_tests {
         .unwrap();
         assert_eq!(retire["generationId"], "generation-1");
         assert!(retire.get("generation_id").is_none());
+    }
+
+    #[test]
+    fn generation_request_contains_only_resolved_extension_paths() {
+        let prepare = serde_json::to_value(JsHostOperation::PrepareGeneration {
+            request: JsGenerationRequest {
+                project_trusted: true,
+                extension_paths: vec!["/extensions/example.ts".to_string()],
+                mode: JsHostMode::Print,
+            },
+        })
+        .unwrap();
+        let request = &prepare["request"];
+
+        assert_eq!(request["extensionPaths"][0], "/extensions/example.ts");
+        assert_eq!(request["projectTrusted"], true);
+        assert!(request.get("cwd").is_none());
+        assert!(request.get("agentDir").is_none());
+        assert!(request.get("explicitPaths").is_none());
+        assert!(request.get("discoverExtensions").is_none());
     }
 }
 

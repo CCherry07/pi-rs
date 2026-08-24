@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createJiti } from "jiti";
@@ -32,15 +33,9 @@ if (!compatibilityModulePath) {
   throw new Error(`Cannot locate the Pi extension compatibility module in ${hostDirectory}`);
 }
 const compatibilityModule: string = compatibilityModulePath;
+const require = createRequire(import.meta.url);
 
 const jsonObjectSchema = z.looseObject({});
-const packageManifestSchema = z.looseObject({
-  pi: z
-    .looseObject({
-      extensions: z.array(z.string()).optional(),
-    })
-    .optional(),
-});
 const toolResultSchema = z.looseObject({
   content: z.array(z.unknown()),
   details: z.unknown().optional(),
@@ -96,7 +91,10 @@ function parseExternal<T>(schema: z.ZodType<T>, value: unknown, description: str
 const PI_PACKAGE_NAMES = [
   "@earendil-works/pi-coding-agent",
   "@mariozechner/pi-coding-agent",
+  "@earendil-works/pi-ai",
+  "@mariozechner/pi-ai",
 ] as const;
+const TYPEBOX_PACKAGE_NAMES = ["typebox", "@sinclair/typebox"] as const;
 const AGENT_HOOKS = new Set([
   "input",
   "before_agent_start",
@@ -205,85 +203,6 @@ interface ExtensionApi {
   getFlag(): undefined;
 }
 
-function readPiManifest(directory: string): string[] | undefined {
-  const path = join(directory, "package.json");
-  if (!existsSync(path)) return undefined;
-  try {
-    const value = parseExternal(
-      packageManifestSchema,
-      parseJson(readFileSync(path, "utf8"), `${path} manifest`),
-      `${path} manifest`,
-    );
-    return value.pi?.extensions;
-  } catch {
-    return undefined;
-  }
-}
-
-function resolveExtensionEntries(directory: string): string[] | undefined {
-  const declared = readPiManifest(directory);
-  if (declared?.length) {
-    const entries = declared
-      .map((entry) => resolve(directory, entry))
-      .filter((entry) => existsSync(entry));
-    if (entries.length) return entries;
-  }
-  for (const name of ["index.ts", "index.js", "index.mts", "index.mjs", "index.cts", "index.cjs"]) {
-    const entry = join(directory, name);
-    if (existsSync(entry)) return [entry];
-  }
-  return undefined;
-}
-
-export function discoverExtensions(directory: string): string[] {
-  if (!existsSync(directory)) return [];
-  const rootEntries = resolveExtensionEntries(directory);
-  if (rootEntries) return rootEntries;
-
-  const discovered: string[] = [];
-  for (const entry of readdirSync(directory, { withFileTypes: true }).sort((left, right) =>
-    left.name.localeCompare(right.name),
-  )) {
-    if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
-    const path = join(directory, entry.name);
-    let stats;
-    try {
-      stats = entry.isSymbolicLink() ? statSync(path) : entry;
-    } catch {
-      continue;
-    }
-    if (stats.isFile() && /\.(?:[cm]?[jt]s)$/.test(entry.name)) {
-      discovered.push(path);
-    } else if (stats.isDirectory()) {
-      discovered.push(...(resolveExtensionEntries(path) ?? []));
-    }
-  }
-  return discovered;
-}
-
-function uniqueCanonicalPaths(paths: string[], cwd: string): string[] {
-  const unique = new Set<string>();
-  const result: string[] = [];
-  for (const path of paths) {
-    const absolute = isAbsolute(path) ? path : resolve(cwd, path);
-    if (!existsSync(absolute)) {
-      throw new Error(`JavaScript extension does not exist: ${absolute}`);
-    }
-    const canonical = realpathSync(absolute);
-    const entries = statSync(canonical).isDirectory()
-      ? (resolveExtensionEntries(canonical) ?? discoverExtensions(canonical))
-      : [canonical];
-    for (const entry of entries) {
-      const resolved = realpathSync(entry);
-      if (!unique.has(resolved)) {
-        unique.add(resolved);
-        result.push(resolved);
-      }
-    }
-  }
-  return result;
-}
-
 function cloneSchema(schema: unknown, toolName: string): Record<string, unknown> {
   try {
     const cloned = parseJson(JSON.stringify(schema), `JavaScript tool ${toolName} schema`);
@@ -372,15 +291,7 @@ export class ExtensionHost {
     };
     this.#generations.set(generationId, state);
     try {
-      const discovered = request.discoverExtensions
-        ? [
-            ...(request.projectTrusted
-              ? discoverExtensions(join(request.cwd, ".pi/extensions"))
-              : []),
-            ...discoverExtensions(join(request.agentDir, "extensions")),
-          ]
-        : [];
-      const paths = uniqueCanonicalPaths([...discovered, ...request.explicitPaths], request.cwd);
+      const paths = request.extensionPaths;
       const agentPlugins: AgentPluginManifest[] = [];
       const providerPlugins: ProviderPluginManifest[] = [];
       const sessionPlugins: SessionPluginManifest[] = [];
@@ -395,7 +306,12 @@ export class ExtensionHost {
           sessionHooks: [],
         };
         const api = this.#createExtensionApi(generationId, id, path, contribution);
-        const alias = Object.fromEntries(PI_PACKAGE_NAMES.map((name) => [name, compatibilityModule]));
+        const alias = {
+          ...Object.fromEntries(PI_PACKAGE_NAMES.map((name) => [name, compatibilityModule])),
+          ...Object.fromEntries(
+            TYPEBOX_PACKAGE_NAMES.map((name) => [name, require.resolve("typebox")]),
+          ),
+        };
         const jiti = createJiti(import.meta.url, {
           alias,
           moduleCache: false,

@@ -12,11 +12,8 @@ const invocationKindSchema = z.enum([
 export const toolExecutionModeSchema = z.enum(["parallel", "sequential"]);
 
 const generationRequestSchema = z.strictObject({
-  cwd: z.string(),
-  agentDir: z.string(),
   projectTrusted: z.boolean(),
-  explicitPaths: z.array(z.string()),
-  discoverExtensions: z.boolean(),
+  extensionPaths: z.array(z.string()),
   mode: hostModeSchema,
 });
 

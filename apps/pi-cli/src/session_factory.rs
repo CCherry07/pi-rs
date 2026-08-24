@@ -3,6 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pi_agent::AgentOptions;
 use pi_core::{ModelId, ProviderId};
+use pi_js_package_manager::{
+    PackageManager as JsPackageManager, ResolveRequest as JsResolveRequest,
+};
 use pi_js_plugin::{JsGenerationRequest, JsHostMode, JsPluginGeneration, JsPluginHost};
 use pi_plugin_anthropic::AnthropicPlugin;
 use pi_plugin_bash::BashPlugin;
@@ -100,13 +103,24 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             .discover()
             .map_err(|error| SessionError::Runtime(error.to_string()))?;
         let js_generation = if let Some(host) = &self.js_plugin_host {
+            let resolution = JsPackageManager::new(JsResolveRequest {
+                cwd: config.cwd.clone(),
+                agent_dir: config.agent_dir.clone(),
+                project_trusted,
+                explicit_sources: config.extensions.clone(),
+                discover_extensions: config.discover_extensions,
+            })
+            .resolve()
+            .await
+            .map_err(|error| SessionError::Runtime(error.to_string()))?;
             let manifest = host
                 .prepare_generation(JsGenerationRequest {
-                    cwd: config.cwd.clone(),
-                    agent_dir: config.agent_dir.clone(),
                     project_trusted,
-                    explicit_paths: config.extensions.clone(),
-                    discover_extensions: config.discover_extensions,
+                    extension_paths: resolution
+                        .extension_paths
+                        .into_iter()
+                        .map(|path| path.display().to_string())
+                        .collect(),
                     mode: self.js_host_mode,
                 })
                 .await
@@ -905,6 +919,9 @@ command = "fixture-command"
         let project = directory.path().join("project");
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::create_dir_all(&project).unwrap();
+        let extension = agent_dir.join("extensions/reload-fixture.ts");
+        std::fs::create_dir_all(extension.parent().unwrap()).unwrap();
+        std::fs::write(&extension, "export default function () {}\n").unwrap();
         let mut config = app_config(&agent_dir, None);
         config.cwd = project.clone();
         config.session_path = agent_dir.join("reload.jsonl");
@@ -932,7 +949,12 @@ command = "fixture-command"
                 .iter()
                 .all(|request| request.mode == JsHostMode::Tui)
         );
-        assert!(requests.iter().all(|request| request.cwd == project));
+        assert!(requests.iter().all(|request| request.project_trusted));
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.extension_paths == [extension.display().to_string()])
+        );
         drop(requests);
         drop(runtime);
         assert_eq!(*host.retired.lock().unwrap(), ["js-1", "js-2"]);

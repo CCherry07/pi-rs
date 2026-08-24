@@ -32,9 +32,10 @@ crates/pi-plugin-sdk            native plugin author interface and descriptor ty
 crates/pi-plugin-macros         agent/provider/session native export macros
 crates/pi-plugin-loader         manifest discovery, compatibility checks, and factory adapters
 crates/pi-plugin-manager        package intent/lock, Registry resolution, CAS, and activation
+crates/pi-js-package-manager     Pi-compatible JS discovery and npm/git orchestration
 crates/pi-js-plugin             typed JS manifest protocol and three Rust lifecycle adapters
 bindings/pi-napi                NAPI-RS boundary between Node callbacks and the Rust product
-packages/pi                     Node launcher, Pi extension discovery, jiti loader, and callback host
+packages/pi                     Node launcher, jiti extension loader, and callback host
 crates/pi-test-support          deterministic scripted providers and tools for tests
 plugins/providers/pi-plugin-openai        OpenAI provider plus reusable Responses wire support
 plugins/providers/pi-plugin-anthropic     Anthropic Messages, Claude Code mode, provider, and catalog
@@ -71,6 +72,7 @@ pi-runtime           -> pi-core + pi-agent + pi-prompt
 apps/pi-cli          -> pi-md + product runtimes and plugins
 apps/pi-md           -> Ratatui presentation dependencies only
 pi-plugin-manager    -> HTTP + filesystem package source adapters
+pi-js-package-manager -> filesystem + npm/git process adapters (no Node dependency)
 pi-js-plugin         -> pi-core + pi-session (no Node or terminal dependency)
 bindings/pi-napi     -> pi-js-plugin + apps/pi-cli + NAPI-RS
 packages/pi          -> Node + jiti + platform pi-napi artifact
@@ -230,19 +232,49 @@ therefore has no NAPI, Node, Jiti, or terminal dependency.
 `packages/pi` itself is authored in TypeScript, executed directly with `tsx` for development and
 compiled by `tsc` into publishable JavaScript plus declarations under `packages/pi/dist`. Zod owns
 runtime validation at the untyped Node seams: Rust host operations, generation manifests, dynamic
-extension registrations/results, package extension declarations, and native binding exports.
+extension registrations/results, and native binding exports.
 TypeScript protocol types are inferred from those schemas so runtime checks and static interfaces
 cannot drift independently.
 
 The boundary uses four generation-scoped operations encoded as JSON: `prepareGeneration`,
-`invoke`, `cancel`, and `retireGeneration`. `prepareGeneration` discovers trusted project
-extensions, global extensions, and explicit `-e` paths in current Pi order, then loads TS/JS with
-Jiti `moduleCache: false`. JavaScript functions stay in a Node-owned callback table; Rust stores
-only opaque generation and callback IDs. `invoke` crosses a weak NAPI threadsafe function and
-awaits the JavaScript Promise without blocking either the Node event loop or Tokio. Rust aborts send
-`cancel`, which aborts the callback's `AbortController`; retirement aborts all remaining work and
-drops every callback for that generation. The weak TSFN lets Node exit once the exported `runPi`
-Promise settles.
+`invoke`, `cancel`, and `retireGeneration`. Before `prepareGeneration`, `ProductSessionFactory`
+calls the deep Rust Module `pi-js-package-manager` through its
+`resolve(request) -> resolution` Interface. It merges explicit `-e` local/npm/git sources first,
+then trusted project settings entries, trusted project auto-discovery, user settings entries, user
+auto-discovery, and configured package resources in current Pi precedence. Package manifests and
+filters, ignore files, canonical-path deduplication, managed npm/git installation, custom
+`npmCommand`, and `PI_OFFLINE` are hidden behind that Interface. The Node Adapter receives only the
+ordered `extensionPaths` load list and loads TS/JS with Jiti `moduleCache: false`; it has no settings,
+source, installation, filtering, or precedence policy. JavaScript functions stay in a Node-owned
+callback table; Rust stores only opaque generation and callback IDs. `invoke` crosses a weak NAPI
+threadsafe function and awaits the JavaScript Promise without blocking either the Node event loop or Tokio.
+Rust aborts send `cancel`, which aborts the callback's `AbortController`; retirement aborts all
+remaining work and drops every callback for that generation. The weak TSFN lets Node exit once the
+exported `runPi` Promise settles.
+
+Managed npm installation deliberately uses npm's legacy peer-dependency mode, matching current Pi:
+Pi extensions commonly declare the Pi SDK and TypeBox as peers, but those modules belong to the
+running host rather than each managed package root. Before Jiti imports an extension, the Node host
+aliases current and legacy `pi-ai` / `pi-coding-agent` package names to its compatibility API and
+aliases `typebox` / `@sinclair/typebox` to its bundled TypeBox runtime. This keeps one host ABI in a
+generation and prevents npm from installing a second Pi product runtime beside an extension.
+
+The same Module exposes one management dispatcher,
+`manage(Install | Remove | Update | List) -> ManageResult`. Top-level CLI commands adapt to this
+Interface without duplicating npm/git parsing or settings policy. Install performs the physical
+operation before persisting intent; remove performs physical cleanup before deleting matching
+intent; update skips exact npm versions, batches mutable npm sources per scope, and reconciles git
+refs or upstream branches; list reports user entries before trusted project entries. Project-scope
+writes require the Rust-owned trust decision. Settings persistence merges the `packages` field into
+the latest JSON object and preserves unrelated fields.
+
+`pi-js-package-manager` is intentionally separate from the native `pi-plugin-manager`. JavaScript
+packages use mutable npm projects and git checkouts, Pi settings filters, and Jiti entry points;
+native packages use version-locked manifests, verified CAS blobs, and an activation view. JavaScript
+discovery runs while a candidate session generation is prepared, so resolution or installation
+failure preserves the published generation. As in current Pi, successful npm/git filesystem writes
+are durable package-manager side effects and are not rolled back if later extension import or
+runtime validation fails.
 
 One JavaScript source may contribute to all three systems, but the manifest partitions it into
 separate agent, provider, and session plugin adapters. No `PluginBundle` is reintroduced. Manifest
@@ -315,10 +347,11 @@ Trust-requiring resources are the current cwd's `.pi/settings.json`, `extensions
 `plugins.json`, `plugins.lock`, `skills`, `prompts`, `themes`, `SYSTEM.md`, and
 `APPEND_SYSTEM.md`, plus `.agents/skills` found from cwd toward
 the repository root. The user-level `~/.agents/skills` root is always trusted. The current runtime
-uses the decision to gate project `.pi` prompt files, project skill roots, and native plugin
-manifests; future project settings and packages must consume this same service rather than add
-local trust flags. As in Pi, `AGENTS.override.md`, `AGENTS.md`, and `CLAUDE.md` context discovery is
-not gated by project trust, and trust is not a tool sandbox.
+uses the decision to gate project `.pi` prompt files, project skill roots, project JavaScript
+settings/packages/extensions, and native plugin manifests. The Rust JavaScript PackageManager is
+called only after this decision and does not introduce a second trust store or prompt. As in Pi,
+`AGENTS.override.md`, `AGENTS.md`, and `CLAUDE.md` context discovery is not gated by project trust,
+and trust is not a tool sandbox.
 
 Filesystem tool paths follow Pi's `resolveToCwd` behavior. Relative paths resolve from the active
 cwd, while absolute paths, `~` paths, `file://` URLs, and parent-relative paths may address files

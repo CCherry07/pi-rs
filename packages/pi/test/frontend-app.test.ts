@@ -21,11 +21,8 @@ test("discovers the frontend-app TypeScript extension and invokes its callbacks"
       JSON.stringify({
         type: "prepareGeneration",
         request: {
-          cwd: projectDirectory,
-          agentDir: join(projectDirectory, ".test-agent"),
           projectTrusted: true,
-          explicitPaths: [],
-          discoverExtensions: true,
+          extensionPaths: [join(projectDirectory, ".pi/extensions/frontend-napi.ts")],
           mode: "print",
         },
       }),

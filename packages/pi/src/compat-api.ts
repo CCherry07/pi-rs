@@ -3,6 +3,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { type TUnsafe, Type } from "typebox";
+
 function packageVersion(): string {
   let directory = dirname(fileURLToPath(import.meta.url));
   for (;;) {
@@ -28,6 +30,19 @@ function packageVersion(): string {
  * erased by jiti; this shim contains only runtime-neutral helpers. */
 export const CONFIG_DIR_NAME = ".pi";
 export const VERSION = packageVersion();
+export { Type };
+
+export function StringEnum<T extends readonly string[]>(
+  values: T,
+  options?: { description?: string; default?: T[number] },
+): TUnsafe<T[number]> {
+  return Type.Unsafe<T[number]>({
+    type: "string",
+    enum: values,
+    ...(options?.description ? { description: options.description } : {}),
+    ...(options?.default ? { default: options.default } : {}),
+  });
+}
 
 export function defineTool<T>(tool: T): T {
   return tool;
