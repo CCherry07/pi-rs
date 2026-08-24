@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/CCherry07/pi-rs/compare/v0.4.0...v0.4.1) (2026-08-24)
+
+
+### Bug Fixes
+
+* **tui:** keep working indicator active during tools ([749dfae](https://github.com/CCherry07/pi-rs/commit/749dfae9c912ec863dad9ff4afe2556b7e31b709))
+
 ## [0.4.0](https://github.com/CCherry07/pi_rs/compare/v0.3.0...v0.4.0) (2026-08-24)
 
 
