@@ -145,7 +145,11 @@ test("runs the frontend-app extension through NAPI", async () => {
       events.some(isAgentStartEvent),
       `agent_start was not emitted:\n${result.stdout}`,
     );
-    assert.equal(requests.length, 1);
+    assert.equal(
+      requests.length,
+      1,
+      `provider request count did not match\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
     const providerRequest = requests[0];
     assert.ok(providerRequest);
     assert.equal(
