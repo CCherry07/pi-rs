@@ -197,13 +197,9 @@ jobs:
           name: release-bundle-${{ env.RELEASE_TAG }}
           path: dist
 
-      - name: Publish platform packages, then the root package
+      - name: Publish and verify platform packages, then the root package
         working-directory: packages/pi
         run: npm run release:publish -- --npm-dir dist/npm
-
-      - name: Verify the complete release from the public registry
-        working-directory: packages/pi
-        run: npm run release:verify-published -- --npm-dir dist/npm
 
   publish-github-release:
     needs: publish-npm

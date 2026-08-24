@@ -33,6 +33,10 @@ const sourcePackagePath = join(packageDirectory, "package.json");
 const releaseDirectory = join(workspaceDirectory, "dist", "release");
 const npmDirectory = join(workspaceDirectory, "dist", "npm");
 const npmRegistry = "https://registry.npmjs.org";
+const publishedPackagePollAttempts = 12;
+const publishedPackageInitialDelayMs = 1_000;
+const publishedPackageMaxDelayMs = 10_000;
+const sleepBuffer = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 
 const packageManifestSchema = z.looseObject({
   name: z.string().min(1),
@@ -894,20 +898,85 @@ export function assertPublishedPackageMatches(
   }
 }
 
+export interface PublishedPackagePollOptions {
+  attempts?: number;
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  query?: (name: string, version: string) => unknown;
+  sleep?: (delayMs: number) => void;
+  onRetry?: (error: unknown, attempt: number, delayMs: number) => void;
+}
+
+function sleepSynchronously(delayMs: number): void {
+  Atomics.wait(sleepBuffer, 0, 0, delayMs);
+}
+
+export function waitForPublishedPackage(
+  stagedValue: unknown,
+  expectedIntegrity: string,
+  options: PublishedPackagePollOptions = {},
+): void {
+  const staged = stagedPackageSchema.parse(stagedValue);
+  const identity = `${staged.name}@${staged.version}`;
+  const attempts = options.attempts ?? publishedPackagePollAttempts;
+  const initialDelayMs = options.initialDelayMs ?? publishedPackageInitialDelayMs;
+  const maxDelayMs = options.maxDelayMs ?? publishedPackageMaxDelayMs;
+  if (!Number.isInteger(attempts) || attempts < 1) {
+    throw new Error("Published package polling attempts must be a positive integer");
+  }
+  if (initialDelayMs < 1 || maxDelayMs < initialDelayMs) {
+    throw new Error("Published package polling delays must be positive and ordered");
+  }
+
+  const query = options.query ?? publishedPackage;
+  const sleep = options.sleep ?? sleepSynchronously;
+  const onRetry =
+    options.onRetry ??
+    ((_error: unknown, attempt: number, delayMs: number) => {
+      process.stdout.write(
+        `Waiting for ${identity} to become verifiable ` +
+          `(attempt ${attempt}/${attempts}; retrying in ${delayMs}ms)\n`,
+      );
+    });
+  let delayMs = initialDelayMs;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      assertPublishedPackageMatches(
+        staged,
+        query(staged.name, staged.version),
+        expectedIntegrity,
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) break;
+      onRetry(error, attempt, delayMs);
+      sleep(delayMs);
+      delayMs = Math.min(delayMs * 2, maxDelayMs);
+    }
+  }
+
+  throw new Error(`Published package ${identity} was not verifiable after ${attempts} attempts`, {
+    cause: lastError,
+  });
+}
+
+function verifyPublishedPackagePath(directory: string, packagePath: string): void {
+  const manifest = stagedPackageSchema.parse(
+    JSON.parse(readFileSync(join(packagePath, "package.json"), "utf8")) as unknown,
+  );
+  const tarball = npmTarballPath(directory, manifest.name, manifest.version);
+  if (!existsSync(tarball)) throw new Error(`Publish tarball does not exist: ${tarball}`);
+  waitForPublishedPackage(manifest, sha512Integrity(tarball));
+  process.stdout.write(`Verified published ${manifest.name}@${manifest.version}\n`);
+}
+
 export function verifyPublishedNpmRelease(directory = npmDirectory): void {
   verifyNpmStaging(directory);
   for (const packagePath of publishPackageDirectories(directory)) {
-    const manifest = stagedPackageSchema.parse(
-      JSON.parse(readFileSync(join(packagePath, "package.json"), "utf8")) as unknown,
-    );
-    const tarball = npmTarballPath(directory, manifest.name, manifest.version);
-    if (!existsSync(tarball)) throw new Error(`Publish tarball does not exist: ${tarball}`);
-    assertPublishedPackageMatches(
-      manifest,
-      publishedPackage(manifest.name, manifest.version),
-      sha512Integrity(tarball),
-    );
-    process.stdout.write(`Verified published ${manifest.name}@${manifest.version}\n`);
+    verifyPublishedPackagePath(directory, packagePath);
   }
 }
 
@@ -923,11 +992,13 @@ function publishNpm(arguments_: string[]): void {
     );
     if (!dryRun && packageIsPublished(manifest.name, manifest.version)) {
       process.stdout.write(`Skipping already-published ${manifest.name}@${manifest.version}\n`);
+      verifyPublishedPackagePath(directory, packagePath);
       continue;
     }
     const tarball = npmTarballPath(directory, manifest.name, manifest.version);
     if (!existsSync(tarball)) throw new Error(`Publish tarball does not exist: ${tarball}`);
     run("npm", npmCommandArguments(tarball, dryRun));
+    if (!dryRun) verifyPublishedPackagePath(directory, packagePath);
   }
 }
 

@@ -10,6 +10,7 @@ import {
   releaseMatrix,
   synchronizeCargoLockWorkspaceVersions,
   validateReleaseConfiguration,
+  waitForPublishedPackage,
   workspaceVersionPackageNames,
 } from "../scripts/release.js";
 import { VERSION } from "../src/compat-api.js";
@@ -104,6 +105,65 @@ test("registry verification requires the exact staged tarball and selectors", ()
   );
 });
 
+test("registry verification polls through npm publication propagation", () => {
+  const staged = {
+    name: "@pi-rs/cli-win32-x64-msvc",
+    version: "0.4.1",
+    os: ["win32"],
+    cpu: ["x64"],
+  };
+  const published = {
+    ...staged,
+    dist: {
+      integrity: "sha512-release",
+      tarball:
+        "https://registry.npmjs.org/@pi-rs/cli-win32-x64-msvc/-/cli-win32-x64-msvc-0.4.1.tgz",
+    },
+  };
+  const delays: number[] = [];
+  let queries = 0;
+
+  waitForPublishedPackage(staged, "sha512-release", {
+    attempts: 4,
+    initialDelayMs: 100,
+    maxDelayMs: 250,
+    query: () => {
+      queries += 1;
+      if (queries < 4) throw new Error("npm view returned E404");
+      return published;
+    },
+    sleep: (delayMs) => delays.push(delayMs),
+    onRetry: () => {},
+  });
+
+  assert.equal(queries, 4);
+  assert.deepEqual(delays, [100, 200, 250]);
+});
+
+test("registry verification fails after its bounded polling window", () => {
+  const staged = {
+    name: "@pi-rs/cli-win32-x64-msvc",
+    version: "0.4.1",
+  };
+  const delays: number[] = [];
+
+  assert.throws(
+    () =>
+      waitForPublishedPackage(staged, "sha512-release", {
+        attempts: 3,
+        initialDelayMs: 50,
+        maxDelayMs: 100,
+        query: () => {
+          throw new Error("npm view returned E404");
+        },
+        sleep: (delayMs) => delays.push(delayMs),
+        onRetry: () => {},
+      }),
+    /was not verifiable after 3 attempts/,
+  );
+  assert.deepEqual(delays, [50, 100]);
+});
+
 test("registry verification accepts npm 12 singleton view results", () => {
   const identity = "@pi-rs/cli-darwin-arm64@0.3.0";
   const published = {
@@ -174,7 +234,8 @@ test("Release Please owns version PRs and dispatches the product release workflo
     "utf8",
   );
   assert.doesNotMatch(releaseWorkflow, /NPM_TOKEN|NODE_AUTH_TOKEN/);
-  assert.match(releaseWorkflow, /release:verify-published/);
+  assert.doesNotMatch(releaseWorkflow, /release:verify-published/);
+  assert.match(releaseWorkflow, /Publish and verify platform packages, then the root package/);
   assert.match(releasePleaseWorkflow, /gh workflow run release\.yml/);
   assert.match(releasePleaseWorkflow, /if: always\(\)/);
   assert.match(releasePleaseWorkflow, /git\/ref\/tags\/\$RELEASE_TAG/);

@@ -196,8 +196,11 @@ release workflow. The dispatch derives the version tag from the merged manifest,
 tag targets the triggering commit, and skips an existing run. This both avoids duplicates and
 recovers when Release Please creates a tag but fails before exposing its action outputs. The
 explicit dispatch is required because a tag created with `GITHUB_TOKEN` does not recursively start
-another workflow. The draft becomes public only after every npm tarball is published and verified
-from the public registry.
+another workflow. The publish command polls the public registry with bounded backoff after each
+package and verifies its exact metadata and integrity before continuing. Platform packages therefore
+become verifiably public before the root package is published, and the draft GitHub Release becomes
+public only after the root package passes the same check. The standalone verification command
+remains available for manual audit and release recovery.
 
 `packages/pi/src/native-target.ts` is the one target vocabulary shared by release tooling and the
 Node loader. Supported artifacts currently cover macOS arm64/x64, Linux glibc arm64/x64, and
