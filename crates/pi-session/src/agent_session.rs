@@ -311,6 +311,8 @@ impl AgentSession {
     ) -> Result<PreparedAgentSession, SessionError> {
         let path = path.into();
         let state = runtime.agent().state();
+        let initial_model = crate::InitialModelRequest::default()
+            .requested(state.provider_id.clone(), state.model_id.as_str());
         let header = SessionHeader::new(next_unique_id("session"), runtime.cwd());
         runtime.agent().set_session_id(Some(header.id.clone()));
         let identity = session_identity(&header, path.clone());
@@ -342,7 +344,10 @@ impl AgentSession {
         );
         log.append_batch(initial_entries)?;
         let context = log.load()?.context_with_options(&options.context)?;
-        restore_runtime_context(&runtime, &context)?;
+        // A new session records the runtime's already-validated selection.
+        // Preserve it even when the model is intentionally absent from the
+        // catalog; catalog fallback applies only while restoring old state.
+        restore_runtime_context_with_request(&runtime, &context, initial_model)?;
         let activity = Arc::new(std::sync::Mutex::new(SessionActivity::default()));
         let events = AgentSessionEventHub::new(
             runtime.agent().state(),
@@ -2718,6 +2723,49 @@ mod tests {
                 "compact:1:extension summary:true".to_string(),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn new_session_preserves_a_custom_model_outside_the_catalog() {
+        struct Catalog;
+
+        impl pi_core::ProviderPlugin for Catalog {
+            fn id(&self) -> pi_core::PluginId {
+                pi_core::PluginId::new("catalog")
+            }
+
+            fn register(
+                &self,
+                context: &mut pi_core::ProviderRegisterContext<'_>,
+            ) -> pi_core::Result<()> {
+                context.register_model(pi_core::ModelSpec::new(
+                    "scripted",
+                    "registered",
+                    "Registered",
+                    "test",
+                ))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
+            .provider_plugin(Catalog)
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("unlisted"),
+                ..AgentOptions::default()
+            })
+            .build()
+            .unwrap();
+
+        let session = AgentSession::create(runtime, directory.path().join("session.jsonl"))
+            .await
+            .unwrap();
+        let state = session.runtime().agent().state();
+
+        assert_eq!(state.provider_id.as_str(), "scripted");
+        assert_eq!(state.model_id.as_str(), "unlisted");
     }
 
     #[tokio::test]

@@ -152,12 +152,11 @@ impl InitialModelResolver {
                 fallback_message: None,
             }),
             [] => {
-                if let Some(provider) = requested_provider
-                    && self
-                        .models
-                        .iter()
-                        .any(|model| eq_ignore_case(model.provider.as_str(), provider.as_str()))
-                {
+                // An explicit provider may intentionally use a model that is
+                // absent from the catalog (for example an OpenAI-compatible
+                // endpoint). The runtime validates that the provider itself
+                // is registered when the selection is applied.
+                if let Some(provider) = requested_provider {
                     return Ok(requested_selection(provider.clone(), reference));
                 }
                 Err(InitialModelResolveError::NotFound {
@@ -350,10 +349,8 @@ mod tests {
 
     #[test]
     fn explicit_provider_allows_a_custom_model_id() {
-        let resolver = InitialModelResolver::new(
-            vec![model("custom", "registered", "Registered")],
-            fallback(),
-        );
+        let resolver =
+            InitialModelResolver::new(vec![model("other", "registered", "Registered")], fallback());
 
         let selected = resolver
             .resolve(InitialModelRequest::default().requested("custom", "unlisted"))
