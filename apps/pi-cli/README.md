@@ -203,8 +203,21 @@ Register custom providers and models in `<agent-dir>/models.json`:
 ```
 
 Environment references and shell-command values in model configuration are resolved only when a
-request is sent; credentials are not copied into the public model catalog. Initial model selection
-uses this priority:
+request is sent; credentials are not copied into the public model catalog. Custom routes support
+`openai-completions`, `openai-responses`, `anthropic-messages`, and `google-generative-ai`.
+xAI-compatible Responses gateways use bearer authentication and accept an API base URL (typically
+ending in `/v1`) or a complete `/responses` `baseUrl`. Anthropic-compatible gateways accept a
+service-root, `/v1`, or complete `/v1/messages` URL and use `x-api-key`; Google routes use
+`x-goog-api-key` and the Generative AI streaming endpoint.
+
+Pi-compatible provider/model/upsert/override precedence is preserved. Model overrides support all
+catalog fields, including partial cost updates, per-key `samplingParams`, headers, and typed
+protocol `compat`. Pricing tiers use the highest matching total-input threshold for the whole
+request. Compatibility settings alter request serialization, streaming expectations, caching,
+routing, thinking, deferred tools, and session-affinity behavior rather than remaining metadata.
+Dynamic `oauth: "radius"` catalogs still require a future OAuth/remote-catalog/`pi-messages`
+provider implementation and are rejected explicitly for now.
+Initial model selection uses this priority:
 
 1. explicit `--model` / `--provider` arguments;
 2. the model restored from a session, if still available;

@@ -22,6 +22,10 @@ pub enum CoreError {
     DuplicateProviderOverride(String),
     #[error("duplicate model: {0}")]
     DuplicateModel(String),
+    #[error("duplicate model override: {0}")]
+    DuplicateModelOverride(String),
+    #[error("cannot override unknown model: {0}")]
+    ModelOverrideTargetNotFound(String),
     #[error("model {model} references unknown provider {provider}")]
     ModelProviderNotFound { provider: String, model: String },
     #[error("duplicate command name: {0}")]

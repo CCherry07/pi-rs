@@ -8,8 +8,12 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
+futures.workspace = true
 garde.workspace = true
 pi-core.workspace = true
+pi-provider.workspace = true
+pi-plugin-anthropic.workspace = true
+pi-plugin-google.workspace = true
 pi-plugin-openai.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -18,7 +22,6 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
-futures.workspace = true
 pi-agent.workspace = true
 pi-runtime.workspace = true
 tempfile = "3.21.0"

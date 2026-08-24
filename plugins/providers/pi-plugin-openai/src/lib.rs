@@ -21,3 +21,7 @@ pub use plugin::{
     openai_codex_models,
 };
 pub use provider::{OpenAiCompatibleProvider, OpenAiProvider};
+pub use request::OpenAiCompletionsCompat;
+pub use responses::{
+    OPENAI_RESPONSES_API, OpenAiResponsesCompat, OpenAiResponsesCompatibleProvider,
+};

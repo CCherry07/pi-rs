@@ -213,6 +213,26 @@ Environment variables in `apiKey`, headers, and other string settings are resolv
 request is sent. Shell-command values prefixed with `!` are also supported. Credentials are never
 copied into the public model catalog.
 
+Custom routes support all four APIs accepted by current Pi `models.json` catalogs:
+`openai-completions`, `openai-responses`, `anthropic-messages`, and `google-generative-ai`. xAI and
+other Responses-compatible gateways use `openai-responses`; their `baseUrl` may be the API base URL
+(typically ending in `/v1`) or the complete `/responses` endpoint. Anthropic-compatible routes
+accept a service root, `/v1`, or complete `/v1/messages` URL and send API keys as `x-api-key`;
+`authHeader: true` additionally sends a bearer header. Google routes use
+`<baseUrl>/models/<model>:streamGenerateContent?alt=sse` and `x-goog-api-key`.
+
+Provider, model, and `modelOverrides` layers follow Pi's merge order. Overrides cover `name`,
+`reasoning`, `thinkingLevelMap`, `input`, partial `cost`, `contextWindow`, `maxTokens`, merged
+`samplingParams`, `headers`, and protocol-specific `compat`. Cost rates are dollars per million
+tokens; the highest matching `inputTokensAbove` tier prices the whole request, including prompt
+cache reads/writes. `compat` controls the actual wire request (roles, thinking formats, token-budget
+fields, routing, caching, strict/deferred tools, session affinity, and provider-specific behavior),
+and is validated against the selected API during generation construction.
+
+The dynamic `oauth: "radius"` provider remains a separate boundary: its OAuth flow, remote catalog,
+and `pi-messages` protocol are not implemented by the static `models.json` router yet, so that
+configuration is rejected explicitly instead of being accepted without working end to end.
+
 Initial model selection uses this order:
 
 1. an explicit CLI `--model` / `--provider` request;

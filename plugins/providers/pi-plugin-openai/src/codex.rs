@@ -300,6 +300,7 @@ mod tests {
     fn builds_codex_responses_payload() {
         let request = ProviderRequest {
             model: pi_core::ModelId::new("gpt-5.5"),
+            model_spec: None,
             system_prompt: "system".to_string(),
             messages: vec![Message::User(pi_core::UserMessage {
                 content: vec![ContentBlock::Text(pi_core::TextContent::new("hello"))],
@@ -310,6 +311,7 @@ mod tests {
             max_output_tokens: Some(123),
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),
+            session_id: None,
         };
         let body = responses_request_body(&request);
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");

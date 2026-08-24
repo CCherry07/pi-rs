@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use pi_core::{PluginId, ProviderId, ProviderPlugin, ProviderRegisterContext, Result};
+use pi_core::{
+    PluginId, ProviderError, ProviderId, ProviderPlugin, ProviderRegisterContext, Result,
+};
 
 use config::{PreparedProvider, load_models_file};
 use provider::ModelsJsonProvider;
@@ -104,13 +106,30 @@ impl ProviderPlugin for ModelsPlugin {
     fn register(&self, context: &mut ProviderRegisterContext<'_>) -> Result<()> {
         for configured in &self.providers {
             let fallback = context.base_provider(&configured.id);
+            let base_models = context.base_models(&configured.id);
+            let base_ids = base_models
+                .iter()
+                .map(|model| model.id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let fallback_apis = base_models
+                .iter()
+                .map(|model| model.api.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let configured = configured
+                .compose_with_base(&base_models)
+                .map_err(ProviderError::Failure)?;
             context.register_provider_override(Arc::new(ModelsJsonProvider::new(
                 configured.clone(),
                 fallback,
+                fallback_apis,
                 Arc::clone(&self.resolver),
             )))?;
             for model in &configured.models {
-                context.register_model(model.spec.clone())?;
+                if base_ids.contains(&model.id) {
+                    context.register_model_override(model.spec.clone())?;
+                } else {
+                    context.register_model(model.spec.clone())?;
+                }
             }
         }
         Ok(())
@@ -121,7 +140,8 @@ impl ProviderPlugin for ModelsPlugin {
 mod tests {
     use super::*;
     use pi_agent::AgentOptions;
-    use pi_core::{ModelId, RegistriesBuilder};
+    use pi_core::{ModelId, ModelInput, RegistriesBuilder};
+    use pi_plugin_anthropic::AnthropicPlugin;
     use pi_runtime::{PiRuntime, SystemPrompt};
 
     fn config(name: &str) -> String {
@@ -130,6 +150,7 @@ mod tests {
               // models.json accepts comments
               "providers": {{
                 "custom": {{
+                  "name": "Custom Provider",
                   "baseUrl": "http://localhost:11434/v1",
                   "api": "openai-completions",
                   "models": [{{
@@ -176,6 +197,10 @@ mod tests {
         let spec = registries.model(&provider, &model).unwrap();
 
         assert!(registries.provider(&provider).is_some());
+        assert_eq!(
+            registries.provider_name(&provider).as_deref(),
+            Some("Custom Provider")
+        );
         assert_eq!(spec.name, "Generation 1 overridden");
         assert_eq!(spec.context_window, 32_000);
         assert_eq!(spec.max_tokens, 4_096);
@@ -183,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_api_fails_during_generation_build() {
+    fn anthropic_messages_api_registers_custom_models() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("models.json");
         std::fs::write(
@@ -199,10 +224,153 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let error = ModelsPlugin::load(ModelsPluginOptions::new(&path))
-            .err()
-            .expect("unsupported API must fail");
-        assert!(error.to_string().contains("unsupported api"));
+        let plugin = ModelsPlugin::load(ModelsPluginOptions::new(&path)).unwrap();
+        let (_, _, registries) = RegistriesBuilder::new()
+            .register_plugin_sets(Vec::new(), vec![Arc::new(plugin)])
+            .unwrap();
+        let spec = registries
+            .model(&ProviderId::new("custom"), &ModelId::new("model"))
+            .unwrap();
+
+        assert_eq!(spec.api, "anthropic-messages");
+        assert_eq!(spec.base_url.as_deref(), Some("https://example.test"));
+    }
+
+    #[test]
+    fn openai_responses_api_registers_custom_models() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("models.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "providers": {
+                "custom-xai": {
+                  "baseUrl": "https://api.x.ai/v1",
+                  "api": "openai-responses",
+                  "models": [{ "id": "grok-custom" }]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let plugin = ModelsPlugin::load(ModelsPluginOptions::new(&path)).unwrap();
+        let (_, _, registries) = RegistriesBuilder::new()
+            .register_plugin_sets(Vec::new(), vec![Arc::new(plugin)])
+            .unwrap();
+        let spec = registries
+            .model(&ProviderId::new("custom-xai"), &ModelId::new("grok-custom"))
+            .unwrap();
+
+        assert_eq!(spec.api, "openai-responses");
+        assert_eq!(spec.base_url.as_deref(), Some("https://api.x.ai/v1"));
+    }
+
+    #[test]
+    fn google_generative_ai_api_registers_custom_models() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("models.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "providers": {
+                "my-google": {
+                  "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+                  "api": "google-generative-ai",
+                  "models": [{ "id": "gemma-4-31b-it", "reasoning": true }]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let plugin = ModelsPlugin::load(ModelsPluginOptions::new(&path)).unwrap();
+        let (_, _, registries) = RegistriesBuilder::new()
+            .register_plugin_sets(Vec::new(), vec![Arc::new(plugin)])
+            .unwrap();
+        let spec = registries
+            .model(
+                &ProviderId::new("my-google"),
+                &ModelId::new("gemma-4-31b-it"),
+            )
+            .unwrap();
+
+        assert_eq!(spec.api, "google-generative-ai");
+        assert!(spec.reasoning);
+        assert_eq!(
+            spec.base_url.as_deref(),
+            Some("https://generativelanguage.googleapis.com/v1beta")
+        );
+    }
+
+    #[test]
+    fn built_in_models_receive_provider_overlays_full_overrides_and_custom_upserts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("models.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "providers": {
+                "anthropic": {
+                  "baseUrl": "https://proxy.example/v1",
+                  "compat": {
+                    "forceAdaptiveThinking": true,
+                    "supportsLongCacheRetention": true
+                  },
+                  "models": [{ "id": "custom-claude", "reasoning": true }],
+                  "modelOverrides": {
+                    "claude-sonnet-4-6": {
+                      "name": "Proxy Sonnet",
+                      "reasoning": false,
+                      "input": ["text"],
+                      "cost": { "input": 9.0 },
+                      "contextWindow": 123456,
+                      "maxTokens": 6543,
+                      "samplingParams": { "top_p": 0.8 },
+                      "compat": { "supportsLongCacheRetention": false }
+                    }
+                  }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let plugin = ModelsPlugin::load(ModelsPluginOptions::new(&path)).unwrap();
+        let (_, _, registries) = RegistriesBuilder::new()
+            .register_plugin_sets(
+                Vec::new(),
+                vec![
+                    Arc::new(AnthropicPlugin::with_api_key("test")),
+                    Arc::new(plugin),
+                ],
+            )
+            .unwrap();
+        let provider = ProviderId::new("anthropic");
+        let sonnet = registries
+            .model(&provider, &ModelId::new("claude-sonnet-4-6"))
+            .unwrap();
+        let custom = registries
+            .model(&provider, &ModelId::new("custom-claude"))
+            .unwrap();
+
+        assert_eq!(registries.model_specs().len(), 4);
+        assert_eq!(sonnet.name, "Proxy Sonnet");
+        assert!(!sonnet.reasoning);
+        assert_eq!(sonnet.input, vec![ModelInput::Text]);
+        assert_eq!(sonnet.cost.input, 9.0);
+        assert_eq!(sonnet.cost.output, 15.0);
+        assert_eq!(sonnet.context_window, 123_456);
+        assert_eq!(sonnet.max_tokens, 6_543);
+        assert_eq!(sonnet.sampling_params["top_p"], 0.8);
+        assert_eq!(
+            sonnet.compat.as_ref().unwrap()["forceAdaptiveThinking"],
+            true
+        );
+        assert_eq!(
+            sonnet.compat.as_ref().unwrap()["supportsLongCacheRetention"],
+            false
+        );
+        assert_eq!(sonnet.base_url.as_deref(), Some("https://proxy.example/v1"));
+        assert_eq!(custom.api, "anthropic-messages");
+        assert_eq!(custom.base_url.as_deref(), Some("https://proxy.example/v1"));
     }
 
     #[tokio::test]

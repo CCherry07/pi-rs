@@ -11,7 +11,7 @@ use pi_core::{
     AbortHandle, AbortSignal, AgentPlugin, AssistantMessage, CommandContext, CommandOutcome,
     CommandSpec, InputEvent, InputPatch, Message, ModelId, ModelSpec, PluginId,
     ProviderCallContext, ProviderId, ProviderPlugin, ProviderPluginDriver, ProviderRequest,
-    RegistriesBuilder, ThinkingLevel,
+    RegistriesBuilder, StreamEvent, ThinkingLevel,
 };
 use pi_prompt::{BuildSystemPromptOptions, build_system_prompt};
 use pi_resources::{ResourceDiagnostic, ResourceLoaderOptions, load_resources};
@@ -531,6 +531,10 @@ impl PiRuntime {
             .provider_statuses()
     }
 
+    pub fn provider_name(&self, provider: &ProviderId) -> Option<String> {
+        self.agent.runtime().registries().provider_name(provider)
+    }
+
     pub fn model(&self, provider: &ProviderId, model: &ModelId) -> Option<ModelSpec> {
         self.agent
             .runtime()
@@ -958,9 +962,15 @@ impl PiRuntime {
             state.model_id.clone(),
             Arc::clone(runtime.provider_plugins()),
         );
+        let model_spec = runtime
+            .registries()
+            .model(&state.provider_id, &state.model_id)
+            .cloned();
+        let model_cost = model_spec.as_ref().map(|model| model.cost.clone());
         let mut stream = provider
             .stream(
                 ProviderRequest {
+                    model_spec,
                     model: state.model_id,
                     system_prompt: request.system_prompt,
                     messages: request.messages,
@@ -969,6 +979,7 @@ impl PiRuntime {
                     max_output_tokens: request.max_output_tokens,
                     headers: Default::default(),
                     sampling_params: Default::default(),
+                    session_id: self.agent.session_id(),
                 },
                 call_context,
                 signal.child(),
@@ -985,8 +996,12 @@ impl PiRuntime {
             let Some(item) = item else {
                 break;
             };
+            let mut event = item.map_err(|error| RuntimeError::Provider(error.to_string()))?;
+            if let (Some(cost), StreamEvent::Done { usage, .. }) = (&model_cost, &mut event) {
+                usage.cost = cost.calculate(usage);
+            }
             assembler
-                .push(item.map_err(|error| RuntimeError::Provider(error.to_string()))?)
+                .push(event)
                 .map_err(|error| RuntimeError::Assembly(error.to_string()))?;
         }
         assembler

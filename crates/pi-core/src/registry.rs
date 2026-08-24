@@ -13,6 +13,7 @@ pub struct RegistriesBuilder {
     providers: HashMap<ProviderId, (PluginId, Arc<dyn Provider>)>,
     provider_overrides: HashSet<ProviderId>,
     models: HashMap<(ProviderId, ModelId), (PluginId, ModelSpec)>,
+    model_overrides: HashSet<(ProviderId, ModelId)>,
 }
 
 impl RegistriesBuilder {
@@ -88,6 +89,34 @@ impl RegistriesBuilder {
         Ok(())
     }
 
+    pub(crate) fn models_for_provider(&self, provider: &ProviderId) -> Vec<ModelSpec> {
+        let mut models = self
+            .models
+            .iter()
+            .filter(|((candidate, _), _)| candidate == provider)
+            .map(|(_, (_, model))| model.clone())
+            .collect::<Vec<_>>();
+        models.sort_by(|left, right| left.id.cmp(&right.id));
+        models
+    }
+
+    pub(crate) fn register_model_override(
+        &mut self,
+        owner: PluginId,
+        model: ModelSpec,
+    ) -> Result<()> {
+        let key = (model.provider.clone(), model.id.clone());
+        let display = format!("{}/{}", model.provider, model.id);
+        if !self.models.contains_key(&key) {
+            return Err(CoreError::ModelOverrideTargetNotFound(display));
+        }
+        if !self.model_overrides.insert(key.clone()) {
+            return Err(CoreError::DuplicateModelOverride(display));
+        }
+        self.models.insert(key, (owner, model));
+        Ok(())
+    }
+
     pub fn register_plugins(
         mut self,
         plugins: Vec<Arc<dyn AgentPlugin>>,
@@ -157,6 +186,10 @@ impl FrozenRegistries {
 
     pub fn provider(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
         self.models.provider(id)
+    }
+
+    pub fn provider_name(&self, id: &ProviderId) -> Option<String> {
+        self.models.provider_name(id)
     }
 
     pub fn has_providers(&self) -> bool {

@@ -222,6 +222,7 @@ struct AgentInner {
     listeners: Arc<RwLock<RegisteredListeners>>,
     next_subscription: AtomicU64,
     runtime: RwLock<Arc<AgentRuntime>>,
+    session_id: RwLock<Option<String>>,
     config: AgentOptions,
 }
 
@@ -241,6 +242,22 @@ impl AgentMessageQueues for QueueAdapter {
 }
 
 impl Agent {
+    pub fn set_session_id(&self, session_id: Option<String>) {
+        *self
+            .inner
+            .session_id
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = session_id;
+    }
+
+    pub fn session_id(&self) -> Option<String> {
+        self.inner
+            .session_id
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     pub fn downgrade(&self) -> WeakAgent {
         WeakAgent {
             inner: Arc::downgrade(&self.inner),
@@ -288,6 +305,7 @@ impl Agent {
                 listeners: Arc::new(RwLock::new(Vec::new())),
                 next_subscription: AtomicU64::new(1),
                 runtime: RwLock::new(runtime),
+                session_id: RwLock::new(None),
                 config: options,
             }),
         }
@@ -594,6 +612,7 @@ impl Agent {
             max_tool_iterations: self.inner.config.max_tool_iterations,
             max_parallel_tools: self.inner.config.max_parallel_tools,
             cwd: self.inner.config.cwd.clone(),
+            session_id: self.session_id(),
         };
         let queue_adapter: Arc<dyn AgentMessageQueues> = Arc::new(QueueAdapter {
             steering: Arc::clone(&self.inner.steering),

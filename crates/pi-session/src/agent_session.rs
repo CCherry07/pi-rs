@@ -312,6 +312,7 @@ impl AgentSession {
         let path = path.into();
         let state = runtime.agent().state();
         let header = SessionHeader::new(next_unique_id("session"), runtime.cwd());
+        runtime.agent().set_session_id(Some(header.id.clone()));
         let identity = session_identity(&header, path.clone());
         let session_plugin_driver = Arc::new(options.plugins.build(identity)?);
         let log = SessionLog::create_deferred(path, header)?;
@@ -436,6 +437,9 @@ impl AgentSession {
         options: AgentSessionOptions,
     ) -> Result<PreparedAgentSession, SessionError> {
         let recovered_queue = recover_interrupted_state(&log, &document)?;
+        runtime
+            .agent()
+            .set_session_id(Some(document.header.id.clone()));
         let identity = session_identity(&document.header, log.path().to_path_buf());
         let session_plugin_driver = Arc::new(options.plugins.build(identity)?);
         let context = document.context_with_options(&options.context)?;

@@ -31,6 +31,10 @@ impl ModelRuntime {
             .map(|(_, provider)| Arc::clone(provider))
     }
 
+    pub fn provider_name(&self, id: &ProviderId) -> Option<String> {
+        self.providers.get(id).map(|(_, provider)| provider.name())
+    }
+
     pub fn has_providers(&self) -> bool {
         !self.providers.is_empty()
     }

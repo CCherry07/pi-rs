@@ -5,8 +5,8 @@ use futures::StreamExt;
 use pi_core::{
     AbortSignal, AgentEvent, AssistantMessage, ContentBlock, FrozenRegistries, Message, ModelId,
     PluginDriver, ProviderCallContext, ProviderId, ProviderPluginDriver, ProviderRequest, RunId,
-    StopReason, TextContent, ThinkingLevel, ToolExecutionMode, ToolResult, ToolResultMessage,
-    Usage,
+    StopReason, StreamEvent, TextContent, ThinkingLevel, ToolExecutionMode, ToolResult,
+    ToolResultMessage, Usage,
 };
 
 use crate::{AgentEventSink, StreamAssembler, ToolScheduler};
@@ -45,6 +45,7 @@ pub struct AgentLoopConfig {
     pub max_tool_iterations: usize,
     pub max_parallel_tools: usize,
     pub cwd: PathBuf,
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -419,8 +420,13 @@ async fn stream_assistant_response(
         .context(run_id, &config.cwd, &signal, context.messages.clone())
         .await
         .map_err(|error| AgentLoopError::Event(error.to_string()))?;
+    let model_spec = registries
+        .model(&config.provider_id, &config.model_id)
+        .cloned();
+    let model_cost = model_spec.as_ref().map(|model| model.cost.clone());
     let request = ProviderRequest {
         model: config.model_id.clone(),
+        model_spec,
         system_prompt: context.system_prompt.clone(),
         messages: request_messages,
         tools,
@@ -428,6 +434,7 @@ async fn stream_assistant_response(
         max_output_tokens: None,
         headers: Default::default(),
         sampling_params: Default::default(),
+        session_id: config.session_id.clone(),
     };
 
     let call_context = ProviderCallContext::new(
@@ -471,7 +478,7 @@ async fn stream_assistant_response(
         let Some(item) = item else {
             break;
         };
-        let stream_event = match item {
+        let mut stream_event = match item {
             Ok(event) => event,
             Err(error) => {
                 let message = assembler.failure_message(StopReason::Error, error.to_string());
@@ -501,6 +508,9 @@ async fn stream_assistant_response(
                 return Ok(message);
             }
         };
+        if let (Some(cost), StreamEvent::Done { usage, .. }) = (&model_cost, &mut stream_event) {
+            usage.cost = cost.calculate(usage);
+        }
         let update = match assembler.push(stream_event) {
             Ok(update) => update,
             Err(error) => {

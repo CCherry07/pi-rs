@@ -23,6 +23,7 @@ members = [
     "plugins/providers/pi-plugin-anthropic",
     "plugins/providers/pi-plugin-openai",
     "plugins/providers/pi-plugin-xai",
+    "plugins/providers/pi-plugin-google",
     "crates/pi-tool-support",
     "plugins/tools/pi-plugin-read",
     "plugins/tools/pi-plugin-write",
@@ -75,6 +76,7 @@ pi-plugin-models = { path = "plugins/providers/pi-plugin-models" }
 pi-plugin-anthropic = { path = "plugins/providers/pi-plugin-anthropic" }
 pi-plugin-openai = { path = "plugins/providers/pi-plugin-openai" }
 pi-plugin-xai = { path = "plugins/providers/pi-plugin-xai" }
+pi-plugin-google = { path = "plugins/providers/pi-plugin-google" }
 pi-tool-support = { path = "crates/pi-tool-support" }
 pi-plugin-read = { path = "plugins/tools/pi-plugin-read" }
 pi-plugin-write = { path = "plugins/tools/pi-plugin-write" }

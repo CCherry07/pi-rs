@@ -9,16 +9,19 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use messages::{AnthropicMode, request_body, stream as messages_stream};
+use messages::{AnthropicMode, compatibility, request_body, stream as messages_stream};
 use pi_core::{
     AbortSignal, ModelCost, ModelInput, ModelSpec, PluginId, Provider, ProviderAvailability,
     ProviderCallContext, ProviderError, ProviderId, ProviderPlugin, ProviderRegisterContext,
     ProviderRequest, ProviderStream,
 };
 use pi_provider::{HttpTransport, ReqwestTransport, TransportError, collect_body_limited};
+use serde_json::json;
+
+pub use messages::AnthropicMessagesCompat;
 
 const PROVIDER_ID: &str = "anthropic";
-const API_NAME: &str = "anthropic-messages";
+pub const ANTHROPIC_MESSAGES_API: &str = "anthropic-messages";
 const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 
 #[derive(Clone)]
@@ -26,6 +29,44 @@ enum AnthropicCredential {
     ApiKey(String),
     Bearer(String),
     ClaudeCodeOAuth(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct AnthropicCompatibleConfig {
+    pub provider_id: ProviderId,
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub headers: BTreeMap<String, String>,
+}
+
+impl AnthropicCompatibleConfig {
+    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self {
+            provider_id: ProviderId::new("anthropic-compatible"),
+            base_url: base_url.into(),
+            api_key: Some(api_key.into()),
+            headers: BTreeMap::new(),
+        }
+    }
+
+    pub fn without_api_key(base_url: impl Into<String>) -> Self {
+        Self {
+            provider_id: ProviderId::new("anthropic-compatible"),
+            base_url: base_url.into(),
+            api_key: None,
+            headers: BTreeMap::new(),
+        }
+    }
+
+    pub fn provider_id(mut self, id: impl Into<ProviderId>) -> Self {
+        self.provider_id = id.into();
+        self
+    }
+
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(name.into(), value.into());
+        self
+    }
 }
 
 /// Independent Anthropic provider plugin with Claude Code OAuth-token request shaping.
@@ -83,6 +124,44 @@ impl ProviderPlugin for AnthropicPlugin {
 pub struct AnthropicProvider {
     credential: Option<AnthropicCredential>,
     transport: Arc<dyn HttpTransport>,
+}
+
+pub struct AnthropicCompatibleProvider {
+    config: AnthropicCompatibleConfig,
+    transport: Arc<dyn HttpTransport>,
+}
+
+impl AnthropicCompatibleProvider {
+    pub fn new(config: AnthropicCompatibleConfig) -> Result<Self, ProviderError> {
+        Self::with_transport(config, Arc::new(ReqwestTransport::new()))
+    }
+
+    pub fn with_transport(
+        config: AnthropicCompatibleConfig,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Result<Self, ProviderError> {
+        validate_compatible_config(&config)?;
+        Ok(Self { config, transport })
+    }
+
+    pub(crate) fn endpoint(&self) -> String {
+        messages_endpoint(&self.config.base_url)
+    }
+
+    fn headers(&self, request: &ProviderRequest) -> BTreeMap<String, String> {
+        let mut headers = self.config.headers.clone();
+        insert_header(&mut headers, "Accept", "text/event-stream");
+        insert_header(&mut headers, "Content-Type", "application/json");
+        insert_header(&mut headers, "anthropic-version", "2023-06-01");
+        if let Some(api_key) = &self.config.api_key {
+            insert_header(&mut headers, "x-api-key", api_key);
+        }
+        apply_compat_headers(&mut headers, request);
+        for (name, value) in &request.headers {
+            insert_header(&mut headers, name, value);
+        }
+        headers
+    }
 }
 
 impl AnthropicProvider {
@@ -143,6 +222,7 @@ impl AnthropicProvider {
                 );
             }
         }
+        apply_compat_headers(&mut headers, request);
         for (name, value) in &request.headers {
             insert_header(&mut headers, name, value);
         }
@@ -171,53 +251,83 @@ impl Provider for AnthropicProvider {
         signal: AbortSignal,
     ) -> Result<ProviderStream, ProviderError> {
         let headers = self.headers(&request)?;
-        let payload = context
-            .before_provider_request(
-                &signal,
-                request_body(
-                    &request,
-                    if self.is_oauth() {
-                        AnthropicMode::ClaudeCode
-                    } else {
-                        AnthropicMode::Standard
-                    },
-                ),
-            )
-            .await?;
-        let response = self
-            .transport
-            .post_json(ENDPOINT, &headers, &payload, signal.clone())
-            .await
-            .map_err(map_transport_error)?;
-        if !(200..300).contains(&response.status) {
-            let status = response.status;
-            let body = collect_body_limited(response.body, 64 * 1024)
-                .await
-                .map_err(map_transport_error)?;
-            return Err(ProviderError::Failure(format!("HTTP {status}: {body}")));
-        }
-        if response
-            .content_type
-            .as_deref()
-            .is_some_and(|value| !value.to_ascii_lowercase().contains("text/event-stream"))
-        {
-            return Err(ProviderError::Protocol(format!(
-                "unexpected Content-Type {:?}; expected text/event-stream",
-                response.content_type.as_deref().unwrap_or("<missing>")
-            )));
-        }
-        Ok(messages_stream(
+        let mode = if self.is_oauth() {
+            AnthropicMode::ClaudeCode
+        } else {
+            AnthropicMode::Standard
+        };
+        let endpoint = request
+            .model_spec
+            .as_ref()
+            .and_then(|model| model.base_url.as_deref())
+            .map(messages_endpoint)
+            .unwrap_or_else(|| ENDPOINT.to_string());
+        stream_messages(
+            &self.transport,
             ProviderId::new(PROVIDER_ID),
-            request.model,
-            API_NAME,
-            response.body,
+            &endpoint,
+            headers,
+            request.model.clone(),
+            request,
+            context,
             signal,
-            if self.is_oauth() {
-                AnthropicMode::ClaudeCode
-            } else {
-                AnthropicMode::Standard
-            },
-        ))
+            mode,
+        )
+        .await
+    }
+}
+
+fn messages_endpoint(base: &str) -> String {
+    let base = base.trim();
+    let suffix_start = [base.find('?'), base.find('#')]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(base.len());
+    let (path, suffix) = base.split_at(suffix_start);
+    let path = path.trim_end_matches('/');
+    if path.ends_with("/messages") {
+        format!("{path}{suffix}")
+    } else if path.ends_with("/v1") {
+        format!("{path}/messages{suffix}")
+    } else {
+        format!("{path}/v1/messages{suffix}")
+    }
+}
+
+#[async_trait]
+impl Provider for AnthropicCompatibleProvider {
+    fn id(&self) -> ProviderId {
+        self.config.provider_id.clone()
+    }
+
+    fn availability(&self) -> ProviderAvailability {
+        if self.config.api_key.is_some() {
+            ProviderAvailability::Available
+        } else {
+            ProviderAvailability::MissingCredentials
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        context: ProviderCallContext,
+        signal: AbortSignal,
+    ) -> Result<ProviderStream, ProviderError> {
+        let headers = self.headers(&request);
+        stream_messages(
+            &self.transport,
+            self.config.provider_id.clone(),
+            &self.endpoint(),
+            headers,
+            request.model.clone(),
+            request,
+            context,
+            signal,
+            AnthropicMode::Standard,
+        )
+        .await
     }
 }
 
@@ -267,7 +377,7 @@ fn model(
     cache_read: f64,
     cache_write: f64,
 ) -> ModelSpec {
-    let mut model = ModelSpec::new(PROVIDER_ID, id, name, API_NAME);
+    let mut model = ModelSpec::new(PROVIDER_ID, id, name, ANTHROPIC_MESSAGES_API);
     model.base_url = Some("https://api.anthropic.com".to_string());
     model.reasoning = true;
     model.input = vec![ModelInput::Text, ModelInput::Image];
@@ -280,6 +390,12 @@ fn model(
     };
     model.context_window = context;
     model.max_tokens = output;
+    model.compat = Some(json!({
+        "forceAdaptiveThinking": true,
+        "supportsEagerToolInputStreaming": true,
+        "supportsStrictTools": true,
+        "supportsToolReferences": !id.contains("haiku")
+    }));
     model
 }
 
@@ -287,6 +403,68 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_messages(
+    transport: &Arc<dyn HttpTransport>,
+    provider_id: ProviderId,
+    endpoint: &str,
+    headers: BTreeMap<String, String>,
+    model: pi_core::ModelId,
+    request: ProviderRequest,
+    context: ProviderCallContext,
+    signal: AbortSignal,
+    mode: AnthropicMode,
+) -> Result<ProviderStream, ProviderError> {
+    let payload = context
+        .before_provider_request(&signal, request_body(&request, mode))
+        .await?;
+    let response = transport
+        .post_json(endpoint, &headers, &payload, signal.clone())
+        .await
+        .map_err(map_transport_error)?;
+    if !(200..300).contains(&response.status) {
+        let status = response.status;
+        let body = collect_body_limited(response.body, 64 * 1024)
+            .await
+            .map_err(map_transport_error)?;
+        return Err(ProviderError::Failure(format!("HTTP {status}: {body}")));
+    }
+    if response
+        .content_type
+        .as_deref()
+        .is_some_and(|value| !value.to_ascii_lowercase().contains("text/event-stream"))
+    {
+        return Err(ProviderError::Protocol(format!(
+            "unexpected Content-Type {:?}; expected text/event-stream",
+            response.content_type.as_deref().unwrap_or("<missing>")
+        )));
+    }
+    Ok(messages_stream(
+        provider_id,
+        model,
+        ANTHROPIC_MESSAGES_API,
+        response.body,
+        signal,
+        mode,
+    ))
+}
+
+fn validate_compatible_config(config: &AnthropicCompatibleConfig) -> Result<(), ProviderError> {
+    if config.base_url.trim().is_empty() {
+        return Err(ProviderError::Failure(
+            "base URL cannot be empty".to_string(),
+        ));
+    }
+    if config
+        .api_key
+        .as_ref()
+        .is_some_and(|key| key.contains(['\r', '\n']))
+    {
+        return Err(ProviderError::Failure("invalid API key".to_string()));
+    }
+    Ok(())
 }
 
 fn insert_header(headers: &mut BTreeMap<String, String>, name: &str, value: &str) {
@@ -300,6 +478,31 @@ fn insert_header(headers: &mut BTreeMap<String, String>, name: &str, value: &str
     headers.insert(name.to_string(), value.to_string());
 }
 
+fn apply_compat_headers(headers: &mut BTreeMap<String, String>, request: &ProviderRequest) {
+    let compat = compatibility(request);
+    if !request.tools.is_empty() && !compat.supports_eager_tool_input_streaming {
+        let beta = "fine-grained-tool-streaming-2025-05-14";
+        let current = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+            .map(|(_, value)| value.as_str())
+            .unwrap_or_default();
+        if !current.split(',').any(|value| value.trim() == beta) {
+            let value = if current.is_empty() {
+                beta.to_string()
+            } else {
+                format!("{current},{beta}")
+            };
+            insert_header(headers, "anthropic-beta", &value);
+        }
+    }
+    if compat.send_session_affinity_headers
+        && let Some(session_id) = &request.session_id
+    {
+        insert_header(headers, "x-session-affinity", session_id);
+    }
+}
+
 fn map_transport_error(error: TransportError) -> ProviderError {
     match error {
         TransportError::Aborted => ProviderError::Aborted,
@@ -309,8 +512,50 @@ fn map_transport_error(error: TransportError) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
-    use pi_core::ModelId;
+    use pi_core::{AbortHandle, ModelId, ThinkingLevel};
+    use pi_provider::{HttpResponse, TransportError};
+    use serde_json::Value;
+
+    #[derive(Default)]
+    struct CapturedRequest {
+        url: String,
+        headers: BTreeMap<String, String>,
+        body: Option<Value>,
+    }
+
+    #[derive(Default)]
+    struct CapturingTransport {
+        request: Mutex<CapturedRequest>,
+    }
+
+    #[async_trait]
+    impl HttpTransport for CapturingTransport {
+        async fn post_json(
+            &self,
+            url: &str,
+            headers: &BTreeMap<String, String>,
+            body: &Value,
+            _signal: AbortSignal,
+        ) -> Result<HttpResponse, TransportError> {
+            *self
+                .request
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = CapturedRequest {
+                url: url.to_string(),
+                headers: headers.clone(),
+                body: Some(body.clone()),
+            };
+            Ok(HttpResponse {
+                status: 200,
+                content_type: Some("text/event-stream".to_string()),
+                headers: Vec::new(),
+                body: Box::pin(futures::stream::empty()),
+            })
+        }
+    }
 
     #[test]
     fn catalog_contains_current_claude_models() {
@@ -321,5 +566,76 @@ mod tests {
                 .any(|model| model.id == ModelId::new("claude-sonnet-4-6")
                     && model.context_window == 1_000_000)
         );
+    }
+
+    #[test]
+    fn compatible_endpoint_accepts_root_v1_and_full_urls() {
+        let root = AnthropicCompatibleProvider::new(AnthropicCompatibleConfig::without_api_key(
+            "https://example.test",
+        ))
+        .unwrap();
+        assert_eq!(root.endpoint(), "https://example.test/v1/messages");
+
+        let versioned = AnthropicCompatibleProvider::new(
+            AnthropicCompatibleConfig::without_api_key("https://example.test/v1"),
+        )
+        .unwrap();
+        assert_eq!(versioned.endpoint(), "https://example.test/v1/messages");
+
+        let full = AnthropicCompatibleProvider::new(AnthropicCompatibleConfig::without_api_key(
+            "https://example.test/v1/messages?region=cn",
+        ))
+        .unwrap();
+        assert_eq!(
+            full.endpoint(),
+            "https://example.test/v1/messages?region=cn"
+        );
+    }
+
+    #[tokio::test]
+    async fn compatible_provider_sends_anthropic_headers_and_payload() {
+        let transport = Arc::new(CapturingTransport::default());
+        let provider = AnthropicCompatibleProvider::with_transport(
+            AnthropicCompatibleConfig::new("https://example.test/v1", "configured-key")
+                .provider_id("byteintl")
+                .header("X-Provider", "provider"),
+            transport.clone(),
+        )
+        .unwrap();
+        let request = ProviderRequest {
+            model: ModelId::new("custom-claude"),
+            model_spec: None,
+            system_prompt: "system".to_string(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            thinking_level: ThinkingLevel::Off,
+            max_output_tokens: Some(4_096),
+            headers: BTreeMap::from([
+                ("x-api-key".to_string(), "request-key".to_string()),
+                ("X-Request".to_string(), "request".to_string()),
+            ]),
+            sampling_params: BTreeMap::new(),
+            session_id: None,
+        };
+        let context = ProviderCallContext::without_plugins(
+            "/project",
+            ProviderId::new("byteintl"),
+            ModelId::new("custom-claude"),
+        );
+        let (_, signal) = AbortHandle::new();
+
+        let _stream = provider.stream(request, context, signal).await.unwrap();
+
+        let captured = transport
+            .request
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(captured.url, "https://example.test/v1/messages");
+        assert_eq!(captured.headers["x-api-key"], "request-key");
+        assert_eq!(captured.headers["anthropic-version"], "2023-06-01");
+        assert_eq!(captured.headers["X-Provider"], "provider");
+        assert_eq!(captured.headers["X-Request"], "request");
+        assert_eq!(captured.body.as_ref().unwrap()["model"], "custom-claude");
+        assert_eq!(captured.body.as_ref().unwrap()["max_tokens"], 4_096);
     }
 }

@@ -10,7 +10,7 @@ use pi_core::{
     ProviderRequest, ProviderStream,
 };
 use pi_plugin_openai::responses::{
-    input_items, stream as responses_stream, tools as response_tools,
+    request_body as responses_request_body, stream as responses_stream,
 };
 use pi_provider::{HttpTransport, ReqwestTransport, TransportError, collect_body_limited};
 use serde_json::{Value, json};
@@ -123,14 +123,15 @@ impl Provider for XAiProvider {
         let payload = context
             .before_provider_request(&signal, xai_request_body(&request))
             .await?;
+        let endpoint = request
+            .model_spec
+            .as_ref()
+            .and_then(|model| model.base_url.as_deref())
+            .map(responses_endpoint)
+            .unwrap_or_else(|| format!("{BASE_URL}/responses"));
         let response = self
             .transport
-            .post_json(
-                &format!("{BASE_URL}/responses"),
-                &headers,
-                &payload,
-                signal.clone(),
-            )
+            .post_json(&endpoint, &headers, &payload, signal.clone())
             .await
             .map_err(map_transport_error)?;
         if !(200..300).contains(&response.status) {
@@ -162,31 +163,21 @@ impl Provider for XAiProvider {
 }
 
 fn xai_request_body(request: &ProviderRequest) -> Value {
-    let mut input = Vec::new();
-    if !request.system_prompt.is_empty() {
-        input.push(json!({"role": "developer", "content": request.system_prompt}));
-    }
-    input.extend(input_items(&request.messages));
-    let tools = response_tools(&request.tools);
-    let mut payload = json!({
-        "model": request.model.as_str(), "input": input, "stream": true, "store": false,
-        "include": ["reasoning.encrypted_content"]
-    });
-    if !tools.is_empty() {
-        payload["tools"] = Value::Array(tools);
-        payload["tool_choice"] = Value::String("auto".to_string());
+    let mut payload = responses_request_body(request);
+    payload["include"] = json!(["reasoning.encrypted_content"]);
+    if payload.get("tools").is_some() {
         payload["parallel_tool_calls"] = Value::Bool(true);
     }
-    if request.thinking_level != pi_core::ThinkingLevel::Off {
-        payload["reasoning"] = json!({"effort": request.thinking_level.as_str()});
-    }
-    if let Some(max_tokens) = request.max_output_tokens {
-        payload["max_output_tokens"] = json!(max_tokens.max(16));
-    }
-    if let Value::Object(payload) = &mut payload {
-        payload.extend(request.sampling_params.clone());
-    }
     payload
+}
+
+fn responses_endpoint(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if base.ends_with("/responses") {
+        base.to_string()
+    } else {
+        format!("{base}/responses")
+    }
 }
 
 pub fn xai_models() -> Vec<ModelSpec> {
@@ -282,6 +273,9 @@ mod tests {
     fn payload_uses_xai_responses_shape() {
         let request = ProviderRequest {
             model: ModelId::new("grok-4.6"),
+            model_spec: xai_models()
+                .into_iter()
+                .find(|model| model.id == ModelId::new("grok-4.6")),
             system_prompt: "system".to_string(),
             messages: vec![Message::User(UserMessage::text("hello", 0))],
             tools: Vec::new(),
@@ -289,6 +283,7 @@ mod tests {
             max_output_tokens: Some(8),
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),
+            session_id: None,
         };
         let payload = xai_request_body(&request);
         assert_eq!(payload["input"][0]["role"], "developer");

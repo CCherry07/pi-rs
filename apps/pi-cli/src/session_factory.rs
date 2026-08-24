@@ -681,6 +681,7 @@ command = "fixture-command"
                 "catalog-provider": {
                   "baseUrl": "https://catalog.example/v1",
                   "api": "openai-completions",
+                  "apiKey": "test-key",
                   "models": [
                     { "id": "catalog-first", "name": "Catalog First" },
                     { "id": "catalog-requested", "name": "Catalog Requested" }
@@ -714,6 +715,7 @@ command = "fixture-command"
                 "catalog-provider": {
                   "baseUrl": "https://catalog.example/v1",
                   "api": "openai-completions",
+                  "apiKey": "test-key",
                   "models": [
                     { "id": "catalog-first" },
                     { "id": "catalog-requested" }
@@ -883,6 +885,7 @@ command = "fixture-command"
                 "catalog-provider": {
                   "baseUrl": "https://catalog.example/v1",
                   "api": "openai-completions",
+                  "apiKey": "test-key",
                   "models": [
                     { "id": "alpha" },
                     { "id": "beta" }

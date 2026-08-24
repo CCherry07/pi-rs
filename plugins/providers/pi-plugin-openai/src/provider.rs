@@ -13,10 +13,10 @@ use pi_provider::{
 };
 
 use crate::config::{OpenAiCompatibleConfig, OpenAiConfig, validate_config};
-use crate::request::request_body;
+use crate::request::{ResolvedOpenAiCompletionsCompat, affinity_headers, request_body};
 use crate::stream::{ChunkState, consume_json};
 
-const API_NAME: &str = "openai-chat-completions";
+const API_NAME: &str = "openai-completions";
 
 pub struct OpenAiCompatibleProvider {
     config: OpenAiCompatibleConfig,
@@ -37,19 +37,7 @@ impl OpenAiCompatibleProvider {
     }
 
     pub(crate) fn endpoint(&self) -> String {
-        let base = self.config.base_url.trim();
-        let suffix_start = [base.find('?'), base.find('#')]
-            .into_iter()
-            .flatten()
-            .min()
-            .unwrap_or(base.len());
-        let (path, suffix) = base.split_at(suffix_start);
-        let path = path.trim_end_matches('/');
-        if path.ends_with("/chat/completions") {
-            format!("{path}{suffix}")
-        } else {
-            format!("{path}/chat/completions{suffix}")
-        }
+        completions_endpoint(&self.config.base_url)
     }
 
     fn headers(&self, request: &ProviderRequest) -> BTreeMap<String, String> {
@@ -58,6 +46,9 @@ impl OpenAiCompatibleProvider {
         insert_header(&mut headers, "Content-Type", "application/json");
         if let Some(key) = &self.config.api_key {
             insert_header(&mut headers, "Authorization", format!("Bearer {key}"));
+        }
+        for (name, value) in affinity_headers(request) {
+            insert_header(&mut headers, name, value);
         }
         for (name, value) in &request.headers {
             insert_header(&mut headers, name, value);
@@ -87,12 +78,20 @@ impl Provider for OpenAiCompatibleProvider {
         signal: AbortSignal,
     ) -> Result<ProviderStream, ProviderError> {
         let headers = self.headers(&request);
+        let supports_finish_reason =
+            ResolvedOpenAiCompletionsCompat::for_request(&request).supports_finish_reason;
+        let endpoint = request
+            .model_spec
+            .as_ref()
+            .and_then(|model| model.base_url.as_deref())
+            .map(completions_endpoint)
+            .unwrap_or_else(|| self.endpoint());
         let payload = context
             .before_provider_request(&signal, request_body(&request))
             .await?;
         let response = self
             .transport
-            .post_json(&self.endpoint(), &headers, &payload, signal.clone())
+            .post_json(&endpoint, &headers, &payload, signal.clone())
             .await
             .map_err(map_transport_error)?;
         if !(200..300).contains(&response.status) {
@@ -121,7 +120,7 @@ impl Provider for OpenAiCompatibleProvider {
                 metadata: ResponseMetadata::new(provider_id, model, API_NAME, now_ms()),
             });
             let mut decoder = SseDecoder::new();
-            let mut state = ChunkState::default();
+            let mut state = ChunkState::new(supports_finish_reason);
             loop {
                 let next = tokio::select! {
                     _ = signal.wait() => {
@@ -141,7 +140,10 @@ impl Provider for OpenAiCompatibleProvider {
                         };
                         for event in decoded {
                             if event.data == "[DONE]" {
-                                for event in state.finish() { yield Ok(event); }
+                                match state.finish() {
+                                    Ok(events) => for event in events { yield Ok(event); },
+                                    Err(error) => yield Err(error),
+                                }
                                 return;
                             }
                             match consume_json(&mut state, &event.data) {
@@ -168,13 +170,32 @@ impl Provider for OpenAiCompatibleProvider {
                                 return;
                             }
                         }
-                        for event in state.finish() { yield Ok(event); }
+                        match state.finish() {
+                            Ok(events) => for event in events { yield Ok(event); },
+                            Err(error) => yield Err(error),
+                        }
                         return;
                     }
                 }
             }
         };
         Ok(Box::pin(output))
+    }
+}
+
+fn completions_endpoint(base: &str) -> String {
+    let base = base.trim();
+    let suffix_start = [base.find('?'), base.find('#')]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(base.len());
+    let (path, suffix) = base.split_at(suffix_start);
+    let path = path.trim_end_matches('/');
+    if path.ends_with("/chat/completions") {
+        format!("{path}{suffix}")
+    } else {
+        format!("{path}/chat/completions{suffix}")
     }
 }
 
@@ -349,6 +370,7 @@ mod tests {
         .unwrap();
         let request = ProviderRequest {
             model: ModelId::new("model"),
+            model_spec: None,
             system_prompt: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),
@@ -356,6 +378,7 @@ mod tests {
             max_output_tokens: None,
             headers: BTreeMap::from([("authorization".to_string(), "Bearer request".to_string())]),
             sampling_params: BTreeMap::new(),
+            session_id: None,
         };
         let headers = provider.headers(&request);
 
@@ -386,6 +409,7 @@ mod tests {
         );
         let request = ProviderRequest {
             model: ModelId::new("model"),
+            model_spec: None,
             system_prompt: "system".to_string(),
             messages: Vec::new(),
             tools: Vec::new(),
@@ -393,6 +417,7 @@ mod tests {
             max_output_tokens: None,
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),
+            session_id: None,
         };
         let (_, signal) = pi_core::AbortHandle::new();
 

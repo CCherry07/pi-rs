@@ -10,12 +10,17 @@ use serde_json::{Map, Value};
 use crate::ModelsPluginError;
 
 const OPENAI_COMPLETIONS_API: &str = "openai-completions";
+const OPENAI_RESPONSES_API: &str = "openai-responses";
+const ANTHROPIC_MESSAGES_API: &str = "anthropic-messages";
+const GOOGLE_GENERATIVE_AI_API: &str = "google-generative-ai";
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedProvider {
     pub id: ProviderId,
+    pub name: Option<String>,
     pub api: Option<String>,
     pub base_url: Option<String>,
+    pub compat: Option<Value>,
     pub api_key: Option<String>,
     pub runtime_api_key: Option<String>,
     pub headers: BTreeMap<String, String>,
@@ -33,11 +38,25 @@ pub(crate) struct PreparedModel {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PreparedOverride {
+    pub name: Option<String>,
     pub reasoning: Option<bool>,
     pub thinking_level_map: BTreeMap<String, Option<String>>,
+    pub input: Option<Vec<ModelInput>>,
+    pub cost: Option<PreparedCostOverride>,
+    pub context_window: Option<u64>,
     pub max_tokens: Option<u64>,
     pub sampling_params: BTreeMap<String, Value>,
     pub headers: BTreeMap<String, String>,
+    pub compat: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PreparedCostOverride {
+    pub input: Option<f64>,
+    pub output: Option<f64>,
+    pub cache_read: Option<f64>,
+    pub cache_write: Option<f64>,
+    pub tiers: Option<Vec<ModelCostTier>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema, Validate)]
@@ -60,16 +79,13 @@ struct ProviderDefinition {
     api_key: Option<String>,
     #[garde(length(min = 1), custom(optional_non_blank))]
     api: Option<String>,
-    #[garde(length(min = 1), custom(optional_non_blank))]
-    oauth: Option<String>,
-    #[serde(default)]
-    #[garde(custom(non_blank_map_keys))]
-    headers: BTreeMap<String, String>,
-    #[schemars(with = "Option<BTreeMap<String, Value>>")]
+    oauth: Option<ModelsOAuthConfig>,
+    #[garde(custom(optional_non_blank_map_keys))]
+    headers: Option<BTreeMap<String, String>>,
+    #[schemars(with = "Option<ProviderCompatSchema>")]
     #[garde(custom(optional_object_value))]
     compat: Option<Value>,
-    #[serde(default)]
-    auth_header: bool,
+    auth_header: Option<bool>,
     #[serde(default)]
     #[garde(dive)]
     models: Vec<ModelDefinition>,
@@ -106,9 +122,15 @@ struct ModelDefinition {
     #[serde(default)]
     #[garde(custom(non_blank_map_keys))]
     headers: BTreeMap<String, String>,
-    #[schemars(with = "Option<BTreeMap<String, Value>>")]
+    #[schemars(with = "Option<ProviderCompatSchema>")]
     #[garde(custom(optional_object_value))]
     compat: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum ModelsOAuthConfig {
+    Radius,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, Validate)]
@@ -132,7 +154,7 @@ struct ModelOverride {
     #[serde(default)]
     #[garde(custom(non_blank_map_keys))]
     headers: BTreeMap<String, String>,
-    #[schemars(with = "Option<BTreeMap<String, Value>>")]
+    #[schemars(with = "Option<ProviderCompatSchema>")]
     #[garde(custom(optional_object_value))]
     compat: Option<Value>,
 }
@@ -196,6 +218,265 @@ struct ModelCostTierConfig {
     cache_write: f64,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum ProviderCompatSchema {
+    OpenAiCompletions(Box<OpenAiCompletionsCompatSchema>),
+    OpenAiResponses(OpenAiResponsesCompatSchema),
+    AnthropicMessages(AnthropicMessagesCompatSchema),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OpenAiCompletionsCompatSchema {
+    supports_store: Option<bool>,
+    supports_developer_role: Option<bool>,
+    supports_reasoning_effort: Option<bool>,
+    supports_usage_in_streaming: Option<bool>,
+    supports_finish_reason: Option<bool>,
+    max_tokens_field: Option<MaxTokensFieldSchema>,
+    requires_tool_result_name: Option<bool>,
+    requires_assistant_after_tool_result: Option<bool>,
+    requires_thinking_as_text: Option<bool>,
+    requires_reasoning_content_on_assistant_messages: Option<bool>,
+    thinking_format: Option<ThinkingFormatSchema>,
+    chat_template_kwargs: Option<BTreeMap<String, ChatTemplateKwargSchema>>,
+    chat_template_args: Option<BTreeMap<String, ChatTemplateKwargSchema>>,
+    cache_control_format: Option<CacheControlFormatSchema>,
+    open_router_routing: Option<OpenRouterRoutingSchema>,
+    vercel_gateway_routing: Option<VercelGatewayRoutingSchema>,
+    zai_tool_stream: Option<bool>,
+    supports_thinking_token_budget: Option<bool>,
+    thinking_token_budget_field: Option<ThinkingTokenBudgetFieldSchema>,
+    #[serde(rename = "supportsOpenAIGrammarTools")]
+    #[schemars(rename = "supportsOpenAIGrammarTools")]
+    supports_open_ai_grammar_tools: Option<bool>,
+    supports_strict_mode: Option<bool>,
+    send_session_affinity_headers: Option<bool>,
+    deferred_tools_mode: Option<DeferredToolsModeSchema>,
+    session_affinity_format: Option<SessionAffinityFormatSchema>,
+    supports_long_cache_retention: Option<bool>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OpenAiResponsesCompatSchema {
+    supports_developer_role: Option<bool>,
+    session_affinity_format: Option<SessionAffinityFormatSchema>,
+    supports_long_cache_retention: Option<bool>,
+    supports_strict_mode: Option<bool>,
+    #[serde(rename = "supportsOpenAIGrammarTools")]
+    #[schemars(rename = "supportsOpenAIGrammarTools")]
+    supports_open_ai_grammar_tools: Option<bool>,
+    supports_additional_tools: Option<bool>,
+    supports_tool_search: Option<bool>,
+    supports_explicit_prompt_cache_mode: Option<bool>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AnthropicMessagesCompatSchema {
+    supports_eager_tool_input_streaming: Option<bool>,
+    supports_long_cache_retention: Option<bool>,
+    send_session_affinity_headers: Option<bool>,
+    supports_cache_control_on_tools: Option<bool>,
+    supports_temperature: Option<bool>,
+    force_adaptive_thinking: Option<bool>,
+    allow_empty_signature: Option<bool>,
+    supports_strict_tools: Option<bool>,
+    allowed_fallback_models: Option<Vec<String>>,
+    supports_tool_references: Option<bool>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum MaxTokensFieldSchema {
+    MaxCompletionTokens,
+    MaxTokens,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+enum ThinkingFormatSchema {
+    Openai,
+    Openrouter,
+    Together,
+    Baseten,
+    Deepseek,
+    Zai,
+    Qwen,
+    ChatTemplate,
+    QwenChatTemplate,
+    StringThinking,
+    AntLing,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum CacheControlFormatSchema {
+    Anthropic,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum DeferredToolsModeSchema {
+    Kimi,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+enum SessionAffinityFormatSchema {
+    Openai,
+    OpenaiNosession,
+    Openrouter,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+enum ThinkingTokenBudgetFieldSchema {
+    #[serde(rename = "thinking_token_budget")]
+    #[schemars(rename = "thinking_token_budget")]
+    TokenBudget,
+    #[serde(rename = "thinking_budget")]
+    #[schemars(rename = "thinking_budget")]
+    Budget,
+    #[serde(rename = "thinking_budget_tokens")]
+    #[schemars(rename = "thinking_budget_tokens")]
+    BudgetTokens,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum ChatTemplateKwargSchema {
+    String(String),
+    Number(f64),
+    Boolean(bool),
+    Null(()),
+    Variable(ChatTemplateVariableSchema),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatTemplateVariableSchema {
+    #[serde(rename = "$var")]
+    #[schemars(rename = "$var")]
+    variable: ChatTemplateVariableNameSchema,
+    omit_when_off: Option<bool>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+enum ChatTemplateVariableNameSchema {
+    #[serde(rename = "thinking.enabled")]
+    #[schemars(rename = "thinking.enabled")]
+    Enabled,
+    #[serde(rename = "thinking.effort")]
+    #[schemars(rename = "thinking.effort")]
+    Effort,
+    #[serde(rename = "thinking.budget")]
+    #[schemars(rename = "thinking.budget")]
+    Budget,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct VercelGatewayRoutingSchema {
+    only: Option<Vec<String>>,
+    order: Option<Vec<String>>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct OpenRouterRoutingSchema {
+    allow_fallbacks: Option<bool>,
+    require_parameters: Option<bool>,
+    data_collection: Option<DataCollectionSchema>,
+    zdr: Option<bool>,
+    enforce_distillable_text: Option<bool>,
+    order: Option<Vec<String>>,
+    only: Option<Vec<String>>,
+    ignore: Option<Vec<String>>,
+    quantizations: Option<Vec<String>>,
+    sort: Option<OpenRouterSortSchema>,
+    max_price: Option<OpenRouterMaxPriceSchema>,
+    preferred_min_throughput: Option<NumberOrPercentilesSchema>,
+    preferred_max_latency: Option<NumberOrPercentilesSchema>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum DataCollectionSchema {
+    Deny,
+    Allow,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum OpenRouterSortSchema {
+    String(String),
+    Object(OpenRouterSortObjectSchema),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct OpenRouterSortObjectSchema {
+    by: Option<String>,
+    partition: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct OpenRouterMaxPriceSchema {
+    prompt: Option<NumberOrStringSchema>,
+    completion: Option<NumberOrStringSchema>,
+    image: Option<NumberOrStringSchema>,
+    audio: Option<NumberOrStringSchema>,
+    request: Option<NumberOrStringSchema>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum NumberOrStringSchema {
+    Number(f64),
+    String(String),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum NumberOrPercentilesSchema {
+    Number(f64),
+    Percentiles(PercentileCutoffsSchema),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PercentileCutoffsSchema {
+    p50: Option<f64>,
+    p75: Option<f64>,
+    p90: Option<f64>,
+    p99: Option<f64>,
+}
+
 impl From<ModelCostTierConfig> for ModelCostTier {
     fn from(value: ModelCostTierConfig) -> Self {
         Self {
@@ -204,6 +485,39 @@ impl From<ModelCostTierConfig> for ModelCostTier {
             output: value.output,
             cache_read: value.cache_read,
             cache_write: value.cache_write,
+        }
+    }
+}
+
+impl From<ModelCostOverride> for PreparedCostOverride {
+    fn from(value: ModelCostOverride) -> Self {
+        Self {
+            input: value.input,
+            output: value.output,
+            cache_read: value.cache_read,
+            cache_write: value.cache_write,
+            tiers: value
+                .tiers
+                .map(|tiers| tiers.into_iter().map(Into::into).collect()),
+        }
+    }
+}
+
+impl From<ModelOverride> for PreparedOverride {
+    fn from(value: ModelOverride) -> Self {
+        Self {
+            name: value.name,
+            reasoning: value.reasoning,
+            thinking_level_map: value.thinking_level_map,
+            input: value
+                .input
+                .map(|input| input.into_iter().map(Into::into).collect()),
+            cost: value.cost.map(Into::into),
+            context_window: value.context_window,
+            max_tokens: value.max_tokens,
+            sampling_params: value.sampling_params,
+            headers: value.headers,
+            compat: value.compat,
         }
     }
 }
@@ -245,6 +559,107 @@ pub(crate) fn load_models_file(
         })
 }
 
+impl PreparedProvider {
+    /// Composes one models.json provider over model metadata registered by
+    /// earlier provider plugins, matching Pi's built-in/custom upsert order.
+    pub(crate) fn compose_with_base(&self, base_models: &[ModelSpec]) -> Result<Self, String> {
+        let mut models = base_models
+            .iter()
+            .cloned()
+            .map(|mut spec| {
+                if let Some(base_url) = &self.base_url {
+                    spec.base_url = Some(base_url.clone());
+                }
+                spec.compat = merge_compat(spec.compat.take(), self.compat.clone());
+                PreparedModel {
+                    id: spec.id.clone(),
+                    spec,
+                    headers: BTreeMap::new(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for configured in &self.models {
+            let existing_index = models.iter().position(|model| model.id == configured.id);
+            let defaults = existing_index
+                .and_then(|index| models.get(index))
+                .or_else(|| models.first());
+            let mut model = configured.clone();
+            if model.spec.api.is_empty() {
+                model.spec.api = self
+                    .api
+                    .clone()
+                    .or_else(|| defaults.map(|model| model.spec.api.clone()))
+                    .ok_or_else(|| {
+                        format!(
+                            "provider {}, model {}: no api specified at model or provider level",
+                            self.id, model.id
+                        )
+                    })?;
+            }
+            if model.spec.base_url.is_none() {
+                model.spec.base_url = self
+                    .base_url
+                    .clone()
+                    .or_else(|| defaults.and_then(|model| model.spec.base_url.clone()));
+            }
+            if model.spec.base_url.is_none() {
+                return Err(format!(
+                    "provider {}, model {}: baseUrl is required for a custom model",
+                    self.id, model.id
+                ));
+            }
+            match existing_index {
+                Some(index) => models[index] = model,
+                None => models.push(model),
+            }
+        }
+
+        for model in &mut models {
+            let Some(model_override) = self.model_overrides.get(&model.id) else {
+                continue;
+            };
+            apply_override(&mut model.spec, model_override);
+            let mut headers = model_override.headers.clone();
+            // Pi gives the concrete custom model definition precedence over
+            // modelOverrides for request headers.
+            headers.extend(std::mem::take(&mut model.headers));
+            model.headers = headers;
+        }
+        for model in &models {
+            validate_compat(&self.id, &model.spec)?;
+        }
+
+        let mut composed = self.clone();
+        composed.models = models;
+        Ok(composed)
+    }
+}
+
+fn validate_compat(provider: &ProviderId, model: &ModelSpec) -> Result<(), String> {
+    let Some(compat) = &model.compat else {
+        return Ok(());
+    };
+    let result = match model.api.as_str() {
+        OPENAI_COMPLETIONS_API => {
+            serde_json::from_value::<OpenAiCompletionsCompatSchema>(compat.clone()).map(|_| ())
+        }
+        OPENAI_RESPONSES_API => {
+            serde_json::from_value::<OpenAiResponsesCompatSchema>(compat.clone()).map(|_| ())
+        }
+        ANTHROPIC_MESSAGES_API => {
+            serde_json::from_value::<AnthropicMessagesCompatSchema>(compat.clone()).map(|_| ())
+        }
+        _ => Ok(()),
+    };
+    result.map_err(|error| {
+        format!(
+            "provider {provider}, model {}: invalid compat for API {:?}: {error}",
+            model.id, model.api
+        )
+    })
+}
+
 impl ModelsFile {
     fn compile(
         self,
@@ -265,19 +680,19 @@ impl ProviderDefinition {
         runtime_api_keys: &BTreeMap<ProviderId, String>,
     ) -> Result<PreparedProvider, String> {
         let provider = self;
-        if let Some(oauth) = &provider.oauth {
+        if provider.oauth.is_some() {
             return Err(format!(
-                "provider {id}: oauth {oauth:?} is not supported by pi-plugin-models yet"
+                "provider {id}: oauth \"radius\" is not supported by pi-plugin-models yet"
             ));
         }
         if provider.models.is_empty()
             && provider.base_url.is_none()
             && provider.api_key.is_none()
             && provider.api.is_none()
-            && provider.headers.is_empty()
+            && provider.headers.is_none()
             && provider.compat.is_none()
             && provider.model_overrides.is_empty()
-            && !provider.auth_header
+            && provider.auth_header.is_none()
         {
             return Err(format!(
                 "provider {id}: must configure baseUrl, apiKey, api, headers, modelOverrides, or models"
@@ -289,12 +704,6 @@ impl ProviderDefinition {
             .as_deref()
             .map(|api| normalize_api(&id, None, api))
             .transpose()?;
-        if provider.base_url.is_some() && provider_api.is_none() && provider.models.is_empty() {
-            return Err(format!(
-                "provider {id}: api is required when baseUrl configures a provider-wide route"
-            ));
-        }
-
         let provider_compat = provider.compat.clone();
         let mut seen = HashSet::new();
         let mut models = Vec::with_capacity(provider.models.len());
@@ -305,42 +714,31 @@ impl ProviderDefinition {
                     definition.id
                 ));
             }
-            let model_override = provider.model_overrides.get(&definition.id);
             models.push(definition.compile(
                 &id,
-                model_override,
                 provider_api.as_deref(),
                 provider.base_url.as_deref(),
                 provider_compat.as_ref(),
             )?);
         }
 
-        let mut model_overrides = BTreeMap::new();
-        for (model_id, value) in provider.model_overrides {
-            if seen.contains(&model_id) {
-                continue;
-            }
-            model_overrides.insert(
-                ModelId::new(model_id),
-                PreparedOverride {
-                    reasoning: value.reasoning,
-                    thinking_level_map: value.thinking_level_map,
-                    max_tokens: value.max_tokens,
-                    sampling_params: value.sampling_params,
-                    headers: value.headers,
-                },
-            );
-        }
+        let model_overrides = provider
+            .model_overrides
+            .into_iter()
+            .map(|(model_id, value)| (ModelId::new(model_id), value.into()))
+            .collect();
 
         let provider_id = ProviderId::new(id);
         Ok(PreparedProvider {
             runtime_api_key: runtime_api_keys.get(&provider_id).cloned(),
             id: provider_id,
+            name: provider.name,
             api: provider_api,
             base_url: provider.base_url,
+            compat: provider_compat,
             api_key: provider.api_key,
-            headers: provider.headers,
-            auth_header: provider.auth_header,
+            headers: provider.headers.unwrap_or_default(),
+            auth_header: provider.auth_header.unwrap_or(false),
             models,
             model_overrides,
         })
@@ -351,7 +749,6 @@ impl ModelDefinition {
     fn compile(
         self,
         provider: &str,
-        model_override: Option<&ModelOverride>,
         provider_api: Option<&str>,
         provider_base_url: Option<&str>,
         provider_compat: Option<&Value>,
@@ -359,23 +756,15 @@ impl ModelDefinition {
         let definition = self;
         let api = match definition.api.as_deref().or(provider_api) {
             Some(api) => normalize_api(provider, Some(&definition.id), api)?,
-            None => {
-                return Err(format!(
-                    "provider {provider}, model {}: no api specified at model or provider level",
-                    definition.id
-                ));
-            }
+            // A custom model under a built-in provider inherits the API from
+            // the replaced model (or the provider's first model) during
+            // generation registration, when that catalog is available.
+            None => String::new(),
         };
         let base_url = definition
             .base_url
             .clone()
-            .or_else(|| provider_base_url.map(str::to_string))
-            .ok_or_else(|| {
-                format!(
-                    "provider {provider}, model {}: baseUrl is required for a custom model",
-                    definition.id
-                )
-            })?;
+            .or_else(|| provider_base_url.map(str::to_string));
         let context_window = definition.context_window.unwrap_or(128_000);
         let max_tokens = definition.max_tokens.unwrap_or(16_384);
 
@@ -388,7 +777,7 @@ impl ModelDefinition {
                 .unwrap_or_else(|| definition.id.clone()),
             api,
         );
-        spec.base_url = Some(base_url);
+        spec.base_url = base_url;
         spec.reasoning = definition.reasoning;
         spec.thinking_level_map = definition.thinking_level_map;
         spec.input = definition.input.map_or_else(
@@ -401,14 +790,7 @@ impl ModelDefinition {
         spec.sampling_params = definition.sampling_params;
         spec.compat = merge_compat(provider_compat.cloned(), definition.compat);
 
-        let mut headers = BTreeMap::new();
-        if let Some(model_override) = model_override {
-            apply_override(&mut spec, model_override);
-            headers.extend(model_override.headers.clone());
-        }
-        // Pi gives the concrete model definition precedence over modelOverrides
-        // for request headers.
-        headers.extend(definition.headers);
+        let headers = definition.headers;
         Ok(PreparedModel {
             id: spec.id.clone(),
             spec,
@@ -417,7 +799,7 @@ impl ModelDefinition {
     }
 }
 
-fn apply_override(spec: &mut ModelSpec, value: &ModelOverride) {
+pub(crate) fn apply_override(spec: &mut ModelSpec, value: &PreparedOverride) {
     if let Some(name) = &value.name {
         spec.name.clone_from(name);
     }
@@ -427,7 +809,7 @@ fn apply_override(spec: &mut ModelSpec, value: &ModelOverride) {
     spec.thinking_level_map
         .extend(value.thinking_level_map.clone());
     if let Some(input) = &value.input {
-        spec.input = input.iter().copied().map(Into::into).collect();
+        spec.input.clone_from(input);
     }
     if let Some(cost) = &value.cost {
         if let Some(input) = cost.input {
@@ -443,7 +825,7 @@ fn apply_override(spec: &mut ModelSpec, value: &ModelOverride) {
             spec.cost.cache_write = cache_write;
         }
         if let Some(tiers) = &cost.tiers {
-            spec.cost.tiers = tiers.iter().cloned().map(Into::into).collect();
+            spec.cost.tiers.clone_from(tiers);
         }
     }
     if let Some(context_window) = value.context_window {
@@ -461,13 +843,16 @@ fn normalize_api(provider: &str, model: Option<&str>, api: &str) -> Result<Strin
         "openai-completions" | "openai-chat-completions" | "openai-compatible" => {
             OPENAI_COMPLETIONS_API
         }
+        OPENAI_RESPONSES_API => OPENAI_RESPONSES_API,
+        ANTHROPIC_MESSAGES_API => ANTHROPIC_MESSAGES_API,
+        GOOGLE_GENERATIVE_AI_API => GOOGLE_GENERATIVE_AI_API,
         other => {
             let target = model.map_or_else(
                 || format!("provider {provider}"),
                 |model| format!("provider {provider}, model {model}"),
             );
             return Err(format!(
-                "{target}: unsupported api {other:?}; this build supports openai-completions"
+                "{target}: unsupported api {other:?}; this build supports openai-completions, openai-responses, anthropic-messages, and google-generative-ai"
             ));
         }
     };
@@ -497,6 +882,15 @@ fn non_blank_map_keys<V>(values: &BTreeMap<String, V>, _: &()) -> garde::Result 
     Ok(())
 }
 
+fn optional_non_blank_map_keys<V>(
+    values: &Option<BTreeMap<String, V>>,
+    context: &(),
+) -> garde::Result {
+    values
+        .as_ref()
+        .map_or(Ok(()), |values| non_blank_map_keys(values, context))
+}
+
 fn validate_thinking_level_map(map: &BTreeMap<String, Option<String>>, _: &()) -> garde::Result {
     const LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
     if let Some(level) = map.keys().find(|level| !LEVELS.contains(&level.as_str())) {
@@ -519,21 +913,29 @@ fn merge_compat(base: Option<Value>, overlay: Option<Value>) -> Option<Value> {
         (None, None) => None,
         (Some(value), None) | (None, Some(value)) => Some(value),
         (Some(Value::Object(mut base)), Some(Value::Object(overlay))) => {
-            merge_objects(&mut base, overlay);
+            merge_compat_objects(&mut base, overlay);
             Some(Value::Object(base))
         }
         (_, overlay) => overlay,
     }
 }
 
-fn merge_objects(base: &mut Map<String, Value>, overlay: Map<String, Value>) {
+fn merge_compat_objects(base: &mut Map<String, Value>, overlay: Map<String, Value>) {
     for (key, value) in overlay {
-        match (base.get_mut(&key), value) {
-            (Some(Value::Object(base)), Value::Object(overlay)) => merge_objects(base, overlay),
-            (_, value) => {
-                base.insert(key, value);
-            }
+        const NESTED_MERGE_KEYS: [&str; 4] = [
+            "openRouterRouting",
+            "vercelGatewayRouting",
+            "chatTemplateKwargs",
+            "chatTemplateArgs",
+        ];
+        if NESTED_MERGE_KEYS.contains(&key.as_str())
+            && let (Some(Value::Object(base_value)), Value::Object(overlay_value)) =
+                (base.get_mut(&key), &value)
+        {
+            base_value.extend(overlay_value.clone());
+            continue;
         }
+        base.insert(key, value);
     }
 }
 
@@ -600,6 +1002,7 @@ fn strip_json_comments(input: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn json_comments_do_not_touch_urls_or_string_content() {
@@ -628,6 +1031,12 @@ mod tests {
         );
         assert!(encoded.contains("\"minimum\":1"));
         assert!(encoded.contains("\"additionalProperties\":false"));
+        assert!(encoded.contains("supportsFinishReason"));
+        assert!(encoded.contains("thinkingTokenBudgetField"));
+        assert!(encoded.contains("supportsExplicitPromptCacheMode"));
+        assert!(encoded.contains("allowedFallbackModels"));
+        assert!(encoded.contains("preferred_min_throughput"));
+        assert!(encoded.contains("thinking.budget"));
     }
 
     #[test]
@@ -691,5 +1100,72 @@ mod tests {
         assert_eq!(model.input, vec![ModelInput::Text, ModelInput::Image]);
         assert_eq!(model.cost.input, 1.0);
         assert_eq!(model.cost.tiers[0].input_tokens_above, 100_000);
+    }
+
+    #[test]
+    fn explicit_empty_headers_and_false_auth_header_are_valid_overlays() {
+        let parsed: ModelsFile = serde_json::from_str(
+            r#"{
+              "providers": {
+                "custom": { "authHeader": false },
+                "headers-only": { "headers": {} }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let providers = parsed.compile(&BTreeMap::new()).unwrap();
+        assert_eq!(providers.len(), 2);
+        assert!(!providers[0].auth_header);
+        assert!(providers[1].headers.is_empty());
+    }
+
+    #[test]
+    fn compat_validation_rejects_unknown_nested_routing_fields() {
+        let parsed: ModelsFile = serde_json::from_str(
+            r#"{
+              "providers": {
+                "custom": {
+                  "baseUrl": "https://example.test",
+                  "api": "openai-completions",
+                  "models": [{
+                    "id": "model",
+                    "compat": {
+                      "openRouterRouting": {"unknown": true}
+                    }
+                  }]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let provider = parsed.compile(&BTreeMap::new()).unwrap().remove(0);
+        let error = provider.compose_with_base(&[]).unwrap_err();
+        assert!(error.contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn compat_merge_is_shallow_except_for_pi_nested_maps() {
+        let merged = merge_compat(
+            Some(json!({
+                "openRouterRouting": {"only": ["base"], "order": ["base"]},
+                "chatTemplateKwargs": {"base": 1},
+                "ordinary": {"base": true}
+            })),
+            Some(json!({
+                "openRouterRouting": {"order": ["override"]},
+                "chatTemplateKwargs": {"override": 2},
+                "ordinary": {"override": true}
+            })),
+        )
+        .unwrap();
+
+        assert_eq!(merged["openRouterRouting"]["only"][0], "base");
+        assert_eq!(merged["openRouterRouting"]["order"][0], "override");
+        assert_eq!(merged["chatTemplateKwargs"]["base"], 1);
+        assert_eq!(merged["chatTemplateKwargs"]["override"], 2);
+        assert!(merged["ordinary"].get("base").is_none());
+        assert_eq!(merged["ordinary"]["override"], true);
     }
 }

@@ -2,16 +2,205 @@
 
 //! Shared OpenAI Responses wire projection and SSE stream adaptation.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use async_stream::stream;
+use async_trait::async_trait;
 use futures::StreamExt;
 use pi_core::{
-    AbortSignal, ContentBlock, Message, ProviderError, ProviderId, ProviderStream,
-    ResponseMetadata, StopReason, StreamEvent, ToolCallId, ToolSpec, Usage,
+    AbortSignal, ContentBlock, Message, Provider, ProviderAvailability, ProviderCallContext,
+    ProviderError, ProviderId, ProviderRequest, ProviderStream, ResponseMetadata, StopReason,
+    StreamEvent, ToolCallId, ToolSpec, Usage,
 };
-use pi_provider::{HttpBodyStream, SseDecoder, TransportError};
+use pi_provider::{
+    HttpBodyStream, HttpTransport, ReqwestTransport, SseDecoder, TransportError,
+    collect_body_limited,
+};
+use serde::Deserialize;
 use serde_json::{Value, json};
+
+use crate::config::{OpenAiCompatibleConfig, validate_config};
+use crate::request::SessionAffinityFormat;
+
+pub const OPENAI_RESPONSES_API: &str = "openai-responses";
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct OpenAiResponsesCompat {
+    pub supports_developer_role: Option<bool>,
+    pub session_affinity_format: Option<SessionAffinityFormat>,
+    pub supports_long_cache_retention: Option<bool>,
+    pub supports_strict_mode: Option<bool>,
+    #[serde(rename = "supportsOpenAIGrammarTools")]
+    pub supports_open_ai_grammar_tools: Option<bool>,
+    pub supports_additional_tools: Option<bool>,
+    pub supports_tool_search: Option<bool>,
+    pub supports_explicit_prompt_cache_mode: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedOpenAiResponsesCompat {
+    supports_developer_role: bool,
+    session_affinity_format: SessionAffinityFormat,
+    supports_long_cache_retention: bool,
+    supports_strict_mode: bool,
+    supports_additional_tools: bool,
+    supports_tool_search: bool,
+    supports_explicit_prompt_cache_mode: bool,
+}
+
+impl ResolvedOpenAiResponsesCompat {
+    fn for_request(request: &ProviderRequest) -> Self {
+        let configured = request
+            .model_spec
+            .as_ref()
+            .and_then(|model| model.compat.clone())
+            .and_then(|value| serde_json::from_value::<OpenAiResponsesCompat>(value).ok())
+            .unwrap_or_default();
+        let openrouter = request.model_spec.as_ref().is_some_and(|model| {
+            model.provider.as_str() == "openrouter"
+                || model
+                    .base_url
+                    .as_deref()
+                    .is_some_and(|url| url.contains("openrouter.ai"))
+        });
+        Self {
+            supports_developer_role: configured.supports_developer_role.unwrap_or(true),
+            session_affinity_format: configured.session_affinity_format.unwrap_or(if openrouter {
+                SessionAffinityFormat::Openrouter
+            } else {
+                SessionAffinityFormat::Openai
+            }),
+            supports_long_cache_retention: configured.supports_long_cache_retention.unwrap_or(true),
+            supports_strict_mode: configured.supports_strict_mode.unwrap_or(false),
+            supports_additional_tools: configured.supports_additional_tools.unwrap_or(false),
+            supports_tool_search: configured.supports_tool_search.unwrap_or(false),
+            supports_explicit_prompt_cache_mode: configured
+                .supports_explicit_prompt_cache_mode
+                .unwrap_or(false),
+        }
+    }
+}
+
+/// Configurable provider for OpenAI Responses-compatible endpoints.
+pub struct OpenAiResponsesCompatibleProvider {
+    config: OpenAiCompatibleConfig,
+    transport: Arc<dyn HttpTransport>,
+}
+
+impl OpenAiResponsesCompatibleProvider {
+    pub fn new(config: OpenAiCompatibleConfig) -> Result<Self, ProviderError> {
+        Self::with_transport(config, Arc::new(ReqwestTransport::new()))
+    }
+
+    pub fn with_transport(
+        config: OpenAiCompatibleConfig,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Result<Self, ProviderError> {
+        validate_config(&config)?;
+        Ok(Self { config, transport })
+    }
+
+    pub(crate) fn endpoint(&self) -> String {
+        responses_endpoint(&self.config.base_url)
+    }
+
+    fn headers(&self, request: &ProviderRequest) -> BTreeMap<String, String> {
+        let mut headers = self.config.headers.clone();
+        insert_header(&mut headers, "Accept", "text/event-stream");
+        insert_header(&mut headers, "Content-Type", "application/json");
+        if let Some(key) = &self.config.api_key {
+            insert_header(&mut headers, "Authorization", format!("Bearer {key}"));
+        }
+        for (name, value) in response_affinity_headers(request) {
+            insert_header(&mut headers, name, value);
+        }
+        for (name, value) in &request.headers {
+            insert_header(&mut headers, name, value);
+        }
+        headers
+    }
+}
+
+#[async_trait]
+impl Provider for OpenAiResponsesCompatibleProvider {
+    fn id(&self) -> ProviderId {
+        self.config.provider_id.clone()
+    }
+
+    fn availability(&self) -> ProviderAvailability {
+        if self.config.api_key.is_some() {
+            ProviderAvailability::Available
+        } else {
+            ProviderAvailability::MissingCredentials
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: ProviderRequest,
+        context: ProviderCallContext,
+        signal: AbortSignal,
+    ) -> Result<ProviderStream, ProviderError> {
+        let headers = self.headers(&request);
+        let endpoint = request
+            .model_spec
+            .as_ref()
+            .and_then(|model| model.base_url.as_deref())
+            .map(responses_endpoint)
+            .unwrap_or_else(|| self.endpoint());
+        let payload = context
+            .before_provider_request(&signal, request_body(&request))
+            .await?;
+        let response = self
+            .transport
+            .post_json(&endpoint, &headers, &payload, signal.clone())
+            .await
+            .map_err(map_transport_error)?;
+        if !(200..300).contains(&response.status) {
+            let status = response.status;
+            let body = collect_body_limited(response.body, 64 * 1024)
+                .await
+                .map_err(map_transport_error)?;
+            return Err(ProviderError::Failure(format!("HTTP {status}: {body}")));
+        }
+        if !response
+            .content_type
+            .as_deref()
+            .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"))
+        {
+            return Err(ProviderError::Protocol(format!(
+                "unexpected Content-Type {:?}; expected text/event-stream",
+                response.content_type.as_deref().unwrap_or("<missing>")
+            )));
+        }
+
+        Ok(stream(
+            self.config.provider_id.clone(),
+            request.model,
+            OPENAI_RESPONSES_API,
+            response.body,
+            signal,
+        ))
+    }
+}
+
+fn responses_endpoint(base: &str) -> String {
+    let base = base.trim();
+    let suffix_start = [base.find('?'), base.find('#')]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(base.len());
+    let (path, suffix) = base.split_at(suffix_start);
+    let path = path.trim_end_matches('/');
+    if path.ends_with("/responses") {
+        format!("{path}{suffix}")
+    } else {
+        format!("{path}/responses{suffix}")
+    }
+}
 
 /// Projects semantic messages into OpenAI Responses input items.
 pub fn input_items(messages: &[Message]) -> Vec<Value> {
@@ -20,18 +209,211 @@ pub fn input_items(messages: &[Message]) -> Vec<Value> {
 
 /// Projects semantic tools into OpenAI Responses function definitions.
 pub fn tools(tools: &[ToolSpec]) -> Vec<Value> {
+    tools_with_compat(tools, false, false)
+}
+
+fn tools_with_compat(
+    tools: &[ToolSpec],
+    supports_strict_mode: bool,
+    defer_loading: bool,
+) -> Vec<Value> {
     tools
         .iter()
         .map(|tool| {
-            json!({
+            let mut value = json!({
                 "type": "function",
                 "name": tool.name,
                 "description": tool.description,
-                "parameters": tool.parameters,
-                "strict": false
-            })
+                "parameters": tool.parameters
+            });
+            if supports_strict_mode {
+                value["strict"] = Value::Bool(false);
+            }
+            if defer_loading {
+                value["defer_loading"] = Value::Bool(true);
+            }
+            value
         })
         .collect()
+}
+
+/// Projects a semantic request into an OpenAI Responses payload.
+pub fn request_body(request: &ProviderRequest) -> Value {
+    request_body_with_cache_retention(request, cache_retention())
+}
+
+fn request_body_with_cache_retention(
+    request: &ProviderRequest,
+    cache_retention: CacheRetention,
+) -> Value {
+    let compat = ResolvedOpenAiResponsesCompat::for_request(request);
+    let mut input = Vec::new();
+    if !request.system_prompt.is_empty() {
+        let role = if request
+            .model_spec
+            .as_ref()
+            .is_some_and(|model| model.reasoning)
+            && compat.supports_developer_role
+        {
+            "developer"
+        } else {
+            "system"
+        };
+        input.push(json!({"role": role, "content": request.system_prompt}));
+    }
+    input.extend(input_items_with_deferred_tools(request, &compat));
+    let deferred_names = deferred_tool_names(request, &compat);
+    let immediate_tools = request
+        .tools
+        .iter()
+        .filter(|tool| !deferred_names.contains(&tool.name))
+        .cloned()
+        .collect::<Vec<_>>();
+    let tools = tools_with_compat(&immediate_tools, compat.supports_strict_mode, false);
+    let mut payload = json!({
+        "model": request.model.as_str(),
+        "input": input,
+        "stream": true,
+        "store": false
+    });
+    if !tools.is_empty() {
+        payload["tools"] = Value::Array(tools);
+        payload["tool_choice"] = Value::String("auto".to_string());
+    }
+    if request.thinking_level != pi_core::ThinkingLevel::Off {
+        let effort = request
+            .model_spec
+            .as_ref()
+            .and_then(|model| {
+                model
+                    .thinking_level_map
+                    .get(request.thinking_level.as_str())
+            })
+            .map_or_else(
+                || Some(request.thinking_level.as_str().to_string()),
+                Clone::clone,
+            );
+        if let Some(effort) = effort {
+            payload["reasoning"] = json!({
+                    "effort": effort,
+                "summary": "auto"
+            });
+            payload["include"] = json!(["reasoning.encrypted_content"]);
+        }
+    } else if let Some(model) = request.model_spec.as_ref().filter(|model| model.reasoning)
+        && model.thinking_level_map.get("off") != Some(&None)
+    {
+        payload["reasoning"] = json!({
+            "effort": model
+                .thinking_level_map
+                .get("off")
+                .and_then(Clone::clone)
+                .unwrap_or_else(|| "none".to_string())
+        });
+    }
+    if let Some(max_tokens) = request.max_output_tokens {
+        payload["max_output_tokens"] = json!(max_tokens.max(16));
+    }
+    match cache_retention {
+        CacheRetention::None if compat.supports_explicit_prompt_cache_mode => {
+            payload["prompt_cache_options"] = json!({"mode": "explicit"});
+        }
+        CacheRetention::None => {}
+        CacheRetention::Short => {
+            if let Some(session_id) = &request.session_id {
+                payload["prompt_cache_key"] = Value::String(session_id.clone());
+            }
+        }
+        CacheRetention::Long => {
+            if let Some(session_id) = &request.session_id {
+                payload["prompt_cache_key"] = Value::String(session_id.clone());
+            }
+            if compat.supports_long_cache_retention {
+                payload["prompt_cache_retention"] = Value::String("24h".to_string());
+            }
+        }
+    }
+    // models.json samplingParams are applied last so user keys win.
+    if let Value::Object(payload) = &mut payload {
+        payload.extend(request.sampling_params.clone());
+    }
+    payload
+}
+
+fn deferred_tool_names(
+    request: &ProviderRequest,
+    compat: &ResolvedOpenAiResponsesCompat,
+) -> std::collections::HashSet<String> {
+    if !compat.supports_additional_tools && !compat.supports_tool_search {
+        return std::collections::HashSet::new();
+    }
+    request
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::ToolResult(message) => message.added_tool_names.as_ref(),
+            _ => None,
+        })
+        .flatten()
+        .cloned()
+        .collect()
+}
+
+fn input_items_with_deferred_tools(
+    request: &ProviderRequest,
+    compat: &ResolvedOpenAiResponsesCompat,
+) -> Vec<Value> {
+    let mut items = Vec::new();
+    let mut loaded = std::collections::HashSet::new();
+    let by_name = request
+        .tools
+        .iter()
+        .map(|tool| (tool.name.as_str(), tool))
+        .collect::<HashMap<_, _>>();
+    for message in &request.messages {
+        items.extend(message_input_items(message));
+        let Message::ToolResult(result) = message else {
+            continue;
+        };
+        let deferred = result
+            .added_tool_names
+            .iter()
+            .flatten()
+            .filter(|name| loaded.insert((*name).clone()))
+            .filter_map(|name| by_name.get(name.as_str()).copied().cloned())
+            .collect::<Vec<_>>();
+        if deferred.is_empty() {
+            continue;
+        }
+        if compat.supports_additional_tools {
+            items.push(json!({
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": tools_with_compat(&deferred, compat.supports_strict_mode, false)
+            }));
+        } else if compat.supports_tool_search {
+            let names = deferred
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>();
+            let call_id = format!("pi_tool_load_{}", items.len());
+            items.push(json!({
+                "type": "tool_search_call",
+                "call_id": call_id,
+                "execution": "client",
+                "status": "completed",
+                "arguments": {"query": names.join(" "), "limit": names.len()}
+            }));
+            items.push(json!({
+                "type": "tool_search_output",
+                "call_id": call_id,
+                "execution": "client",
+                "status": "completed",
+                "tools": tools_with_compat(&deferred, compat.supports_strict_mode, true)
+            }));
+        }
+    }
+    items
 }
 
 /// Adapts an accepted OpenAI Responses SSE body into the semantic provider stream.
@@ -374,6 +756,39 @@ fn response_usage(response: &Value) -> Usage {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheRetention {
+    None,
+    Short,
+    Long,
+}
+
+fn cache_retention() -> CacheRetention {
+    match std::env::var("PI_CACHE_RETENTION").as_deref() {
+        Ok("none") => CacheRetention::None,
+        Ok("long") => CacheRetention::Long,
+        _ => CacheRetention::Short,
+    }
+}
+
+fn response_affinity_headers(request: &ProviderRequest) -> BTreeMap<String, String> {
+    let Some(session_id) = &request.session_id else {
+        return BTreeMap::new();
+    };
+    match ResolvedOpenAiResponsesCompat::for_request(request).session_affinity_format {
+        SessionAffinityFormat::Openrouter => {
+            BTreeMap::from([("x-session-id".to_string(), session_id.clone())])
+        }
+        SessionAffinityFormat::Openai => BTreeMap::from([
+            ("session_id".to_string(), session_id.clone()),
+            ("x-client-request-id".to_string(), session_id.clone()),
+        ]),
+        SessionAffinityFormat::OpenaiNosession => {
+            BTreeMap::from([("x-client-request-id".to_string(), session_id.clone())])
+        }
+    }
+}
+
 fn map_transport_error(error: TransportError) -> ProviderError {
     match error {
         TransportError::Aborted => ProviderError::Aborted,
@@ -382,6 +797,22 @@ fn map_transport_error(error: TransportError) -> ProviderError {
         }
         other => ProviderError::Failure(other.to_string()),
     }
+}
+
+fn insert_header(
+    headers: &mut BTreeMap<String, String>,
+    name: impl AsRef<str>,
+    value: impl Into<String>,
+) {
+    let name = name.as_ref();
+    if let Some(existing) = headers
+        .keys()
+        .find(|existing| existing.eq_ignore_ascii_case(name))
+        .cloned()
+    {
+        headers.remove(&existing);
+    }
+    headers.insert(name.to_string(), value.into());
 }
 
 fn now_ms() -> i64 {
@@ -394,12 +825,59 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use futures::stream;
-    use pi_core::{AbortHandle, ModelId, UserMessage};
+    use pi_core::{AbortHandle, ModelId, ModelSpec, ProviderRequest, ThinkingLevel, UserMessage};
+
+    #[test]
+    fn compatible_endpoint_accepts_root_and_full_urls() {
+        let root = OpenAiResponsesCompatibleProvider::new(OpenAiCompatibleConfig::without_api_key(
+            "https://api.x.ai/v1",
+        ))
+        .unwrap();
+        assert_eq!(root.endpoint(), "https://api.x.ai/v1/responses");
+
+        let full = OpenAiResponsesCompatibleProvider::new(OpenAiCompatibleConfig::without_api_key(
+            "https://gateway.example/responses?api-version=2026-01-01",
+        ))
+        .unwrap();
+        assert_eq!(
+            full.endpoint(),
+            "https://gateway.example/responses?api-version=2026-01-01"
+        );
+    }
 
     #[test]
     fn projects_messages_and_tools_through_the_public_interface() {
         let input = input_items(&[Message::User(UserMessage::text("hello", 0))]);
         assert_eq!(input[0]["content"][0]["type"], "input_text");
+    }
+
+    #[test]
+    fn models_json_compat_controls_responses_cache_and_affinity() {
+        let mut model = ModelSpec::new("custom", "model", "Model", OPENAI_RESPONSES_API);
+        model.compat = Some(json!({
+            "supportsExplicitPromptCacheMode": true,
+            "sessionAffinityFormat": "openrouter"
+        }));
+        let request = ProviderRequest {
+            model: ModelId::new("model"),
+            model_spec: Some(model),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            thinking_level: ThinkingLevel::Off,
+            max_output_tokens: None,
+            headers: BTreeMap::new(),
+            sampling_params: BTreeMap::new(),
+            session_id: Some("session-1".to_string()),
+        };
+
+        let body = request_body_with_cache_retention(&request, CacheRetention::None);
+        assert_eq!(body["prompt_cache_options"]["mode"], "explicit");
+        assert!(body.get("prompt_cache_key").is_none());
+        assert_eq!(
+            response_affinity_headers(&request)["x-session-id"],
+            "session-1"
+        );
     }
 
     #[tokio::test]

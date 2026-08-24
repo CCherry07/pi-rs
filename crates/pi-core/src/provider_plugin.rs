@@ -59,6 +59,20 @@ impl<'a> ProviderRegisterContext<'a> {
     pub fn register_model(&mut self, model: ModelSpec) -> Result<()> {
         self.registries.register_model(self.owner.clone(), model)
     }
+
+    /// Returns model metadata registered by earlier provider plugins for one
+    /// provider. A later catalog overlay can use this immutable snapshot to
+    /// compose explicit user configuration.
+    pub fn base_models(&self, provider: &ProviderId) -> Vec<ModelSpec> {
+        self.registries.models_for_provider(provider)
+    }
+
+    /// Replaces one model registered by an earlier provider plugin. A model
+    /// may be overridden at most once while constructing a generation.
+    pub fn register_model_override(&mut self, model: ModelSpec) -> Result<()> {
+        self.registries
+            .register_model_override(self.owner.clone(), model)
+    }
 }
 
 /// A provider-system plugin that contributes providers, routing overlays,

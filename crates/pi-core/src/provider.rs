@@ -7,13 +7,17 @@ use async_trait::async_trait;
 use futures::Stream;
 
 use crate::{
-    AbortSignal, Message, ModelId, ProviderId, ProviderPluginDriver, StreamEvent, ThinkingLevel,
-    ToolSpec,
+    AbortSignal, Message, ModelId, ModelSpec, ProviderId, ProviderPluginDriver, StreamEvent,
+    ThinkingLevel, ToolSpec,
 };
 
 #[derive(Debug, Clone)]
 pub struct ProviderRequest {
     pub model: ModelId,
+    /// Effective generation-local model metadata. Runtime callers populate
+    /// this from the frozen catalog so protocol adapters can honor model
+    /// compatibility settings without depending on catalog policy.
+    pub model_spec: Option<ModelSpec>,
     pub system_prompt: String,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
@@ -27,6 +31,9 @@ pub struct ProviderRequest {
     /// Provider-specific request parameters. Concrete providers decide how
     /// these are represented on the wire.
     pub sampling_params: BTreeMap<String, serde_json::Value>,
+    /// Stable affinity key when the caller owns a persisted session. Callers
+    /// without a session leave this unset.
+    pub session_id: Option<String>,
 }
 
 pub type ProviderStream =
@@ -146,6 +153,10 @@ impl ProviderAvailability {
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn id(&self) -> ProviderId;
+
+    fn name(&self) -> String {
+        self.id().to_string()
+    }
 
     /// Credential-blind availability for the current immutable generation.
     /// Providers with request-time credential resolution should override this

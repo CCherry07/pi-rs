@@ -3832,6 +3832,7 @@ mod tests {
                 "custom": {
                   "baseUrl": "https://example.invalid/v1",
                   "api": "openai-completions",
+                  "apiKey": "test-key",
                   "models": [
                     { "id": "alpha", "name": "Alpha Registered" },
                     { "id": "beta", "name": "Beta Registered" }
