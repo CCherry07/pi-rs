@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/CCherry07/pi_rs/compare/v0.3.0...v0.4.0) (2026-08-24)
+
+
+### Features
+
+* **packages:** add JavaScript package management ([cf47850](https://github.com/CCherry07/pi_rs/commit/cf47850eeb39ba992e2a7e93c940a93e71e01c82))
+
+
+### Bug Fixes
+
+* **package:** handle missing native npm packages ([6415f88](https://github.com/CCherry07/pi_rs/commit/6415f884f304d0c1c2bd0d6273ddb81bd4a9afc0))
+
 ## [0.3.0](https://github.com/CCherry07/pi_rs/compare/v0.2.1...v0.3.0) (2026-08-24)
 
 
