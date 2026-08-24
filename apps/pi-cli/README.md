@@ -14,8 +14,8 @@ plugins all use the same production runtime.
   code, CJK/IME input, command completion, history, scrolling, mouse selection, and clipboard copy.
 - **Repository-aware agent** — built-in `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`,
   `find`, and `ls` tools for understanding and changing real projects.
-- **Multiple providers and models** — built-in OpenAI-compatible, OpenAI Codex, Anthropic, and xAI
-  integrations, plus custom providers and models declared in `models.json`.
+- **Multiple providers and models** — built-in OpenAI-compatible, OpenAI Codex, Anthropic, Google,
+  and xAI integrations, plus custom providers and models declared in `models.json`.
 - **Authentication in the product** — `/login` and `/logout` manage Pi-compatible credentials from
   the TUI; browser/device OAuth and hidden API-key prompts are supported.
 - **Persistent Pi v4 sessions** — resume previous work, queue steering or follow-up messages, branch
@@ -89,6 +89,7 @@ pi auth login xai --oauth
 
 # Prompt for an API key without echo
 pi auth login anthropic --api-key
+pi auth login google --api-key
 
 # Inspect credential metadata without printing secrets
 pi auth status
@@ -102,8 +103,8 @@ replacement, and mode `0600` on Unix. `/logout` removes stored credentials only;
 variables and credentials declared in `models.json` remain unchanged.
 
 Environment variables are supported as an alternative, including `OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`, and `XAI_API_KEY`. Explicit
-CLI credentials take precedence over stored credentials.
+`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`, `GEMINI_API_KEY`, and
+`XAI_API_KEY`. Explicit CLI credentials take precedence over stored credentials.
 
 ## Product modes
 

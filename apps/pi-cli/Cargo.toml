@@ -33,6 +33,7 @@ pi-plugin-openai.workspace = true
 pi-plugin-xai.workspace = true
 pi-plugin-models.workspace = true
 pi-plugin-anthropic.workspace = true
+pi-plugin-google.workspace = true
 pi-plugin-skills.workspace = true
 pi-plugin-read.workspace = true
 pi-plugin-write.workspace = true

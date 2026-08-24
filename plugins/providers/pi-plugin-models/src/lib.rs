@@ -351,7 +351,7 @@ mod tests {
             .model(&provider, &ModelId::new("custom-claude"))
             .unwrap();
 
-        assert_eq!(registries.model_specs().len(), 4);
+        assert_eq!(registries.model_specs().len(), 9);
         assert_eq!(sonnet.name, "Proxy Sonnet");
         assert!(!sonnet.reasoning);
         assert_eq!(sonnet.input, vec![ModelInput::Text]);

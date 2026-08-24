@@ -2034,6 +2034,7 @@ dependencies = [
  "pi-plugin-bash",
  "pi-plugin-edit",
  "pi-plugin-find",
+ "pi-plugin-google",
  "pi-plugin-grep",
  "pi-plugin-hashline-edit",
  "pi-plugin-loader",

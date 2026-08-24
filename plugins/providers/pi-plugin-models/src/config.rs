@@ -227,9 +227,12 @@ enum ProviderCompatSchema {
     AnthropicMessages(AnthropicMessagesCompatSchema),
 }
 
+// Pi's TypeBox compat objects intentionally leave additional properties open.
+// Keep known fields typed while preserving provider-specific and forward-compatible
+// top-level keys for the concrete provider implementation.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct OpenAiCompletionsCompatSchema {
     supports_store: Option<bool>,
     supports_developer_role: Option<bool>,
@@ -262,7 +265,7 @@ struct OpenAiCompletionsCompatSchema {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct OpenAiResponsesCompatSchema {
     supports_developer_role: Option<bool>,
     session_affinity_format: Option<SessionAffinityFormatSchema>,
@@ -278,7 +281,7 @@ struct OpenAiResponsesCompatSchema {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct AnthropicMessagesCompatSchema {
     supports_eager_tool_input_streaming: Option<bool>,
     supports_long_cache_retention: Option<bool>,
@@ -1143,6 +1146,43 @@ mod tests {
         let provider = parsed.compile(&BTreeMap::new()).unwrap().remove(0);
         let error = provider.compose_with_base(&[]).unwrap_err();
         assert!(error.contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn compat_preserves_unknown_extension_fields_for_every_supported_api() {
+        for api in [
+            OPENAI_COMPLETIONS_API,
+            OPENAI_RESPONSES_API,
+            ANTHROPIC_MESSAGES_API,
+            GOOGLE_GENERATIVE_AI_API,
+        ] {
+            let parsed: ModelsFile = serde_json::from_value(json!({
+                "providers": {
+                    "custom": {
+                        "baseUrl": "https://example.test",
+                        "api": api,
+                        "compat": { "supportsTools": false },
+                        "models": [{
+                            "id": "model",
+                            "compat": { "vendorCapability": "preserved" }
+                        }]
+                    }
+                }
+            }))
+            .unwrap();
+
+            let provider = parsed.compile(&BTreeMap::new()).unwrap().remove(0);
+            let provider = provider.compose_with_base(&[]).unwrap();
+            let compat = provider.models[0].spec.compat.as_ref().unwrap();
+
+            assert_eq!(compat["supportsTools"], false, "API {api}");
+            assert_eq!(compat["vendorCapability"], "preserved", "API {api}");
+        }
+
+        let schema =
+            serde_json::to_value(schemars::schema_for!(OpenAiCompletionsCompatSchema)).unwrap();
+
+        assert_ne!(schema["additionalProperties"], false);
     }
 
     #[test]

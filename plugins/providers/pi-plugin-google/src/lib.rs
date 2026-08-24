@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
-//! Google Generative AI wire adapter used by models.json providers.
+//! Google AI Studio provider/catalog and reusable Generative AI wire adapter.
+
+mod catalog;
+
+pub use catalog::google_models;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -9,9 +13,10 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use pi_core::{
-    AbortSignal, ContentBlock, Message, Provider, ProviderAvailability, ProviderCallContext,
-    ProviderError, ProviderId, ProviderRequest, ProviderStream, ResponseMetadata, StopReason,
-    StreamEvent, ThinkingLevel, ToolCallId, Usage,
+    AbortSignal, ContentBlock, Message, PluginId, Provider, ProviderAvailability,
+    ProviderCallContext, ProviderError, ProviderId, ProviderPlugin, ProviderRegisterContext,
+    ProviderRequest, ProviderStream, ResponseMetadata, StopReason, StreamEvent, ThinkingLevel,
+    ToolCallId, Usage,
 };
 use pi_provider::{
     HttpBodyStream, HttpTransport, ReqwestTransport, SseDecoder, TransportError,
@@ -20,6 +25,49 @@ use pi_provider::{
 use serde_json::{Value, json};
 
 pub const GOOGLE_GENERATIVE_AI_API: &str = "google-generative-ai";
+pub(crate) const GOOGLE_PROVIDER_ID: &str = "google";
+pub(crate) const GOOGLE_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+
+/// Built-in Google AI Studio provider and current Pi Gemini catalog.
+pub struct GooglePlugin {
+    provider: Arc<GoogleCompatibleProvider>,
+}
+
+impl GooglePlugin {
+    pub fn discover() -> Result<Self, ProviderError> {
+        Self::from_stored(None)
+    }
+
+    pub fn from_stored(api_key: Option<String>) -> Result<Self, ProviderError> {
+        Self::new(env("GEMINI_API_KEY").or(api_key))
+    }
+
+    pub fn new(api_key: Option<String>) -> Result<Self, ProviderError> {
+        let config = api_key
+            .map_or_else(
+                || GoogleCompatibleConfig::without_api_key(GOOGLE_BASE_URL),
+                |api_key| GoogleCompatibleConfig::new(GOOGLE_BASE_URL, api_key),
+            )
+            .provider_id(GOOGLE_PROVIDER_ID);
+        Ok(Self {
+            provider: Arc::new(GoogleCompatibleProvider::new(config)?),
+        })
+    }
+}
+
+impl ProviderPlugin for GooglePlugin {
+    fn id(&self) -> PluginId {
+        PluginId::new("google-provider")
+    }
+
+    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+        context.register_provider(self.provider.clone())?;
+        for model in google_models() {
+            context.register_model(model)?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct GoogleCompatibleConfig {
@@ -787,6 +835,12 @@ fn normalized_tool_id(id: &str) -> String {
         .collect()
 }
 
+fn env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
 fn insert_header(
     headers: &mut BTreeMap<String, String>,
     name: impl AsRef<str>,
@@ -865,6 +919,46 @@ mod tests {
             ),
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro:streamGenerateContent?alt=sse"
         );
+    }
+
+    #[test]
+    fn builtin_catalog_contains_current_gemini_models() {
+        let models = google_models();
+        assert_eq!(models.len(), 22);
+        let pro = models
+            .iter()
+            .find(|model| model.id == ModelId::new("gemini-3.1-pro-preview"))
+            .unwrap();
+
+        assert_eq!(pro.provider, ProviderId::new("google"));
+        assert_eq!(pro.api, GOOGLE_GENERATIVE_AI_API);
+        assert_eq!(pro.base_url.as_deref(), Some(GOOGLE_BASE_URL));
+        assert_eq!(pro.context_window, 1_048_576);
+        assert_eq!(pro.max_tokens, 65_536);
+        assert_eq!(pro.cost.input, 2.0);
+        assert_eq!(pro.cost.output, 12.0);
+        assert_eq!(pro.cost.cache_read, 0.2);
+        assert_eq!(pro.thinking_level_map["high"].as_deref(), Some("HIGH"));
+        assert!(
+            models
+                .iter()
+                .any(|model| model.id == ModelId::new("gemini-3.6-flash"))
+        );
+    }
+
+    #[test]
+    fn builtin_plugin_availability_tracks_api_key_configuration() {
+        let missing = GooglePlugin::new(None).unwrap();
+        let configured = GooglePlugin::new(Some("gemini-test-key".to_string())).unwrap();
+
+        assert!(matches!(
+            missing.provider.availability(),
+            ProviderAvailability::MissingCredentials
+        ));
+        assert!(matches!(
+            configured.provider.availability(),
+            ProviderAvailability::Available
+        ));
     }
 
     #[tokio::test]

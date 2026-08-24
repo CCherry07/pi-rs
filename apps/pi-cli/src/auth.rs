@@ -378,10 +378,16 @@ fn select_provider(agent_dir: &Path, requested: Option<&str>) -> Result<String, 
 }
 
 fn provider_catalog(agent_dir: &Path) -> Result<Vec<String>, String> {
-    let mut providers = ["anthropic", "openai-codex", "openai-compatible", "xai"]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    let mut providers = [
+        "anthropic",
+        "google",
+        "openai-codex",
+        "openai-compatible",
+        "xai",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
     let models_path = agent_dir.join("models.json");
     let configured = pi_plugin_models::ModelsPlugin::load(
         pi_plugin_models::ModelsPluginOptions::new(&models_path),
@@ -528,6 +534,20 @@ mod tests {
                 .contains(&"acme-gateway".to_string())
         );
         assert!(!oauth_supported("acme-gateway"));
+    }
+
+    #[test]
+    fn login_catalog_includes_builtin_google_api_key_provider() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let google = login_provider_catalog(directory.path())
+            .unwrap()
+            .into_iter()
+            .find(|provider| provider.id == "google")
+            .expect("Google must be available from /login without models.json");
+
+        assert!(!google.supports_oauth);
+        assert_eq!(google.stored_kind, None);
     }
 
     #[test]

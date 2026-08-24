@@ -363,6 +363,56 @@ pub fn anthropic_models() -> Vec<ModelSpec> {
             0.5,
             6.25,
         ),
+        model(
+            "claude-opus-4-7",
+            "Claude Opus 4.7",
+            1_000_000,
+            128_000,
+            5.0,
+            25.0,
+            0.5,
+            6.25,
+        ),
+        model(
+            "claude-opus-4-8",
+            "Claude Opus 4.8",
+            1_000_000,
+            128_000,
+            5.0,
+            25.0,
+            0.5,
+            6.25,
+        ),
+        model(
+            "claude-sonnet-5",
+            "Claude Sonnet 5",
+            1_000_000,
+            128_000,
+            2.0,
+            10.0,
+            0.2,
+            2.5,
+        ),
+        model(
+            "claude-opus-5",
+            "Claude Opus 5",
+            1_000_000,
+            128_000,
+            5.0,
+            25.0,
+            0.5,
+            6.25,
+        ),
+        model(
+            "claude-fable-5",
+            "Claude Fable 5",
+            1_000_000,
+            128_000,
+            10.0,
+            50.0,
+            1.0,
+            12.5,
+        ),
     ]
 }
 
@@ -390,12 +440,56 @@ fn model(
     };
     model.context_window = context;
     model.max_tokens = output;
-    model.compat = Some(json!({
-        "forceAdaptiveThinking": true,
+    let mut compat = json!({
         "supportsEagerToolInputStreaming": true,
         "supportsStrictTools": true,
         "supportsToolReferences": !id.contains("haiku")
-    }));
+    });
+    if matches!(
+        id,
+        "claude-sonnet-4-6"
+            | "claude-opus-4-6"
+            | "claude-opus-4-7"
+            | "claude-opus-4-8"
+            | "claude-sonnet-5"
+            | "claude-opus-5"
+            | "claude-fable-5"
+    ) {
+        compat["forceAdaptiveThinking"] = json!(true);
+    }
+    if matches!(id, "claude-opus-4-7" | "claude-opus-4-8" | "claude-opus-5") {
+        compat["supportsTemperature"] = json!(false);
+    }
+    match id {
+        "claude-opus-4-6" | "claude-sonnet-4-6" => {
+            model
+                .thinking_level_map
+                .insert("max".to_string(), Some("max".to_string()));
+        }
+        "claude-opus-4-7" | "claude-opus-4-8" | "claude-opus-5" | "claude-sonnet-5" => {
+            model
+                .thinking_level_map
+                .insert("xhigh".to_string(), Some("xhigh".to_string()));
+            model
+                .thinking_level_map
+                .insert("max".to_string(), Some("max".to_string()));
+        }
+        "claude-fable-5" => {
+            model.thinking_level_map.insert("off".to_string(), None);
+            model
+                .thinking_level_map
+                .insert("xhigh".to_string(), Some("xhigh".to_string()));
+            model
+                .thinking_level_map
+                .insert("max".to_string(), Some("max".to_string()));
+            compat["allowedFallbackModels"] = json!(["claude-opus-4-8", "claude-opus-5"]);
+        }
+        _ => {}
+    }
+    if id == "claude-opus-5" {
+        compat["allowedFallbackModels"] = json!(["claude-opus-4-8"]);
+    }
+    model.compat = Some(compat);
     model
 }
 
@@ -560,11 +654,105 @@ mod tests {
     #[test]
     fn catalog_contains_current_claude_models() {
         let models = anthropic_models();
-        assert!(
+        let expected = [
+            ("claude-haiku-4-5", 200_000, 64_000, 1.0, 5.0, 0.1, 1.25),
+            (
+                "claude-sonnet-4-6",
+                1_000_000,
+                128_000,
+                3.0,
+                15.0,
+                0.3,
+                3.75,
+            ),
+            ("claude-opus-4-6", 1_000_000, 128_000, 5.0, 25.0, 0.5, 6.25),
+            ("claude-opus-4-7", 1_000_000, 128_000, 5.0, 25.0, 0.5, 6.25),
+            ("claude-opus-4-8", 1_000_000, 128_000, 5.0, 25.0, 0.5, 6.25),
+            ("claude-sonnet-5", 1_000_000, 128_000, 2.0, 10.0, 0.2, 2.5),
+            ("claude-opus-5", 1_000_000, 128_000, 5.0, 25.0, 0.5, 6.25),
+            ("claude-fable-5", 1_000_000, 128_000, 10.0, 50.0, 1.0, 12.5),
+        ];
+
+        assert_eq!(models.len(), expected.len());
+        for (id, context_window, max_tokens, input_cost, output_cost, cache_read, cache_write) in
+            expected
+        {
+            let spec = models
+                .iter()
+                .find(|model| model.id == ModelId::new(id))
+                .unwrap_or_else(|| panic!("missing Anthropic model {id}"));
+            assert_eq!(spec.context_window, context_window, "{id}");
+            assert_eq!(spec.max_tokens, max_tokens, "{id}");
+            assert_eq!(spec.cost.input, input_cost, "{id}");
+            assert_eq!(spec.cost.output, output_cost, "{id}");
+            assert_eq!(spec.cost.cache_read, cache_read, "{id}");
+            assert_eq!(spec.cost.cache_write, cache_write, "{id}");
+            assert_eq!(spec.input, vec![ModelInput::Text, ModelInput::Image]);
+            assert!(spec.reasoning, "{id}");
+        }
+    }
+
+    #[test]
+    fn catalog_matches_pi_anthropic_thinking_compatibility() {
+        let models = anthropic_models();
+        let find = |id: &str| {
             models
                 .iter()
-                .any(|model| model.id == ModelId::new("claude-sonnet-4-6")
-                    && model.context_window == 1_000_000)
+                .find(|model| model.id == ModelId::new(id))
+                .unwrap_or_else(|| panic!("missing Anthropic model {id}"))
+        };
+
+        let haiku = find("claude-haiku-4-5");
+        assert_eq!(
+            haiku.compat.as_ref().unwrap()["forceAdaptiveThinking"],
+            Value::Null
+        );
+        assert!(haiku.thinking_level_map.is_empty());
+
+        for id in [
+            "claude-sonnet-4-6",
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "claude-fable-5",
+        ] {
+            assert_eq!(
+                find(id).compat.as_ref().unwrap()["forceAdaptiveThinking"],
+                true,
+                "{id}"
+            );
+        }
+
+        assert_eq!(
+            find("claude-opus-4-6").thinking_level_map["max"],
+            Some("max".to_string())
+        );
+        assert!(
+            !find("claude-opus-4-6")
+                .thinking_level_map
+                .contains_key("xhigh")
+        );
+        assert_eq!(
+            find("claude-opus-4-8").thinking_level_map["xhigh"],
+            Some("xhigh".to_string())
+        );
+        for id in ["claude-opus-4-7", "claude-opus-4-8", "claude-opus-5"] {
+            assert_eq!(
+                find(id).compat.as_ref().unwrap()["supportsTemperature"],
+                false,
+                "{id}"
+            );
+        }
+        assert_eq!(
+            find("claude-opus-5").compat.as_ref().unwrap()["allowedFallbackModels"],
+            json!(["claude-opus-4-8"])
+        );
+        assert_eq!(find("claude-fable-5").thinking_level_map["off"], None);
+        assert_eq!(
+            find("claude-fable-5").compat.as_ref().unwrap()["allowedFallbackModels"],
+            json!(["claude-opus-4-8", "claude-opus-5"])
         );
     }
 

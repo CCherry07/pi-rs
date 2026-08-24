@@ -8,6 +8,7 @@ use pi_plugin_anthropic::AnthropicPlugin;
 use pi_plugin_bash::BashPlugin;
 use pi_plugin_edit::EditPlugin;
 use pi_plugin_find::FindPlugin;
+use pi_plugin_google::GooglePlugin;
 use pi_plugin_grep::GrepPlugin;
 use pi_plugin_hashline_edit::HashlineEditPlugin;
 use pi_plugin_loader::{NativePluginLoader, NativePluginLoaderOptions, NativePlugins};
@@ -220,6 +221,8 @@ fn build_runtime_with_codex_credentials(
 ) -> Result<PiRuntime, RuntimeError> {
     let stored_anthropic =
         read_stored_credential(&config.agent_dir, "anthropic").map_err(RuntimeError::Build)?;
+    let stored_google =
+        read_stored_credential(&config.agent_dir, "google").map_err(RuntimeError::Build)?;
     let stored_xai =
         read_stored_credential(&config.agent_dir, "xai").map_err(RuntimeError::Build)?;
     let stored_codex =
@@ -274,7 +277,7 @@ fn build_runtime_with_codex_credentials(
                     .map(str::to_string),
             ),
         })
-    } else if config.provider == "anthropic" {
+    } else if matches!(config.provider.as_str(), "anthropic" | "google") {
         builder
     } else {
         builder.try_provider_plugin_factory({
@@ -319,6 +322,28 @@ fn build_runtime_with_codex_credentials(
                     .as_ref()
                     .and_then(StoredCredential::secret)
                     .map(str::to_string),
+            )
+        })
+    };
+    let builder = if config.provider == "google" {
+        let explicit_api_key = config.api_key.clone();
+        let stored_google = stored_google.clone();
+        builder.try_provider_plugin_factory(move || match &explicit_api_key {
+            Some(api_key) => GooglePlugin::new(Some(api_key.clone())),
+            None => GooglePlugin::from_stored(
+                stored_google
+                    .as_ref()
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_owned),
+            ),
+        })
+    } else {
+        builder.try_provider_plugin_factory(move || {
+            GooglePlugin::from_stored(
+                stored_google
+                    .as_ref()
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_owned),
             )
         })
     };
@@ -584,6 +609,44 @@ command = "fixture-command"
         assert_eq!(runtime.agent().state().model_id.as_str(), "grok-4.6");
         assert!(runtime.available_models().iter().any(|model| {
             model.provider == ProviderId::new("xai") && model.id == ModelId::new("grok-4.6")
+        }));
+    }
+
+    #[test]
+    fn stored_google_api_key_registers_and_selects_builtin_catalog() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("auth.json"),
+            serde_json::json!({
+                "google": {"type": "api_key", "key": "gemini-test-key"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut config = app_config(directory.path(), Some("gemini-3.1-pro-preview"));
+        config.provider = "google".to_string();
+        config.requested_provider = Some("google".to_string());
+
+        let runtime = build_runtime_with_codex_credentials(
+            &config,
+            false,
+            &NativePlugins::default(),
+            None,
+            Some(pi_plugin_openai::CodexCredentials::default()),
+        )
+        .unwrap();
+
+        let model = runtime
+            .model(
+                &ProviderId::new("google"),
+                &ModelId::new("gemini-3.1-pro-preview"),
+            )
+            .expect("the built-in Google catalog must be registered");
+        assert_eq!(model.context_window, 1_048_576);
+        assert_eq!(runtime.agent().state().provider_id.as_str(), "google");
+        assert!(runtime.available_models().iter().any(|model| {
+            model.provider == ProviderId::new("google")
+                && model.id == ModelId::new("gemini-3.1-pro-preview")
         }));
     }
 
