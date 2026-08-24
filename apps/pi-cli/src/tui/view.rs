@@ -24,8 +24,9 @@ pub(super) fn cached_transcript_layout(
     gutter: u16,
     appearance: TerminalAppearance,
 ) -> Arc<CachedTranscriptLayout> {
-    let show_working_placeholder =
-        app.streaming_assistant.is_none() && (app.awaiting_assistant || app.status == "Working…");
+    let show_working_placeholder = app.streaming_assistant.is_none()
+        && !app.compacting
+        && (app.working_started_at.is_some() || app.awaiting_assistant || app.status == "Working…");
     let key = TranscriptLayoutKey {
         width,
         gutter,

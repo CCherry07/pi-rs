@@ -861,7 +861,8 @@ impl App {
     }
 
     fn has_active_animation(&self) -> bool {
-        self.awaiting_assistant
+        self.working_started_at.is_some()
+            || self.awaiting_assistant
             || self.streaming_assistant.is_some_and(|index| {
                 matches!(
                     self.transcript.get(index),
@@ -1106,6 +1107,7 @@ impl App {
             }
             AgentEvent::AgentEnd { .. } => {
                 self.awaiting_assistant = false;
+                self.working_started_at = None;
                 self.is_running = false;
             }
             AgentEvent::ToolExecutionUpdate { tool_name, .. } => {
@@ -2543,6 +2545,32 @@ mod tests {
             "the transcript should acknowledge submission before any provider event arrives"
         );
         assert!(render_app(&app, 80, 12).contains("Working (5s • esc to interrupt)"));
+    }
+
+    #[test]
+    fn tool_execution_keeps_the_agent_working_indicator_active() {
+        let mut app = demo_app();
+        app.transcript.clear();
+        app.apply_agent_event(AgentEvent::AgentStart);
+        app.apply_agent_event(AgentEvent::ToolExecutionStart {
+            tool_call_id: ToolCallId::new("call-web-search"),
+            tool_name: "web_search".to_string(),
+            args: serde_json::json!({ "query": "Beijing weather tomorrow" }),
+        });
+
+        assert!(
+            app.has_active_animation(),
+            "the working indicator should keep animating while a tool is running"
+        );
+        let screen = render_app(&app, 100, 12);
+        assert!(
+            screen.contains("web_search"),
+            "tool status should remain visible:\n{screen}"
+        );
+        assert!(
+            screen.contains("Working"),
+            "agent status should remain visible:\n{screen}"
+        );
     }
 
     #[test]
