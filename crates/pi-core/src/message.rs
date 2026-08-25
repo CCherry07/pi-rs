@@ -11,6 +11,7 @@ pub enum Message {
     User(UserMessage),
     Assistant(Arc<AssistantMessage>),
     ToolResult(Arc<ToolResultMessage>),
+    Custom(Arc<CustomMessage>),
 }
 
 impl Message {
@@ -22,8 +23,25 @@ impl Message {
         Self::ToolResult(Arc::new(message))
     }
 
+    pub fn custom(message: CustomMessage) -> Self {
+        Self::Custom(Arc::new(message))
+    }
+
     pub fn is_assistant(&self) -> bool {
         matches!(self, Self::Assistant(_))
+    }
+
+    /// Projects an agent-level extension message into the provider message
+    /// vocabulary. Custom messages intentionally remain distinct in agent
+    /// state, lifecycle events, and session storage until this seam.
+    pub fn into_provider_message(self) -> Self {
+        match self {
+            Self::Custom(message) => Self::User(UserMessage {
+                content: message.content.to_blocks(),
+                timestamp_ms: message.timestamp_ms,
+            }),
+            message => message,
+        }
     }
 }
 
@@ -43,6 +61,42 @@ impl UserMessage {
             timestamp_ms,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CustomMessageContent {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+}
+
+impl Default for CustomMessageContent {
+    fn default() -> Self {
+        Self::Blocks(Vec::new())
+    }
+}
+
+impl CustomMessageContent {
+    pub fn to_blocks(&self) -> Vec<ContentBlock> {
+        match self {
+            Self::Text(text) => vec![ContentBlock::Text(TextContent::new(text.clone()))],
+            Self::Blocks(blocks) => blocks.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomMessage {
+    pub custom_type: String,
+    #[serde(default)]
+    pub content: CustomMessageContent,
+    #[serde(default)]
+    pub display: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+    #[serde(rename = "timestamp")]
+    pub timestamp_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

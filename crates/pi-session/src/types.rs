@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use pi_core::{Message, ModelId, ProviderId, Usage, UsageCost};
+use pi_core::{
+    CustomMessage, CustomMessageContent, Message, ModelId, ProviderId, Usage, UsageCost,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
@@ -66,6 +68,10 @@ impl AgentMessage {
                 message: Message::ToolResult(_),
                 ..
             } => "toolResult",
+            AgentMessageKind::Standard {
+                message: Message::Custom(_),
+                ..
+            } => "custom",
             AgentMessageKind::Custom { role, .. } => role,
         }
     }
@@ -141,10 +147,17 @@ impl PartialEq for AgentMessage {
 
 impl From<Message> for AgentMessage {
     fn from(message: Message) -> Self {
-        Self(AgentMessageKind::Standard {
-            message,
-            original: None,
-        })
+        match message {
+            Message::Custom(_) => {
+                let value = serde_json::to_value(message)
+                    .expect("pi-core custom messages always serialize to JSON");
+                Self::custom(value).expect("pi-core custom messages always contain a role")
+            }
+            message => Self(AgentMessageKind::Standard {
+                message,
+                original: None,
+            }),
+        }
     }
 }
 
@@ -355,9 +368,34 @@ pub struct CustomEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomMessageEntry {
+    pub custom_type: String,
+    #[serde(default)]
+    pub content: CustomMessageContent,
+    #[serde(default)]
+    pub display: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+}
+
+impl CustomMessageEntry {
+    pub fn to_message(&self, timestamp_ms: i64) -> Message {
+        Message::custom(CustomMessage {
+            custom_type: self.custom_type.clone(),
+            content: self.content.clone(),
+            display: self.display,
+            details: self.details.clone(),
+            timestamp_ms,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEntry {
     Message(MessageEntry),
+    CustomMessage(CustomMessageEntry),
     ModelChange(ModelChangeEntry),
     ThinkingLevelChange(ThinkingLevelEntry),
     ActiveToolsChange(ActiveToolsEntry),
@@ -374,9 +412,19 @@ impl SessionEntry {
         })
     }
 
+    pub fn custom_message(message: &CustomMessage) -> Self {
+        Self::CustomMessage(CustomMessageEntry {
+            custom_type: message.custom_type.clone(),
+            content: message.content.clone(),
+            display: message.display,
+            details: message.details.clone(),
+        })
+    }
+
     pub fn entry_type(&self) -> SessionEntryType {
         match self {
             Self::Message(_) => SessionEntryType::Message,
+            Self::CustomMessage(_) => SessionEntryType::CustomMessage,
             Self::ModelChange(_) => SessionEntryType::ModelChange,
             Self::ThinkingLevelChange(_) => SessionEntryType::ThinkingLevelChange,
             Self::ActiveToolsChange(_) => SessionEntryType::ActiveToolsChange,
@@ -391,6 +439,7 @@ impl SessionEntry {
 #[serde(rename_all = "snake_case")]
 pub enum SessionEntryType {
     Message,
+    CustomMessage,
     ModelChange,
     ThinkingLevelChange,
     ActiveToolsChange,

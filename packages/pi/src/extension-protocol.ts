@@ -71,6 +71,15 @@ const generationManifestSchema = z.strictObject({
       hooks: z.array(hookManifestSchema),
     }),
   ),
+  diagnostics: z.array(
+    z.strictObject({
+      pluginId: z.string(),
+      path: z.string(),
+      feature: z.string(),
+      status: z.literal('inactive'),
+      message: z.string(),
+    }),
+  ).default([]),
 })
 
 export type HostMode = z.infer<typeof hostModeSchema>
@@ -85,6 +94,7 @@ export type CommandManifest = z.infer<typeof commandManifestSchema>
 export type AgentPluginManifest = z.infer<typeof generationManifestSchema>['agentPlugins'][number]
 export type ProviderPluginManifest = z.infer<typeof generationManifestSchema>['providerPlugins'][number]
 export type SessionPluginManifest = z.infer<typeof generationManifestSchema>['sessionPlugins'][number]
+export type ExtensionDiagnostic = z.infer<typeof generationManifestSchema>['diagnostics'][number]
 export type GenerationManifest = z.infer<typeof generationManifestSchema>
 
 export function parseJson(raw: string, description = 'JSON value'): unknown {

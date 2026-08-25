@@ -17,6 +17,7 @@ napi-derive = "=3.6.3"
 pi-cli = { path = "../../apps/pi-cli" }
 tokio.workspace = true
 pi-js-plugin.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [build-dependencies]

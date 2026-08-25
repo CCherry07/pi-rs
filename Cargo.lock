@@ -2194,6 +2194,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2217,6 +2218,7 @@ dependencies = [
  "napi-derive",
  "pi-cli",
  "pi-js-plugin",
+ "serde",
  "serde_json",
  "tokio",
 ]

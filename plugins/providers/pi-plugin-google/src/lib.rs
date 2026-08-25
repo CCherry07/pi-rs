@@ -271,6 +271,23 @@ fn project_messages(request: &ProviderRequest) -> Vec<Value> {
                     messages.push(json!({"role": "user", "parts": parts}));
                 }
             }
+            Message::Custom(message) => {
+                let parts = message
+                    .content
+                    .to_blocks()
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text(text) => Some(json!({"text": text.text})),
+                        ContentBlock::Image(image) => Some(json!({
+                            "inlineData": {"mimeType": image.mime_type, "data": image.data}
+                        })),
+                        ContentBlock::Thinking(_) | ContentBlock::ToolCall(_) => None,
+                    })
+                    .collect::<Vec<_>>();
+                if !parts.is_empty() {
+                    messages.push(json!({"role": "user", "parts": parts}));
+                }
+            }
             Message::Assistant(message) => {
                 let same_model = request.model_spec.as_ref().is_some_and(|model| {
                     message.provider == model.provider && message.model == request.model

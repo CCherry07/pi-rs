@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { PiApplication } from "../src/index.js";
+import { PiNodeHost } from "../src/index.js";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 
@@ -12,7 +12,7 @@ test("runs a TypeScript command through Node, NAPI, and the Rust session runtime
   const agentDirectory = await mkdtemp(join(tmpdir(), "pi-rs-napi-agent-"));
   const extension = join(testDirectory, "fixtures", "command.ts");
 
-  await new PiApplication({
+  await new PiNodeHost({
     arguments: [
       "--cwd",
       testDirectory,
@@ -48,7 +48,7 @@ test("loads a settings extension through PackageManager discovery and NAPI", asy
     JSON.stringify({ extensions: ["./configured/settings-command.js"] }),
   );
 
-  await new PiApplication({
+  await new PiNodeHost({
     arguments: [
       "--cwd",
       testDirectory,
@@ -74,7 +74,7 @@ test("runs a PackageManager command through the Node/NAPI launcher", async () =>
     JSON.stringify({ packages: [extension] }),
   );
 
-  await new PiApplication({
+  await new PiNodeHost({
     arguments: [
       "--cwd",
       projectDirectory,

@@ -510,12 +510,12 @@ mod tests {
         let (_, signal) = AbortHandle::new();
         let patch = plugin
             .before_agent_start(
-                PluginContext {
-                    plugin_id: PluginId::new("skills"),
-                    run_id: RunId::new("run"),
-                    cwd: "/tmp".into(),
-                    abort_signal: signal,
-                },
+                PluginContext::new(
+                    PluginId::new("skills"),
+                    RunId::new("run"),
+                    "/tmp".into(),
+                    signal,
+                ),
                 BeforeAgentStartEvent {
                     system_prompt: "base".into(),
                     input_messages: Vec::new(),

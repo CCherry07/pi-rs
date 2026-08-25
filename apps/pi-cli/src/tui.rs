@@ -22,7 +22,8 @@ use pi_core::{
 };
 use pi_session::{
     AgentSession, AgentSessionEvent, AgentSessionSnapshot, EntryOrder, EntryQuery, ForkPosition,
-    PiSession, QueueSnapshot, SessionEntry, ShellExecutionOptions, SubmitOutcome,
+    PiSession, QueueSnapshot, SessionEntry, SessionRuntimeInventory, ShellExecutionOptions,
+    SubmitOutcome,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -116,7 +117,6 @@ const STATUS_DOT: &str = "•";
 const MOUSE_SCROLL_LINES_PER_TICK: usize = 3;
 const PAGE_SCROLL_OVERLAP: usize = 4;
 const COMPOSER_TEXT_OFFSET: u16 = 2;
-const STARTUP_HEADER_HEIGHT: u16 = 9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ScrollDirection {
@@ -612,6 +612,25 @@ const THINKING_CHOICES: [ThinkingChoice; 7] = [
     },
 ];
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RegisteredPluginInventory {
+    js_extensions: Vec<String>,
+    rust_plugins: Vec<String>,
+}
+
+impl RegisteredPluginInventory {
+    fn from_runtime(inventory: &SessionRuntimeInventory) -> Self {
+        Self {
+            js_extensions: inventory.js_extensions().to_vec(),
+            rust_plugins: inventory
+                .configured_native_plugins()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        }
+    }
+}
+
 struct App {
     transcript: Vec<TranscriptItem>,
     show_startup_header: bool,
@@ -622,6 +641,7 @@ struct App {
     queue: QueueSnapshot,
     command_specs: Vec<CommandSpec>,
     model_specs: Vec<ModelSpec>,
+    registered_plugins: RegisteredPluginInventory,
     session_choices: Vec<SessionChoice>,
     tree_choices: Vec<SessionEntryChoice>,
     fork_choices: Vec<SessionEntryChoice>,
@@ -715,6 +735,8 @@ impl App {
             discover_session_choices(session.log().path(), session.runtime().cwd());
         let (tree_choices, fork_choices) = session_entry_choices(session);
         let input_history = InputHistory::from_transcript(&transcript);
+        let registered_plugins =
+            RegisteredPluginInventory::from_runtime(session.runtime_inventory());
         Self {
             transcript,
             show_startup_header: true,
@@ -725,6 +747,7 @@ impl App {
             queue: snapshot.queue.clone(),
             command_specs: session.runtime().command_specs(),
             model_specs: session.runtime().available_models(),
+            registered_plugins,
             session_choices,
             tree_choices,
             fork_choices,
@@ -999,6 +1022,15 @@ impl App {
                     self.streaming_assistant = Some(self.transcript.len() - 1);
                 }
                 Message::ToolResult(_) => {}
+                Message::Custom(message) => {
+                    if message.display {
+                        self.transcript.push(TranscriptItem::Notice(format!(
+                            "[{}]\n{}",
+                            message.custom_type,
+                            custom_content_text(&message.content)
+                        )));
+                    }
+                }
             },
             AgentEvent::MessageUpdate { message, .. } => {
                 let text = message
@@ -1592,6 +1624,7 @@ fn session_entry_choices(
                 .as_standard()
                 .map(message_choice_text)
                 .unwrap_or_else(|| format!("{} message", entry.message.role())),
+            SessionEntry::CustomMessage(message) => message.custom_type.clone(),
             SessionEntry::ModelChange(change) => {
                 format!("Model: {}/{}", change.provider, change.model_id)
             }
@@ -1626,6 +1659,7 @@ fn message_choice_text(message: &Message) -> String {
             assistant_text(message).unwrap_or_else(|| "Assistant message".to_string())
         }
         Message::ToolResult(message) => format!("Tool result: {}", message.tool_name),
+        Message::Custom(message) => format!("{} message", message.custom_type),
     }
 }
 
@@ -1640,9 +1674,24 @@ fn user_text(content: &[ContentBlock]) -> String {
         .join("\n")
 }
 
+fn custom_content_text(content: &pi_core::CustomMessageContent) -> String {
+    match content {
+        pi_core::CustomMessageContent::Text(text) => text.clone(),
+        pi_core::CustomMessageContent::Blocks(blocks) => user_text(blocks),
+    }
+}
+
 fn push_history_entry(transcript: &mut Vec<TranscriptItem>, entry: &SessionEntry) {
-    if let SessionEntry::Message(message) = entry {
-        push_history_message(transcript, &message.message);
+    match entry {
+        SessionEntry::Message(message) => push_history_message(transcript, &message.message),
+        SessionEntry::CustomMessage(message) if message.display => {
+            transcript.push(TranscriptItem::Notice(format!(
+                "[{}]\n{}",
+                message.custom_type,
+                custom_content_text(&message.content)
+            )));
+        }
+        _ => {}
     }
 }
 
@@ -1710,6 +1759,15 @@ fn push_history_message(transcript: &mut Vec<TranscriptItem>, message: &pi_sessi
                     });
                 }
             }
+            Message::Custom(message) => {
+                if message.display {
+                    transcript.push(TranscriptItem::Notice(format!(
+                        "[{}]\n{}",
+                        message.custom_type,
+                        custom_content_text(&message.content)
+                    )));
+                }
+            }
         }
         return;
     }
@@ -1757,7 +1815,7 @@ fn push_history_message(transcript: &mut Vec<TranscriptItem>, message: &pi_sessi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_session::{AgentSessionRuntimeRequest, AgentSessionRuntimeTarget, PiApplication};
+    use pi_session::{AgentSessionRuntimeRequest, AgentSessionRuntimeTarget, MultiSessionManager};
     use ratatui::backend::TestBackend;
     use ratatui::{TerminalOptions, Viewport};
 
@@ -1817,6 +1875,7 @@ mod tests {
                 argument_hint: Some("[task]".to_string()),
             }],
             model_specs: Vec::new(),
+            registered_plugins: RegisteredPluginInventory::default(),
             session_choices: Vec::new(),
             tree_choices: Vec::new(),
             fork_choices: Vec::new(),
@@ -1992,7 +2051,7 @@ mod tests {
     #[tokio::test]
     async fn name_and_session_commands_use_the_active_session_log() {
         let directory = tempfile::tempdir().unwrap();
-        let application = PiApplication::new(|request: AgentSessionRuntimeRequest| async move {
+        let sessions = MultiSessionManager::new(|request: AgentSessionRuntimeRequest| async move {
             let AgentSessionRuntimeTarget::Create { cwd, path } = request.target else {
                 unreachable!("this test does not replace the session")
             };
@@ -2014,7 +2073,7 @@ mod tests {
                 .build()?;
             AgentSession::prepare_create(pi_runtime, path).await
         });
-        let runtime = application
+        let runtime = sessions
             .create_session(directory.path(), directory.path().join("session.jsonl"))
             .await
             .unwrap();
@@ -2042,7 +2101,7 @@ mod tests {
         assert!(info.contains("Session Info"));
         assert!(info.contains("Name: release polish"));
         assert!(info.contains("Messages: 0"));
-        application.shutdown().await.unwrap();
+        sessions.shutdown().await.unwrap();
     }
 
     #[test]
@@ -3422,6 +3481,10 @@ mod tests {
         let mut app = demo_app();
         app.transcript.clear();
         app.show_startup_header = true;
+        app.registered_plugins = RegisteredPluginInventory {
+            js_extensions: vec!["clipboard.ts".to_string(), "session-tools.ts".to_string()],
+            rust_plugins: vec!["frontend-check".to_string(), "release-audit".to_string()],
+        };
         app.input.clear();
         app.queue = QueueSnapshot::default();
 
@@ -3434,10 +3497,73 @@ mod tests {
         assert!(screen.contains("model:"));
         assert!(screen.contains("directory:"));
         assert!(screen.contains("gpt-5.6-sol high  /model to change"));
+        assert!(screen.contains("js extensions:  clipboard.ts, session-tools.ts"));
+        assert!(screen.contains("rust plugins:   frontend-check, release-audit"));
         assert!(screen.contains("Ask pi to do anything"));
         assert!(screen.contains("Tip: type / for commands or ! for shell"));
         let card_top = screen.lines().find(|line| line.contains('╭')).unwrap();
         assert_eq!(UnicodeWidthStr::width(card_top.trim_start()), 54);
+    }
+
+    #[test]
+    fn registered_plugin_inventory_uses_resolved_js_identities_and_configured_native_plugins() {
+        let runtime_inventory = SessionRuntimeInventory::new(
+            [
+                "npm:@counterposition/pi-web-search".to_string(),
+                "npm:@narumitw/pi-lsp@0.49.5".to_string(),
+                "clipboard.ts".to_string(),
+            ],
+            [pi_core::PluginId::new("frontend-check")],
+        );
+        let inventory = RegisteredPluginInventory::from_runtime(&runtime_inventory);
+
+        assert_eq!(
+            inventory.js_extensions,
+            [
+                "npm:@counterposition/pi-web-search",
+                "npm:@narumitw/pi-lsp@0.49.5",
+                "clipboard.ts",
+            ]
+        );
+        assert_eq!(inventory.rust_plugins, ["frontend-check"]);
+    }
+
+    #[test]
+    fn startup_card_wraps_registration_lists_without_clipping_entries() {
+        let mut app = demo_app();
+        app.transcript.clear();
+        app.show_startup_header = true;
+        app.input.clear();
+        app.queue = QueueSnapshot::default();
+        app.registered_plugins = RegisteredPluginInventory {
+            js_extensions: vec![
+                "clipboard.ts".to_string(),
+                "session-tools".to_string(),
+                "review-workflow.ts".to_string(),
+            ],
+            rust_plugins: vec![
+                "frontend-check".to_string(),
+                "repository-policy".to_string(),
+                "release-audit".to_string(),
+                "last-native-plugin".to_string(),
+            ],
+        };
+
+        let screen = render_app(&app, 60, 28);
+
+        for registration in app
+            .registered_plugins
+            .js_extensions
+            .iter()
+            .chain(&app.registered_plugins.rust_plugins)
+        {
+            assert!(
+                screen.contains(registration),
+                "missing {registration}\n{screen}"
+            );
+        }
+        assert!(screen.contains("Tip: type / for commands or ! for shell"));
+        assert!(screen.contains("Ask pi to do anything"));
     }
 
     #[test]

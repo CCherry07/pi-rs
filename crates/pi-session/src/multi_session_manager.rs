@@ -12,16 +12,16 @@ use crate::{
     ForkPosition, PreparedAgentSession, SessionError,
 };
 
-/// The application-level owner of active Pi sessions.
+/// Owns and coordinates multiple active Pi sessions.
 ///
 /// The active-session table is intentionally private. Frontends keep the
 /// returned [`PiSession`] handles and do not coordinate a separate registry.
 #[derive(Clone)]
-pub struct PiApplication {
-    inner: Arc<ApplicationInner>,
+pub struct MultiSessionManager {
+    inner: Arc<MultiSessionManagerInner>,
 }
 
-struct ApplicationInner {
+struct MultiSessionManagerInner {
     factory: Arc<dyn AgentSessionRuntimeFactory>,
     sessions: Mutex<HashMap<String, PiSession>>,
     operation_gate: tokio::sync::Mutex<()>,
@@ -36,16 +36,26 @@ struct ApplicationInner {
 pub struct PiSession {
     registration_id: Arc<str>,
     runtime: AgentSessionRuntime,
-    application: Weak<ApplicationInner>,
+    manager: Weak<MultiSessionManagerInner>,
+}
+
+/// A non-owning handle to a managed [`PiSession`].
+///
+/// Upgrading succeeds while the owning [`MultiSessionManager`] still has the
+/// session registered.
+#[derive(Clone)]
+pub struct WeakPiSession {
+    registration_id: Arc<str>,
+    manager: Weak<MultiSessionManagerInner>,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum PiApplicationError {
+pub enum MultiSessionManagerError {
     #[error(transparent)]
     Runtime(#[from] AgentSessionRuntimeError),
-    #[error("Pi application is closed")]
+    #[error("multi-session manager is closed")]
     Closed,
-    #[error("session is not managed by this Pi application")]
+    #[error("session is not managed by this multi-session manager")]
     UnknownSession,
     #[error("session path is already active: {0}")]
     SessionAlreadyActive(PathBuf),
@@ -64,13 +74,13 @@ impl AgentSessionRuntimeFactory for SharedFactory {
     }
 }
 
-impl PiApplication {
+impl MultiSessionManager {
     pub fn new<F>(factory: F) -> Self
     where
         F: AgentSessionRuntimeFactory + 'static,
     {
         Self {
-            inner: Arc::new(ApplicationInner {
+            inner: Arc::new(MultiSessionManagerInner {
                 factory: Arc::new(factory),
                 sessions: Mutex::new(HashMap::new()),
                 operation_gate: tokio::sync::Mutex::new(()),
@@ -83,7 +93,7 @@ impl PiApplication {
         &self,
         cwd: impl Into<PathBuf>,
         path: impl Into<PathBuf>,
-    ) -> Result<PiSession, PiApplicationError> {
+    ) -> Result<PiSession, MultiSessionManagerError> {
         self.acquire(
             AgentSessionRuntimeTarget::create(cwd, path),
             ExistingSessionPolicy::Reject,
@@ -94,7 +104,7 @@ impl PiApplication {
     pub async fn open_session(
         &self,
         path: impl Into<PathBuf>,
-    ) -> Result<PiSession, PiApplicationError> {
+    ) -> Result<PiSession, MultiSessionManagerError> {
         self.acquire(
             AgentSessionRuntimeTarget::open(path),
             ExistingSessionPolicy::Reuse,
@@ -113,7 +123,7 @@ impl PiApplication {
             .collect()
     }
 
-    pub async fn close_session(&self, session: &PiSession) -> Result<(), PiApplicationError> {
+    pub async fn close_session(&self, session: &PiSession) -> Result<(), MultiSessionManagerError> {
         let _operation = self.inner.operation_gate.lock().await;
         self.inner.ensure_open()?;
         let removed = self
@@ -122,12 +132,12 @@ impl PiApplication {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(session.registration_id.as_ref())
-            .ok_or(PiApplicationError::UnknownSession)?;
+            .ok_or(MultiSessionManagerError::UnknownSession)?;
         removed.runtime.shutdown().await?;
         Ok(())
     }
 
-    pub async fn shutdown(&self) -> Result<(), PiApplicationError> {
+    pub async fn shutdown(&self) -> Result<(), MultiSessionManagerError> {
         let _operation = self.inner.operation_gate.lock().await;
         if self.inner.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
@@ -155,7 +165,7 @@ impl PiApplication {
         &self,
         target: AgentSessionRuntimeTarget,
         existing: ExistingSessionPolicy,
-    ) -> Result<PiSession, PiApplicationError> {
+    ) -> Result<PiSession, MultiSessionManagerError> {
         let _operation = self.inner.operation_gate.lock().await;
         self.inner.ensure_open()?;
         let path = comparable_path(target.path());
@@ -163,7 +173,7 @@ impl PiApplication {
             return match existing {
                 ExistingSessionPolicy::Reuse => Ok(active),
                 ExistingSessionPolicy::Reject => {
-                    Err(PiApplicationError::SessionAlreadyActive(path))
+                    Err(MultiSessionManagerError::SessionAlreadyActive(path))
                 }
             };
         }
@@ -174,7 +184,7 @@ impl PiApplication {
         let session = PiSession {
             registration_id: Arc::clone(&registration_id),
             runtime,
-            application: Arc::downgrade(&self.inner),
+            manager: Arc::downgrade(&self.inner),
         };
         self.inner
             .sessions
@@ -186,6 +196,13 @@ impl PiApplication {
 }
 
 impl PiSession {
+    pub fn downgrade(&self) -> WeakPiSession {
+        WeakPiSession {
+            registration_id: Arc::clone(&self.registration_id),
+            manager: self.manager.clone(),
+        }
+    }
+
     /// Returns the current generation of the underlying agent session.
     pub fn current(&self) -> Arc<AgentSession> {
         self.runtime.session()
@@ -212,25 +229,25 @@ impl PiSession {
         &self,
         cwd: impl Into<PathBuf>,
         path: impl Into<PathBuf>,
-    ) -> Result<AgentSessionReplacement, PiApplicationError> {
+    ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
         let cwd = cwd.into();
         let path = path.into();
-        let application = self.application()?;
-        let _operation = application.operation_gate.lock().await;
-        application.ensure_open()?;
-        application.ensure_path_available(self, &path)?;
+        let manager = self.manager()?;
+        let _operation = manager.operation_gate.lock().await;
+        manager.ensure_open()?;
+        manager.ensure_path_available(self, &path)?;
         Ok(self.runtime.new_session(cwd, path).await?)
     }
 
     pub async fn resume_session(
         &self,
         path: impl Into<PathBuf>,
-    ) -> Result<AgentSessionReplacement, PiApplicationError> {
+    ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
         let path = path.into();
-        let application = self.application()?;
-        let _operation = application.operation_gate.lock().await;
-        application.ensure_open()?;
-        application.ensure_path_available(self, &path)?;
+        let manager = self.manager()?;
+        let _operation = manager.operation_gate.lock().await;
+        manager.ensure_open()?;
+        manager.ensure_path_available(self, &path)?;
         Ok(self.runtime.switch_session(path).await?)
     }
 
@@ -238,17 +255,17 @@ impl PiSession {
         &self,
         entry_id: impl Into<String>,
         position: ForkPosition,
-    ) -> Result<AgentSessionReplacement, PiApplicationError> {
-        let application = self.application()?;
-        let _operation = application.operation_gate.lock().await;
-        application.ensure_open()?;
+    ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
+        let manager = self.manager()?;
+        let _operation = manager.operation_gate.lock().await;
+        manager.ensure_open()?;
         Ok(self.runtime.fork_session(entry_id, position).await?)
     }
 
-    pub async fn reload(&self) -> Result<(), PiApplicationError> {
-        let application = self.application()?;
-        let _operation = application.operation_gate.lock().await;
-        application.ensure_open()?;
+    pub async fn reload(&self) -> Result<(), MultiSessionManagerError> {
+        let manager = self.manager()?;
+        let _operation = manager.operation_gate.lock().await;
+        manager.ensure_open()?;
         self.runtime.reload().await?;
         Ok(())
     }
@@ -257,15 +274,29 @@ impl PiSession {
         self.runtime.abort();
     }
 
-    fn application(&self) -> Result<Arc<ApplicationInner>, PiApplicationError> {
-        self.application.upgrade().ok_or(PiApplicationError::Closed)
+    fn manager(&self) -> Result<Arc<MultiSessionManagerInner>, MultiSessionManagerError> {
+        self.manager
+            .upgrade()
+            .ok_or(MultiSessionManagerError::Closed)
     }
 }
 
-impl ApplicationInner {
-    fn ensure_open(&self) -> Result<(), PiApplicationError> {
+impl WeakPiSession {
+    pub fn upgrade(&self) -> Option<PiSession> {
+        self.manager
+            .upgrade()?
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(self.registration_id.as_ref())
+            .cloned()
+    }
+}
+
+impl MultiSessionManagerInner {
+    fn ensure_open(&self) -> Result<(), MultiSessionManagerError> {
         if self.closed.load(Ordering::Acquire) {
-            Err(PiApplicationError::Closed)
+            Err(MultiSessionManagerError::Closed)
         } else {
             Ok(())
         }
@@ -284,7 +315,7 @@ impl ApplicationInner {
         &self,
         owner: &PiSession,
         path: &Path,
-    ) -> Result<(), PiApplicationError> {
+    ) -> Result<(), MultiSessionManagerError> {
         let path = comparable_path(path);
         let occupied = self
             .sessions
@@ -296,7 +327,7 @@ impl ApplicationInner {
                     && comparable_path(&session.path()) == path
             });
         if occupied {
-            Err(PiApplicationError::SessionAlreadyActive(path))
+            Err(MultiSessionManagerError::SessionAlreadyActive(path))
         } else {
             Ok(())
         }
@@ -338,8 +369,8 @@ mod tests {
     use super::*;
     use crate::AgentSessionOptions;
 
-    fn test_application() -> PiApplication {
-        PiApplication::new(|request: AgentSessionRuntimeRequest| async move {
+    fn test_manager() -> MultiSessionManager {
+        MultiSessionManager::new(|request: AgentSessionRuntimeRequest| async move {
             let (cwd, path, create, reused_log) = match request.target {
                 AgentSessionRuntimeTarget::Create { cwd, path } => (cwd, path, true, None),
                 AgentSessionRuntimeTarget::Open { path } => {
@@ -391,53 +422,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn application_owns_multiple_sessions_and_closes_them() {
+    async fn manager_owns_multiple_sessions_and_closes_them() {
         let directory = tempfile::tempdir().unwrap();
-        let application = test_application();
-        let first = application
+        let manager = test_manager();
+        let first = manager
             .create_session(directory.path(), directory.path().join("first.jsonl"))
             .await
             .unwrap();
-        let second = application
+        let second = manager
             .create_session(directory.path(), directory.path().join("second.jsonl"))
             .await
             .unwrap();
 
         assert_ne!(first.id(), second.id());
-        assert_eq!(application.sessions().len(), 2);
+        assert_eq!(manager.sessions().len(), 2);
 
-        application.close_session(&first).await.unwrap();
+        manager.close_session(&first).await.unwrap();
         assert!(first.current().is_closed());
         assert!(!second.current().is_closed());
-        assert_eq!(application.sessions().len(), 1);
+        assert_eq!(manager.sessions().len(), 1);
 
-        application.shutdown().await.unwrap();
+        manager.shutdown().await.unwrap();
         assert!(second.current().is_closed());
-        assert!(application.sessions().is_empty());
+        assert!(manager.sessions().is_empty());
         assert!(matches!(
-            application
+            manager
                 .create_session(directory.path(), directory.path().join("third.jsonl"))
                 .await,
-            Err(PiApplicationError::Closed)
+            Err(MultiSessionManagerError::Closed)
         ));
+    }
+
+    #[tokio::test]
+    async fn weak_session_handle_does_not_keep_the_manager_or_session_alive() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = test_manager();
+        let session = manager
+            .create_session(directory.path(), directory.path().join("session.jsonl"))
+            .await
+            .unwrap();
+        let weak = session.downgrade();
+
+        assert_eq!(weak.upgrade().unwrap().id(), session.id());
+        drop(session);
+        drop(manager);
+
+        assert!(weak.upgrade().is_none());
     }
 
     #[tokio::test]
     async fn opening_an_active_path_reuses_its_handle() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
-        let application = test_application();
-        let created = application
+        let manager = test_manager();
+        let created = manager
             .create_session(directory.path(), &path)
             .await
             .unwrap();
         created.current().log().materialize().unwrap();
 
-        let opened = application.open_session(&path).await.unwrap();
+        let opened = manager.open_session(&path).await.unwrap();
 
         assert_eq!(created.registration_id, opened.registration_id);
-        assert_eq!(application.sessions().len(), 1);
-        application.shutdown().await.unwrap();
+        assert_eq!(manager.sessions().len(), 1);
+        manager.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -445,20 +493,23 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let first_path = directory.path().join("first.jsonl");
         let second_path = directory.path().join("second.jsonl");
-        let application = test_application();
-        let first = application
+        let manager = test_manager();
+        let first = manager
             .create_session(directory.path(), &first_path)
             .await
             .unwrap();
-        let _second = application
+        let _second = manager
             .create_session(directory.path(), &second_path)
             .await
             .unwrap();
 
         let error = first.resume_session(&second_path).await.unwrap_err();
 
-        assert!(matches!(error, PiApplicationError::SessionAlreadyActive(_)));
+        assert!(matches!(
+            error,
+            MultiSessionManagerError::SessionAlreadyActive(_)
+        ));
         assert_eq!(first.path(), first_path);
-        application.shutdown().await.unwrap();
+        manager.shutdown().await.unwrap();
     }
 }

@@ -345,14 +345,21 @@ npm start -- --cwd /path/to/project
 ```
 
 Extensions can currently register tools, commands, agent hooks, `before_provider_request`, and
-session lifecycle hooks. Managed installs intentionally leave Pi SDK and TypeBox peer dependencies
-to the host. Runtime-neutral helpers such as `defineTool`, `StringEnum`, `Type`, `CONFIG_DIR_NAME`,
-`VERSION`, `getAgentDir`, and the built-in tool-result guards are available through current and
-legacy `pi-ai` / `pi-coding-agent` package names; `typebox` and `@sinclair/typebox` resolve to the
-host's bundled runtime. Capabilities that require a richer product bridge—such as JavaScript
-provider registration, custom TUI renderers, UI dialogs, and low-level response hooks—fail
-explicitly instead of being silently ignored. Extension code runs in the Node process as trusted
-code; it is not sandboxed.
+session lifecycle hooks. Base contexts expose native read-only model/session state; command contexts
+also expose wait, new/fork/switch/navigation, and reload operations. Managed installs intentionally
+leave Pi SDK and TypeBox peer dependencies to the host. Runtime-neutral helpers such as
+`defineTool`, `StringEnum`, `Type`, `CONFIG_DIR_NAME`, `VERSION`, `getAgentDir`, and the built-in
+tool-result guards are available through current and legacy `pi-ai` / `pi-coding-agent` package
+names; `typebox` and `@sinclair/typebox`, including subpaths such as `typebox/value`, resolve to the
+host's bundled runtime.
+
+JavaScript extensions do not own the Ratatui frontend: `ctx.hasUI` is false and `ctx.ui` is an
+explicit no-op implementation. Hooks and registrations known to current Pi but not yet implemented
+are reported as inactive and do not fail generation construction; genuinely unknown hook names
+still fail so typos remain visible. See the repository's
+[JavaScript compatibility matrix](../../docs/js-extension-compatibility.md) for the precise hook,
+context, UI, and module status. Extension code runs in the Node process as trusted code; it is not
+sandboxed.
 
 ### Native Rust plugins
 

@@ -22,17 +22,18 @@ pub use error::{CoreError, Result};
 pub use events::{AgentEvent, AssistantMessageEvent};
 pub use ids::{ModelId, PluginId, ProviderId, RunId, ToolCallId};
 pub use message::{
-    AssistantMessage, ContentBlock, DeferredHandle, ImageContent, Message, TextContent,
-    ThinkingContent, ToolCall, ToolResultMessage, UserMessage,
+    AssistantMessage, ContentBlock, CustomMessage, CustomMessageContent, DeferredHandle,
+    ImageContent, Message, TextContent, ThinkingContent, ToolCall, ToolResultMessage, UserMessage,
 };
 pub use model::{
     ModelCost, ModelCostTier, ModelInput, ModelSpec, ResponseMetadata, StopReason, ThinkingLevel,
 };
 pub use model_runtime::{ModelRuntime, ProviderStatus};
 pub use plugin::{
-    AgentEndEvent, AgentPlugin, AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch,
-    ContextEvent, ContextPatch, InputContext, InputEvent, InputPatch, MessageEndEvent,
-    MessageStartEvent, MessageUpdateEvent, PluginContext, PluginDriver, PluginError,
+    AgentEndEvent, AgentPlugin, AgentSettledEvent, AgentStartEvent, BeforeAgentStartEvent,
+    BeforeAgentStartPatch, ContextEvent, ContextPatch, InputContext, InputEvent, InputPatch,
+    InputSource, InputStreamingBehavior, MessageEndEvent, MessageEndPatch, MessageStartEvent,
+    MessageUpdateEvent, PluginContext, PluginDiagnostic, PluginDriver, PluginError,
     RegisterContext, ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolExecutionEndEvent,
     ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch,
     TurnEndEvent, TurnStartEvent,

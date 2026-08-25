@@ -694,6 +694,7 @@ fn validate_mutation_json_shape(value: &Value, line: usize) -> Result<(), Sessio
             if !matches!(
                 entry_type,
                 "message"
+                    | "custom_message"
                     | "model_change"
                     | "thinking_level_change"
                     | "active_tools_change"
@@ -708,7 +709,7 @@ fn validate_mutation_json_shape(value: &Value, line: usize) -> Result<(), Sessio
             }
             require_nullable_json_string(object, "parentId", line)?;
             require_safe_integer(object.get("timestamp"), line, "timestamp", true)?;
-            if entry_type == "custom" {
+            if matches!(entry_type, "custom" | "custom_message") {
                 require_json_string(object, "customType", line)?;
             }
         }

@@ -388,6 +388,15 @@ fn messages(request: &ProviderRequest, compat: &ResolvedOpenAiCompletionsCompat)
                 }));
                 last_was_tool_result = false;
             }
+            Message::Custom(message) => {
+                if last_was_tool_result && compat.requires_assistant_after_tool_result {
+                    messages.push(assistant_tool_bridge());
+                }
+                messages.push(json!({
+                    "role": "user", "content": user_content(&message.content.to_blocks())
+                }));
+                last_was_tool_result = false;
+            }
             Message::Assistant(message) => {
                 if let Some(message) = assistant_message(message, request, compat) {
                     messages.push(message);
@@ -795,7 +804,7 @@ fn has_tool_history(messages: &[Message]) -> bool {
             .iter()
             .any(|block| matches!(block, ContentBlock::ToolCall(_))),
         Message::ToolResult(_) => true,
-        Message::User(_) => false,
+        Message::User(_) | Message::Custom(_) => false,
     })
 }
 

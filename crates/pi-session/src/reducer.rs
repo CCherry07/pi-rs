@@ -447,6 +447,7 @@ fn validate_deferred_handles<'a>(
 
 fn validate_operation_result(
     entries_by_id: &HashMap<&str, &SessionRecord>,
+    deferred_targets: &HashMap<&str, &ProvisionedEntry>,
     record: &LaneRecord,
 ) -> Result<(), RecordLogCorruption> {
     let LaneRecordEntry::OperationStarted { intent, .. } = &record.record else {
@@ -457,7 +458,13 @@ fn validate_operation_result(
             initial_messages, ..
         } => {
             for target in initial_messages {
-                validate_exact_provisioned_entry(entries_by_id, target)?;
+                validate_exact_provisioned_entry(
+                    entries_by_id,
+                    deferred_targets
+                        .get(target.id.as_str())
+                        .copied()
+                        .unwrap_or(target),
+                )?;
             }
             Ok(())
         }
@@ -507,11 +514,18 @@ pub fn validate_record_log(input: &RecordLogSlice) -> Result<(), RecordLogCorrup
     let mut tool_invocations = HashSet::new();
     let mut records = input.records.iter().collect::<Vec<_>>();
     records.sort_by_key(|record| record.seq);
+    let deferred_targets = records
+        .iter()
+        .filter_map(|record| match &record.record {
+            LaneRecordEntry::WriteDeferred { target, .. } => Some((target.id.as_str(), target)),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
 
     for record in records {
         if matches!(record.record, LaneRecordEntry::OperationStarted { .. }) {
             starts.insert(record.id.clone(), record);
-            validate_operation_result(&entries_by_id, record)?;
+            validate_operation_result(&entries_by_id, &deferred_targets, record)?;
             continue;
         }
 
@@ -573,7 +587,13 @@ pub fn validate_record_log(input: &RecordLogSlice) -> Result<(), RecordLogCorrup
                     ));
                 }
                 queue_enqueues.insert(target.id.clone(), record);
-                validate_exact_provisioned_entry(&entries_by_id, target)?;
+                validate_exact_provisioned_entry(
+                    &entries_by_id,
+                    deferred_targets
+                        .get(target.id.as_str())
+                        .copied()
+                        .unwrap_or(target),
+                )?;
             }
             LaneRecordEntry::QueueCancelled { run_id, entry_id } => {
                 let enqueue = queue_enqueues.get(entry_id).copied();
@@ -641,6 +661,7 @@ fn derive_effective_configuration(input: &LaneReductionInput) -> EffectiveLaneCo
             }
             SessionEntry::Compaction(_)
             | SessionEntry::BranchSummary(_)
+            | SessionEntry::CustomMessage(_)
             | SessionEntry::Custom(_) => {}
         }
     }

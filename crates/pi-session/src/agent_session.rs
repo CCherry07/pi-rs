@@ -4,13 +4,12 @@ use std::sync::{Arc, RwLock};
 
 use pi_agent::{AgentLoopOutcome, AgentLoopStop, EventError, PromptInput};
 use pi_core::{
-    AbortHandle, AgentEvent, ContentBlock, Message, ModelId, ProviderId, StopReason, ThinkingLevel,
-    UserMessage,
+    AbortHandle, AgentEvent, CommandOutcome, ContentBlock, ImageContent, InputStreamingBehavior,
+    Message, ModelId, PluginId, ProviderId, StopReason, ThinkingLevel, UserMessage,
 };
 use pi_prompt::BuildSystemPromptOptions;
 use pi_runtime::{
-    PiRuntime, PreparedTextSubmission, QueuedTextOutcome, RuntimePromptOutcome,
-    RuntimeRestoreState, TextSubmissionOutcome,
+    PiRuntime, PreparedTextSubmission, QueuedTextOutcome, RuntimePromptOutcome, RuntimeRestoreState,
 };
 use pi_shell::{DEFAULT_TIMEOUT, ShellChunk, ShellRequest, ShellResult};
 use serde::{Deserialize, Serialize};
@@ -181,6 +180,9 @@ pub struct AgentSessionOptions {
     /// Automatic compaction is enabled only when the model context window is
     /// known. Manual compaction remains available without this value.
     pub context_window: Option<u64>,
+    /// Immutable product registration metadata prepared alongside the runtime
+    /// and session plugin generations.
+    pub runtime_inventory: SessionRuntimeInventory,
 }
 
 impl AgentSessionOptions {
@@ -208,12 +210,44 @@ impl AgentSessionOptions {
         self.context_window = Some(context_window);
         self
     }
+
+    pub fn runtime_inventory(mut self, inventory: SessionRuntimeInventory) -> Self {
+        self.runtime_inventory = inventory;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionRuntimeInventory {
+    js_extensions: Vec<String>,
+    configured_native_plugins: Vec<PluginId>,
+}
+
+impl SessionRuntimeInventory {
+    pub fn new(
+        js_extensions: impl IntoIterator<Item = String>,
+        configured_native_plugins: impl IntoIterator<Item = PluginId>,
+    ) -> Self {
+        Self {
+            js_extensions: js_extensions.into_iter().collect(),
+            configured_native_plugins: configured_native_plugins.into_iter().collect(),
+        }
+    }
+
+    pub fn js_extensions(&self) -> &[String] {
+        &self.js_extensions
+    }
+
+    pub fn configured_native_plugins(&self) -> &[PluginId] {
+        &self.configured_native_plugins
+    }
 }
 
 #[derive(Clone)]
 pub struct AgentSession {
     runtime: PiRuntime,
     log: SessionLog,
+    runtime_inventory: SessionRuntimeInventory,
     context_options: SessionContextBuildOptions,
     session_plugin_sources: SessionPlugins,
     session_plugin_driver: Arc<RwLock<Arc<SessionPluginDriver>>>,
@@ -234,7 +268,7 @@ pub struct AgentSession {
 /// the current session is still valid, then order the lifecycle transition as
 /// old `session_shutdown` followed by new `session_start`.
 pub struct PreparedAgentSession {
-    session: AgentSession,
+    session: Arc<AgentSession>,
 }
 
 pub(crate) struct AgentSessionTransitionGuard {
@@ -253,7 +287,15 @@ impl Drop for AgentSessionTransitionGuard {
 }
 
 impl PreparedAgentSession {
-    pub async fn activate(self, event: SessionStartEvent) -> AgentSession {
+    /// Returns a clone of the prepared generation before lifecycle activation.
+    ///
+    /// Hosts use this to bind generation-scoped capabilities that must already
+    /// be available to the subsequent `session_start` callbacks.
+    pub fn session(&self) -> Arc<AgentSession> {
+        Arc::clone(&self.session)
+    }
+
+    pub async fn activate(self, event: SessionStartEvent) -> Arc<AgentSession> {
         self.session
             .session_plugin_driver()
             .session_start(&event)
@@ -288,13 +330,14 @@ impl AgentSession {
         path: impl Into<PathBuf>,
         options: AgentSessionOptions,
     ) -> Result<Self, SessionError> {
-        Ok(Self::prepare_create_with_options(runtime, path, options)
+        let session = Self::prepare_create_with_options(runtime, path, options)
             .await?
             .activate(SessionStartEvent {
                 reason: SessionStartReason::Startup,
                 previous_session_file: None,
             })
-            .await)
+            .await;
+        Ok(Arc::unwrap_or_clone(session))
     }
 
     pub async fn prepare_create(
@@ -355,9 +398,10 @@ impl AgentSession {
             QueueSnapshot::default(),
         );
 
-        let session = Self {
+        let session = Arc::new(Self {
             runtime,
             log,
+            runtime_inventory: options.runtime_inventory,
             context_options: options.context,
             session_plugin_sources: options.plugins,
             session_plugin_driver: Arc::new(RwLock::new(session_plugin_driver)),
@@ -369,7 +413,7 @@ impl AgentSession {
             events,
             activity,
             bash_abort: Arc::new(std::sync::Mutex::new(None)),
-        };
+        });
         session.attach_agent_bridge();
         Ok(PreparedAgentSession { session })
     }
@@ -398,13 +442,14 @@ impl AgentSession {
         path: impl Into<PathBuf>,
         options: AgentSessionOptions,
     ) -> Result<Self, SessionError> {
-        Ok(Self::prepare_open_with_options(runtime, path, options)
+        let session = Self::prepare_open_with_options(runtime, path, options)
             .await?
             .activate(SessionStartEvent {
                 reason: SessionStartReason::Startup,
                 previous_session_file: None,
             })
-            .await)
+            .await;
+        Ok(Arc::unwrap_or_clone(session))
     }
 
     pub async fn prepare_open(
@@ -462,9 +507,10 @@ impl AgentSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .queue_snapshot();
         let events = AgentSessionEventHub::new(runtime.agent().state(), log.name(), queue);
-        let session = Self {
+        let session = Arc::new(Self {
             runtime,
             log,
+            runtime_inventory: options.runtime_inventory,
             context_options: options.context,
             session_plugin_sources: options.plugins,
             session_plugin_driver: Arc::new(RwLock::new(session_plugin_driver)),
@@ -476,13 +522,17 @@ impl AgentSession {
             events,
             activity,
             bash_abort: Arc::new(std::sync::Mutex::new(None)),
-        };
+        });
         session.attach_agent_bridge();
         Ok(PreparedAgentSession { session })
     }
 
     pub fn runtime(&self) -> &PiRuntime {
         &self.runtime
+    }
+
+    pub fn runtime_inventory(&self) -> &SessionRuntimeInventory {
+        &self.runtime_inventory
     }
 
     /// Returns the context window used by compaction for the active model.
@@ -598,7 +648,7 @@ impl AgentSession {
     }
 
     pub async fn submit(&self, text: impl Into<String>) -> Result<SubmitOutcome, SessionError> {
-        let text = text.into();
+        let mut text = text.into();
         if self
             .activity
             .lock()
@@ -608,10 +658,21 @@ impl AgentSession {
         {
             return self.queue_text(text, QueueKind::Steer).await;
         }
+        let display_text = text.clone();
+        if let Some(outcome) = self.runtime.execute_command(&text).await? {
+            match outcome {
+                CommandOutcome::Handled => return Ok(SubmitOutcome::Handled),
+                CommandOutcome::TransformInput(transformed) => text = transformed,
+            }
+        }
         let _operation = self.operation_gate.lock().await;
         self.ensure_open()?;
         self.maybe_threshold_compact_locked().await;
-        let prepared = match self.runtime.prepare_text_submission(text).await? {
+        let prepared = match self
+            .runtime
+            .prepare_text_submission_after_command(display_text, text)
+            .await?
+        {
             PreparedTextSubmission::Handled => return Ok(SubmitOutcome::Handled),
             PreparedTextSubmission::Agent(prepared) => prepared,
         };
@@ -619,14 +680,14 @@ impl AgentSession {
             prepared.generation(),
             prepared.display_text(),
             prepared.text(),
+            prepared.images(),
         )?;
         let result = match prepared.run().await {
             Ok(recorded) => self.finish_prompt_locked(recorded).await,
             Err(error) => Err(SessionError::from(error)),
         };
         let finish_result = self.finish_run(&run_id, &result);
-        self.events
-            .publish_agent_settled(self.runtime.agent().state());
+        self.emit_agent_settled().await;
         match (result, finish_result) {
             (Ok(outcome), Ok(())) => Ok(SubmitOutcome::Agent(outcome)),
             (Err(error), _) => Err(error),
@@ -810,8 +871,9 @@ impl AgentSession {
         generation: u64,
         display_text: &str,
         text: &str,
+        images: &[ImageContent],
     ) -> Result<String, SessionError> {
-        let message = Message::User(UserMessage::text(text, now_ms()));
+        let message = Message::User(input_user_message(text, images, now_ms()));
         let session_message = if display_text == text {
             AgentMessage::from(message.clone())
         } else {
@@ -870,18 +932,29 @@ impl AgentSession {
             let run = activity.active_run.as_ref().ok_or(SessionError::Busy)?;
             (run.id.clone(), run.generation)
         };
-        let (generation, display_text, text) = match self.runtime.process_queued_text(text).await? {
-            QueuedTextOutcome::Handled => return Ok(SubmitOutcome::Handled),
-            QueuedTextOutcome::Message {
-                generation,
-                display_text,
-                text,
-            } => (generation, display_text, text),
+        let behavior = match kind {
+            QueueKind::Steer => InputStreamingBehavior::Steer,
+            QueueKind::FollowUp => InputStreamingBehavior::FollowUp,
+            QueueKind::NextRun => {
+                return Err(SessionError::InvalidEntry(
+                    "next-run queue cannot target an active run".to_string(),
+                ));
+            }
         };
+        let (generation, display_text, text, images) =
+            match self.runtime.process_queued_text(text, behavior).await? {
+                QueuedTextOutcome::Handled => return Ok(SubmitOutcome::Handled),
+                QueuedTextOutcome::Message {
+                    generation,
+                    display_text,
+                    text,
+                    images,
+                } => (generation, display_text, text, images),
+            };
         if generation != expected.1 {
             return Err(SessionError::Busy);
         }
-        let message = Message::User(UserMessage::text(&text, now_ms()));
+        let message = Message::User(input_user_message(&text, &images, now_ms()));
         let session_message = if display_text == text {
             AgentMessage::from(message.clone())
         } else {
@@ -1021,20 +1094,34 @@ impl AgentSession {
         self.ensure_open()?;
         self.maybe_threshold_compact_locked().await;
         let recorded = match input.into() {
-            PromptInput::Text(text) => match self.runtime.submit_text(text).await? {
-                TextSubmissionOutcome::Handled => {
+            PromptInput::Text(text) => match self.runtime.prepare_text_submission(text).await? {
+                PreparedTextSubmission::Handled => {
                     return Err(SessionError::Runtime(
                         "input was handled without starting an agent run; use submit()".to_string(),
                     ));
                 }
-                TextSubmissionOutcome::Agent(recorded) => *recorded,
+                PreparedTextSubmission::Agent(prepared) => {
+                    prepared.run().await.map_err(SessionError::from)
+                }
             },
-            messages => self.runtime.prompt_recorded(messages).await?,
+            messages => self
+                .runtime
+                .prompt_recorded(messages)
+                .await
+                .map_err(SessionError::from),
         };
-        let result = self.finish_prompt_locked(recorded).await;
+        let result = match recorded {
+            Ok(recorded) => self.finish_prompt_locked(recorded).await,
+            Err(error) => Err(error),
+        };
+        self.emit_agent_settled().await;
+        result
+    }
+
+    async fn emit_agent_settled(&self) {
+        self.runtime.dispatch_agent_settled().await;
         self.events
             .publish_agent_settled(self.runtime.agent().state());
-        result
     }
 
     async fn finish_prompt_locked(
@@ -1632,36 +1719,62 @@ impl AgentSession {
                 let activity = Arc::clone(&activity);
                 async move {
                     let display_text = product_display_text(&activity, &event);
-                    let (persisted_entry, queue_snapshot) =
-                        if let AgentEvent::MessageEnd { message } = &event {
-                            let mut activity = activity
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            let matched = activity.active_run.as_ref().and_then(|run| {
-                                run.pending
-                                    .iter()
-                                    .position(|pending| pending_message_matches(pending, message))
-                            });
-                            if let Some(index) = matched {
-                                let run = activity
-                                    .active_run
-                                    .as_mut()
-                                    .expect("matched pending message requires active run");
-                                let pending = run.pending.remove(index);
-                                log.append_entry(pending.target.clone(), MAIN_LANE)
+                    let (persisted_entry, queue_snapshot) = if let AgentEvent::MessageEnd {
+                        message,
+                    } = &event
+                    {
+                        let mut activity = activity
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let matched = activity.active_run.as_ref().and_then(|run| {
+                            run.pending
+                                .iter()
+                                .position(|pending| pending_message_matches(pending, message))
+                        });
+                        if let Some(index) = matched {
+                            let run = activity
+                                .active_run
+                                .as_mut()
+                                .expect("matched pending message requires active run");
+                            let pending = run.pending.remove(index);
+                            let equivalent = pending_message_equivalent(&pending, message);
+                            let mut target = pending.target;
+                            if !equivalent {
+                                target.entry = match message {
+                                    Message::Custom(message) => {
+                                        SessionEntry::custom_message(message)
+                                    }
+                                    message => SessionEntry::message(message.clone()),
+                                };
+                                if let Some(run_id) = &pending.run_id {
+                                    log.append_record(NewLaneRecord {
+                                        id: next_unique_id("message-replacement"),
+                                        lane: MAIN_LANE.to_string(),
+                                        record: LaneRecordEntry::WriteDeferred {
+                                            run_id: run_id.clone(),
+                                            target: target.clone(),
+                                        },
+                                    })
                                     .map_err(|error| EventError(error.to_string()))?;
-                                let queue_snapshot =
-                                    pending.kind.is_some().then(|| activity.queue_snapshot());
-                                (Some(pending.target.entry), queue_snapshot)
-                            } else {
-                                let entry = SessionEntry::message(message.clone());
-                                log.append(entry.clone())
-                                    .map_err(|error| EventError(error.to_string()))?;
-                                (Some(entry), None)
+                                }
                             }
+                            log.append_entry(target.clone(), MAIN_LANE)
+                                .map_err(|error| EventError(error.to_string()))?;
+                            let queue_snapshot =
+                                pending.kind.is_some().then(|| activity.queue_snapshot());
+                            (Some(target.entry), queue_snapshot)
                         } else {
-                            (None, None)
-                        };
+                            let entry = match message {
+                                Message::Custom(message) => SessionEntry::custom_message(message),
+                                message => SessionEntry::message(message.clone()),
+                            };
+                            log.append(entry.clone())
+                                .map_err(|error| EventError(error.to_string()))?;
+                            (Some(entry), None)
+                        }
+                    } else {
+                        (None, None)
+                    };
                     if matches!(
                         &event,
                         AgentEvent::MessageEnd { message }
@@ -1692,7 +1805,23 @@ impl AgentSession {
     }
 }
 
+fn input_user_message(text: &str, images: &[ImageContent], timestamp_ms: i64) -> UserMessage {
+    let mut content = vec![ContentBlock::Text(pi_core::TextContent::new(text))];
+    content.extend(images.iter().cloned().map(ContentBlock::Image));
+    UserMessage {
+        content,
+        timestamp_ms,
+    }
+}
+
 fn pending_message_matches(pending: &PendingSessionMessage, message: &Message) -> bool {
+    match (&pending.message, message) {
+        (Message::User(_), Message::User(_)) => true,
+        _ => pending.message == *message,
+    }
+}
+
+fn pending_message_equivalent(pending: &PendingSessionMessage, message: &Message) -> bool {
     match (&pending.message, message) {
         (Message::User(expected), Message::User(actual)) => expected.content == actual.content,
         _ => pending.message == *message,
@@ -1721,7 +1850,9 @@ fn product_display_text(
         .pending
         .iter()
         .find(|pending| pending_message_matches(pending, message))
-        .map(|pending| pending.display_text.clone())
+        .and_then(|pending| {
+            pending_message_equivalent(pending, message).then(|| pending.display_text.clone())
+        })
 }
 
 fn project_product_user_event(event: AgentEvent, display_text: Option<&str>) -> AgentEvent {
@@ -1940,7 +2071,7 @@ fn restore_runtime_context_with_request(
             .active_tool_names
             .clone()
             .unwrap_or(current.active_tools),
-        messages: context.provider_messages(),
+        messages: context.runtime_messages(),
     })?;
     Ok(())
 }
@@ -1965,8 +2096,10 @@ mod tests {
     use async_trait::async_trait;
     use pi_agent::{AgentLoopStop, AgentOptions};
     use pi_core::{
-        AgentPlugin, Command, CommandContext, CommandError, CommandOutcome, CommandSpec,
-        ContentBlock, Message, PluginId, RegisterContext, ResponseMetadata, StreamEvent, Usage,
+        AgentPlugin, AgentSettledEvent, BeforeAgentStartEvent, BeforeAgentStartPatch, Command,
+        CommandContext, CommandError, CommandOutcome, CommandSpec, ContentBlock, CustomMessage,
+        CustomMessageContent, Message, MessageEndEvent, MessageEndPatch, PluginContext,
+        PluginError, PluginId, RegisterContext, ResponseMetadata, StreamEvent, TextContent, Usage,
         UserMessage,
     };
     use pi_runtime::SystemPrompt;
@@ -1975,9 +2108,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        EntryOrder, EntryQuery, SUMMARIZATION_SYSTEM_PROMPT, SessionBeforeCompactResult,
-        SessionBeforeTreeResult, SessionEntryType, SessionPlugin, SessionPluginContext,
-        SessionPluginError, SessionPlugins,
+        AgentSessionEvent, EntryOrder, EntryQuery, SUMMARIZATION_SYSTEM_PROMPT,
+        SessionBeforeCompactResult, SessionBeforeTreeResult, SessionEntryType, SessionPlugin,
+        SessionPluginContext, SessionPluginError, SessionPlugins,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2007,6 +2140,111 @@ mod tests {
         ])
     }
 
+    struct PersistMessageEndReplacement;
+
+    struct FailingAgentSettledPlugin;
+
+    struct BlockingAgentSettledPlugin {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    struct CountingAgentLifecyclePlugin {
+        ends: Arc<AtomicUsize>,
+        settled: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AgentPlugin for FailingAgentSettledPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("failing-agent-settled")
+        }
+
+        async fn agent_settled(
+            &self,
+            _context: PluginContext,
+            _event: AgentSettledEvent,
+        ) -> Result<(), PluginError> {
+            Err(PluginError::Hook {
+                plugin_id: self.id(),
+                hook: "agent_settled",
+                message: "intentional settled failure".to_string(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl AgentPlugin for BlockingAgentSettledPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("blocking-agent-settled")
+        }
+
+        async fn agent_settled(
+            &self,
+            _context: PluginContext,
+            _event: AgentSettledEvent,
+        ) -> Result<(), PluginError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AgentPlugin for CountingAgentLifecyclePlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("counting-agent-lifecycle")
+        }
+
+        async fn agent_end(
+            &self,
+            _context: PluginContext,
+            _event: pi_core::AgentEndEvent,
+        ) -> Result<(), PluginError> {
+            self.ends.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn agent_settled(
+            &self,
+            _context: PluginContext,
+            _event: AgentSettledEvent,
+        ) -> Result<(), PluginError> {
+            self.settled.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl AgentPlugin for PersistMessageEndReplacement {
+        fn id(&self) -> PluginId {
+            PluginId::new("persist-message-end-replacement")
+        }
+
+        async fn message_end(
+            &self,
+            _context: PluginContext,
+            event: MessageEndEvent,
+        ) -> Result<MessageEndPatch, PluginError> {
+            let message = match event.message {
+                Message::User(mut user) => {
+                    user.content = vec![ContentBlock::Text(TextContent::new("persisted user"))];
+                    Message::User(user)
+                }
+                Message::Assistant(assistant) => {
+                    let mut assistant = (*assistant).clone();
+                    assistant.content =
+                        vec![ContentBlock::Text(TextContent::new("persisted assistant"))];
+                    Message::assistant(assistant)
+                }
+                message => message,
+            };
+            Ok(MessageEndPatch {
+                message: Some(message),
+            })
+        }
+    }
+
     fn scripted_runtime(turns: impl IntoIterator<Item = ScriptedTurn>) -> PiRuntime {
         PiRuntime::builder()
             .provider_plugin(ScriptedProviderPlugin::scripted(turns))
@@ -2022,6 +2260,32 @@ mod tests {
 
     struct ExpandingCommandPlugin;
 
+    struct BeforeStartInjectionPlugin;
+
+    #[async_trait]
+    impl AgentPlugin for BeforeStartInjectionPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("before-start-injection")
+        }
+
+        async fn before_agent_start(
+            &self,
+            _context: PluginContext,
+            event: BeforeAgentStartEvent,
+        ) -> Result<BeforeAgentStartPatch, PluginError> {
+            Ok(BeforeAgentStartPatch {
+                system_prompt: Some(format!("{}|injected", event.system_prompt)),
+                messages: vec![Message::custom(CustomMessage {
+                    custom_type: "fixture-context".to_string(),
+                    content: CustomMessageContent::Text("injected context".to_string()),
+                    display: false,
+                    details: Some(serde_json::json!({"source": "fixture"})),
+                    timestamp_ms: 1,
+                })],
+            })
+        }
+    }
+
     #[async_trait]
     impl AgentPlugin for ExpandingCommandPlugin {
         fn id(&self) -> PluginId {
@@ -2031,6 +2295,161 @@ mod tests {
         fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
             context.register_command(Arc::new(ExpandingCommand))
         }
+    }
+
+    #[tokio::test]
+    async fn before_agent_start_custom_messages_follow_the_user_and_persist_as_custom_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("before-start.jsonl");
+        let scripted = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".to_string())]);
+        let provider = scripted.provider();
+        let runtime = PiRuntime::builder()
+            .agent_plugin(BeforeStartInjectionPlugin)
+            .provider_plugin(scripted)
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("test"),
+                ..AgentOptions::default()
+            })
+            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .build()
+            .unwrap();
+        let session = AgentSession::create(runtime, &path).await.unwrap();
+
+        session.submit("hello").await.unwrap();
+
+        let requests = provider.requests();
+        assert!(requests[0].system_prompt.ends_with("|injected"));
+        assert!(matches!(
+            &requests[0].messages[..2],
+            [Message::User(user), Message::User(injected)]
+                if matches!(&user.content[0], ContentBlock::Text(text) if text.text == "hello")
+                    && matches!(&injected.content[0], ContentBlock::Text(text) if text.text == "injected context")
+        ));
+
+        let (_, document) = SessionLog::open(&path).unwrap();
+        let branch = document.branch().unwrap();
+        let conversation = branch
+            .into_iter()
+            .filter(|record| {
+                matches!(
+                    &record.entry,
+                    SessionEntry::Message(_) | SessionEntry::CustomMessage(_)
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            &conversation[0].entry,
+            SessionEntry::Message(message) if message.message.role() == "user"
+        ));
+        assert!(matches!(
+            &conversation[1].entry,
+            SessionEntry::CustomMessage(message)
+                if message.custom_type == "fixture-context"
+                    && message.details == Some(serde_json::json!({"source": "fixture"}))
+        ));
+        assert!(matches!(
+            &session.runtime().agent().state().messages[1],
+            Message::Custom(message) if message.custom_type == "fixture-context"
+        ));
+    }
+
+    #[tokio::test]
+    async fn message_end_replacements_are_the_messages_persisted_and_restored() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let runtime = PiRuntime::builder()
+            .agent_plugin(PersistMessageEndReplacement)
+            .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
+                "provider assistant".to_string(),
+            )]))
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("test"),
+                ..AgentOptions::default()
+            })
+            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .build()
+            .unwrap();
+        let session = AgentSession::create(runtime, &path).await.unwrap();
+
+        session.submit("submitted user").await.unwrap();
+        drop(session);
+
+        let (_, document) = SessionLog::open(&path).unwrap();
+        let messages = document.context().unwrap().runtime_messages();
+        assert!(matches!(&messages[0], Message::User(user)
+            if matches!(&user.content[0], ContentBlock::Text(text)
+                if text.text == "persisted user")));
+        assert!(matches!(&messages[1], Message::Assistant(assistant)
+            if matches!(&assistant.content[0], ContentBlock::Text(text)
+                if text.text == "persisted assistant")));
+
+        let reopened = AgentSession::open(scripted_runtime([]), &path)
+            .await
+            .unwrap();
+        assert_eq!(reopened.runtime().agent().state().messages, messages);
+    }
+
+    #[tokio::test]
+    async fn agent_settled_hooks_finish_before_the_product_event_and_isolate_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent-settled.jsonl");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runtime = PiRuntime::builder()
+            .agent_plugin(FailingAgentSettledPlugin)
+            .agent_plugin(BlockingAgentSettledPlugin {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            })
+            .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
+                "done".to_string(),
+            )]))
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("test"),
+                ..AgentOptions::default()
+            })
+            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .build()
+            .unwrap();
+        let session = AgentSession::create(runtime, &path).await.unwrap();
+        let mut subscription = session.subscribe();
+
+        let submit = {
+            let session = session.clone();
+            tokio::spawn(async move { session.submit("hello").await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        while let Ok(event) = subscription.events.try_recv() {
+            assert!(!matches!(event.event, AgentSessionEvent::AgentSettled));
+        }
+
+        release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), submit)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let mut saw_settled = false;
+        while let Ok(event) = subscription.events.try_recv() {
+            saw_settled |= matches!(event.event, AgentSessionEvent::AgentSettled);
+        }
+        assert!(saw_settled);
+        assert!(
+            session
+                .runtime()
+                .plugin_diagnostics()
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic.plugin_id == PluginId::new("failing-agent-settled")
+                        && diagnostic.hook == "agent_settled"
+                        && diagnostic.message.contains("intentional settled failure")
+                })
+        );
     }
 
     struct ExpandingCommand;
@@ -2911,6 +3330,8 @@ mod tests {
     #[tokio::test]
     async fn overflow_compaction_drops_the_failed_assistant_and_retries_once() {
         let directory = tempfile::tempdir().unwrap();
+        let agent_ends = Arc::new(AtomicUsize::new(0));
+        let agent_settled = Arc::new(AtomicUsize::new(0));
         let provider_plugin = ScriptedProviderPlugin::scripted([
             ScriptedTurn::Error("context window token length exceeded".to_string()),
             ScriptedTurn::Text("overflow summary".to_string()),
@@ -2918,6 +3339,10 @@ mod tests {
         ]);
         let provider = provider_plugin.provider();
         let runtime = PiRuntime::builder()
+            .agent_plugin(CountingAgentLifecyclePlugin {
+                ends: Arc::clone(&agent_ends),
+                settled: Arc::clone(&agent_settled),
+            })
             .provider_plugin(provider_plugin)
             .agent_options(AgentOptions {
                 provider_id: ProviderId::new("scripted"),
@@ -2941,6 +3366,8 @@ mod tests {
 
         assert_eq!(outcome.stop, AgentLoopStop::Completed);
         assert_eq!(provider.requests().len(), 3);
+        assert_eq!(agent_ends.load(Ordering::SeqCst), 2);
+        assert_eq!(agent_settled.load(Ordering::SeqCst), 1);
         assert!(
             matches!(outcome.final_context.messages.last(), Some(Message::Assistant(message))
             if matches!(&message.content[0], ContentBlock::Text(text) if text.text == "recovered answer"))

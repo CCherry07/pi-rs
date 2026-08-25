@@ -1,12 +1,18 @@
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_agent::AgentOptions;
-use pi_core::{ModelId, ProviderId};
+use pi_core::{ModelId, PluginId, ProviderId};
 use pi_js_package_manager::{
     PackageManager as JsPackageManager, ResolveRequest as JsResolveRequest,
+    ResolvedExtensionIdentity,
 };
-use pi_js_plugin::{JsGenerationRequest, JsHostMode, JsPluginGeneration, JsPluginHost};
+use pi_js_plugin::{
+    ExtensionContextAccess, ExtensionSessionBinding, JsGenerationRequest, JsHostMode,
+    JsPluginGeneration, JsPluginHost, SessionExtensionContextAccess,
+};
 use pi_plugin_anthropic::AnthropicPlugin;
 use pi_plugin_bash::BashPlugin;
 use pi_plugin_edit::EditPlugin;
@@ -30,7 +36,7 @@ use pi_runtime::{PiRuntime, RuntimeError, SystemPrompt};
 use pi_session::{
     AgentSession, AgentSessionOptions, AgentSessionRuntimeFactory, AgentSessionRuntimeRequest,
     AgentSessionRuntimeTarget, InitialModelRequest, ModelRuntimeServices, PreparedAgentSession,
-    SessionError, SessionPlugins,
+    SessionError, SessionPlugins, SessionRuntimeInventory,
 };
 
 use crate::auth::{StoredCredential, read_stored_credential};
@@ -42,6 +48,7 @@ pub(crate) struct ProductSessionFactory {
     config: AppConfig,
     project_trust: ProjectTrustService,
     js_plugin_host: Option<Arc<dyn JsPluginHost>>,
+    js_session_binding: Option<ExtensionSessionBinding>,
     js_host_mode: JsHostMode,
 }
 
@@ -51,6 +58,7 @@ impl ProductSessionFactory {
             config,
             project_trust,
             js_plugin_host: None,
+            js_session_binding: None,
             js_host_mode: JsHostMode::Print,
         }
     }
@@ -59,8 +67,10 @@ impl ProductSessionFactory {
         mut self,
         host: Arc<dyn JsPluginHost>,
         mode: JsHostMode,
+        session_binding: ExtensionSessionBinding,
     ) -> Self {
         self.js_plugin_host = Some(host);
+        self.js_session_binding = Some(session_binding);
         self.js_host_mode = mode;
         self
     }
@@ -102,6 +112,10 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
         let native_plugins = NativePluginLoader::new(native_options)
             .discover()
             .map_err(|error| SessionError::Runtime(error.to_string()))?;
+        let configured_native_plugins =
+            configured_native_plugin_ids(&package_reconciliations, &native_plugins);
+        let mut js_context = None;
+        let mut js_extensions = Vec::new();
         let js_generation = if let Some(host) = &self.js_plugin_host {
             let resolution = JsPackageManager::new(JsResolveRequest {
                 cwd: config.cwd.clone(),
@@ -113,22 +127,37 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             .resolve()
             .await
             .map_err(|error| SessionError::Runtime(error.to_string()))?;
+            let extension_labels = javascript_inventory_labels(&resolution.extension_identities);
+            let extension_paths = resolution.extension_paths;
             let manifest = host
                 .prepare_generation(JsGenerationRequest {
                     project_trusted,
-                    extension_paths: resolution
-                        .extension_paths
-                        .into_iter()
+                    extension_paths: extension_paths
+                        .iter()
                         .map(|path| path.display().to_string())
                         .collect(),
                     mode: self.js_host_mode,
                 })
                 .await
                 .map_err(|error| SessionError::Runtime(error.to_string()))?;
-            Some(
-                JsPluginGeneration::prepare_with_host(manifest, Arc::clone(host))
-                    .map_err(|error| SessionError::Runtime(error.to_string()))?,
+            let context = Arc::new(SessionExtensionContextAccess::new(
+                project_trusted,
+                self.js_session_binding.clone().ok_or_else(|| {
+                    SessionError::Runtime(
+                        "JavaScript plugin host is missing its session binding".to_string(),
+                    )
+                })?,
+            ));
+            let context_access: Arc<dyn ExtensionContextAccess> = context.clone();
+            let generation = JsPluginGeneration::prepare_with_host_and_context(
+                manifest,
+                Arc::clone(host),
+                context_access,
             )
+            .map_err(|error| SessionError::Runtime(error.to_string()))?;
+            js_extensions = extension_labels;
+            js_context = Some(context);
+            Some(generation)
         } else {
             None
         };
@@ -149,7 +178,11 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
         }
         let session_options = AgentSessionOptions::default()
             .plugins(session_plugins)
-            .initial_model(initial_model_request(&config));
+            .initial_model(initial_model_request(&config))
+            .runtime_inventory(SessionRuntimeInventory::new(
+                js_extensions,
+                configured_native_plugins,
+            ));
         let prepared = if create {
             AgentSession::prepare_create_with_options(runtime, path, session_options).await
         } else if let Some(log) = reused_log {
@@ -159,6 +192,9 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
         };
         match prepared {
             Ok(prepared) => {
+                if let Some(context) = &js_context {
+                    context.bind_generation_session(prepared.session());
+                }
                 for reconciliation in package_reconciliations {
                     reconciliation.commit();
                 }
@@ -182,6 +218,104 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             }
         }
     }
+}
+
+fn configured_native_plugin_ids(
+    reconciliations: &[PreparedPluginReconcile],
+    native_plugins: &NativePlugins,
+) -> Vec<PluginId> {
+    retain_loaded_configured_native_plugins(
+        reconciliations
+            .iter()
+            .flat_map(PreparedPluginReconcile::installed)
+            .map(|plugin| plugin.id),
+        native_plugins
+            .descriptors()
+            .into_iter()
+            .map(|descriptor| descriptor.id),
+    )
+}
+
+fn retain_loaded_configured_native_plugins(
+    configured: impl IntoIterator<Item = String>,
+    loaded: impl IntoIterator<Item = String>,
+) -> Vec<PluginId> {
+    let loaded = loaded.into_iter().collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    configured
+        .into_iter()
+        .filter(|id| loaded.contains(id) && seen.insert(id.clone()))
+        .map(PluginId::new)
+        .collect()
+}
+
+fn javascript_inventory_labels(identities: &[ResolvedExtensionIdentity]) -> Vec<String> {
+    let paths = identities
+        .iter()
+        .filter_map(|identity| match identity {
+            ResolvedExtensionIdentity::Package(_) => None,
+            ResolvedExtensionIdentity::Path(path) => Some(path.clone()),
+        })
+        .collect::<Vec<_>>();
+    let mut path_labels = compact_extension_labels(&paths).into_iter();
+    let mut seen = HashSet::new();
+
+    identities
+        .iter()
+        .filter_map(|identity| {
+            let label = match identity {
+                ResolvedExtensionIdentity::Package(source) => source.clone(),
+                ResolvedExtensionIdentity::Path(_) => path_labels.next()?,
+            };
+            seen.insert(label.clone()).then_some(label)
+        })
+        .collect()
+}
+
+fn compact_extension_labels(paths: &[PathBuf]) -> Vec<String> {
+    let segments = paths
+        .iter()
+        .map(|path| {
+            let mut segments = path
+                .iter()
+                .map(|segment| segment.to_string_lossy().into_owned())
+                .filter(|segment| !segment.is_empty() && segment != "/")
+                .collect::<Vec<_>>();
+            if segments.len() > 1
+                && matches!(
+                    segments.last().map(String::as_str),
+                    Some("index.ts" | "index.js")
+                )
+            {
+                segments.pop();
+            }
+            if segments.is_empty() {
+                segments.push(path.display().to_string());
+            }
+            segments
+        })
+        .collect::<Vec<_>>();
+
+    segments
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            (1..=path.len())
+                .find_map(|count| {
+                    let candidate = &path[path.len() - count..];
+                    segments
+                        .iter()
+                        .enumerate()
+                        .all(|(other_index, other)| {
+                            other_index == index
+                                || other.len() < count
+                                || !other.ends_with(candidate)
+                        })
+                        .then(|| candidate.join("/"))
+                })
+                .unwrap_or_else(|| path.join("/"))
+        })
+        .collect()
 }
 
 async fn prepare_native_packages(
@@ -468,6 +602,7 @@ mod tests {
         async fn invoke(
             &self,
             _invocation: pi_js_plugin::JsInvocation,
+            _context: pi_js_plugin::ExtensionContextHandle,
         ) -> Result<serde_json::Value, pi_js_plugin::JsCallbackError> {
             Ok(serde_json::json!({ "action": "continue" }))
         }
@@ -498,6 +633,7 @@ mod tests {
                 }],
                 provider_plugins: Vec::new(),
                 session_plugins: Vec::new(),
+                diagnostics: Vec::new(),
             })
         }
     }
@@ -522,6 +658,44 @@ command = "fixture-command"
         )
         .unwrap();
         package
+    }
+
+    #[test]
+    fn native_inventory_only_keeps_loaded_plugins_from_plugins_json() {
+        let plugins = retain_loaded_configured_native_plugins(
+            [
+                "configured".to_string(),
+                "not-loaded".to_string(),
+                "configured".to_string(),
+            ],
+            ["configured".to_string(), "explicit-path".to_string()],
+        );
+
+        assert_eq!(plugins, [PluginId::new("configured")]);
+    }
+
+    #[test]
+    fn javascript_inventory_uses_package_sources_without_hiding_local_extensions() {
+        let labels = javascript_inventory_labels(&[
+            ResolvedExtensionIdentity::Package("npm:@counterposition/pi-web-search".to_string()),
+            ResolvedExtensionIdentity::Package("npm:@narumitw/pi-lsp@0.49.5".to_string()),
+            ResolvedExtensionIdentity::Path(PathBuf::from(
+                "/workspace/.pi/extensions/clipboard.ts",
+            )),
+            ResolvedExtensionIdentity::Path(PathBuf::from(
+                "/workspace/local/session-tools/index.ts",
+            )),
+        ]);
+
+        assert_eq!(
+            labels,
+            [
+                "npm:@counterposition/pi-web-search",
+                "npm:@narumitw/pi-lsp@0.49.5",
+                "clipboard.ts",
+                "session-tools",
+            ]
+        );
     }
 
     fn jwt(account_id: &str) -> String {
@@ -919,17 +1093,36 @@ command = "fixture-command"
         let project = directory.path().join("project");
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::create_dir_all(&project).unwrap();
-        let extension = agent_dir.join("extensions/reload-fixture.ts");
+        let package_source = "npm:@narumitw/pi-lsp@0.49.5";
+        let package = agent_dir.join("npm/node_modules/@narumitw/pi-lsp");
+        let extension = package.join("dist/index.ts");
         std::fs::create_dir_all(extension.parent().unwrap()).unwrap();
         std::fs::write(&extension, "export default function () {}\n").unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{
+              "name": "@narumitw/pi-lsp",
+              "version": "0.49.5",
+              "pi": {"extensions": ["./dist/index.ts"]}
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            format!(r#"{{"packages":["{package_source}"]}}"#),
+        )
+        .unwrap();
         let mut config = app_config(&agent_dir, None);
         config.cwd = project.clone();
         config.session_path = agent_dir.join("reload.jsonl");
         config.trust_override = Some(true);
         let (trust, _) = ProjectTrustService::new(&agent_dir, Some(true), false).unwrap();
         let host = Arc::new(RecordingJsHost::default());
-        let factory = ProductSessionFactory::new(config.clone(), trust)
-            .with_js_plugin_host(host.clone(), JsHostMode::Tui);
+        let factory = ProductSessionFactory::new(config.clone(), trust).with_js_plugin_host(
+            host.clone(),
+            JsHostMode::Tui,
+            ExtensionSessionBinding::new(),
+        );
         let runtime = pi_session::AgentSessionRuntime::create(
             factory,
             AgentSessionRuntimeTarget::create(&project, &config.session_path),
@@ -937,7 +1130,16 @@ command = "fixture-command"
         .await
         .unwrap();
 
+        assert_eq!(
+            runtime.session().runtime_inventory().js_extensions(),
+            [package_source]
+        );
+
         runtime.reload().await.unwrap();
+        assert_eq!(
+            runtime.session().runtime_inventory().js_extensions(),
+            [package_source]
+        );
         assert_eq!(*host.retired.lock().unwrap(), ["js-1"]);
         runtime.shutdown().await.unwrap();
 

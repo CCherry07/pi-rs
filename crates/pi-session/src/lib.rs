@@ -9,13 +9,13 @@
 
 mod agent_session;
 mod agent_session_runtime;
-mod application;
 mod compaction;
 mod context;
 mod event;
 mod jsonl;
 mod memory;
 mod model_runtime_services;
+mod multi_session_manager;
 mod reducer;
 mod repo;
 mod session;
@@ -25,20 +25,19 @@ mod types;
 
 pub use agent_session::{
     AgentSession, AgentSessionOptions, PROMPT_SNAPSHOT_CUSTOM_TYPE, PreparedAgentSession,
-    PromptSnapshot, RESOURCE_DIAGNOSTIC_CUSTOM_TYPE, ResourceSnapshot, ShellExecutionOptions,
-    SubmitOutcome, read_prompt_snapshot,
+    PromptSnapshot, RESOURCE_DIAGNOSTIC_CUSTOM_TYPE, ResourceSnapshot, SessionRuntimeInventory,
+    ShellExecutionOptions, SubmitOutcome, read_prompt_snapshot,
 };
 pub use agent_session_runtime::{
     AgentSessionReplacement, AgentSessionRuntime, AgentSessionRuntimeError,
     AgentSessionRuntimeFactory, AgentSessionRuntimeRequest, AgentSessionRuntimeTarget,
 };
-pub use application::{PiApplication, PiApplicationError, PiSession};
 pub use compaction::*;
 pub use context::{
     ContextEntryTransform, CustomEntryContextMessageProjector, SessionContext,
     SessionContextBuildOptions, SessionModel, agent_message_to_provider_message,
-    build_context_entries, build_session_context, default_context_entry_transform,
-    session_entry_to_context_messages,
+    agent_message_to_runtime_message, build_context_entries, build_session_context,
+    default_context_entry_transform, session_entry_to_context_messages,
 };
 pub use event::{
     AgentSessionEvent, AgentSessionSnapshot, AgentSessionSubscription, BashExecutionSnapshot,
@@ -49,6 +48,9 @@ pub use memory::{InMemorySession, InMemorySessionRepo};
 pub use model_runtime_services::{
     InitialModelRequest, InitialModelResolveError, InitialModelResolver, InitialModelSelection,
     InitialModelSource, ModelRuntimeServices,
+};
+pub use multi_session_manager::{
+    MultiSessionManager, MultiSessionManagerError, PiSession, WeakPiSession,
 };
 pub use reducer::*;
 pub use repo::{JsonlSessionRepo, list_jsonl_session_metadata, load_jsonl_session};

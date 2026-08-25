@@ -36,6 +36,14 @@ pub struct ResolveRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolution {
     pub extension_paths: Vec<PathBuf>,
+    pub extension_identities: Vec<ResolvedExtensionIdentity>,
+}
+
+/// User-facing identity for one or more resolved extension entry points.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ResolvedExtensionIdentity {
+    Package(String),
+    Path(PathBuf),
 }
 
 /// Settings scope used by JavaScript package management commands.
@@ -202,13 +210,23 @@ impl PackageManager {
             Vec::new()
         };
 
-        let mut seen = HashSet::new();
-        let extension_paths = explicit
+        let mut seen_paths = HashSet::new();
+        let extensions: Vec<_> = explicit
             .into_iter()
             .chain(configured)
-            .filter(|path| seen.insert(canonical_or_original(path)))
+            .filter(|entry| seen_paths.insert(canonical_or_original(&entry.path)))
             .collect();
-        Ok(Resolution { extension_paths })
+        let mut seen_identities = HashSet::new();
+        let extension_identities = extensions
+            .iter()
+            .map(ResolvedExtension::identity)
+            .filter(|identity| seen_identities.insert(identity.clone()))
+            .collect();
+        let extension_paths = extensions.into_iter().map(|entry| entry.path).collect();
+        Ok(Resolution {
+            extension_paths,
+            extension_identities,
+        })
     }
 
     fn ensure_management_scope(&self, scope: PackageScope) -> Result<(), PackageManagerError> {
@@ -547,7 +565,7 @@ impl PackageManager {
         }
     }
 
-    async fn resolve_configured(&self) -> Result<Vec<PathBuf>, PackageManagerError> {
+    async fn resolve_configured(&self) -> Result<Vec<ResolvedExtension>, PackageManagerError> {
         let mut extensions = Vec::new();
         let mut packages = Vec::new();
         if self.project_trusted {
@@ -604,14 +622,14 @@ impl PackageManager {
         Ok(sort_and_dedupe(extensions)
             .into_iter()
             .filter(|entry| entry.enabled)
-            .flat_map(|entry| expand_entry(&entry.path))
+            .flat_map(expand_resolved_extension)
             .collect())
     }
 
     async fn resolve_explicit(
         &self,
         sources: &[String],
-    ) -> Result<Vec<PathBuf>, PackageManagerError> {
+    ) -> Result<Vec<ResolvedExtension>, PackageManagerError> {
         let packages: Vec<_> = sources
             .iter()
             .cloned()
@@ -624,7 +642,7 @@ impl PackageManager {
         Ok(sort_and_dedupe(extensions)
             .into_iter()
             .filter(|entry| entry.enabled)
-            .flat_map(|entry| expand_entry(&entry.path))
+            .flat_map(expand_resolved_extension)
             .collect())
     }
 
@@ -1499,6 +1517,19 @@ struct ResolvedExtension {
     metadata: ExtensionMetadata,
 }
 
+impl ResolvedExtension {
+    fn identity(&self) -> ResolvedExtensionIdentity {
+        if self.metadata.origin == ExtensionOrigin::Package
+            && (self.metadata.scope != SourceScope::Temporary
+                || !matches!(parse_source(&self.metadata.source), ParsedSource::Local(_)))
+        {
+            ResolvedExtensionIdentity::Package(self.metadata.source.clone())
+        } else {
+            ResolvedExtensionIdentity::Path(self.path.clone())
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct NpmSource {
     spec: String,
@@ -1869,6 +1900,17 @@ fn expand_entry(path: &Path) -> Vec<PathBuf> {
         Ok(_) => vec![path.to_path_buf()],
         Err(_) => Vec::new(),
     }
+}
+
+fn expand_resolved_extension(entry: ResolvedExtension) -> Vec<ResolvedExtension> {
+    expand_entry(&entry.path)
+        .into_iter()
+        .map(|path| ResolvedExtension {
+            path,
+            enabled: entry.enabled,
+            metadata: entry.metadata.clone(),
+        })
+        .collect()
 }
 
 fn apply_patterns(paths: &[PathBuf], patterns: &[String], base: &Path) -> HashSet<PathBuf> {

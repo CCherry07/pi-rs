@@ -12,8 +12,20 @@ import {
   type NativeTarget,
 } from "./native-target.js";
 
+export interface NativeExtensionContext {
+  query(operation: string): string;
+  notify(operation: string): void;
+  request(operation: string): Promise<string>;
+}
+
 export interface NativeBinding {
-  runPi(arguments_: string[], dispatch: (operation: string) => Promise<string>): Promise<void>;
+  runPi(
+    arguments_: string[],
+    dispatch: (
+      operation: string,
+      context?: NativeExtensionContext,
+    ) => Promise<string>,
+  ): Promise<void>;
 }
 
 const nativeBindingSchema = z.looseObject({

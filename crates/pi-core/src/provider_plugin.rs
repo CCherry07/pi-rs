@@ -4,9 +4,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
+use crate::plugin::PluginDiagnosticSink;
 use crate::{
-    AbortSignal, CoreError, ModelId, ModelSpec, PluginError, PluginId, Provider, ProviderId,
-    RegistriesBuilder, Result,
+    AbortSignal, CoreError, ModelId, ModelSpec, PluginDiagnostic, PluginError, PluginId, Provider,
+    ProviderId, RegistriesBuilder, Result,
 };
 
 #[derive(Clone)]
@@ -17,6 +18,34 @@ pub struct ProviderPluginContext {
     pub model_id: ModelId,
     pub cwd: PathBuf,
     pub abort_signal: AbortSignal,
+    diagnostics: PluginDiagnosticSink,
+}
+
+impl ProviderPluginContext {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        plugin_id: PluginId,
+        generation: u64,
+        provider_id: ProviderId,
+        model_id: ModelId,
+        cwd: PathBuf,
+        abort_signal: AbortSignal,
+    ) -> Self {
+        Self {
+            plugin_id,
+            generation,
+            provider_id,
+            model_id,
+            cwd,
+            abort_signal,
+            diagnostics: PluginDiagnosticSink::default(),
+        }
+    }
+
+    pub fn report_hook_error(&self, hook: &'static str, message: impl Into<String>) {
+        self.diagnostics
+            .record(self.plugin_id.clone(), hook, message);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -106,6 +135,7 @@ struct RegisteredProviderPlugin {
 /// Immutable, generation-local provider plugin set.
 pub struct ProviderPluginDriver {
     plugins: Vec<RegisteredProviderPlugin>,
+    diagnostics: PluginDiagnosticSink,
 }
 
 impl ProviderPluginDriver {
@@ -121,6 +151,7 @@ impl ProviderPluginDriver {
         }
         Ok(Self {
             plugins: registered,
+            diagnostics: PluginDiagnosticSink::default(),
         })
     }
 
@@ -129,6 +160,14 @@ impl ProviderPluginDriver {
             .iter()
             .map(|plugin| plugin.id.clone())
             .collect()
+    }
+
+    pub fn diagnostics(&self) -> Vec<PluginDiagnostic> {
+        self.diagnostics.snapshot()
+    }
+
+    pub fn take_diagnostics(&self) -> Vec<PluginDiagnostic> {
+        self.diagnostics.take()
     }
 
     pub fn register_all(&self, registries: &mut RegistriesBuilder) -> Result<()> {
@@ -163,15 +202,22 @@ impl ProviderPluginDriver {
                         model_id: model_id.clone(),
                         cwd: cwd.to_path_buf(),
                         abort_signal: signal.clone(),
+                        diagnostics: self.diagnostics.clone(),
                     },
                     event,
                 )
-                .await
-                .map_err(|error| PluginError::Hook {
-                    plugin_id: registered.id.clone(),
-                    hook: "before_provider_request",
-                    message: error.to_string(),
-                })?;
+                .await;
+            let replacement = match replacement {
+                Ok(replacement) => replacement,
+                Err(error) => {
+                    self.diagnostics.record(
+                        registered.id.clone(),
+                        "before_provider_request",
+                        error.to_string(),
+                    );
+                    continue;
+                }
+            };
             if let Some(replacement) = replacement {
                 payload = replacement;
             }
@@ -212,6 +258,8 @@ mod tests {
         field: &'static str,
     }
 
+    struct FailingPayloadPlugin;
+
     #[async_trait]
     impl ProviderPlugin for PayloadPlugin {
         fn id(&self) -> PluginId {
@@ -226,6 +274,21 @@ mod tests {
             let mut payload = event.payload;
             payload[self.field] = Value::String(self.id.to_string());
             Ok(Some(payload))
+        }
+    }
+
+    #[async_trait]
+    impl ProviderPlugin for FailingPayloadPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("failing")
+        }
+
+        async fn before_provider_request(
+            &self,
+            _context: ProviderPluginContext,
+            _event: BeforeProviderRequestEvent,
+        ) -> std::result::Result<Option<Value>, PluginError> {
+            Err(PluginError::Registration("intentional failure".to_string()))
         }
     }
 
@@ -317,5 +380,44 @@ mod tests {
                 "second": "second"
             })
         );
+    }
+
+    #[tokio::test]
+    async fn request_hook_failures_are_diagnostic_and_later_hooks_still_run() {
+        let driver = ProviderPluginDriver::new(vec![
+            Arc::new(PayloadPlugin {
+                id: "first",
+                field: "first",
+            }),
+            Arc::new(FailingPayloadPlugin),
+            Arc::new(PayloadPlugin {
+                id: "second",
+                field: "second",
+            }),
+        ])
+        .unwrap();
+        let (_, signal) = crate::AbortHandle::new();
+
+        let payload = driver
+            .before_provider_request(
+                1,
+                &ProviderId::new("provider"),
+                &ModelId::new("model"),
+                std::path::Path::new("/workspace"),
+                &signal,
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            payload,
+            serde_json::json!({"first": "first", "second": "second"})
+        );
+        assert!(driver.diagnostics().iter().any(|diagnostic| {
+            diagnostic.plugin_id == PluginId::new("failing")
+                && diagnostic.hook == "before_provider_request"
+                && diagnostic.message.contains("intentional failure")
+        }));
     }
 }

@@ -17,7 +17,11 @@ struct RecordingDispatcher {
 
 #[async_trait]
 impl JsCallbackDispatcher for RecordingDispatcher {
-    async fn invoke(&self, invocation: JsInvocation) -> Result<Value, JsCallbackError> {
+    async fn invoke(
+        &self,
+        invocation: JsInvocation,
+        _context: pi_js_plugin::ExtensionContextHandle,
+    ) -> Result<Value, JsCallbackError> {
         self.invocations.lock().unwrap().push(invocation);
         Ok(json!({
             "content": [{"type": "text", "text": "Hello from JavaScript"}],
@@ -55,6 +59,7 @@ async fn manifest_tool_registers_and_dispatches_through_the_public_tool_interfac
             }],
             provider_plugins: Vec::new(),
             session_plugins: Vec::new(),
+            diagnostics: Vec::new(),
         },
         dispatcher.clone(),
     )

@@ -337,6 +337,10 @@ pub fn estimate_tokens(message: &AgentMessage) -> u64 {
             })
             .sum(),
         Some(Message::ToolResult(message)) => content_chars(&message.content),
+        Some(Message::Custom(message)) => match &message.content {
+            pi_core::CustomMessageContent::Text(text) => text.len(),
+            pi_core::CustomMessageContent::Blocks(content) => content_chars(content),
+        },
         None => custom_message_chars(message),
     };
     u64::try_from(chars.saturating_add(3) / 4).unwrap_or(u64::MAX)
@@ -586,6 +590,12 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
                     ));
                 }
             }
+            Message::Custom(message) => {
+                let content = content_text(&message.content.to_blocks());
+                if !content.is_empty() {
+                    parts.push(format!("[User]: {content}"));
+                }
+            }
         }
     }
     parts.join("\n\n")
@@ -667,6 +677,9 @@ impl CompactableEntry {
     fn from_record(record: &SessionRecord) -> Self {
         match &record.entry {
             SessionEntry::Message(message) => Self::Message(message.message.clone()),
+            SessionEntry::CustomMessage(message) => {
+                Self::Message(AgentMessage::from(message.to_message(record.timestamp_ms)))
+            }
             SessionEntry::BranchSummary(summary) => Self::BranchSummary(
                 AgentMessage::custom(json!({
                     "role": "branchSummary",

@@ -10,7 +10,9 @@ PackageManager::new(request).manage(operation).await -> Result<ManageResult, Pac
 
 The request contains cwd, agent directory, the Rust-owned project trust decision, explicit CLI
 sources, and the automatic-discovery switch. The result is one ordered, canonical-path-deduplicated
-extension load list.
+extension load list plus its deduplicated source identities. Package entries retain the effective
+source string from `settings.json`; direct and automatically discovered entries retain their path.
+Callers therefore do not need to recover package names from installation paths.
 
 `manage` accepts one of four typed operations: install, remove, update, or list. It owns user versus
 project scope, project-trust enforcement, physical npm/git changes, settings persistence, pinned

@@ -695,7 +695,7 @@ function smokeInstalledNpmPackage(
       [
         "--input-type=module",
         "-e",
-        'const { PiApplication } = await import("@pi-rs/cli"); await new PiApplication({ arguments: ["--version"] }).run();',
+        'const { PiNodeHost } = await import("@pi-rs/cli"); await new PiNodeHost({ arguments: ["--version"] }).run();',
       ],
       { cwd: installation },
     );

@@ -1,5 +1,12 @@
 use super::*;
 
+const STARTUP_CARD_WIDTH: u16 = 54;
+const STARTUP_CARD_MIN_WIDTH: u16 = 36;
+const STARTUP_CARD_TOP_MARGIN: u16 = 1;
+const STARTUP_CARD_TRAILING_HEIGHT: u16 = 2;
+const JS_EXTENSIONS_LABEL: &str = " js extensions:  ";
+const RUST_PLUGINS_LABEL: &str = " rust plugins:   ";
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct UiAreas {
     pub(super) transcript: Rect,
@@ -9,12 +16,17 @@ pub(super) struct UiAreas {
     pub(super) gutter: u16,
 }
 
-pub(super) fn startup_header_height(width: u16, gutter: u16) -> u16 {
+pub(super) fn startup_header_height(app: &App, width: u16, gutter: u16) -> u16 {
     let content_width = width.saturating_sub(gutter.saturating_mul(2));
-    if content_width < 36 {
+    if content_width < STARTUP_CARD_MIN_WIDTH {
         2
     } else {
-        STARTUP_HEADER_HEIGHT
+        STARTUP_CARD_TOP_MARGIN
+            .saturating_add(startup_card_height(
+                app,
+                content_width.min(STARTUP_CARD_WIDTH),
+            ))
+            .saturating_add(STARTUP_CARD_TRAILING_HEIGHT)
     }
 }
 
@@ -56,7 +68,7 @@ pub(super) fn cached_transcript_layout(
         error: None,
     });
     let startup_height = if app.show_startup_header {
-        usize::from(startup_header_height(width, gutter))
+        usize::from(startup_header_height(app, width, gutter))
     } else {
         0
     };
@@ -868,9 +880,7 @@ pub(super) fn render_startup_header(
     palette: UiPalette,
 ) {
     let width = area.width;
-    let top_margin = u16::from(area.height >= 7);
-    let height = area.height.saturating_sub(top_margin).min(6);
-    if width < 36 || height < 6 {
+    if width < STARTUP_CARD_MIN_WIDTH {
         Widget::render(
             Paragraph::new(Line::from(vec![
                 Span::styled(">_ ", Style::default().fg(Color::DarkGray)),
@@ -881,7 +891,16 @@ pub(super) fn render_startup_header(
         );
         return;
     }
-    let card_width = width.min(54);
+    let top_margin = STARTUP_CARD_TOP_MARGIN;
+    let card_width = width.min(STARTUP_CARD_WIDTH);
+    let height = startup_card_height(app, card_width).min(
+        area.height
+            .saturating_sub(top_margin)
+            .saturating_sub(STARTUP_CARD_TRAILING_HEIGHT),
+    );
+    if height < 6 {
+        return;
+    }
     let card = Rect::new(
         area.x,
         area.y.saturating_add(top_margin),
@@ -893,36 +912,7 @@ pub(super) fn render_startup_header(
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray));
     let inner_width = usize::from(card_width.saturating_sub(2));
-    let directory = truncate_start(&compact_path(&app.cwd), inner_width.saturating_sub(12));
-    let mut model = app.model.clone();
-    if app.thinking != "off" {
-        model.push(' ');
-        model.push_str(&app.thinking);
-    }
-    let model = truncate_end(&model, inner_width.saturating_sub(30));
-    let text = vec![
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled(">_ ", Style::default().fg(Color::DarkGray)),
-            Span::styled("pi", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(
-                format!(" (v{})", env!("CARGO_PKG_VERSION")),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        Line::default(),
-        Line::from(vec![
-            Span::styled(" model:      ", Style::default().fg(Color::DarkGray)),
-            Span::raw(model),
-            Span::raw("  "),
-            Span::styled("/model", Style::default().fg(palette.accent)),
-            Span::styled(" to change", Style::default().fg(Color::DarkGray)),
-        ]),
-        Line::from(vec![
-            Span::styled(" directory:  ", Style::default().fg(Color::DarkGray)),
-            Span::raw(directory),
-        ]),
-    ];
+    let text = startup_card_lines(app, palette.accent, inner_width);
     Widget::render(
         Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
         card,
@@ -948,6 +938,67 @@ pub(super) fn render_startup_header(
             buffer,
         );
     }
+}
+
+fn startup_card_height(app: &App, card_width: u16) -> u16 {
+    let inner_width = card_width.saturating_sub(2).max(1);
+    let line_count = Paragraph::new(startup_card_lines(
+        app,
+        Color::Reset,
+        usize::from(inner_width),
+    ))
+    .wrap(Wrap { trim: false })
+    .line_count(inner_width)
+    .max(1);
+    u16::try_from(line_count)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+}
+
+fn startup_card_lines(app: &App, accent: Color, inner_width: usize) -> Vec<Line<'static>> {
+    let directory = truncate_start(&compact_path(&app.cwd), inner_width.saturating_sub(12));
+    let mut model = app.model.clone();
+    if app.thinking != "off" {
+        model.push(' ');
+        model.push_str(&app.thinking);
+    }
+    let model = truncate_end(&model, inner_width.saturating_sub(30));
+    vec![
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled(">_ ", Style::default().fg(Color::DarkGray)),
+            Span::styled("pi", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" (v{})", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::default(),
+        Line::from(vec![
+            Span::styled(" model:      ", Style::default().fg(Color::DarkGray)),
+            Span::raw(model),
+            Span::raw("  "),
+            Span::styled("/model", Style::default().fg(accent)),
+            Span::styled(" to change", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled(" directory:  ", Style::default().fg(Color::DarkGray)),
+            Span::raw(directory),
+        ]),
+        startup_inventory_line(JS_EXTENSIONS_LABEL, &app.registered_plugins.js_extensions),
+        startup_inventory_line(RUST_PLUGINS_LABEL, &app.registered_plugins.rust_plugins),
+    ]
+}
+
+fn startup_inventory_line(label: &'static str, registrations: &[String]) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(label, Style::default().fg(Color::DarkGray)),
+        Span::raw(if registrations.is_empty() {
+            "none".to_string()
+        } else {
+            registrations.join(", ")
+        }),
+    ])
 }
 
 pub(super) fn draw_context_panel(
@@ -1194,7 +1245,7 @@ pub(super) fn message_token_usage(message: &Message) -> u64 {
         Message::ToolResult(message) => {
             message.usage.as_ref().map_or(0, |usage| usage.total_tokens)
         }
-        Message::User(_) => 0,
+        Message::User(_) | Message::Custom(_) => 0,
     }
 }
 

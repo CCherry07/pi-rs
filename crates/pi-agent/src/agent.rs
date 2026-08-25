@@ -628,9 +628,8 @@ impl Agent {
         };
         let result = match kind {
             RunKind::Prompt(mut prompts) => {
-                let mut injected = hook.messages;
-                injected.append(&mut prompts);
-                run_agent_loop(run_id, injected, context, config, services, abort_signal).await
+                prompts.extend(hook.messages);
+                run_agent_loop(run_id, prompts, context, config, services, abort_signal).await
             }
             RunKind::Continue if hook.messages.is_empty() => {
                 run_agent_loop_continue(run_id, context, config, services, abort_signal).await

@@ -129,11 +129,14 @@ impl AgentSessionRuntime {
     where
         F: AgentSessionRuntimeFactory + 'static,
     {
-        Self::from_parts(session, Arc::new(factory))
+        Self::from_parts(Arc::new(session), Arc::new(factory))
     }
 
-    fn from_parts(session: AgentSession, factory: Arc<dyn AgentSessionRuntimeFactory>) -> Self {
-        let (current, _) = watch::channel(Arc::new(session));
+    fn from_parts(
+        session: Arc<AgentSession>,
+        factory: Arc<dyn AgentSessionRuntimeFactory>,
+    ) -> Self {
+        let (current, _) = watch::channel(session);
         Self {
             current,
             factory,
@@ -297,7 +300,7 @@ impl AgentSessionRuntime {
                 target_session_file: Some(path),
             })
             .await;
-        let next = Arc::new(prepared.activate(start_event).await);
+        let next = prepared.activate(start_event).await;
         self.current.send_replace(next);
         Ok(AgentSessionReplacement::Replaced)
     }
@@ -360,7 +363,7 @@ impl AgentSessionRuntime {
         let start_event = request.start_event.clone();
         let prepared = self.factory.prepare(request).await?;
         current.shutdown_with(shutdown_event).await;
-        let next = Arc::new(prepared.activate(start_event).await);
+        let next = prepared.activate(start_event).await;
         self.current.send_replace(next);
         Ok(())
     }

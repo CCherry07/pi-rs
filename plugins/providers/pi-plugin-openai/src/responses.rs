@@ -482,6 +482,16 @@ fn message_input_items(message: &Message) -> Vec<Value> {
             "role": "user",
             "content": message.content.iter().filter_map(input_content).collect::<Vec<_>>()
         })],
+        Message::Custom(message) => vec![json!({
+            "type": "message",
+            "role": "user",
+            "content": message
+                .content
+                .to_blocks()
+                .iter()
+                .filter_map(input_content)
+                .collect::<Vec<_>>()
+        })],
         Message::Assistant(message) => {
             let mut items = Vec::new();
             let text = message

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
@@ -16,7 +17,7 @@ pub struct EventError(pub String);
 
 #[async_trait]
 pub trait AgentEventSink: Send + Sync {
-    async fn emit(&self, event: AgentEvent, signal: AbortSignal) -> Result<(), EventError>;
+    async fn emit(&self, event: AgentEvent, signal: AbortSignal) -> Result<AgentEvent, EventError>;
 }
 
 #[async_trait]
@@ -41,6 +42,7 @@ pub(crate) struct AgentEventDispatcher {
     plugins: Arc<PluginDriver>,
     run_id: RunId,
     cwd: PathBuf,
+    turn_index: AtomicU64,
 }
 
 impl AgentEventDispatcher {
@@ -57,6 +59,7 @@ impl AgentEventDispatcher {
             plugins,
             run_id,
             cwd,
+            turn_index: AtomicU64::new(0),
         }
     }
 
@@ -101,38 +104,61 @@ impl AgentEventDispatcher {
         }
     }
 
-    async fn dispatch_plugin(&self, event: AgentEvent, signal: &AbortSignal) {
+    async fn dispatch_plugin(&self, event: &AgentEvent, signal: &AbortSignal) -> Option<Message> {
         match event {
             AgentEvent::AgentStart => {
+                self.turn_index.store(0, Ordering::Relaxed);
                 self.plugins
                     .agent_start(&self.run_id, &self.cwd, signal, AgentStartEvent)
-                    .await
+                    .await;
+                None
             }
             AgentEvent::AgentEnd { messages } => {
                 self.plugins
-                    .agent_end(&self.run_id, &self.cwd, signal, AgentEndEvent { messages })
-                    .await
+                    .agent_end(
+                        &self.run_id,
+                        &self.cwd,
+                        signal,
+                        AgentEndEvent {
+                            messages: messages.clone(),
+                        },
+                    )
+                    .await;
+                None
             }
             AgentEvent::TurnStart => {
                 self.plugins
-                    .turn_start(&self.run_id, &self.cwd, signal, TurnStartEvent)
-                    .await
+                    .turn_start(
+                        &self.run_id,
+                        &self.cwd,
+                        signal,
+                        TurnStartEvent {
+                            turn_index: self.turn_index.load(Ordering::Relaxed),
+                            timestamp_ms: now_ms(),
+                        },
+                    )
+                    .await;
+                None
             }
             AgentEvent::TurnEnd {
                 message,
                 tool_results,
             } => {
+                let turn_index = self.turn_index.load(Ordering::Relaxed);
                 self.plugins
                     .turn_end(
                         &self.run_id,
                         &self.cwd,
                         signal,
                         TurnEndEvent {
-                            message,
-                            tool_results,
+                            turn_index,
+                            message: message.clone(),
+                            tool_results: tool_results.clone(),
                         },
                     )
-                    .await
+                    .await;
+                self.turn_index.fetch_add(1, Ordering::Relaxed);
+                None
             }
             AgentEvent::MessageStart { message } => {
                 self.plugins
@@ -140,9 +166,12 @@ impl AgentEventDispatcher {
                         &self.run_id,
                         &self.cwd,
                         signal,
-                        MessageStartEvent { message },
+                        MessageStartEvent {
+                            message: message.clone(),
+                        },
                     )
-                    .await
+                    .await;
+                None
             }
             AgentEvent::MessageUpdate { message, event } => {
                 self.plugins
@@ -150,15 +179,26 @@ impl AgentEventDispatcher {
                         &self.run_id,
                         &self.cwd,
                         signal,
-                        MessageUpdateEvent { message, event },
+                        MessageUpdateEvent {
+                            message: message.clone(),
+                            event: event.clone(),
+                        },
                     )
-                    .await
+                    .await;
+                None
             }
-            AgentEvent::MessageEnd { message } => {
+            AgentEvent::MessageEnd { message } => Some(
                 self.plugins
-                    .message_end(&self.run_id, &self.cwd, signal, MessageEndEvent { message })
-                    .await
-            }
+                    .message_end(
+                        &self.run_id,
+                        &self.cwd,
+                        signal,
+                        MessageEndEvent {
+                            message: message.clone(),
+                        },
+                    )
+                    .await,
+            ),
             AgentEvent::ToolExecutionStart {
                 tool_call_id,
                 tool_name,
@@ -170,12 +210,13 @@ impl AgentEventDispatcher {
                         &self.cwd,
                         signal,
                         ToolExecutionStartEvent {
-                            tool_call_id,
-                            tool_name,
-                            args,
+                            tool_call_id: tool_call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            args: args.clone(),
                         },
                     )
-                    .await
+                    .await;
+                None
             }
             AgentEvent::ToolExecutionUpdate {
                 tool_call_id,
@@ -189,13 +230,14 @@ impl AgentEventDispatcher {
                         &self.cwd,
                         signal,
                         ToolExecutionUpdateEvent {
-                            tool_call_id,
-                            tool_name,
-                            args,
-                            partial_result,
+                            tool_call_id: tool_call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            args: args.clone(),
+                            partial_result: partial_result.clone(),
                         },
                     )
-                    .await
+                    .await;
+                None
             }
             AgentEvent::ToolExecutionEnd {
                 tool_call_id,
@@ -209,13 +251,14 @@ impl AgentEventDispatcher {
                         &self.cwd,
                         signal,
                         ToolExecutionEndEvent {
-                            tool_call_id,
-                            tool_name,
-                            result,
-                            is_error,
+                            tool_call_id: tool_call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            result: result.clone(),
+                            is_error: *is_error,
                         },
                     )
-                    .await
+                    .await;
+                None
             }
         }
     }
@@ -223,9 +266,24 @@ impl AgentEventDispatcher {
 
 #[async_trait]
 impl AgentEventSink for AgentEventDispatcher {
-    async fn emit(&self, event: AgentEvent, signal: AbortSignal) -> Result<(), EventError> {
+    async fn emit(
+        &self,
+        mut event: AgentEvent,
+        signal: AbortSignal,
+    ) -> Result<AgentEvent, EventError> {
         self.reduce(&event);
-        self.dispatch_plugin(event.clone(), &signal).await;
+        if let Some(message) = self.dispatch_plugin(&event, &signal).await {
+            event = AgentEvent::MessageEnd { message };
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let AgentEvent::MessageEnd { message } = &event
+                && let Some(last) = state.snapshot.messages.last_mut()
+            {
+                *last = message.clone();
+            }
+        }
         let listeners = self
             .listeners
             .read()
@@ -236,6 +294,15 @@ impl AgentEventSink for AgentEventDispatcher {
         for listener in listeners {
             listener.on_event(event.clone(), signal.clone()).await?;
         }
-        Ok(())
+        Ok(event)
     }
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        })
 }

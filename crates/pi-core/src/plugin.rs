@@ -1,7 +1,8 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
@@ -22,12 +23,82 @@ pub enum PluginError {
     Registration(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginDiagnostic {
+    pub plugin_id: PluginId,
+    pub hook: String,
+    pub message: String,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct PluginDiagnosticSink {
+    diagnostics: Arc<Mutex<Vec<PluginDiagnostic>>>,
+}
+
+impl PluginDiagnosticSink {
+    pub(crate) fn record(
+        &self,
+        plugin_id: PluginId,
+        hook: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        self.diagnostics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(PluginDiagnostic {
+                plugin_id,
+                hook: hook.into(),
+                message: message.into(),
+            });
+    }
+
+    pub(crate) fn snapshot(&self) -> Vec<PluginDiagnostic> {
+        self.diagnostics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn take(&self) -> Vec<PluginDiagnostic> {
+        std::mem::take(
+            &mut *self
+                .diagnostics
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
 #[derive(Clone)]
 pub struct PluginContext {
     pub plugin_id: PluginId,
     pub run_id: RunId,
     pub cwd: PathBuf,
     pub abort_signal: AbortSignal,
+    diagnostics: PluginDiagnosticSink,
+}
+
+impl PluginContext {
+    pub fn new(
+        plugin_id: PluginId,
+        run_id: RunId,
+        cwd: PathBuf,
+        abort_signal: AbortSignal,
+    ) -> Self {
+        Self {
+            plugin_id,
+            run_id,
+            cwd,
+            abort_signal,
+            diagnostics: PluginDiagnosticSink::default(),
+        }
+    }
+
+    pub fn report_hook_error(&self, hook: &'static str, message: impl Into<String>) {
+        self.diagnostics
+            .record(self.plugin_id.clone(), hook, message);
+    }
 }
 
 #[derive(Clone)]
@@ -35,17 +106,46 @@ pub struct InputContext {
     pub plugin_id: PluginId,
     pub cwd: PathBuf,
     pub abort_signal: AbortSignal,
+    diagnostics: PluginDiagnosticSink,
+}
+
+impl InputContext {
+    pub fn report_hook_error(&self, hook: &'static str, message: impl Into<String>) {
+        self.diagnostics
+            .record(self.plugin_id.clone(), hook, message);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InputSource {
+    Interactive,
+    Rpc,
+    Extension,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InputStreamingBehavior {
+    Steer,
+    FollowUp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputEvent {
     pub text: String,
+    pub images: Option<Vec<crate::ImageContent>>,
+    pub source: InputSource,
+    pub streaming_behavior: Option<InputStreamingBehavior>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputPatch {
     Continue,
-    Transform(String),
+    Transform {
+        text: String,
+        images: Option<Vec<crate::ImageContent>>,
+    },
     Handled,
 }
 
@@ -92,11 +192,20 @@ pub struct AgentEndEvent {
     pub messages: Vec<Message>,
 }
 
+/// Fired by product/session orchestration after the low-level Agent is idle
+/// and no automatic retry, compaction, or queued continuation remains.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TurnStartEvent;
+pub struct AgentSettledEvent;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnStartEvent {
+    pub turn_index: u64,
+    pub timestamp_ms: i64,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnEndEvent {
+    pub turn_index: u64,
     pub message: AssistantMessage,
     pub tool_results: Vec<ToolResultMessage>,
 }
@@ -115,6 +224,11 @@ pub struct MessageUpdateEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageEndEvent {
     pub message: Message,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MessageEndPatch {
+    pub message: Option<Message>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -244,6 +358,13 @@ pub trait AgentPlugin: Send + Sync {
     ) -> std::result::Result<(), PluginError> {
         Ok(())
     }
+    async fn agent_settled(
+        &self,
+        _context: PluginContext,
+        _event: AgentSettledEvent,
+    ) -> std::result::Result<(), PluginError> {
+        Ok(())
+    }
     async fn turn_start(
         &self,
         _context: PluginContext,
@@ -276,8 +397,8 @@ pub trait AgentPlugin: Send + Sync {
         &self,
         _context: PluginContext,
         _event: MessageEndEvent,
-    ) -> std::result::Result<(), PluginError> {
-        Ok(())
+    ) -> std::result::Result<MessageEndPatch, PluginError> {
+        Ok(MessageEndPatch::default())
     }
     async fn tool_execution_start(
         &self,
@@ -331,22 +452,19 @@ struct RegisteredPlugin {
     plugin: Arc<dyn AgentPlugin>,
 }
 
-pub struct PluginDriver {
-    plugins: Vec<RegisteredPlugin>,
+fn same_message_role(left: &Message, right: &Message) -> bool {
+    matches!(
+        (left, right),
+        (Message::User(_), Message::User(_))
+            | (Message::Assistant(_), Message::Assistant(_))
+            | (Message::ToolResult(_), Message::ToolResult(_))
+            | (Message::Custom(_), Message::Custom(_))
+    )
 }
 
-fn plugin_context(
-    registered: &RegisteredPlugin,
-    run_id: &RunId,
-    cwd: &std::path::Path,
-    signal: &AbortSignal,
-) -> PluginContext {
-    PluginContext {
-        plugin_id: registered.id.clone(),
-        run_id: run_id.clone(),
-        cwd: cwd.to_path_buf(),
-        abort_signal: signal.clone(),
-    }
+pub struct PluginDriver {
+    plugins: Vec<RegisteredPlugin>,
+    diagnostics: PluginDiagnosticSink,
 }
 
 impl PluginDriver {
@@ -360,8 +478,10 @@ impl PluginDriver {
             }
             registered.push(RegisteredPlugin { id, plugin });
         }
+        let diagnostics = PluginDiagnosticSink::default();
         Ok(Self {
             plugins: registered,
+            diagnostics,
         })
     }
 
@@ -372,6 +492,40 @@ impl PluginDriver {
             .collect()
     }
 
+    pub fn diagnostics(&self) -> Vec<PluginDiagnostic> {
+        self.diagnostics.snapshot()
+    }
+
+    pub fn take_diagnostics(&self) -> Vec<PluginDiagnostic> {
+        self.diagnostics.take()
+    }
+
+    fn plugin_context(
+        &self,
+        registered: &RegisteredPlugin,
+        run_id: &RunId,
+        cwd: &std::path::Path,
+        signal: &AbortSignal,
+    ) -> PluginContext {
+        PluginContext {
+            plugin_id: registered.id.clone(),
+            run_id: run_id.clone(),
+            cwd: cwd.to_path_buf(),
+            abort_signal: signal.clone(),
+            diagnostics: self.diagnostics.clone(),
+        }
+    }
+
+    fn record_error(
+        &self,
+        registered: &RegisteredPlugin,
+        hook: &'static str,
+        error: impl std::fmt::Display,
+    ) {
+        self.diagnostics
+            .record(registered.id.clone(), hook, error.to_string());
+    }
+
     /// Chains input transformations in plugin registration order. A handled
     /// result short-circuits the remaining plugins.
     pub async fn input(
@@ -380,34 +534,39 @@ impl PluginDriver {
         signal: &AbortSignal,
         mut event: InputEvent,
     ) -> std::result::Result<InputPatch, PluginError> {
-        let original = event.text.clone();
+        let original = event.clone();
         for registered in &self.plugins {
-            let patch = registered
-                .plugin
-                .input(
-                    InputContext {
-                        plugin_id: registered.id.clone(),
-                        cwd: cwd.to_path_buf(),
-                        abort_signal: signal.clone(),
-                    },
-                    event.clone(),
-                )
-                .await
-                .map_err(|error| PluginError::Hook {
-                    plugin_id: registered.id.clone(),
-                    hook: "input",
-                    message: error.to_string(),
-                })?;
+            let context = InputContext {
+                plugin_id: registered.id.clone(),
+                cwd: cwd.to_path_buf(),
+                abort_signal: signal.clone(),
+                diagnostics: self.diagnostics.clone(),
+            };
+            let patch = match registered.plugin.input(context, event.clone()).await {
+                Ok(patch) => patch,
+                Err(error) => {
+                    self.record_error(registered, "input", error);
+                    continue;
+                }
+            };
             match patch {
                 InputPatch::Continue => {}
-                InputPatch::Transform(text) => event.text = text,
+                InputPatch::Transform { text, images } => {
+                    event.text = text;
+                    if images.is_some() {
+                        event.images = images;
+                    }
+                }
                 InputPatch::Handled => return Ok(InputPatch::Handled),
             }
         }
-        if event.text == original {
+        if event == original {
             Ok(InputPatch::Continue)
         } else {
-            Ok(InputPatch::Transform(event.text))
+            Ok(InputPatch::Transform {
+                text: event.text,
+                images: event.images,
+            })
         }
     }
 
@@ -428,21 +587,20 @@ impl PluginDriver {
     ) -> std::result::Result<BeforeAgentStartPatch, PluginError> {
         let mut messages = Vec::new();
         for registered in &self.plugins {
-            let context = PluginContext {
-                plugin_id: registered.id.clone(),
-                run_id: run_id.clone(),
-                cwd: cwd.to_path_buf(),
-                abort_signal: signal.clone(),
-            };
-            let patch = registered
+            let patch = match registered
                 .plugin
-                .before_agent_start(context, event.clone())
+                .before_agent_start(
+                    self.plugin_context(registered, run_id, cwd, signal),
+                    event.clone(),
+                )
                 .await
-                .map_err(|error| PluginError::Hook {
-                    plugin_id: registered.id.clone(),
-                    hook: "before_agent_start",
-                    message: error.to_string(),
-                })?;
+            {
+                Ok(patch) => patch,
+                Err(error) => {
+                    self.record_error(registered, "before_agent_start", error);
+                    continue;
+                }
+            };
             if let Some(system_prompt) = patch.system_prompt {
                 event.system_prompt = system_prompt;
             }
@@ -462,13 +620,16 @@ impl PluginDriver {
         event: AgentStartEvent,
     ) {
         for registered in &self.plugins {
-            let _ = registered
+            if let Err(error) = registered
                 .plugin
                 .agent_start(
-                    plugin_context(registered, run_id, cwd, signal),
+                    self.plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
-                .await;
+                .await
+            {
+                self.record_error(registered, "agent_start", error);
+            }
         }
     }
 
@@ -480,13 +641,37 @@ impl PluginDriver {
         event: AgentEndEvent,
     ) {
         for registered in &self.plugins {
-            let _ = registered
+            if let Err(error) = registered
                 .plugin
                 .agent_end(
-                    plugin_context(registered, run_id, cwd, signal),
+                    self.plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
-                .await;
+                .await
+            {
+                self.record_error(registered, "agent_end", error);
+            }
+        }
+    }
+
+    pub async fn agent_settled(
+        &self,
+        run_id: &RunId,
+        cwd: &std::path::Path,
+        signal: &AbortSignal,
+        event: AgentSettledEvent,
+    ) {
+        for registered in &self.plugins {
+            if let Err(error) = registered
+                .plugin
+                .agent_settled(
+                    self.plugin_context(registered, run_id, cwd, signal),
+                    event.clone(),
+                )
+                .await
+            {
+                self.record_error(registered, "agent_settled", error);
+            }
         }
     }
 
@@ -498,13 +683,16 @@ impl PluginDriver {
         event: TurnStartEvent,
     ) {
         for registered in &self.plugins {
-            let _ = registered
+            if let Err(error) = registered
                 .plugin
                 .turn_start(
-                    plugin_context(registered, run_id, cwd, signal),
+                    self.plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
-                .await;
+                .await
+            {
+                self.record_error(registered, "turn_start", error);
+            }
         }
     }
 
@@ -516,13 +704,16 @@ impl PluginDriver {
         event: TurnEndEvent,
     ) {
         for registered in &self.plugins {
-            let _ = registered
+            if let Err(error) = registered
                 .plugin
                 .turn_end(
-                    plugin_context(registered, run_id, cwd, signal),
+                    self.plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
-                .await;
+                .await
+            {
+                self.record_error(registered, "turn_end", error);
+            }
         }
     }
 
@@ -534,13 +725,16 @@ impl PluginDriver {
         event: MessageStartEvent,
     ) {
         for registered in &self.plugins {
-            let _ = registered
+            if let Err(error) = registered
                 .plugin
                 .message_start(
-                    plugin_context(registered, run_id, cwd, signal),
+                    self.plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
-                .await;
+                .await
+            {
+                self.record_error(registered, "message_start", error);
+            }
         }
     }
 
@@ -552,13 +746,16 @@ impl PluginDriver {
         event: MessageUpdateEvent,
     ) {
         for registered in &self.plugins {
-            let _ = registered
+            if let Err(error) = registered
                 .plugin
                 .message_update(
-                    plugin_context(registered, run_id, cwd, signal),
+                    self.plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
-                .await;
+                .await
+            {
+                self.record_error(registered, "message_update", error);
+            }
         }
     }
 
@@ -567,17 +764,36 @@ impl PluginDriver {
         run_id: &RunId,
         cwd: &std::path::Path,
         signal: &AbortSignal,
-        event: MessageEndEvent,
-    ) {
+        mut event: MessageEndEvent,
+    ) -> Message {
         for registered in &self.plugins {
-            let _ = registered
+            let patch = match registered
                 .plugin
                 .message_end(
-                    plugin_context(registered, run_id, cwd, signal),
+                    self.plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
-                .await;
+                .await
+            {
+                Ok(patch) => patch,
+                Err(error) => {
+                    self.record_error(registered, "message_end", error);
+                    continue;
+                }
+            };
+            if let Some(replacement) = patch.message {
+                if same_message_role(&event.message, &replacement) {
+                    event.message = replacement;
+                } else {
+                    self.diagnostics.record(
+                        registered.id.clone(),
+                        "message_end",
+                        "message_end handlers must return a message with the same role",
+                    );
+                }
+            }
         }
+        event.message
     }
 
     pub async fn tool_execution_start(
@@ -588,13 +804,16 @@ impl PluginDriver {
         event: ToolExecutionStartEvent,
     ) {
         for registered in &self.plugins {
-            let _ = registered
+            if let Err(error) = registered
                 .plugin
                 .tool_execution_start(
-                    plugin_context(registered, run_id, cwd, signal),
+                    self.plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
-                .await;
+                .await
+            {
+                self.record_error(registered, "tool_execution_start", error);
+            }
         }
     }
 
@@ -606,13 +825,16 @@ impl PluginDriver {
         event: ToolExecutionUpdateEvent,
     ) {
         for registered in &self.plugins {
-            let _ = registered
+            if let Err(error) = registered
                 .plugin
                 .tool_execution_update(
-                    plugin_context(registered, run_id, cwd, signal),
+                    self.plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
-                .await;
+                .await
+            {
+                self.record_error(registered, "tool_execution_update", error);
+            }
         }
     }
 
@@ -624,13 +846,16 @@ impl PluginDriver {
         event: ToolExecutionEndEvent,
     ) {
         for registered in &self.plugins {
-            let _ = registered
+            if let Err(error) = registered
                 .plugin
                 .tool_execution_end(
-                    plugin_context(registered, run_id, cwd, signal),
+                    self.plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
-                .await;
+                .await
+            {
+                self.record_error(registered, "tool_execution_end", error);
+            }
         }
     }
 
@@ -642,26 +867,22 @@ impl PluginDriver {
         mut messages: Vec<Message>,
     ) -> std::result::Result<Vec<Message>, PluginError> {
         for registered in &self.plugins {
-            let context = PluginContext {
-                plugin_id: registered.id.clone(),
-                run_id: run_id.clone(),
-                cwd: cwd.to_path_buf(),
-                abort_signal: signal.clone(),
-            };
-            let patch = registered
+            let patch = match registered
                 .plugin
                 .context(
-                    context,
+                    self.plugin_context(registered, run_id, cwd, signal),
                     ContextEvent {
                         messages: messages.clone(),
                     },
                 )
                 .await
-                .map_err(|error| PluginError::Hook {
-                    plugin_id: registered.id.clone(),
-                    hook: "context",
-                    message: error.to_string(),
-                })?;
+            {
+                Ok(patch) => patch,
+                Err(error) => {
+                    self.record_error(registered, "context", error);
+                    continue;
+                }
+            };
             if let Some(replacement) = patch.messages {
                 messages = replacement;
             }
@@ -678,16 +899,10 @@ impl PluginDriver {
     ) -> std::result::Result<ToolCallPatch, PluginError> {
         let mut arguments = event.validated_args;
         for registered in &self.plugins {
-            let context = PluginContext {
-                plugin_id: registered.id.clone(),
-                run_id: run_id.clone(),
-                cwd: cwd.to_path_buf(),
-                abort_signal: signal.clone(),
-            };
             let patch = registered
                 .plugin
                 .tool_call(
-                    context,
+                    self.plugin_context(registered, run_id, cwd, signal),
                     ToolCallEvent {
                         assistant_message: event.assistant_message.clone(),
                         tool_call: event.tool_call.clone(),
@@ -725,26 +940,22 @@ impl PluginDriver {
     ) -> ToolResult {
         let mut result = event.result;
         for registered in &self.plugins {
-            let context = PluginContext {
-                plugin_id: registered.id.clone(),
-                run_id: run_id.clone(),
-                cwd: cwd.to_path_buf(),
-                abort_signal: signal.clone(),
-            };
             let current_event = ToolResultEvent {
                 assistant_message: event.assistant_message.clone(),
                 tool_call: event.tool_call.clone(),
                 validated_args: event.validated_args.clone(),
                 result: result.clone(),
             };
-            match registered.plugin.tool_result(context, current_event).await {
+            match registered
+                .plugin
+                .tool_result(
+                    self.plugin_context(registered, run_id, cwd, signal),
+                    current_event,
+                )
+                .await
+            {
                 Ok(patch) => patch.apply(&mut result),
-                Err(error) => {
-                    return ToolResult::error(format!(
-                        "plugin {} failed in tool_result: {error}",
-                        registered.id
-                    ));
-                }
+                Err(error) => self.record_error(registered, "tool_result", error),
             }
         }
         result

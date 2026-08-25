@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use pi_js_package_manager::{PackageManager, ResolveRequest};
+use pi_js_package_manager::{PackageManager, ResolveRequest, ResolvedExtensionIdentity};
 use serde_json::json;
 
 fn touch(path: &Path) {
@@ -79,6 +79,19 @@ async fn matches_pi_package_manager_extension_source_precedence() {
     .unwrap();
 
     assert_eq!(resolution.extension_paths, paths);
+    assert_eq!(
+        resolution.extension_identities,
+        [
+            ResolvedExtensionIdentity::Path(paths[0].clone()),
+            ResolvedExtensionIdentity::Path(paths[1].clone()),
+            ResolvedExtensionIdentity::Path(paths[2].clone()),
+            ResolvedExtensionIdentity::Path(paths[3].clone()),
+            ResolvedExtensionIdentity::Path(paths[4].clone()),
+            ResolvedExtensionIdentity::Package(
+                "npm:example-package@^1.0.0 || >=2.0.0 <3.0.0".to_string(),
+            ),
+        ]
+    );
 }
 
 #[tokio::test]

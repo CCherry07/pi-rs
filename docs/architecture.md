@@ -2,7 +2,7 @@
 
 ## Scope
 
-The current product is a plugin-first Rust coding agent with one `PiApplication` / `PiSession`
+The current product is a plugin-first Rust coding agent with one `MultiSessionManager` / `PiSession`
 Interface behind interactive TUI, print, and NDJSON modes. Both the standalone binary and the Node
 extension host delegate interactive terminal ownership to the Ratatui frontend in `apps/pi-cli`.
 Its core implements the deterministic:
@@ -26,7 +26,7 @@ crates/pi-runtime               plugin registration and Agent construction
 crates/pi-provider              vendor-neutral HTTP transport and SSE framing
 crates/pi-prompt                pure Pi-style system prompt assembly
 crates/pi-resources             generic system/append prompts and project context discovery
-crates/pi-session               Pi v4 storage plus PiApplication/PiSession product runtime
+crates/pi-session               Pi v4 storage plus MultiSessionManager/PiSession product runtime
 apps/pi-md                     TUI-owned Markdown parsing, streaming repair, highlighting, and Ratatui rendering
 crates/pi-plugin-sdk            native plugin author interface and descriptor types
 crates/pi-plugin-macros         agent/provider/session native export macros
@@ -101,15 +101,28 @@ and invokes the NAPI `runPi` entry; interactive, print, JSON, piped-input, and p
 arguments are forwarded unchanged. This keeps extension callbacks in Node without allowing Node and
 Rust to compete for raw mode, stdout, editor state, or transcript projection.
 
-All frontend adapters enter the product through two public session Modules. `PiApplication` owns the
-runtime factory, application shutdown, and a private table of active handles. `PiSession` is the
+All frontend adapters enter the product through two public session Modules. `MultiSessionManager`
+owns the runtime factory, manager shutdown, and a private table of active handles. `PiSession` is the
 cloneable per-frontend handle for current-session events and new/resume/fork/reload transitions.
 There is deliberately no public `SessionRegistry`: duplicate-path checks and handle bookkeeping are
-implementation details of `PiApplication`. `AgentSessionRuntime` remains the lower-level replacement
+implementation details of `MultiSessionManager`. `AgentSessionRuntime` remains the lower-level replacement
 transaction used inside each `PiSession`, rather than a type frontend adapters coordinate directly.
 The print and NDJSON Adapters pin `PiSession::current()` for one invocation; the longer-lived TUI
 also watches the handle's replacement stream. This keeps generation changes behind the same
 Interface while preventing a single in-flight submission from crossing generations.
+
+The TUI startup card reads immutable `SessionRuntimeInventory` metadata from the prepared
+`AgentSession`. `pi-js-package-manager::Resolution` retains the source identity already attached to
+each resolved entry: effective package entries use their original `settings.json` source, while
+explicit files and automatic extensions retain their resolved path identity. `ProductSessionFactory`
+turns those identities into stable labels only after the Node generation prepares successfully, so
+the TUI never guesses package names from install-layout segments such as `dist/index.ts`. The
+Rust-plugin list is intentionally narrower: it is the ordered intersection of `plugins.json`
+reconciliation results and successfully loaded native descriptors. Built-in Rust plugins and
+explicit `--plugin` paths remain active but are not presented as configured Rust plugins. Replacing
+a session or running `/reload` rebuilds this inventory with the same transaction as the runtime and
+session plugin generations, so the frontend never reconstructs registration state from
+configuration files or plugin ID conventions.
 
 ## Plugin-first rules
 
@@ -117,15 +130,15 @@ Interface while preventing a single in-flight submission from crossing generatio
 2. Agent plugin hooks, provider plugin registration, and provider request hooks each execute in builder order. There is no numeric priority.
 3. Duplicate IDs are rejected within each plugin system; duplicate tool, command, provider, or model IDs fail runtime construction.
 4. Registries are mutable only during registration and frozen before Agent construction.
-5. `tool_call` runs in order, chains argument patches, and the first block decision wins. Hook errors fail closed for that tool call.
-6. `tool_result` patches results in order. A hook failure converts that executed call to an error result.
-7. `before_agent_start` runs once per prompt/continue invocation in registration order; prompt replacements chain and injected messages are accumulated for that run only.
-8. `context` runs before every provider request and chains message replacements without mutating the persisted transcript.
-9. `tool_call` chains argument patches and may block; patched arguments are revalidated. `tool_result` chains result patches. Legacy before/after tool hooks remain compatible.
-10. Lifecycle events are delivered through independent plugin methods (`agent_start/end`, `turn_start/end`, `message_start/update/end`, and `tool_execution_start/update/end`) in registration order; observer errors do not fail the run.
+5. `tool_call` runs in order, chains argument patches, revalidates patched arguments, and lets the first block decision win. It is the intentional fail-closed exception: a hook error fails that tool call.
+6. `input` receives text, images, source, and optional streaming behavior. Text/image replacements chain in registration order, `Handled` stops the submission, and a hook error is recorded as a generation-local plugin diagnostic before later hooks continue.
+7. `before_agent_start` runs once per prompt/continue invocation in registration order; prompt replacements chain and injected messages are accumulated for that run only. Hook errors are diagnosed and skipped without discarding earlier replacements.
+8. `context` runs before every provider request and chains message replacements without mutating the persisted transcript. Hook errors are diagnosed and later hooks still run.
+9. `tool_result` chains content, details, usage, and error patches. Hook errors are diagnosed and skipped; they do not rewrite a successfully executed tool result into a failure. Legacy before/after tool hooks remain compatible.
+10. Lifecycle events are delivered through independent plugin methods (`agent_start/end/settled`, `turn_start/end`, `message_start/update/end`, and `tool_execution_start/update/end`) in registration order. `agent_start`/`agent_end` belong to each low-level run, while session orchestration emits `agent_settled` once no automatic retry, compaction, or queued continuation remains and before publishing the product settled event. Turns use a zero-based per-run index and `turn_start` also carries its millisecond timestamp. `message_end` may replace a message while preserving its role; each valid replacement becomes the next hook's input and the final message is used by Agent state, listeners, provider context, tool scheduling, and persistence. Observer errors and invalid cross-role replacements are diagnosed and skipped without failing the run.
 11. A native plugin is trusted in-process code; the loader and trait interfaces are not a sandbox.
 12. Registered slash commands own both their `CommandSpec` and execution. A `TransformInput` result then passes through `input` hooks in registration order before the agent run; `Handled` stops the submission. Text preprocessing retains both the product-facing submitted text and the effective model text rather than requiring a frontend to reverse an expansion.
-13. `before_provider_request` runs after a concrete provider has serialized its final wire payload and before transport. Replacements chain in provider-plugin order; hook errors fail the provider request instead of sending a payload that skipped a requested mutation.
+13. `before_provider_request` runs after a concrete provider has serialized its final wire payload and before transport. Replacements chain in provider-plugin order; hook errors are diagnosed and skipped so later provider hooks still receive the last valid payload.
 
 ## Runtime generations and reload
 
@@ -138,7 +151,8 @@ Use `agent_plugin_factory` / `try_agent_plugin_factory` for reloadable agent plu
 Product wiring installs agent, provider, and session plugins through their three independent factory
 seams. Each `PiSession` uses `AgentSessionRuntime` for cross-system atomicity: its factory prepares
 the complete runtime and session plugin generations before shutting down or replacing the current
-session.
+session. The prepared session carries registration inventory as generation-local metadata; it is
+not persisted into Pi v4 session data and does not introduce another plugin lifecycle.
 `pi-plugin-loader` discovers global manifests and trusted project manifests, resolves explicit
 `--plugin` paths, verifies a C-layout descriptor before resolving an exact-build Rust constructor,
 and partitions packages into separately ordered agent, provider, and session factories. It snapshots
@@ -244,8 +258,13 @@ extension registrations/results, and native binding exports.
 TypeScript protocol types are inferred from those schemas so runtime checks and static interfaces
 cannot drift independently.
 
-The boundary uses four generation-scoped operations encoded as JSON: `prepareGeneration`,
-`invoke`, `cancel`, and `retireGeneration`. Before `prepareGeneration`, `ProductSessionFactory`
+The callback boundary uses four generation-scoped operations encoded as JSON: `prepareGeneration`,
+`invoke`, `cancel`, and `retireGeneration`. Every `invoke` also receives a NAPI class instance named
+`NativeExtensionContext`; it is a direct native capability rather than another serialized host
+operation or a process-global callback broker. Its deliberately small Interface has three methods:
+`query` for synchronous reads, `notify` for non-blocking commands, and `request` for awaited
+commands. The operation payloads and results are JSON, but the capability object itself is passed
+as the second threadsafe-function argument. Before `prepareGeneration`, `ProductSessionFactory`
 calls the deep Rust Module `pi-js-package-manager` through its
 `resolve(request) -> resolution` Interface. It merges explicit `-e` local/npm/git sources first,
 then trusted project settings entries, trusted project auto-discovery, user settings entries, user
@@ -257,8 +276,29 @@ source, installation, filtering, or precedence policy. JavaScript functions stay
 callback table; Rust stores only opaque generation and callback IDs. `invoke` crosses a weak NAPI
 threadsafe function and awaits the JavaScript Promise without blocking either the Node event loop or Tokio.
 Rust aborts send `cancel`, which aborts the callback's `AbortController`; retirement aborts all
-remaining work and drops every callback for that generation. The weak TSFN lets Node exit once the
-exported `runPi` Promise settles.
+remaining work and drops every callback for that generation. The native context is guarded by the
+same generation epoch, so a context retained by extension code fails with a retired-context error
+after its generation is gone. `ExtensionSessionBinding` connects each prepared generation to its
+concrete `AgentSession` before `session_start`, then to the stable outer `PiSession` after initial
+startup. Reads therefore remain generation-correct during activation and follow successful
+new/resume/fork/reload replacements afterward. Both links are non-owning (`Weak<AgentSession>` and
+`WeakPiSession`), because the concrete session owns the plugin generation; a strong context-to-
+session edge would form a cycle and prevent generation retirement. The weak TSFN lets Node exit
+once the exported `runPi` Promise settles.
+
+Node builds Pi's lazy `ExtensionContext` and `ExtensionCommandContext` facades over that native
+capability. Ordinary hooks and tools receive only base context operations. Registered commands also
+receive `getSystemPromptOptions`, `waitForIdle`, and session replacement/navigation operations.
+The native side returns typed v4 records; the Node compatibility facade removes journal-only
+sequence fields, converts millisecond timestamps to Pi extension timestamps, and projects the
+header into the current read-only `SessionManager` shape. Durable storage itself remains v4.
+Command dispatch occurs before acquiring the old `AgentSession` operation gate; a command can
+therefore await `newSession`, `fork`, `switchSession`, or `reload` without deadlocking on the
+submission that invoked it. The native generation context falls back to `PiSession::current()` once
+its prepared `AgentSession` closes, which lets Pi-compatible `withSession` callbacks observe the
+replacement before the old JavaScript command returns. There is no `JsContextBroker`: lifetime and
+authority are explicit in the callback argument, while orchestration remains in
+`MultiSessionManager` / `PiSession`.
 
 Managed npm installation deliberately uses npm's legacy peer-dependency mode, matching current Pi:
 Pi extensions commonly declare the Pi SDK and TypeBox as peers, but those modules belong to the
@@ -291,6 +331,15 @@ schemas, and later ordinary registry collisions before a candidate is published.
 metadata and execution mode become ordinary `ToolSpec` fields; hook replacement and cancellation
 semantics continue through the existing typed drivers.
 
+Supported JavaScript hooks use the same typed driver semantics as native plugins rather than a
+second compatibility path. `input` transports and chains text plus images with Pi's source and
+streaming-behavior fields; `turn_start`/`turn_end` expose the per-run turn index and start timestamp;
+and `message_end` replacements flow back into the live Agent and persisted session, subject to the
+same-role invariant. Callback rejection, malformed results, and invalid replacements become
+generation-local diagnostics and do not suppress later callbacks. `tool_call` remains intentionally
+fail-closed, matching Pi's tool runner. Provider payload callbacks use the same isolated chaining
+rule as the Rust `ProviderPluginDriver`.
+
 `ProductSessionFactory` asks the Node host for a fresh callback generation on initial construction,
 new/resumed sessions, and `/reload`, alongside native plugins, resources, models, and session
 plugins. The existing whole-session transaction prepares all of them before swap. A failed import,
@@ -300,10 +349,17 @@ sessions.
 
 This is compatibility by explicit capability, not an unsafe claim that every Pi TUI API is already
 portable. The current bridge supports registered tools and commands, the Rust agent lifecycle
-hooks, `before_provider_request`, and the ten session hooks. APIs that require a bidirectional UI,
-renderer, dynamic-provider stream, resource contribution, or tool-progress channel throw during
-registration/use rather than silently doing nothing. JavaScript extensions are trusted in-process
-Node code and share the process and OS authority of the product.
+hooks, `before_provider_request`, the ten session hooks, read-only session/model context, and the
+command-safe session operations described above. UI is an intentional product divergence: every
+JavaScript context reports `hasUI = false` and exposes one explicit NoOp UI object with Pi-compatible
+default return values. UI registrations, renderers, flags, dynamic providers, resource discovery,
+and other recognized-but-inactive facilities do not fail generation construction; they produce an
+`inactive` generation diagnostic and contribute no runtime callback. A hook name known to current
+Pi but not implemented follows the same inactive policy, while an unknown hook name remains a hard
+extension error so typos are not hidden. Unsupported result fields on an otherwise supported hook
+are ignored rather than failing the callback. The maintained capability matrix is
+[`docs/js-extension-compatibility.md`](js-extension-compatibility.md). JavaScript extensions are
+trusted in-process Node code and share the process and OS authority of the product.
 
 `ModelsPlugin` is a provider plugin loaded after the base protocol provider. It loads one immutable,
 credential-blind `models.json` snapshot per generation and composes layers in Pi order: built-in
@@ -389,7 +445,7 @@ policy for the current cwd; generation rebuild/restart applies the changed resou
 
 ## Agent layering
 
-`Agent` is the stateful façade. It owns transcript state, active-run cancellation, steering/follow-up queues, subscriptions, and idle settlement. It is an `Arc`-backed cloneable handle so another task can call `abort`, `steer`, or `follow_up` while a prompt is running.
+`Agent` is the stateful façade. It owns transcript state, active-run cancellation, steering/follow-up queues, subscriptions, and low-level run idleness. It is an `Arc`-backed cloneable handle so another task can call `abort`, `steer`, or `follow_up` while a prompt is running. `AgentSession` owns product settlement because only it can establish that retry, compaction, and queued-continuation policy has also finished; it dispatches the generation's `agent_settled` plugin hook before publishing `AgentSessionEvent::AgentSettled`.
 
 `AgentLoop` is a stateless single-run engine over an `AgentContext` snapshot. It emits lifecycle events, invokes a provider, delegates stream assembly and tool execution, polls steering after each turn, polls follow-up before settlement, and returns the final context plus messages added by that invocation.
 
@@ -466,6 +522,20 @@ pi-rs resume and queue recovery do not expose private expanded prompts. Frontend
 reverse plugin-specific prompt formats; messages written before this metadata existed display their
 persisted content as-is.
 
+`before_agent_start` custom messages remain agent-level messages through lifecycle dispatch and
+runtime state. For a normal prompt the submitted user message is emitted first, followed by custom
+messages accumulated in hook registration order. The session Adapter persists them as Pi v4
+`custom_message` entries, retaining `customType`, string-or-block content, `display`, and `details`;
+only the provider-request seam projects them to ordinary user messages. Resuming a session restores
+the custom role before the same request-time projection, so extension context and lifecycle events
+do not silently turn injected messages into user submissions.
+
+A role-preserving `message_end` replacement is the completed message for both live state and Pi v4
+persistence. If the replaced message was provisioned before the run, the session journal records a
+same-ID deferred-target correction before appending it. Recovery validation resolves that latest
+target, so resume reconstructs the transformed user, assistant, or tool-result message rather than
+the pre-hook value while ordinary display-text metadata remains intact.
+
 `AgentSession::create` and `AgentSession::open` adapt the v4 tree to `PiRuntime`. Configuration
 changes are v4 entries, completed messages are persisted on `message_end`, and pi-rs-only prompt
 snapshots/resource diagnostics use reserved `customType` values rather than extending the v4 entry
@@ -504,11 +574,11 @@ generation is prepared before the old generation receives `session_shutdown(relo
 failure therefore leaves the old generation running. A successful reload commits the new
 generation and emits `session_start(reload)`.
 
-`PiApplication` is the multi-session product Module above `AgentSession`. It owns the injected
-`AgentSessionRuntimeFactory`, serializes application-level acquisition and shutdown, and keeps its
+`MultiSessionManager` is the multi-session product Module above `AgentSession`. It owns the injected
+`AgentSessionRuntimeFactory`, serializes manager-level acquisition and shutdown, and keeps its
 active-session map private. Opening an already-active path reuses its `PiSession`; creating or
 switching to a path owned by another handle fails before any session lifecycle transition starts.
-Application shutdown drains and closes every managed handle.
+Manager shutdown drains and closes every managed handle.
 
 Each `PiSession` has one replaceable current `AgentSession`. Its internal `AgentSessionRuntime`
 serializes replacement, dispatches `session_before_switch` or `session_before_fork`, settles the
@@ -526,6 +596,7 @@ replacement path.
 agent_start
 turn_start
 message_start/end(user)
+message_start/end(custom*)       `before_agent_start` registration order
 message_start/update*/end(assistant)
 tool_execution_start*      source order
 tool_execution_update*     may interleave
@@ -534,9 +605,10 @@ message_start/end(tool)     source order
 turn_end
 ... next turn ...
 agent_end
+agent_settled                     session-owned; after all automatic continuation
 ```
 
-Listeners execute and settle in subscription order. Agent idle state is published only after `agent_end` listeners finish.
+Listeners execute and settle in subscription order. Low-level Agent idle state is published only after `agent_end` listeners finish. Product settled state is published only after every `agent_settled` plugin callback finishes; callback failures are diagnostic and do not suppress that event.
 
 ## Current validation
 

@@ -356,6 +356,15 @@ fn project_message(
             "role": "user",
             "content": message.content.iter().filter_map(project_user_block).collect::<Vec<_>>()
         })],
+        Message::Custom(message) => vec![json!({
+            "role": "user",
+            "content": message
+                .content
+                .to_blocks()
+                .iter()
+                .filter_map(project_user_block)
+                .collect::<Vec<_>>()
+        })],
         Message::Assistant(message) => vec![json!({
             "role": "assistant",
             "content": message.content.iter().filter_map(|block| {

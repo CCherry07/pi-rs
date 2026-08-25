@@ -83,6 +83,9 @@ pub fn session_entry_to_context_messages(
                 vec![message.message.clone()]
             }
         }
+        SessionEntry::CustomMessage(message) => {
+            vec![AgentMessage::from(message.to_message(record.timestamp_ms))]
+        }
         SessionEntry::Compaction(compaction) => {
             let mut messages = Vec::with_capacity(compaction.retained_tail.len() + 1);
             messages.push(
@@ -155,6 +158,7 @@ pub fn build_session_context(
             }
             SessionEntry::Compaction(_)
             | SessionEntry::BranchSummary(_)
+            | SessionEntry::CustomMessage(_)
             | SessionEntry::Custom(_) => {}
         }
     }
@@ -189,6 +193,17 @@ impl SessionContext {
             .collect();
         repair_dangling_tool_calls(messages)
     }
+
+    /// Rebuilds agent state without collapsing Pi custom messages into their
+    /// provider-facing user-message projection.
+    pub fn runtime_messages(&self) -> Vec<Message> {
+        let messages = self
+            .messages
+            .iter()
+            .filter_map(agent_message_to_runtime_message)
+            .collect();
+        repair_dangling_tool_calls(messages)
+    }
 }
 
 fn repair_dangling_tool_calls(messages: Vec<Message>) -> Vec<Message> {
@@ -216,7 +231,7 @@ fn repair_dangling_tool_calls(messages: Vec<Message>) -> Vec<Message> {
                     pending.remove(index);
                 }
             }
-            Message::User(_) => {}
+            Message::User(_) | Message::Custom(_) => {}
         }
         repaired.push(message);
     }
@@ -246,7 +261,7 @@ fn append_missing_tool_results(
 
 pub fn agent_message_to_provider_message(message: &AgentMessage) -> Option<Message> {
     if let Some(message) = message.as_standard() {
-        return Some(message.clone());
+        return Some(message.clone().into_provider_message());
     }
     let value = message.as_custom()?;
     match value.get("role").and_then(Value::as_str)? {
@@ -284,6 +299,17 @@ pub fn agent_message_to_provider_message(message: &AgentMessage) -> Option<Messa
         ))),
         _ => None,
     }
+}
+
+pub fn agent_message_to_runtime_message(message: &AgentMessage) -> Option<Message> {
+    if let Some(message) = message.as_standard() {
+        return Some(message.clone());
+    }
+    let value = message.as_custom()?;
+    if value.get("role").and_then(Value::as_str) == Some("custom") {
+        return serde_json::from_value(value.clone()).ok();
+    }
+    agent_message_to_provider_message(message)
 }
 
 fn json_timestamp(value: &Value) -> Option<i64> {
@@ -327,6 +353,9 @@ impl SessionDocument {
             .iter()
             .filter_map(|record| match &record.entry {
                 SessionEntry::Message(message) => Some(message.message.clone()),
+                SessionEntry::CustomMessage(message) => {
+                    Some(AgentMessage::from(message.to_message(record.timestamp_ms)))
+                }
                 _ => None,
             })
             .collect()
@@ -417,15 +446,15 @@ mod tests {
     use std::sync::Arc;
 
     use pi_core::{
-        AssistantMessage, ContentBlock, Message, ModelId, ProviderId, StopReason, TextContent,
-        ToolCall, Usage, UserMessage,
+        AssistantMessage, ContentBlock, CustomMessageContent, Message, ModelId, ProviderId,
+        StopReason, TextContent, ToolCall, Usage, UserMessage,
     };
     use serde_json::json;
 
     use super::*;
     use crate::{
-        CompactionEntry, CustomEntry, MessageEntry, ModelChangeEntry, SessionEntry,
-        ThinkingLevelEntry,
+        CompactionEntry, CustomEntry, CustomMessageEntry, MessageEntry, ModelChangeEntry,
+        SessionEntry, ThinkingLevelEntry,
     };
 
     fn record(id: &str, seq: u64, parent_id: Option<&str>, entry: SessionEntry) -> SessionRecord {
@@ -622,6 +651,36 @@ mod tests {
             if matches!(&user.content[0], ContentBlock::Text(text) if text.text == "visible")));
         assert!(matches!(&projected[1], Message::User(user)
             if matches!(&user.content[0], ContentBlock::Text(text) if text.text.contains("Ran `pwd`"))));
+    }
+
+    #[test]
+    fn custom_message_entries_preserve_runtime_identity_and_project_to_provider_user_messages() {
+        let entry = SessionEntry::CustomMessage(CustomMessageEntry {
+            custom_type: "fixture-context".to_string(),
+            content: CustomMessageContent::Text("injected context".to_string()),
+            display: false,
+            details: Some(json!({"source": "fixture"})),
+        });
+        let wire = serde_json::to_value(&entry).unwrap();
+        assert_eq!(wire["type"], "custom_message");
+        assert_eq!(wire["customType"], "fixture-context");
+
+        let context = build_session_context(
+            &[record("custom", 5, None, entry)],
+            &SessionContextBuildOptions::default(),
+        );
+        assert_eq!(context.messages[0].role(), "custom");
+        assert!(matches!(
+            &context.runtime_messages()[0],
+            Message::Custom(message)
+                if message.custom_type == "fixture-context"
+                    && message.details == Some(json!({"source": "fixture"}))
+        ));
+        assert!(matches!(
+            &context.provider_messages()[0],
+            Message::User(message)
+                if matches!(&message.content[0], ContentBlock::Text(text) if text.text == "injected context")
+        ));
     }
 
     #[test]

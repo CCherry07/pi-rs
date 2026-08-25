@@ -15,8 +15,8 @@ use std::io::{IsTerminal, Read};
 use std::sync::Arc;
 
 use config::{AppConfig, Cli, CliCommand};
-use pi_js_plugin::{JsHostMode, JsPluginHost};
-use pi_session::{PiApplication, PiSession, SessionLog};
+use pi_js_plugin::{ExtensionSessionBinding, JsHostMode, JsPluginHost};
+use pi_session::{MultiSessionManager, PiSession, SessionLog};
 use project_trust::{ProjectTrustEvaluation, ProjectTrustPromptRequest, ProjectTrustService};
 use tokio::sync::mpsc;
 
@@ -141,30 +141,70 @@ async fn run(cli: Cli, js_host: Option<Arc<dyn JsPluginHost>>) -> Result<(), Str
     let agent_dir = config.agent_dir.clone();
     let session_path = config.session_path.clone();
     let mut factory = session_factory::ProductSessionFactory::new(config, trust.service.clone());
-    if let Some(js_host) = js_host {
-        factory = factory.with_js_plugin_host(js_host, cli_mode.js_host_mode());
+    let js_session_binding = js_host.as_ref().map(|_| ExtensionSessionBinding::new());
+    if let (Some(js_host), Some(session_binding)) = (js_host, js_session_binding.clone()) {
+        factory = factory.with_js_plugin_host(js_host, cli_mode.js_host_mode(), session_binding);
     }
-    let application = PiApplication::new(factory);
+    let sessions = MultiSessionManager::new(factory);
     let session = if session_exists {
-        application.open_session(&session_path).await
+        sessions.open_session(&session_path).await
     } else {
-        application.create_session(&cwd, &session_path).await
+        sessions.create_session(&cwd, &session_path).await
     }
     .map_err(|error| error.to_string())?;
-    let result = run_cli(
+    if let Some(binding) = &js_session_binding {
+        binding.bind(session.clone());
+    }
+    let result = run_cli_with_shutdown(
         cli_mode,
         session,
         cli.fullscreen_enabled(),
         trust.service,
         trust.requests,
         agent_dir,
+        js_session_binding,
     )
     .await;
-    let shutdown = application
-        .shutdown()
-        .await
-        .map_err(|error| error.to_string());
+    let shutdown = sessions.shutdown().await.map_err(|error| error.to_string());
     finish_run(result, shutdown)
+}
+
+async fn run_cli_with_shutdown(
+    mode: CLIMode,
+    session: PiSession,
+    fullscreen: bool,
+    project_trust: ProjectTrustService,
+    trust_requests: mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
+    agent_dir: std::path::PathBuf,
+    shutdown: Option<ExtensionSessionBinding>,
+) -> Result<(), String> {
+    if let Some(shutdown) = shutdown {
+        let abort_session = session.clone();
+        tokio::select! {
+            result = run_cli(
+                mode,
+                session,
+                fullscreen,
+                project_trust,
+                trust_requests,
+                agent_dir,
+            ) => result,
+            () = shutdown.wait_for_shutdown() => {
+                abort_session.abort();
+                Ok(())
+            }
+        }
+    } else {
+        run_cli(
+            mode,
+            session,
+            fullscreen,
+            project_trust,
+            trust_requests,
+            agent_dir,
+        )
+        .await
+    }
 }
 
 async fn run_cli(
@@ -197,7 +237,7 @@ fn finish_run(result: Result<(), String>, shutdown: Result<(), String>) -> Resul
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
         (Err(error), Err(shutdown_error)) => Err(format!(
-            "{error}\napplication shutdown also failed: {shutdown_error}"
+            "{error}\nmulti-session shutdown also failed: {shutdown_error}"
         )),
     }
 }
@@ -319,7 +359,7 @@ mod tests {
                 Err("frontend failed".to_string()),
                 Err("shutdown failed".to_string())
             ),
-            Err("frontend failed\napplication shutdown also failed: shutdown failed".to_string())
+            Err("frontend failed\nmulti-session shutdown also failed: shutdown failed".to_string())
         );
         assert_eq!(
             finish_run(Ok(()), Err("shutdown failed".to_string())),

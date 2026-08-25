@@ -14,7 +14,11 @@ struct RetiringDispatcher {
 
 #[async_trait]
 impl JsCallbackDispatcher for RetiringDispatcher {
-    async fn invoke(&self, _invocation: JsInvocation) -> Result<Value, JsCallbackError> {
+    async fn invoke(
+        &self,
+        _invocation: JsInvocation,
+        _context: pi_js_plugin::ExtensionContextHandle,
+    ) -> Result<Value, JsCallbackError> {
         unreachable!("manifest validation does not invoke callbacks")
     }
 
@@ -39,11 +43,12 @@ fn unsupported_hooks_fail_the_candidate_and_retire_its_host_generation() {
         JsGenerationManifest {
             generation_id: "js-invalid".to_string(),
             agent_plugins: vec![empty_agent(vec![JsHookManifest {
-                name: "agent_settled".to_string(),
-                callback_id: "settled".to_string(),
+                name: "model_select".to_string(),
+                callback_id: "model-select".to_string(),
             }])],
             provider_plugins: Vec::new(),
             session_plugins: Vec::new(),
+            diagnostics: Vec::new(),
         },
         dispatcher.clone(),
     );
@@ -74,6 +79,7 @@ fn callback_ids_are_unique_across_the_three_lifecycle_manifests() {
                 }],
             }],
             session_plugins: Vec::new(),
+            diagnostics: Vec::new(),
         },
         dispatcher,
     );

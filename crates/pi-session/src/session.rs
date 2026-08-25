@@ -315,6 +315,7 @@ fn validate_entry_payload(entry: &SessionEntry) -> Result<(), SessionError> {
         SessionEntry::ModelChange(_)
         | SessionEntry::ThinkingLevelChange(_)
         | SessionEntry::ActiveToolsChange(_)
+        | SessionEntry::CustomMessage(_)
         | SessionEntry::Custom(_) => Ok(()),
     }
 }
@@ -397,7 +398,7 @@ fn validate_agent_message(message: &AgentMessage) -> Result<(), SessionError> {
             }
             Ok(())
         }
-        Some(Message::User(_)) | None => Ok(()),
+        Some(Message::User(_) | Message::Custom(_)) | None => Ok(()),
     }
 }
 

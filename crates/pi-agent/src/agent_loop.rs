@@ -115,8 +115,7 @@ pub async fn run_agent_loop(
         queues,
         events,
     } = services;
-    let new_messages = prompts.clone();
-    context.messages.extend(prompts.clone());
+    let mut new_messages = Vec::with_capacity(prompts.len());
     emit(&events, AgentEvent::AgentStart, &signal).await?;
     emit(&events, AgentEvent::TurnStart, &signal).await?;
     for prompt in prompts {
@@ -128,7 +127,9 @@ pub async fn run_agent_loop(
             &signal,
         )
         .await?;
-        emit(&events, AgentEvent::MessageEnd { message: prompt }, &signal).await?;
+        let prompt = emit_message_end(&events, &signal, prompt).await?;
+        context.messages.push(prompt.clone());
+        new_messages.push(prompt);
     }
     run_loop(
         run_id,
@@ -241,14 +242,7 @@ async fn run_loop(
                     &signal,
                 )
                 .await?;
-                emit(
-                    &events,
-                    AgentEvent::MessageEnd {
-                        message: message.clone(),
-                    },
-                    &signal,
-                )
-                .await?;
+                let message = emit_message_end(&events, &signal, message).await?;
                 context.messages.push(message.clone());
                 new_messages.push(message);
             }
@@ -419,7 +413,10 @@ async fn stream_assistant_response(
     let request_messages = plugins
         .context(run_id, &config.cwd, &signal, context.messages.clone())
         .await
-        .map_err(|error| AgentLoopError::Event(error.to_string()))?;
+        .map_err(|error| AgentLoopError::Event(error.to_string()))?
+        .into_iter()
+        .map(Message::into_provider_message)
+        .collect();
     let model_spec = registries
         .model(&config.provider_id, &config.model_id)
         .cloned();
@@ -451,7 +448,7 @@ async fn stream_assistant_response(
         Ok(stream) => stream,
         Err(error) => {
             let message = provider_failure_message(config, error.to_string(), StopReason::Error);
-            emit_message_pair(&events, &signal, &message).await?;
+            let message = emit_message_pair(&events, &signal, &message).await?;
             context.messages.push(Message::assistant(message.clone()));
             return Ok(message);
         }
@@ -465,7 +462,9 @@ async fn stream_assistant_response(
                 if !started {
                     emit(&events, AgentEvent::MessageStart { message: Message::assistant(message.clone()) }, &signal).await?;
                 }
-                emit(&events, AgentEvent::MessageEnd { message: Message::assistant(message.clone()) }, &signal).await?;
+                let message = message_as_assistant(
+                    emit_message_end(&events, &signal, Message::assistant(message)).await?
+                )?;
                 if started {
                     replace_last_assistant(context, message.clone());
                 } else {
@@ -492,14 +491,9 @@ async fn stream_assistant_response(
                     )
                     .await?;
                 }
-                emit(
-                    &events,
-                    AgentEvent::MessageEnd {
-                        message: Message::assistant(message.clone()),
-                    },
-                    &signal,
-                )
-                .await?;
+                let message = message_as_assistant(
+                    emit_message_end(&events, &signal, Message::assistant(message)).await?,
+                )?;
                 if started {
                     replace_last_assistant(context, message.clone());
                 } else {
@@ -515,8 +509,8 @@ async fn stream_assistant_response(
             Ok(update) => update,
             Err(error) => {
                 let message = assembler.failure_message(StopReason::Error, error.to_string());
-                commit_failed_assistant(context, &events, &signal, message.clone(), started)
-                    .await?;
+                let message =
+                    commit_failed_assistant(context, &events, &signal, message, started).await?;
                 return Ok(message);
             }
         };
@@ -555,7 +549,8 @@ async fn stream_assistant_response(
         Ok(message) => message,
         Err(error) => {
             let message = provider_failure_message(config, error.to_string(), StopReason::Error);
-            commit_failed_assistant(context, &events, &signal, message.clone(), started).await?;
+            let message =
+                commit_failed_assistant(context, &events, &signal, message, started).await?;
             return Ok(message);
         }
     };
@@ -574,14 +569,10 @@ async fn stream_assistant_response(
         )
         .await?;
     }
-    emit(
-        &events,
-        AgentEvent::MessageEnd {
-            message: Message::assistant(final_message.clone()),
-        },
-        &signal,
-    )
-    .await?;
+    let final_message = message_as_assistant(
+        emit_message_end(&events, &signal, Message::assistant(final_message)).await?,
+    )?;
+    replace_last_assistant(context, final_message.clone());
     Ok(final_message)
 }
 
@@ -591,7 +582,7 @@ async fn commit_failed_assistant(
     signal: &AbortSignal,
     message: AssistantMessage,
     started: bool,
-) -> Result<(), AgentLoopError> {
+) -> Result<AssistantMessage, AgentLoopError> {
     if !started {
         emit(
             events,
@@ -602,20 +593,14 @@ async fn commit_failed_assistant(
         )
         .await?;
     }
-    emit(
-        events,
-        AgentEvent::MessageEnd {
-            message: Message::assistant(message.clone()),
-        },
-        signal,
-    )
-    .await?;
+    let message =
+        message_as_assistant(emit_message_end(events, signal, Message::assistant(message)).await?)?;
     if started {
-        replace_last_assistant(context, message);
+        replace_last_assistant(context, message.clone());
     } else {
-        context.messages.push(Message::assistant(message));
+        context.messages.push(Message::assistant(message.clone()));
     }
-    Ok(())
+    Ok(message)
 }
 
 fn replace_last_assistant(context: &mut AgentContext, message: AssistantMessage) {
@@ -653,7 +638,7 @@ async fn emit_message_pair(
     events: &Arc<dyn AgentEventSink>,
     signal: &AbortSignal,
     message: &AssistantMessage,
-) -> Result<(), AgentLoopError> {
+) -> Result<AssistantMessage, AgentLoopError> {
     emit(
         events,
         AgentEvent::MessageStart {
@@ -662,14 +647,9 @@ async fn emit_message_pair(
         signal,
     )
     .await?;
-    emit(
-        events,
-        AgentEvent::MessageEnd {
-            message: Message::assistant(message.clone()),
-        },
-        signal,
+    message_as_assistant(
+        emit_message_end(events, signal, Message::assistant(message.clone())).await?,
     )
-    .await
 }
 
 async fn fail_truncated_tool_calls(
@@ -739,14 +719,9 @@ where
             signal,
         )
         .await?;
-        emit(
-            &events,
-            AgentEvent::MessageEnd {
-                message: Message::tool_result(message.clone()),
-            },
-            signal,
-        )
-        .await?;
+        let message = message_as_tool_result(
+            emit_message_end(&events, signal, Message::tool_result(message)).await?,
+        )?;
         messages.push(message);
     }
     Ok(crate::ExecutedToolBatch {
@@ -763,7 +738,43 @@ async fn emit(
     events
         .emit(event, signal.clone())
         .await
+        .map(|_| ())
         .map_err(|error| AgentLoopError::Event(error.to_string()))
+}
+
+async fn emit_message_end(
+    events: &Arc<dyn AgentEventSink>,
+    signal: &AbortSignal,
+    message: Message,
+) -> Result<Message, AgentLoopError> {
+    match events
+        .emit(AgentEvent::MessageEnd { message }, signal.clone())
+        .await
+        .map_err(|error| AgentLoopError::Event(error.to_string()))?
+    {
+        AgentEvent::MessageEnd { message } => Ok(message),
+        event => Err(AgentLoopError::Event(format!(
+            "message_end dispatch returned a different event: {event:?}"
+        ))),
+    }
+}
+
+fn message_as_assistant(message: Message) -> Result<AssistantMessage, AgentLoopError> {
+    match message {
+        Message::Assistant(message) => Ok(Arc::unwrap_or_clone(message)),
+        message => Err(AgentLoopError::Event(format!(
+            "message_end changed assistant role to {message:?}"
+        ))),
+    }
+}
+
+fn message_as_tool_result(message: Message) -> Result<ToolResultMessage, AgentLoopError> {
+    match message {
+        Message::ToolResult(message) => Ok(Arc::unwrap_or_clone(message)),
+        message => Err(AgentLoopError::Event(format!(
+            "message_end changed tool-result role to {message:?}"
+        ))),
+    }
 }
 
 fn now_ms() -> i64 {

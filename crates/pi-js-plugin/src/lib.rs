@@ -1,18 +1,23 @@
+mod context;
+
+pub use context::*;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use pi_core::{
-    AbortSignal, AgentEndEvent, AgentPlugin, AgentStartEvent, BeforeAgentStartEvent,
-    BeforeAgentStartPatch, BeforeProviderRequestEvent, Command, CommandContext, CommandError,
-    CommandOutcome, CommandSpec, ContentBlock, ContextEvent, ContextPatch, InputContext,
-    InputEvent, InputPatch, Message, MessageEndEvent, MessageStartEvent, MessageUpdateEvent,
-    PluginContext, PluginError, PluginId, ProviderPlugin, ProviderPluginContext, RegisterContext,
-    Tool, ToolCallEvent, ToolCallId, ToolCallPatch, ToolContext, ToolError, ToolExecutionEndEvent,
-    ToolExecutionMode, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResult,
-    ToolResultEvent, ToolResultPatch, ToolSpec, ToolUpdateSink, TurnEndEvent, TurnStartEvent,
-    Usage,
+    AbortSignal, AgentEndEvent, AgentPlugin, AgentSettledEvent, AgentStartEvent,
+    BeforeAgentStartEvent, BeforeAgentStartPatch, BeforeProviderRequestEvent, Command,
+    CommandContext, CommandError, CommandOutcome, CommandSpec, ContentBlock, ContextEvent,
+    ContextPatch, CustomMessage, CustomMessageContent, ImageContent, InputContext, InputEvent,
+    InputPatch, InputSource, InputStreamingBehavior, Message, MessageEndEvent, MessageEndPatch,
+    MessageStartEvent, MessageUpdateEvent, PluginContext, PluginError, PluginId, ProviderPlugin,
+    ProviderPluginContext, RegisterContext, Tool, ToolCallEvent, ToolCallId, ToolCallPatch,
+    ToolContext, ToolError, ToolExecutionEndEvent, ToolExecutionMode, ToolExecutionStartEvent,
+    ToolExecutionUpdateEvent, ToolResult, ToolResultEvent, ToolResultPatch, ToolSpec,
+    ToolUpdateSink, TurnEndEvent, TurnStartEvent, Usage,
 };
 use pi_session::{
     CompactionEntry, SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent,
@@ -36,6 +41,24 @@ pub struct JsGenerationManifest {
     pub provider_plugins: Vec<JsProviderPluginManifest>,
     #[serde(default)]
     pub session_plugins: Vec<JsSessionPluginManifest>,
+    #[serde(default)]
+    pub diagnostics: Vec<JsExtensionDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsExtensionDiagnostic {
+    pub plugin_id: String,
+    pub path: String,
+    pub feature: String,
+    pub status: JsExtensionSupportStatus,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum JsExtensionSupportStatus {
+    Inactive,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -216,7 +239,11 @@ impl JsCallbackError {
 
 #[async_trait]
 pub trait JsCallbackDispatcher: Send + Sync {
-    async fn invoke(&self, invocation: JsInvocation) -> Result<Value, JsCallbackError>;
+    async fn invoke(
+        &self,
+        invocation: JsInvocation,
+        context: ExtensionContextHandle,
+    ) -> Result<Value, JsCallbackError>;
 
     fn cancel(&self, _invocation_id: &str) {}
 
@@ -241,6 +268,7 @@ pub struct JsPluginGeneration {
     agent_plugins: Vec<Arc<dyn AgentPlugin>>,
     provider_plugins: Vec<Arc<dyn ProviderPlugin>>,
     session_plugins: Vec<Arc<dyn SessionPlugin>>,
+    diagnostics: Vec<JsExtensionDiagnostic>,
 }
 
 impl JsPluginGeneration {
@@ -248,22 +276,48 @@ impl JsPluginGeneration {
         manifest: JsGenerationManifest,
         host: Arc<dyn JsPluginHost>,
     ) -> Result<Self, JsPluginError> {
-        Self::prepare(manifest, Arc::new(HostCallbackDispatcher { host }))
+        Self::prepare_with_host_and_context(
+            manifest,
+            host,
+            Arc::new(UnavailableExtensionContextAccess),
+        )
+    }
+
+    pub fn prepare_with_host_and_context(
+        manifest: JsGenerationManifest,
+        host: Arc<dyn JsPluginHost>,
+        context: Arc<dyn ExtensionContextAccess>,
+    ) -> Result<Self, JsPluginError> {
+        Self::prepare_with_context(manifest, Arc::new(HostCallbackDispatcher { host }), context)
     }
 
     pub fn prepare(
         manifest: JsGenerationManifest,
         dispatcher: Arc<dyn JsCallbackDispatcher>,
     ) -> Result<Self, JsPluginError> {
+        Self::prepare_with_context(
+            manifest,
+            dispatcher,
+            Arc::new(UnavailableExtensionContextAccess),
+        )
+    }
+
+    pub fn prepare_with_context(
+        manifest: JsGenerationManifest,
+        dispatcher: Arc<dyn JsCallbackDispatcher>,
+        context: Arc<dyn ExtensionContextAccess>,
+    ) -> Result<Self, JsPluginError> {
         let JsGenerationManifest {
             generation_id,
             agent_plugins,
             provider_plugins,
             session_plugins,
+            diagnostics,
         } = manifest;
         let lease = Arc::new(JsGenerationLease {
             generation_id,
             dispatcher,
+            context: ExtensionContextEpoch::new(context),
         });
         validate_manifest(
             &lease.generation_id,
@@ -320,6 +374,7 @@ impl JsPluginGeneration {
             agent_plugins,
             provider_plugins,
             session_plugins,
+            diagnostics,
         })
     }
 
@@ -334,6 +389,10 @@ impl JsPluginGeneration {
     pub fn session_plugins(&self) -> Vec<Arc<dyn SessionPlugin>> {
         self.session_plugins.clone()
     }
+
+    pub fn diagnostics(&self) -> &[JsExtensionDiagnostic] {
+        &self.diagnostics
+    }
 }
 
 struct HostCallbackDispatcher {
@@ -342,8 +401,12 @@ struct HostCallbackDispatcher {
 
 #[async_trait]
 impl JsCallbackDispatcher for HostCallbackDispatcher {
-    async fn invoke(&self, invocation: JsInvocation) -> Result<Value, JsCallbackError> {
-        self.host.invoke(invocation).await
+    async fn invoke(
+        &self,
+        invocation: JsInvocation,
+        context: ExtensionContextHandle,
+    ) -> Result<Value, JsCallbackError> {
+        self.host.invoke(invocation, context).await
     }
 
     fn cancel(&self, invocation_id: &str) {
@@ -360,6 +423,7 @@ const AGENT_HOOKS: &[&str] = &[
     "before_agent_start",
     "agent_start",
     "agent_end",
+    "agent_settled",
     "turn_start",
     "turn_end",
     "message_start",
@@ -539,6 +603,7 @@ fn validate_callback_id(
 struct JsGenerationLease {
     generation_id: String,
     dispatcher: Arc<dyn JsCallbackDispatcher>,
+    context: ExtensionContextEpoch,
 }
 
 enum JsInvokeError {
@@ -567,9 +632,14 @@ impl JsGenerationLease {
             kind,
             payload,
         };
+        let context = self.context.handle(if kind == JsInvocationKind::Command {
+            ExtensionContextScope::Command
+        } else {
+            ExtensionContextScope::Base
+        });
         if let Some(signal) = abort_signal {
             tokio::select! {
-                response = self.dispatcher.invoke(invocation) => {
+                response = self.dispatcher.invoke(invocation, context) => {
                     response.map_err(JsInvokeError::Callback)
                 }
                 () = signal.wait() => {
@@ -579,7 +649,7 @@ impl JsGenerationLease {
             }
         } else {
             self.dispatcher
-                .invoke(invocation)
+                .invoke(invocation, context)
                 .await
                 .map_err(JsInvokeError::Callback)
         }
@@ -588,6 +658,7 @@ impl JsGenerationLease {
 
 impl Drop for JsGenerationLease {
     fn drop(&mut self) {
+        self.context.retire();
         self.dispatcher.retire_generation(&self.generation_id);
     }
 }
@@ -642,14 +713,18 @@ impl JsAgentPlugin {
     ) -> Result<(), PluginError> {
         let context_value = plugin_context_value(context);
         for callback_id in self.hook_callbacks(name) {
-            self.invoke_hook(
-                name,
-                callback_id,
-                context_value.clone(),
-                event.clone(),
-                &context.abort_signal,
-            )
-            .await?;
+            if let Err(error) = self
+                .invoke_hook(
+                    name,
+                    callback_id,
+                    context_value.clone(),
+                    event.clone(),
+                    &context.abort_signal,
+                )
+                .await
+            {
+                context.report_hook_error(name, error.to_string());
+            }
         }
         Ok(())
     }
@@ -661,6 +736,149 @@ fn plugin_context_value(context: &PluginContext) -> Value {
         "runId": context.run_id.as_str(),
         "cwd": context.cwd.to_string_lossy(),
     })
+}
+
+fn input_source(source: InputSource) -> &'static str {
+    match source {
+        InputSource::Interactive => "interactive",
+        InputSource::Rpc => "rpc",
+        InputSource::Extension => "extension",
+    }
+}
+
+fn input_streaming_behavior(behavior: InputStreamingBehavior) -> &'static str {
+    match behavior {
+        InputStreamingBehavior::Steer => "steer",
+        InputStreamingBehavior::FollowUp => "followUp",
+    }
+}
+
+fn input_images_value(images: &[ImageContent]) -> Value {
+    Value::Array(
+        images
+            .iter()
+            .map(|image| {
+                json!({
+                    "type": "image",
+                    "data": image.data,
+                    "mimeType": image.mime_type,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn parse_input_images(value: &Value) -> Result<Vec<ImageContent>, String> {
+    let blocks = serde_json::from_value::<Vec<ContentBlock>>(value.clone())
+        .map_err(|error| format!("invalid input images result: {error}"))?;
+    blocks
+        .into_iter()
+        .map(|block| match block {
+            ContentBlock::Image(image) => Ok(image),
+            _ => Err("input images result may only contain image blocks".to_string()),
+        })
+        .collect()
+}
+
+fn pi_prompt_input(messages: &[Message]) -> (String, Vec<ContentBlock>) {
+    let Some(user) = messages.iter().rev().find_map(|message| match message {
+        Message::User(user) => Some(user),
+        Message::Assistant(_) | Message::ToolResult(_) | Message::Custom(_) => None,
+    }) else {
+        return (String::new(), Vec::new());
+    };
+
+    let mut prompt = String::new();
+    let mut images = Vec::new();
+    for block in &user.content {
+        match block {
+            ContentBlock::Text(text) => prompt.push_str(&text.text),
+            ContentBlock::Image(_) => images.push(block.clone()),
+            ContentBlock::Thinking(_) | ContentBlock::ToolCall(_) => {}
+        }
+    }
+    (prompt, images)
+}
+
+fn before_agent_start_message(value: &Value) -> Result<Message, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "message must be an object".to_string())?;
+    let custom_type = object
+        .get("customType")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "message.customType must be a string".to_string())?
+        .to_string();
+    let content = match object.get("content") {
+        None | Some(Value::Null) => CustomMessageContent::default(),
+        Some(Value::String(text)) => CustomMessageContent::Text(text.clone()),
+        Some(Value::Array(_)) => {
+            let blocks: Vec<ContentBlock> = serde_json::from_value(
+                object
+                    .get("content")
+                    .expect("matched message content")
+                    .clone(),
+            )
+            .map_err(|error| format!("message.content is invalid: {error}"))?;
+            if blocks
+                .iter()
+                .any(|block| !matches!(block, ContentBlock::Text(_) | ContentBlock::Image(_)))
+            {
+                return Err("message.content only supports text and image blocks".to_string());
+            }
+            CustomMessageContent::Blocks(blocks)
+        }
+        Some(_) => {
+            return Err("message.content must be a string, an array, null, or omitted".to_string());
+        }
+    };
+    let display = match object.get("display") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(display)) => *display,
+        Some(_) => return Err("message.display must be a boolean".to_string()),
+    };
+    Ok(Message::custom(CustomMessage {
+        custom_type,
+        content,
+        display,
+        details: object.get("details").cloned(),
+        timestamp_ms: now_ms(),
+    }))
+}
+
+fn message_end_replacement(value: &Value) -> Result<Message, String> {
+    let mut value = value.clone();
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "message_end replacement must be an object".to_string())?;
+    if matches!(
+        object.get("role").and_then(Value::as_str),
+        Some("user" | "assistant" | "toolResult" | "custom")
+    ) && object.get("content").is_none_or(Value::is_null)
+    {
+        object.insert("content".to_string(), Value::Array(Vec::new()));
+    }
+    serde_json::from_value(value)
+        .map_err(|error| format!("invalid message_end replacement: {error}"))
+}
+
+fn same_message_role(left: &Message, right: &Message) -> bool {
+    matches!(
+        (left, right),
+        (Message::User(_), Message::User(_))
+            | (Message::Assistant(_), Message::Assistant(_))
+            | (Message::ToolResult(_), Message::ToolResult(_))
+            | (Message::Custom(_), Message::Custom(_))
+    )
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 #[async_trait]
@@ -684,49 +902,80 @@ impl AgentPlugin for JsAgentPlugin {
         context: InputContext,
         event: InputEvent,
     ) -> Result<InputPatch, PluginError> {
-        let original = event.text;
-        let mut text = original.clone();
+        let original = event.clone();
+        let mut text = event.text;
+        let mut images = event.images;
         let context_value = json!({
             "pluginId": context.plugin_id.as_str(),
             "cwd": context.cwd.to_string_lossy(),
         });
         for callback_id in self.hook_callbacks("input") {
-            let result = self
+            let mut event_value = json!({
+                "type": "input",
+                "text": text,
+                "source": input_source(event.source),
+            });
+            if let Some(current_images) = &images {
+                event_value
+                    .as_object_mut()
+                    .expect("input event is an object")
+                    .insert("images".to_string(), input_images_value(current_images));
+            }
+            if let Some(behavior) = event.streaming_behavior {
+                event_value
+                    .as_object_mut()
+                    .expect("input event is an object")
+                    .insert(
+                        "streamingBehavior".to_string(),
+                        Value::String(input_streaming_behavior(behavior).to_string()),
+                    );
+            }
+            let result = match self
                 .invoke_hook(
                     "input",
                     callback_id,
                     context_value.clone(),
-                    json!({ "type": "input", "text": text }),
+                    event_value,
                     &context.abort_signal,
                 )
-                .await?;
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    context.report_hook_error("input", error.to_string());
+                    continue;
+                }
+            };
             match result.get("action").and_then(Value::as_str) {
                 None | Some("continue") => {}
                 Some("handled") => return Ok(InputPatch::Handled),
                 Some("transform") => {
-                    text = result
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| PluginError::Hook {
-                            plugin_id: self.id.clone(),
-                            hook: "input",
-                            message: "transform result is missing text".to_string(),
-                        })?
-                        .to_string();
+                    let Some(next_text) = result.get("text").and_then(Value::as_str) else {
+                        context.report_hook_error("input", "transform result is missing text");
+                        continue;
+                    };
+                    let next_images = match result.get("images") {
+                        Some(value) if !value.is_null() => match parse_input_images(value) {
+                            Ok(images) => Some(images),
+                            Err(error) => {
+                                context.report_hook_error("input", error);
+                                continue;
+                            }
+                        },
+                        _ => images.clone(),
+                    };
+                    text = next_text.to_string();
+                    images = next_images;
                 }
                 Some(action) => {
-                    return Err(PluginError::Hook {
-                        plugin_id: self.id.clone(),
-                        hook: "input",
-                        message: format!("invalid input action: {action}"),
-                    });
+                    context.report_hook_error("input", format!("invalid input action: {action}"));
                 }
             }
         }
-        Ok(if text == original {
+        Ok(if text == original.text && images == original.images {
             InputPatch::Continue
         } else {
-            InputPatch::Transform(text)
+            InputPatch::Transform { text, images }
         })
     }
 
@@ -737,42 +986,62 @@ impl AgentPlugin for JsAgentPlugin {
     ) -> Result<BeforeAgentStartPatch, PluginError> {
         let original_system_prompt = event.system_prompt;
         let mut system_prompt = original_system_prompt.clone();
+        let mut messages = Vec::new();
         let context_value = plugin_context_value(&context);
+        let (prompt, images) = pi_prompt_input(&event.input_messages);
+        let system_prompt_options = self
+            .lease
+            .context
+            .query_for_adapter(ExtensionContextQuery::SystemPromptOptions)
+            .unwrap_or_else(|_| json!({ "cwd": context.cwd }));
         for callback_id in self.hook_callbacks("before_agent_start") {
-            let result = self
+            let mut event_value = json!({
+                "type": "before_agent_start",
+                "prompt": prompt,
+                "systemPrompt": system_prompt,
+                "systemPromptOptions": system_prompt_options,
+                "inputMessages": event.input_messages,
+                "activeTools": event.active_tools,
+                "providerId": event.provider_id.as_str(),
+                "modelId": event.model_id.as_str(),
+            });
+            if !images.is_empty() {
+                event_value
+                    .as_object_mut()
+                    .expect("before_agent_start event is an object")
+                    .insert("images".to_string(), json!(images));
+            }
+            let result = match self
                 .invoke_hook(
                     "before_agent_start",
                     callback_id,
                     context_value.clone(),
-                    json!({
-                        "type": "before_agent_start",
-                        "systemPrompt": system_prompt,
-                        "inputMessages": event.input_messages,
-                        "activeTools": event.active_tools,
-                        "providerId": event.provider_id.as_str(),
-                        "modelId": event.model_id.as_str(),
-                    }),
+                    event_value,
                     &context.abort_signal,
                 )
-                .await?;
-            if result
-                .get("message")
-                .is_some_and(|message| !message.is_null())
+                .await
             {
-                return Err(PluginError::Hook {
-                    plugin_id: self.id.clone(),
-                    hook: "before_agent_start",
-                    message: "custom message injection is not supported by the Rust message model"
-                        .to_string(),
-                });
-            }
+                Ok(result) => result,
+                Err(error) => {
+                    context.report_hook_error("before_agent_start", error.to_string());
+                    continue;
+                }
+            };
             if let Some(replacement) = result.get("systemPrompt").and_then(Value::as_str) {
                 system_prompt = replacement.to_string();
+            }
+            if let Some(message) = result.get("message") {
+                match before_agent_start_message(message) {
+                    Ok(message) => messages.push(message),
+                    Err(error) => {
+                        context.report_hook_error("before_agent_start", error);
+                    }
+                }
             }
         }
         Ok(BeforeAgentStartPatch {
             system_prompt: (system_prompt != original_system_prompt).then_some(system_prompt),
-            messages: Vec::new(),
+            messages,
         })
     }
 
@@ -798,13 +1067,34 @@ impl AgentPlugin for JsAgentPlugin {
         .await
     }
 
+    async fn agent_settled(
+        &self,
+        context: PluginContext,
+        _event: AgentSettledEvent,
+    ) -> Result<(), PluginError> {
+        self.notify_hooks(
+            "agent_settled",
+            &context,
+            json!({ "type": "agent_settled" }),
+        )
+        .await
+    }
+
     async fn turn_start(
         &self,
         context: PluginContext,
-        _event: TurnStartEvent,
+        event: TurnStartEvent,
     ) -> Result<(), PluginError> {
-        self.notify_hooks("turn_start", &context, json!({ "type": "turn_start" }))
-            .await
+        self.notify_hooks(
+            "turn_start",
+            &context,
+            json!({
+                "type": "turn_start",
+                "turnIndex": event.turn_index,
+                "timestamp": event.timestamp_ms,
+            }),
+        )
+        .await
     }
 
     async fn turn_end(
@@ -817,6 +1107,7 @@ impl AgentPlugin for JsAgentPlugin {
             &context,
             json!({
                 "type": "turn_end",
+                "turnIndex": event.turn_index,
                 "message": event.message,
                 "toolResults": event.tool_results,
             }),
@@ -859,13 +1150,49 @@ impl AgentPlugin for JsAgentPlugin {
         &self,
         context: PluginContext,
         event: MessageEndEvent,
-    ) -> Result<(), PluginError> {
-        self.notify_hooks(
-            "message_end",
-            &context,
-            json!({ "type": "message_end", "message": event.message }),
-        )
-        .await
+    ) -> Result<MessageEndPatch, PluginError> {
+        let original = event.message;
+        let mut message = original.clone();
+        let context_value = plugin_context_value(&context);
+        for callback_id in self.hook_callbacks("message_end") {
+            let result = match self
+                .invoke_hook(
+                    "message_end",
+                    callback_id,
+                    context_value.clone(),
+                    json!({ "type": "message_end", "message": message }),
+                    &context.abort_signal,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    context.report_hook_error("message_end", error.to_string());
+                    continue;
+                }
+            };
+            let Some(replacement) = result.get("message") else {
+                continue;
+            };
+            let replacement = match message_end_replacement(replacement) {
+                Ok(replacement) => replacement,
+                Err(error) => {
+                    context.report_hook_error("message_end", error);
+                    continue;
+                }
+            };
+            if same_message_role(&message, &replacement) {
+                message = replacement;
+            } else {
+                context.report_hook_error(
+                    "message_end",
+                    "message_end handlers must return a message with the same role",
+                );
+            }
+        }
+        Ok(MessageEndPatch {
+            message: (message != original).then_some(message),
+        })
     }
 
     async fn tool_execution_start(
@@ -933,7 +1260,7 @@ impl AgentPlugin for JsAgentPlugin {
         let mut messages = original.clone();
         let context_value = plugin_context_value(&context);
         for callback_id in self.hook_callbacks("context") {
-            let result = self
+            let result = match self
                 .invoke_hook(
                     "context",
                     callback_id,
@@ -941,15 +1268,20 @@ impl AgentPlugin for JsAgentPlugin {
                     json!({ "type": "context", "messages": messages }),
                     &context.abort_signal,
                 )
-                .await?;
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    context.report_hook_error("context", error.to_string());
+                    continue;
+                }
+            };
             if let Some(replacement) = result.get("messages") {
-                messages = serde_json::from_value::<Vec<Message>>(replacement.clone()).map_err(
-                    |error| PluginError::Hook {
-                        plugin_id: self.id.clone(),
-                        hook: "context",
-                        message: format!("invalid messages result: {error}"),
-                    },
-                )?;
+                match serde_json::from_value::<Vec<Message>>(replacement.clone()) {
+                    Ok(replacement) => messages = replacement,
+                    Err(error) => context
+                        .report_hook_error("context", format!("invalid messages result: {error}")),
+                }
             }
         }
         Ok(ContextPatch {
@@ -1015,7 +1347,7 @@ impl AgentPlugin for JsAgentPlugin {
         let mut aggregate = JsToolResultPatch::default();
         let context_value = plugin_context_value(&context);
         for callback_id in self.hook_callbacks("tool_result") {
-            let patch = self
+            let patch = match self
                 .invoke_hook(
                     "tool_result",
                     callback_id,
@@ -1032,14 +1364,24 @@ impl AgentPlugin for JsAgentPlugin {
                     }),
                     &context.abort_signal,
                 )
-                .await?;
-            let parsed = serde_json::from_value::<JsToolResultPatch>(patch).map_err(|error| {
-                PluginError::Hook {
-                    plugin_id: self.id.clone(),
-                    hook: "tool_result",
-                    message: format!("invalid tool result patch: {error}"),
+                .await
+            {
+                Ok(patch) => patch,
+                Err(error) => {
+                    context.report_hook_error("tool_result", error.to_string());
+                    continue;
                 }
-            })?;
+            };
+            let parsed = match serde_json::from_value::<JsToolResultPatch>(patch) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    context.report_hook_error(
+                        "tool_result",
+                        format!("invalid tool result patch: {error}"),
+                    );
+                    continue;
+                }
+            };
             parsed.clone().into_core().apply(&mut result);
             aggregate.merge(&parsed);
         }
@@ -1252,7 +1594,7 @@ impl ProviderPlugin for JsProviderPlugin {
             .iter()
             .filter(|hook| hook.name == "before_provider_request")
         {
-            let result = self
+            let result = match self
                 .lease
                 .invoke(
                     &hook.callback_id,
@@ -1274,14 +1616,17 @@ impl ProviderPlugin for JsProviderPlugin {
                     Some(&context.abort_signal),
                 )
                 .await
-                .map_err(|error| PluginError::Hook {
-                    plugin_id: self.id.clone(),
-                    hook: "before_provider_request",
-                    message: match error {
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    let message = match error {
                         JsInvokeError::Aborted => "JavaScript hook was aborted".to_string(),
                         JsInvokeError::Callback(error) => error.to_string(),
-                    },
-                })?;
+                    };
+                    context.report_hook_error("before_provider_request", message);
+                    continue;
+                }
+            };
             if !result.is_null() {
                 payload = result;
             }

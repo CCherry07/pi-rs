@@ -135,6 +135,14 @@ While the agent is idle, `Enter` submits a new prompt. While it is working, `Ent
 input into the active turn and `Alt+Enter` queues a follow-up for the next turn. Tool calls, provider
 errors, queued input, compaction, and session changes remain visible in the same transcript.
 
+The startup card lists successfully resolved JavaScript/TypeScript packages by their effective
+`settings.json` `packages` source (for example `npm:@narumitw/pi-lsp@0.49.5`) instead of guessing a
+name from an entry path such as `dist/index.ts`. Explicit files and automatic `.pi/extensions`
+entries still use compact path labels. Its Rust plugin row contains only successfully loaded native
+plugins configured through global or trusted-project `plugins.json`; built-in Rust plugins and
+explicit `--plugin` paths are intentionally omitted. Both rows refresh after `/reload` and session
+replacement.
+
 Common commands:
 
 | Command                       | Purpose                                                               |

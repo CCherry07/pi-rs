@@ -8,10 +8,11 @@ use pi_agent::{
     AgentRuntime, PromptInput, StreamAssembler,
 };
 use pi_core::{
-    AbortHandle, AbortSignal, AgentPlugin, AssistantMessage, CommandContext, CommandOutcome,
-    CommandSpec, InputEvent, InputPatch, Message, ModelId, ModelSpec, PluginId,
+    AbortHandle, AbortSignal, AgentPlugin, AgentSettledEvent, AssistantMessage, CommandContext,
+    CommandOutcome, CommandSpec, ContentBlock, ImageContent, InputEvent, InputPatch, InputSource,
+    InputStreamingBehavior, Message, ModelId, ModelSpec, PluginDiagnostic, PluginId,
     ProviderCallContext, ProviderId, ProviderPlugin, ProviderPluginDriver, ProviderRequest,
-    RegistriesBuilder, StreamEvent, ThinkingLevel,
+    RegistriesBuilder, RunId, StreamEvent, TextContent, ThinkingLevel, UserMessage,
 };
 use pi_prompt::{BuildSystemPromptOptions, build_system_prompt};
 use pi_resources::{ResourceDiagnostic, ResourceLoaderOptions, load_resources};
@@ -78,6 +79,7 @@ pub enum QueuedTextOutcome {
         generation: u64,
         display_text: String,
         text: String,
+        images: Vec<ImageContent>,
     },
 }
 
@@ -94,6 +96,7 @@ pub struct PreparedRuntimePrompt {
     generation: u64,
     display_text: String,
     text: String,
+    images: Vec<ImageContent>,
 }
 
 impl PreparedRuntimePrompt {
@@ -109,10 +112,22 @@ impl PreparedRuntimePrompt {
         &self.display_text
     }
 
+    pub fn images(&self) -> &[ImageContent] {
+        &self.images
+    }
+
     pub async fn run(self) -> Result<RuntimePromptOutcome, RuntimeError> {
-        self.runtime
-            .prompt_recorded_locked(PromptInput::Text(self.text))
-            .await
+        if self.images.is_empty() {
+            self.runtime
+                .prompt_recorded_locked(PromptInput::Text(self.text))
+                .await
+        } else {
+            self.runtime
+                .prompt_recorded_locked(PromptInput::Messages(vec![Message::User(
+                    input_user_message(self.text, self.images, now_ms()),
+                )]))
+                .await
+        }
     }
 }
 
@@ -591,6 +606,13 @@ impl PiRuntime {
         self.current_generation().resource_diagnostics.clone()
     }
 
+    pub fn plugin_diagnostics(&self) -> Vec<PluginDiagnostic> {
+        let generation = self.current_generation();
+        let mut diagnostics = generation.agent.plugins().diagnostics();
+        diagnostics.extend(generation.provider_plugins.diagnostics());
+        diagnostics
+    }
+
     pub fn prompt_options(&self) -> Option<BuildSystemPromptOptions> {
         self.current_generation()
             .prompt_options
@@ -617,12 +639,22 @@ impl PiRuntime {
         &self,
         input: impl Into<String>,
     ) -> Result<InputPatch, RuntimeError> {
+        self.process_input_event(InputEvent {
+            text: input.into(),
+            images: None,
+            source: InputSource::Interactive,
+            streaming_behavior: None,
+        })
+        .await
+    }
+
+    pub async fn process_input_event(&self, event: InputEvent) -> Result<InputPatch, RuntimeError> {
         let _reload_guard = self.reload_lock.lock().await;
         let runtime = self.agent.runtime();
         let (_, signal) = AbortHandle::new();
         runtime
             .plugins()
-            .input(self.cwd(), &signal, InputEvent { text: input.into() })
+            .input(self.cwd(), &signal, event)
             .await
             .map_err(|error| RuntimeError::Input(error.to_string()))
     }
@@ -847,17 +879,56 @@ impl PiRuntime {
                 CommandOutcome::TransformInput(transformed) => text = transformed,
             }
         }
-        text = match self.process_input_locked(&runtime, &text).await? {
+        self.prepare_text_submission_locked(reload_guard, runtime, display_text, text)
+            .await
+    }
+
+    /// Runs input hooks after a host has already dispatched a slash command.
+    ///
+    /// Session hosts use this split so a command may replace the current
+    /// session without waiting on the old session's operation gate. The
+    /// returned prompt still retains one generation lease across input hooks
+    /// and the eventual agent run.
+    pub async fn prepare_text_submission_after_command(
+        &self,
+        display_text: String,
+        text: String,
+    ) -> Result<PreparedTextSubmission, RuntimeError> {
+        let reload_guard = Arc::clone(&self.reload_lock).lock_owned().await;
+        let runtime = self.agent.runtime();
+        self.prepare_text_submission_locked(reload_guard, runtime, display_text, text)
+            .await
+    }
+
+    async fn prepare_text_submission_locked(
+        &self,
+        reload_guard: tokio::sync::OwnedMutexGuard<()>,
+        runtime: Arc<AgentRuntime>,
+        display_text: String,
+        mut text: String,
+    ) -> Result<PreparedTextSubmission, RuntimeError> {
+        let mut images = Vec::new();
+        match self
+            .process_input_locked(&runtime, &text, None, InputSource::Interactive, None)
+            .await?
+        {
             InputPatch::Handled => return Ok(PreparedTextSubmission::Handled),
-            InputPatch::Transform(transformed) => transformed,
-            InputPatch::Continue => text,
-        };
+            InputPatch::Transform {
+                text: transformed,
+                images: transformed_images,
+            } => {
+                text = transformed;
+                images = transformed_images.unwrap_or_default();
+            }
+            InputPatch::Continue => {}
+        }
         Ok(PreparedTextSubmission::Agent(PreparedRuntimePrompt {
             runtime: self.clone(),
             _reload_guard: reload_guard,
             generation: runtime.generation(),
             display_text,
             text,
+            images,
         }))
     }
 
@@ -867,6 +938,7 @@ impl PiRuntime {
     pub async fn process_queued_text(
         &self,
         text: impl Into<String>,
+        streaming_behavior: InputStreamingBehavior,
     ) -> Result<QueuedTextOutcome, RuntimeError> {
         let mut text = text.into();
         let display_text = text.clone();
@@ -892,15 +964,32 @@ impl PiRuntime {
                 CommandOutcome::TransformInput(transformed) => text = transformed,
             }
         }
-        text = match self.process_input_locked(&runtime, &text).await? {
+        let mut images = Vec::new();
+        match self
+            .process_input_locked(
+                &runtime,
+                &text,
+                None,
+                InputSource::Interactive,
+                Some(streaming_behavior),
+            )
+            .await?
+        {
             InputPatch::Handled => return Ok(QueuedTextOutcome::Handled),
-            InputPatch::Transform(transformed) => transformed,
-            InputPatch::Continue => text,
-        };
+            InputPatch::Transform {
+                text: transformed,
+                images: transformed_images,
+            } => {
+                text = transformed;
+                images = transformed_images.unwrap_or_default();
+            }
+            InputPatch::Continue => {}
+        }
         Ok(QueuedTextOutcome::Message {
             generation: runtime.generation(),
             display_text,
             text,
+            images,
         })
     }
 
@@ -1059,6 +1148,17 @@ impl PiRuntime {
         self.agent.wait_for_idle().await;
     }
 
+    /// Dispatches the product-level lifecycle event after session-owned retry,
+    /// compaction, and queued continuation orchestration has fully settled.
+    pub async fn dispatch_agent_settled(&self) {
+        let runtime = self.agent.runtime();
+        let (_, signal) = AbortHandle::new();
+        runtime
+            .plugins()
+            .agent_settled(&RunId::next(), self.cwd(), &signal, AgentSettledEvent)
+            .await;
+    }
+
     fn current_generation(&self) -> Arc<RuntimeGeneration> {
         Arc::clone(
             &self
@@ -1072,6 +1172,9 @@ impl PiRuntime {
         &self,
         runtime: &AgentRuntime,
         text: &str,
+        images: Option<Vec<ImageContent>>,
+        source: InputSource,
+        streaming_behavior: Option<InputStreamingBehavior>,
     ) -> Result<InputPatch, RuntimeError> {
         let (_, signal) = AbortHandle::new();
         runtime
@@ -1081,6 +1184,9 @@ impl PiRuntime {
                 &signal,
                 InputEvent {
                     text: text.to_string(),
+                    images,
+                    source,
+                    streaming_behavior,
                 },
             )
             .await
@@ -1115,6 +1221,24 @@ impl PiRuntime {
     }
 }
 
+fn input_user_message(text: String, images: Vec<ImageContent>, timestamp_ms: i64) -> UserMessage {
+    let mut content = vec![ContentBlock::Text(TextContent::new(text))];
+    content.extend(images.into_iter().map(ContentBlock::Image));
+    UserMessage {
+        content,
+        timestamp_ms,
+    }
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1122,13 +1246,14 @@ mod tests {
     use pi_core::{
         AgentEndEvent, AgentEvent, AgentPlugin, AgentStartEvent, BeforeAgentStartEvent,
         BeforeAgentStartPatch, BeforeProviderRequestEvent, Command, CommandError, ContentBlock,
-        ContextEvent, ContextPatch, InputContext, InputEvent, InputPatch, Message, MessageEndEvent,
-        MessageStartEvent, MessageUpdateEvent, PluginContext, PluginError, PluginId, Provider,
-        ProviderCallContext, ProviderError, ProviderPlugin, ProviderPluginContext,
-        ProviderRegisterContext, ProviderStream, RegisterContext, ResponseMetadata, StopReason,
-        StreamEvent, TextContent, ToolCall, ToolCallBlock, ToolCallEvent, ToolCallPatch,
-        ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent,
-        ToolResultPatch, TurnEndEvent, TurnStartEvent, Usage, UserMessage,
+        ContextEvent, ContextPatch, CustomMessage, CustomMessageContent, InputContext, InputEvent,
+        InputPatch, Message, MessageEndEvent, MessageEndPatch, MessageStartEvent,
+        MessageUpdateEvent, PluginContext, PluginError, PluginId, Provider, ProviderCallContext,
+        ProviderError, ProviderPlugin, ProviderPluginContext, ProviderRegisterContext,
+        ProviderStream, RegisterContext, ResponseMetadata, StopReason, StreamEvent, TextContent,
+        ToolCall, ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolExecutionEndEvent,
+        ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch,
+        TurnEndEvent, TurnStartEvent, Usage, UserMessage,
     };
     use pi_test_support::TestToolsPlugin;
     use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
@@ -1443,8 +1568,78 @@ mod tests {
             _context: InputContext,
             event: InputEvent,
         ) -> Result<InputPatch, PluginError> {
-            Ok(InputPatch::Transform(format!("{}|input", event.text)))
+            Ok(InputPatch::Transform {
+                text: format!("{}|input", event.text),
+                images: None,
+            })
         }
+    }
+
+    #[derive(Clone)]
+    struct MultimodalInputPlugin {
+        events: Arc<Mutex<Vec<InputEvent>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentPlugin for MultimodalInputPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("multimodal-input")
+        }
+
+        async fn input(
+            &self,
+            _context: InputContext,
+            event: InputEvent,
+        ) -> Result<InputPatch, PluginError> {
+            self.events.lock().unwrap().push(event.clone());
+            Ok(if event.streaming_behavior.is_none() {
+                InputPatch::Transform {
+                    text: format!("{}|image", event.text),
+                    images: Some(vec![ImageContent {
+                        data: "aW1hZ2U=".to_string(),
+                        mime_type: "image/png".to_string(),
+                    }]),
+                }
+            } else {
+                InputPatch::Continue
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn input_hook_images_reach_the_provider_and_streaming_metadata_reaches_hooks() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let scripted = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".to_string())]);
+        let provider = scripted.provider();
+        let runtime = PiRuntime::builder()
+            .agent_plugin(MultimodalInputPlugin {
+                events: Arc::clone(&events),
+            })
+            .provider_plugin(scripted)
+            .build()
+            .unwrap();
+
+        runtime.submit_text("review").await.unwrap();
+        runtime
+            .process_queued_text("follow", InputStreamingBehavior::FollowUp)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(&provider.requests()[0].messages[0], Message::User(user)
+            if matches!(&user.content[..], [ContentBlock::Text(text), ContentBlock::Image(image)]
+                if text.text == "review|image"
+                    && image.data == "aW1hZ2U="
+                    && image.mime_type == "image/png"))
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events[0].source, InputSource::Interactive);
+        assert_eq!(events[0].streaming_behavior, None);
+        assert_eq!(events[1].source, InputSource::Interactive);
+        assert_eq!(
+            events[1].streaming_behavior,
+            Some(InputStreamingBehavior::FollowUp)
+        );
     }
 
     #[tokio::test]
@@ -1511,7 +1706,7 @@ mod tests {
         let QueuedTextOutcome::Message {
             display_text, text, ..
         } = runtime
-            .process_queued_text("/generation focus")
+            .process_queued_text("/generation focus", InputStreamingBehavior::Steer)
             .await
             .unwrap()
         else {
@@ -1616,7 +1811,10 @@ mod tests {
             }
             self.entered.notify_one();
             self.release.notified().await;
-            Ok(InputPatch::Transform(format!("input-{}", self.value)))
+            Ok(InputPatch::Transform {
+                text: format!("input-{}", self.value),
+                images: None,
+            })
         }
 
         async fn before_agent_start(
@@ -1699,7 +1897,15 @@ mod tests {
                 system_prompt: Some(format!("{}{}", event.system_prompt, self.suffix)),
                 messages: self
                     .inject
-                    .map(|text| vec![Message::User(UserMessage::text(text, 1))])
+                    .map(|text| {
+                        vec![Message::custom(CustomMessage {
+                            custom_type: "fixture-context".to_string(),
+                            content: CustomMessageContent::Text(text.to_string()),
+                            display: false,
+                            details: None,
+                            timestamp_ms: 1,
+                        })]
+                    })
                     .unwrap_or_default(),
             })
         }
@@ -1725,19 +1931,127 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn before_agent_start_failure_restores_idle_without_mutating_transcript() {
+    async fn before_agent_start_failure_is_diagnostic_and_does_not_abort_the_run() {
+        let scripted = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("used".to_string())]);
+        let provider = scripted.provider();
         let runtime = PiRuntime::builder()
             .agent_plugin(FailingPromptHook)
-            .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
-                "unused".to_string(),
-            )]))
+            .provider_plugin(scripted)
             .build()
             .unwrap();
-        let error = runtime.prompt("hello").await.unwrap_err();
-        assert!(error.to_string().contains("before_agent_start"));
+        let outcome = runtime.prompt("hello").await.unwrap();
+        assert_eq!(provider.requests().len(), 1);
+        assert!(
+            outcome.new_messages.iter().any(|message| matches!(message,
+            Message::Assistant(message)
+                if matches!(&message.content[0], ContentBlock::Text(text) if text.text == "used")))
+        );
         let state = runtime.agent().state();
         assert!(!state.is_running);
-        assert!(state.messages.is_empty());
+        assert!(!state.messages.is_empty());
+        assert!(runtime.plugin_diagnostics().iter().any(|diagnostic| {
+            diagnostic.plugin_id == PluginId::new("failing-prompt")
+                && diagnostic.hook == "before_agent_start"
+                && diagnostic
+                    .message
+                    .contains("intentional prompt hook failure")
+        }));
+    }
+
+    struct ReplaceMessageEnd;
+
+    struct WrongMessageEndRole;
+
+    #[async_trait::async_trait]
+    impl AgentPlugin for WrongMessageEndRole {
+        fn id(&self) -> PluginId {
+            PluginId::new("wrong-message-end-role")
+        }
+
+        async fn message_end(
+            &self,
+            _context: PluginContext,
+            event: MessageEndEvent,
+        ) -> Result<MessageEndPatch, PluginError> {
+            Ok(MessageEndPatch {
+                message: matches!(event.message, Message::User(_)).then(|| {
+                    Message::custom(CustomMessage {
+                        custom_type: "wrong-role".to_string(),
+                        content: CustomMessageContent::Text("wrong".to_string()),
+                        display: false,
+                        details: None,
+                        timestamp_ms: 1,
+                    })
+                }),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AgentPlugin for ReplaceMessageEnd {
+        fn id(&self) -> PluginId {
+            PluginId::new("replace-message-end")
+        }
+
+        async fn message_end(
+            &self,
+            _context: PluginContext,
+            event: MessageEndEvent,
+        ) -> Result<MessageEndPatch, PluginError> {
+            let message = match event.message {
+                Message::User(mut user) => {
+                    user.content = vec![ContentBlock::Text(TextContent::new("rewritten user"))];
+                    Message::User(user)
+                }
+                Message::Assistant(assistant) => {
+                    let mut assistant = (*assistant).clone();
+                    assistant.content =
+                        vec![ContentBlock::Text(TextContent::new("rewritten assistant"))];
+                    Message::assistant(assistant)
+                }
+                message => message,
+            };
+            Ok(MessageEndPatch {
+                message: Some(message),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn message_end_replacement_updates_provider_context_outcome_and_agent_state() {
+        let scripted =
+            ScriptedProviderPlugin::scripted([ScriptedTurn::Text("provider original".to_string())]);
+        let provider = scripted.provider();
+        let runtime = PiRuntime::builder()
+            .agent_plugin(WrongMessageEndRole)
+            .agent_plugin(ReplaceMessageEnd)
+            .provider_plugin(scripted)
+            .build()
+            .unwrap();
+
+        let outcome = runtime.prompt("original user").await.unwrap();
+        assert!(
+            matches!(&provider.requests()[0].messages[0], Message::User(user)
+            if matches!(&user.content[0], ContentBlock::Text(text)
+                if text.text == "rewritten user"))
+        );
+        assert!(matches!(&outcome.new_messages[0], Message::User(user)
+            if matches!(&user.content[0], ContentBlock::Text(text)
+                if text.text == "rewritten user")));
+        assert!(
+            matches!(&outcome.new_messages[1], Message::Assistant(assistant)
+            if matches!(&assistant.content[0], ContentBlock::Text(text)
+                if text.text == "rewritten assistant"))
+        );
+        assert_eq!(
+            runtime.agent().state().messages,
+            outcome.final_context.messages
+        );
+        assert!(runtime.plugin_diagnostics().iter().any(|diagnostic| {
+            diagnostic.plugin_id == PluginId::new("wrong-message-end-role")
+                && diagnostic.hook == "message_end"
+                && diagnostic.message.contains("same role")
+        }));
     }
 
     #[tokio::test]
@@ -1774,7 +2088,13 @@ mod tests {
         assert_eq!(requests[0].system_prompt, "base|a|b");
         assert_eq!(requests[1].system_prompt, "base|a|b");
         assert!(matches!(&requests[0].messages[0], Message::User(message)
+            if matches!(&message.content[0], ContentBlock::Text(text) if text.text == "first")));
+        assert!(matches!(&requests[0].messages[1], Message::User(message)
             if matches!(&message.content[0], ContentBlock::Text(text) if text.text == "injected")));
+        assert!(matches!(
+            &runtime.agent().state().messages[1],
+            Message::Custom(message) if message.custom_type == "fixture-context"
+        ));
         assert_eq!(runtime.agent().state().system_prompt, "base");
     }
 
@@ -1835,9 +2155,9 @@ mod tests {
             &self,
             _: PluginContext,
             _: MessageEndEvent,
-        ) -> Result<(), PluginError> {
+        ) -> Result<MessageEndPatch, PluginError> {
             self.push("message_end");
-            Ok(())
+            Ok(MessageEndPatch::default())
         }
         async fn tool_execution_start(
             &self,
@@ -1863,6 +2183,82 @@ mod tests {
             self.push("tool_execution_end");
             Ok(())
         }
+    }
+
+    #[derive(Clone)]
+    struct TurnMetadataPlugin {
+        starts: Arc<Mutex<Vec<TurnStartEvent>>>,
+        ends: Arc<Mutex<Vec<TurnEndEvent>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentPlugin for TurnMetadataPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("turn-metadata")
+        }
+
+        async fn turn_start(
+            &self,
+            _context: PluginContext,
+            event: TurnStartEvent,
+        ) -> Result<(), PluginError> {
+            self.starts.lock().unwrap().push(event);
+            Ok(())
+        }
+
+        async fn turn_end(
+            &self,
+            _context: PluginContext,
+            event: TurnEndEvent,
+        ) -> Result<(), PluginError> {
+            self.ends.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_hooks_receive_zero_based_indices_and_start_timestamps() {
+        let starts = Arc::new(Mutex::new(Vec::new()));
+        let ends = Arc::new(Mutex::new(Vec::new()));
+        let runtime = PiRuntime::builder()
+            .agent_plugin(TurnMetadataPlugin {
+                starts: Arc::clone(&starts),
+                ends: Arc::clone(&ends),
+            })
+            .agent_plugin(TestToolsPlugin::new())
+            .provider_plugin(ScriptedProviderPlugin::scripted([
+                ScriptedTurn::ToolCalls(vec![ToolCall::new(
+                    "echo-1",
+                    "echo",
+                    json!({"text": "one"}),
+                )]),
+                ScriptedTurn::Text("done".to_string()),
+            ]))
+            .agent_options(AgentOptions {
+                active_tools: vec!["echo".to_string()],
+                ..AgentOptions::default()
+            })
+            .build()
+            .unwrap();
+
+        runtime.prompt("run").await.unwrap();
+
+        let starts = starts.lock().unwrap();
+        assert_eq!(
+            starts
+                .iter()
+                .map(|event| event.turn_index)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert!(starts.iter().all(|event| event.timestamp_ms > 0));
+        let ends = ends.lock().unwrap();
+        assert_eq!(
+            ends.iter()
+                .map(|event| event.turn_index)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
     }
 
     struct ContextToolHookPlugin;

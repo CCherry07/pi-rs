@@ -183,7 +183,7 @@ impl ToolScheduler {
                 )
                 .await
                 .map_err(|error| SchedulerError::Event(error.to_string()))?;
-            events
+            let event = events
                 .emit(
                     AgentEvent::MessageEnd {
                         message: Message::tool_result(message.clone()),
@@ -192,6 +192,15 @@ impl ToolScheduler {
                 )
                 .await
                 .map_err(|error| SchedulerError::Event(error.to_string()))?;
+            let AgentEvent::MessageEnd {
+                message: Message::ToolResult(message),
+            } = event
+            else {
+                return Err(SchedulerError::Event(
+                    "message_end changed a tool-result event role".to_string(),
+                ));
+            };
+            let message = Arc::unwrap_or_clone(message);
             messages.push(message);
         }
 
@@ -407,6 +416,7 @@ impl ToolScheduler {
                 signal.clone(),
             )
             .await
+            .map(|_| ())
             .map_err(|error| SchedulerError::Event(error.to_string()))
     }
 }
