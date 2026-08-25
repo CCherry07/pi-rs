@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/CCherry07/pi-rs/compare/v0.4.1...v0.5.0) (2026-08-25)
+
+
+### Features
+
+* expand Pi-compatible extension runtime ([7ebb29d](https://github.com/CCherry07/pi-rs/commit/7ebb29d1cf8204bbe348cb63c8b68d3bc43662bf))
+
+
+### Bug Fixes
+
+* **release:** wait for npm registry propagation ([85d1d7f](https://github.com/CCherry07/pi-rs/commit/85d1d7f8a61396c4f58ee03ea0f3552bf15e506d))
+
 ## [0.4.1](https://github.com/CCherry07/pi-rs/compare/v0.4.0...v0.4.1) (2026-08-24)
 
 
