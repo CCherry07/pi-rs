@@ -1,8 +1,8 @@
-# pi_rs agent guide
+# pi-rs agent guide
 
 ## Mission
 
-Build `pi_rs` into a production-quality Rust implementation of the current Pi coding-agent
+Build `pi-rs` into a production-quality Rust implementation of the current Pi coding-agent
 product. Match observable Pi behavior where it is intentional, while keeping the Rust design
 plugin-first, generation-based, and strongly typed. The target is a usable CLI/TUI product, not
 only a library port.

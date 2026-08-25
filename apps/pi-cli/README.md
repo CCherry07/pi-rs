@@ -1,6 +1,6 @@
 # pi CLI
 
-`pi` is the terminal coding-agent product built by `pi_rs`. It can inspect a repository, edit files,
+`pi` is the terminal coding-agent product built by `pi-rs`. It can inspect a repository, edit files,
 run commands, search code, manage long-running sessions, and work with multiple model providers from
 one interactive terminal interface.
 
@@ -51,8 +51,8 @@ mirror is stale.
 The repository pins Rust 1.98.0 through `rust-toolchain.toml`.
 
 ```bash
-git clone https://github.com/CCherry07/pi_rs.git
-cd pi_rs
+git clone https://github.com/CCherry07/pi-rs.git
+cd pi-rs
 cargo run -p pi-cli --
 ```
 
@@ -111,13 +111,13 @@ Environment variables are supported as an alternative, including `OPENAI_API_KEY
 
 ## Product modes
 
-| Mode | Command | Best for |
-| --- | --- | --- |
-| Interactive TUI | `pi` | Daily coding, exploration, edits, and long-running sessions |
-| Main-screen TUI | `pi --no-fullscreen` | Keeping output in the terminal scrollback |
-| Final text | `pi --print "prompt"` | Shell scripts and one-shot answers |
-| NDJSON events | `pi --json "prompt"` | Integrations that consume structured product events |
-| Piped input | `printf 'prompt' \| pi --print` | Unix pipelines and generated prompts |
+| Mode            | Command                         | Best for                                                    |
+| --------------- | ------------------------------- | ----------------------------------------------------------- |
+| Interactive TUI | `pi`                            | Daily coding, exploration, edits, and long-running sessions |
+| Main-screen TUI | `pi --no-fullscreen`            | Keeping output in the terminal scrollback                   |
+| Final text      | `pi --print "prompt"`           | Shell scripts and one-shot answers                          |
+| NDJSON events   | `pi --json "prompt"`            | Integrations that consume structured product events         |
+| Piped input     | `printf 'prompt' \| pi --print` | Unix pipelines and generated prompts                        |
 
 Shell shorthand works in every frontend and does not require provider credentials:
 
@@ -137,46 +137,46 @@ errors, queued input, compaction, and session changes remain visible in the same
 
 Common commands:
 
-| Command | Purpose |
-| --- | --- |
-| `/login [provider]` | Configure OAuth or API-key authentication |
-| `/logout` | Select and remove a stored provider credential |
-| `/model [provider/model\|id]` | Inspect or change the active model |
-| `/thinking <level>` | Change reasoning depth for the active model |
-| `/new [path]` | Start a new session |
-| `/resume [query\|path]` | Find and continue a previous session |
-| `/compact [instructions]` | Compact the current context, optionally with guidance |
-| `/fork` | Branch before a selected previous user message |
-| `/clone` | Clone the session at its current position |
-| `/tree` | Navigate the current session tree |
-| `/name [name]` | Show or set the session name |
-| `/session` | Show session path, ID, messages, tokens, and cost |
-| `/reload` | Atomically rebuild plugins, models, resources, and session extensions |
-| `/trust` | Review or change trust for the current project |
-| `/copy` | Copy the last completed assistant response |
-| `/clear` | Clear the visible transcript without deleting the session |
-| `/help` | Show the command list |
-| `/quit` | Exit the application |
-| `/skill:<name>` | Invoke a discovered skill |
+| Command                       | Purpose                                                               |
+| ----------------------------- | --------------------------------------------------------------------- |
+| `/login [provider]`           | Configure OAuth or API-key authentication                             |
+| `/logout`                     | Select and remove a stored provider credential                        |
+| `/model [provider/model\|id]` | Inspect or change the active model                                    |
+| `/thinking <level>`           | Change reasoning depth for the active model                           |
+| `/new [path]`                 | Start a new session                                                   |
+| `/resume [query\|path]`       | Find and continue a previous session                                  |
+| `/compact [instructions]`     | Compact the current context, optionally with guidance                 |
+| `/fork`                       | Branch before a selected previous user message                        |
+| `/clone`                      | Clone the session at its current position                             |
+| `/tree`                       | Navigate the current session tree                                     |
+| `/name [name]`                | Show or set the session name                                          |
+| `/session`                    | Show session path, ID, messages, tokens, and cost                     |
+| `/reload`                     | Atomically rebuild plugins, models, resources, and session extensions |
+| `/trust`                      | Review or change trust for the current project                        |
+| `/copy`                       | Copy the last completed assistant response                            |
+| `/clear`                      | Clear the visible transcript without deleting the session             |
+| `/help`                       | Show the command list                                                 |
+| `/quit`                       | Exit the application                                                  |
+| `/skill:<name>`               | Invoke a discovered skill                                             |
 
 Plugin-provided commands are added to the same command palette as built-in commands and skills.
 
 Key bindings:
 
-| Key | Action |
-| --- | --- |
-| `Enter` | Complete a selected command, submit while idle, or steer while running |
-| `Alt+Enter` | Queue a follow-up message |
-| `Ctrl+J` | Insert a newline |
-| `Up` / `Down` | Select a command or browse input history |
-| `Tab` | Complete the selected command or skill |
-| `PageUp` / `PageDown` | Scroll the transcript |
-| `Ctrl+End` | Jump back to the latest transcript content |
-| Mouse drag | Select transcript text |
-| `Cmd+C` / `Ctrl+Shift+C` | Copy selected transcript text |
-| `Esc` | Close a focused view or interrupt active work |
-| `Ctrl+C` | Close a view, clear the editor, interrupt work, or quit while idle |
-| `Ctrl+D` | Quit while idle with an empty editor |
+| Key                      | Action                                                                 |
+| ------------------------ | ---------------------------------------------------------------------- |
+| `Enter`                  | Complete a selected command, submit while idle, or steer while running |
+| `Alt+Enter`              | Queue a follow-up message                                              |
+| `Ctrl+J`                 | Insert a newline                                                       |
+| `Up` / `Down`            | Select a command or browse input history                               |
+| `Tab`                    | Complete the selected command or skill                                 |
+| `PageUp` / `PageDown`    | Scroll the transcript                                                  |
+| `Ctrl+End`               | Jump back to the latest transcript content                             |
+| Mouse drag               | Select transcript text                                                 |
+| `Cmd+C` / `Ctrl+Shift+C` | Copy selected transcript text                                          |
+| `Esc`                    | Close a focused view or interrupt active work                          |
+| `Ctrl+C`                 | Close a view, clear the editor, interrupt work, or quit while idle     |
+| `Ctrl+D`                 | Quit while idle with an empty editor                                   |
 
 ## Models and providers
 
@@ -318,7 +318,7 @@ pi remove npm:example-extension
 `install` and `remove` use user scope by default; `--local` selects trusted project scope. Exact npm
 versions stay pinned during update, while npm ranges and unversioned packages update in their
 managed scope. Git updates reconcile the configured ref or the checkout's upstream branch. Bare
-`pi update` retains current Pi's self-update meaning; pi_rs does not yet implement self-update, so
+`pi update` retains current Pi's self-update meaning; pi-rs does not yet implement self-update, so
 use `--extensions` for all JavaScript packages.
 
 ```bash

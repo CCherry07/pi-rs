@@ -153,16 +153,16 @@ npm/git 安装和跨 harness Skills 已形成实际分发生态；仓库还有 t
 [Package 安全说明](https://github.com/earendil-works/pi/blob/59a71b235dadb4ad0d67557a8abb0aaa093e68b4/packages/coding-agent/docs/packages.md)、
 [coding-agent 产品哲学](https://github.com/earendil-works/pi/blob/59a71b235dadb4ad0d67557a8abb0aaa093e68b4/packages/coding-agent/README.md)
 
-## 6. 对 `pi_rs` 的直接启示
+## 6. 对 `pi-rs` 的直接启示
 
 1. Pi Package 是分发概念，不应映射成第四种运行时插件或跨生命周期 wrapper。未来的
    manifest/loader 可以从一个包解析出彼此独立的 agent/provider/session factories；完整
    generation preparation 负责跨生命周期的原子切换。
-2. Pi 真正成熟的是“资源发现和 Extension surface”，不是复杂依赖求解。因此 `pi_rs` 先做
+2. Pi 真正成熟的是“资源发现和 Extension surface”，不是复杂依赖求解。因此 `pi-rs` 先做
    manifest、来源/provenance、发现、factory 构建和原子 generation reload，比先做拓扑排序更贴近 Pi。
 3. Provider 应继续拥有 catalog、auth 和 request routing；`models.json` 是配置 overlay，完整自定义
    Provider 才是可执行插件。这与当前 `ProviderPlugin + ModelRuntime` 方向一致。
-4. 动态插件一旦允许第三方 native code，就会继承 Pi 的最大风险。`pi_rs` 若要比 Pi 更适合产品化，
+4. 动态插件一旦允许第三方 native code，就会继承 Pi 的最大风险。`pi-rs` 若要比 Pi 更适合产品化，
    应把“可信进程内插件”和“非可信进程外/WASM 插件”设计成 loader 层策略，而不是污染核心 Driver。
 5. SDK、RPC、TUI 应继续消费相同的 session runtime 和 semantic event stream；Pi 的生态扩展性很大
    一部分来自这条统一产品主干。

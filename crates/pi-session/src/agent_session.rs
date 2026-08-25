@@ -100,7 +100,7 @@ impl PromptSnapshot {
             active_tools,
             context_files,
             // Skills are plugin-owned generation resources. The field stays in
-            // this pi_rs diagnostic extension without coupling the session
+            // this pi-rs diagnostic extension without coupling the session
             // backend to SkillsPlugin.
             skills: Vec::new(),
         }

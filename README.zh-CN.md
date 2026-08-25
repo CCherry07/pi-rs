@@ -1,8 +1,8 @@
-# pi_rs
+# pi-rs
 
 [English](README.md) | **简体中文**
 
-`pi_rs` 是一个用 Rust 实现的 Pi 风格终端 coding agent。它以当前 TypeScript Pi 为行为
+`pi-rs` 是一个用 Rust 实现的 Pi 风格终端 coding agent。它以当前 TypeScript Pi 为行为
 参照，提供可实际使用的全屏 TUI、模型与 Provider 配置、工具调用、Skills、项目
 Trust，以及可恢复的 Pi v4 会话。
 
@@ -40,7 +40,7 @@ Trust，以及可恢复的 Pi v4 会话。
 
 ```bash
 git clone <your-repository-url>
-cd pi_rs
+cd pi-rs
 
 # 配置一个 OpenAI-compatible API
 export OPENAI_API_KEY="..."
@@ -251,23 +251,23 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 
 ## 架构
 
-| 目录 | 职责 |
-| --- | --- |
-| `apps/pi-cli` | CLI、TUI、终端生命周期、Project Trust 和产品装配 |
-| `crates/pi-core` | 强类型 contracts、registries 和插件 drivers |
-| `crates/pi-agent` | Agent façade、agent loop、stream assembly 和工具调度 |
-| `crates/pi-runtime` | generation 构建、prompt 装配和原子 reload |
-| `crates/pi-session` | Pi v4 JSONL、树/分支、压缩、恢复 reducer 和 session runtime |
-| `crates/pi-provider` | Provider-neutral HTTP transport 与 SSE |
-| `crates/pi-prompt` / `pi-resources` | 系统 prompt 和项目上下文发现 |
-| `apps/pi-md` | TUI 所有的 Markdown 解析、streaming mend、语法高亮和 Ratatui 渲染 |
-| `crates/pi-plugin-sdk` / `pi-plugin-loader` | 原生插件作者 interface、兼容校验、发现与 factory adapter |
-| `crates/pi-plugin-manager` | Package intent/lock、静态 Registry、target 选择和 CAS 安装 |
-| `crates/pi-js-plugin` / `bindings/pi-napi` | 强类型 JS lifecycle adapter 与 Node/NAPI 边界 |
-| `packages/pi` | Node 启动层、Pi extension 发现、Jiti loader 和 callback generations |
-| `plugins/` | Skills、Provider catalog 和独立生产工具插件 |
-| `legacy/pi` | 当前 TypeScript Pi 行为参照 |
-| `e2e` | deterministic 全链路测试与示例项目 |
+| 目录                                        | 职责                                                                |
+| ------------------------------------------- | ------------------------------------------------------------------- |
+| `apps/pi-cli`                               | CLI、TUI、终端生命周期、Project Trust 和产品装配                    |
+| `crates/pi-core`                            | 强类型 contracts、registries 和插件 drivers                         |
+| `crates/pi-agent`                           | Agent façade、agent loop、stream assembly 和工具调度                |
+| `crates/pi-runtime`                         | generation 构建、prompt 装配和原子 reload                           |
+| `crates/pi-session`                         | Pi v4 JSONL、树/分支、压缩、恢复 reducer 和 session runtime         |
+| `crates/pi-provider`                        | Provider-neutral HTTP transport 与 SSE                              |
+| `crates/pi-prompt` / `pi-resources`         | 系统 prompt 和项目上下文发现                                        |
+| `apps/pi-md`                                | TUI 所有的 Markdown 解析、streaming mend、语法高亮和 Ratatui 渲染   |
+| `crates/pi-plugin-sdk` / `pi-plugin-loader` | 原生插件作者 interface、兼容校验、发现与 factory adapter            |
+| `crates/pi-plugin-manager`                  | Package intent/lock、静态 Registry、target 选择和 CAS 安装          |
+| `crates/pi-js-plugin` / `bindings/pi-napi`  | 强类型 JS lifecycle adapter 与 Node/NAPI 边界                       |
+| `packages/pi`                               | Node 启动层、Pi extension 发现、Jiti loader 和 callback generations |
+| `plugins/`                                  | Skills、Provider catalog 和独立生产工具插件                         |
+| `legacy/pi`                                 | 当前 TypeScript Pi 行为参照                                         |
+| `e2e`                                       | deterministic 全链路测试与示例项目                                  |
 
 依赖保持向内：核心 contracts 不拥有终端、文件发现、会话存储或厂商路由策略。详细设计、
 hook 顺序和持久化不变量见 [docs/architecture.md](docs/architecture.md)。

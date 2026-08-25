@@ -1,6 +1,6 @@
 # pi CLI
 
-`pi` is the terminal coding-agent product built by `pi_rs`. It can inspect a repository, edit files,
+`pi` is the terminal coding-agent product built by `pi-rs`. It can inspect a repository, edit files,
 run commands, search code, manage long-running sessions, and work with multiple model providers from
 one interactive terminal interface.
 
@@ -55,8 +55,8 @@ For repository contributors with access, the project pins Rust 1.98.0 through
 `rust-toolchain.toml`:
 
 ```bash
-git clone https://github.com/CCherry07/pi_rs.git
-cd pi_rs
+git clone https://github.com/CCherry07/pi-rs.git
+cd pi-rs
 cargo run -p pi-cli --
 ```
 
@@ -329,7 +329,7 @@ pi remove npm:example-extension
 User scope is the default; `--local` writes trusted `<cwd>/.pi/settings.json`. Exact npm versions
 remain pinned during updates. Ranges and unversioned npm packages update in batches per scope, and
 git packages reconcile their configured ref or upstream branch. Bare `pi update` is reserved for
-Pi self-update and is not implemented by pi_rs yet; use `--extensions` to update every configured
+Pi self-update and is not implemented by pi-rs yet; use `--extensions` to update every configured
 JavaScript package.
 
 ```bash
@@ -384,8 +384,8 @@ this package provides the TypeScript launcher and Pi-compatible JavaScript exten
 Build the native bridge for the current machine, then start the complete Node-hosted product:
 
 ```bash
-git clone https://github.com/CCherry07/pi_rs.git
-cd pi_rs/packages/pi
+git clone https://github.com/CCherry07/pi-rs.git
+cd pi-rs/packages/pi
 npm ci
 npm run check
 npm test
@@ -465,7 +465,7 @@ Platform packages publish first and the root package publishes last. Release Ple
 version/changelog PR; the protected workflow publishes through npm Trusted Publishing OIDC and
 verifies every registry tarball before publishing the draft GitHub release. Trusted Publishing must
 be configured separately for the root package and all six platform packages, using repository
-`CCherry07/pi_rs`, workflow `release.yml`, and environment `npm-publish`. The complete pipeline is in
+`CCherry07/pi-rs`, workflow `release.yml`, and environment `npm-publish`. The complete pipeline is in
 `.github/workflows/release.yml`.
 
 Release artifacts currently use checksums and native smoke tests but are not

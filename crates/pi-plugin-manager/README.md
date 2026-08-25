@@ -1,6 +1,6 @@
 # pi-plugin-manager
 
-Native plugin distribution and installation module for `pi_rs`. It is deliberately separate from
+Native plugin distribution and installation module for `pi-rs`. It is deliberately separate from
 `pi-plugin-loader`: the manager resolves and materializes trusted local packages, while the loader
 only validates and loads local native code into a runtime generation.
 

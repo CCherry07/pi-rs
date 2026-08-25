@@ -1,6 +1,6 @@
 # pi-plugin-sdk
 
-Author-facing interface for version-locked native `pi_rs` plugins.
+Author-facing interface for version-locked native `pi-rs` plugins.
 
 ## Create a plugin / 创建插件
 
@@ -16,7 +16,7 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pi-plugin-sdk = { path = "/path/to/pi_rs/crates/pi-plugin-sdk", features = ["agent"] }
+pi-plugin-sdk = { path = "/path/to/pi-rs/crates/pi-plugin-sdk", features = ["agent"] }
 ```
 
 The SDK is currently consumed from the workspace (or a pinned Git revision). Replace the path with

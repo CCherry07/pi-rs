@@ -154,7 +154,7 @@ impl OpenAiCodexProvider {
                 "responses=experimental".to_string(),
             ),
             ("originator".to_string(), "pi".to_string()),
-            ("User-Agent".to_string(), "pi_rs".to_string()),
+            ("User-Agent".to_string(), "pi-rs".to_string()),
         ]);
         for (name, value) in &request.headers {
             insert_header(&mut headers, name, value);

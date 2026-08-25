@@ -1833,7 +1833,7 @@ mod tests {
             provider: "openai-compatible".to_string(),
             model: "gpt-5.6-sol".to_string(),
             thinking: "high".to_string(),
-            cwd: "/Users/cherry/Documents/pi_rs".to_string(),
+            cwd: "/workspace/project".to_string(),
             session_name: None,
             session_tokens: 12_450,
             context_tokens: 8_192,
@@ -2075,7 +2075,7 @@ mod tests {
     #[test]
     fn polished_layout_renders_semantic_regions() {
         let mut app = demo_app();
-        app.cwd = "/workspace/pi_rs".to_string();
+        app.cwd = "/workspace/pi-rs".to_string();
         let expected_cwd = compact_path(&app.cwd);
         let screen = render_app(&app, 100, 32);
         if std::env::var_os("PI_PRINT_TUI_TEST").is_some() {
@@ -3970,7 +3970,7 @@ mod tests {
             SessionChoice {
                 path: PathBuf::from("/tmp/sessions/resume polish.jsonl"),
                 id: "resume-polish".to_string(),
-                cwd: PathBuf::from("/Users/cherry/Documents/pi_rs"),
+                cwd: PathBuf::from("/workspace/project"),
                 name: Some("Resume polish".to_string()),
                 first_message: "Improve the session picker".to_string(),
                 message_count: 12,
@@ -3980,7 +3980,7 @@ mod tests {
             SessionChoice {
                 path: PathBuf::from("/tmp/sessions/older.jsonl"),
                 id: "older".to_string(),
-                cwd: PathBuf::from("/Users/cherry/Documents/pi_rs"),
+                cwd: PathBuf::from("/workspace/project"),
                 name: None,
                 first_message: "Older conversation".to_string(),
                 message_count: 4,
@@ -4116,7 +4116,7 @@ mod tests {
     #[test]
     fn truncation_preserves_requested_display_width() {
         let end = truncate_end("你好 world", 7);
-        let start = truncate_start("/Users/cherry/Documents/pi_rs", 12);
+        let start = truncate_start("/workspace/project", 12);
         assert!(UnicodeWidthStr::width(end.as_str()) <= 7);
         assert!(UnicodeWidthStr::width(start.as_str()) <= 12);
         assert!(end.ends_with('…'));

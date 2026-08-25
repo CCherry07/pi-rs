@@ -48,7 +48,7 @@ After project trust is approved, `pi` discovers its manifest automatically. The 
 
 ## TypeScript pi extension
 
-`.pi/extensions/frontend-napi.ts` exercises the Node/NAPI extension host. From the `pi_rs`
+`.pi/extensions/frontend-napi.ts` exercises the Node/NAPI extension host. From the `pi-rs`
 workspace root, build and launch the Node package with this project as its working directory:
 
 ```bash

@@ -119,7 +119,7 @@ pub(crate) enum CliCommand {
         /// Update one configured extension package.
         #[arg(long = "extension", value_name = "SOURCE")]
         extension: Option<String>,
-        /// Request a pi_rs self-update (not yet implemented).
+        /// Request a pi-rs self-update (not yet implemented).
         #[arg(long = "self")]
         self_update: bool,
         /// Request a model catalog refresh (not handled by the JS package manager).

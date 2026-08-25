@@ -107,7 +107,7 @@ impl AgentMessage {
         Self::custom(value)
     }
 
-    /// Returns product-facing text preserved by pi_rs preprocessing.
+    /// Returns product-facing text preserved by pi-rs preprocessing.
     pub fn display_text(&self) -> Option<&str> {
         match &self.0 {
             AgentMessageKind::Standard {

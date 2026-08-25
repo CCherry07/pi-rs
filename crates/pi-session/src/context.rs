@@ -178,7 +178,7 @@ pub fn build_session_context(
 impl SessionContext {
     /// Applies Pi's default `convertToLlm` projection. Extension roles unknown
     /// to the default converter remain in `messages` but are omitted here.
-    /// Histories produced by older pi_rs versions may end a run immediately
+    /// Histories produced by older pi-rs versions may end a run immediately
     /// after an assistant tool call; synthesize failed results for those calls
     /// so providers receive a structurally valid message sequence.
     pub fn provider_messages(&self) -> Vec<Message> {

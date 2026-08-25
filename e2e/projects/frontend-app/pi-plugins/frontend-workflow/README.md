@@ -11,13 +11,13 @@ cargo test
 cargo build
 ```
 
-Or, from the `frontend-app` directory, build and install it into the project's managed plugin
-activation view:
+Or, from the `frontend-app` directory, build it and synchronize the checked-in relative plugin
+source into the project's managed activation view:
 
 ```bash
 cargo build --manifest-path pi-plugins/frontend-workflow/Cargo.toml
 ../../../target/debug/pi --approve \
-  plugin install --local pi-plugins/frontend-workflow
+  plugin sync --local
 ../../../target/debug/pi --approve
 ```
 

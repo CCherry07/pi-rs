@@ -7,7 +7,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CCherry07/pi_rs.git",
+    "url": "git+https://github.com/CCherry07/pi-rs.git",
     "directory": "packages/pi"
   },
   "bin": {

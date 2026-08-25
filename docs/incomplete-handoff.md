@@ -1,6 +1,6 @@
 # Implementation handoff
 
-Status: `pi_rs` has a usable product baseline. It is no longer only an Agent Core MVP.
+Status: `pi-rs` has a usable product baseline. It is no longer only an Agent Core MVP.
 Interactive TUI, print, and NDJSON modes share the same session runtime, and the main plugin,
 provider, tool, resource, trust, and Pi v4 persistence paths are integrated.
 

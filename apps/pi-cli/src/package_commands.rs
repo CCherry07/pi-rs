@@ -61,7 +61,7 @@ fn operation(command: &CliCommand) -> Result<ManageOperation, String> {
             }
             if *self_update || *all {
                 return Err(
-                    "pi_rs self-update is not implemented; use `pi update --extensions` to update JavaScript packages"
+                    "pi-rs self-update is not implemented; use `pi update --extensions` to update JavaScript packages"
                         .to_string(),
                 );
             }
@@ -80,13 +80,13 @@ fn operation(command: &CliCommand) -> Result<ManageOperation, String> {
                 source == "self" || source == "pi" || source == "pi-coding-agent"
             }) {
                 return Err(
-                    "pi_rs self-update is not implemented; use `pi update --extensions` to update JavaScript packages"
+                    "pi-rs self-update is not implemented; use `pi update --extensions` to update JavaScript packages"
                         .to_string(),
                 );
             }
             if requested.is_none() && !extensions {
                 return Err(
-                    "bare `pi update` targets the Pi executable; self-update is not implemented in pi_rs. Use `pi update --extensions`."
+                    "bare `pi update` targets the Pi executable; self-update is not implemented in pi-rs. Use `pi update --extensions`."
                         .to_string(),
                 );
             }

@@ -462,12 +462,12 @@ standard user-message content used by Agent, provider projection, replay, and re
 differs, the submitted product-facing text is stored in the user message's namespaced
 `piRs.displayText` extension and projected into product events, transcript history, and queue
 snapshots. Pi v4 readers that ignore unknown fields continue to see the effective message, while
-pi_rs resume and queue recovery do not expose private expanded prompts. Frontends do not parse or
+pi-rs resume and queue recovery do not expose private expanded prompts. Frontends do not parse or
 reverse plugin-specific prompt formats; messages written before this metadata existed display their
 persisted content as-is.
 
 `AgentSession::create` and `AgentSession::open` adapt the v4 tree to `PiRuntime`. Configuration
-changes are v4 entries, completed messages are persisted on `message_end`, and pi_rs-only prompt
+changes are v4 entries, completed messages are persisted on `message_end`, and pi-rs-only prompt
 snapshots/resource diagnostics use reserved `customType` values rather than extending the v4 entry
 union. Opening restores data state only; executable plugins and resources always come from the
 supplied runtime. Checkout, branch summaries, and compaction rebuild runtime context immediately.

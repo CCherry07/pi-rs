@@ -90,7 +90,7 @@ impl XAiProvider {
             ("Accept".to_string(), "text/event-stream".to_string()),
             ("Content-Type".to_string(), "application/json".to_string()),
             ("Authorization".to_string(), format!("Bearer {key}")),
-            ("User-Agent".to_string(), "pi_rs".to_string()),
+            ("User-Agent".to_string(), "pi-rs".to_string()),
         ]);
         for (name, value) in &request.headers {
             insert_header(&mut headers, name, value);
