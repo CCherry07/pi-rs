@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/CCherry07/pi-rs/compare/v0.5.0...v0.5.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* align Pi extension module compatibility ([9c6f5cc](https://github.com/CCherry07/pi-rs/commit/9c6f5cc28af18b19c106d3b4e2b6459c36c5392e))
+
 ## [0.5.0](https://github.com/CCherry07/pi-rs/compare/v0.4.1...v0.5.0) (2026-08-25)
 
 
