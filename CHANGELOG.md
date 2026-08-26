@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0](https://github.com/CCherry07/pi-rs/compare/v0.6.0...v0.7.0) (2026-08-26)
+
+
+### Features
+
+* align agent runtime with Pi behavior ([b9e3bc5](https://github.com/CCherry07/pi-rs/commit/b9e3bc5fcf6489b8ef02dd170d7805fc27a099de))
+* route agent plugin hooks by derived interests ([616063b](https://github.com/CCherry07/pi-rs/commit/616063b74205999cde605c405663375c5ca60737))
+
 ## [0.6.0](https://github.com/CCherry07/pi-rs/compare/v0.5.1...v0.6.0) (2026-08-26)
 
 
