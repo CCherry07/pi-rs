@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/CCherry07/pi-rs/compare/v0.5.1...v0.6.0) (2026-08-26)
+
+
+### Features
+
+* expand JavaScript extension and TUI compatibility ([2e1b050](https://github.com/CCherry07/pi-rs/commit/2e1b050737c862241fe3ea7066ac8bbf987b3b2a))
+
 ## [0.5.1](https://github.com/CCherry07/pi-rs/compare/v0.5.0...v0.5.1) (2026-08-26)
 
 
