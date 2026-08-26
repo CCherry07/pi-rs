@@ -30,7 +30,7 @@
     "build": "npm run clean && tsc",
     "build:native": "tsx ./scripts/release.ts native",
     "build:native:release": "tsx ./scripts/release.ts native --release",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && tsc -p ../../e2e/product/tsconfig.json",
     "prepack": "npm run build",
     "release:check": "tsx ./scripts/release.ts check",
     "release:sync-lock": "tsx ./scripts/release.ts sync-lock",
@@ -41,7 +41,11 @@
     "release:publish": "tsx ./scripts/release.ts publish",
     "release:verify-published": "tsx ./scripts/release.ts verify-published",
     "test": "tsx --test ./test/*.test.ts",
-    "test:native": "npm run build && tsx --test ./test/*.smoke.ts",
+    "test:bridge": "npm run build && tsx --test ./test/*.smoke.ts",
+    "test:e2e": "npm run build && tsx --test ../../e2e/product/*.test.ts",
+    "test:e2e:node": "npm run build && tsx --test ../../e2e/product/node-napi.test.ts",
+    "test:native": "npm run test:bridge && npm run test:e2e:node",
+    "e2e": "npm run build:native && cargo build --locked -p pi-cli && cargo test --locked -p pi-e2e --test runtime_agent -- --nocapture && npm run test:bridge && npm run test:e2e",
     "start": "tsx ./bin/pi.ts"
   },
   "dependencies": {

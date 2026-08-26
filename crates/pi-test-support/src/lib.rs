@@ -7,10 +7,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream;
 use pi_core::{
-    AbortSignal, AgentPlugin, ModelId, PluginId, Provider, ProviderCallContext, ProviderError,
-    ProviderId, ProviderPlugin, ProviderRegisterContext, ProviderRequest, ProviderStream,
-    RegisterContext, ResponseMetadata, StopReason, StreamEvent, Tool, ToolCall, ToolCallId,
-    ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdateSink, Usage,
+    AbortSignal, AgentPlugin, ContentMetadata, ModelId, PluginId, Provider, ProviderCallContext,
+    ProviderError, ProviderId, ProviderPlugin, ProviderRegisterContext, ProviderRequest,
+    ProviderStream, RegisterContext, ResponseMetadata, StopReason, StreamEvent, Tool, ToolCall,
+    ToolCallId, ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdateSink,
+    Usage,
 };
 use serde_json::{Value, json};
 
@@ -102,11 +103,18 @@ impl Provider for ScriptedProvider {
                     metadata: self.metadata(),
                 }];
                 for (content_index, call) in calls.into_iter().enumerate() {
+                    let namespace = call.namespace.clone();
                     events.push(StreamEvent::ToolCallStart {
                         content_index,
                         id: call.id,
                         name: call.name,
                     });
+                    if namespace.is_some() {
+                        events.push(StreamEvent::ContentMetadata {
+                            content_index,
+                            metadata: ContentMetadata::ToolCall { namespace },
+                        });
+                    }
                     events.push(StreamEvent::ToolCallDelta {
                         content_index,
                         arguments_delta: call.arguments.to_string(),

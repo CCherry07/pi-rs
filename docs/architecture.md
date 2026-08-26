@@ -14,8 +14,9 @@ prompt -> provider stream -> assistant message -> tool calls -> tool results -> 
 HTTP providers, production tools, model/resource discovery, resumable sessions, compaction,
 project trust, native dynamic-library loading, and terminal presentation are outer modules around
 that core. A Node/NAPI host adds Pi-compatible JavaScript and TypeScript extensions while Rust owns
-session/runtime and terminal presentation. Live operation replay and signed/OCI native-plugin
-distribution remain open product seams.
+session/runtime and terminal presentation. Interrupted operations are reducer-reconciled without
+implicitly replaying external side effects. Signed/OCI native-plugin distribution remains an open
+product seam.
 
 ## Workspace
 
@@ -27,6 +28,7 @@ crates/pi-provider              vendor-neutral HTTP transport and SSE framing
 crates/pi-prompt                pure Pi-style system prompt assembly
 crates/pi-resources             generic system/append prompts and project context discovery
 crates/pi-session               Pi v4 storage plus MultiSessionManager/PiSession product runtime
+crates/pi-telemetry             typed Pi AI/harness span schemas and sink adapters
 apps/pi-md                     TUI-owned Markdown parsing, streaming repair, highlighting, and Ratatui rendering
 crates/pi-plugin-sdk            native plugin author interface and descriptor types
 crates/pi-plugin-macros         agent/provider/session native export macros
@@ -42,10 +44,12 @@ plugins/providers/pi-plugin-anthropic     Anthropic Messages, Claude Code mode, 
 plugins/providers/pi-plugin-xai           xAI Responses provider and Grok catalog
 plugins/providers/pi-plugin-google        Google Generative AI provider and Gemini catalog
 plugins/providers/pi-plugin-models        models.json catalog, routing, and request-time config
+plugins/features/pi-plugin-{prompts,skills}
+                                generation-local prompt-template and skill discovery/commands
 crates/pi-tool-support           shared path validation, argument, and truncation helpers
 plugins/tools/pi-plugin-{read,write,edit,hashline-edit,bash,grep,find,ls}
                                 one production tool per plugin crate
-e2e/                            deterministic full-agent and ignored real-network E2E
+e2e/                            runtime acceptance plus deterministic black-box product E2E
 apps/pi-cli/src/project_trust.rs product trust policy, persistence, and TUI request broker
 ```
 
@@ -156,11 +160,11 @@ configuration files or plugin ID conventions.
 2. Agent plugin hooks, provider plugin registration, and provider request hooks each execute in builder order. There is no numeric priority.
 3. Duplicate IDs are rejected within each plugin system; duplicate tool, command, provider, or model IDs fail runtime construction.
 4. Registries are mutable only during registration and frozen before Agent construction.
-5. `tool_call` runs in order, chains argument patches, revalidates patched arguments, and lets the first block decision win. It is the intentional fail-closed exception: a hook error fails that tool call.
+5. `tool_call` runs in order, chains argument patches, revalidates patched arguments, and lets the first block decision win. It is the intentional fail-closed exception: a hook error fails that tool call. Every typed `AgentPlugin` callback receives the same `Arc<AgentContext>` snapshot for the batch, including the current system prompt, transcript with the requesting assistant message, and active-tool names. The JavaScript extension Adapter projects Pi's narrower extension event and does not serialize this native context into Node.
 6. `input` receives text, images, source, and optional streaming behavior. Text/image replacements chain in registration order, `Handled` stops the submission, and a hook error is recorded as a generation-local plugin diagnostic before later hooks continue.
 7. `before_agent_start` runs once per prompt/continue invocation in registration order; prompt replacements chain and injected messages are accumulated for that run only. Hook errors are diagnosed and skipped without discarding earlier replacements.
 8. `context` runs before every provider request and chains message replacements without mutating the persisted transcript. Hook errors are diagnosed and later hooks still run.
-9. `tool_result` chains content, details, usage, and error patches. Hook errors are diagnosed and skipped; they do not rewrite a successfully executed tool result into a failure. Legacy before/after tool hooks remain compatible.
+9. `tool_result` receives that same batch context and chains content, details, usage, `added_tool_names`, and error patches. Hook errors are diagnosed and skipped; they do not rewrite a successfully executed tool result into a failure. `added_tool_names` then survives the tool-result message and session/provider projection. Legacy before/after tool hooks remain compatible.
 10. Lifecycle events are delivered through independent plugin methods (`agent_start/end/settled`, `turn_start/end`, `message_start/update/end`, and `tool_execution_start/update/end`) in registration order. `agent_start`/`agent_end` belong to each low-level run, while session orchestration emits `agent_settled` once no automatic retry, compaction, or queued continuation remains and before publishing the product settled event. Turns use a zero-based per-run index and `turn_start` also carries its millisecond timestamp. `message_end` may replace a message while preserving its role; each valid replacement becomes the next hook's input and the final message is used by Agent state, listeners, provider context, tool scheduling, and persistence. Observer errors and invalid cross-role replacements are diagnosed and skipped without failing the run.
 11. A native plugin is trusted in-process code; the loader and trait interfaces are not a sandbox.
 12. Registered slash commands own both their `CommandSpec` and execution. A `TransformInput` result then passes through `input` hooks in registration order before the agent run; `Handled` stops the submission. Text preprocessing retains both the product-facing submitted text and the effective model text rather than requiring a frontend to reverse an expansion.
@@ -186,6 +190,10 @@ each dynamic library by content hash before loading, so rebuilt artifacts receiv
 while unchanged content reuses one process-pinned handle. Libraries remain pinned for the process
 lifetime because plugin code may retain worker threads. Package metadata and artifact lifetime are
 loader concerns rather than a fourth lifecycle or cross-lifecycle bundle.
+
+Native ABI 2 covers the `AgentContext` tool-hook snapshot and `added_tool_names` result contract.
+The loader reads the stable C descriptor first and rejects ABI 1 before resolving any v2 Rust
+constructor symbol, preventing a stale in-process plugin from crossing the changed trait boundary.
 
 Native package distribution is a separate deep module at `pi-plugin-manager`. Editable
 `plugins.json` contains ordered intent; target-specific `plugins.lock` is the exact resolution and
@@ -213,6 +221,32 @@ The current static Registry is signed-data-ready transport only: SHA-256 proves 
 integrity but not publisher identity. Publisher signatures, Git repository and OCI adapters,
 package update/rollback commands, and store garbage collection remain explicit package-manager
 milestones.
+
+## End-to-end validation
+
+End-to-end validation is an outer Test Module and does not add a product runtime or a testing-only
+construction path. Its small Interface is `runProductScenario(scenario) -> ProductRun` under
+`e2e/product`. Scenarios declare product intent—a frontend adapter, input, deterministic provider
+turns, and optional fixture/extension paths—and assert on returned product events, captured provider
+requests, process output, and Pi v4 session data. They never reach through this
+Interface to inspect registries, `ProductSessionFactory`, or plugin implementation state.
+
+Two Adapters make the process seam concrete. `native-cli` starts the standalone Rust binary;
+`node-napi` starts the compiled Node launcher and its selected NAPI binding. Both enter the same
+production `pi-cli` assembly and NDJSON frontend. A private local OpenAI-compatible SSE Adapter is
+the local-substitutable provider dependency. The harness also owns temporary HOME/agent/session
+state, credential scrubbing, offline mode, process deadlines, exhaustive provider scripts, NDJSON
+decoding, and cleanup. CI YAML supplies toolchains and invokes this Interface; scenario and
+transport policy do not live in workflow steps.
+
+The in-process Rust test in `e2e/tests/runtime_agent.rs` remains a runtime acceptance test. It gives
+fast, precise coverage of prompt assembly, plugin hooks, production filesystem tools, agent loops,
+settlement, and session persistence, but it is not labeled as black-box product coverage because it
+bypasses argument parsing and `ProductSessionFactory`. Focused Node/NAPI bridge tests likewise stay
+below the product-E2E seam. The deterministic product suite starts both real process Adapters on
+every pull request and uses no external network or credentials. Real-provider checks are a separate
+future opt-in layer, and fullscreen interaction requires a future PTY Adapter rather than terminal
+logic in the generic harness.
 
 ## Product packaging and release
 
@@ -468,7 +502,22 @@ different cwd sends a semantic trust request to the TUI and waits before constru
 generation, so no project resource can be loaded before the decision. `/trust` updates persisted
 policy for the current cwd; generation rebuild/restart applies the changed resource set.
 
-`SkillsPlugin` is an example of the intended deep-plugin seam: it owns skill root configuration, discovery, frontmatter parsing, collision policy, catalog formatting, `/skill:name` command registration/expansion, and its generation-local diagnostics. Each registered `SkillCommand` owns its metadata and execution, so command discovery, duplicate validation, and dispatch share one source of truth. Generic resource loading and prompt assembly contain no skill-specific policy. The plugin contributes its catalog through `before_agent_start`, which makes a separate `PromptContributor` trait unnecessary.
+`SkillsPlugin` is an example of the intended deep-plugin seam: it owns skill root configuration,
+discovery, frontmatter parsing, collision policy, catalog formatting, `/skill:name` command
+registration/expansion, and its generation-local diagnostics. The generic sourced loader keeps the
+caller's source value attached to both successful skills and diagnostics. A direct root document
+that does not declare valid skill metadata is silently ignored, while a declared `SKILL.md` remains
+diagnostic on invalid metadata. Each registered `SkillCommand` owns its metadata and execution, so
+command discovery, duplicate validation, and dispatch share one source of truth. Generic resource
+loading and prompt assembly contain no skill-specific policy. The plugin contributes its catalog
+through `before_agent_start`, which makes a separate `PromptContributor` trait unnecessary.
+
+`PromptTemplatesPlugin` owns the parallel prompt-template seam. It discovers trusted project,
+user, and explicit Markdown sources non-recursively; preserves visible symlink names and caller
+provenance; parses frontmatter; applies deterministic first-name-wins collision policy; and
+registers one slash command per template. Its argument parser and expansion own Pi's quoted tokens,
+`$N`, `$@`, `$ARGUMENTS`, `${@:N}`, and `${@:N:L}` forms. The CLI only supplies trusted roots and
+registers the plugin factory in each generation.
 
 ## Core contracts
 
@@ -481,13 +530,40 @@ policy for the current cwd; generation rebuild/restart applies the changed resou
 - `ProviderPluginDriver`: validates, registers, and invokes the ordered provider plugin set for one runtime generation.
 - `SessionPluginDriver`: validates and invokes the ordered session plugin set for one session generation.
 - `ModelRuntime`: is the immutable, generation-local model catalog and provider resolver.
+- `TelemetryContext`: starts schema-typed spans through an injected sink; the no-op and in-memory
+  sinks are adapters, not alternate event systems.
 - `AbortHandle` / `AbortSignal`: provide cooperative cancellation without exposing Tokio types in public signatures.
 
 ## Agent layering
 
-`Agent` is the stateful façade. It owns transcript state, active-run cancellation, steering/follow-up queues, subscriptions, and low-level run idleness. It is an `Arc`-backed cloneable handle so another task can call `abort`, `steer`, or `follow_up` while a prompt is running. `AgentSession` owns product settlement because only it can establish that retry, compaction, and queued-continuation policy has also finished; it dispatches the generation's `agent_settled` plugin hook before publishing `AgentSessionEvent::AgentSettled`.
+`Agent` is the stateful façade. It owns transcript state, active-run cancellation, steering/follow-up queues, subscriptions, and low-level run idleness. It is an `Arc`-backed cloneable handle so another task can call `abort`, `steer`, or `follow_up` while a prompt is running. Continuing from an assistant tail first consumes one steering batch as the new prompt and suppresses only the loop's initial duplicate steering poll; later steering remains queued until the first response completes. Follow-up is consumed only when no steering is available. `AgentSession` owns product settlement because only it can establish that retry, compaction, and queued-continuation policy has also finished; it dispatches the generation's `agent_settled` plugin hook before publishing `AgentSessionEvent::AgentSettled`.
 
-`AgentLoop` is a stateless single-run engine over an `AgentContext` snapshot. It emits lifecycle events, invokes a provider, delegates stream assembly and tool execution, polls steering after each turn, polls follow-up before settlement, and returns the final context plus messages added by that invocation.
+`AgentLoop` is a stateless single-run engine over an `AgentContext` snapshot. It emits lifecycle
+events, invokes a provider, delegates stream assembly and tool execution, polls steering after each
+turn, polls follow-up before settlement, and returns the final context plus messages added by that
+invocation. `AgentTurnControl` owns Pi's between-turn callbacks. After `turn_end`,
+`prepare_next_turn` may replace only the run-local context/provider/model/thinking values, then
+`should_stop_after_turn` runs, and only then does queue polling occur. These replacements never
+mutate the reusable Agent configuration. `FnTurnControl` is the closure Adapter for this single
+Interface; it hides async future boxing rather than introducing a second callback lifecycle. Turn
+callbacks receive `Arc`-backed immutable snapshots, while the live loop mutates its context and
+per-run transcript with copy-on-write. The normal sequential callback path therefore shares the
+same snapshot without cloning the transcript; retaining a snapshot beyond its callback is safe but
+may make a later mutation clone the retained data.
+
+Cancellation and exceptional termination close the same observable lifecycle as Pi. A cancellation
+that races with turn entry first commits the prompt and already-drained steering, then emits an
+aborted assistant `message_start`/`message_end`, `turn_end`, and `agent_end`. Errors escaping the
+loop trigger the equivalent error assistant sequence on a best-effort basis while the Rust API
+still returns the originating `Err`; recovery emission continues past listener failures so state
+reducers can observe as much of the terminal sequence as possible.
+
+Provider streaming starts a typed `pi.ai.request` span and records normalized response metadata,
+usage, chunk count, first-chunk latency, error status, and terminal reason. Product `submit` owns the
+outer `pi.harness.run` span. `pi-telemetry` also exposes the complete exact harness span vocabulary
+for compaction, navigation, checkpoints, turns, steps, tools, hooks, sleeps, event handlers, and
+session writes so new orchestration can remain compile-time constrained instead of emitting
+unstructured maps.
 
 `StreamAssembler` is the sole owner of provider-stream assembly:
 
@@ -495,15 +571,15 @@ policy for the current cwd; generation rebuild/restart applies the changed resou
 StreamEvent -> partial snapshots -> final AssistantMessage
 ```
 
-It validates Start/Delta/End/Done transitions, preserves content-index order, and parses tool argument JSON only after the tool-call block ends.
+It validates Start/Delta/End/Done transitions, preserves content-index order, and parses tool argument JSON only after the tool-call block ends. Separate response/content metadata events preserve resolved response model and ID, diagnostics, deferred handles, raw stop reason, `end_turn`, redacted-thinking markers, and tool namespaces as providers discover them. Stream errors and aborts finalize the accumulated partial blocks and observed metadata instead of replacing them with an empty assistant message.
 
-`ToolScheduler` has three phases:
+`ToolScheduler` selects sequential execution when requested globally or when any resolved call is
+declared sequential. Its two observable schedules are:
 
-1. **Prepare, source ordered:** emit start, resolve tool, prepare/validate arguments, run `tool_call`, then revalidate patched arguments.
-2. **Execute:** sequential globally or when any ready tool declares sequential; otherwise bounded parallel execution.
-3. **Finalize:** run `tool_result`, emit end in completion order, then emit/persist tool-result messages in assistant source order.
+1. **Sequential:** each call completes `start -> prepare/validate -> tool_call -> execute -> tool_result -> end -> result message` before the next call starts. Cancellation after a result leaves later calls unstarted.
+2. **Parallel:** start and preparation remain source ordered, ready executions are bounded by `max_parallel_tools`, end events use completion order, and result messages use assistant source order.
 
-Unknown, invalid, blocked, and truncated tool calls produce error tool-result messages rather than disappearing from provider history.
+Unknown, invalid, blocked, and truncated tool calls produce error tool-result messages rather than disappearing from provider history. Final result messages preserve non-empty `added_tool_names`; tool-call and tool-result hooks share one immutable `AgentContext` batch snapshot.
 
 ## Session persistence and restore
 
@@ -540,7 +616,17 @@ handle without placing the complete output in provider context.
 reject contradictory operation, attempt, queue, tool, provisioned-entry, and deferred-handle logs,
 then reconstruct pending input, deferred writes, unfinished steps, tool batches, effective
 configuration, structural targets, overflow state, and terminal-failure provenance without mutating
-storage.
+storage. Opening a product session feeds the main lane through that reducer before restoring the
+runtime. Accepted but unapplied deferred writes are committed, an initial user message that never
+reached `message_end` and undelivered run queues become durable `next_run` items, and the interrupted
+operation is closed as aborted. This reconciliation is idempotent across repeated opens.
+
+Opening a session never performs provider I/O or blindly re-executes a tool. The current TypeScript
+Harness scaffold rejects every recorded-session restore, while pi-rs deliberately provides the
+stronger fail-closed reconciliation above. Automatic replay would be unsafe for a tool whose
+external side effect completed before its result was persisted; a future opt-in replay adapter must
+therefore require both a provider deferred-redemption capability and an explicit safe tool replay
+policy rather than weakening open semantics.
 
 JSONL loading repairs only a syntactically torn final append, using a sibling temporary file and
 atomic rename. A complete schema-invalid final line and every malformed middle line are hard errors.
@@ -592,8 +678,9 @@ that does not mutate the agent transcript. `AgentSession::compact` performs manu
 `AgentSessionOptions::context_window` enables threshold compaction before/after runs. Recoverable
 context overflow removes the failed assistant from the prepared context, compacts, and retries once.
 Retained pre-compaction usage is ignored for subsequent threshold decisions so it cannot cause an
-immediate compaction loop. Harness-level crash/deferred operation replay remains separate from this
-live execution path.
+immediate compaction loop. Each summary request is also constrained by the active generation's
+`ModelSpec`: non-reasoning models force thinking off, and the configured summary budget is clamped
+to the model's maximum output tokens.
 
 Session extensions use a third, session-owned lifecycle system. `SessionPlugin` mirrors Pi's ten
 `session_*` extension hooks: start, info change, before switch/fork/compact/tree, compact success or
@@ -662,7 +749,8 @@ The workspace includes an end-to-end test where two delay tools complete in reve
 
 ## Next milestones
 
-1. Connect the recovery reducer to crash/deferred operation replay above the v4 session backend.
+1. Add opt-in deferred redemption and safe-tool replay adapters without making session open perform
+   provider I/O or replay unknown side effects.
 2. Add publisher signatures, Git/OCI sources, update/rollback, and CAS garbage collection to the
    native package manager.
 3. Continue current-Pi conformance at product seams with deterministic regressions before

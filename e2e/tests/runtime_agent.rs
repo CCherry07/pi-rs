@@ -100,7 +100,7 @@ impl AgentPlugin for AuditPlugin {
 }
 
 #[tokio::test]
-async fn full_agent_prompt_tools_plugins_resources_and_session() {
+async fn runtime_acceptance_covers_prompt_tools_plugins_resources_and_session() {
     let directory = tempfile::tempdir().unwrap();
     let cwd = directory.path().join("project");
     let agent_dir = directory.path().join("agent");

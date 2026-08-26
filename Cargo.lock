@@ -2068,6 +2068,8 @@ dependencies = [
  "async-trait",
  "futures",
  "pi-core",
+ "pi-telemetry",
+ "pi-test-support",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
@@ -2075,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "pi-cli"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "arboard",
  "async-trait",
@@ -2102,6 +2104,7 @@ dependencies = [
  "pi-plugin-manager",
  "pi-plugin-models",
  "pi-plugin-openai",
+ "pi-plugin-prompts",
  "pi-plugin-read",
  "pi-plugin-skills",
  "pi-plugin-write",
@@ -2144,15 +2147,9 @@ dependencies = [
  "async-trait",
  "pi-agent",
  "pi-core",
- "pi-plugin-bash",
- "pi-plugin-edit",
- "pi-plugin-find",
- "pi-plugin-grep",
- "pi-plugin-ls",
  "pi-plugin-read",
  "pi-plugin-skills",
  "pi-plugin-write",
- "pi-prompt",
  "pi-resources",
  "pi-runtime",
  "pi-session",
@@ -2164,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "pi-js-package-manager"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "futures",
  "glob",
@@ -2209,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "pi-napi"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "dotenvy",
@@ -2424,6 +2421,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-plugin-prompts"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "pi-core",
+ "pi-runtime",
+ "pi-test-support",
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "pi-plugin-read"
 version = "0.1.0"
 dependencies = [
@@ -2553,6 +2564,7 @@ dependencies = [
  "pi-resources",
  "pi-runtime",
  "pi-shell",
+ "pi-telemetry",
  "pi-test-support",
  "serde",
  "serde_json",
@@ -2570,6 +2582,15 @@ dependencies = [
  "pi-core",
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "pi-telemetry"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

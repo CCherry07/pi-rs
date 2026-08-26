@@ -12,3 +12,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 pi-core.workspace = true
+pi-telemetry.workspace = true
+
+[dev-dependencies]
+pi-test-support.workspace = true

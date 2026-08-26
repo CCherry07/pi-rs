@@ -1360,6 +1360,7 @@ impl AgentPlugin for JsAgentPlugin {
                         "content": result.content,
                         "details": result.details,
                         "usage": result.usage,
+                        "addedToolNames": result.added_tool_names,
                         "isError": result.is_error,
                     }),
                     &context.abort_signal,
@@ -1502,6 +1503,7 @@ fn tool_result_value(result: &ToolResult) -> Value {
         "content": result.content,
         "details": result.details,
         "usage": result.usage,
+        "addedToolNames": result.added_tool_names,
         "isError": result.is_error,
         "terminate": result.terminate,
     })
@@ -2107,6 +2109,8 @@ struct JsToolResult {
     #[serde(default)]
     usage: Option<Usage>,
     #[serde(default)]
+    added_tool_names: Option<Vec<String>>,
+    #[serde(default)]
     is_error: bool,
     #[serde(default)]
     terminate: bool,
@@ -2122,6 +2126,8 @@ struct JsToolResultPatch {
     #[serde(default)]
     usage: Option<Usage>,
     #[serde(default)]
+    added_tool_names: Option<Vec<String>>,
+    #[serde(default)]
     is_error: Option<bool>,
     #[serde(default)]
     terminate: Option<bool>,
@@ -2133,6 +2139,7 @@ impl JsToolResultPatch {
             content: self.content,
             details: self.details,
             usage: self.usage,
+            added_tool_names: self.added_tool_names,
             is_error: self.is_error,
             terminate: self.terminate,
         }
@@ -2147,6 +2154,9 @@ impl JsToolResultPatch {
         }
         if next.usage.is_some() {
             self.usage.clone_from(&next.usage);
+        }
+        if next.added_tool_names.is_some() {
+            self.added_tool_names.clone_from(&next.added_tool_names);
         }
         if next.is_error.is_some() {
             self.is_error = next.is_error;
@@ -2163,6 +2173,7 @@ impl From<JsToolResult> for ToolResult {
             content: result.content,
             details: result.details,
             usage: result.usage,
+            added_tool_names: result.added_tool_names,
             is_error: result.is_error,
             terminate: result.terminate,
         }

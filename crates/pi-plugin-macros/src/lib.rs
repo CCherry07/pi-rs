@@ -145,26 +145,26 @@ fn expand_export(
         PluginKind::Agent => (
             quote!(::pi_plugin_sdk::NativePluginKind::Agent as u32),
             quote!(::pi_plugin_sdk::AgentPlugin),
-            Ident::new("pi_agent_plugin_create_v1", proc_macro2::Span::call_site()),
-            quote!(::pi_plugin_sdk::AgentPluginCreateV1),
+            Ident::new("pi_agent_plugin_create_v2", proc_macro2::Span::call_site()),
+            quote!(::pi_plugin_sdk::AgentPluginCreateV2),
         ),
         PluginKind::Provider => (
             quote!(::pi_plugin_sdk::NativePluginKind::Provider as u32),
             quote!(::pi_plugin_sdk::ProviderPlugin),
             Ident::new(
-                "pi_provider_plugin_create_v1",
+                "pi_provider_plugin_create_v2",
                 proc_macro2::Span::call_site(),
             ),
-            quote!(::pi_plugin_sdk::ProviderPluginCreateV1),
+            quote!(::pi_plugin_sdk::ProviderPluginCreateV2),
         ),
         PluginKind::Session => (
             quote!(::pi_plugin_sdk::NativePluginKind::Session as u32),
             quote!(::pi_plugin_sdk::SessionPlugin),
             Ident::new(
-                "pi_session_plugin_create_v1",
+                "pi_session_plugin_create_v2",
                 proc_macro2::Span::call_site(),
             ),
-            quote!(::pi_plugin_sdk::SessionPluginCreateV1),
+            quote!(::pi_plugin_sdk::SessionPluginCreateV2),
         ),
     };
 

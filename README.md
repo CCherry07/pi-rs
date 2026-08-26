@@ -388,11 +388,26 @@ ordering, persistence invariants, and the detailed design.
 
 ## Development and validation
 
+The Pi core conformance subset and its oracle mapping are documented in
+[docs/pi-core-test-matrix.md](docs/pi-core-test-matrix.md). Run that focused set with:
+
+```bash
+./scripts/test-core.sh
+```
+
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 git diff --check
+```
+
+Run the deterministic black-box product E2E stack, including the standalone CLI and Node/NAPI
+adapters, with:
+
+```bash
+npm ci --prefix packages/pi
+npm --prefix packages/pi run e2e
 ```
 
 Never put real provider credentials in source, logs, or fixtures. The default validation path uses

@@ -269,6 +269,7 @@ pub struct ToolCallEvent {
     pub assistant_message: AssistantMessage,
     pub tool_call: ToolCall,
     pub validated_args: Value,
+    pub context: Arc<crate::AgentContext>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -289,6 +290,7 @@ pub struct ToolResultEvent {
     pub tool_call: ToolCall,
     pub validated_args: Value,
     pub result: ToolResult,
+    pub context: Arc<crate::AgentContext>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -296,6 +298,7 @@ pub struct ToolResultPatch {
     pub content: Option<Vec<ContentBlock>>,
     pub details: Option<Value>,
     pub usage: Option<Usage>,
+    pub added_tool_names: Option<Vec<String>>,
     pub is_error: Option<bool>,
     pub terminate: Option<bool>,
 }
@@ -310,6 +313,9 @@ impl ToolResultPatch {
         }
         if let Some(usage) = self.usage {
             result.usage = Some(usage);
+        }
+        if let Some(added_tool_names) = self.added_tool_names {
+            result.added_tool_names = Some(added_tool_names);
         }
         if let Some(is_error) = self.is_error {
             result.is_error = is_error;
@@ -907,6 +913,7 @@ impl PluginDriver {
                         assistant_message: event.assistant_message.clone(),
                         tool_call: event.tool_call.clone(),
                         validated_args: arguments.clone(),
+                        context: Arc::clone(&event.context),
                     },
                 )
                 .await
@@ -945,6 +952,7 @@ impl PluginDriver {
                 tool_call: event.tool_call.clone(),
                 validated_args: event.validated_args.clone(),
                 result: result.clone(),
+                context: Arc::clone(&event.context),
             };
             match registered
                 .plugin

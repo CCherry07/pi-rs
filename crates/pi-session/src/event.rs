@@ -330,3 +330,74 @@ impl AgentSessionEventHub {
             .send(RevisionedAgentSessionEvent { revision, event });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use pi_core::{ModelId, ProviderId};
+
+    use super::*;
+
+    fn agent_state() -> AgentStateSnapshot {
+        AgentStateSnapshot {
+            system_prompt: String::new(),
+            provider_id: ProviderId::new("scripted"),
+            model_id: ModelId::new("test"),
+            thinking_level: ThinkingLevel::Off,
+            active_tools: Vec::new(),
+            messages: Vec::new(),
+            is_running: false,
+            streaming_message: None,
+            pending_tool_calls: HashSet::new(),
+            error_message: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn subscription_starts_with_an_authoritative_snapshot_then_live_revisions() {
+        let hub = AgentSessionEventHub::new(
+            agent_state(),
+            Some("before".to_string()),
+            QueueSnapshot::default(),
+        );
+        hub.publish_queue(QueueSnapshot {
+            steering: vec!["queued".to_string()],
+            follow_up: Vec::new(),
+        });
+
+        let mut subscription = hub.subscribe();
+        assert_eq!(subscription.snapshot.revision, 1);
+        assert_eq!(subscription.snapshot.queue.steering, vec!["queued"]);
+
+        hub.publish_session_info(Some("after".to_string()));
+        let event = subscription.events.recv().await.unwrap();
+        assert_eq!(event.revision, 2);
+        assert!(matches!(
+            event.event,
+            AgentSessionEvent::SessionInfoChanged { name } if name.as_deref() == Some("after")
+        ));
+        let current = hub.snapshot();
+        assert_eq!(current.revision, 2);
+        assert_eq!(current.name.as_deref(), Some("after"));
+    }
+
+    #[tokio::test]
+    async fn unsubscribed_receivers_do_not_affect_snapshot_publication() {
+        let hub = AgentSessionEventHub::new(agent_state(), None, QueueSnapshot::default());
+        let subscription = hub.subscribe();
+        drop(subscription);
+
+        hub.publish_thinking(
+            ThinkingLevel::High,
+            AgentStateSnapshot {
+                thinking_level: ThinkingLevel::High,
+                ..agent_state()
+            },
+        );
+
+        let snapshot = hub.snapshot();
+        assert_eq!(snapshot.revision, 1);
+        assert_eq!(snapshot.agent.thinking_level, ThinkingLevel::High);
+    }
+}

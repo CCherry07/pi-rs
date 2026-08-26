@@ -501,4 +501,46 @@ mod tests {
         assert_eq!(std::fs::metadata(path).unwrap().len(), 60 * 1024);
         std::fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn utf8_tail_matches_byte_slicing_without_splitting_code_points() {
+        for input in ["", "ascii", "aé🙂b", "中文🙂tail", "👩‍💻"] {
+            for max_bytes in 0..=input.len() + 2 {
+                let expected = if input.len() <= max_bytes {
+                    input
+                } else {
+                    let mut start = input.len() - max_bytes;
+                    while start < input.len() && !input.is_char_boundary(start) {
+                        start += 1;
+                    }
+                    &input[start..]
+                };
+                let actual = truncate_utf8_from_end(input, max_bytes);
+                assert_eq!(actual, expected, "input={input:?}, max_bytes={max_bytes}");
+                assert!(actual.len() <= max_bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn line_count_ignores_one_trailing_newline() {
+        assert_eq!(lines_for_counting("one\ntwo\n"), vec!["one", "two"]);
+        assert_eq!(lines_for_counting("one\ntwo"), vec!["one", "two"]);
+        assert!(lines_for_counting("").is_empty());
+    }
+
+    #[test]
+    fn oversized_unicode_last_line_keeps_a_valid_byte_limited_tail() {
+        let input = format!("prefix{}", "🙂".repeat(20_000));
+        let truncated = truncate_tail(&input, 1, input.len(), input.len());
+
+        assert_eq!(truncated.truncated_by, TruncatedBy::Bytes);
+        assert!(truncated.last_line_partial);
+        assert!(truncated.output_bytes <= MAX_OUTPUT_BYTES);
+        assert!(truncated.content.ends_with('🙂'));
+        assert_eq!(
+            truncated.content,
+            truncate_utf8_from_end(&input, MAX_OUTPUT_BYTES)
+        );
+    }
 }

@@ -117,10 +117,10 @@ impl Provider for OpenAiCompatibleProvider {
         let mut body = response.body;
         let output = stream! {
             yield Ok(StreamEvent::Start {
-                metadata: ResponseMetadata::new(provider_id, model, API_NAME, now_ms()),
+                metadata: ResponseMetadata::new(provider_id, model.clone(), API_NAME, now_ms()),
             });
             let mut decoder = SseDecoder::new();
-            let mut state = ChunkState::new(supports_finish_reason);
+            let mut state = ChunkState::for_model(supports_finish_reason, &model);
             loop {
                 let next = tokio::select! {
                     _ = signal.wait() => {

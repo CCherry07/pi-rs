@@ -1,12 +1,19 @@
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use futures::StreamExt;
 use pi_core::{
-    AbortSignal, AgentEvent, AssistantMessage, ContentBlock, FrozenRegistries, Message, ModelId,
-    PluginDriver, ProviderCallContext, ProviderId, ProviderPluginDriver, ProviderRequest, RunId,
-    StopReason, StreamEvent, TextContent, ThinkingLevel, ToolExecutionMode, ToolResult,
-    ToolResultMessage, Usage,
+    AbortSignal, AgentContext, AgentEvent, AssistantMessage, ContentBlock, FrozenRegistries,
+    Message, ModelId, PluginDriver, ProviderCallContext, ProviderId, ProviderPluginDriver,
+    ProviderRequest, RunId, StopReason, StreamEvent, TextContent, ThinkingLevel, ToolExecutionMode,
+    ToolResult, ToolResultMessage, Usage,
+};
+use pi_telemetry::{
+    ActiveSpan, AiOperation, AiRequestEnd, AiRequestSpan, AiRequestStart, AiStopReason, SpanStatus,
+    TelemetryContext,
 };
 
 use crate::{AgentEventSink, StreamAssembler, ToolScheduler};
@@ -25,15 +32,10 @@ pub enum AgentLoopError {
     Event(String),
     #[error("tool scheduling failed: {0}")]
     ToolScheduling(String),
+    #[error(transparent)]
+    TurnControl(#[from] AgentTurnControlError),
     #[error("maximum tool iterations exceeded: {0}")]
     MaxToolIterations(usize),
-}
-
-#[derive(Debug, Clone)]
-pub struct AgentContext {
-    pub system_prompt: String,
-    pub messages: Vec<Message>,
-    pub active_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +66,137 @@ pub struct AgentLoopOutcome {
     pub stop: AgentLoopStop,
 }
 
+/// Shared, immutable state captured after one assistant response and its tool
+/// batch have completed.
+///
+/// Cloning this value or any field is O(1). The live loop uses copy-on-write,
+/// so retaining a snapshot beyond the callback is safe but may make a later
+/// transcript mutation clone the retained data.
+#[derive(Debug, Clone)]
+pub struct AgentTurnContext {
+    pub message: Arc<AssistantMessage>,
+    pub tool_results: Arc<Vec<ToolResultMessage>>,
+    pub context: Arc<AgentContext>,
+    pub new_messages: Arc<Vec<Message>>,
+}
+
+/// Run-local replacements applied before the next provider request.
+#[derive(Debug, Clone, Default)]
+pub struct AgentLoopTurnUpdate {
+    pub context: Option<AgentContext>,
+    pub provider_id: Option<ProviderId>,
+    pub model_id: Option<ModelId>,
+    pub thinking_level: Option<ThinkingLevel>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("turn control failed: {0}")]
+pub struct AgentTurnControlError(pub String);
+
+/// Run-local control seam invoked between a completed turn and queue polling.
+#[async_trait]
+pub trait AgentTurnControl: Send + Sync {
+    async fn prepare_next_turn(
+        &self,
+        _context: AgentTurnContext,
+        _signal: AbortSignal,
+    ) -> Result<Option<AgentLoopTurnUpdate>, AgentTurnControlError> {
+        Ok(None)
+    }
+
+    async fn should_stop_after_turn(
+        &self,
+        _context: AgentTurnContext,
+        _signal: AbortSignal,
+    ) -> Result<bool, AgentTurnControlError> {
+        Ok(false)
+    }
+}
+
+pub struct NoopAgentTurnControl;
+
+#[async_trait]
+impl AgentTurnControl for NoopAgentTurnControl {}
+
+type TurnControlFuture<T> =
+    Pin<Box<dyn Future<Output = Result<T, AgentTurnControlError>> + Send + 'static>>;
+type PrepareNextTurnFn = dyn Fn(AgentTurnContext, AbortSignal) -> TurnControlFuture<Option<AgentLoopTurnUpdate>>
+    + Send
+    + Sync;
+type ShouldStopAfterTurnFn =
+    dyn Fn(AgentTurnContext, AbortSignal) -> TurnControlFuture<bool> + Send + Sync;
+
+/// Closure adapter for [`AgentTurnControl`].
+///
+/// Hooks that are not configured retain the trait's no-op behavior. The
+/// adapter owns future boxing so callers can provide ordinary async closures.
+#[derive(Default)]
+pub struct FnTurnControl {
+    prepare_next_turn: Option<Box<PrepareNextTurnFn>>,
+    should_stop_after_turn: Option<Box<ShouldStopAfterTurnFn>>,
+}
+
+impl FnTurnControl {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            prepare_next_turn: None,
+            should_stop_after_turn: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_prepare_next_turn<F, Fut>(mut self, callback: F) -> Self
+    where
+        F: Fn(AgentTurnContext, AbortSignal) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Option<AgentLoopTurnUpdate>, AgentTurnControlError>>
+            + Send
+            + 'static,
+    {
+        self.prepare_next_turn = Some(Box::new(move |context, signal| {
+            Box::pin(callback(context, signal))
+        }));
+        self
+    }
+
+    #[must_use]
+    pub fn with_should_stop_after_turn<F, Fut>(mut self, callback: F) -> Self
+    where
+        F: Fn(AgentTurnContext, AbortSignal) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<bool, AgentTurnControlError>> + Send + 'static,
+    {
+        self.should_stop_after_turn = Some(Box::new(move |context, signal| {
+            Box::pin(callback(context, signal))
+        }));
+        self
+    }
+}
+
+#[async_trait]
+impl AgentTurnControl for FnTurnControl {
+    async fn prepare_next_turn(
+        &self,
+        context: AgentTurnContext,
+        signal: AbortSignal,
+    ) -> Result<Option<AgentLoopTurnUpdate>, AgentTurnControlError> {
+        let Some(callback) = &self.prepare_next_turn else {
+            return Ok(None);
+        };
+        callback(context, signal).await
+    }
+
+    async fn should_stop_after_turn(
+        &self,
+        context: AgentTurnContext,
+        signal: AbortSignal,
+    ) -> Result<bool, AgentTurnControlError> {
+        let Some(callback) = &self.should_stop_after_turn else {
+            return Ok(false);
+        };
+        callback(context, signal).await
+    }
+}
+
 pub trait AgentMessageQueues: Send + Sync {
     fn drain_steering(&self) -> Vec<Message>;
     fn drain_follow_up(&self) -> Vec<Message>;
@@ -78,6 +211,8 @@ pub struct AgentLoopServices {
     pub plugins: Arc<PluginDriver>,
     pub provider_plugins: Arc<ProviderPluginDriver>,
     pub queues: Arc<dyn AgentMessageQueues>,
+    pub turn_control: Arc<dyn AgentTurnControl>,
+    pub telemetry: TelemetryContext,
     pub events: Arc<dyn AgentEventSink>,
 }
 
@@ -86,6 +221,7 @@ struct AssistantResponseServices {
     registries: Arc<FrozenRegistries>,
     plugins: Arc<PluginDriver>,
     provider_plugins: Arc<ProviderPluginDriver>,
+    telemetry: TelemetryContext,
     events: Arc<dyn AgentEventSink>,
 }
 
@@ -113,6 +249,8 @@ pub async fn run_agent_loop(
         plugins,
         provider_plugins,
         queues,
+        turn_control,
+        telemetry,
         events,
     } = services;
     let mut new_messages = Vec::with_capacity(prompts.len());
@@ -141,6 +279,8 @@ pub async fn run_agent_loop(
         plugins,
         provider_plugins,
         queues,
+        turn_control,
+        telemetry,
         signal,
         events,
         true,
@@ -161,6 +301,8 @@ pub async fn run_agent_loop_continue(
         plugins,
         provider_plugins,
         queues,
+        turn_control,
+        telemetry,
         events,
     } = services;
     if context.messages.is_empty() {
@@ -181,6 +323,8 @@ pub async fn run_agent_loop_continue(
         plugins,
         provider_plugins,
         queues,
+        turn_control,
+        telemetry,
         signal,
         events,
         true,
@@ -191,18 +335,22 @@ pub async fn run_agent_loop_continue(
 #[allow(clippy::too_many_arguments)]
 async fn run_loop(
     run_id: RunId,
-    mut context: AgentContext,
-    mut new_messages: Vec<Message>,
-    config: AgentLoopConfig,
+    context: AgentContext,
+    new_messages: Vec<Message>,
+    mut config: AgentLoopConfig,
     generation: u64,
     registries: Arc<FrozenRegistries>,
     plugins: Arc<PluginDriver>,
     provider_plugins: Arc<ProviderPluginDriver>,
     queues: Arc<dyn AgentMessageQueues>,
+    turn_control: Arc<dyn AgentTurnControl>,
+    telemetry: TelemetryContext,
     signal: AbortSignal,
     events: Arc<dyn AgentEventSink>,
     mut first_turn: bool,
 ) -> Result<AgentLoopOutcome, AgentLoopError> {
+    let mut context = Arc::new(context);
+    let mut new_messages = Arc::new(new_messages);
     let scheduler = ToolScheduler::new(
         Arc::clone(&registries),
         Arc::clone(&plugins),
@@ -214,6 +362,7 @@ async fn run_loop(
         registries: Arc::clone(&registries),
         plugins: Arc::clone(&plugins),
         provider_plugins,
+        telemetry,
         events: Arc::clone(&events),
     };
     let mut pending = queues.drain_steering();
@@ -224,10 +373,6 @@ async fn run_loop(
     'run: loop {
         let mut should_continue = true;
         while should_continue || !pending.is_empty() {
-            if signal.is_aborted() {
-                stop = AgentLoopStop::Aborted;
-                break 'run;
-            }
             if !first_turn {
                 emit(&events, AgentEvent::TurnStart, &signal).await?;
             }
@@ -243,19 +388,47 @@ async fn run_loop(
                 )
                 .await?;
                 let message = emit_message_end(&events, &signal, message).await?;
-                context.messages.push(message.clone());
-                new_messages.push(message);
+                Arc::make_mut(&mut context).messages.push(message.clone());
+                Arc::make_mut(&mut new_messages).push(message);
+            }
+
+            // Pi enters the turn even when cancellation raced with queue
+            // polling: already-drained steering is committed before the
+            // aborted assistant closes the turn. Avoid returning early here,
+            // otherwise those messages disappear from the observable run.
+            if signal.is_aborted() {
+                let assistant = provider_failure_message(
+                    &config,
+                    "operation aborted".to_string(),
+                    StopReason::Aborted,
+                );
+                let assistant = emit_message_pair(&events, &signal, &assistant).await?;
+                Arc::make_mut(&mut context)
+                    .messages
+                    .push(Message::assistant(assistant.clone()));
+                Arc::make_mut(&mut new_messages).push(Message::assistant(assistant.clone()));
+                emit(
+                    &events,
+                    AgentEvent::TurnEnd {
+                        message: assistant,
+                        tool_results: Vec::new(),
+                    },
+                    &signal,
+                )
+                .await?;
+                stop = AgentLoopStop::Aborted;
+                break 'run;
             }
 
             let assistant = stream_assistant_response(
                 &run_id,
-                &mut context,
+                Arc::make_mut(&mut context),
                 &config,
                 &response_services,
                 signal.clone(),
             )
             .await?;
-            new_messages.push(Message::assistant(assistant.clone()));
+            Arc::make_mut(&mut new_messages).push(Message::assistant(assistant.clone()));
 
             if matches!(
                 assistant.stop_reason,
@@ -301,8 +474,8 @@ async fn run_loop(
                     tool_results = batch.messages;
                     for result in &tool_results {
                         let message = Message::tool_result(result.clone());
-                        context.messages.push(message.clone());
-                        new_messages.push(message);
+                        Arc::make_mut(&mut context).messages.push(message.clone());
+                        Arc::make_mut(&mut new_messages).push(message);
                     }
                     emit(
                         &events,
@@ -324,6 +497,7 @@ async fn run_loop(
                         .execute_batch(
                             &run_id,
                             &assistant,
+                            Arc::clone(&context),
                             calls,
                             config.tool_execution,
                             signal.clone(),
@@ -338,20 +512,64 @@ async fn run_loop(
                 tool_results = batch.messages;
                 for result in &tool_results {
                     let message = Message::tool_result(result.clone());
-                    context.messages.push(message.clone());
-                    new_messages.push(message);
+                    Arc::make_mut(&mut context).messages.push(message.clone());
+                    Arc::make_mut(&mut new_messages).push(message);
                 }
             }
 
             emit(
                 &events,
                 AgentEvent::TurnEnd {
-                    message: assistant,
-                    tool_results,
+                    message: assistant.clone(),
+                    tool_results: tool_results.clone(),
                 },
                 &signal,
             )
             .await?;
+
+            let message = Arc::new(assistant);
+            let tool_results = Arc::new(tool_results);
+
+            if let Some(update) = turn_control
+                .prepare_next_turn(
+                    AgentTurnContext {
+                        message: Arc::clone(&message),
+                        tool_results: Arc::clone(&tool_results),
+                        context: Arc::clone(&context),
+                        new_messages: Arc::clone(&new_messages),
+                    },
+                    signal.clone(),
+                )
+                .await?
+            {
+                if let Some(next_context) = update.context {
+                    context = Arc::new(next_context);
+                }
+                if let Some(provider_id) = update.provider_id {
+                    config.provider_id = provider_id;
+                }
+                if let Some(model_id) = update.model_id {
+                    config.model_id = model_id;
+                }
+                if let Some(thinking_level) = update.thinking_level {
+                    config.thinking_level = thinking_level;
+                }
+            }
+
+            if turn_control
+                .should_stop_after_turn(
+                    AgentTurnContext {
+                        message,
+                        tool_results,
+                        context: Arc::clone(&context),
+                        new_messages: Arc::clone(&new_messages),
+                    },
+                    signal.clone(),
+                )
+                .await?
+            {
+                break 'run;
+            }
 
             // Steering is polled after every completed turn, including a final
             // text-only turn and a terminating tool batch. This matches Pi's
@@ -376,15 +594,15 @@ async fn run_loop(
     emit(
         &events,
         AgentEvent::AgentEnd {
-            messages: new_messages.clone(),
+            messages: new_messages.as_ref().clone(),
         },
         &signal,
     )
     .await?;
 
     Ok(AgentLoopOutcome {
-        new_messages,
-        final_context: context,
+        new_messages: Arc::unwrap_or_clone(new_messages),
+        final_context: Arc::unwrap_or_clone(context),
         stop,
     })
 }
@@ -421,6 +639,9 @@ async fn stream_assistant_response(
         .model(&config.provider_id, &config.model_id)
         .cloned();
     let model_cost = model_spec.as_ref().map(|model| model.cost.clone());
+    let api = model_spec
+        .as_ref()
+        .map_or_else(|| "unknown".to_string(), |model| model.api.clone());
     let request = ProviderRequest {
         model: config.model_id.clone(),
         model_spec,
@@ -441,6 +662,19 @@ async fn stream_assistant_response(
         config.model_id.clone(),
         provider_plugins,
     );
+    let telemetry_span = services
+        .telemetry
+        .start_span::<AiRequestSpan>(AiRequestStart {
+            operation: AiOperation::Stream,
+            provider: config.provider_id.to_string(),
+            model: config.model_id.to_string(),
+            api,
+            streaming: true,
+            deferred: None,
+        });
+    let request_started = std::time::Instant::now();
+    let mut chunk_count = 0_u64;
+    let mut time_to_first_chunk_ms = None;
     let stream_result = provider.stream(request, call_context, signal.child()).await;
     let mut assembler = StreamAssembler::new();
     let mut started = false;
@@ -450,6 +684,12 @@ async fn stream_assistant_response(
             let message = provider_failure_message(config, error.to_string(), StopReason::Error);
             let message = emit_message_pair(&events, &signal, &message).await?;
             context.messages.push(Message::assistant(message.clone()));
+            finish_ai_request(
+                &telemetry_span,
+                &message,
+                chunk_count,
+                time_to_first_chunk_ms,
+            );
             return Ok(message);
         }
     };
@@ -470,6 +710,12 @@ async fn stream_assistant_response(
                 } else {
                     context.messages.push(Message::assistant(message.clone()));
                 }
+                finish_ai_request(
+                    &telemetry_span,
+                    &message,
+                    chunk_count,
+                    time_to_first_chunk_ms,
+                );
                 return Ok(message);
             }
             item = stream.next() => item,
@@ -477,6 +723,10 @@ async fn stream_assistant_response(
         let Some(item) = item else {
             break;
         };
+        chunk_count = chunk_count.saturating_add(1);
+        time_to_first_chunk_ms.get_or_insert_with(|| {
+            u64::try_from(request_started.elapsed().as_millis()).unwrap_or(u64::MAX)
+        });
         let mut stream_event = match item {
             Ok(event) => event,
             Err(error) => {
@@ -499,6 +749,12 @@ async fn stream_assistant_response(
                 } else {
                     context.messages.push(Message::assistant(message.clone()));
                 }
+                finish_ai_request(
+                    &telemetry_span,
+                    &message,
+                    chunk_count,
+                    time_to_first_chunk_ms,
+                );
                 return Ok(message);
             }
         };
@@ -511,6 +767,12 @@ async fn stream_assistant_response(
                 let message = assembler.failure_message(StopReason::Error, error.to_string());
                 let message =
                     commit_failed_assistant(context, &events, &signal, message, started).await?;
+                finish_ai_request(
+                    &telemetry_span,
+                    &message,
+                    chunk_count,
+                    time_to_first_chunk_ms,
+                );
                 return Ok(message);
             }
         };
@@ -548,9 +810,15 @@ async fn stream_assistant_response(
     let final_message = match assembler.finish() {
         Ok(message) => message,
         Err(error) => {
-            let message = provider_failure_message(config, error.to_string(), StopReason::Error);
+            let message = assembler.failure_message(StopReason::Error, error.to_string());
             let message =
                 commit_failed_assistant(context, &events, &signal, message, started).await?;
+            finish_ai_request(
+                &telemetry_span,
+                &message,
+                chunk_count,
+                time_to_first_chunk_ms,
+            );
             return Ok(message);
         }
     };
@@ -573,7 +841,53 @@ async fn stream_assistant_response(
         emit_message_end(&events, &signal, Message::assistant(final_message)).await?,
     )?;
     replace_last_assistant(context, final_message.clone());
+    finish_ai_request(
+        &telemetry_span,
+        &final_message,
+        chunk_count,
+        time_to_first_chunk_ms,
+    );
     Ok(final_message)
+}
+
+fn finish_ai_request(
+    span: &ActiveSpan<AiRequestSpan>,
+    message: &AssistantMessage,
+    chunk_count: u64,
+    time_to_first_chunk_ms: Option<u64>,
+) {
+    let stop_reason = match message.stop_reason {
+        StopReason::Stop => Some(AiStopReason::Stop),
+        StopReason::Length => Some(AiStopReason::Length),
+        StopReason::ToolUse => Some(AiStopReason::ToolUse),
+        StopReason::Error => Some(AiStopReason::Error),
+        StopReason::Aborted => Some(AiStopReason::Aborted),
+        StopReason::Deferred => Some(AiStopReason::Deferred),
+        StopReason::Pending => None,
+    };
+    span.set_end_attributes(AiRequestEnd {
+        response_model: message.response_model.clone(),
+        response_id: message.response_id.clone(),
+        stop_reason,
+        input_tokens: Some(message.usage.input),
+        output_tokens: Some(message.usage.output),
+        cache_read_tokens: Some(message.usage.cache_read),
+        cache_write_tokens: Some(message.usage.cache_write),
+        reasoning_tokens: message.usage.reasoning,
+        total_tokens: Some(message.usage.total_tokens),
+        cost: Some(message.usage.cost.total),
+        chunk_count: Some(chunk_count),
+        time_to_first_chunk_ms,
+        error_type: message
+            .error_message
+            .as_ref()
+            .map(|_| "provider".to_string()),
+        ..AiRequestEnd::default()
+    });
+    if message.stop_reason == StopReason::Error {
+        span.set_status(SpanStatus::Error);
+    }
+    span.finish();
 }
 
 async fn commit_failed_assistant(
@@ -632,6 +946,63 @@ fn provider_failure_message(
         end_turn: None,
         timestamp_ms: now_ms(),
     }
+}
+
+/// Best-effort outer lifecycle recovery matching Pi's `handleRunFailure`.
+///
+/// The originating loop error remains the caller's result. Recovery emission
+/// deliberately continues after listener failures so the state reducer still
+/// observes `message_end`, `turn_end`, and `agent_end` whenever possible.
+pub(crate) async fn emit_run_failure_lifecycle(
+    events: &Arc<dyn AgentEventSink>,
+    signal: &AbortSignal,
+    config: &AgentLoopConfig,
+    error: &AgentLoopError,
+) {
+    let reason = if signal.is_aborted() {
+        StopReason::Aborted
+    } else {
+        StopReason::Error
+    };
+    let mut assistant = provider_failure_message(config, error.to_string(), reason);
+    let _ = events
+        .emit(
+            AgentEvent::MessageStart {
+                message: Message::assistant(assistant.clone()),
+            },
+            signal.clone(),
+        )
+        .await;
+    if let Ok(AgentEvent::MessageEnd {
+        message: Message::Assistant(message),
+    }) = events
+        .emit(
+            AgentEvent::MessageEnd {
+                message: Message::assistant(assistant.clone()),
+            },
+            signal.clone(),
+        )
+        .await
+    {
+        assistant = Arc::unwrap_or_clone(message);
+    }
+    let _ = events
+        .emit(
+            AgentEvent::TurnEnd {
+                message: assistant.clone(),
+                tool_results: Vec::new(),
+            },
+            signal.clone(),
+        )
+        .await;
+    let _ = events
+        .emit(
+            AgentEvent::AgentEnd {
+                messages: vec![Message::assistant(assistant)],
+            },
+            signal.clone(),
+        )
+        .await;
 }
 
 async fn emit_message_pair(

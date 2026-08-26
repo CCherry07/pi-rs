@@ -17,7 +17,12 @@ pub use pi_core::ProviderPlugin;
 #[cfg(feature = "session")]
 pub use pi_session::SessionPlugin;
 
-pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 1;
+/// Version of the trusted Rust-ABI plugin contract.
+///
+/// ABI 2 adds the shared `AgentContext` to tool hooks and
+/// `added_tool_names` to tool results. Hosts must reject ABI 1 artifacts
+/// before resolving their Rust-ABI constructors.
+pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 2;
 pub const BUILD_FINGERPRINT: &str = env!("PI_PLUGIN_BUILD_FINGERPRINT");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -89,15 +94,15 @@ pub type PluginDescriptorFnV1 = unsafe extern "C" fn() -> *const NativePluginDes
 pub type PluginOptionsSchemaFnV1 = unsafe fn() -> String;
 
 #[cfg(feature = "agent")]
-pub type AgentPluginCreateV1 =
+pub type AgentPluginCreateV2 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn AgentPlugin>, PluginLoadError>;
 
 #[cfg(feature = "provider")]
-pub type ProviderPluginCreateV1 =
+pub type ProviderPluginCreateV2 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn ProviderPlugin>, PluginLoadError>;
 
 #[cfg(feature = "session")]
-pub type SessionPluginCreateV1 =
+pub type SessionPluginCreateV2 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn SessionPlugin>, PluginLoadError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,7 +229,7 @@ pub mod agent {
         };
         pub use async_trait::async_trait;
         pub use pi_core::{
-            AgentEndEvent, AgentPlugin, AgentStartEvent, BeforeAgentStartEvent,
+            AgentContext, AgentEndEvent, AgentPlugin, AgentStartEvent, BeforeAgentStartEvent,
             BeforeAgentStartPatch, Command, CommandContext, CommandError, CommandOutcome,
             CommandSpec, ContentBlock, ContextEvent, ContextPatch, InputContext, InputEvent,
             InputPatch, MessageEndEvent, MessageStartEvent, MessageUpdateEvent, PluginContext,

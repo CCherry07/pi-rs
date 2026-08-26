@@ -1,6 +1,6 @@
 use pi_core::{
-    AssistantMessage, AssistantMessageEvent, ContentBlock, ResponseMetadata, StopReason,
-    StreamEvent, TextContent, ThinkingContent, ToolCall, Usage,
+    AssistantMessage, AssistantMessageEvent, ContentBlock, ContentMetadata, ResponseMetadata,
+    StopReason, StreamEvent, TextContent, ThinkingContent, ToolCall, Usage,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -43,6 +43,7 @@ enum PartialBlock {
     Thinking {
         text: String,
         signature: Option<String>,
+        redacted: Option<bool>,
         ended: bool,
     },
     ToolCall {
@@ -50,6 +51,7 @@ enum PartialBlock {
         name: String,
         raw_arguments: String,
         signature: Option<String>,
+        namespace: Option<String>,
         ended: bool,
     },
 }
@@ -93,6 +95,51 @@ impl StreamAssembler {
                 Ok(StreamUpdate {
                     started: true,
                     message_event: Some(AssistantMessageEvent::Start),
+                })
+            }
+            StreamEvent::Metadata { patch } => {
+                let metadata = self.metadata.as_mut().ok_or(AssemblerError::MissingStart)?;
+                if let Some(response_model) = patch.response_model {
+                    metadata.response_model = Some(response_model);
+                }
+                if let Some(response_id) = patch.response_id {
+                    metadata.response_id = Some(response_id);
+                }
+                if let Some(diagnostics) = patch.diagnostics {
+                    metadata.diagnostics = Some(diagnostics);
+                }
+                if let Some(deferred) = patch.deferred {
+                    metadata.deferred = Some(deferred);
+                }
+                if let Some(raw_stop_reason) = patch.raw_stop_reason {
+                    metadata.raw_stop_reason = Some(raw_stop_reason);
+                }
+                if let Some(end_turn) = patch.end_turn {
+                    metadata.end_turn = Some(end_turn);
+                }
+                Ok(StreamUpdate {
+                    started: false,
+                    message_event: None,
+                })
+            }
+            StreamEvent::ContentMetadata {
+                content_index,
+                metadata,
+            } => {
+                match (self.block_mut(content_index)?, metadata) {
+                    (
+                        PartialBlock::Thinking { redacted, .. },
+                        ContentMetadata::Thinking { redacted: value },
+                    ) => *redacted = value,
+                    (
+                        PartialBlock::ToolCall { namespace, .. },
+                        ContentMetadata::ToolCall { namespace: value },
+                    ) => *namespace = value,
+                    _ => return Err(AssemblerError::BlockTypeMismatch(content_index)),
+                }
+                Ok(StreamUpdate {
+                    started: false,
+                    message_event: None,
                 })
             }
             StreamEvent::TextStart { content_index } => {
@@ -146,6 +193,7 @@ impl StreamAssembler {
                     PartialBlock::Thinking {
                         text: String::new(),
                         signature: None,
+                        redacted: None,
                         ended: false,
                     },
                 )?;
@@ -196,6 +244,7 @@ impl StreamAssembler {
                         name,
                         raw_arguments: String::new(),
                         signature: None,
+                        namespace: None,
                         ended: false,
                     },
                 )?;
@@ -267,7 +316,7 @@ impl StreamAssembler {
         self.build_message(false)
     }
 
-    pub fn finish(self) -> Result<AssistantMessage, AssemblerError> {
+    pub fn finish(&self) -> Result<AssistantMessage, AssemblerError> {
         self.build_message(true)
     }
 
@@ -276,6 +325,12 @@ impl StreamAssembler {
         reason: StopReason,
         message: impl Into<String>,
     ) -> AssistantMessage {
+        let error_message = message.into();
+        if let Ok(mut partial) = self.snapshot() {
+            partial.stop_reason = reason;
+            partial.error_message = Some(error_message);
+            return partial;
+        }
         let metadata = self.metadata.clone().unwrap_or_else(|| {
             ResponseMetadata::new("unknown".into(), "unknown".into(), "unknown", 0)
         });
@@ -284,15 +339,15 @@ impl StreamAssembler {
             api: metadata.api,
             provider: metadata.provider,
             model: metadata.model,
-            response_model: None,
-            response_id: None,
-            diagnostics: None,
+            response_model: metadata.response_model,
+            response_id: metadata.response_id,
+            diagnostics: metadata.diagnostics,
             usage: Usage::default(),
             stop_reason: reason,
-            error_message: Some(message.into()),
-            deferred: None,
-            raw_stop_reason: None,
-            end_turn: None,
+            error_message: Some(error_message),
+            deferred: metadata.deferred,
+            raw_stop_reason: metadata.raw_stop_reason,
+            end_turn: metadata.end_turn,
             timestamp_ms: metadata.timestamp_ms,
         }
     }
@@ -358,6 +413,7 @@ impl StreamAssembler {
                 PartialBlock::Thinking {
                     text,
                     signature,
+                    redacted,
                     ended,
                 } => {
                     if require_finished && !ended {
@@ -366,7 +422,7 @@ impl StreamAssembler {
                     content.push(ContentBlock::Thinking(ThinkingContent {
                         thinking: text.clone(),
                         thinking_signature: signature.clone(),
-                        redacted: None,
+                        redacted: *redacted,
                     }));
                 }
                 PartialBlock::ToolCall {
@@ -374,6 +430,7 @@ impl StreamAssembler {
                     name,
                     raw_arguments,
                     signature,
+                    namespace,
                     ended,
                 } => {
                     if require_finished && !ended {
@@ -399,7 +456,7 @@ impl StreamAssembler {
                         name: name.clone(),
                         arguments,
                         thought_signature: signature.clone(),
-                        namespace: None,
+                        namespace: namespace.clone(),
                     }));
                 }
             }
@@ -410,9 +467,9 @@ impl StreamAssembler {
             api: metadata.api,
             provider: metadata.provider,
             model: metadata.model,
-            response_model: None,
-            response_id: None,
-            diagnostics: None,
+            response_model: metadata.response_model,
+            response_id: metadata.response_id,
+            diagnostics: metadata.diagnostics,
             usage: self.usage.clone(),
             stop_reason: self.stop_reason.unwrap_or(if require_finished {
                 StopReason::Stop
@@ -420,9 +477,9 @@ impl StreamAssembler {
                 StopReason::Pending
             }),
             error_message: None,
-            deferred: None,
-            raw_stop_reason: None,
-            end_turn: None,
+            deferred: metadata.deferred,
+            raw_stop_reason: metadata.raw_stop_reason,
+            end_turn: metadata.end_turn,
             timestamp_ms: metadata.timestamp_ms,
         })
     }
@@ -431,7 +488,9 @@ impl StreamAssembler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_core::{ModelId, ProviderId, ToolCallId};
+    use pi_core::{
+        ContentMetadata, DeferredHandle, ModelId, ProviderId, ResponseMetadataPatch, ToolCallId,
+    };
 
     fn metadata() -> ResponseMetadata {
         ResponseMetadata::new(
@@ -494,6 +553,199 @@ mod tests {
         let message = assembler.finish().unwrap();
         assert_eq!(message.content.len(), 2);
         assert_eq!(message.tool_calls()[0].arguments["text"], "ok");
+    }
+
+    #[test]
+    fn preserves_thinking_content_and_signature_before_text() {
+        let mut assembler = StreamAssembler::new();
+        for event in [
+            StreamEvent::Start {
+                metadata: metadata(),
+            },
+            StreamEvent::ThinkingStart { content_index: 0 },
+            StreamEvent::ThinkingDelta {
+                content_index: 0,
+                delta: "step by step".to_string(),
+            },
+            StreamEvent::ThinkingEnd {
+                content_index: 0,
+                thinking_signature: Some("opaque".to_string()),
+            },
+            StreamEvent::TextStart { content_index: 1 },
+            StreamEvent::TextDelta {
+                content_index: 1,
+                delta: "answer".to_string(),
+            },
+            StreamEvent::TextEnd {
+                content_index: 1,
+                text_signature: Some("text-signature".to_string()),
+            },
+            StreamEvent::Done {
+                reason: StopReason::Stop,
+                usage: Usage::default(),
+            },
+        ] {
+            assembler.push(event).unwrap();
+        }
+
+        let message = assembler.finish().unwrap();
+        assert!(matches!(
+            &message.content[0],
+            ContentBlock::Thinking(thinking)
+                if thinking.thinking == "step by step"
+                    && thinking.thinking_signature.as_deref() == Some("opaque")
+        ));
+        assert!(matches!(
+            &message.content[1],
+            ContentBlock::Text(text)
+                if text.text == "answer"
+                    && text.text_signature.as_deref() == Some("text-signature")
+        ));
+    }
+
+    #[test]
+    fn preserves_response_and_content_metadata() {
+        let mut assembler = StreamAssembler::new();
+        assembler
+            .push(StreamEvent::Start {
+                metadata: metadata(),
+            })
+            .unwrap();
+        assembler
+            .push(StreamEvent::Metadata {
+                patch: ResponseMetadataPatch {
+                    response_model: Some("resolved-model".to_string()),
+                    response_id: Some("response-1".to_string()),
+                    diagnostics: Some(vec![serde_json::json!({"code":"retry"})]),
+                    deferred: Some(DeferredHandle {
+                        provider: ProviderId::new("scripted"),
+                        model_id: ModelId::new("test"),
+                        api: "scripted".to_string(),
+                        id: "deferred-1".to_string(),
+                        expires_at: Some(10),
+                        poll_after_ms: Some(20),
+                        data: Some(serde_json::json!({"cursor":"next"})),
+                    }),
+                    raw_stop_reason: Some("completed".to_string()),
+                    end_turn: Some(true),
+                },
+            })
+            .unwrap();
+        assembler
+            .push(StreamEvent::ThinkingStart { content_index: 0 })
+            .unwrap();
+        assembler
+            .push(StreamEvent::ContentMetadata {
+                content_index: 0,
+                metadata: ContentMetadata::Thinking {
+                    redacted: Some(true),
+                },
+            })
+            .unwrap();
+        assembler
+            .push(StreamEvent::ThinkingDelta {
+                content_index: 0,
+                delta: "[Reasoning redacted]".to_string(),
+            })
+            .unwrap();
+        assembler
+            .push(StreamEvent::ThinkingEnd {
+                content_index: 0,
+                thinking_signature: Some("opaque".to_string()),
+            })
+            .unwrap();
+        assembler
+            .push(StreamEvent::ToolCallStart {
+                content_index: 1,
+                id: ToolCallId::new("call-1"),
+                name: "echo".to_string(),
+            })
+            .unwrap();
+        assembler
+            .push(StreamEvent::ContentMetadata {
+                content_index: 1,
+                metadata: ContentMetadata::ToolCall {
+                    namespace: Some("dynamic".to_string()),
+                },
+            })
+            .unwrap();
+        assembler
+            .push(StreamEvent::ToolCallDelta {
+                content_index: 1,
+                arguments_delta: "{}".to_string(),
+            })
+            .unwrap();
+        assembler
+            .push(StreamEvent::ToolCallEnd {
+                content_index: 1,
+                thought_signature: None,
+            })
+            .unwrap();
+        assembler
+            .push(StreamEvent::Done {
+                reason: StopReason::Deferred,
+                usage: Usage::default(),
+            })
+            .unwrap();
+
+        let message = assembler.finish().unwrap();
+        assert_eq!(message.response_model.as_deref(), Some("resolved-model"));
+        assert_eq!(message.response_id.as_deref(), Some("response-1"));
+        assert_eq!(
+            message.diagnostics,
+            Some(vec![serde_json::json!({"code":"retry"})])
+        );
+        assert_eq!(message.deferred.as_ref().unwrap().id, "deferred-1");
+        assert_eq!(message.raw_stop_reason.as_deref(), Some("completed"));
+        assert_eq!(message.end_turn, Some(true));
+        assert!(matches!(
+            &message.content[0],
+            ContentBlock::Thinking(thinking) if thinking.redacted == Some(true)
+        ));
+        assert_eq!(
+            message.tool_calls()[0].namespace.as_deref(),
+            Some("dynamic")
+        );
+    }
+
+    #[test]
+    fn failure_message_preserves_accumulated_partial_content_and_metadata() {
+        let mut assembler = StreamAssembler::new();
+        assembler
+            .push(StreamEvent::Start {
+                metadata: metadata(),
+            })
+            .unwrap();
+        assembler
+            .push(StreamEvent::Metadata {
+                patch: ResponseMetadataPatch {
+                    response_id: Some("response-before-failure".to_string()),
+                    raw_stop_reason: Some("failed".to_string()),
+                    ..ResponseMetadataPatch::default()
+                },
+            })
+            .unwrap();
+        assembler
+            .push(StreamEvent::TextStart { content_index: 0 })
+            .unwrap();
+        assembler
+            .push(StreamEvent::TextDelta {
+                content_index: 0,
+                delta: "kept partial".to_string(),
+            })
+            .unwrap();
+
+        let message = assembler.failure_message(StopReason::Error, "network failed");
+        assert!(matches!(
+            &message.content[0],
+            ContentBlock::Text(text) if text.text == "kept partial"
+        ));
+        assert_eq!(
+            message.response_id.as_deref(),
+            Some("response-before-failure")
+        );
+        assert_eq!(message.raw_stop_reason.as_deref(), Some("failed"));
+        assert_eq!(message.error_message.as_deref(), Some("network failed"));
     }
 
     #[test]

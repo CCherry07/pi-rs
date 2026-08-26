@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod abort;
+mod agent_context;
 mod command;
 mod error;
 mod events;
@@ -17,6 +18,7 @@ mod tool;
 mod usage;
 
 pub use abort::{AbortError, AbortHandle, AbortSignal};
+pub use agent_context::AgentContext;
 pub use command::{Command, CommandContext, CommandError, CommandOutcome, CommandSpec};
 pub use error::{CoreError, Result};
 pub use events::{AgentEvent, AssistantMessageEvent};
@@ -47,7 +49,7 @@ pub use provider_plugin::{
     ProviderRegisterContext,
 };
 pub use registry::{FrozenRegistries, RegistriesBuilder};
-pub use stream::StreamEvent;
+pub use stream::{ContentMetadata, ResponseMetadataPatch, StreamEvent};
 pub use tool::{
     Tool, ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate,
     ToolUpdateSink,

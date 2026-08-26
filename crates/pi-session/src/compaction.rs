@@ -173,6 +173,21 @@ pub struct CompactionCompletion {
     pub usage: Usage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactionModelCapabilities {
+    pub reasoning: bool,
+    pub max_output_tokens: Option<u64>,
+}
+
+impl Default for CompactionModelCapabilities {
+    fn default() -> Self {
+        Self {
+            reasoning: true,
+            max_output_tokens: None,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CompactionError {
     #[error("compaction aborted: {0}")]
@@ -183,6 +198,10 @@ pub enum CompactionError {
 
 #[async_trait]
 pub trait CompactionCompleter: Send + Sync {
+    fn model_capabilities(&self) -> CompactionModelCapabilities {
+        CompactionModelCapabilities::default()
+    }
+
     async fn complete_compaction(
         &self,
         request: CompactionCompletionRequest,
@@ -192,6 +211,20 @@ pub trait CompactionCompleter: Send + Sync {
 
 #[async_trait]
 impl CompactionCompleter for PiRuntime {
+    fn model_capabilities(&self) -> CompactionModelCapabilities {
+        let state = self.agent().state();
+        self.model(&state.provider_id, &state.model_id).map_or(
+            CompactionModelCapabilities {
+                reasoning: false,
+                max_output_tokens: None,
+            },
+            |model| CompactionModelCapabilities {
+                reasoning: model.reasoning,
+                max_output_tokens: (model.max_tokens > 0).then_some(model.max_tokens),
+            },
+        )
+    }
+
     async fn complete_compaction(
         &self,
         request: CompactionCompletionRequest,
@@ -628,12 +661,18 @@ async fn generate_summary(
         prompt.push_str("\n</previous-summary>\n\n");
     }
     prompt.push_str(&base_prompt);
+    let capabilities = completer.model_capabilities();
+    let max_output_tokens = clamp_summary_tokens(
+        preparation.settings.reserve_tokens.saturating_mul(4) / 5,
+        capabilities,
+    );
+    let thinking_level = compaction_thinking_level(thinking_level, capabilities);
     completer
         .complete_compaction(
             CompactionCompletionRequest {
                 system_prompt: SUMMARIZATION_SYSTEM_PROMPT.to_string(),
                 prompt,
-                max_output_tokens: preparation.settings.reserve_tokens.saturating_mul(4) / 5,
+                max_output_tokens,
                 thinking_level,
             },
             signal,
@@ -652,17 +691,37 @@ async fn generate_turn_prefix_summary(
         "<conversation>\n{}\n</conversation>\n\n{TURN_PREFIX_SUMMARIZATION_PROMPT}",
         serialize_conversation(messages)
     );
+    let capabilities = completer.model_capabilities();
+    let max_output_tokens = clamp_summary_tokens(reserve_tokens / 2, capabilities);
+    let thinking_level = compaction_thinking_level(thinking_level, capabilities);
     completer
         .complete_compaction(
             CompactionCompletionRequest {
                 system_prompt: SUMMARIZATION_SYSTEM_PROMPT.to_string(),
                 prompt,
-                max_output_tokens: reserve_tokens / 2,
+                max_output_tokens,
                 thinking_level,
             },
             signal,
         )
         .await
+}
+
+fn clamp_summary_tokens(requested: u64, capabilities: CompactionModelCapabilities) -> u64 {
+    capabilities
+        .max_output_tokens
+        .map_or(requested, |maximum| requested.min(maximum))
+}
+
+fn compaction_thinking_level(
+    requested: ThinkingLevel,
+    capabilities: CompactionModelCapabilities,
+) -> ThinkingLevel {
+    if capabilities.reasoning {
+        requested
+    } else {
+        ThinkingLevel::Off
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1043,6 +1102,45 @@ mod tests {
     }
 
     #[test]
+    fn token_totals_and_thresholds_match_pi_boundaries() {
+        assert_eq!(calculate_context_tokens(&usage(42)), 42);
+        assert_eq!(
+            calculate_context_tokens(&Usage {
+                input: 10,
+                output: 20,
+                cache_read: 30,
+                cache_write: 40,
+                total_tokens: 0,
+                ..Usage::default()
+            }),
+            100
+        );
+        let settings = CompactionSettings {
+            enabled: true,
+            reserve_tokens: 200,
+            keep_recent_tokens: 50,
+        };
+        assert!(!should_compact(800, 1_000, settings));
+        assert!(should_compact(801, 1_000, settings));
+        assert!(!should_compact(
+            u64::MAX,
+            1_000,
+            CompactionSettings {
+                enabled: false,
+                ..settings
+            }
+        ));
+        assert!(should_compact(
+            1,
+            100,
+            CompactionSettings {
+                reserve_tokens: 200,
+                ..settings
+            }
+        ));
+    }
+
+    #[test]
     fn cut_point_never_starts_at_a_tool_result() {
         let entries = vec![
             message_record(0, user("request")),
@@ -1107,6 +1205,36 @@ mod tests {
     }
 
     #[test]
+    fn preparation_requires_compactable_history_after_the_latest_compaction() {
+        assert!(
+            prepare_compaction(
+                &[],
+                CompactionSettings::default(),
+                &SessionContextBuildOptions::default()
+            )
+            .is_none()
+        );
+        let latest = record(
+            0,
+            SessionEntry::Compaction(CompactionEntry {
+                summary: "done".to_string(),
+                retained_tail: Vec::new(),
+                tokens_before: 10,
+                details: None,
+                usage: None,
+            }),
+        );
+        assert!(
+            prepare_compaction(
+                &[latest],
+                CompactionSettings::default(),
+                &SessionContextBuildOptions::default()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn retained_pre_compaction_usage_is_not_treated_as_current_usage() {
         let retained = assistant("small retained answer", 100_000);
         let entries = vec![record(
@@ -1144,10 +1272,114 @@ mod tests {
 
     struct FakeCompleter {
         prompts: Mutex<Vec<CompactionCompletionRequest>>,
+        capabilities: CompactionModelCapabilities,
+    }
+
+    #[tokio::test]
+    async fn summary_request_carries_previous_summary_custom_focus_and_reasoning() {
+        let preparation = CompactionPreparation {
+            messages_to_summarize: vec![user("new work")],
+            turn_prefix_messages: Vec::new(),
+            retained_tail: vec![assistant("tail", 10)],
+            is_split_turn: false,
+            tokens_before: 500,
+            previous_summary: Some("old summary".to_string()),
+            file_ops: FileOperations::default(),
+            settings: CompactionSettings {
+                reserve_tokens: 100,
+                keep_recent_tokens: 20,
+                enabled: true,
+            },
+        };
+        let completer = FakeCompleter {
+            prompts: Mutex::new(Vec::new()),
+            capabilities: CompactionModelCapabilities::default(),
+        };
+        let (_, signal) = pi_core::AbortHandle::new();
+
+        let result = compact(
+            &preparation,
+            &completer,
+            Some("preserve exact errors"),
+            ThinkingLevel::High,
+            signal,
+        )
+        .await
+        .unwrap();
+        let requests = completer.prompts.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].thinking_level, ThinkingLevel::High);
+        assert_eq!(requests[0].max_output_tokens, 80);
+        assert_eq!(requests[0].system_prompt, SUMMARIZATION_SYSTEM_PROMPT);
+        assert!(
+            requests[0]
+                .prompt
+                .contains("<previous-summary>\nold summary")
+        );
+        assert!(
+            requests[0]
+                .prompt
+                .contains("Additional focus: preserve exact errors")
+        );
+        assert_eq!(result.summary, "## Goal\nKeep working");
+        assert_eq!(result.retained_tail, preparation.retained_tail);
+    }
+
+    struct FailingCompleter {
+        aborted: bool,
+    }
+
+    #[async_trait]
+    impl CompactionCompleter for FailingCompleter {
+        async fn complete_compaction(
+            &self,
+            _request: CompactionCompletionRequest,
+            _signal: AbortSignal,
+        ) -> Result<CompactionCompletion, CompactionError> {
+            if self.aborted {
+                Err(CompactionError::Aborted("cancelled fixture".to_string()))
+            } else {
+                Err(CompactionError::SummarizationFailed(
+                    "failed fixture".to_string(),
+                ))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn summary_failures_and_aborts_are_returned_without_partial_entries() {
+        let preparation = CompactionPreparation {
+            messages_to_summarize: vec![user("work")],
+            turn_prefix_messages: Vec::new(),
+            retained_tail: Vec::new(),
+            is_split_turn: false,
+            tokens_before: 10,
+            previous_summary: None,
+            file_ops: FileOperations::default(),
+            settings: CompactionSettings::default(),
+        };
+        for (aborted, expected) in [(false, "failed fixture"), (true, "cancelled fixture")] {
+            let (_, signal) = pi_core::AbortHandle::new();
+            let error = compact(
+                &preparation,
+                &FailingCompleter { aborted },
+                None,
+                ThinkingLevel::Off,
+                signal,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains(expected));
+            assert_eq!(matches!(error, CompactionError::Aborted(_)), aborted);
+        }
     }
 
     #[async_trait]
     impl CompactionCompleter for FakeCompleter {
+        fn model_capabilities(&self) -> CompactionModelCapabilities {
+            self.capabilities
+        }
+
         async fn complete_compaction(
             &self,
             request: CompactionCompletionRequest,
@@ -1159,6 +1391,49 @@ mod tests {
                 usage: usage(25),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn summaries_respect_model_reasoning_and_output_capabilities() {
+        let preparation = CompactionPreparation {
+            messages_to_summarize: vec![user("history")],
+            turn_prefix_messages: vec![user("large turn")],
+            retained_tail: vec![assistant("tail", 10)],
+            is_split_turn: true,
+            tokens_before: 600_000,
+            previous_summary: None,
+            file_ops: FileOperations::default(),
+            settings: CompactionSettings {
+                reserve_tokens: 500_000,
+                keep_recent_tokens: 20_000,
+                enabled: true,
+            },
+        };
+        let completer = FakeCompleter {
+            prompts: Mutex::new(Vec::new()),
+            capabilities: CompactionModelCapabilities {
+                reasoning: false,
+                max_output_tokens: Some(128_000),
+            },
+        };
+        let (_, signal) = pi_core::AbortHandle::new();
+
+        compact(&preparation, &completer, None, ThinkingLevel::High, signal)
+            .await
+            .unwrap();
+
+        let requests = completer.prompts.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.max_output_tokens == 128_000)
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.thinking_level == ThinkingLevel::Off)
+        );
     }
 
     #[tokio::test]
@@ -1189,6 +1464,7 @@ mod tests {
         };
         let completer = Arc::new(FakeCompleter {
             prompts: Mutex::new(Vec::new()),
+            capabilities: CompactionModelCapabilities::default(),
         });
         let (_, signal) = pi_core::AbortHandle::new();
         let result = compact(

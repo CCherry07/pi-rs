@@ -17,8 +17,10 @@ members = [
     "crates/pi-js-package-manager",
     "crates/pi-js-plugin",
     "crates/pi-test-support",
+    "crates/pi-telemetry",
     "bindings/pi-napi",
     "e2e",
+    "plugins/features/pi-plugin-prompts",
     "plugins/features/pi-plugin-skills",
     "plugins/providers/pi-plugin-models",
     "plugins/providers/pi-plugin-anthropic",
@@ -73,6 +75,8 @@ pi-plugin-manager = { path = "crates/pi-plugin-manager" }
 pi-js-package-manager = { path = "crates/pi-js-package-manager" }
 pi-js-plugin = { path = "crates/pi-js-plugin" }
 pi-test-support = { path = "crates/pi-test-support" }
+pi-telemetry = { path = "crates/pi-telemetry" }
+pi-plugin-prompts = { path = "plugins/features/pi-plugin-prompts" }
 pi-plugin-skills = { path = "plugins/features/pi-plugin-skills" }
 pi-plugin-models = { path = "plugins/providers/pi-plugin-models" }
 pi-plugin-anthropic = { path = "plugins/providers/pi-plugin-anthropic" }

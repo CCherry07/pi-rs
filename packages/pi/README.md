@@ -435,7 +435,10 @@ Useful package commands:
 | `npm start -- [pi arguments]`  | Run the TypeScript launcher against the local binding     |
 | `npm run check`                | Type-check the Node host without emitting files           |
 | `npm test`                     | Test discovery, loading, release logic, and host behavior |
-| `npm run test:native`          | Smoke-test the real Node → NAPI → Rust callback path      |
+| `npm run test:bridge`          | Test the focused Node → NAPI → Rust callback seam         |
+| `npm run test:native`          | Run bridge checks plus the Node/NAPI product E2E          |
+| `npm run test:e2e`             | Run prepared standalone and Node/NAPI product scenarios   |
+| `npm run e2e`                  | Build artifacts and run the complete deterministic stack |
 | `npm run build`                | Emit publishable JavaScript and declarations to `dist/`   |
 | `npm run build:native`         | Build a debug native binding for the current host         |
 | `npm run build:native:release` | Build a release native binding for the current host       |
@@ -459,6 +462,7 @@ Before submitting a change, run both Node checks and the workspace quality gates
 cd packages/pi
 npm run check
 npm test
+npm run e2e
 
 cd ../..
 

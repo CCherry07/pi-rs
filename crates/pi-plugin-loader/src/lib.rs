@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use libloading::{Library, Symbol};
 use pi_core::{AgentPlugin, ProviderPlugin};
 use pi_plugin_sdk::{
-    AgentPluginCreateV1, BUILD_FINGERPRINT, NATIVE_PLUGIN_ABI_VERSION, NativePluginKind,
+    AgentPluginCreateV2, BUILD_FINGERPRINT, NATIVE_PLUGIN_ABI_VERSION, NativePluginKind,
     PluginDescriptorFnV1, PluginLoadContext, PluginOptionsValue, PluginScope,
-    ProviderPluginCreateV1, SessionPluginCreateV1,
+    ProviderPluginCreateV2, SessionPluginCreateV2,
 };
 use pi_runtime::PiRuntimeBuilder;
 use pi_session::{SessionPlugin, SessionPlugins};
@@ -19,9 +19,9 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 const DESCRIPTOR_SYMBOL: &[u8] = b"pi_plugin_descriptor_v1\0";
-const AGENT_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_agent_plugin_create_v1\0";
-const PROVIDER_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_provider_plugin_create_v1\0";
-const SESSION_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_session_plugin_create_v1\0";
+const AGENT_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_agent_plugin_create_v2\0";
+const PROVIDER_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_provider_plugin_create_v2\0";
+const SESSION_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_session_plugin_create_v2\0";
 const MANIFEST_FILE_NAME: &str = "pi-plugin.toml";
 
 #[derive(Debug, thiserror::Error)]
@@ -282,7 +282,7 @@ impl FactoryCommon {
 #[derive(Clone)]
 pub struct NativeAgentPluginFactory {
     common: Arc<FactoryCommon>,
-    create: AgentPluginCreateV1,
+    create: AgentPluginCreateV2,
 }
 
 impl NativeAgentPluginFactory {
@@ -303,7 +303,7 @@ impl NativeAgentPluginFactory {
 #[derive(Clone)]
 pub struct NativeProviderPluginFactory {
     common: Arc<FactoryCommon>,
-    create: ProviderPluginCreateV1,
+    create: ProviderPluginCreateV2,
 }
 
 impl NativeProviderPluginFactory {
@@ -324,7 +324,7 @@ impl NativeProviderPluginFactory {
 #[derive(Clone)]
 pub struct NativeSessionPluginFactory {
     common: Arc<FactoryCommon>,
-    create: SessionPluginCreateV1,
+    create: SessionPluginCreateV2,
 }
 
 impl NativeSessionPluginFactory {
@@ -483,13 +483,7 @@ fn load_library(
         // descriptor which remains valid while the library is pinned.
         unsafe { *pointer }
     };
-    if raw_descriptor.abi_version != NATIVE_PLUGIN_ABI_VERSION {
-        return Err(NativePluginError::AbiMismatch {
-            path: package.artifact,
-            expected: NATIVE_PLUGIN_ABI_VERSION,
-            actual: raw_descriptor.abi_version,
-        });
-    }
+    verify_abi_version(&package.artifact, raw_descriptor.abi_version)?;
     let kind = NativePluginKind::from_u32(raw_descriptor.kind).ok_or_else(|| {
         NativePluginError::InvalidDescriptor {
             path: package.artifact.clone(),
@@ -540,11 +534,11 @@ fn load_library(
             // SAFETY: The exact build fingerprint was verified before resolving
             // this Rust-ABI constructor, and the library remains pinned.
             let create = unsafe {
-                load_symbol::<AgentPluginCreateV1>(
+                load_symbol::<AgentPluginCreateV2>(
                     &pinned._library,
                     &package.artifact,
                     AGENT_CONSTRUCTOR_SYMBOL,
-                    "pi_agent_plugin_create_v1",
+                    "pi_agent_plugin_create_v2",
                 )?
             };
             Ok(LoadedFactory::Agent(NativeAgentPluginFactory {
@@ -555,11 +549,11 @@ fn load_library(
         NativePluginKind::Provider => {
             // SAFETY: See the agent constructor branch above.
             let create = unsafe {
-                load_symbol::<ProviderPluginCreateV1>(
+                load_symbol::<ProviderPluginCreateV2>(
                     &pinned._library,
                     &package.artifact,
                     PROVIDER_CONSTRUCTOR_SYMBOL,
-                    "pi_provider_plugin_create_v1",
+                    "pi_provider_plugin_create_v2",
                 )?
             };
             Ok(LoadedFactory::Provider(NativeProviderPluginFactory {
@@ -570,11 +564,11 @@ fn load_library(
         NativePluginKind::Session => {
             // SAFETY: See the agent constructor branch above.
             let create = unsafe {
-                load_symbol::<SessionPluginCreateV1>(
+                load_symbol::<SessionPluginCreateV2>(
                     &pinned._library,
                     &package.artifact,
                     SESSION_CONSTRUCTOR_SYMBOL,
-                    "pi_session_plugin_create_v1",
+                    "pi_session_plugin_create_v2",
                 )?
             };
             Ok(LoadedFactory::Session(NativeSessionPluginFactory {
@@ -582,6 +576,18 @@ fn load_library(
                 create,
             }))
         }
+    }
+}
+
+fn verify_abi_version(path: &Path, actual: u32) -> Result<(), NativePluginError> {
+    if actual == NATIVE_PLUGIN_ABI_VERSION {
+        Ok(())
+    } else {
+        Err(NativePluginError::AbiMismatch {
+            path: path.to_path_buf(),
+            expected: NATIVE_PLUGIN_ABI_VERSION,
+            actual,
+        })
     }
 }
 
@@ -829,6 +835,21 @@ fn create_dir_all(path: &Path) -> Result<(), NativePluginError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_pre_context_agent_hook_abi_before_loading_a_constructor() {
+        let path = Path::new("legacy-plugin.dylib");
+
+        assert!(matches!(
+            verify_abi_version(path, 1),
+            Err(NativePluginError::AbiMismatch {
+                expected: 2,
+                actual: 1,
+                ..
+            })
+        ));
+        assert!(verify_abi_version(path, NATIVE_PLUGIN_ABI_VERSION).is_ok());
+    }
 
     #[test]
     fn missing_discovery_root_is_empty() {

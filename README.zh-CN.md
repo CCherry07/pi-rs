@@ -267,18 +267,32 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 | `packages/pi`                               | Node 启动层、Pi extension 发现、Jiti loader 和 callback generations |
 | `plugins/`                                  | Skills、Provider catalog 和独立生产工具插件                         |
 | `legacy/pi`                                 | 当前 TypeScript Pi 行为参照                                         |
-| `e2e`                                       | deterministic 全链路测试与示例项目                                  |
+| `e2e`                                       | runtime acceptance、黑盒产品 E2E 与示例项目                          |
 
 依赖保持向内：核心 contracts 不拥有终端、文件发现、会话存储或厂商路由策略。详细设计、
 hook 顺序和持久化不变量见 [docs/architecture.md](docs/architecture.md)。
 
 ## 开发与验证
 
+Pi 核心行为的测试子集及其与 TypeScript oracle 的映射见
+[docs/pi-core-test-matrix.md](docs/pi-core-test-matrix.md)。聚焦运行入口是：
+
+```bash
+./scripts/test-core.sh
+```
+
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 git diff --check
+```
+
+下面的统一入口会构建 standalone CLI 与 Node/NAPI，并运行完整的 deterministic 黑盒产品 E2E：
+
+```bash
+npm ci --prefix packages/pi
+npm --prefix packages/pi run e2e
 ```
 
 真实 Provider 测试不要把 API key 写入源码、日志或 fixtures。默认验证路径使用

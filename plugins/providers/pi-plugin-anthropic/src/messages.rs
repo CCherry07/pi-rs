@@ -7,8 +7,9 @@ use std::collections::{HashMap, HashSet};
 use async_stream::stream;
 use futures::StreamExt;
 use pi_core::{
-    AbortSignal, ContentBlock, Message, ProviderError, ProviderId, ProviderRequest, ProviderStream,
-    ResponseMetadata, StopReason, StreamEvent, ToolCallId, Usage,
+    AbortSignal, ContentBlock, ContentMetadata, Message, ProviderError, ProviderId,
+    ProviderRequest, ProviderStream, ResponseMetadata, ResponseMetadataPatch, StopReason,
+    StreamEvent, ToolCallId, Usage,
 };
 use pi_provider::{HttpBodyStream, SseDecoder, TransportError};
 use serde::Deserialize;
@@ -300,10 +301,10 @@ pub fn stream(
     let api = api.into();
     Box::pin(stream! {
         yield Ok(StreamEvent::Start {
-            metadata: ResponseMetadata::new(provider, model, api, now_ms()),
+            metadata: ResponseMetadata::new(provider, model.clone(), api, now_ms()),
         });
         let mut decoder = SseDecoder::new();
-        let mut state = StreamState::new(mode);
+        let mut state = StreamState::new(mode, &model);
         loop {
             let next = tokio::select! {
                 _ = signal.wait() => { yield Err(ProviderError::Aborted); return; }
@@ -486,10 +487,11 @@ struct StreamState {
     reason: Option<StopReason>,
     closed: bool,
     mode: AnthropicMode,
+    requested_model: String,
 }
 
 impl StreamState {
-    fn new(mode: AnthropicMode) -> Self {
+    fn new(mode: AnthropicMode, model: &pi_core::ModelId) -> Self {
         Self {
             blocks: HashMap::new(),
             next_index: 0,
@@ -497,6 +499,7 @@ impl StreamState {
             reason: None,
             closed: false,
             mode,
+            requested_model: model.as_str().to_string(),
         }
     }
 
@@ -510,7 +513,24 @@ impl StreamState {
             .and_then(Value::as_str)
             .unwrap_or_default()
         {
-            "message_start" => self.update_usage(value.pointer("/message/usage")),
+            "message_start" => {
+                self.update_usage(value.pointer("/message/usage"));
+                let patch = ResponseMetadataPatch {
+                    response_model: value
+                        .pointer("/message/model")
+                        .and_then(Value::as_str)
+                        .filter(|model| *model != self.requested_model.as_str())
+                        .map(str::to_string),
+                    response_id: value
+                        .pointer("/message/id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    ..ResponseMetadataPatch::default()
+                };
+                if patch.response_model.is_some() || patch.response_id.is_some() {
+                    events.push(StreamEvent::Metadata { patch });
+                }
+            }
             "content_block_start" => {
                 let wire_index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
                 let block = value.get("content_block").unwrap_or(&Value::Null);
@@ -531,6 +551,18 @@ impl StreamState {
                         events.push(StreamEvent::ThinkingStart {
                             content_index: index,
                         });
+                        if kind == "redacted_thinking" {
+                            events.push(StreamEvent::ContentMetadata {
+                                content_index: index,
+                                metadata: ContentMetadata::Thinking {
+                                    redacted: Some(true),
+                                },
+                            });
+                            events.push(StreamEvent::ThinkingDelta {
+                                content_index: index,
+                                delta: "[Reasoning redacted]".to_string(),
+                            });
+                        }
                         BlockKind::Thinking
                     }
                     "tool_use" => {
@@ -636,10 +668,15 @@ impl StreamState {
             }
             "message_delta" => {
                 self.update_usage(value.get("usage"));
-                self.reason = value
-                    .pointer("/delta/stop_reason")
-                    .and_then(Value::as_str)
-                    .map(map_stop_reason);
+                if let Some(reason) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                    self.reason = Some(map_stop_reason(reason));
+                    events.push(StreamEvent::Metadata {
+                        patch: ResponseMetadataPatch {
+                            raw_stop_reason: Some(reason.to_string()),
+                            ..ResponseMetadataPatch::default()
+                        },
+                    });
+                }
             }
             "message_stop" => {
                 self.closed = true;
@@ -802,5 +839,49 @@ mod tests {
         );
         assert_eq!(body["tools"][0]["name"], "Read");
         assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn stream_state_preserves_response_metadata_and_redacted_thinking() {
+        let mut state = StreamState::new(AnthropicMode::Standard, &ModelId::new("requested-model"));
+        let start = state
+            .consume(
+                r#"{"type":"message_start","message":{"id":"msg-1","model":"resolved-model","usage":{}}}"#,
+            )
+            .unwrap();
+        assert!(matches!(
+            &start[0],
+            StreamEvent::Metadata { patch }
+                if patch.response_id.as_deref() == Some("msg-1")
+                    && patch.response_model.as_deref() == Some("resolved-model")
+        ));
+
+        let redacted = state
+            .consume(
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"opaque"}}"#,
+            )
+            .unwrap();
+        assert!(redacted.iter().any(|event| matches!(
+            event,
+            StreamEvent::ContentMetadata {
+                metadata: ContentMetadata::Thinking {
+                    redacted: Some(true)
+                },
+                ..
+            }
+        )));
+        assert!(redacted.iter().any(|event| matches!(
+            event,
+            StreamEvent::ThinkingDelta { delta, .. } if delta == "[Reasoning redacted]"
+        )));
+
+        let delta = state
+            .consume(r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{}}"#)
+            .unwrap();
+        assert!(matches!(
+            &delta[0],
+            StreamEvent::Metadata { patch }
+                if patch.raw_stop_reason.as_deref() == Some("max_tokens")
+        ));
     }
 }

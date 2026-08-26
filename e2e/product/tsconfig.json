@@ -1,0 +1,9 @@
+{
+  "extends": "../../packages/pi/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../..",
+    "typeRoots": ["../../packages/pi/node_modules/@types"]
+  },
+  "include": ["./**/*.ts"]
+}

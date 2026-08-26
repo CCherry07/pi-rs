@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use pi_core::{ProviderError, StopReason, StreamEvent, ToolCallId, Usage};
+use pi_core::{
+    ModelId, ProviderError, ResponseMetadataPatch, StopReason, StreamEvent, ToolCallId, Usage,
+};
 use serde_json::Value;
 
 pub(crate) struct ChunkState {
@@ -14,6 +16,9 @@ pub(crate) struct ChunkState {
     closed: bool,
     supports_finish_reason: bool,
     saw_finish_reason: bool,
+    requested_model: Option<String>,
+    response_id: Option<String>,
+    response_model: Option<String>,
 }
 
 impl Default for ChunkState {
@@ -35,6 +40,16 @@ impl ChunkState {
             closed: false,
             supports_finish_reason,
             saw_finish_reason: false,
+            requested_model: None,
+            response_id: None,
+            response_model: None,
+        }
+    }
+
+    pub(crate) fn for_model(supports_finish_reason: bool, model: &ModelId) -> Self {
+        Self {
+            requested_model: Some(model.as_str().to_string()),
+            ..Self::new(supports_finish_reason)
         }
     }
 }
@@ -55,6 +70,32 @@ pub(crate) fn consume_json(
 impl ChunkState {
     fn consume(&mut self, chunk: &Value) -> Result<Vec<StreamEvent>, ProviderError> {
         let mut events = Vec::new();
+        let response_id = chunk
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| self.response_id.as_deref() != Some(*value));
+        let response_model = chunk
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|value| self.response_model.as_deref() != Some(*value));
+        if response_id.is_some() || response_model.is_some() {
+            let response_id = response_id.map(str::to_string);
+            let concrete_model = response_model.map(str::to_string);
+            if let Some(value) = &response_id {
+                self.response_id = Some(value.clone());
+            }
+            if let Some(value) = &concrete_model {
+                self.response_model = Some(value.clone());
+            }
+            events.push(StreamEvent::Metadata {
+                patch: ResponseMetadataPatch {
+                    response_id,
+                    response_model: concrete_model
+                        .filter(|value| self.requested_model.as_deref() != Some(value.as_str())),
+                    ..ResponseMetadataPatch::default()
+                },
+            });
+        }
         if let Some(usage) = chunk.get("usage").filter(|value| !value.is_null()) {
             self.usage = parse_usage(usage);
         }
@@ -146,6 +187,12 @@ impl ChunkState {
                 "tool_calls" | "function_call" => StopReason::ToolUse,
                 "content_filter" | "error" => StopReason::Error,
                 _ => StopReason::Stop,
+            });
+            events.push(StreamEvent::Metadata {
+                patch: ResponseMetadataPatch {
+                    raw_stop_reason: Some(reason.to_string()),
+                    ..ResponseMetadataPatch::default()
+                },
             });
             events.extend(self.close());
         }
@@ -287,5 +334,28 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn preserves_completion_identity_concrete_model_and_raw_finish_reason() {
+        let mut state = ChunkState::for_model(true, &ModelId::new("requested-model"));
+        let events = state
+            .consume(&json!({
+                "id": "chatcmpl-1",
+                "model": "resolved-model",
+                "choices": [{"delta": {}, "finish_reason": "length"}]
+            }))
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Metadata { patch }
+                if patch.response_id.as_deref() == Some("chatcmpl-1")
+                    && patch.response_model.as_deref() == Some("resolved-model")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Metadata { patch }
+                if patch.raw_stop_reason.as_deref() == Some("length")
+        )));
     }
 }

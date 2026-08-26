@@ -24,6 +24,7 @@ use pi_plugin_manager::{
 };
 use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
 use pi_plugin_openai::{OpenAiCodexPlugin, OpenAiCompatibleConfig, OpenAiCompatiblePlugin};
+use pi_plugin_prompts::{PromptTemplateLoaderOptions, PromptTemplatesPlugin};
 use pi_plugin_read::ReadPlugin;
 use pi_plugin_skills::{SkillLoaderOptions, SkillsPlugin};
 use pi_plugin_write::WritePlugin;
@@ -384,6 +385,9 @@ fn build_runtime_with_codex_credentials(
         .provider_id(config.provider.clone());
     let mut skill_options = SkillLoaderOptions::new(&config.cwd, &config.agent_dir);
     skill_options.project_trusted = project_trusted;
+    let mut prompt_template_options =
+        PromptTemplateLoaderOptions::new(&config.cwd, &config.agent_dir);
+    prompt_template_options.project_trusted = project_trusted;
     if let Some(home) = std::env::var_os("HOME") {
         skill_options
             .additional_paths
@@ -491,6 +495,10 @@ fn build_runtime_with_codex_credentials(
         .try_provider_plugin_factory({
             let model_options = model_options.clone();
             move || ModelsPlugin::load(model_options.clone())
+        })
+        .agent_plugin_factory({
+            let prompt_template_options = prompt_template_options.clone();
+            move || PromptTemplatesPlugin::load(prompt_template_options.clone())
         })
         .agent_plugin_factory({
             let skill_options = skill_options.clone();

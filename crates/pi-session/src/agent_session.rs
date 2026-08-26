@@ -12,6 +12,10 @@ use pi_runtime::{
     PiRuntime, PreparedTextSubmission, QueuedTextOutcome, RuntimePromptOutcome, RuntimeRestoreState,
 };
 use pi_shell::{DEFAULT_TIMEOUT, ShellChunk, ShellRequest, ShellResult};
+use pi_telemetry::{
+    OperationStartAttributes, RunEnd, RunOperationKind, RunOutcome as TelemetryRunOutcome, RunSpan,
+    RunStart, SpanStatus,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -27,7 +31,7 @@ use crate::{
     SessionPluginReloadReport, SessionPlugins, SessionShutdownEvent, SessionShutdownReason,
     SessionStartEvent, SessionStartReason, SessionTreeEvent, ThinkingLevelEntry, TreePreparation,
     compact as generate_compaction, estimate_context_tokens, estimate_session_context_tokens,
-    next_unique_id, now_ms, prepare_compaction, should_compact,
+    next_unique_id, now_ms, prepare_compaction, reduce_lane_state, should_compact,
 };
 
 pub const PROMPT_SNAPSHOT_CUSTOM_TYPE: &str = "pi.prompt_snapshot";
@@ -483,10 +487,23 @@ impl AgentSession {
     fn prepare_loaded(
         runtime: PiRuntime,
         log: SessionLog,
-        document: SessionDocument,
+        mut document: SessionDocument,
         options: AgentSessionOptions,
     ) -> Result<PreparedAgentSession, SessionError> {
-        let recovered_queue = recover_interrupted_state(&log, &document)?;
+        let agent_state = runtime.agent().state();
+        let recovery_defaults = crate::EffectiveLaneConfiguration {
+            model: SessionModel {
+                provider: agent_state.provider_id.clone(),
+                model_id: agent_state.model_id.clone(),
+            },
+            thinking_level: agent_state.thinking_level.as_str().to_string(),
+            active_tool_names: runtime.active_tools(),
+        };
+        let recovered_queue = recover_interrupted_state(&log, &document, recovery_defaults)?;
+        // Recovery may commit accepted deferred writes before runtime context is
+        // restored, so always project the reconciled document rather than the
+        // stale open snapshot.
+        document = log.load()?;
         runtime
             .agent()
             .set_session_id(Some(document.header.id.clone()));
@@ -689,12 +706,45 @@ impl AgentSession {
             prepared.text(),
             prepared.images(),
         )?;
+        let telemetry = self.runtime.agent().telemetry_context();
+        let run_span = telemetry.start_span::<RunSpan>(RunStart {
+            operation: OperationStartAttributes {
+                session_id: self
+                    .runtime
+                    .agent()
+                    .session_id()
+                    .unwrap_or_else(|| "unsaved".to_string()),
+                lane_name: MAIN_LANE.to_string(),
+                operation_id: run_id.clone(),
+                recovery: false,
+            },
+            kind: RunOperationKind::Run,
+        });
         let result = match prepared.run().await {
             Ok(recorded) => self.finish_prompt_locked(recorded).await,
             Err(error) => Err(SessionError::from(error)),
         };
         let finish_result = self.finish_run(&run_id, &result);
         self.emit_agent_settled().await;
+        let (telemetry_outcome, telemetry_error) = match (&result, &finish_result) {
+            (Ok(outcome), Ok(())) if outcome.stop == AgentLoopStop::Aborted => {
+                (TelemetryRunOutcome::Aborted, None)
+            }
+            (Ok(_), Ok(())) => (TelemetryRunOutcome::Completed, None),
+            (Err(_), _) | (Ok(_), Err(_)) => (
+                TelemetryRunOutcome::Failed,
+                Some(("session_run_failed".to_string(), "session".to_string())),
+            ),
+        };
+        run_span.set_end_attributes(RunEnd {
+            outcome: Some(telemetry_outcome),
+            error_code: telemetry_error.as_ref().map(|(code, _)| code.clone()),
+            error_type: telemetry_error.map(|(_, message)| message),
+        });
+        if telemetry_outcome == TelemetryRunOutcome::Failed {
+            run_span.set_status(SpanStatus::Error);
+        }
+        run_span.finish();
         match (result, finish_result) {
             (Ok(outcome), Ok(())) => Ok(SubmitOutcome::Agent(outcome)),
             (Err(error), _) => Err(error),
@@ -1890,6 +1940,40 @@ fn project_product_user_event(event: AgentEvent, display_text: Option<&str>) -> 
     }
 }
 
+fn pending_session_message(
+    kind: QueueKind,
+    run_id: Option<String>,
+    target: ProvisionedEntry,
+) -> Option<PendingSessionMessage> {
+    let SessionEntry::Message(message_entry) = &target.entry else {
+        return None;
+    };
+    let message = message_entry.message.as_standard()?.clone();
+    let Message::User(user) = &message else {
+        return None;
+    };
+    let text = user
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            ContentBlock::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(PendingSessionMessage {
+        kind: Some(kind),
+        run_id,
+        display_text: message_entry
+            .message
+            .display_text()
+            .unwrap_or(&text)
+            .to_string(),
+        message,
+        target,
+    })
+}
+
 fn recover_pending_queue(document: &SessionDocument) -> Vec<PendingSessionMessage> {
     let persisted = document
         .entries
@@ -1919,33 +2003,7 @@ fn recover_pending_queue(document: &SessionDocument) -> Vec<PendingSessionMessag
             if persisted.contains(target.id.as_str()) || cancelled.contains(target.id.as_str()) {
                 return None;
             }
-            let SessionEntry::Message(message_entry) = &target.entry else {
-                return None;
-            };
-            let message = message_entry.message.as_standard()?.clone();
-            let Message::User(user) = &message else {
-                return None;
-            };
-            let text = user
-                .content
-                .iter()
-                .filter_map(|content| match content {
-                    ContentBlock::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            Some(PendingSessionMessage {
-                kind: Some(*queue),
-                run_id: run_id.clone(),
-                display_text: message_entry
-                    .message
-                    .display_text()
-                    .unwrap_or(&text)
-                    .to_string(),
-                message,
-                target: target.clone(),
-            })
+            pending_session_message(*queue, run_id.clone(), target.clone())
         })
         .collect()
 }
@@ -1953,8 +2011,57 @@ fn recover_pending_queue(document: &SessionDocument) -> Vec<PendingSessionMessag
 fn recover_interrupted_state(
     log: &SessionLog,
     document: &SessionDocument,
+    defaults: crate::EffectiveLaneConfiguration,
 ) -> Result<Vec<PendingSessionMessage>, SessionError> {
-    let mut recovered = recover_pending_queue(document);
+    let open_operations = log.find_open_operations(MAIN_LANE, None)?;
+    let mut missing_initial_messages = Vec::new();
+    if let Some(started) = open_operations.first() {
+        let branch = document.branch()?;
+        let reduction = reduce_lane_state(&crate::LaneReductionInput {
+            slice: crate::RecordLogSlice {
+                lane: MAIN_LANE.to_string(),
+                open_operations: open_operations.clone(),
+                records: document
+                    .records
+                    .iter()
+                    .filter(|record| record.lane == MAIN_LANE)
+                    .cloned()
+                    .collect(),
+                entries: document.entries.clone(),
+            },
+            leaf_id: document
+                .lanes
+                .iter()
+                .find(|lane| lane.lane == MAIN_LANE)
+                .and_then(|lane| lane.leaf_id.clone()),
+            own_entries: branch
+                .iter()
+                .filter(|entry| entry.seq > started.seq)
+                .map(|entry| (*entry).clone())
+                .collect(),
+            configuration_entries: branch
+                .iter()
+                .filter(|entry| entry.seq <= started.seq)
+                .map(|entry| (*entry).clone())
+                .collect(),
+            defaults,
+        })
+        .map_err(|error| {
+            SessionError::InvalidPayload(format!("invalid interrupted operation log: {error}"))
+        })?;
+        if let Some(operation) = reduction.lane_state.operation {
+            // A deferred write records an entry already accepted by the live
+            // operation. Applying it is idempotent because the reducer only
+            // returns targets whose exact IDs are still absent.
+            for target in operation.pending_writes {
+                log.append_entry(target, MAIN_LANE)?;
+            }
+            missing_initial_messages = operation.missing_initial_messages;
+        }
+    }
+
+    let reconciled = log.load()?;
+    let mut recovered = recover_pending_queue(&reconciled);
     for item in &mut recovered {
         if item.run_id.is_none() {
             continue;
@@ -1979,7 +2086,30 @@ fn recover_interrupted_state(
             },
         })?;
     }
-    let finished = document
+
+    // If the process stopped before Agent emitted the initial message_end,
+    // preserve the provisioned user input as a next-run item. Replaying it
+    // automatically during open would make session construction perform
+    // provider I/O and could duplicate external side effects.
+    for target in missing_initial_messages {
+        if recovered.iter().any(|item| item.target.id == target.id) {
+            continue;
+        }
+        log.append_record(NewLaneRecord {
+            id: next_unique_id("queue-recovery"),
+            lane: MAIN_LANE.to_string(),
+            record: LaneRecordEntry::QueueEnqueued {
+                queue: QueueKind::NextRun,
+                run_id: None,
+                target: target.clone(),
+            },
+        })?;
+        if let Some(item) = pending_session_message(QueueKind::NextRun, None, target) {
+            recovered.push(item);
+        }
+    }
+
+    let finished = reconciled
         .records
         .iter()
         .filter_map(|record| match &record.record {
@@ -1987,7 +2117,7 @@ fn recover_interrupted_state(
             _ => None,
         })
         .collect::<std::collections::HashSet<_>>();
-    for operation in document.records.iter().filter(|record| {
+    for operation in reconciled.records.iter().filter(|record| {
         matches!(record.record, LaneRecordEntry::OperationStarted { .. })
             && !finished.contains(record.id.as_str())
     }) {
@@ -2268,6 +2398,72 @@ mod tests {
     struct ExpandingCommandPlugin;
 
     struct BeforeStartInjectionPlugin;
+
+    #[test]
+    fn tree_preparation_collects_only_the_abandoned_branch_in_chronological_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = SessionLog::create(
+            directory.path().join("session.jsonl"),
+            SessionHeader::new("session", directory.path()),
+        )
+        .unwrap();
+        let root = log
+            .append_message(Message::User(UserMessage::text("root", 1)))
+            .unwrap();
+        let common = log
+            .append_message(Message::User(UserMessage::text("common", 2)))
+            .unwrap();
+        let abandoned = [
+            log.append_message(Message::User(UserMessage::text("abandoned one", 3)))
+                .unwrap(),
+            log.append_message(Message::User(UserMessage::text("abandoned two", 4)))
+                .unwrap(),
+        ];
+        log.create_lane("target", Some(&common)).unwrap();
+        let target = log
+            .append_to_lane(
+                SessionEntry::message(Message::User(UserMessage::text("target", 5))),
+                "target",
+            )
+            .unwrap();
+
+        let preparation = tree_preparation(&log.load().unwrap(), Some(&target), true).unwrap();
+        assert_eq!(
+            preparation.common_ancestor_id.as_deref(),
+            Some(common.as_str())
+        );
+        assert_eq!(
+            preparation
+                .entries_to_summarize
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            abandoned.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(
+            !preparation
+                .entries_to_summarize
+                .iter()
+                .any(|entry| entry.id == root)
+        );
+        assert!(preparation.user_wants_summary);
+
+        let empty_log = SessionLog::create(
+            directory.path().join("empty.jsonl"),
+            SessionHeader::new("empty", directory.path()),
+        )
+        .unwrap();
+        empty_log.create_lane("target", None).unwrap();
+        let only_target = empty_log
+            .append_to_lane(
+                SessionEntry::message(Message::User(UserMessage::text("target", 1))),
+                "target",
+            )
+            .unwrap();
+        let empty = tree_preparation(&empty_log.load().unwrap(), Some(&only_target), true).unwrap();
+        assert!(empty.entries_to_summarize.is_empty());
+        assert!(empty.common_ancestor_id.is_none());
+    }
 
     #[async_trait]
     impl AgentPlugin for BeforeStartInjectionPlugin {
@@ -2795,6 +2991,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_emits_typed_product_run_and_provider_request_spans() {
+        let directory = tempfile::tempdir().unwrap();
+        let sink = Arc::new(pi_telemetry::InMemoryTelemetrySink::default());
+        let runtime = PiRuntime::builder()
+            .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
+                "done".to_string(),
+            )]))
+            .agent_options(AgentOptions {
+                telemetry: pi_telemetry::TelemetryContext::new(sink.clone()),
+                ..AgentOptions::default()
+            })
+            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .build()
+            .unwrap();
+        let session = AgentSession::create(runtime, directory.path().join("telemetry.jsonl"))
+            .await
+            .unwrap();
+
+        session.submit("trace me").await.unwrap();
+
+        let records = sink.records();
+        assert_eq!(records.len(), 4);
+        assert!(matches!(
+            &records[0],
+            pi_telemetry::TelemetryRecord::Start { name, attributes, .. }
+                if name == "pi.harness.run"
+                    && attributes["pi.operation.kind"] == "run"
+                    && attributes["pi.operation.recovery"] == false
+        ));
+        assert!(matches!(
+            &records[1],
+            pi_telemetry::TelemetryRecord::Start { name, .. } if name == "pi.ai.request"
+        ));
+        assert!(matches!(
+            &records[2],
+            pi_telemetry::TelemetryRecord::End { name, .. } if name == "pi.ai.request"
+        ));
+        assert!(matches!(
+            &records[3],
+            pi_telemetry::TelemetryRecord::End { name, attributes, status, .. }
+                if name == "pi.harness.run"
+                    && attributes["pi.operation.outcome"] == "completed"
+                    && *status == pi_telemetry::SpanStatus::Ok
+        ));
+    }
+
+    #[tokio::test]
     async fn durable_queue_revisions_survive_abort_and_process_recovery() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("queued-session.jsonl");
@@ -2873,6 +3116,114 @@ mod tests {
             entries: document.entries,
         })
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_reconciles_interrupted_run_from_reducer_without_replaying_side_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("interrupted-session.jsonl");
+        let log = SessionLog::create(
+            &path,
+            SessionHeader::new("interrupted-session", directory.path()),
+        )
+        .unwrap();
+        let user = AgentMessage::from(Message::User(UserMessage::text("recover me", 1)));
+        let initial = ProvisionedEntry {
+            id: "initial-user".to_string(),
+            entry: SessionEntry::message(user.clone()),
+        };
+        log.append_record(NewLaneRecord {
+            id: "interrupted-run".to_string(),
+            lane: MAIN_LANE.to_string(),
+            record: LaneRecordEntry::OperationStarted {
+                source_leaf_id: None,
+                intent: OperationIntent::Run {
+                    original_prompt: vec![user],
+                    initial_messages: vec![initial],
+                    system_prompt_override: None,
+                    resume_data: None,
+                },
+            },
+        })
+        .unwrap();
+        log.append_record(NewLaneRecord {
+            id: "accepted-write".to_string(),
+            lane: MAIN_LANE.to_string(),
+            record: LaneRecordEntry::WriteDeferred {
+                run_id: "interrupted-run".to_string(),
+                target: ProvisionedEntry {
+                    id: "accepted-entry".to_string(),
+                    entry: SessionEntry::Custom(CustomEntry {
+                        custom_type: "accepted".to_string(),
+                        data: Some(serde_json::json!({ "value": true })),
+                    }),
+                },
+            },
+        })
+        .unwrap();
+        drop(log);
+
+        let reopened = AgentSession::open(scripted_runtime([]), &path)
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.snapshot().queue.follow_up,
+            vec!["recover me".to_string()]
+        );
+        let document = reopened.log().load().unwrap();
+        assert!(
+            document
+                .entries
+                .iter()
+                .any(|entry| entry.id == "accepted-entry")
+        );
+        assert!(
+            reopened
+                .log()
+                .find_open_operations(MAIN_LANE, None)
+                .unwrap()
+                .is_empty()
+        );
+        let interrupted_finishes = document
+            .records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    &record.record,
+                    LaneRecordEntry::OperationFinished {
+                        run_id,
+                        outcome: OperationOutcome::Aborted,
+                        error: Some(OperationError { code, .. }),
+                    } if run_id == "interrupted-run" && code == "interrupted"
+                )
+            })
+            .count();
+        assert_eq!(interrupted_finishes, 1);
+        reopened.shutdown().await;
+        drop(reopened);
+
+        let reopened_again = AgentSession::open(scripted_runtime([]), &path)
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened_again.snapshot().queue.follow_up,
+            vec!["recover me".to_string()]
+        );
+        assert_eq!(
+            reopened_again
+                .log()
+                .load()
+                .unwrap()
+                .records
+                .iter()
+                .filter(|record| matches!(
+                    &record.record,
+                    LaneRecordEntry::OperationFinished { run_id, .. }
+                        if run_id == "interrupted-run"
+                ))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -3288,6 +3639,64 @@ mod tests {
                 .iter()
                 .any(|record| matches!(record.entry, SessionEntry::Compaction(_)))
         );
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_uses_active_model_reasoning_and_output_limits() {
+        struct LimitedCatalog;
+
+        impl pi_core::ProviderPlugin for LimitedCatalog {
+            fn id(&self) -> pi_core::PluginId {
+                pi_core::PluginId::new("limited-catalog")
+            }
+
+            fn register(
+                &self,
+                context: &mut pi_core::ProviderRegisterContext<'_>,
+            ) -> pi_core::Result<()> {
+                let mut model = pi_core::ModelSpec::new("scripted", "limited", "Limited", "test");
+                model.reasoning = false;
+                model.max_tokens = 32;
+                context.register_model(model)
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let provider_plugin = ScriptedProviderPlugin::scripted([
+            ScriptedTurn::Text("answer".to_string()),
+            ScriptedTurn::Text("## Original Request\nKeep going".to_string()),
+        ]);
+        let provider = provider_plugin.provider();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(provider_plugin)
+            .provider_plugin(LimitedCatalog)
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("limited"),
+                thinking_level: ThinkingLevel::High,
+                ..AgentOptions::default()
+            })
+            .build()
+            .unwrap();
+        let session = AgentSession::create_with_options(
+            runtime,
+            directory.path().join("session.jsonl"),
+            AgentSessionOptions::default().compaction(CompactionSettings {
+                reserve_tokens: 1_000,
+                keep_recent_tokens: 1,
+                enabled: true,
+            }),
+        )
+        .await
+        .unwrap();
+
+        session.prompt("do the work").await.unwrap();
+        session.compact(None).await.unwrap();
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].max_output_tokens, Some(32));
+        assert_eq!(requests[1].thinking_level, ThinkingLevel::Off);
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ModelId, ProviderId, Usage, UsageCost};
+use crate::{DeferredHandle, ModelId, ProviderId, Usage, UsageCost};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -259,6 +259,12 @@ pub struct ResponseMetadata {
     pub model: ModelId,
     pub api: String,
     pub timestamp_ms: i64,
+    pub response_model: Option<String>,
+    pub response_id: Option<String>,
+    pub diagnostics: Option<Vec<Value>>,
+    pub deferred: Option<DeferredHandle>,
+    pub raw_stop_reason: Option<String>,
+    pub end_turn: Option<bool>,
 }
 
 impl ResponseMetadata {
@@ -273,6 +279,12 @@ impl ResponseMetadata {
             model,
             api: api.into(),
             timestamp_ms,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            deferred: None,
+            raw_stop_reason: None,
+            end_turn: None,
         }
     }
 }

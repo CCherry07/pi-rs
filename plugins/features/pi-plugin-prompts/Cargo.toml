@@ -1,5 +1,5 @@
 [package]
-name = "pi-e2e"
+name = "pi-plugin-prompts"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -8,15 +8,12 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
-pi-agent.workspace = true
 pi-core.workspace = true
-pi-resources.workspace = true
+serde.workspace = true
+serde_yaml = "0.9.34"
+
+[dev-dependencies]
 pi-runtime.workspace = true
-pi-session.workspace = true
 pi-test-support.workspace = true
-pi-plugin-skills.workspace = true
-pi-plugin-read.workspace = true
-pi-plugin-write.workspace = true
-serde_json.workspace = true
 tempfile = "3.21.0"
 tokio.workspace = true

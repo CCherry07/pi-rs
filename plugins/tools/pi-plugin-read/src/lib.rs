@@ -608,6 +608,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn truncation_counts_utf8_bytes_and_not_a_trailing_newline_as_a_line() {
+        let content = format!("{}\n", vec!["line"; MAX_OUTPUT_LINES].join("\n"));
+        let exact_limit = truncate_head(&content);
+        assert!(!exact_limit.truncated);
+        assert_eq!(exact_limit.total_lines, MAX_OUTPUT_LINES);
+        assert_eq!(exact_limit.output_lines, MAX_OUTPUT_LINES);
+        assert_eq!(exact_limit.total_bytes, content.len());
+
+        let first = "é".repeat(12_500);
+        let second = "🙂".repeat(8_000);
+        let oversized = format!("{first}\n{second}");
+        let by_bytes = truncate_head(&oversized);
+        assert!(by_bytes.truncated);
+        assert_eq!(by_bytes.truncated_by, Some(TruncatedBy::Bytes));
+        assert_eq!(by_bytes.content, first);
+        assert_eq!(by_bytes.output_bytes, 25_000);
+        assert!(!by_bytes.first_line_exceeds_limit);
+    }
+
     #[tokio::test]
     async fn user_limit_gets_continuation_without_truncation_details() {
         let dir = tempfile::tempdir().unwrap();

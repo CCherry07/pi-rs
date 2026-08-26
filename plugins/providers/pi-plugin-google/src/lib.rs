@@ -15,8 +15,8 @@ use futures::StreamExt;
 use pi_core::{
     AbortSignal, ContentBlock, Message, PluginId, Provider, ProviderAvailability,
     ProviderCallContext, ProviderError, ProviderId, ProviderPlugin, ProviderRegisterContext,
-    ProviderRequest, ProviderStream, ResponseMetadata, StopReason, StreamEvent, ThinkingLevel,
-    ToolCallId, Usage,
+    ProviderRequest, ProviderStream, ResponseMetadata, ResponseMetadataPatch, StopReason,
+    StreamEvent, ThinkingLevel, ToolCallId, Usage,
 };
 use pi_provider::{
     HttpBodyStream, HttpTransport, ReqwestTransport, SseDecoder, TransportError,
@@ -480,13 +480,13 @@ fn google_stream(
         yield Ok(StreamEvent::Start {
             metadata: ResponseMetadata::new(
                 provider,
-                model,
+                model.clone(),
                 GOOGLE_GENERATIVE_AI_API,
                 now_ms(),
             ),
         });
         let mut decoder = SseDecoder::new();
-        let mut state = GoogleStreamState::default();
+        let mut state = GoogleStreamState::new(&model);
         loop {
             let next = tokio::select! {
                 _ = signal.wait() => { yield Err(ProviderError::Aborted); return; }
@@ -530,7 +530,6 @@ fn google_stream(
     })
 }
 
-#[derive(Default)]
 struct GoogleStreamState {
     text_index: Option<usize>,
     thinking_index: Option<usize>,
@@ -541,9 +540,25 @@ struct GoogleStreamState {
     closed: bool,
     saw_finish_reason: bool,
     signatures: HashMap<usize, String>,
+    requested_model: String,
 }
 
 impl GoogleStreamState {
+    fn new(model: &pi_core::ModelId) -> Self {
+        Self {
+            text_index: None,
+            thinking_index: None,
+            next_index: 0,
+            next_tool: 0,
+            usage: Usage::default(),
+            reason: None,
+            closed: false,
+            saw_finish_reason: false,
+            signatures: HashMap::new(),
+            requested_model: model.as_str().to_string(),
+        }
+    }
+
     fn consume(&mut self, data: &str) -> Result<Vec<StreamEvent>, ProviderError> {
         let value: Value = serde_json::from_str(data).map_err(|error| {
             ProviderError::Protocol(format!("invalid Google SSE JSON: {error}"))
@@ -553,6 +568,23 @@ impl GoogleStreamState {
         }
         self.update_usage(value.get("usageMetadata"));
         let mut events = Vec::new();
+        let response_patch = ResponseMetadataPatch {
+            response_model: value
+                .get("modelVersion")
+                .and_then(Value::as_str)
+                .filter(|model| *model != self.requested_model.as_str())
+                .map(str::to_string),
+            response_id: value
+                .get("responseId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            ..ResponseMetadataPatch::default()
+        };
+        if response_patch.response_model.is_some() || response_patch.response_id.is_some() {
+            events.push(StreamEvent::Metadata {
+                patch: response_patch,
+            });
+        }
         if let Some(parts) = value
             .pointer("/candidates/0/content/parts")
             .and_then(Value::as_array)
@@ -662,6 +694,12 @@ impl GoogleStreamState {
             });
             self.close_text(&mut events);
             self.closed = true;
+            events.push(StreamEvent::Metadata {
+                patch: ResponseMetadataPatch {
+                    raw_stop_reason: Some(reason.to_string()),
+                    ..ResponseMetadataPatch::default()
+                },
+            });
             events.push(StreamEvent::Done {
                 reason: self.reason.unwrap_or(StopReason::Stop),
                 usage: self.usage.clone(),
@@ -976,6 +1014,27 @@ mod tests {
             configured.provider.availability(),
             ProviderAvailability::Available
         ));
+    }
+
+    #[test]
+    fn stream_state_preserves_response_identity_and_raw_finish_reason() {
+        let mut state = GoogleStreamState::new(&ModelId::new("requested-model"));
+        let events = state
+            .consume(
+                r#"{"responseId":"response-1","modelVersion":"resolved-model","candidates":[{"finishReason":"MAX_TOKENS"}]}"#,
+            )
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Metadata { patch }
+                if patch.response_id.as_deref() == Some("response-1")
+                    && patch.response_model.as_deref() == Some("resolved-model")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Metadata { patch }
+                if patch.raw_stop_reason.as_deref() == Some("MAX_TOKENS")
+        )));
     }
 
     #[tokio::test]

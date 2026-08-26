@@ -9,9 +9,9 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use pi_core::{
-    AbortSignal, ContentBlock, Message, Provider, ProviderAvailability, ProviderCallContext,
-    ProviderError, ProviderId, ProviderRequest, ProviderStream, ResponseMetadata, StopReason,
-    StreamEvent, ToolCallId, ToolSpec, Usage,
+    AbortSignal, ContentBlock, ContentMetadata, Message, Provider, ProviderAvailability,
+    ProviderCallContext, ProviderError, ProviderId, ProviderRequest, ProviderStream,
+    ResponseMetadata, ResponseMetadataPatch, StopReason, StreamEvent, ToolCallId, ToolSpec, Usage,
 };
 use pi_provider::{
     HttpBodyStream, HttpTransport, ReqwestTransport, SseDecoder, TransportError,
@@ -427,10 +427,10 @@ pub fn stream(
     let api = api.into();
     Box::pin(stream! {
         yield Ok(StreamEvent::Start {
-            metadata: ResponseMetadata::new(provider, model, api, now_ms()),
+            metadata: ResponseMetadata::new(provider, model.clone(), api, now_ms()),
         });
         let mut decoder = SseDecoder::new();
-        let mut state = StreamState::default();
+        let mut state = StreamState::new(&model);
         loop {
             let next = tokio::select! {
                 _ = signal.wait() => { yield Err(ProviderError::Aborted); return; }
@@ -450,7 +450,9 @@ pub fn stream(
                         match state.consume(&event.data) {
                             Ok(events) => {
                                 let done = events.iter().any(|event| matches!(event, StreamEvent::Done { .. }));
+                                let pending_error = state.take_pending_error();
                                 for event in events { yield Ok(event); }
+                                if let Some(error) = pending_error { yield Err(error); return; }
                                 if done { return; }
                             }
                             Err(error) => { yield Err(error); return; }
@@ -461,7 +463,11 @@ pub fn stream(
                 None => {
                     match decoder.finish() {
                         Ok(Some(event)) if event.data != "[DONE]" => match state.consume(&event.data) {
-                            Ok(events) => for event in events { yield Ok(event); },
+                            Ok(events) => {
+                                let pending_error = state.take_pending_error();
+                                for event in events { yield Ok(event); }
+                                if let Some(error) = pending_error { yield Err(error); return; }
+                            },
                             Err(error) => { yield Err(error); return; }
                         },
                         Ok(_) => {}
@@ -543,7 +549,6 @@ fn input_content(block: &ContentBlock) -> Option<Value> {
     }
 }
 
-#[derive(Default)]
 struct StreamState {
     text_index: Option<usize>,
     thinking_index: Option<usize>,
@@ -551,9 +556,28 @@ struct StreamState {
     had_tool_call: bool,
     next_index: usize,
     closed: bool,
+    requested_model: Option<String>,
+    pending_error: Option<ProviderError>,
 }
 
 impl StreamState {
+    fn new(model: &pi_core::ModelId) -> Self {
+        Self {
+            text_index: None,
+            thinking_index: None,
+            tools: HashMap::new(),
+            had_tool_call: false,
+            next_index: 0,
+            closed: false,
+            requested_model: Some(model.as_str().to_string()),
+            pending_error: None,
+        }
+    }
+
+    fn take_pending_error(&mut self) -> Option<ProviderError> {
+        self.pending_error.take()
+    }
+
     fn consume(&mut self, data: &str) -> Result<Vec<StreamEvent>, ProviderError> {
         let value: Value = serde_json::from_str(data).map_err(|error| {
             ProviderError::Protocol(format!("invalid OpenAI Responses SSE JSON: {error}"))
@@ -563,6 +587,49 @@ impl StreamState {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let mut events = Vec::new();
+        if matches!(
+            kind,
+            "response.created"
+                | "response.completed"
+                | "response.done"
+                | "response.incomplete"
+                | "response.failed"
+        ) {
+            let response = value.get("response").unwrap_or(&Value::Null);
+            let status = response.get("status").and_then(Value::as_str);
+            let incomplete_reason = response
+                .pointer("/incomplete_details/reason")
+                .and_then(Value::as_str);
+            let terminal = kind != "response.created";
+            let patch = ResponseMetadataPatch {
+                response_model: response
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|model| self.requested_model.as_deref() != Some(*model))
+                    .map(str::to_string),
+                response_id: response
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                raw_stop_reason: terminal
+                    .then(|| match (status, incomplete_reason) {
+                        (Some(status), Some(reason)) => Some(format!("{status}.{reason}")),
+                        (Some(status), None) => Some(status.to_string()),
+                        (None, Some(reason)) => Some(reason.to_string()),
+                        (None, None) => None,
+                    })
+                    .flatten(),
+                end_turn: response.get("end_turn").and_then(Value::as_bool),
+                ..ResponseMetadataPatch::default()
+            };
+            if patch.response_model.is_some()
+                || patch.response_id.is_some()
+                || patch.raw_stop_reason.is_some()
+                || patch.end_turn.is_some()
+            {
+                events.push(StreamEvent::Metadata { patch });
+            }
+        }
         match kind {
             "response.output_text.delta" => {
                 let delta = value
@@ -627,6 +694,16 @@ impl StreamState {
                         id: ToolCallId::new(call_id),
                         name: name.to_string(),
                     });
+                    if let Some(namespace) =
+                        value.pointer("/item/namespace").and_then(Value::as_str)
+                    {
+                        events.push(StreamEvent::ContentMetadata {
+                            content_index: index,
+                            metadata: ContentMetadata::ToolCall {
+                                namespace: Some(namespace.to_string()),
+                            },
+                        });
+                    }
                     if let Some(arguments) = value
                         .pointer("/item/arguments")
                         .and_then(Value::as_str)
@@ -664,6 +741,16 @@ impl StreamState {
                         .and_then(Value::as_str)
                         .unwrap_or_default();
                     if let Some(index) = self.tools.remove(item_id) {
+                        if let Some(namespace) =
+                            value.pointer("/item/namespace").and_then(Value::as_str)
+                        {
+                            events.push(StreamEvent::ContentMetadata {
+                                content_index: index,
+                                metadata: ContentMetadata::ToolCall {
+                                    namespace: Some(namespace.to_string()),
+                                },
+                            });
+                        }
                         events.push(StreamEvent::ToolCallEnd {
                             content_index: index,
                             thought_signature: None,
@@ -689,7 +776,7 @@ impl StreamState {
                     .or_else(|| value.get("message"))
                     .and_then(Value::as_str)
                     .unwrap_or("OpenAI Responses request failed");
-                return Err(ProviderError::Failure(message.to_string()));
+                self.pending_error = Some(ProviderError::Failure(message.to_string()));
             }
             _ => {}
         }
@@ -890,6 +977,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn response_stream_state_preserves_metadata_namespace_and_failure_status() {
+        let mut state = StreamState::new(&ModelId::new("requested-model"));
+        let created = state
+            .consume(
+                r#"{"type":"response.created","response":{"id":"response-1","model":"resolved-model"}}"#,
+            )
+            .unwrap();
+        assert!(matches!(
+            &created[0],
+            StreamEvent::Metadata { patch }
+                if patch.response_id.as_deref() == Some("response-1")
+                    && patch.response_model.as_deref() == Some("resolved-model")
+        ));
+
+        let added = state
+            .consume(
+                r#"{"type":"response.output_item.added","item":{"type":"function_call","id":"item-1","call_id":"call-1","name":"echo","namespace":"dynamic"}}"#,
+            )
+            .unwrap();
+        assert!(added.iter().any(|event| matches!(
+            event,
+            StreamEvent::ContentMetadata {
+                metadata: ContentMetadata::ToolCall { namespace: Some(namespace) },
+                ..
+            } if namespace == "dynamic"
+        )));
+
+        let failed = state
+            .consume(
+                r#"{"type":"response.failed","response":{"id":"response-1","status":"failed","end_turn":false,"error":{"message":"upstream failed"}}}"#,
+            )
+            .unwrap();
+        assert!(failed.iter().any(|event| matches!(
+            event,
+            StreamEvent::Metadata { patch }
+                if patch.raw_stop_reason.as_deref() == Some("failed")
+                    && patch.end_turn == Some(false)
+        )));
+        assert!(matches!(
+            state.take_pending_error(),
+            Some(ProviderError::Failure(message)) if message == "upstream failed"
+        ));
+    }
+
     #[tokio::test]
     async fn adapts_completed_sse_into_semantic_events() {
         let body: HttpBodyStream = Box::pin(stream::iter([Ok(
@@ -912,5 +1044,40 @@ mod tests {
         assert!(events.iter().any(
             |event| matches!(event, Ok(StreamEvent::Done { usage, .. }) if usage.total_tokens == 2)
         ));
+    }
+
+    #[tokio::test]
+    async fn response_failure_yields_observed_metadata_before_the_error() {
+        let body: HttpBodyStream = Box::pin(stream::iter([Ok(
+            b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"response-1\"}}\n\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"response-1\",\"status\":\"failed\",\"error\":{\"message\":\"upstream failed\"}}}\n\n"
+                .to_vec(),
+        )]));
+        let (_, signal) = AbortHandle::new();
+        let events = stream(
+            ProviderId::new("test"),
+            ModelId::new("model"),
+            "openai-responses",
+            body,
+            signal,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let failed_metadata = events.iter().position(|event| {
+            matches!(
+                event,
+                Ok(StreamEvent::Metadata { patch })
+                    if patch.raw_stop_reason.as_deref() == Some("failed")
+            )
+        });
+        let failure = events.iter().position(|event| {
+            matches!(
+                event,
+                Err(ProviderError::Failure(message)) if message == "upstream failed"
+            )
+        });
+        assert!(
+            failed_metadata.is_some_and(|metadata| failure.is_some_and(|error| metadata < error))
+        );
     }
 }

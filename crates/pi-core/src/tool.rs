@@ -29,6 +29,7 @@ pub struct ToolResult {
     pub content: Vec<ContentBlock>,
     pub details: Option<Value>,
     pub usage: Option<Usage>,
+    pub added_tool_names: Option<Vec<String>>,
     pub is_error: bool,
     pub terminate: bool,
 }
@@ -39,6 +40,7 @@ impl ToolResult {
             content: vec![ContentBlock::Text(crate::TextContent::new(text))],
             details: None,
             usage: None,
+            added_tool_names: None,
             is_error: false,
             terminate: false,
         }

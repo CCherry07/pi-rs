@@ -1,3 +1,4 @@
 #![forbid(unsafe_code)]
 
-//! End-to-end test harnesses live in `tests/`; the real-network runner is in `examples/`.
+//! Fast runtime acceptance lives in `tests/`; black-box process scenarios and their shared
+//! harness live in `product/` and are invoked through the `packages/pi` E2E scripts.

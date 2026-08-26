@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use pi_core::{
@@ -7,12 +7,15 @@ use pi_core::{
     PluginDriver, ProviderId, ProviderPluginDriver, RunId, ThinkingLevel, ToolCallId,
     ToolExecutionMode, UserMessage,
 };
+use pi_telemetry::TelemetryContext;
 use tokio::sync::watch;
 
+use crate::agent_loop::emit_run_failure_lifecycle;
 use crate::event_dispatcher::{AgentEventDispatcher, AgentEventListener};
 use crate::{
     AgentContext, AgentEventSink, AgentLoopConfig, AgentLoopOutcome, AgentLoopServices,
-    AgentMessageQueues, PendingMessageQueue, QueueMode, run_agent_loop, run_agent_loop_continue,
+    AgentMessageQueues, AgentTurnControl, NoopAgentTurnControl, PendingMessageQueue, QueueMode,
+    run_agent_loop, run_agent_loop_continue,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +96,8 @@ pub struct AgentOptions {
     pub cwd: std::path::PathBuf,
     pub steering_mode: QueueMode,
     pub follow_up_mode: QueueMode,
+    pub turn_control: Arc<dyn AgentTurnControl>,
+    pub telemetry: TelemetryContext,
 }
 
 impl Default for AgentOptions {
@@ -110,6 +115,8 @@ impl Default for AgentOptions {
             cwd: std::path::PathBuf::from("."),
             steering_mode: QueueMode::OneAtATime,
             follow_up_mode: QueueMode::OneAtATime,
+            turn_control: Arc::new(NoopAgentTurnControl),
+            telemetry: TelemetryContext::noop(),
         }
     }
 }
@@ -229,10 +236,14 @@ struct AgentInner {
 struct QueueAdapter {
     steering: Arc<PendingMessageQueue>,
     follow_up: Arc<PendingMessageQueue>,
+    skip_next_steering_poll: AtomicBool,
 }
 
 impl AgentMessageQueues for QueueAdapter {
     fn drain_steering(&self) -> Vec<Message> {
+        if self.skip_next_steering_poll.swap(false, Ordering::AcqRel) {
+            return Vec::new();
+        }
         self.steering.drain()
     }
 
@@ -321,7 +332,11 @@ impl Agent {
             }
             PromptInput::Messages(messages) => messages,
         };
-        self.run(RunKind::Prompt(prompts)).await
+        self.run(RunKind::Prompt {
+            messages: prompts,
+            skip_initial_steering_poll: false,
+        })
+        .await
     }
 
     pub async fn continue_run(&self) -> Result<AgentLoopOutcome, AgentError> {
@@ -394,6 +409,10 @@ impl Agent {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
+    }
+
+    pub fn telemetry_context(&self) -> TelemetryContext {
+        self.inner.config.telemetry.clone()
     }
 
     /// Installs a complete runtime generation after the active run settles.
@@ -547,6 +566,36 @@ impl Agent {
             .run_gate
             .try_lock()
             .map_err(|_| AgentError::AlreadyRunning)?;
+        let kind = match kind {
+            RunKind::Continue => match self.state().messages.last() {
+                None => return Err(AgentError::Loop("agent context is empty".to_string())),
+                Some(Message::Assistant(_)) => {
+                    let steering = self.inner.steering.drain();
+                    if !steering.is_empty() {
+                        RunKind::Prompt {
+                            messages: steering,
+                            // The selected steering item is already the prompt for this
+                            // run. Leave the next one-at-a-time item queued until the
+                            // first response completes.
+                            skip_initial_steering_poll: true,
+                        }
+                    } else {
+                        let follow_up = self.inner.follow_up.drain();
+                        if follow_up.is_empty() {
+                            return Err(AgentError::Loop(
+                                "cannot continue from an assistant message".to_string(),
+                            ));
+                        }
+                        RunKind::Prompt {
+                            messages: follow_up,
+                            skip_initial_steering_poll: false,
+                        }
+                    }
+                }
+                Some(_) => RunKind::Continue,
+            },
+            kind => kind,
+        };
         let runtime = self.runtime();
         let run_id = RunId::next();
         let (abort_handle, abort_signal) = AbortHandle::new();
@@ -572,7 +621,7 @@ impl Agent {
 
         let snapshot = self.state();
         let input_messages = match &kind {
-            RunKind::Prompt(prompts) => prompts.clone(),
+            RunKind::Prompt { messages, .. } => messages.clone(),
             RunKind::Continue => Vec::new(),
         };
         let hook = match runtime
@@ -617,19 +666,31 @@ impl Agent {
         let queue_adapter: Arc<dyn AgentMessageQueues> = Arc::new(QueueAdapter {
             steering: Arc::clone(&self.inner.steering),
             follow_up: Arc::clone(&self.inner.follow_up),
+            skip_next_steering_poll: AtomicBool::new(matches!(
+                &kind,
+                RunKind::Prompt {
+                    skip_initial_steering_poll: true,
+                    ..
+                }
+            )),
         });
+        let events = self.event_sink(run_id.clone(), Arc::clone(runtime.plugins()));
         let services = AgentLoopServices {
             generation: runtime.generation(),
             registries: Arc::clone(runtime.registries()),
             plugins: Arc::clone(runtime.plugins()),
             provider_plugins: Arc::clone(runtime.provider_plugins()),
             queues: queue_adapter,
-            events: self.event_sink(run_id.clone(), Arc::clone(runtime.plugins())),
+            turn_control: Arc::clone(&self.inner.config.turn_control),
+            telemetry: self.inner.config.telemetry.clone(),
+            events: Arc::clone(&events),
         };
+        let failure_config = config.clone();
+        let failure_signal = abort_signal.clone();
         let result = match kind {
-            RunKind::Prompt(mut prompts) => {
-                prompts.extend(hook.messages);
-                run_agent_loop(run_id, prompts, context, config, services, abort_signal).await
+            RunKind::Prompt { mut messages, .. } => {
+                messages.extend(hook.messages);
+                run_agent_loop(run_id, messages, context, config, services, abort_signal).await
             }
             RunKind::Continue if hook.messages.is_empty() => {
                 run_agent_loop_continue(run_id, context, config, services, abort_signal).await
@@ -646,6 +707,10 @@ impl Agent {
                 .await
             }
         };
+
+        if let Err(error) = &result {
+            emit_run_failure_lifecycle(&events, &failure_signal, &failure_config, error).await;
+        }
 
         self.finish_active_run(&completion_sender);
         result.map_err(|error| AgentError::Loop(error.to_string()))
@@ -730,7 +795,10 @@ fn validate_active_tools(tools: &[String], runtime: &AgentRuntime) -> Result<(),
 }
 
 enum RunKind {
-    Prompt(Vec<Message>),
+    Prompt {
+        messages: Vec<Message>,
+        skip_initial_steering_poll: bool,
+    },
     Continue,
 }
 

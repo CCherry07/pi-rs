@@ -17,7 +17,7 @@ diagnostics. Unknown names still fail construction.
 | Agent | `tool_execution_start`, `tool_execution_update`, `tool_execution_end` | Active. |
 | Agent | `context` | Active; message replacement is supported. |
 | Agent | `tool_call` | Active; in-place input mutation, blocking, reason, and terminate are supported. |
-| Agent | `tool_result` | Active; content, details, usage, and error patches are supported. |
+| Agent | `tool_result` | Active; content, details, usage, `addedToolNames`, and error patches are supported. |
 | Provider | `before_provider_request` | Active; payload replacements chain in registration order. |
 | Session | `session_start`, `session_info_changed`, `session_before_switch`, `session_before_fork`, `session_before_compact`, `session_compact`, `session_compact_failed`, `session_shutdown`, `session_before_tree`, `session_tree` | Active through the session plugin lifecycle. |
 | Product/UI | `project_trust`, `resources_discover`, `before_provider_headers`, `after_provider_response`, `model_select`, `thinking_level_select`, `user_bash` | Recognized and inactive. |
@@ -26,6 +26,11 @@ Supported callbacks run in registration order. A rejected callback, malformed pa
 cross-role `message_end` replacement is recorded in the generation's diagnostics and later
 callbacks continue from the last valid value. `tool_call` is the deliberate exception: it remains
 fail-closed for the affected tool call, matching Pi's runner.
+
+Native `AgentPlugin` tool hooks receive an `Arc<AgentContext>` batch snapshot. The JavaScript
+Adapter intentionally does not add that field to extension events because current Pi extension
+`tool_call` / `tool_result` payloads expose only call/result data; the full context belongs to Pi's
+lower-level before/after-tool callback contract.
 
 ## Context capabilities
 

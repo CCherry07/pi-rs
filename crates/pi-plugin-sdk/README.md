@@ -122,6 +122,12 @@ trusted in-process code and are intentionally never unloaded during the process 
 loading, the host snapshots each artifact below `<agent-dir>/cache/plugins/artifacts/<sha256>`;
 unchanged content reuses one pinned handle, while a rebuilt artifact gets a new load path on reload.
 
+The current contract is native ABI **2**. It adds the shared `AgentContext` to agent tool hooks and
+`added_tool_names` to tool results, so ABI 1 artifacts are rejected before any Rust-ABI constructor
+is resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 2 constructors use the
+`pi_{agent,provider,session}_plugin_create_v2` symbols. Rebuild every native plugin against the
+current SDK after upgrading the host.
+
 Every factory call creates a fresh instance. Runtime and session reload continue to use the existing
 fallible generation factories: a constructor, registration, or validation failure leaves the active
 generation unchanged.

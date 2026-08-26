@@ -71,3 +71,51 @@ impl PendingMessageQueue {
             .is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pi_core::UserMessage;
+
+    fn user(text: &str, timestamp_ms: i64) -> Message {
+        Message::User(UserMessage::text(text, timestamp_ms))
+    }
+
+    #[test]
+    fn one_at_a_time_is_fifo_and_reports_pending_state() {
+        let queue = PendingMessageQueue::new(QueueMode::OneAtATime);
+        queue.enqueue(user("one", 1));
+        queue.enqueue(user("two", 2));
+
+        assert!(queue.has_items());
+        assert_eq!(queue.drain(), vec![user("one", 1)]);
+        assert!(queue.has_items());
+        assert_eq!(queue.drain(), vec![user("two", 2)]);
+        assert!(!queue.has_items());
+        assert!(queue.drain().is_empty());
+    }
+
+    #[test]
+    fn all_mode_drains_the_complete_queue_in_source_order() {
+        let queue = PendingMessageQueue::new(QueueMode::All);
+        queue.enqueue(user("one", 1));
+        queue.enqueue(user("two", 2));
+
+        assert_eq!(queue.drain(), vec![user("one", 1), user("two", 2)]);
+        assert!(!queue.has_items());
+    }
+
+    #[test]
+    fn mode_changes_preserve_items_and_clear_discards_them() {
+        let queue = PendingMessageQueue::new(QueueMode::OneAtATime);
+        queue.enqueue(user("one", 1));
+        queue.enqueue(user("two", 2));
+        queue.set_mode(QueueMode::All);
+
+        assert_eq!(queue.mode(), QueueMode::All);
+        assert_eq!(queue.drain(), vec![user("one", 1), user("two", 2)]);
+        queue.enqueue(user("three", 3));
+        queue.clear();
+        assert!(!queue.has_items());
+    }
+}
