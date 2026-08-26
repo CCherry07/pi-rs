@@ -47,7 +47,7 @@ use crate::clipboard::{ClipboardWriter, SystemClipboard};
 use crate::config::AuthCommand;
 use crate::output::{assistant_text, shell_command};
 use crate::project_trust::{ProjectTrustOption, ProjectTrustPromptRequest, ProjectTrustService};
-use crate::transcript_selection::{TranscriptSelection, TranscriptSurface};
+use crate::text_selection::{ScreenSelection, ScreenTextSurface};
 use crate::{auth, auth::AuthProviderInfo};
 
 mod components;
@@ -668,7 +668,7 @@ struct App {
     animation_frame: usize,
     scroll_from_bottom: usize,
     scroll_input: ScrollInputNormalizer,
-    transcript_selection: Option<TranscriptSelection>,
+    screen_selection: Option<ScreenSelection>,
     trust_prompt: Option<TrustPromptState>,
     pending_auth: Option<AuthRequest>,
     epoch: u64,
@@ -774,7 +774,7 @@ impl App {
             animation_frame: 0,
             scroll_from_bottom: 0,
             scroll_input: ScrollInputNormalizer::for_terminal(),
-            transcript_selection: None,
+            screen_selection: None,
             trust_prompt: None,
             pending_auth: None,
             epoch: 1,
@@ -790,7 +790,7 @@ impl App {
     fn update(&mut self, message: AppMessage) {
         match message {
             AppMessage::SessionEvent { event, snapshot } => {
-                self.transcript_selection = None;
+                self.screen_selection = None;
                 self.apply_session_event(event);
                 self.sync_snapshot(&snapshot);
             }
@@ -807,6 +807,7 @@ impl App {
             }
             AppMessage::EffectCompleted(_) => {}
             AppMessage::TrustRequested(request) => {
+                self.screen_selection = None;
                 self.trust_prompt = Some(request.into());
                 self.status = "Choose project trust".to_string();
             }
@@ -837,7 +838,7 @@ impl App {
         self.working_started_at = None;
         self.bash_line = None;
         self.scroll_from_bottom = 0;
-        self.transcript_selection = None;
+        self.screen_selection = None;
     }
 
     fn active_bottom_view(&self) -> Option<BottomPaneView> {
@@ -884,17 +885,18 @@ impl App {
     }
 
     fn has_active_animation(&self) -> bool {
-        self.working_started_at.is_some()
-            || self.awaiting_assistant
-            || self.streaming_assistant.is_some_and(|index| {
-                matches!(
-                    self.transcript.get(index),
-                    Some(TranscriptItem::Assistant {
-                        streaming: true,
-                        ..
-                    })
-                )
-            })
+        self.screen_selection.is_none()
+            && (self.working_started_at.is_some()
+                || self.awaiting_assistant
+                || self.streaming_assistant.is_some_and(|index| {
+                    matches!(
+                        self.transcript.get(index),
+                        Some(TranscriptItem::Assistant {
+                            streaming: true,
+                            ..
+                        })
+                    )
+                }))
     }
 
     fn advance_animation(&mut self) {
@@ -994,6 +996,10 @@ impl App {
                     || "Session name cleared".to_string(),
                     |name| format!("Session: {name}"),
                 );
+            }
+            AgentSessionEvent::ExtensionNotice { message, .. } => {
+                self.status.clone_from(&message);
+                self.transcript.push(TranscriptItem::Notice(message));
             }
             _ => {}
         }
@@ -1266,13 +1272,13 @@ fn render_tui_frame(
     terminal: &mut TuiTerminal,
     app: &App,
     palette: UiPalette,
-) -> Result<(TranscriptSurface, u16), String> {
+) -> Result<(ScreenTextSurface, u16), String> {
     let completed = terminal
         .draw(|frame| draw(frame, app, palette))
         .map_err(|error| error.to_string())?;
     let areas = ui_areas(completed.area, app);
     Ok((
-        TranscriptSurface::capture(completed.buffer, areas.transcript),
+        ScreenTextSurface::capture(completed.buffer),
         areas.transcript.height,
     ))
 }
@@ -1341,22 +1347,10 @@ async fn run_loop(
             terminal_event = events.next() => {
                 match terminal_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        if app.trust_prompt.is_some() {
-                            let mut ui = KeyUi {
-                                clipboard: &mut clipboard,
-                                transcript_viewport_height,
-                            };
-                            handle_key(
-                                key,
-                                &mut app,
-                                &session,
-                                &session_handle,
-                                &project_trust,
-                                &effect_sender,
-                                &mut ui,
-                            );
-                        } else if !handle_copy_shortcut(key, &mut app, &surface, &mut clipboard) {
-                            app.transcript_selection = None;
+                        let copied_selection = terminal.fullscreen
+                            && handle_copy_shortcut(key, &mut app, &surface, &mut clipboard);
+                        if !copied_selection {
+                            app.screen_selection = None;
                             let mut ui = KeyUi {
                                 clipboard: &mut clipboard,
                                 transcript_viewport_height,
@@ -1372,16 +1366,16 @@ async fn run_loop(
                             );
                         }
                     }
-                    Some(Ok(Event::Mouse(mouse))) if app.trust_prompt.is_none() => {
-                        handle_mouse(mouse, &mut app, &surface)
+                    Some(Ok(Event::Mouse(mouse))) if terminal.fullscreen => {
+                        handle_mouse_event(mouse, &mut app, &surface, &mut clipboard);
                     }
                     Some(Ok(Event::Paste(text))) if app.trust_prompt.is_none() => {
-                        app.transcript_selection = None;
+                        app.screen_selection = None;
                         app.input.insert_str(text);
                         app.input_history.reset_navigation();
                         app.command_palette.get_mut().reset();
                     }
-                    Some(Ok(Event::Resize(_, _))) => app.transcript_selection = None,
+                    Some(Ok(Event::Resize(_, _))) => app.screen_selection = None,
                     Some(Ok(_)) => {}
                     Some(Err(error)) => return Err(error.to_string()),
                     None => app.quit = true,
@@ -1831,6 +1825,14 @@ mod tests {
         }
     }
 
+    struct FailingClipboard;
+
+    impl ClipboardWriter for FailingClipboard {
+        fn set_text(&mut self, _text: &str) -> Result<(), String> {
+            Err("clipboard denied".to_string())
+        }
+    }
+
     fn demo_app() -> App {
         App {
             transcript: vec![
@@ -1902,7 +1904,7 @@ mod tests {
             animation_frame: 0,
             scroll_from_bottom: 0,
             scroll_input: ScrollInputNormalizer::with_events_per_tick(1),
-            transcript_selection: None,
+            screen_selection: None,
             trust_prompt: None,
             pending_auth: None,
             epoch: 1,
@@ -1969,9 +1971,33 @@ mod tests {
         }
     }
 
-    fn blank_surface(width: u16, height: u16) -> TranscriptSurface {
+    fn blank_surface(width: u16, height: u16) -> ScreenTextSurface {
         let area = Rect::new(0, 0, width, height);
-        TranscriptSurface::capture(&ratatui::buffer::Buffer::empty(area), area)
+        ScreenTextSurface::capture(&ratatui::buffer::Buffer::empty(area))
+    }
+
+    fn drag_screen_selection(
+        app: &mut App,
+        surface: &ScreenTextSurface,
+        start: (u16, u16),
+        end: (u16, u16),
+    ) {
+        for (kind, (column, row)) in [
+            (MouseEventKind::Down(MouseButton::Left), start),
+            (MouseEventKind::Drag(MouseButton::Left), end),
+            (MouseEventKind::Up(MouseButton::Left), end),
+        ] {
+            handle_mouse(
+                MouseEvent {
+                    kind,
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                },
+                app,
+                surface,
+            );
+        }
     }
 
     #[test]
@@ -2689,6 +2715,25 @@ mod tests {
     }
 
     #[test]
+    fn extension_notice_is_visible_in_the_transcript() {
+        let mut app = demo_app();
+        app.transcript.clear();
+
+        app.apply_session_event(AgentSessionEvent::ExtensionNotice {
+            message: "/todos requires interactive mode".to_string(),
+            level: pi_session::ExtensionNoticeLevel::Error,
+        });
+
+        assert_eq!(
+            app.transcript,
+            vec![TranscriptItem::Notice(
+                "/todos requires interactive mode".to_string()
+            )]
+        );
+        assert_eq!(app.status, "/todos requires interactive mode");
+    }
+
+    #[test]
     fn transformed_user_message_displays_the_original_command_after_resume() {
         let message = pi_session::AgentMessage::with_display_text(
             Message::User(pi_core::UserMessage::text(
@@ -2975,7 +3020,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_drag_selects_the_visible_assistant_text() {
+    fn mouse_drag_release_requests_copy_of_visible_assistant_text() {
         let mut app = demo_app();
         app.transcript = vec![TranscriptItem::Assistant {
             text: "copy me".to_string(),
@@ -2990,9 +3035,10 @@ mod tests {
         terminal.draw(|frame| draw(frame, &app, palette)).unwrap();
         let buffer = terminal.backend().buffer();
         let (x, y) = find_buffer_position(buffer, 40, 8, "copy me").expect("assistant text");
-        let surface = TranscriptSurface::capture(buffer, Rect::new(0, 0, 40, 8));
+        let surface = ScreenTextSurface::capture(buffer);
+        let mut clipboard = RecordingClipboard::default();
 
-        handle_mouse(
+        handle_mouse_event(
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: x,
@@ -3001,8 +3047,9 @@ mod tests {
             },
             &mut app,
             &surface,
+            &mut clipboard,
         );
-        handle_mouse(
+        handle_mouse_event(
             MouseEvent {
                 kind: MouseEventKind::Drag(MouseButton::Left),
                 column: x + 3,
@@ -3011,8 +3058,9 @@ mod tests {
             },
             &mut app,
             &surface,
+            &mut clipboard,
         );
-        handle_mouse(
+        handle_mouse_event(
             MouseEvent {
                 kind: MouseEventKind::Up(MouseButton::Left),
                 column: x + 3,
@@ -3021,16 +3069,50 @@ mod tests {
             },
             &mut app,
             &surface,
+            &mut clipboard,
         );
 
-        let selection = app.transcript_selection.expect("finished selection");
+        let selection = app.screen_selection.expect("finished selection");
         assert_eq!(surface.selected_text(selection).as_deref(), Some("copy"));
-        assert_eq!(app.status, "Ready");
-        assert!(render_app(&app, 140, 12).contains("Ctrl+Shift+C copy"));
+        assert_eq!(clipboard.text.as_deref(), Some("copy"));
+        assert_eq!(app.status, "Copied 4 characters");
+        let screen = render_app(&app, 140, 12);
+        assert!(!screen.contains("Ctrl+Shift+C copy"));
+        assert!(!screen.contains("drag to copy"));
     }
 
     #[test]
-    fn dragged_transcript_selection_is_visibly_highlighted() {
+    fn mouse_drag_release_reports_clipboard_failures() {
+        let mut app = demo_app();
+        let area = Rect::new(0, 0, 8, 1);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        buffer.set_string(0, 0, "copy me", Style::default());
+        let surface = ScreenTextSurface::capture(&buffer);
+        let mut clipboard = FailingClipboard;
+
+        for (kind, column) in [
+            (MouseEventKind::Down(MouseButton::Left), 0),
+            (MouseEventKind::Drag(MouseButton::Left), 3),
+            (MouseEventKind::Up(MouseButton::Left), 3),
+        ] {
+            handle_mouse_event(
+                MouseEvent {
+                    kind,
+                    column,
+                    row: 0,
+                    modifiers: KeyModifiers::NONE,
+                },
+                &mut app,
+                &surface,
+                &mut clipboard,
+            );
+        }
+
+        assert_eq!(app.status, "Copy failed: clipboard denied");
+    }
+
+    #[test]
+    fn dragged_screen_selection_is_visibly_highlighted() {
         let mut app = demo_app();
         app.transcript = vec![TranscriptItem::Assistant {
             text: "highlight me".to_string(),
@@ -3045,7 +3127,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &app, palette)).unwrap();
         let buffer = terminal.backend().buffer();
         let (x, y) = find_buffer_position(buffer, 40, 8, "highlight me").expect("assistant text");
-        let surface = TranscriptSurface::capture(buffer, Rect::new(0, 0, 40, 8));
+        let surface = ScreenTextSurface::capture(buffer);
         for kind in [
             MouseEventKind::Down(MouseButton::Left),
             MouseEventKind::Drag(MouseButton::Left),
@@ -3081,8 +3163,8 @@ mod tests {
         let area = Rect::new(0, 0, 12, 1);
         let mut buffer = ratatui::buffer::Buffer::empty(area);
         buffer.set_string(0, 0, "copy me", Style::default());
-        let surface = TranscriptSurface::capture(&buffer, area);
-        app.transcript_selection = Some(TranscriptSelection::new(
+        let surface = ScreenTextSurface::capture(&buffer);
+        app.screen_selection = Some(ScreenSelection::new(
             Position::new(0, 0),
             Position::new(3, 0),
         ));
@@ -3098,6 +3180,115 @@ mod tests {
         assert!(consumed);
         assert_eq!(clipboard.text.as_deref(), Some("copy"));
         assert_eq!(app.status, "Copied 4 characters");
+    }
+
+    #[test]
+    fn screen_selection_copies_composer_text_outside_the_transcript() {
+        let mut app = demo_app();
+        app.input.set_text("draft to copy");
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let palette = UiPalette::from_background(Some(RgbColor::new(0, 0, 0)));
+        terminal.draw(|frame| draw(frame, &app, palette)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (x, y) = find_buffer_position(buffer, 80, 16, "draft to copy").expect("composer text");
+        let surface = ScreenTextSurface::capture(buffer);
+
+        drag_screen_selection(&mut app, &surface, (x, y), (x + 4, y));
+
+        let selection = app.screen_selection.expect("composer selection");
+        assert_eq!(surface.selected_text(selection).as_deref(), Some("draft"));
+    }
+
+    #[test]
+    fn screen_selection_highlight_is_painted_after_the_footer() {
+        let mut app = demo_app();
+        app.status = "footer copy target".to_string();
+        let backend = TestBackend::new(140, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let palette = UiPalette::from_background(Some(RgbColor::new(0, 0, 0)));
+        terminal.draw(|frame| draw(frame, &app, palette)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (x, y) =
+            find_buffer_position(buffer, 140, 16, "footer copy target").expect("footer status");
+        let surface = ScreenTextSurface::capture(buffer);
+        drag_screen_selection(&mut app, &surface, (x, y), (x + 5, y));
+
+        terminal.draw(|frame| draw(frame, &app, palette)).unwrap();
+
+        for selected_x in x..=x + 5 {
+            assert_eq!(
+                terminal.backend().buffer()[(selected_x, y)].bg,
+                Color::Rgb(10, 78, 152)
+            );
+        }
+    }
+
+    #[test]
+    fn screen_selection_copies_bottom_view_text() {
+        let mut app = demo_app();
+        app.view_stack.push(BottomPaneView::Model);
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let palette = UiPalette::from_background(Some(RgbColor::new(0, 0, 0)));
+        terminal.draw(|frame| draw(frame, &app, palette)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (x, y) = find_buffer_position(buffer, 100, 24, "Select Model and Effort")
+            .expect("bottom view title");
+        let surface = ScreenTextSurface::capture(buffer);
+
+        drag_screen_selection(&mut app, &surface, (x, y), (x + 5, y));
+
+        let selection = app.screen_selection.expect("bottom view selection");
+        assert_eq!(surface.selected_text(selection).as_deref(), Some("Select"));
+    }
+
+    #[test]
+    fn screen_selection_and_copy_work_on_the_trust_prompt() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(project.join(".pi/skills")).unwrap();
+        let (service, _) =
+            ProjectTrustService::new(&directory.path().join("agent"), None, true).unwrap();
+        let mut app = demo_app();
+        app.trust_prompt = Some(TrustPromptState {
+            cwd: project.clone(),
+            options: service.manual_options(&project).unwrap(),
+            selected: 0,
+            response: None,
+        });
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let palette = UiPalette::from_background(Some(RgbColor::new(0, 0, 0)));
+        terminal.draw(|frame| draw(frame, &app, palette)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (x, y) =
+            find_buffer_position(buffer, 100, 24, "Trust project folder?").expect("trust title");
+        let surface = ScreenTextSurface::capture(buffer);
+        drag_screen_selection(&mut app, &surface, (x, y), (x + 4, y));
+        let mut clipboard = RecordingClipboard::default();
+
+        assert!(handle_copy_shortcut(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
+            &mut app,
+            &surface,
+            &mut clipboard,
+        ));
+        assert_eq!(clipboard.text.as_deref(), Some("Trust"));
+        assert!(app.trust_prompt.is_some());
+    }
+
+    #[test]
+    fn active_screen_selection_suppresses_animation_ticks() {
+        let mut app = demo_app();
+        app.awaiting_assistant = true;
+        assert!(app.has_active_animation());
+        app.screen_selection = Some(ScreenSelection::new(
+            Position::new(0, 0),
+            Position::new(1, 0),
+        ));
+
+        assert!(!app.has_active_animation());
     }
 
     #[test]
@@ -3626,21 +3817,13 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let palette = UiPalette::from_background(Some(RgbColor::new(255, 255, 255)));
         let completed = terminal.draw(|frame| draw(frame, &app, palette)).unwrap();
-        let areas = ui_areas(completed.area, &app);
-        std::hint::black_box(TranscriptSurface::capture(
-            completed.buffer,
-            areas.transcript,
-        ));
+        std::hint::black_box(ScreenTextSurface::capture(completed.buffer));
 
         let started = std::time::Instant::now();
         for frame_index in 0..30 {
             app.scroll_from_bottom = frame_index * MOUSE_SCROLL_LINES_PER_TICK;
             let completed = terminal.draw(|frame| draw(frame, &app, palette)).unwrap();
-            let areas = ui_areas(completed.area, &app);
-            std::hint::black_box(TranscriptSurface::capture(
-                completed.buffer,
-                areas.transcript,
-            ));
+            std::hint::black_box(ScreenTextSurface::capture(completed.buffer));
         }
         let average_frame = started.elapsed() / 30;
 

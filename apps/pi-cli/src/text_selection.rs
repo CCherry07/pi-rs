@@ -4,14 +4,14 @@ use ratatui::style::Color;
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct TranscriptSelection {
+pub(crate) struct ScreenSelection {
     anchor: Position,
     focus: Position,
     dragging: bool,
     dragged: bool,
 }
 
-impl TranscriptSelection {
+impl ScreenSelection {
     #[cfg(test)]
     pub(crate) const fn new(anchor: Position, focus: Position) -> Self {
         Self {
@@ -22,7 +22,7 @@ impl TranscriptSelection {
         }
     }
 
-    pub(crate) fn begin(surface: &TranscriptSurface, position: Position) -> Option<Self> {
+    pub(crate) fn begin(surface: &ScreenTextSurface, position: Position) -> Option<Self> {
         let anchor = surface.point(position)?;
         Some(Self {
             anchor,
@@ -32,7 +32,7 @@ impl TranscriptSelection {
         })
     }
 
-    pub(crate) fn drag_to(&mut self, surface: &TranscriptSurface, position: Position) {
+    pub(crate) fn drag_to(&mut self, surface: &ScreenTextSurface, position: Position) {
         if !self.dragging {
             return;
         }
@@ -42,7 +42,7 @@ impl TranscriptSelection {
         }
     }
 
-    pub(crate) fn finish(&mut self, surface: &TranscriptSurface, position: Position) -> bool {
+    pub(crate) fn finish(&mut self, surface: &ScreenTextSurface, position: Position) -> bool {
         if self.dragging
             && let Some(focus) = surface.clamped_point(position)
         {
@@ -77,24 +77,18 @@ impl Default for SurfaceCell {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TranscriptSurface {
+pub(crate) struct ScreenTextSurface {
     area: Rect,
     rows: Vec<Vec<SurfaceCell>>,
 }
 
-impl TranscriptSurface {
-    pub(crate) fn capture(buffer: &Buffer, requested: Rect) -> Self {
-        let buffer_area = *buffer.area();
-        let left = requested.x.max(buffer_area.x);
-        let top = requested.y.max(buffer_area.y);
-        let right = requested.right().min(buffer_area.right());
-        let bottom = requested.bottom().min(buffer_area.bottom());
-        let area = Rect::new(
-            left,
-            top,
-            right.saturating_sub(left),
-            bottom.saturating_sub(top),
-        );
+impl ScreenTextSurface {
+    /// Capture the complete rendered terminal frame.
+    ///
+    /// Keeping the area implicit prevents callers from accidentally limiting
+    /// selection to one widget or layout region.
+    pub(crate) fn capture(buffer: &Buffer) -> Self {
+        let area = *buffer.area();
         let mut rows = Vec::with_capacity(usize::from(area.height));
         for y in area.y..area.bottom() {
             let mut row = vec![SurfaceCell::default(); usize::from(area.width)];
@@ -122,7 +116,7 @@ impl TranscriptSurface {
         Self { area, rows }
     }
 
-    pub(crate) fn point(&self, position: Position) -> Option<Position> {
+    fn point(&self, position: Position) -> Option<Position> {
         (position.x >= self.area.x
             && position.x < self.area.right()
             && position.y >= self.area.y
@@ -130,7 +124,7 @@ impl TranscriptSurface {
         .then(|| self.snap_to_lead(position))
     }
 
-    pub(crate) fn clamped_point(&self, position: Position) -> Option<Position> {
+    fn clamped_point(&self, position: Position) -> Option<Position> {
         if self.area.is_empty() {
             return None;
         }
@@ -154,7 +148,7 @@ impl TranscriptSurface {
         Position::new(self.area.x.saturating_add(offset), position.y)
     }
 
-    pub(crate) fn selected_text(&self, selection: TranscriptSelection) -> Option<String> {
+    pub(crate) fn selected_text(&self, selection: ScreenSelection) -> Option<String> {
         if self.area.is_empty() {
             return None;
         }
@@ -189,12 +183,7 @@ impl TranscriptSurface {
         (!text.trim().is_empty()).then_some(text)
     }
 
-    pub(crate) fn paint(
-        &self,
-        buffer: &mut Buffer,
-        selection: TranscriptSelection,
-        background: Color,
-    ) {
+    pub(crate) fn paint(&self, buffer: &mut Buffer, selection: ScreenSelection, background: Color) {
         if self.area.is_empty() {
             return;
         }
@@ -236,8 +225,8 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         buffer.set_string(0, 0, "alpha", Style::default());
         buffer.set_string(0, 1, "中 beta", Style::default());
-        let surface = TranscriptSurface::capture(&buffer, area);
-        let selection = TranscriptSelection::new(Position::new(1, 0), Position::new(4, 1));
+        let surface = ScreenTextSurface::capture(&buffer);
+        let selection = ScreenSelection::new(Position::new(1, 0), Position::new(4, 1));
 
         assert_eq!(
             surface.selected_text(selection).as_deref(),
@@ -251,10 +240,10 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         buffer.set_string(0, 0, "abcde", Style::default());
         buffer.set_string(0, 1, "中 xy", Style::default());
-        let surface = TranscriptSurface::capture(&buffer, area);
+        let surface = ScreenTextSurface::capture(&buffer);
 
         let mut selection =
-            TranscriptSelection::begin(&surface, Position::new(4, 1)).expect("selection start");
+            ScreenSelection::begin(&surface, Position::new(4, 1)).expect("selection start");
         selection.drag_to(&surface, Position::new(1, 0));
         assert!(selection.finish(&surface, Position::new(1, 0)));
         assert_eq!(
@@ -262,8 +251,7 @@ mod tests {
             Some("bcde\n中 xy")
         );
 
-        let mut click =
-            TranscriptSelection::begin(&surface, Position::new(2, 0)).expect("click start");
+        let mut click = ScreenSelection::begin(&surface, Position::new(2, 0)).expect("click start");
         assert!(!click.finish(&surface, Position::new(2, 0)));
     }
 
@@ -272,8 +260,8 @@ mod tests {
         let area = Rect::new(0, 0, 5, 1);
         let mut buffer = Buffer::empty(area);
         buffer.set_string(0, 0, "hello", Style::default());
-        let surface = TranscriptSurface::capture(&buffer, area);
-        let selection = TranscriptSelection::new(Position::new(1, 0), Position::new(3, 0));
+        let surface = ScreenTextSurface::capture(&buffer);
+        let selection = ScreenSelection::new(Position::new(1, 0), Position::new(3, 0));
 
         surface.paint(&mut buffer, selection, Color::Blue);
 

@@ -25,11 +25,30 @@ pub(crate) async fn run_print(session_handle: PiSession, input: String) -> Resul
         }
         return Ok(());
     }
-    match session
-        .submit(input)
-        .await
-        .map_err(|error| error.to_string())?
-    {
+    let mut subscription = session.subscribe();
+    let submission = session.submit(input);
+    tokio::pin!(submission);
+    let outcome = loop {
+        tokio::select! {
+            result = &mut submission => {
+                let outcome = result.map_err(|error| error.to_string())?;
+                while let Ok(event) = subscription.events.try_recv() {
+                    print_extension_notice(&subscription, event);
+                }
+                break outcome;
+            }
+            event = subscription.events.recv() => match event {
+                Ok(event) => print_extension_notice(&subscription, event),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    subscription.snapshot = session.snapshot();
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Err("session event stream closed during print submission".to_string());
+                }
+            }
+        }
+    };
+    match outcome {
         SubmitOutcome::Agent(outcome) => {
             if let Some(text) = outcome.new_messages.iter().rev().find_map(assistant_text) {
                 print!("{text}");
@@ -45,6 +64,18 @@ pub(crate) async fn run_print(session_handle: PiSession, input: String) -> Resul
         _ => return Err("unsupported submission outcome".to_string()),
     }
     Ok(())
+}
+
+fn print_extension_notice(
+    subscription: &pi_session::AgentSessionSubscription,
+    event: RevisionedAgentSessionEvent,
+) {
+    if event.revision <= subscription.snapshot.revision {
+        return;
+    }
+    if let AgentSessionEvent::ExtensionNotice { message, .. } = event.event {
+        println!("{message}");
+    }
 }
 
 pub(crate) async fn run_json(session_handle: PiSession, input: String) -> Result<(), String> {
@@ -143,6 +174,9 @@ fn event_json(event: RevisionedAgentSessionEvent) -> Value {
         }
         AgentSessionEvent::SessionInfoChanged { name } => {
             json!({"type":"session_info_changed","name":name})
+        }
+        AgentSessionEvent::ExtensionNotice { message, level } => {
+            json!({"type":"extension_notice","message":message,"level":level.as_str()})
         }
         AgentSessionEvent::ThinkingLevelChanged { level } => {
             json!({"type":"thinking_level_changed","level":level})
@@ -245,4 +279,31 @@ pub(crate) fn shell_command(input: &str) -> Option<(String, bool)> {
     }
     .trim();
     (!command.is_empty()).then(|| (command.to_string(), excluded))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pi_session::ExtensionNoticeLevel;
+
+    #[test]
+    fn ndjson_preserves_extension_notice_severity() {
+        assert_eq!(
+            event_json(RevisionedAgentSessionEvent {
+                revision: 7,
+                event: AgentSessionEvent::ExtensionNotice {
+                    message: "/todos requires interactive mode".to_string(),
+                    level: ExtensionNoticeLevel::Error,
+                },
+            }),
+            json!({
+                "revision": 7,
+                "event": {
+                    "type": "extension_notice",
+                    "message": "/todos requires interactive mode",
+                    "level": "error",
+                },
+            })
+        );
+    }
 }

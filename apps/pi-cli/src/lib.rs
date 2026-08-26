@@ -8,13 +8,14 @@ mod package_commands;
 mod plugin_commands;
 mod project_trust;
 mod session_factory;
-mod transcript_selection;
+mod text_selection;
 mod tui;
 
 use std::io::{IsTerminal, Read};
 use std::sync::Arc;
 
 use config::{AppConfig, Cli, CliCommand};
+use pi_js_package_manager::PackageManager as JsPackageManager;
 use pi_js_plugin::{ExtensionSessionBinding, JsHostMode, JsPluginHost};
 use pi_session::{MultiSessionManager, PiSession, SessionLog};
 use project_trust::{ProjectTrustEvaluation, ProjectTrustPromptRequest, ProjectTrustService};
@@ -97,12 +98,6 @@ pub async fn run_with_js_host(
 }
 
 async fn run(cli: Cli, js_host: Option<Arc<dyn JsPluginHost>>) -> Result<(), String> {
-    if js_host.is_none() && !cli.extensions.is_empty() {
-        return Err(
-            "--extension requires the Node/NAPI launcher; run `npm start --prefix packages/pi --`"
-                .to_string(),
-        );
-    }
     let mut config = AppConfig::resolve(&cli)?;
     if !matches!(cli.command, Some(CliCommand::Auth { .. })) {
         auth::refresh_oauth_if_needed(&config.agent_dir).await?;
@@ -137,6 +132,7 @@ async fn run(cli: Cli, js_host: Option<Arc<dyn JsPluginHost>>) -> Result<(), Str
     let input = resolve_input(&cli, stdin_is_terminal)?;
     let cli_mode = CLIMode::resolve(&cli, input, stdin_is_terminal)?;
     let trust = resolve_project_trust(&cli, &config, cli_mode.is_interactive()).await?;
+    ensure_javascript_host_available(&config, trust.trusted(), js_host.is_some())?;
     let cwd = config.cwd.clone();
     let agent_dir = config.agent_dir.clone();
     let session_path = config.session_path.clone();
@@ -167,6 +163,25 @@ async fn run(cli: Cli, js_host: Option<Arc<dyn JsPluginHost>>) -> Result<(), Str
     .await;
     let shutdown = sessions.shutdown().await.map_err(|error| error.to_string());
     finish_run(result, shutdown)
+}
+
+fn ensure_javascript_host_available(
+    config: &AppConfig,
+    project_trusted: bool,
+    host_available: bool,
+) -> Result<(), String> {
+    if host_available
+        || !JsPackageManager::new(config.javascript_resolve_request(project_trusted))
+            .requires_javascript_host()
+    {
+        return Ok(());
+    }
+    Err(
+        "JavaScript/TypeScript extensions are active for this run, but this executable uses the native-only Rust adapter.\n\
+From a pi-rs source checkout, run `./scripts/pi-dev ...`; installed users should run the `@pi-rs/cli` npm launcher.\n\
+Pass `--no-extensions` to disable configured and automatic extensions; explicit `-e`/`--extension` sources must also be removed."
+            .to_string(),
+    )
 }
 
 async fn run_cli_with_shutdown(
@@ -293,7 +308,12 @@ fn resolve_input(cli: &Cli, stdin_is_terminal: bool) -> Result<Option<String>, S
 
 #[cfg(test)]
 mod tests {
-    use super::{CLIMode, Cli, JsHostMode, finish_run};
+    use std::fs;
+
+    use serde_json::json;
+
+    use super::{CLIMode, Cli, JsHostMode, ensure_javascript_host_available, finish_run};
+    use crate::config::AppConfig;
 
     fn cli(arguments: &[&str]) -> Cli {
         Cli::try_parse_pi_from(
@@ -350,6 +370,43 @@ mod tests {
             CLIMode::resolve(&cli(&[]), None, false),
             Err("--print requires a prompt or stdin".to_string())
         );
+    }
+
+    #[test]
+    fn native_adapter_rejects_active_javascript_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        let agent_dir = root.path().join("agent");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::to_vec(&json!({"packages": ["npm:todo-extension"]})).unwrap(),
+        )
+        .unwrap();
+        let config = AppConfig::resolve(&cli(&[
+            "--cwd",
+            cwd.to_str().unwrap(),
+            "--agent-dir",
+            agent_dir.to_str().unwrap(),
+        ]))
+        .unwrap();
+
+        let error = ensure_javascript_host_available(&config, true, false).unwrap_err();
+        assert!(error.contains("native-only Rust adapter"));
+        assert!(error.contains("./scripts/pi-dev"));
+        assert!(error.contains("--no-extensions"));
+        assert!(ensure_javascript_host_available(&config, true, true).is_ok());
+
+        let disabled = AppConfig::resolve(&cli(&[
+            "--cwd",
+            cwd.to_str().unwrap(),
+            "--agent-dir",
+            agent_dir.to_str().unwrap(),
+            "--no-extensions",
+        ]))
+        .unwrap();
+        assert!(ensure_javascript_host_available(&disabled, true, false).is_ok());
     }
 
     #[test]

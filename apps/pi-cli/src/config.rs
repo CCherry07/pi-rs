@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use pi_js_package_manager::ResolveRequest as JsResolveRequest;
 
 #[derive(Debug, Parser)]
 #[command(name = "pi", version, about = "Pi coding agent for the terminal")]
@@ -276,6 +277,16 @@ impl AppConfig {
             extensions: cli.extensions.clone(),
             discover_extensions: !cli.no_extensions,
         })
+    }
+
+    pub(crate) fn javascript_resolve_request(&self, project_trusted: bool) -> JsResolveRequest {
+        JsResolveRequest {
+            cwd: self.cwd.clone(),
+            agent_dir: self.agent_dir.clone(),
+            project_trusted,
+            explicit_sources: self.extensions.clone(),
+            discover_extensions: self.discover_extensions,
+        }
     }
 }
 

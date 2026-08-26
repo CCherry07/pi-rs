@@ -5,10 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use pi_agent::AgentOptions;
 use pi_core::{ModelId, PluginId, ProviderId};
-use pi_js_package_manager::{
-    PackageManager as JsPackageManager, ResolveRequest as JsResolveRequest,
-    ResolvedExtensionIdentity,
-};
+use pi_js_package_manager::{PackageManager as JsPackageManager, ResolvedExtensionIdentity};
 use pi_js_plugin::{
     ExtensionContextAccess, ExtensionSessionBinding, JsGenerationRequest, JsHostMode,
     JsPluginGeneration, JsPluginHost, SessionExtensionContextAccess,
@@ -117,16 +114,11 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
         let mut js_context = None;
         let mut js_extensions = Vec::new();
         let js_generation = if let Some(host) = &self.js_plugin_host {
-            let resolution = JsPackageManager::new(JsResolveRequest {
-                cwd: config.cwd.clone(),
-                agent_dir: config.agent_dir.clone(),
-                project_trusted,
-                explicit_sources: config.extensions.clone(),
-                discover_extensions: config.discover_extensions,
-            })
-            .resolve()
-            .await
-            .map_err(|error| SessionError::Runtime(error.to_string()))?;
+            let resolution =
+                JsPackageManager::new(config.javascript_resolve_request(project_trusted))
+                    .resolve()
+                    .await
+                    .map_err(|error| SessionError::Runtime(error.to_string()))?;
             let extension_labels = javascript_inventory_labels(&resolution.extension_identities);
             let extension_paths = resolution.extension_paths;
             let manifest = host

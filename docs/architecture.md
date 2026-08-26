@@ -96,10 +96,36 @@ terminal-presentation seam, not a new core/runtime message protocol. This is a p
 routing choice, not a claim that Pi implements Codex-only accounts, usage limits, permissions, or
 remote services. Terminal styling, view routing, and selector state remain owned by `apps/pi-cli`.
 
+Fullscreen text selection is a TUI-owned deep Module. `ScreenTextSurface::capture(buffer)` accepts
+only the complete final Ratatui buffer, hiding cell-width normalization, wide-character continuation
+cells, coordinate clamping, text extraction, and highlight painting behind that Interface. The view
+paints selection after every other widget, including focused bottom views and the project-trust
+screen, so no caller can accidentally restrict copying to the transcript. The controller routes
+fullscreen mouse gestures through this Module and emits a clipboard write when a non-empty drag is
+released. This avoids depending on `Cmd+C` / `Ctrl+Shift+C`, which terminal emulators commonly
+consume instead of forwarding to fullscreen applications; forwarded shortcuts remain available for
+re-copy and stay distinct from `Ctrl+C`. Animation ticks pause while a selection is active.
+Main-screen mode never enables mouse capture and leaves visible-text selection to the terminal.
+Semantic `/copy` remains independent and copies the last completed assistant message.
+
+The clipboard Module retains its small `ClipboardWriter::set_text` Interface. Its system Adapter
+uses the native clipboard first for local sessions, PowerShell as the WSL fallback, and tmux then
+bounded OSC 52 for terminal-mediated copying. SSH deliberately skips the remote native clipboard so
+copied text reaches the user's local terminal.
+
 `packages/pi` does not own a terminal frontend. Its executable creates the JavaScript extension host
 and invokes the NAPI `runPi` entry; interactive, print, JSON, piped-input, and plugin-management
 arguments are forwarded unchanged. This keeps extension callbacks in Node without allowing Node and
 Rust to compete for raw mode, stdout, editor state, or transcript projection.
+
+`scripts/pi-dev` is the source-checkout Adapter for that same Interface. It incrementally builds
+`pi-napi` for Rust's current host target and passes the resulting absolute library path through
+`PI_RS_NATIVE_BINDING` before starting the TypeScript host. It never relies on copied package
+artifacts, so an older `packages/pi/pi-napi.*.node` cannot shadow the current Rust generation. The
+standalone Rust Adapter remains native-only. Before constructing a session, it asks the
+`pi-js-package-manager` Module whether the trusted/discovered configuration can require JavaScript;
+an active requirement fails with an actionable launcher message unless the user explicitly disabled
+discovery. This probe is read-only and never installs or updates a package.
 
 All frontend adapters enter the product through two public session Modules. `MultiSessionManager`
 owns the runtime factory, manager shutdown, and a private table of active handles. `PiSession` is the
@@ -266,7 +292,10 @@ operation or a process-global callback broker. Its deliberately small Interface 
 commands. The operation payloads and results are JSON, but the capability object itself is passed
 as the second threadsafe-function argument. Before `prepareGeneration`, `ProductSessionFactory`
 calls the deep Rust Module `pi-js-package-manager` through its
-`resolve(request) -> resolution` Interface. It merges explicit `-e` local/npm/git sources first,
+`resolve(request) -> resolution` Interface. Its side-effect-free
+`requires_javascript_host() -> bool` query is also used by the native-only startup Adapter after
+construction from the same request.
+The Module merges explicit `-e` local/npm/git sources first,
 then trusted project settings entries, trusted project auto-discovery, user settings entries, user
 auto-discovery, and configured package resources in current Pi precedence. Package manifests and
 filters, ignore files, canonical-path deduplication, managed npm/git installation, custom
@@ -309,9 +338,11 @@ mirrors Pi's complete extension-loader module table for both the `@earendil-work
 `@sinclair/typebox` roots and subpaths alias to the bundled TypeBox runtime. This is module-resolution
 coverage, not a claim that every upstream JavaScript runtime export is reimplemented. It keeps one
 host ABI in a generation and prevents npm from installing a second Pi product runtime beside an
-extension. Pi TUI peers are deliberately not supplied: when Jiti reports that an entry's missing
-module is exactly `@earendil-works/pi-tui` or `@mariozechner/pi-tui`, the host records that entry as
-inactive and continues preparing later entries. All other missing modules remain fatal.
+extension. `@earendil-works/pi-tui` and `@mariozechner/pi-tui` alias to a separate terminal-inert
+compatibility module. Its pure text helpers and inert component classes allow mixed extension
+modules to evaluate and retain non-UI registrations, while renderer/widget/shortcut registrations
+remain inactive and terminal ownership stays in `apps/pi-cli`. All other missing modules remain
+fatal.
 
 The same Module exposes one management dispatcher,
 `manage(Install | Remove | Update | List) -> ManageResult`. Top-level CLI commands adapt to this
@@ -349,16 +380,19 @@ rule as the Rust `ProviderPluginDriver`.
 `ProductSessionFactory` asks the Node host for a fresh callback generation on initial construction,
 new/resumed sessions, and `/reload`, alongside native plugins, resources, models, and session
 plugins. The existing whole-session transaction prepares all of them before swap. Except for the
-explicit inactive Pi TUI-peer case above, a failed import, factory, manifest, or registry build drops
-the candidate (retiring its Node callbacks) and keeps the old Rust and JavaScript generations active.
+recognized facilities that deliberately register as inactive, a failed import, factory, manifest,
+or registry build drops the candidate (retiring its Node callbacks) and keeps the old Rust and
+JavaScript generations active.
 Executable JavaScript is never serialized into Pi v4 sessions.
 
 This is compatibility by explicit capability, not an unsafe claim that every Pi TUI API is already
 portable. The current bridge supports registered tools and commands, the Rust agent lifecycle
 hooks, `before_provider_request`, the ten session hooks, read-only session/model context, and the
 command-safe session operations described above. UI is an intentional product divergence: every
-JavaScript context reports `hasUI = false` and exposes one explicit NoOp UI object with Pi-compatible
-default return values. UI registrations, renderers, flags, dynamic providers, resource discovery,
+JavaScript context reports `hasUI = false` and exposes one explicit inert UI object with
+Pi-compatible default return values. Its `notify` method crosses the native context as a transient
+`AgentSessionEvent::ExtensionNotice`; each Rust frontend owns presentation, and nothing is persisted
+to the v4 session log. UI registrations, renderers, flags, dynamic providers, resource discovery,
 and other recognized-but-inactive facilities do not fail generation construction; they produce an
 `inactive` generation diagnostic and contribute no runtime callback. A hook name known to current
 Pi but not implemented follows the same inactive policy, while an unknown hook name remains a hard

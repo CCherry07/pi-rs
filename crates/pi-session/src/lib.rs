@@ -41,7 +41,7 @@ pub use context::{
 };
 pub use event::{
     AgentSessionEvent, AgentSessionSnapshot, AgentSessionSubscription, BashExecutionSnapshot,
-    CompactionSnapshot, QueueSnapshot, RevisionedAgentSessionEvent,
+    CompactionSnapshot, ExtensionNoticeLevel, QueueSnapshot, RevisionedAgentSessionEvent,
 };
 pub use jsonl::SessionLog;
 pub use memory::{InMemorySession, InMemorySessionRepo};

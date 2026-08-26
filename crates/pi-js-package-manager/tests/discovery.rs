@@ -191,6 +191,73 @@ async fn no_extensions_preserves_explicit_local_directory_discovery() {
     assert_eq!(resolution.extension_paths, [first, second]);
 }
 
+#[test]
+fn javascript_host_requirement_probe_is_side_effect_free_and_respects_discovery() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().join("project");
+    let agent_dir = root.path().join("agent");
+    write_json(
+        &agent_dir.join("settings.json"),
+        json!({"packages": ["npm:not-installed@1.0.0"]}),
+    );
+
+    let configured = PackageManager::new(request(&cwd, &agent_dir, Vec::new(), true, true));
+    assert!(configured.requires_javascript_host());
+    assert!(!agent_dir.join("npm/node_modules/not-installed").exists());
+
+    let installed = agent_dir.join("npm/node_modules/not-installed");
+    write_json(
+        &installed.join("package.json"),
+        json!({"name": "not-installed", "version": "1.0.0"}),
+    );
+    let package_without_extensions =
+        PackageManager::new(request(&cwd, &agent_dir, Vec::new(), true, true));
+    assert!(!package_without_extensions.requires_javascript_host());
+
+    let disabled = PackageManager::new(request(&cwd, &agent_dir, Vec::new(), true, false));
+    assert!(!disabled.requires_javascript_host());
+
+    let explicit = PackageManager::new(request(
+        &cwd,
+        &agent_dir,
+        vec!["explicit.ts".to_string()],
+        true,
+        false,
+    ));
+    assert!(explicit.requires_javascript_host());
+}
+
+#[test]
+fn javascript_host_requirement_probe_respects_trust_deltas_and_automatic_extensions() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().join("project");
+    let agent_dir = root.path().join("agent");
+    write_json(
+        &agent_dir.join("settings.json"),
+        json!({"packages": ["npm:shared-package@1.0.0"]}),
+    );
+    write_json(
+        &cwd.join(".pi/settings.json"),
+        json!({
+            "packages": [{
+                "source": "npm:shared-package@1.0.0",
+                "autoload": false
+            }]
+        }),
+    );
+
+    let trusted = PackageManager::new(request(&cwd, &agent_dir, Vec::new(), true, true));
+    assert!(!trusted.requires_javascript_host());
+
+    let untrusted = PackageManager::new(request(&cwd, &agent_dir, Vec::new(), false, true));
+    assert!(untrusted.requires_javascript_host());
+
+    touch(&cwd.join(".pi/extensions/project.ts"));
+    let trusted_with_automatic =
+        PackageManager::new(request(&cwd, &agent_dir, Vec::new(), true, true));
+    assert!(trusted_with_automatic.requires_javascript_host());
+}
+
 #[tokio::test]
 async fn installs_missing_npm_sources_with_the_configured_command() {
     let root = tempfile::tempdir().unwrap();

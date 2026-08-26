@@ -561,6 +561,13 @@ impl AgentSession {
         self.events.subscribe()
     }
 
+    /// Publishes a transient, presentation-neutral notice from an extension.
+    /// The notice is delivered to active frontend subscribers and is not
+    /// written into the session log.
+    pub fn notify_extension(&self, message: String, level: crate::ExtensionNoticeLevel) {
+        self.events.publish_extension_notice(message, level);
+    }
+
     pub fn session_plugin_driver(&self) -> Arc<SessionPluginDriver> {
         Arc::clone(
             &self

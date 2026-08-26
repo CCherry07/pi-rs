@@ -31,6 +31,7 @@ function packageVersion(): string {
 export const CONFIG_DIR_NAME = ".pi";
 export const VERSION = packageVersion();
 export { Type };
+export { Editor as CustomEditor } from "./compat-tui.js";
 
 export function StringEnum<T extends readonly string[]>(
   values: T,

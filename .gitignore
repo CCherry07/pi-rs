@@ -13,3 +13,4 @@ dist/
 **/.pi/plugins/installed/
 **/.pi/plugins/.installed-*/
 **/.pi/plugins.lock.guard
+.pi

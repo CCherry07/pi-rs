@@ -12,7 +12,7 @@ const PI_COMPATIBILITY_ENTRYPOINTS = [
   'pi-ai',
 ] as const
 
-export const PI_TUI_PACKAGE_NAMES: readonly string[] = Object.freeze(
+const PI_TUI_PACKAGE_NAMES: readonly string[] = Object.freeze(
   PI_PACKAGE_SCOPES.map(scope => `${scope}/pi-tui`),
 )
 
@@ -29,17 +29,23 @@ const TYPEBOX_PACKAGE_SUBPATHS = [
   '',
 ] as const
 
-/** Resolves extension peers to the single runtime bundled by the host. */
+export interface CompatibilityModulePaths {
+  pi: string
+  tui: string
+}
+
+/** Resolves extension peers to the runtimes owned by the host. */
 export class CompatibilityResolver {
   readonly aliases: Readonly<Record<string, string>>
 
-  constructor(require: NodeRequire, compatibilityModulePath: string) {
+  constructor(require: NodeRequire, modules: CompatibilityModulePaths) {
     const entries: [string, string][] = [
       ...PI_PACKAGE_SCOPES.flatMap(scope =>
         PI_COMPATIBILITY_ENTRYPOINTS.map(
-          (entrypoint): [string, string] => [`${scope}/${entrypoint}`, compatibilityModulePath],
+          (entrypoint): [string, string] => [`${scope}/${entrypoint}`, modules.pi],
         ),
       ),
+      ...PI_TUI_PACKAGE_NAMES.map((packageName): [string, string] => [packageName, modules.tui]),
       ...TYPEBOX_PACKAGE_NAMES.flatMap((packageName) =>
         TYPEBOX_PACKAGE_SUBPATHS.map(
           (subpath): [string, string] => [

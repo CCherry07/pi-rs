@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { createJiti } from 'jiti'
 import { z } from 'zod'
 
-import { CompatibilityResolver, PI_TUI_PACKAGE_NAMES } from './compatibility-resolver.js'
+import { CompatibilityResolver } from './compatibility-resolver.js'
 import { createExtensionContext } from './extension-context.js'
 import type { PiExtensionCommandContext, PiExtensionContext } from './extension-api.js'
 import type { NativeExtensionContext } from './native-binding.js'
@@ -33,9 +33,15 @@ const compatibilityModulePath = [join(hostDirectory, 'compat-api.js'), join(host
 if (!compatibilityModulePath) {
   throw new Error(`Cannot locate the Pi extension compatibility module in ${hostDirectory}`)
 }
-const compatibilityModule: string = compatibilityModulePath
+const compatibilityTuiModulePath = [join(hostDirectory, 'compat-tui.js'), join(hostDirectory, 'compat-tui.ts')].find(existsSync)
+if (!compatibilityTuiModulePath) {
+  throw new Error(`Cannot locate the Pi TUI compatibility module in ${hostDirectory}`)
+}
 const require = createRequire(import.meta.url)
-const compatibilityResolver = new CompatibilityResolver(require, compatibilityModule)
+const compatibilityResolver = new CompatibilityResolver(require, {
+  pi: compatibilityModulePath,
+  tui: compatibilityTuiModulePath,
+})
 
 const jsonObjectSchema = z.looseObject({})
 const toolResultSchema = z.looseObject({
@@ -96,31 +102,6 @@ function parseExternal<T>(schema: z.ZodType<T>, value: unknown, description: str
   })
 }
 
-function unavailablePiTuiPeer(error: unknown): string | undefined {
-  const pending = [error]
-  const seen = new Set<unknown>()
-  const messages: string[] = []
-  let moduleNotFound = false
-
-  while (pending.length) {
-    const current = pending.shift()
-    if (current === undefined || seen.has(current)) continue
-    seen.add(current)
-    if (current instanceof Error) messages.push(current.message)
-    if (!isRecord(current)) continue
-    if (typeof current.message === 'string' && !(current instanceof Error)) {
-      messages.push(current.message)
-    }
-    moduleNotFound ||= current.code === 'MODULE_NOT_FOUND' || current.code === 'ERR_MODULE_NOT_FOUND'
-    if (current.cause !== undefined) pending.push(current.cause)
-  }
-
-  if (!moduleNotFound) return undefined
-  return PI_TUI_PACKAGE_NAMES.find(packageName =>
-    messages.some(message => message.includes(`'${packageName}'`) || message.includes(`"${packageName}"`)),
-  )
-}
-
 const AGENT_HOOKS = new Set([
   'input',
   'before_agent_start',
@@ -164,69 +145,6 @@ const KNOWN_HOOKS = new Set([
   'thinking_level_select',
   'user_bash',
 ])
-
-interface NoOpExtensionUI {
-  select(): Promise<undefined>
-  confirm(): Promise<boolean>
-  input(): Promise<undefined>
-  notify(): void
-  onTerminalInput(): () => void
-  setStatus(): void
-  setWorkingMessage(): void
-  setWorkingVisible(): void
-  setWorkingIndicator(): void
-  setHiddenThinkingLabel(): void
-  setWidget(): void
-  setFooter(): void
-  setHeader(): void
-  setTitle(): void
-  custom(): Promise<undefined>
-  pasteToEditor(): void
-  setEditorText(): void
-  getEditorText(): string
-  editor(): Promise<undefined>
-  addAutocompleteProvider(): void
-  setEditorComponent(): void
-  getEditorComponent(): undefined
-  getAllThemes(): never[]
-  getTheme(): undefined
-  setTheme(): { success: false; error: string }
-  getToolsExpanded(): boolean
-  setToolsExpanded(): void
-  readonly theme: undefined
-}
-
-const noOp = (): void => {}
-const NO_OP_UI: NoOpExtensionUI = Object.freeze({
-  select: async () => undefined,
-  confirm: async () => false,
-  input: async () => undefined,
-  notify: noOp,
-  onTerminalInput: () => noOp,
-  setStatus: noOp,
-  setWorkingMessage: noOp,
-  setWorkingVisible: noOp,
-  setWorkingIndicator: noOp,
-  setHiddenThinkingLabel: noOp,
-  setWidget: noOp,
-  setFooter: noOp,
-  setHeader: noOp,
-  setTitle: noOp,
-  custom: async () => undefined,
-  pasteToEditor: noOp,
-  setEditorText: noOp,
-  getEditorText: () => '',
-  editor: async () => undefined,
-  addAutocompleteProvider: noOp,
-  setEditorComponent: noOp,
-  getEditorComponent: () => undefined,
-  getAllThemes: () => [],
-  getTheme: () => undefined,
-  setTheme: () => ({ success: false as const, error: 'JavaScript extension UI is inactive in pi-rs' }),
-  getToolsExpanded: () => false,
-  setToolsExpanded: noOp,
-  theme: undefined,
-})
 
 type ExtensionContext = PiExtensionContext
 type ExtensionCommandContext = PiExtensionCommandContext
@@ -329,7 +247,7 @@ function createExtensionEventBus(): ExtensionEventBus {
     emit: (channel, data) => {
       for (const listener of listeners.get(channel) ?? []) {
         try {
-          Promise.resolve(listener(data)).catch(noOp)
+          Promise.resolve(listener(data)).catch(() => undefined)
         } catch {
           // Cross-extension event failures are isolated from the emitter.
         }
@@ -451,21 +369,7 @@ export class ExtensionHost {
           moduleCache: false,
           interopDefault: true,
         })
-        let imported: unknown
-        try {
-          imported = await jiti.import<unknown>(path, { default: true })
-        } catch (error) {
-          const unavailablePeer = unavailablePiTuiPeer(error)
-          if (!unavailablePeer) throw error
-          diagnostics.push({
-            pluginId: id,
-            path,
-            feature: unavailablePeer,
-            status: 'inactive',
-            message: `${unavailablePeer} is unavailable because JavaScript extension UI is inactive in pi-rs; extension was skipped`,
-          })
-          continue
-        }
+        const imported = await jiti.import<unknown>(path, { default: true })
         const factory = parseExternal(callableSchema, imported, `Extension default export (${path})`)
         await callDynamic(factory, undefined, [api])
         if (contribution.tools.length || contribution.commands.length || contribution.agentHooks.length) {
@@ -678,7 +582,6 @@ export class ExtensionHost {
       mode: state.mode,
       projectTrusted: state.projectTrusted,
       signal,
-      ui: NO_OP_UI as unknown as Record<string, unknown>,
       command,
       assertActive: () => {
         this.#requireGeneration(generationId)

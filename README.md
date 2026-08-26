@@ -50,14 +50,15 @@ export OPENAI_API_KEY="..."
 export OPENAI_MODEL="gpt-4o-mini"
 export OPENAI_BASE_URL="https://api.openai.com/v1"
 
-# Start the fullscreen TUI
-cargo run -p pi-cli --
+# Install the local Node host and start the complete fullscreen product
+npm install --prefix packages/pi
+./scripts/pi-dev
 ```
 
 The terminal alternate screen is enabled by default. To stay on the main terminal screen:
 
 ```bash
-cargo run -p pi-cli -- --no-fullscreen
+./scripts/pi-dev --no-fullscreen
 ```
 
 Other common modes:
@@ -154,8 +155,8 @@ and Grok 4.6 catalog. Without `XAI_API_KEY`, these models remain registered for 
 hidden from the available-model selector.
 
 ```bash
-# Start in a specific project
-cargo run -p pi-cli -- --cwd /path/to/project
+# Start the native-only adapter in a specific project
+cargo run -p pi-cli -- --no-extensions --cwd /path/to/project
 ```
 
 Show all CLI options:
@@ -164,17 +165,21 @@ Show all CLI options:
 cargo run -p pi-cli -- --help
 ```
 
-To run Pi-compatible JavaScript or TypeScript extensions, build the optional Node host:
+To run Pi-compatible JavaScript or TypeScript extensions from a source checkout, use the
+workspace launcher. It incrementally builds the current host NAPI library and passes its exact path
+to Node, so a stale copied `.node` file cannot win resolution:
 
 ```bash
-cd packages/pi
-npm install
-npm run build:native
-npm start -- --cwd /path/to/project
+npm install --prefix packages/pi
+./scripts/pi-dev --cwd /path/to/project
 
 # Or load an exact extension path
-npm start -- --no-extensions -e /path/to/extension.ts
+./scripts/pi-dev --no-extensions -e /path/to/extension.ts
 ```
+
+The standalone `target/debug/pi` adapter fails with an actionable message when extension
+configuration is active instead of silently omitting it. Pass `--no-extensions` only when a
+native-only run is intentional.
 
 It discovers trusted project `.pi/extensions`, global `<agent-dir>/extensions`, and explicit `-e`
 paths in Pi order. `/reload` rebuilds JavaScript callbacks in the same atomic product-generation

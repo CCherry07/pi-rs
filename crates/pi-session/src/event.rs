@@ -9,6 +9,28 @@ use crate::{CompactionEntry, CompactionReason, SessionEntry};
 
 const DEFAULT_EVENT_CAPACITY: usize = 512;
 
+/// Presentation-neutral severity attached to a JavaScript extension notice.
+///
+/// Frontends decide how to render the notice; extensions never receive a
+/// terminal handle through this event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExtensionNoticeLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+impl ExtensionNoticeLevel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
 /// Product events emitted by an [`crate::AgentSession`].
 ///
 /// This is the Rust counterpart of Pi's `AgentSessionEvent`: core agent
@@ -39,6 +61,10 @@ pub enum AgentSessionEvent {
     },
     SessionInfoChanged {
         name: Option<String>,
+    },
+    ExtensionNotice {
+        message: String,
+        level: ExtensionNoticeLevel,
     },
     ThinkingLevelChanged {
         level: ThinkingLevel,
@@ -209,6 +235,13 @@ impl AgentSessionEventHub {
         self.publish(
             AgentSessionEvent::SessionInfoChanged { name: name.clone() },
             |snapshot| snapshot.name = name,
+        );
+    }
+
+    pub(crate) fn publish_extension_notice(&self, message: String, level: ExtensionNoticeLevel) {
+        self.publish(
+            AgentSessionEvent::ExtensionNotice { message, level },
+            |_| {},
         );
     }
 

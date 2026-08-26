@@ -49,14 +49,17 @@ point of use rather than corrupting session state.
 ## UI and registrations
 
 JavaScript extensions never own terminal rendering. `ctx.hasUI` is always false and `ctx.ui` is an
-explicit NoOp object: selection/input/editor/custom calls resolve `undefined`, confirmation resolves
-`false`, getters return empty values, and setters/notifications do nothing. Factories supplied to UI
-registration methods are not executed.
+explicit inert object: selection/input/editor/custom calls resolve `undefined`, confirmation resolves
+`false`, getters return empty values, and setters do nothing. `ctx.ui.notify(message, level)` is the
+exception: it publishes a transient, presentation-neutral product notice that the Rust TUI, print,
+and NDJSON frontends render themselves. Factories supplied to UI registration methods are not
+executed.
 
-If an extension cannot be imported solely because the host intentionally does not provide the
-`@earendil-works/pi-tui` or `@mariozechner/pi-tui` peer, that extension entry is skipped with an
-inactive diagnostic and the rest of the generation continues. Missing non-UI dependencies remain
-fatal so broken packages and installation mistakes are not hidden.
+Both `@earendil-works/pi-tui` and `@mariozechner/pi-tui` resolve to a terminal-inert compatibility
+module. It supplies pure text and key-identifier helpers plus inert component classes so a mixed extension can finish
+module evaluation and keep its tools, commands, and hooks. Renderer, widget, shortcut, and other UI
+registrations remain inactive. Any other missing dependency is fatal so broken packages and
+installation mistakes are not hidden.
 
 The following registration surfaces are recognized and inactive: shortcuts, flags, providers,
 message/Markdown/entry renderers, and tool `prepareArguments`. Extension-level send/append/session
@@ -70,10 +73,11 @@ no streaming update callback; their final result remains supported. The generati
 The host covers every module specifier in Pi's extension-loader alias table for both
 `@earendil-works` and `@mariozechner`: `pi-coding-agent`, `pi-agent-core`, `pi-ai`,
 `pi-ai/compat`, `pi-ai/oauth`, and `pi-ai/providers/all` resolve to the one host compatibility
-module. `pi-tui` is the deliberate inactive exception described above. The host also maps `typebox`
-and `@sinclair/typebox`, including supported subpaths such as `/compile` and `/value`, to the single
-TypeBox runtime bundled by the host. Subpath aliases take precedence over package-root aliases so
-resolution cannot produce paths such as `build/index.mjs/value`.
+module. Both `pi-tui` namespaces resolve to the separate terminal-inert compatibility module
+described above. The host also maps `typebox` and `@sinclair/typebox`, including supported subpaths
+such as `/compile` and `/value`, to the single TypeBox runtime bundled by the host. Subpath aliases
+take precedence over package-root aliases so resolution cannot produce paths such as
+`build/index.mjs/value`.
 
 Module resolution coverage does not imply that every runtime export from the upstream JavaScript
 Agent, provider, or TUI implementations exists in pi-rs. The compatibility module exposes the

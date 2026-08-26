@@ -387,65 +387,67 @@ test('keeps inactive JavaScript UI registrations non-fatal while agent_settled s
   assert.deepEqual(result, { action: 'handled' })
 })
 
-test('skips extensions whose unsupported current or legacy Pi TUI peer is unavailable', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-missing-tui-peer-'))
-  const earendilUiExtension = join(root, 'earendil-ui-extension.ts')
-  const marioUiExtension = join(root, 'mario-ui-extension.ts')
-  const activeExtension = join(root, 'active-extension.ts')
-  await writeFile(
-    earendilUiExtension,
-    `
-      import { SelectList } from "@earendil-works/pi-tui";
-      void SelectList;
-      export default function (pi: any) {
-        pi.registerShortcut("ctrl+t", () => undefined);
-      }
-    `,
-  )
-  await writeFile(
-    marioUiExtension,
-    `
-      import { SelectList } from "@mariozechner/pi-tui";
-      void SelectList;
-      export default function (pi: any) {
-        pi.registerShortcut("ctrl+m", () => undefined);
-      }
-    `,
-  )
-  await writeFile(
-    activeExtension,
-    `
-      export default function (pi: any) {
-        pi.registerCommand("still-active", {
-          handler: async () => ({ action: "handled" })
-        });
-      }
-    `,
-  )
+test('keeps non-UI contributions from extensions that import current or legacy Pi TUI', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-inert-tui-'))
+  const cases = [
+    { scope: 'earendil', module: '@earendil-works/pi-tui' },
+    { scope: 'mario', module: '@mariozechner/pi-tui' },
+  ] as const
+  const extensionPaths: string[] = []
+
+  for (const fixture of cases) {
+    const extension = join(root, `${fixture.scope}-extension.ts`)
+    extensionPaths.push(extension)
+    await writeFile(
+      extension,
+      `
+        import { Key, Text, truncateToWidth } from "${fixture.module}";
+        const preview = new Text(truncateToWidth("todo preview", 7, "…"), 0, 0);
+        const shortcut = Key.ctrlAlt("f");
+
+        export default function (pi: any) {
+          pi.registerTool({
+            name: "${fixture.scope}-todo",
+            description: "Mixed extension tool",
+            parameters: { type: "object", properties: {} },
+            renderCall: () => preview,
+            async execute() {
+              return { content: [{ type: "text", text: "ok" }] };
+            }
+          });
+          pi.registerCommand("${fixture.scope}-todos", {
+            handler: async () => ({ action: "handled" })
+          });
+          pi.registerShortcut(shortcut, () => undefined);
+        }
+      `,
+    )
+  }
 
   const host = new ExtensionHost()
   const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
     type: 'prepareGeneration',
     request: {
       projectTrusted: true,
-      extensionPaths: [earendilUiExtension, marioUiExtension, activeExtension],
+      extensionPaths,
       mode: 'tui',
     },
   })))
 
-  assert.equal(manifest.agentPlugins.length, 1)
-  assert.equal(manifest.agentPlugins[0]?.commands[0]?.name, 'still-active')
   assert.deepEqual(
-    manifest.diagnostics.map(diagnostic => ({
-      path: diagnostic.path,
-      feature: diagnostic.feature,
+    manifest.agentPlugins.map(plugin => ({
+      tools: plugin.tools.map(tool => tool.name),
+      commands: plugin.commands.map(command => command.name),
     })),
     [
-      { path: earendilUiExtension, feature: '@earendil-works/pi-tui' },
-      { path: marioUiExtension, feature: '@mariozechner/pi-tui' },
+      { tools: ['earendil-todo'], commands: ['earendil-todos'] },
+      { tools: ['mario-todo'], commands: ['mario-todos'] },
     ],
   )
-  assert.ok(manifest.diagnostics.every(diagnostic => /extension was skipped/.test(diagnostic.message)))
+  assert.deepEqual(
+    manifest.diagnostics.map(diagnostic => diagnostic.feature),
+    ['pi.registerShortcut', 'pi.registerShortcut'],
+  )
 })
 
 test('keeps ordinary missing extension dependencies fatal', async () => {
@@ -496,6 +498,7 @@ test('builds command context from the native query notify and request capability
               prompt: ctx.getSystemPrompt(),
               promptOptions: ctx.getSystemPromptOptions()
             };
+            ctx.ui.notify("Extension notice", "warning");
             ctx.abort();
             ctx.compact({ customInstructions: "shorten" });
             await ctx.waitForIdle();
@@ -621,6 +624,7 @@ test('builds command context from the native query notify and request capability
     replacementSessionId: 'session-after',
   })
   assert.deepEqual(notifications, [
+    { type: 'uiNotify', message: 'Extension notice', level: 'warning' },
     { type: 'abort' },
     { type: 'compact', customInstructions: 'shorten' },
   ])

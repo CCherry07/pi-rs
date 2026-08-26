@@ -57,11 +57,14 @@ For repository contributors with access, the project pins Rust 1.98.0 through
 ```bash
 git clone https://github.com/CCherry07/pi-rs.git
 cd pi-rs
-cargo run -p pi-cli --
+npm install --prefix packages/pi
+./scripts/pi-dev
 ```
 
-The standalone Rust binary does not embed a JavaScript VM. Use the npm/Node launcher when loading
-Pi-compatible JavaScript or TypeScript extensions.
+`scripts/pi-dev` incrementally builds and explicitly selects the current workspace NAPI library.
+The standalone Rust adapter does not embed a JavaScript VM; when JavaScript extension configuration
+is active it exits with an actionable launcher error rather than silently omitting extensions. Use
+`cargo run -p pi-cli -- --no-extensions` for an intentional native-only run.
 
 ## First use
 
@@ -338,10 +341,8 @@ pi --cwd /path/to/project
 pi --no-extensions -e /path/to/extension.ts
 
 # Development launcher
-cd packages/pi
-npm ci
-npm run build:native
-npm start -- --cwd /path/to/project
+npm install --prefix packages/pi
+./scripts/pi-dev --cwd /path/to/project
 ```
 
 Extensions can currently register tools, commands, agent hooks, `before_provider_request`, and
@@ -353,17 +354,19 @@ tool-result guards are available through current and legacy `pi-ai` / `pi-coding
 names; `typebox` and `@sinclair/typebox`, including subpaths such as `typebox/value`, resolve to the
 host's bundled runtime.
 
-The host resolves Pi's complete non-UI extension module table for both the current
+The host resolves Pi's extension module table for both the current
 `@earendil-works` and legacy `@mariozechner` namespaces: `pi-coding-agent`, `pi-agent-core`,
-`pi-ai`, `pi-ai/compat`, `pi-ai/oauth`, and `pi-ai/providers/all`. Module resolution does not imply
-that every upstream JavaScript runtime export is implemented; the compatibility API remains the
-explicit capability boundary.
+`pi-ai`, `pi-ai/compat`, `pi-ai/oauth`, `pi-ai/providers/all`, and `pi-tui`. The TUI names resolve to
+a terminal-inert module so mixed extensions can retain their tools, commands, and hooks without
+owning Ratatui. Module resolution does not imply that every upstream JavaScript runtime export is
+implemented; the compatibility API remains the explicit capability boundary.
 
 JavaScript extensions do not own the Ratatui frontend: `ctx.hasUI` is false and `ctx.ui` is an
-explicit no-op implementation. Hooks and registrations known to current Pi but not yet implemented
-are reported as inactive and do not fail generation construction; genuinely unknown hook names
-still fail so typos remain visible. An extension entry whose only missing dependency is a legacy or
-current Pi TUI peer is skipped with an inactive diagnostic; other missing dependencies remain fatal.
+explicit inert implementation. Its interactive methods return safe defaults and its UI mutations
+remain inactive; `ctx.ui.notify()` becomes a semantic product notice rendered by the active Rust
+frontend. Hooks and registrations known to current Pi but not yet implemented are reported as
+inactive and do not fail generation construction; genuinely unknown hook names still fail so typos
+remain visible. Other missing dependencies remain fatal.
 See the repository's
 [JavaScript compatibility matrix](../../docs/js-extension-compatibility.md) for the precise hook,
 context, UI, and module status. Extension code runs in the Node process as trusted code; it is not
@@ -400,8 +403,19 @@ Build the native bridge for the current machine, then start the complete Node-ho
 
 ```bash
 git clone https://github.com/CCherry07/pi-rs.git
-cd pi-rs/packages/pi
-npm ci
+cd pi-rs
+npm install --prefix packages/pi
+./scripts/pi-dev --cwd .
+```
+
+The workspace launcher invokes Cargo incrementally and sets `PI_RS_NATIVE_BINDING` to the exact
+host-target debug library before executing the TypeScript host. This prevents an older copied
+`packages/pi/pi-napi.*.node` artifact from being loaded first.
+
+Package-level development commands remain available:
+
+```bash
+cd packages/pi
 npm run check
 npm test
 npm run build:native
@@ -417,6 +431,7 @@ Useful package commands:
 
 | Command                        | Purpose                                                   |
 | ------------------------------ | --------------------------------------------------------- |
+| `../../scripts/pi-dev [args]`  | Run against the exact current workspace NAPI binding      |
 | `npm start -- [pi arguments]`  | Run the TypeScript launcher against the local binding     |
 | `npm run check`                | Type-check the Node host without emitting files           |
 | `npm test`                     | Test discovery, loading, release logic, and host behavior |
@@ -430,12 +445,12 @@ To work on the standalone Rust CLI without the JavaScript host, run from the rep
 ```bash
 cd ../..
 
-# Fullscreen TUI
-cargo run -p pi-cli --
+# Fullscreen TUI, intentionally ignoring configured JavaScript extensions
+cargo run -p pi-cli -- --no-extensions
 
 # One-shot and NDJSON modes
-cargo run -p pi-cli -- --print "summarize this repository"
-cargo run -p pi-cli -- --json "list the Rust crates"
+cargo run -p pi-cli -- --no-extensions --print "summarize this repository"
+cargo run -p pi-cli -- --no-extensions --json "list the Rust crates"
 ```
 
 Before submitting a change, run both Node checks and the workspace quality gates:

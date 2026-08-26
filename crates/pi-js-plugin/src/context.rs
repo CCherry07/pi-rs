@@ -5,8 +5,9 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use async_trait::async_trait;
 use pi_session::{
-    AgentSession, AgentSessionReplacement, ForkPosition, MAIN_LANE, PiSession, SessionDocument,
-    SessionRecord, WeakPiSession, build_context_entries, estimate_context_tokens,
+    AgentSession, AgentSessionReplacement, ExtensionNoticeLevel, ForkPosition, MAIN_LANE,
+    PiSession, SessionDocument, SessionRecord, WeakPiSession, build_context_entries,
+    estimate_context_tokens,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -70,6 +71,10 @@ pub enum ExtensionContextNotification {
         custom_instructions: Option<String>,
     },
     Shutdown,
+    UiNotify {
+        message: String,
+        level: ExtensionNoticeLevel,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -586,6 +591,9 @@ impl ExtensionContextAccess for SessionExtensionContextAccess {
                 }
                 self.binding.request_shutdown();
             }
+            ExtensionContextNotification::UiNotify { message, level } => {
+                self.session()?.notify_extension(message, level);
+            }
         }
         Ok(())
     }
@@ -838,6 +846,18 @@ mod tests {
             })
             .unwrap(),
             json!({ "type": "switchSession", "sessionPath": "session.jsonl" })
+        );
+        assert_eq!(
+            serde_json::to_value(ExtensionContextNotification::UiNotify {
+                message: "Extension notice".to_string(),
+                level: ExtensionNoticeLevel::Warning,
+            })
+            .unwrap(),
+            json!({
+                "type": "uiNotify",
+                "message": "Extension notice",
+                "level": "warning",
+            })
         );
     }
 }

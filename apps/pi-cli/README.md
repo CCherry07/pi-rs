@@ -11,7 +11,8 @@ plugins all use the same production runtime.
 ## Product highlights
 
 - **Interactive coding workspace** — fullscreen Ratatui UI with streamed Markdown, syntax-highlighted
-  code, CJK/IME input, command completion, history, scrolling, mouse selection, and clipboard copy.
+  code, CJK/IME input, command completion, history, scrolling, whole-screen mouse selection, and
+  clipboard copy.
 - **Repository-aware agent** — built-in `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`,
   `find`, and `ls` tools for understanding and changing real projects.
 - **Multiple providers and models** — built-in OpenAI-compatible, OpenAI Codex, Anthropic, Google,
@@ -53,11 +54,15 @@ The repository pins Rust 1.98.0 through `rust-toolchain.toml`.
 ```bash
 git clone https://github.com/CCherry07/pi-rs.git
 cd pi-rs
-cargo run -p pi-cli --
+npm install --prefix packages/pi
+./scripts/pi-dev
 ```
 
-The standalone Rust binary does not embed a JavaScript VM. Use the npm/Node launcher when loading
-Pi-compatible JavaScript or TypeScript extensions.
+`scripts/pi-dev` incrementally builds the current host NAPI library and explicitly selects it for
+the Node launcher. The standalone Rust adapter does not embed a JavaScript VM; when JavaScript
+extension configuration is active it exits with an actionable launcher error instead of silently
+omitting extensions. Use `cargo run -p pi-cli -- --no-extensions` for an intentional native-only
+run.
 
 ## First use
 
@@ -114,7 +119,7 @@ Environment variables are supported as an alternative, including `OPENAI_API_KEY
 | Mode            | Command                         | Best for                                                    |
 | --------------- | ------------------------------- | ----------------------------------------------------------- |
 | Interactive TUI | `pi`                            | Daily coding, exploration, edits, and long-running sessions |
-| Main-screen TUI | `pi --no-fullscreen`            | Keeping output in the terminal scrollback                   |
+| Main-screen TUI | `pi --no-fullscreen`            | Terminal-native selection and main-screen output            |
 | Final text      | `pi --print "prompt"`           | Shell scripts and one-shot answers                          |
 | NDJSON events   | `pi --json "prompt"`            | Integrations that consume structured product events         |
 | Piped input     | `printf 'prompt' \| pi --print` | Unix pipelines and generated prompts                        |
@@ -180,11 +185,26 @@ Key bindings:
 | `Tab`                    | Complete the selected command or skill                                 |
 | `PageUp` / `PageDown`    | Scroll the transcript                                                  |
 | `Ctrl+End`               | Jump back to the latest transcript content                             |
-| Mouse drag               | Select transcript text                                                 |
-| `Cmd+C` / `Ctrl+Shift+C` | Copy selected transcript text                                          |
+| Mouse drag               | Select and copy any visible TUI text in fullscreen mode                |
+| `Cmd+C` / `Ctrl+Shift+C` | Re-copy the selection when the terminal forwards the shortcut         |
 | `Esc`                    | Close a focused view or interrupt active work                          |
 | `Ctrl+C`                 | Close a view, clear the editor, interrupt work, or quit while idle     |
 | `Ctrl+D`                 | Quit while idle with an empty editor                                   |
+
+Fullscreen selection is application-owned because mouse capture is needed for transcript scrolling.
+It covers the complete final frame, including the transcript, startup card, composer, completion
+panel, focused bottom views, project-trust prompt, context panel, and footer. Selection highlighting
+is painted after every widget, and active selection pauses animation ticks so copyable text remains
+stable. Releasing a non-empty drag writes the selected text immediately because terminal emulators
+commonly consume their native copy shortcuts instead of forwarding them to a fullscreen TUI.
+`Cmd+C` / `Ctrl+Shift+C` remain best-effort re-copy shortcuts for terminals that do forward them.
+`--no-fullscreen` does not capture the mouse and leaves visible-text selection to the terminal.
+`/copy` remains a separate semantic operation that copies the last completed assistant response
+without requiring a visible selection.
+
+Clipboard writes use the local native clipboard first. Over SSH they use tmux forwarding when
+available and then OSC 52 so the text reaches the local terminal; WSL additionally falls back to
+PowerShell. OSC 52 payloads are bounded before encoding.
 
 ## Models and providers
 
@@ -335,10 +355,8 @@ pi --cwd /path/to/project
 pi --no-extensions -e /path/to/extension.ts
 
 # Development launcher
-cd packages/pi
-npm install
-npm run build:native
-npm start -- --cwd /path/to/project
+npm install --prefix packages/pi
+./scripts/pi-dev --cwd /path/to/project
 ```
 
 See [`packages/pi/README.md`](../../packages/pi/README.md) for the supported Pi extension API and
@@ -375,12 +393,13 @@ provider, plugin, resource, and session behavior stays in the workspace librarie
 Run the CLI directly during development:
 
 ```bash
-# Fullscreen TUI
-cargo run -p pi-cli --
+# Complete Node-hosted product with JavaScript extensions
+./scripts/pi-dev
 
-# One-shot and NDJSON modes
-cargo run -p pi-cli -- --print "summarize this repository"
-cargo run -p pi-cli -- --json "list the Rust crates"
+# Intentional native-only modes
+cargo run -p pi-cli -- --no-extensions
+cargo run -p pi-cli -- --no-extensions --print "summarize this repository"
+cargo run -p pi-cli -- --no-extensions --json "list the Rust crates"
 
 # Quality gates
 cargo fmt --all -- --check

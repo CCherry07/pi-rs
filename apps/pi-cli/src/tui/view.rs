@@ -286,30 +286,31 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, app: &App, palette: UiPalette
     }
     if let Some(prompt) = &app.trust_prompt {
         draw_project_trust_prompt(frame, &prompt.cwd, &prompt.options, prompt.selected);
-        return;
-    }
-    let areas = ui_areas(root, app);
-    let suggestions = suggestions_for_app(app);
+    } else {
+        let areas = ui_areas(root, app);
+        let suggestions = suggestions_for_app(app);
 
-    draw_transcript(frame, areas.transcript, app, areas.gutter, palette);
-    if let Some(selection) = app.transcript_selection {
-        let surface = TranscriptSurface::capture(frame.buffer_mut(), areas.transcript);
+        draw_transcript(frame, areas.transcript, app, areas.gutter, palette);
+        if let Some(view) = app.active_bottom_view() {
+            draw_bottom_pane_view(frame, areas.composer, app, view, palette);
+        } else {
+            draw_composer(frame, areas.composer, app, palette);
+            if !areas.context.is_empty() {
+                draw_context_panel(frame, areas.context, app, &suggestions, palette);
+            }
+            if !areas.footer.is_empty() {
+                draw_footer(frame, areas.footer, app, palette);
+            }
+        }
+    }
+
+    if let Some(selection) = app.screen_selection {
+        let surface = ScreenTextSurface::capture(frame.buffer_mut());
         surface.paint(
             frame.buffer_mut(),
             selection,
             selection_background(palette.terminal_appearance),
         );
-    }
-    if let Some(view) = app.active_bottom_view() {
-        draw_bottom_pane_view(frame, areas.composer, app, view, palette);
-        return;
-    }
-    draw_composer(frame, areas.composer, app, palette);
-    if !areas.context.is_empty() {
-        draw_context_panel(frame, areas.context, app, &suggestions, palette);
-    }
-    if !areas.footer.is_empty() {
-        draw_footer(frame, areas.footer, app, palette);
     }
 }
 
@@ -1351,20 +1352,6 @@ pub(super) fn draw_footer(
             usage_footer(app),
             Style::default().fg(palette.accent),
         ));
-    }
-    if area.width >= 120 {
-        spans.push(footer_separator());
-        if app.transcript_selection.is_some() {
-            spans.push(Span::styled(
-                "⌘C / Ctrl+Shift+C copy",
-                Style::default().fg(palette.accent),
-            ));
-        } else {
-            spans.push(Span::styled(
-                "/ commands",
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

@@ -331,25 +331,29 @@ pub(super) fn is_copy_shortcut(key: KeyEvent) -> bool {
 pub(super) fn handle_copy_shortcut(
     key: KeyEvent,
     app: &mut App,
-    surface: &TranscriptSurface,
+    surface: &ScreenTextSurface,
     clipboard: &mut impl ClipboardWriter,
 ) -> bool {
     if !is_copy_shortcut(key) {
         return false;
     }
-    let Some(selection) = app.transcript_selection else {
-        app.status = "No transcript text selected".to_string();
+    let Some(selection) = app.screen_selection else {
+        app.status = "No screen text selected".to_string();
         return true;
     };
     let Some(text) = surface.selected_text(selection) else {
-        app.status = "No transcript text selected".to_string();
+        app.status = "No screen text selected".to_string();
         return true;
     };
-    match clipboard.set_text(&text) {
+    copy_screen_text(app, clipboard, &text);
+    true
+}
+
+fn copy_screen_text(app: &mut App, clipboard: &mut impl ClipboardWriter, text: &str) {
+    match clipboard.set_text(text) {
         Ok(()) => app.status = format!("Copied {} characters", text.chars().count()),
         Err(error) => app.status = format!("Copy failed: {error}"),
     }
-    true
 }
 
 pub(super) fn handle_copy_command(app: &mut App, clipboard: &mut impl ClipboardWriter) -> bool {
@@ -403,36 +407,61 @@ pub(super) fn handle_vertical_navigation(code: KeyCode, app: &mut App) -> bool {
     true
 }
 
-pub(super) fn handle_mouse(mouse: MouseEvent, app: &mut App, surface: &TranscriptSurface) {
+pub(super) fn handle_mouse(
+    mouse: MouseEvent,
+    app: &mut App,
+    surface: &ScreenTextSurface,
+) -> Option<String> {
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            app.transcript_selection = None;
-            let lines = app.scroll_input.lines(ScrollDirection::Up);
-            app.scroll_from_bottom = app.scroll_from_bottom.saturating_add(lines);
+            app.screen_selection = None;
+            if app.trust_prompt.is_none() {
+                let lines = app.scroll_input.lines(ScrollDirection::Up);
+                app.scroll_from_bottom = app.scroll_from_bottom.saturating_add(lines);
+            }
         }
         MouseEventKind::ScrollDown => {
-            app.transcript_selection = None;
-            let lines = app.scroll_input.lines(ScrollDirection::Down);
-            app.scroll_from_bottom = app.scroll_from_bottom.saturating_sub(lines);
+            app.screen_selection = None;
+            if app.trust_prompt.is_none() {
+                let lines = app.scroll_input.lines(ScrollDirection::Down);
+                app.scroll_from_bottom = app.scroll_from_bottom.saturating_sub(lines);
+            }
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            app.transcript_selection =
-                TranscriptSelection::begin(surface, Position::new(mouse.column, mouse.row));
+            app.screen_selection =
+                ScreenSelection::begin(surface, Position::new(mouse.column, mouse.row));
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            if let Some(selection) = &mut app.transcript_selection {
+            if let Some(selection) = &mut app.screen_selection {
                 selection.drag_to(surface, Position::new(mouse.column, mouse.row));
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
-            let keep = app.transcript_selection.as_mut().is_some_and(|selection| {
+            let keep = app.screen_selection.as_mut().is_some_and(|selection| {
                 selection.finish(surface, Position::new(mouse.column, mouse.row))
             });
             if !keep {
-                app.transcript_selection = None;
+                app.screen_selection = None;
+            } else if let Some(text) = app
+                .screen_selection
+                .and_then(|selection| surface.selected_text(selection))
+            {
+                return Some(text);
             }
         }
         _ => {}
+    }
+    None
+}
+
+pub(super) fn handle_mouse_event(
+    mouse: MouseEvent,
+    app: &mut App,
+    surface: &ScreenTextSurface,
+    clipboard: &mut impl ClipboardWriter,
+) {
+    if let Some(text) = handle_mouse(mouse, app, surface) {
+        copy_screen_text(app, clipboard, &text);
     }
 }
 

@@ -229,6 +229,156 @@ impl PackageManager {
         })
     }
 
+    /// Returns whether this request can require a JavaScript runtime.
+    ///
+    /// This is a side-effect-free startup probe for native-only adapters. It
+    /// applies trust, discovery, automatic-entry, package override, and
+    /// `--no-extensions` policy without installing or updating packages.
+    /// Configured npm/git packages that are not installed are treated
+    /// conservatively as requiring the host because their manifests cannot be
+    /// inspected until the normal Node-hosted resolution transaction.
+    pub fn requires_javascript_host(&self) -> bool {
+        if !self.explicit_sources.is_empty() {
+            return true;
+        }
+        if !self.discover_extensions {
+            return false;
+        }
+        self.configured_packages_require_javascript_host()
+            || self.configured_local_entries_require_javascript_host()
+    }
+
+    fn configured_packages_require_javascript_host(&self) -> bool {
+        let packages = self.configured_packages();
+        let mut extensions = Vec::new();
+        let mut unresolved_package = false;
+        for entry in &packages {
+            let shadowed_by_project_delta = entry.scope == SourceScope::User
+                && packages.iter().any(|candidate| {
+                    candidate.scope == SourceScope::Project
+                        && candidate.package.is_autoload_delta()
+                        && self.package_identity(candidate.package.source(), candidate.scope)
+                            == self.package_identity(entry.package.source(), entry.scope)
+                });
+            if shadowed_by_project_delta || !entry.package.may_enable_extensions() {
+                continue;
+            }
+
+            let source = entry.package.source();
+            let filter = entry.package.filter();
+            let delta_base = self.find_delta_base(entry, &packages);
+            let (resolved_source, resolved_scope) =
+                delta_base.as_ref().map_or((source, entry.scope), |base| {
+                    (base.source.as_str(), base.scope)
+                });
+            let metadata = ExtensionMetadata::package(source, entry.scope);
+            match parse_source(resolved_source) {
+                ParsedSource::Local(local) => {
+                    let path = resolve_path(&local.path, &self.base_directory(resolved_scope));
+                    let Ok(metadata_fs) = fs::metadata(&path) else {
+                        continue;
+                    };
+                    let add_directly = metadata_fs.is_file()
+                        || (metadata_fs.is_dir()
+                            && !collect_package_extensions(
+                                &path,
+                                &mut extensions,
+                                filter,
+                                metadata.clone(),
+                            ));
+                    if add_directly {
+                        add_extension(&mut extensions, path, metadata, true);
+                    }
+                }
+                ParsedSource::Npm(npm) => {
+                    let Ok(root) = self.npm_install_root(resolved_scope) else {
+                        unresolved_package = true;
+                        continue;
+                    };
+                    let installed = root.join("node_modules").join(&npm.name);
+                    if installed_npm_matches(&npm, &installed) {
+                        collect_package_extensions(&installed, &mut extensions, filter, metadata);
+                    } else if !offline() {
+                        unresolved_package = true;
+                    }
+                }
+                ParsedSource::Git(git) => match self.git_install_path(&git, resolved_scope) {
+                    Ok(installed) if installed.exists() => {
+                        collect_package_extensions(&installed, &mut extensions, filter, metadata);
+                    }
+                    Ok(_) if !offline() => unresolved_package = true,
+                    Ok(_) => {}
+                    Err(_) => unresolved_package = true,
+                },
+            }
+        }
+        unresolved_package
+            || sort_and_dedupe(extensions)
+                .into_iter()
+                .filter(|entry| entry.enabled)
+                .flat_map(expand_resolved_extension)
+                .next()
+                .is_some()
+    }
+
+    fn configured_packages(&self) -> Vec<ScopedPackage> {
+        let mut packages = Vec::new();
+        if self.project_trusted {
+            packages.extend(
+                self.project_settings
+                    .packages
+                    .iter()
+                    .cloned()
+                    .map(|package| ScopedPackage::new(package, SourceScope::Project)),
+            );
+        }
+        packages.extend(
+            self.user_settings
+                .packages
+                .iter()
+                .cloned()
+                .map(|package| ScopedPackage::new(package, SourceScope::User)),
+        );
+        self.dedupe_packages(packages)
+    }
+
+    fn configured_local_entries_require_javascript_host(&self) -> bool {
+        let mut extensions = Vec::new();
+        if self.project_trusted {
+            self.resolve_local_entries(
+                &self.project_settings.extensions,
+                &mut extensions,
+                SourceScope::Project,
+                &self.cwd.join(CONFIG_DIRECTORY),
+            );
+        }
+        self.resolve_local_entries(
+            &self.user_settings.extensions,
+            &mut extensions,
+            SourceScope::User,
+            &self.agent_dir,
+        );
+        if self.project_trusted {
+            self.add_automatic_entries(
+                &self.cwd.join(CONFIG_DIRECTORY).join("extensions"),
+                &self.project_settings.extensions,
+                &mut extensions,
+                SourceScope::Project,
+                &self.cwd.join(CONFIG_DIRECTORY),
+            );
+        }
+        self.add_automatic_entries(
+            &self.agent_dir.join("extensions"),
+            &self.user_settings.extensions,
+            &mut extensions,
+            SourceScope::User,
+            &self.agent_dir,
+        );
+        sort_and_dedupe(extensions)
+            .into_iter()
+            .any(|entry| entry.enabled)
+    }
+
     fn ensure_management_scope(&self, scope: PackageScope) -> Result<(), PackageManagerError> {
         if scope == PackageScope::Project && !self.project_trusted {
             return Err(PackageManagerError::ProjectNotTrusted);
@@ -567,24 +717,7 @@ impl PackageManager {
 
     async fn resolve_configured(&self) -> Result<Vec<ResolvedExtension>, PackageManagerError> {
         let mut extensions = Vec::new();
-        let mut packages = Vec::new();
-        if self.project_trusted {
-            packages.extend(
-                self.project_settings
-                    .packages
-                    .iter()
-                    .cloned()
-                    .map(|package| ScopedPackage::new(package, SourceScope::Project)),
-            );
-        }
-        packages.extend(
-            self.user_settings
-                .packages
-                .iter()
-                .cloned()
-                .map(|package| ScopedPackage::new(package, SourceScope::User)),
-        );
-        let packages = self.dedupe_packages(packages);
+        let packages = self.configured_packages();
         self.resolve_package_sources(&packages, &mut extensions, false)
             .await?;
 
@@ -1398,6 +1531,16 @@ impl PackageSource {
 
     fn is_autoload_delta(&self) -> bool {
         matches!(self, Self::Filter(filter) if filter.autoload == Some(false))
+    }
+
+    fn may_enable_extensions(&self) -> bool {
+        match self {
+            Self::String(_) => true,
+            Self::Filter(filter) => filter.extensions.as_ref().map_or_else(
+                || filter.autoload != Some(false),
+                |extensions| !extensions.is_empty(),
+            ),
+        }
     }
 
     fn set_source(&mut self, source: String) {
