@@ -303,9 +303,15 @@ authority are explicit in the callback argument, while orchestration remains in
 Managed npm installation deliberately uses npm's legacy peer-dependency mode, matching current Pi:
 Pi extensions commonly declare the Pi SDK and TypeBox as peers, but those modules belong to the
 running host rather than each managed package root. Before Jiti imports an extension, the Node host
-aliases current and legacy `pi-ai` / `pi-coding-agent` package names to its compatibility API and
-aliases `typebox` / `@sinclair/typebox` to its bundled TypeBox runtime. This keeps one host ABI in a
-generation and prevents npm from installing a second Pi product runtime beside an extension.
+mirrors Pi's complete extension-loader module table for both the `@earendil-works` and
+`@mariozechner` namespaces. `pi-coding-agent`, `pi-agent-core`, `pi-ai`, `pi-ai/compat`,
+`pi-ai/oauth`, and `pi-ai/providers/all` alias to one compatibility API; `typebox` and
+`@sinclair/typebox` roots and subpaths alias to the bundled TypeBox runtime. This is module-resolution
+coverage, not a claim that every upstream JavaScript runtime export is reimplemented. It keeps one
+host ABI in a generation and prevents npm from installing a second Pi product runtime beside an
+extension. Pi TUI peers are deliberately not supplied: when Jiti reports that an entry's missing
+module is exactly `@earendil-works/pi-tui` or `@mariozechner/pi-tui`, the host records that entry as
+inactive and continues preparing later entries. All other missing modules remain fatal.
 
 The same Module exposes one management dispatcher,
 `manage(Install | Remove | Update | List) -> ManageResult`. Top-level CLI commands adapt to this
@@ -342,10 +348,10 @@ rule as the Rust `ProviderPluginDriver`.
 
 `ProductSessionFactory` asks the Node host for a fresh callback generation on initial construction,
 new/resumed sessions, and `/reload`, alongside native plugins, resources, models, and session
-plugins. The existing whole-session transaction prepares all of them before swap. A failed import,
-factory, manifest, or registry build drops the candidate (retiring its Node callbacks) and keeps the
-old Rust and JavaScript generations active. Executable JavaScript is never serialized into Pi v4
-sessions.
+plugins. The existing whole-session transaction prepares all of them before swap. Except for the
+explicit inactive Pi TUI-peer case above, a failed import, factory, manifest, or registry build drops
+the candidate (retiring its Node callbacks) and keeps the old Rust and JavaScript generations active.
+Executable JavaScript is never serialized into Pi v4 sessions.
 
 This is compatibility by explicit capability, not an unsafe claim that every Pi TUI API is already
 portable. The current bridge supports registered tools and commands, the Rust agent lifecycle

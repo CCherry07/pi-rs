@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { createJiti } from 'jiti'
 import { z } from 'zod'
 
-import { CompatibilityResolver } from './compatibility-resolver.js'
+import { CompatibilityResolver, PI_TUI_PACKAGE_NAMES } from './compatibility-resolver.js'
 import { createExtensionContext } from './extension-context.js'
 import type { PiExtensionCommandContext, PiExtensionContext } from './extension-api.js'
 import type { NativeExtensionContext } from './native-binding.js'
@@ -94,6 +94,31 @@ function parseExternal<T>(schema: z.ZodType<T>, value: unknown, description: str
   throw new Error(`${description} is invalid: ${z.prettifyError(result.error)}`, {
     cause: result.error,
   })
+}
+
+function unavailablePiTuiPeer(error: unknown): string | undefined {
+  const pending = [error]
+  const seen = new Set<unknown>()
+  const messages: string[] = []
+  let moduleNotFound = false
+
+  while (pending.length) {
+    const current = pending.shift()
+    if (current === undefined || seen.has(current)) continue
+    seen.add(current)
+    if (current instanceof Error) messages.push(current.message)
+    if (!isRecord(current)) continue
+    if (typeof current.message === 'string' && !(current instanceof Error)) {
+      messages.push(current.message)
+    }
+    moduleNotFound ||= current.code === 'MODULE_NOT_FOUND' || current.code === 'ERR_MODULE_NOT_FOUND'
+    if (current.cause !== undefined) pending.push(current.cause)
+  }
+
+  if (!moduleNotFound) return undefined
+  return PI_TUI_PACKAGE_NAMES.find(packageName =>
+    messages.some(message => message.includes(`'${packageName}'`) || message.includes(`"${packageName}"`)),
+  )
 }
 
 const AGENT_HOOKS = new Set([
@@ -426,7 +451,21 @@ export class ExtensionHost {
           moduleCache: false,
           interopDefault: true,
         })
-        const imported = await jiti.import<unknown>(path, { default: true })
+        let imported: unknown
+        try {
+          imported = await jiti.import<unknown>(path, { default: true })
+        } catch (error) {
+          const unavailablePeer = unavailablePiTuiPeer(error)
+          if (!unavailablePeer) throw error
+          diagnostics.push({
+            pluginId: id,
+            path,
+            feature: unavailablePeer,
+            status: 'inactive',
+            message: `${unavailablePeer} is unavailable because JavaScript extension UI is inactive in pi-rs; extension was skipped`,
+          })
+          continue
+        }
         const factory = parseExternal(callableSchema, imported, `Extension default export (${path})`)
         await callDynamic(factory, undefined, [api])
         if (contribution.tools.length || contribution.commands.length || contribution.agentHooks.length) {

@@ -53,6 +53,11 @@ explicit NoOp object: selection/input/editor/custom calls resolve `undefined`, c
 `false`, getters return empty values, and setters/notifications do nothing. Factories supplied to UI
 registration methods are not executed.
 
+If an extension cannot be imported solely because the host intentionally does not provide the
+`@earendil-works/pi-tui` or `@mariozechner/pi-tui` peer, that extension entry is skipped with an
+inactive diagnostic and the rest of the generation continues. Missing non-UI dependencies remain
+fatal so broken packages and installation mistakes are not hidden.
+
 The following registration surfaces are recognized and inactive: shortcuts, flags, providers,
 message/Markdown/entry renderers, and tool `prepareArguments`. Extension-level send/append/session
 mutation helpers are also inactive. Their query-shaped counterparts return safe empty/default
@@ -62,7 +67,15 @@ no streaming update callback; their final result remains supported. The generati
 
 ## Module compatibility
 
-The host aliases both current and legacy Pi package names to one compatibility module. It also maps
-`typebox` and `@sinclair/typebox`, including supported subpaths such as `/compile` and `/value`, to
-the single TypeBox runtime bundled by the host. Subpath aliases take precedence over package-root
-aliases so resolution cannot produce paths such as `build/index.mjs/value`.
+The host covers every module specifier in Pi's extension-loader alias table for both
+`@earendil-works` and `@mariozechner`: `pi-coding-agent`, `pi-agent-core`, `pi-ai`,
+`pi-ai/compat`, `pi-ai/oauth`, and `pi-ai/providers/all` resolve to the one host compatibility
+module. `pi-tui` is the deliberate inactive exception described above. The host also maps `typebox`
+and `@sinclair/typebox`, including supported subpaths such as `/compile` and `/value`, to the single
+TypeBox runtime bundled by the host. Subpath aliases take precedence over package-root aliases so
+resolution cannot produce paths such as `build/index.mjs/value`.
+
+Module resolution coverage does not imply that every runtime export from the upstream JavaScript
+Agent, provider, or TUI implementations exists in pi-rs. The compatibility module exposes the
+runtime-neutral helpers documented by this matrix; type-only imports disappear during transpilation,
+and unsupported runtime capabilities remain explicit product gaps.

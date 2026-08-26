@@ -1,9 +1,20 @@
-const PI_PACKAGE_NAMES = [
-  '@earendil-works/pi-coding-agent',
-  '@mariozechner/pi-coding-agent',
-  '@earendil-works/pi-ai',
-  '@mariozechner/pi-ai',
+const PI_PACKAGE_SCOPES = [
+  '@earendil-works',
+  '@mariozechner',
 ] as const
+
+const PI_COMPATIBILITY_ENTRYPOINTS = [
+  'pi-coding-agent',
+  'pi-agent-core',
+  'pi-ai/providers/all',
+  'pi-ai/compat',
+  'pi-ai/oauth',
+  'pi-ai',
+] as const
+
+export const PI_TUI_PACKAGE_NAMES: readonly string[] = Object.freeze(
+  PI_PACKAGE_SCOPES.map(scope => `${scope}/pi-tui`),
+)
 
 const TYPEBOX_PACKAGE_NAMES = ['typebox', '@sinclair/typebox'] as const
 const TYPEBOX_PACKAGE_SUBPATHS = [
@@ -24,8 +35,10 @@ export class CompatibilityResolver {
 
   constructor(require: NodeRequire, compatibilityModulePath: string) {
     const entries: [string, string][] = [
-      ...PI_PACKAGE_NAMES.map(
-        (packageName): [string, string] => [packageName, compatibilityModulePath],
+      ...PI_PACKAGE_SCOPES.flatMap(scope =>
+        PI_COMPATIBILITY_ENTRYPOINTS.map(
+          (entrypoint): [string, string] => [`${scope}/${entrypoint}`, compatibilityModulePath],
+        ),
       ),
       ...TYPEBOX_PACKAGE_NAMES.flatMap((packageName) =>
         TYPEBOX_PACKAGE_SUBPATHS.map(

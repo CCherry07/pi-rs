@@ -228,6 +228,82 @@ test('provides host-owned pi-ai and typebox peer modules to managed extensions',
   assert.equal(manifest.agentPlugins[0]?.tools[0]?.description, 'Verify host-owned peer modules')
 })
 
+test('resolves every non-UI module exposed by the current Pi extension loader', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-all-pi-peers-'))
+  const extension = join(root, 'all-pi-peers.ts')
+  await writeFile(
+    extension,
+    `
+      import * as EarendilCodingAgent from "@earendil-works/pi-coding-agent";
+      import * as EarendilAgentCore from "@earendil-works/pi-agent-core";
+      import * as EarendilAi from "@earendil-works/pi-ai";
+      import * as EarendilAiCompat from "@earendil-works/pi-ai/compat";
+      import * as EarendilAiOauth from "@earendil-works/pi-ai/oauth";
+      import * as EarendilAiProviders from "@earendil-works/pi-ai/providers/all";
+      import * as MarioCodingAgent from "@mariozechner/pi-coding-agent";
+      import * as MarioAgentCore from "@mariozechner/pi-agent-core";
+      import * as MarioAi from "@mariozechner/pi-ai";
+      import * as MarioAiCompat from "@mariozechner/pi-ai/compat";
+      import * as MarioAiOauth from "@mariozechner/pi-ai/oauth";
+      import * as MarioAiProviders from "@mariozechner/pi-ai/providers/all";
+
+      const hostModules = [
+        EarendilCodingAgent,
+        EarendilAgentCore,
+        EarendilAi,
+        EarendilAiCompat,
+        EarendilAiOauth,
+        EarendilAiProviders,
+        MarioCodingAgent,
+        MarioAgentCore,
+        MarioAi,
+        MarioAiCompat,
+        MarioAiOauth,
+        MarioAiProviders,
+      ];
+
+      export default function (pi: any) {
+        pi.registerCommand("all-host-modules", {
+          handler: async () => ({
+            action: hostModules.every(module => typeof module === "object")
+              ? "handled"
+              : "failed"
+          })
+        });
+      }
+    `,
+  )
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: {
+      projectTrusted: true,
+      extensionPaths: [extension],
+      mode: 'print',
+    },
+  })))
+
+  const command = manifest.agentPlugins[0]?.commands[0]
+  assert.equal(command?.name, 'all-host-modules')
+  assert.deepEqual(
+    parseJson(await host.dispatch(JSON.stringify({
+      type: 'invoke',
+      invocation: {
+        generationId: manifest.generationId,
+        invocationId: 'all-host-modules-command',
+        callbackId: command?.callbackId,
+        kind: 'command',
+        payload: {
+          arguments: '',
+          context: { cwd: root },
+        },
+      },
+    }))),
+    { action: 'handled' },
+  )
+})
+
 test('keeps inactive JavaScript UI registrations non-fatal while agent_settled stays active', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-inactive-'))
   const extension = join(root, 'inactive-extension.ts')
@@ -309,6 +385,92 @@ test('keeps inactive JavaScript UI registrations non-fatal while agent_settled s
     },
   })))
   assert.deepEqual(result, { action: 'handled' })
+})
+
+test('skips extensions whose unsupported current or legacy Pi TUI peer is unavailable', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-missing-tui-peer-'))
+  const earendilUiExtension = join(root, 'earendil-ui-extension.ts')
+  const marioUiExtension = join(root, 'mario-ui-extension.ts')
+  const activeExtension = join(root, 'active-extension.ts')
+  await writeFile(
+    earendilUiExtension,
+    `
+      import { SelectList } from "@earendil-works/pi-tui";
+      void SelectList;
+      export default function (pi: any) {
+        pi.registerShortcut("ctrl+t", () => undefined);
+      }
+    `,
+  )
+  await writeFile(
+    marioUiExtension,
+    `
+      import { SelectList } from "@mariozechner/pi-tui";
+      void SelectList;
+      export default function (pi: any) {
+        pi.registerShortcut("ctrl+m", () => undefined);
+      }
+    `,
+  )
+  await writeFile(
+    activeExtension,
+    `
+      export default function (pi: any) {
+        pi.registerCommand("still-active", {
+          handler: async () => ({ action: "handled" })
+        });
+      }
+    `,
+  )
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: {
+      projectTrusted: true,
+      extensionPaths: [earendilUiExtension, marioUiExtension, activeExtension],
+      mode: 'tui',
+    },
+  })))
+
+  assert.equal(manifest.agentPlugins.length, 1)
+  assert.equal(manifest.agentPlugins[0]?.commands[0]?.name, 'still-active')
+  assert.deepEqual(
+    manifest.diagnostics.map(diagnostic => ({
+      path: diagnostic.path,
+      feature: diagnostic.feature,
+    })),
+    [
+      { path: earendilUiExtension, feature: '@earendil-works/pi-tui' },
+      { path: marioUiExtension, feature: '@mariozechner/pi-tui' },
+    ],
+  )
+  assert.ok(manifest.diagnostics.every(diagnostic => /extension was skipped/.test(diagnostic.message)))
+})
+
+test('keeps ordinary missing extension dependencies fatal', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-missing-peer-'))
+  const extension = join(root, 'broken-extension.ts')
+  await writeFile(
+    extension,
+    `
+      import missing from "a-package-that-definitely-does-not-exist";
+      export default function () { return missing; }
+    `,
+  )
+
+  const host = new ExtensionHost()
+  await assert.rejects(
+    host.dispatch(JSON.stringify({
+      type: 'prepareGeneration',
+      request: {
+        projectTrusted: true,
+        extensionPaths: [extension],
+        mode: 'tui',
+      },
+    })),
+    /Cannot find module 'a-package-that-definitely-does-not-exist'/,
+  )
 })
 
 test('builds command context from the native query notify and request capability', async () => {

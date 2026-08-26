@@ -353,10 +353,18 @@ tool-result guards are available through current and legacy `pi-ai` / `pi-coding
 names; `typebox` and `@sinclair/typebox`, including subpaths such as `typebox/value`, resolve to the
 host's bundled runtime.
 
+The host resolves Pi's complete non-UI extension module table for both the current
+`@earendil-works` and legacy `@mariozechner` namespaces: `pi-coding-agent`, `pi-agent-core`,
+`pi-ai`, `pi-ai/compat`, `pi-ai/oauth`, and `pi-ai/providers/all`. Module resolution does not imply
+that every upstream JavaScript runtime export is implemented; the compatibility API remains the
+explicit capability boundary.
+
 JavaScript extensions do not own the Ratatui frontend: `ctx.hasUI` is false and `ctx.ui` is an
 explicit no-op implementation. Hooks and registrations known to current Pi but not yet implemented
 are reported as inactive and do not fail generation construction; genuinely unknown hook names
-still fail so typos remain visible. See the repository's
+still fail so typos remain visible. An extension entry whose only missing dependency is a legacy or
+current Pi TUI peer is skipped with an inactive diagnostic; other missing dependencies remain fatal.
+See the repository's
 [JavaScript compatibility matrix](../../docs/js-extension-compatibility.md) for the precise hook,
 context, UI, and module status. Extension code runs in the Node process as trusted code; it is not
 sandboxed.
