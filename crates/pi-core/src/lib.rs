@@ -1,5 +1,10 @@
 #![forbid(unsafe_code)]
 
+extern crate self as pi_core;
+
+#[doc(hidden)]
+pub use async_trait::async_trait as __plugin_async_trait;
+
 mod abort;
 mod agent_context;
 mod command;
@@ -31,14 +36,15 @@ pub use model::{
     ModelCost, ModelCostTier, ModelInput, ModelSpec, ResponseMetadata, StopReason, ThinkingLevel,
 };
 pub use model_runtime::{ModelRuntime, ProviderStatus};
+pub use pi_plugin_macros::{agent_plugin, provider_plugin};
 pub use plugin::{
-    AgentEndEvent, AgentPlugin, AgentSettledEvent, AgentStartEvent, BeforeAgentStartEvent,
-    BeforeAgentStartPatch, ContextEvent, ContextPatch, InputContext, InputEvent, InputPatch,
-    InputSource, InputStreamingBehavior, MessageEndEvent, MessageEndPatch, MessageStartEvent,
-    MessageUpdateEvent, PluginContext, PluginDiagnostic, PluginDriver, PluginError,
-    RegisterContext, ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolExecutionEndEvent,
-    ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch,
-    TurnEndEvent, TurnStartEvent,
+    AgentEndEvent, AgentHook, AgentHookInterests, AgentPlugin, AgentSettledEvent, AgentStartEvent,
+    BeforeAgentStartEvent, BeforeAgentStartPatch, ContextEvent, ContextPatch, InputContext,
+    InputEvent, InputPatch, InputSource, InputStreamingBehavior, MessageEndEvent, MessageEndPatch,
+    MessageStartEvent, MessageUpdateEvent, PluginContext, PluginDiagnostic, PluginDriver,
+    PluginError, RegisterContext, ToolCallBlock, ToolCallEvent, ToolCallPatch,
+    ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent,
+    ToolResultPatch, TurnEndEvent, TurnStartEvent,
 };
 pub use provider::{
     Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderRequest,

@@ -1,6 +1,5 @@
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use pi_agent::AgentOptions;
 use pi_core::{
     AgentEndEvent, AgentPlugin, AgentStartEvent, ContentBlock, ContextEvent, ContextPatch, Message,
@@ -21,7 +20,7 @@ struct AuditPlugin {
     events: Arc<Mutex<Vec<&'static str>>>,
 }
 
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for AuditPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("e2e-audit")

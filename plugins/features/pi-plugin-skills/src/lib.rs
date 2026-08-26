@@ -230,7 +230,7 @@ fn render_skill_invocation(skill: &SkillInfo, arguments: &str) -> String {
     }
 }
 
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for SkillsPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("skills")

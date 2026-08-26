@@ -16,7 +16,7 @@ const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 
 pub struct FindPlugin;
 pub struct FindTool;
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for FindPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("find-tool")

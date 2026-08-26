@@ -148,7 +148,7 @@ impl ToolPlugin {
     }
 }
 
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for ToolPlugin {
     fn id(&self) -> PluginId {
         PluginId::new(self.id)
@@ -279,7 +279,7 @@ impl Tool for StrictTool {
 
 struct PatchStrictArguments;
 
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for PatchStrictArguments {
     fn id(&self) -> PluginId {
         PluginId::new("patch-strict-arguments")
@@ -299,7 +299,7 @@ impl AgentPlugin for PatchStrictArguments {
 
 struct BlockAllTools;
 
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for BlockAllTools {
     fn id(&self) -> PluginId {
         PluginId::new("block-all-tools")
@@ -322,7 +322,7 @@ impl AgentPlugin for BlockAllTools {
 
 struct TerminateToolResults;
 
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for TerminateToolResults {
     fn id(&self) -> PluginId {
         PluginId::new("terminate-tool-results")
@@ -344,7 +344,7 @@ struct ObserveToolHookContext {
     observed: Arc<Mutex<Vec<Arc<AgentContext>>>>,
 }
 
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for ObserveToolHookContext {
     fn id(&self) -> PluginId {
         PluginId::new("observe-tool-hook-context")

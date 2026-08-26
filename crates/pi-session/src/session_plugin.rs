@@ -205,6 +205,8 @@ pub struct SessionPluginDiagnostic {
 /// Pi-style session lifecycle extension. Observer failures are isolated and
 /// exposed as diagnostics; before-hook results follow Pi's ordered
 /// last-non-empty-wins behavior, with the first cancellation short-circuiting.
+/// Statically linked implementations use `#[pi_session::session_plugin]`,
+/// which supplies the async-trait expansion.
 #[async_trait]
 pub trait SessionPlugin: Send + Sync {
     fn id(&self) -> PluginId;
@@ -679,7 +681,7 @@ mod tests {
         calls: Arc<Mutex<Vec<&'static str>>>,
     }
 
-    #[async_trait]
+    #[pi_session::session_plugin]
     impl SessionPlugin for SwitchPlugin {
         fn id(&self) -> PluginId {
             PluginId::new(self.id)

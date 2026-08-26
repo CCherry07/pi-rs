@@ -1265,7 +1265,7 @@ mod tests {
 
     struct DuplicatePlugin;
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for DuplicatePlugin {
         fn id(&self) -> PluginId {
             PluginId::new("duplicate")
@@ -1274,7 +1274,7 @@ mod tests {
 
     struct IdOnlyPlugin(&'static str);
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for IdOnlyPlugin {
         fn id(&self) -> PluginId {
             PluginId::new(self.0)
@@ -1414,7 +1414,7 @@ mod tests {
         provider: Arc<HookedProvider>,
     }
 
-    #[async_trait::async_trait]
+    #[pi_core::provider_plugin]
     impl ProviderPlugin for HookedProviderPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("hook-fixture")
@@ -1435,6 +1435,7 @@ mod tests {
         }
     }
 
+    #[pi_core::provider_plugin]
     impl ProviderPlugin for GenerationCatalogPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("generation-models")
@@ -1510,7 +1511,7 @@ mod tests {
         duplicate_command: bool,
     }
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for GenerationPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("generation")
@@ -1557,7 +1558,7 @@ mod tests {
 
     struct SuffixInputPlugin;
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for SuffixInputPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("suffix-input")
@@ -1580,7 +1581,7 @@ mod tests {
         events: Arc<Mutex<Vec<InputEvent>>>,
     }
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for MultimodalInputPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("multimodal-input")
@@ -1795,7 +1796,7 @@ mod tests {
         release: Arc<Notify>,
     }
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for GenerationLeasePlugin {
         fn id(&self) -> PluginId {
             PluginId::new("generation-lease")
@@ -1882,7 +1883,7 @@ mod tests {
         inject: Option<&'static str>,
     }
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for PromptHookPlugin {
         fn id(&self) -> PluginId {
             PluginId::new(self.id)
@@ -1913,7 +1914,7 @@ mod tests {
 
     struct FailingPromptHook;
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for FailingPromptHook {
         fn id(&self) -> PluginId {
             PluginId::new("failing-prompt")
@@ -1962,7 +1963,7 @@ mod tests {
 
     struct WrongMessageEndRole;
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for WrongMessageEndRole {
         fn id(&self) -> PluginId {
             PluginId::new("wrong-message-end-role")
@@ -1987,7 +1988,7 @@ mod tests {
         }
     }
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for ReplaceMessageEnd {
         fn id(&self) -> PluginId {
             PluginId::new("replace-message-end")
@@ -2109,7 +2110,7 @@ mod tests {
         }
     }
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for LifecyclePlugin {
         fn id(&self) -> PluginId {
             PluginId::new("lifecycle")
@@ -2191,7 +2192,7 @@ mod tests {
         ends: Arc<Mutex<Vec<TurnEndEvent>>>,
     }
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for TurnMetadataPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("turn-metadata")
@@ -2263,7 +2264,7 @@ mod tests {
 
     struct ContextToolHookPlugin;
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for ContextToolHookPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("context-tool-hooks")
@@ -2696,7 +2697,7 @@ mod tests {
 
     struct BlockEchoPlugin;
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for BlockEchoPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("block-echo")
@@ -2723,7 +2724,7 @@ mod tests {
 
     struct PatchToolResultPlugin;
 
-    #[async_trait::async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for PatchToolResultPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("patch-tool-result")

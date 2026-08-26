@@ -106,6 +106,9 @@ impl<'a> ProviderRegisterContext<'a> {
 
 /// A provider-system plugin that contributes providers, routing overlays,
 /// model catalog entries, and provider request lifecycle hooks.
+///
+/// Statically linked implementations use `#[pi_core::provider_plugin]`, which
+/// supplies the async-trait expansion.
 #[async_trait]
 pub trait ProviderPlugin: Send + Sync {
     fn id(&self) -> PluginId;
@@ -260,7 +263,7 @@ mod tests {
 
     struct FailingPayloadPlugin;
 
-    #[async_trait]
+    #[pi_core::provider_plugin]
     impl ProviderPlugin for PayloadPlugin {
         fn id(&self) -> PluginId {
             PluginId::new(self.id)
@@ -277,7 +280,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[pi_core::provider_plugin]
     impl ProviderPlugin for FailingPayloadPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("failing")
@@ -292,6 +295,7 @@ mod tests {
         }
     }
 
+    #[pi_core::provider_plugin]
     impl ProviderPlugin for BaseProviderPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("base")
@@ -302,6 +306,7 @@ mod tests {
         }
     }
 
+    #[pi_core::provider_plugin]
     impl ProviderPlugin for CatalogProviderPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("models")

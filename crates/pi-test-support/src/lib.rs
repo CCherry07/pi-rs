@@ -163,6 +163,7 @@ impl ScriptedProviderPlugin {
     }
 }
 
+#[pi_core::provider_plugin]
 impl ProviderPlugin for ScriptedProviderPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("scripted-provider")
@@ -208,7 +209,7 @@ impl TestToolsPlugin {
     }
 }
 
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for TestToolsPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("test-tools")

@@ -22,7 +22,7 @@ pub struct ReadTool;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const MAX_OUTPUT_LINES: usize = 2_000;
 
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for ReadPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("read")

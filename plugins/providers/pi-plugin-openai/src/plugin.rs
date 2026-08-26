@@ -26,6 +26,7 @@ impl OpenAiCodexPlugin {
     }
 }
 
+#[pi_core::provider_plugin]
 impl ProviderPlugin for OpenAiCodexPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("openai-codex-provider")
@@ -50,6 +51,7 @@ const CODEX_CONTEXT_WINDOW: u64 = 272_000;
 const CODEX_SPARK_CONTEXT_WINDOW: u64 = 128_000;
 const CODEX_MAX_TOKENS: u64 = 128_000;
 
+#[pi_core::provider_plugin]
 impl ProviderPlugin for OpenAiCodexCatalogPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("openai-codex-catalog")
@@ -183,6 +185,7 @@ impl OpenAiCompatiblePlugin {
     }
 }
 
+#[pi_core::provider_plugin]
 impl ProviderPlugin for OpenAiCompatiblePlugin {
     fn id(&self) -> PluginId {
         PluginId::new(format!("{}-provider", self.provider.id()))
@@ -209,6 +212,7 @@ impl OpenAiPlugin {
     }
 }
 
+#[pi_core::provider_plugin]
 impl ProviderPlugin for OpenAiPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("openai-provider")

@@ -255,7 +255,7 @@ impl Command for PromptTemplateCommand {
     }
 }
 
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for PromptTemplatesPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("prompt-templates")

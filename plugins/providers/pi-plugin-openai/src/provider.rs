@@ -310,7 +310,7 @@ mod tests {
 
     struct PayloadPlugin;
 
-    #[async_trait]
+    #[pi_core::provider_plugin]
     impl ProviderPlugin for PayloadPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("payload-hook")

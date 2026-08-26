@@ -10,6 +10,7 @@ publish = false
 async-trait.workspace = true
 pi-agent.workspace = true
 pi-core.workspace = true
+pi-plugin-macros.workspace = true
 pi-prompt.workspace = true
 pi-resources.workspace = true
 pi-runtime.workspace = true

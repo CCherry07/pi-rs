@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use pi_plugin_loader::{NativePluginLoader, NativePluginLoaderOptions};
-use pi_plugin_sdk::NativePluginKind;
+use pi_plugin_sdk::{AgentHook, NativePluginKind};
 
 #[test]
 fn loads_all_three_native_plugin_kinds_and_constructs_fresh_instances() {
@@ -57,10 +57,10 @@ marker = "from-manifest"
     assert_eq!(descriptors[0].kind, NativePluginKind::Agent);
     assert_eq!(descriptors[1].kind, NativePluginKind::Provider);
     assert_eq!(descriptors[2].kind, NativePluginKind::Session);
-    assert_eq!(
-        plugins.agent_factories()[0].create().unwrap().id().as_str(),
-        "native-fixture-agent"
-    );
+    let agent_plugin = plugins.agent_factories()[0].create().unwrap();
+    assert_eq!(agent_plugin.id().as_str(), "native-fixture-agent");
+    assert!(agent_plugin.hook_interests().contains(AgentHook::Input));
+    assert!(!agent_plugin.hook_interests().contains(AgentHook::Context));
     assert_eq!(
         plugins.provider_factories()[0]
             .create()

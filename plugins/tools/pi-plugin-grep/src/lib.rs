@@ -22,7 +22,7 @@ const MAX_LINE_CHARS: usize = 500;
 
 pub struct GrepPlugin;
 pub struct GrepTool;
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for GrepPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("grep-tool")

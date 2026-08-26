@@ -13,7 +13,7 @@ const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 
 pub struct LsPlugin;
 pub struct LsTool;
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for LsPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("ls-tool")

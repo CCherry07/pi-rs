@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use pi_core::{
-    AbortSignal, AgentEndEvent, AgentPlugin, AgentSettledEvent, AgentStartEvent,
-    BeforeAgentStartEvent, BeforeAgentStartPatch, BeforeProviderRequestEvent, Command,
-    CommandContext, CommandError, CommandOutcome, CommandSpec, ContentBlock, ContextEvent,
+    AbortSignal, AgentEndEvent, AgentHook, AgentHookInterests, AgentPlugin, AgentSettledEvent,
+    AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch, BeforeProviderRequestEvent,
+    Command, CommandContext, CommandError, CommandOutcome, CommandSpec, ContentBlock, ContextEvent,
     ContextPatch, CustomMessage, CustomMessageContent, ImageContent, InputContext, InputEvent,
     InputPatch, InputSource, InputStreamingBehavior, Message, MessageEndEvent, MessageEndPatch,
     MessageStartEvent, MessageUpdateEvent, PluginContext, PluginError, PluginId, ProviderPlugin,
@@ -94,7 +94,19 @@ pub enum JsHostOperation {
 
 #[cfg(test)]
 mod wire_tests {
-    use super::{JsGenerationRequest, JsHostMode, JsHostOperation};
+    use pi_core::AgentHook;
+
+    use super::{AGENT_HOOKS, JsGenerationRequest, JsHostMode, JsHostOperation};
+
+    #[test]
+    fn every_validated_agent_hook_has_a_core_route() {
+        for name in AGENT_HOOKS {
+            assert!(
+                AgentHook::from_name(name).is_some(),
+                "missing route for {name}"
+            );
+        }
+    }
 
     #[test]
     fn host_notification_fields_use_camel_case() {
@@ -887,6 +899,18 @@ impl AgentPlugin for JsAgentPlugin {
         self.id.clone()
     }
 
+    fn hook_interests(&self) -> AgentHookInterests {
+        let hooks: Vec<_> = self
+            .hooks
+            .iter()
+            .map(|hook| {
+                AgentHook::from_name(&hook.name)
+                    .expect("validated JavaScript agent hook must have a core route")
+            })
+            .collect();
+        AgentHookInterests::from_hooks(&hooks)
+    }
+
     fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
         for tool in &self.tools {
             context.register_tool(Arc::clone(tool))?;
@@ -1578,7 +1602,7 @@ struct JsProviderPlugin {
     lease: Arc<JsGenerationLease>,
 }
 
-#[async_trait]
+#[pi_core::provider_plugin]
 impl ProviderPlugin for JsProviderPlugin {
     fn id(&self) -> PluginId {
         self.id.clone()
@@ -1767,7 +1791,7 @@ struct JsSessionTreeSummary {
     usage: Option<Usage>,
 }
 
-#[async_trait]
+#[pi_session::session_plugin]
 impl SessionPlugin for JsSessionPlugin {
     fn id(&self) -> PluginId {
         self.id.clone()

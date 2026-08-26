@@ -98,6 +98,7 @@ impl ModelsPlugin {
     }
 }
 
+#[pi_core::provider_plugin]
 impl ProviderPlugin for ModelsPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("models")

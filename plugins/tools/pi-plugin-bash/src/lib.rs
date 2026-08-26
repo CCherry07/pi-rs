@@ -15,7 +15,7 @@ use pi_tool_support::{execution, invalid, require_str, spec};
 pub struct BashPlugin;
 pub struct BashTool;
 
-#[async_trait]
+#[pi_core::agent_plugin]
 impl pi_core::AgentPlugin for BashPlugin {
     fn id(&self) -> pi_core::PluginId {
         pi_core::PluginId::new("bash-tool")

@@ -52,7 +52,7 @@ struct Resolved {
     lines: Vec<String>,
 }
 
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for HashlineEditPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("hashline-edit-tool")

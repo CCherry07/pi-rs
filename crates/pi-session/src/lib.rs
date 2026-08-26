@@ -7,6 +7,12 @@
 //! context is projected from a selected branch; and a JSONL tail is repaired
 //! only when the final append is syntactically torn.
 
+extern crate self as pi_session;
+
+#[doc(hidden)]
+pub use async_trait::async_trait as __plugin_async_trait;
+pub use pi_plugin_macros::session_plugin;
+
 mod agent_session;
 mod agent_session_runtime;
 mod compaction;

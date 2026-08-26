@@ -300,6 +300,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "pi-plugin-macros",
  "serde",
  "serde_json",
  "thiserror",
@@ -365,6 +366,7 @@ dependencies = [
  "async-trait",
  "pi-agent",
  "pi-core",
+ "pi-plugin-macros",
  "pi-prompt",
  "pi-resources",
  "pi-runtime",

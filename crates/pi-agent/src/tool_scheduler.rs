@@ -627,7 +627,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for RecordingPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("recording")

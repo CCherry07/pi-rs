@@ -441,7 +441,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[pi_session::session_plugin]
     impl SessionPlugin for LifecyclePlugin {
         fn id(&self) -> PluginId {
             PluginId::new("runtime-lifecycle")

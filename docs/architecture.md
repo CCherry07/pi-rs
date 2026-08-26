@@ -31,7 +31,7 @@ crates/pi-session               Pi v4 storage plus MultiSessionManager/PiSession
 crates/pi-telemetry             typed Pi AI/harness span schemas and sink adapters
 apps/pi-md                     TUI-owned Markdown parsing, streaming repair, highlighting, and Ratatui rendering
 crates/pi-plugin-sdk            native plugin author interface and descriptor types
-crates/pi-plugin-macros         agent/provider/session native export macros
+crates/pi-plugin-macros         static plugin preparation, agent hook-interest derivation, and native exports
 crates/pi-plugin-loader         manifest discovery, compatibility checks, and factory adapters
 crates/pi-plugin-manager        package intent/lock, Registry resolution, CAS, and activation
 crates/pi-js-package-manager     Pi-compatible JS discovery and npm/git orchestration
@@ -157,7 +157,7 @@ configuration files or plugin ID conventions.
 ## Plugin-first rules
 
 1. Tools and commands are registered through `AgentPlugin`. `ProviderPlugin` contributes provider implementations, routing overlays, model catalog entries, and provider request hooks. Agent code has no provider/tool name switches.
-2. Agent plugin hooks, provider plugin registration, and provider request hooks each execute in builder order. There is no numeric priority.
+2. Agent plugin hooks, provider plugin registration, and provider request hooks each execute in builder order. There is no numeric priority. Statically linked Rust plugin impls use one lifecycle attribute—`#[pi_core::agent_plugin]`, `#[pi_core::provider_plugin]`, or `#[pi_session::session_plugin]`—which expands async callbacks without a companion `#[async_trait]`. The agent attribute also derives hook interests. Native plugins get the corresponding behavior from `#[pi_plugin_sdk::{agent,provider,session}]`, while JavaScript agent adapters derive interests from the validated `pi.on(...)` manifest. `PluginDriver` snapshots an immutable per-hook route when a generation is built. Registration still visits every agent plugin; runtime hooks visit only their exact route, with no catch-all interest or `ALL` fallback.
 3. Duplicate IDs are rejected within each plugin system; duplicate tool, command, provider, or model IDs fail runtime construction.
 4. Registries are mutable only during registration and frozen before Agent construction.
 5. `tool_call` runs in order, chains argument patches, revalidates patched arguments, and lets the first block decision win. It is the intentional fail-closed exception: a hook error fails that tool call. Every typed `AgentPlugin` callback receives the same `Arc<AgentContext>` snapshot for the batch, including the current system prompt, transcript with the requesting assistant message, and active-tool names. The JavaScript extension Adapter projects Pi's narrower extension event and does not serialize this native context into Node.
@@ -174,7 +174,7 @@ configuration files or plugin ID conventions.
 
 `PiRuntime` keeps a reusable blueprint and publishes immutable runtime generations. A generation contains the agent and provider plugin drivers, the frozen `ModelRuntime`/registries, and the assembled base prompt that must move together. Agent plugins may contribute tools, commands, input processing, and lifecycle hooks; provider plugins have a narrow surface for provider/catalog registration and provider request lifecycle hooks.
 
-`reload()` prepares the complete next generation off to the side, validates it against the current provider and active-tool selection, waits for the active run to settle, and then swaps one `Arc<AgentRuntime>`. A failed factory, duplicate registration, or incompatible provider/tool selection leaves the prior generation untouched. Each agent run captures one generation before invoking hooks or resolving providers and tools, so a run cannot observe a mixture of old and new plugin state.
+`reload()` prepares the complete next generation off to the side, validates it against the current provider and active-tool selection, waits for the active run to settle, and then swaps one `Arc<AgentRuntime>`. A failed factory, duplicate registration, or incompatible provider/tool selection leaves the prior generation untouched. Each agent run captures one generation before invoking hooks or resolving providers and tools, so a run cannot observe a mixture of old and new plugin state. Hook-interest routes are rebuilt with the candidate generation and never mutated after publication.
 
 Use `agent_plugin_factory` / `try_agent_plugin_factory` for reloadable agent plugins and `provider_plugin_factory` / `try_provider_plugin_factory` for providers, catalogs, routing overlays, and request hooks. Their pinned `agent_plugin` / `provider_plugin` and `*_arc` forms intentionally reuse an instance, primarily for stateless plugins and externally observed fixtures. `pi-plugin-loader` adapts version-locked dynamic libraries through the existing type-erased fallible factory seams and never mutates live registries in place.
 
@@ -191,8 +191,10 @@ while unchanged content reuses one process-pinned handle. Libraries remain pinne
 lifetime because plugin code may retain worker threads. Package metadata and artifact lifetime are
 loader concerns rather than a fourth lifecycle or cross-lifecycle bundle.
 
-Native ABI 2 covers the `AgentContext` tool-hook snapshot and `added_tool_names` result contract.
-The loader reads the stable C descriptor first and rejects ABI 1 before resolving any v2 Rust
+Native ABI 3 adds the required `AgentPlugin` hook-interest contract to the ABI 2
+`AgentContext`/`added_tool_names` surface. The native agent export macro derives that contract from
+the callback methods in the annotated impl, so authors do not maintain a second hook list. The
+loader reads the stable C descriptor first and rejects older ABIs before resolving any v3 Rust
 constructor symbol, preventing a stale in-process plugin from crossing the changed trait boundary.
 
 Native package distribution is a separate deep module at `pi-plugin-manager`. Editable
@@ -408,8 +410,9 @@ streaming-behavior fields; `turn_start`/`turn_end` expose the per-run turn index
 and `message_end` replacements flow back into the live Agent and persisted session, subject to the
 same-role invariant. Callback rejection, malformed results, and invalid replacements become
 generation-local diagnostics and do not suppress later callbacks. `tool_call` remains intentionally
-fail-closed, matching Pi's tool runner. Provider payload callbacks use the same isolated chaining
-rule as the Rust `ProviderPluginDriver`.
+fail-closed, matching Pi's tool runner. The validated manifest is also the JavaScript adapter's
+hook-interest source, so an extension is never invoked for an event it did not register. Provider
+payload callbacks use the same isolated chaining rule as the Rust `ProviderPluginDriver`.
 
 `ProductSessionFactory` asks the Node host for a fresh callback generation on initial construction,
 new/resumed sessions, and `/reload`, alongside native plugins, resources, models, and session
@@ -523,7 +526,7 @@ registers the plugin factory in each generation.
 
 - `Provider`: accepts semantic `ProviderRequest` data plus a generation-local `ProviderCallContext`, invokes wire hooks when its final payload exists, and returns `Stream<Item = Result<StreamEvent, ProviderError>>`.
 - `Tool`: publishes `ToolSpec` and executes validated JSON arguments with an `AbortSignal` and `ToolUpdateSink`.
-- `AgentPlugin`: registers tools/commands and participates in input, lifecycle, context, and tool hooks.
+- `AgentPlugin`: registers tools/commands and participates in input, lifecycle, context, and tool hooks; its required hook-interest value is macro- or manifest-derived rather than author-maintained.
 - `ProviderPlugin`: registers providers, routing overlays, and model metadata and may implement `before_provider_request` without implementing a provider.
 - `SessionPlugin`: participates only in session lifecycle hooks and is rebuilt by `SessionPlugins`.
 - `PluginDriver`: is the only component that invokes plugin hooks.

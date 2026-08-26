@@ -45,6 +45,48 @@ pub fn agent(args: TokenStream, item: TokenStream) -> TokenStream {
     export_plugin(args, item, PluginKind::Agent)
 }
 
+/// Prepares a statically linked `AgentPlugin` by deriving hook interests and
+/// expanding async callback methods.
+#[proc_macro_attribute]
+pub fn agent_plugin(args: TokenStream, item: TokenStream) -> TokenStream {
+    let args = proc_macro2::TokenStream::from(args);
+    if !args.is_empty() {
+        return syn::Error::new_spanned(args, "`agent_plugin` does not accept arguments")
+            .into_compile_error()
+            .into();
+    }
+    let mut implementation = parse_macro_input!(item as ItemImpl);
+    match inject_agent_hook_interests(&mut implementation, quote!(::pi_core)) {
+        Ok(()) => {
+            ensure_async_trait(&mut implementation, quote!(::pi_core::__plugin_async_trait));
+            quote!(#implementation).into()
+        }
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
+/// Expands async callbacks for a statically linked `ProviderPlugin`.
+#[proc_macro_attribute]
+pub fn provider_plugin(args: TokenStream, item: TokenStream) -> TokenStream {
+    expand_static_plugin(
+        args,
+        item,
+        PluginKind::Provider,
+        quote!(::pi_core::__plugin_async_trait),
+    )
+}
+
+/// Expands async callbacks for a statically linked `SessionPlugin`.
+#[proc_macro_attribute]
+pub fn session_plugin(args: TokenStream, item: TokenStream) -> TokenStream {
+    expand_static_plugin(
+        args,
+        item,
+        PluginKind::Session,
+        quote!(::pi_session::__plugin_async_trait),
+    )
+}
+
 #[proc_macro_attribute]
 pub fn provider(args: TokenStream, item: TokenStream) -> TokenStream {
     export_plugin(args, item, PluginKind::Provider)
@@ -60,6 +102,50 @@ enum PluginKind {
     Agent,
     Provider,
     Session,
+}
+
+fn expand_static_plugin(
+    args: TokenStream,
+    item: TokenStream,
+    kind: PluginKind,
+    async_trait_path: proc_macro2::TokenStream,
+) -> TokenStream {
+    let args = proc_macro2::TokenStream::from(args);
+    if !args.is_empty() {
+        return syn::Error::new_spanned(args, "static plugin attributes do not accept arguments")
+            .into_compile_error()
+            .into();
+    }
+    let mut implementation = parse_macro_input!(item as ItemImpl);
+    let Some((_, trait_path, _)) = &implementation.trait_ else {
+        return syn::Error::new_spanned(
+            implementation,
+            format!(
+                "this attribute must annotate an impl of {}",
+                kind.trait_name()
+            ),
+        )
+        .into_compile_error()
+        .into();
+    };
+    let actual_trait = trait_path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+        .unwrap_or_default();
+    if actual_trait != kind.trait_name() {
+        return syn::Error::new_spanned(
+            trait_path,
+            format!(
+                "this attribute must annotate an impl of {}",
+                kind.trait_name()
+            ),
+        )
+        .into_compile_error()
+        .into();
+    }
+    ensure_async_trait(&mut implementation, async_trait_path);
+    quote!(#implementation).into()
 }
 
 impl PluginKind {
@@ -103,6 +189,9 @@ fn expand_export(
             format!("this macro must annotate an impl of {}", kind.trait_name()),
         ));
     }
+    if matches!(kind, PluginKind::Agent) {
+        inject_agent_hook_interests(implementation, quote!(::pi_plugin_sdk))?;
+    }
     if implementation
         .items
         .iter()
@@ -123,48 +212,36 @@ fn expand_export(
         }
     }));
 
-    let has_async_method = implementation
-        .items
-        .iter()
-        .any(|item| matches!(item, ImplItem::Fn(function) if function.sig.asyncness.is_some()));
-    let has_async_trait_attribute = implementation.attrs.iter().any(|attribute| {
-        attribute
-            .path()
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == "async_trait")
-    });
-    if has_async_method && !has_async_trait_attribute {
-        implementation
-            .attrs
-            .push(parse_quote!(#[::pi_plugin_sdk::async_trait]));
-    }
+    ensure_async_trait(
+        implementation,
+        quote!(::pi_plugin_sdk::__plugin_async_trait),
+    );
 
     let self_type = &implementation.self_ty;
     let (kind_value, trait_type, constructor_name, constructor_alias) = match kind {
         PluginKind::Agent => (
             quote!(::pi_plugin_sdk::NativePluginKind::Agent as u32),
             quote!(::pi_plugin_sdk::AgentPlugin),
-            Ident::new("pi_agent_plugin_create_v2", proc_macro2::Span::call_site()),
-            quote!(::pi_plugin_sdk::AgentPluginCreateV2),
+            Ident::new("pi_agent_plugin_create_v3", proc_macro2::Span::call_site()),
+            quote!(::pi_plugin_sdk::AgentPluginCreateV3),
         ),
         PluginKind::Provider => (
             quote!(::pi_plugin_sdk::NativePluginKind::Provider as u32),
             quote!(::pi_plugin_sdk::ProviderPlugin),
             Ident::new(
-                "pi_provider_plugin_create_v2",
+                "pi_provider_plugin_create_v3",
                 proc_macro2::Span::call_site(),
             ),
-            quote!(::pi_plugin_sdk::ProviderPluginCreateV2),
+            quote!(::pi_plugin_sdk::ProviderPluginCreateV3),
         ),
         PluginKind::Session => (
             quote!(::pi_plugin_sdk::NativePluginKind::Session as u32),
             quote!(::pi_plugin_sdk::SessionPlugin),
             Ident::new(
-                "pi_session_plugin_create_v2",
+                "pi_session_plugin_create_v3",
                 proc_macro2::Span::call_site(),
             ),
-            quote!(::pi_plugin_sdk::SessionPluginCreateV2),
+            quote!(::pi_plugin_sdk::SessionPluginCreateV3),
         ),
     };
 
@@ -231,4 +308,91 @@ fn expand_export(
             #schema
         }
     })
+}
+
+fn inject_agent_hook_interests(
+    implementation: &mut ItemImpl,
+    contract_root: proc_macro2::TokenStream,
+) -> syn::Result<()> {
+    let Some((_, trait_path, _)) = &implementation.trait_ else {
+        return Err(syn::Error::new_spanned(
+            implementation,
+            "`agent_plugin` must annotate an impl of AgentPlugin",
+        ));
+    };
+    if trait_path
+        .segments
+        .last()
+        .is_none_or(|segment| segment.ident != "AgentPlugin")
+    {
+        return Err(syn::Error::new_spanned(
+            trait_path,
+            "`agent_plugin` must annotate an impl of AgentPlugin",
+        ));
+    }
+    if implementation.items.iter().any(
+        |item| matches!(item, ImplItem::Fn(function) if function.sig.ident == "hook_interests"),
+    ) {
+        return Err(syn::Error::new_spanned(
+            implementation,
+            "agent hook interests are generated from implemented callbacks; remove `hook_interests()`",
+        ));
+    }
+
+    let hook_variants = implementation.items.iter().filter_map(|item| {
+        let ImplItem::Fn(function) = item else {
+            return None;
+        };
+        let variant = match function.sig.ident.to_string().as_str() {
+            "input" => quote!(Input),
+            "before_agent_start" => quote!(BeforeAgentStart),
+            "agent_start" => quote!(AgentStart),
+            "agent_end" => quote!(AgentEnd),
+            "agent_settled" => quote!(AgentSettled),
+            "turn_start" => quote!(TurnStart),
+            "turn_end" => quote!(TurnEnd),
+            "message_start" => quote!(MessageStart),
+            "message_update" => quote!(MessageUpdate),
+            "message_end" => quote!(MessageEnd),
+            "tool_execution_start" => quote!(ToolExecutionStart),
+            "tool_execution_update" => quote!(ToolExecutionUpdate),
+            "tool_execution_end" => quote!(ToolExecutionEnd),
+            "context" => quote!(Context),
+            "tool_call" => quote!(ToolCall),
+            "tool_result" => quote!(ToolResult),
+            _ => return None,
+        };
+        Some(variant)
+    });
+    let hook_paths: Vec<_> = hook_variants
+        .map(|variant| quote!(#contract_root::AgentHook::#variant))
+        .collect();
+
+    implementation.items.push(ImplItem::Fn(parse_quote! {
+        fn hook_interests(&self) -> #contract_root::AgentHookInterests {
+            #contract_root::AgentHookInterests::from_hooks(&[
+                #(#hook_paths),*
+            ])
+        }
+    }));
+    Ok(())
+}
+
+fn ensure_async_trait(implementation: &mut ItemImpl, async_trait_path: proc_macro2::TokenStream) {
+    let has_async_method = implementation
+        .items
+        .iter()
+        .any(|item| matches!(item, ImplItem::Fn(function) if function.sig.asyncness.is_some()));
+    let has_async_trait_attribute = implementation.attrs.iter().any(|attribute| {
+        attribute
+            .path()
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "async_trait")
+    });
+    if has_async_method && !has_async_trait_attribute {
+        implementation
+            .attrs
+            .push(parse_quote!(#[#async_trait_path]));
+    }
 }

@@ -40,9 +40,20 @@ impl AgentPlugin for HelloPlugin {
 }
 ```
 
+The agent macro derives the exact hook-interest set from the callback methods present in the impl.
+Authors do not declare a parallel list and there is no catch-all `ALL` mode. A registration-only
+plugin therefore participates in `register()` but receives no runtime hook calls. Statically linked
+plugins inside a host use `#[pi_core::agent_plugin]` for the same derivation without exporting a
+dynamic-library descriptor or constructor. Static provider and session plugins use
+`#[pi_core::provider_plugin]` and `#[pi_session::session_plugin]`. These lifecycle attributes all
+expand async callback methods, so plugin impls do not need a separate `#[async_trait]` attribute.
+Lower-level async traits such as `Tool`, `Command`, and `Provider` still use `#[async_trait]` when
+implemented directly.
+
 Use `#[pi_plugin_sdk::provider]` with the `provider` feature or
 `#[pi_plugin_sdk::session]` with the `session` feature for the other lifecycles. The macro must
-annotate the matching trait impl and a dynamic library may contain only one export macro.
+annotate the matching trait impl. Each macro also supplies its async-trait expansion, and a dynamic
+library may contain only one export macro.
 
 ## Fallible/configured construction / 配置与可失败初始化
 
@@ -122,10 +133,11 @@ trusted in-process code and are intentionally never unloaded during the process 
 loading, the host snapshots each artifact below `<agent-dir>/cache/plugins/artifacts/<sha256>`;
 unchanged content reuses one pinned handle, while a rebuilt artifact gets a new load path on reload.
 
-The current contract is native ABI **2**. It adds the shared `AgentContext` to agent tool hooks and
-`added_tool_names` to tool results, so ABI 1 artifacts are rejected before any Rust-ABI constructor
-is resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 2 constructors use the
-`pi_{agent,provider,session}_plugin_create_v2` symbols. Rebuild every native plugin against the
+The current contract is native ABI **3**. It adds the required, macro-derived agent hook-interest
+contract to the ABI 2 shared `AgentContext` and `added_tool_names` surface, so older artifacts are
+rejected before any Rust-ABI constructor is resolved. The stable C descriptor remains
+`pi_plugin_descriptor_v1`; ABI 3 constructors use the
+`pi_{agent,provider,session}_plugin_create_v3` symbols. Rebuild every native plugin against the
 current SDK after upgrading the host.
 
 Every factory call creates a fresh instance. Runtime and session reload continue to use the existing

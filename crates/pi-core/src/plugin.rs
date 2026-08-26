@@ -326,9 +326,111 @@ impl ToolResultPatch {
     }
 }
 
+/// An `AgentPlugin` callback that can be routed independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum AgentHook {
+    Input,
+    BeforeAgentStart,
+    AgentStart,
+    AgentEnd,
+    AgentSettled,
+    TurnStart,
+    TurnEnd,
+    MessageStart,
+    MessageUpdate,
+    MessageEnd,
+    ToolExecutionStart,
+    ToolExecutionUpdate,
+    ToolExecutionEnd,
+    Context,
+    ToolCall,
+    ToolResult,
+}
+
+const AGENT_HOOKS: [AgentHook; 16] = [
+    AgentHook::Input,
+    AgentHook::BeforeAgentStart,
+    AgentHook::AgentStart,
+    AgentHook::AgentEnd,
+    AgentHook::AgentSettled,
+    AgentHook::TurnStart,
+    AgentHook::TurnEnd,
+    AgentHook::MessageStart,
+    AgentHook::MessageUpdate,
+    AgentHook::MessageEnd,
+    AgentHook::ToolExecutionStart,
+    AgentHook::ToolExecutionUpdate,
+    AgentHook::ToolExecutionEnd,
+    AgentHook::Context,
+    AgentHook::ToolCall,
+    AgentHook::ToolResult,
+];
+
+impl AgentHook {
+    const COUNT: usize = AGENT_HOOKS.len();
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "input" => Some(Self::Input),
+            "before_agent_start" => Some(Self::BeforeAgentStart),
+            "agent_start" => Some(Self::AgentStart),
+            "agent_end" => Some(Self::AgentEnd),
+            "agent_settled" => Some(Self::AgentSettled),
+            "turn_start" => Some(Self::TurnStart),
+            "turn_end" => Some(Self::TurnEnd),
+            "message_start" => Some(Self::MessageStart),
+            "message_update" => Some(Self::MessageUpdate),
+            "message_end" => Some(Self::MessageEnd),
+            "tool_execution_start" => Some(Self::ToolExecutionStart),
+            "tool_execution_update" => Some(Self::ToolExecutionUpdate),
+            "tool_execution_end" => Some(Self::ToolExecutionEnd),
+            "context" => Some(Self::Context),
+            "tool_call" => Some(Self::ToolCall),
+            "tool_result" => Some(Self::ToolResult),
+            _ => None,
+        }
+    }
+}
+
+/// The exact runtime callbacks implemented by an `AgentPlugin`.
+///
+/// Plugin authors normally do not construct this value themselves. The
+/// `#[pi_core::agent_plugin]` and `#[pi_plugin_sdk::agent]` attributes derive
+/// it from the callback methods present on the trait implementation and also
+/// expand async callbacks without a companion `#[async_trait]` attribute.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentHookInterests(u32);
+
+impl AgentHookInterests {
+    pub const fn from_hooks(hooks: &[AgentHook]) -> Self {
+        let mut bits = 0_u32;
+        let mut index = 0;
+        while index < hooks.len() {
+            bits |= 1_u32 << hooks[index].index();
+            index += 1;
+        }
+        Self(bits)
+    }
+
+    pub const fn contains(self, hook: AgentHook) -> bool {
+        self.0 & (1_u32 << hook.index()) != 0
+    }
+}
+
+/// Implement with `#[pi_core::agent_plugin]`; the attribute derives hook
+/// interests and supplies the async-trait expansion.
 #[async_trait]
 pub trait AgentPlugin: Send + Sync {
     fn id(&self) -> PluginId;
+
+    /// Declares the callbacks this plugin implements. Use an agent-plugin
+    /// attribute macro so this stays synchronized with the implementation.
+    fn hook_interests(&self) -> AgentHookInterests;
 
     fn register(&self, _context: &mut RegisterContext<'_>) -> Result<()> {
         Ok(())
@@ -458,6 +560,28 @@ struct RegisteredPlugin {
     plugin: Arc<dyn AgentPlugin>,
 }
 
+struct AgentHookRoutes {
+    plugin_indices: [Vec<usize>; AgentHook::COUNT],
+}
+
+impl Default for AgentHookRoutes {
+    fn default() -> Self {
+        Self {
+            plugin_indices: std::array::from_fn(|_| Vec::new()),
+        }
+    }
+}
+
+impl AgentHookRoutes {
+    fn add(&mut self, hook: AgentHook, plugin_index: usize) {
+        self.plugin_indices[hook.index()].push(plugin_index);
+    }
+
+    fn get(&self, hook: AgentHook) -> &[usize] {
+        &self.plugin_indices[hook.index()]
+    }
+}
+
 fn same_message_role(left: &Message, right: &Message) -> bool {
     matches!(
         (left, right),
@@ -470,6 +594,7 @@ fn same_message_role(left: &Message, right: &Message) -> bool {
 
 pub struct PluginDriver {
     plugins: Vec<RegisteredPlugin>,
+    routes: AgentHookRoutes,
     diagnostics: PluginDiagnosticSink,
 }
 
@@ -477,16 +602,25 @@ impl PluginDriver {
     pub fn new(plugins: Vec<Arc<dyn AgentPlugin>>) -> Result<Self> {
         let mut seen = std::collections::HashSet::new();
         let mut registered = Vec::with_capacity(plugins.len());
+        let mut routes = AgentHookRoutes::default();
         for plugin in plugins {
             let id = plugin.id();
             if !seen.insert(id.clone()) {
                 return Err(CoreError::DuplicatePlugin(id.to_string()));
+            }
+            let interests = plugin.hook_interests();
+            let plugin_index = registered.len();
+            for hook in AGENT_HOOKS {
+                if interests.contains(hook) {
+                    routes.add(hook, plugin_index);
+                }
             }
             registered.push(RegisteredPlugin { id, plugin });
         }
         let diagnostics = PluginDiagnosticSink::default();
         Ok(Self {
             plugins: registered,
+            routes,
             diagnostics,
         })
     }
@@ -504,6 +638,13 @@ impl PluginDriver {
 
     pub fn take_diagnostics(&self) -> Vec<PluginDiagnostic> {
         self.diagnostics.take()
+    }
+
+    fn interested_plugins(&self, hook: AgentHook) -> impl Iterator<Item = &RegisteredPlugin> {
+        self.routes
+            .get(hook)
+            .iter()
+            .map(|&index| &self.plugins[index])
     }
 
     fn plugin_context(
@@ -541,7 +682,7 @@ impl PluginDriver {
         mut event: InputEvent,
     ) -> std::result::Result<InputPatch, PluginError> {
         let original = event.clone();
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::Input) {
             let context = InputContext {
                 plugin_id: registered.id.clone(),
                 cwd: cwd.to_path_buf(),
@@ -592,7 +733,7 @@ impl PluginDriver {
         mut event: BeforeAgentStartEvent,
     ) -> std::result::Result<BeforeAgentStartPatch, PluginError> {
         let mut messages = Vec::new();
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::BeforeAgentStart) {
             let patch = match registered
                 .plugin
                 .before_agent_start(
@@ -625,7 +766,7 @@ impl PluginDriver {
         signal: &AbortSignal,
         event: AgentStartEvent,
     ) {
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::AgentStart) {
             if let Err(error) = registered
                 .plugin
                 .agent_start(
@@ -646,7 +787,7 @@ impl PluginDriver {
         signal: &AbortSignal,
         event: AgentEndEvent,
     ) {
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::AgentEnd) {
             if let Err(error) = registered
                 .plugin
                 .agent_end(
@@ -667,7 +808,7 @@ impl PluginDriver {
         signal: &AbortSignal,
         event: AgentSettledEvent,
     ) {
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::AgentSettled) {
             if let Err(error) = registered
                 .plugin
                 .agent_settled(
@@ -688,7 +829,7 @@ impl PluginDriver {
         signal: &AbortSignal,
         event: TurnStartEvent,
     ) {
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::TurnStart) {
             if let Err(error) = registered
                 .plugin
                 .turn_start(
@@ -709,7 +850,7 @@ impl PluginDriver {
         signal: &AbortSignal,
         event: TurnEndEvent,
     ) {
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::TurnEnd) {
             if let Err(error) = registered
                 .plugin
                 .turn_end(
@@ -730,7 +871,7 @@ impl PluginDriver {
         signal: &AbortSignal,
         event: MessageStartEvent,
     ) {
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::MessageStart) {
             if let Err(error) = registered
                 .plugin
                 .message_start(
@@ -751,7 +892,7 @@ impl PluginDriver {
         signal: &AbortSignal,
         event: MessageUpdateEvent,
     ) {
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::MessageUpdate) {
             if let Err(error) = registered
                 .plugin
                 .message_update(
@@ -772,7 +913,7 @@ impl PluginDriver {
         signal: &AbortSignal,
         mut event: MessageEndEvent,
     ) -> Message {
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::MessageEnd) {
             let patch = match registered
                 .plugin
                 .message_end(
@@ -809,7 +950,7 @@ impl PluginDriver {
         signal: &AbortSignal,
         event: ToolExecutionStartEvent,
     ) {
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::ToolExecutionStart) {
             if let Err(error) = registered
                 .plugin
                 .tool_execution_start(
@@ -830,7 +971,7 @@ impl PluginDriver {
         signal: &AbortSignal,
         event: ToolExecutionUpdateEvent,
     ) {
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::ToolExecutionUpdate) {
             if let Err(error) = registered
                 .plugin
                 .tool_execution_update(
@@ -851,7 +992,7 @@ impl PluginDriver {
         signal: &AbortSignal,
         event: ToolExecutionEndEvent,
     ) {
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::ToolExecutionEnd) {
             if let Err(error) = registered
                 .plugin
                 .tool_execution_end(
@@ -872,7 +1013,7 @@ impl PluginDriver {
         signal: &AbortSignal,
         mut messages: Vec<Message>,
     ) -> std::result::Result<Vec<Message>, PluginError> {
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::Context) {
             let patch = match registered
                 .plugin
                 .context(
@@ -904,7 +1045,7 @@ impl PluginDriver {
         event: ToolCallEvent,
     ) -> std::result::Result<ToolCallPatch, PluginError> {
         let mut arguments = event.validated_args;
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::ToolCall) {
             let patch = registered
                 .plugin
                 .tool_call(
@@ -946,7 +1087,7 @@ impl PluginDriver {
         event: ToolResultEvent,
     ) -> ToolResult {
         let mut result = event.result;
-        for registered in &self.plugins {
+        for registered in self.interested_plugins(AgentHook::ToolResult) {
             let current_event = ToolResultEvent {
                 assistant_message: event.assistant_message.clone(),
                 tool_call: event.tool_call.clone(),
@@ -967,5 +1108,140 @@ impl PluginDriver {
             }
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::AbortHandle;
+
+    struct RegistrationOnlyPlugin {
+        registrations: Arc<AtomicUsize>,
+    }
+
+    #[pi_core::agent_plugin]
+    impl AgentPlugin for RegistrationOnlyPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("registration-only")
+        }
+
+        fn register(&self, _context: &mut RegisterContext<'_>) -> Result<()> {
+            self.registrations.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    struct InputPlugin {
+        id: &'static str,
+        suffix: &'static str,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[pi_core::agent_plugin]
+    impl AgentPlugin for InputPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new(self.id)
+        }
+
+        async fn input(
+            &self,
+            _context: InputContext,
+            event: InputEvent,
+        ) -> std::result::Result<InputPatch, PluginError> {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(self.id);
+            Ok(InputPatch::Transform {
+                text: format!("{}{}", event.text, self.suffix),
+                images: event.images,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn derives_hook_routes_without_skipping_registration_or_ordered_chaining() {
+        let registrations = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let plugins: Vec<Arc<dyn AgentPlugin>> = vec![
+            Arc::new(RegistrationOnlyPlugin {
+                registrations: Arc::clone(&registrations),
+            }),
+            Arc::new(InputPlugin {
+                id: "first-input",
+                suffix: "-first",
+                calls: Arc::clone(&calls),
+            }),
+            Arc::new(InputPlugin {
+                id: "second-input",
+                suffix: "-second",
+                calls: Arc::clone(&calls),
+            }),
+        ];
+        let driver = PluginDriver::new(plugins).unwrap();
+
+        assert_eq!(driver.routes.get(AgentHook::Input), &[1, 2]);
+        assert!(driver.routes.get(AgentHook::Context).is_empty());
+
+        driver.register_all(&mut RegistriesBuilder::new()).unwrap();
+        assert_eq!(registrations.load(Ordering::Relaxed), 1);
+
+        let (_abort, signal) = AbortHandle::new();
+        let patch = driver
+            .input(
+                std::path::Path::new("."),
+                &signal,
+                InputEvent {
+                    text: "seed".to_string(),
+                    images: None,
+                    source: InputSource::Interactive,
+                    streaming_behavior: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            patch,
+            InputPatch::Transform {
+                text: "seed-first-second".to_string(),
+                images: None,
+            }
+        );
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["first-input", "second-input"]
+        );
+    }
+
+    #[test]
+    fn hook_names_do_not_have_a_wildcard_fallback() {
+        for hook in AGENT_HOOKS {
+            let name = match hook {
+                AgentHook::Input => "input",
+                AgentHook::BeforeAgentStart => "before_agent_start",
+                AgentHook::AgentStart => "agent_start",
+                AgentHook::AgentEnd => "agent_end",
+                AgentHook::AgentSettled => "agent_settled",
+                AgentHook::TurnStart => "turn_start",
+                AgentHook::TurnEnd => "turn_end",
+                AgentHook::MessageStart => "message_start",
+                AgentHook::MessageUpdate => "message_update",
+                AgentHook::MessageEnd => "message_end",
+                AgentHook::ToolExecutionStart => "tool_execution_start",
+                AgentHook::ToolExecutionUpdate => "tool_execution_update",
+                AgentHook::ToolExecutionEnd => "tool_execution_end",
+                AgentHook::Context => "context",
+                AgentHook::ToolCall => "tool_call",
+                AgentHook::ToolResult => "tool_result",
+            };
+            assert_eq!(AgentHook::from_name(name), Some(hook));
+        }
+        assert_eq!(AgentHook::from_name("all"), None);
+        assert_eq!(AgentHook::from_name("unknown"), None);
     }
 }

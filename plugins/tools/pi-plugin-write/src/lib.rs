@@ -14,7 +14,7 @@ use std::sync::Arc;
 pub struct WritePlugin;
 pub struct WriteTool;
 
-#[async_trait]
+#[pi_core::agent_plugin]
 impl AgentPlugin for WritePlugin {
     fn id(&self) -> PluginId {
         PluginId::new("write-tool")

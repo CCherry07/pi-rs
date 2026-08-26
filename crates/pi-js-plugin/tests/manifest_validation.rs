@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use pi_core::AgentHook;
 use pi_js_plugin::{
     JsAgentPluginManifest, JsCallbackDispatcher, JsCallbackError, JsGenerationManifest,
     JsHookManifest, JsInvocation, JsPluginGeneration, JsProviderPluginManifest,
@@ -34,6 +35,30 @@ fn empty_agent(hooks: Vec<JsHookManifest>) -> JsAgentPluginManifest {
         commands: Vec::new(),
         hooks,
     }
+}
+
+#[test]
+fn agent_hook_interests_are_derived_from_the_validated_manifest() {
+    let dispatcher = Arc::new(RetiringDispatcher::default());
+    let generation = JsPluginGeneration::prepare(
+        JsGenerationManifest {
+            generation_id: "js-interests".to_string(),
+            agent_plugins: vec![empty_agent(vec![JsHookManifest {
+                name: "input".to_string(),
+                callback_id: "input-callback".to_string(),
+            }])],
+            provider_plugins: Vec::new(),
+            session_plugins: Vec::new(),
+            diagnostics: Vec::new(),
+        },
+        dispatcher,
+    )
+    .unwrap();
+
+    let plugin = generation.agent_plugins().remove(0);
+    let interests = plugin.hook_interests();
+    assert!(interests.contains(AgentHook::Input));
+    assert!(!interests.contains(AgentHook::Context));
 }
 
 #[test]

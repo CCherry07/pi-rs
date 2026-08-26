@@ -4,25 +4,26 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use async_trait::async_trait;
+#[doc(hidden)]
+pub use async_trait::async_trait as __plugin_async_trait;
 pub use pi_core::PluginId;
 pub use pi_plugin_macros::{agent, provider, session};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 pub use serde_json::Value as PluginOptionsValue;
 
-#[cfg(feature = "agent")]
-pub use pi_core::AgentPlugin;
 #[cfg(feature = "provider")]
 pub use pi_core::ProviderPlugin;
+#[cfg(feature = "agent")]
+pub use pi_core::{AgentHook, AgentHookInterests, AgentPlugin};
 #[cfg(feature = "session")]
 pub use pi_session::SessionPlugin;
 
 /// Version of the trusted Rust-ABI plugin contract.
 ///
-/// ABI 2 adds the shared `AgentContext` to tool hooks and
-/// `added_tool_names` to tool results. Hosts must reject ABI 1 artifacts
-/// before resolving their Rust-ABI constructors.
-pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 2;
+/// ABI 3 adds the required `AgentPlugin` hook-interest contract. Hosts must
+/// reject older artifacts before resolving their Rust-ABI constructors.
+pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 3;
 pub const BUILD_FINGERPRINT: &str = env!("PI_PLUGIN_BUILD_FINGERPRINT");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -94,15 +95,15 @@ pub type PluginDescriptorFnV1 = unsafe extern "C" fn() -> *const NativePluginDes
 pub type PluginOptionsSchemaFnV1 = unsafe fn() -> String;
 
 #[cfg(feature = "agent")]
-pub type AgentPluginCreateV2 =
+pub type AgentPluginCreateV3 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn AgentPlugin>, PluginLoadError>;
 
 #[cfg(feature = "provider")]
-pub type ProviderPluginCreateV2 =
+pub type ProviderPluginCreateV3 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn ProviderPlugin>, PluginLoadError>;
 
 #[cfg(feature = "session")]
-pub type SessionPluginCreateV2 =
+pub type SessionPluginCreateV3 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn SessionPlugin>, PluginLoadError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,14 +230,15 @@ pub mod agent {
         };
         pub use async_trait::async_trait;
         pub use pi_core::{
-            AgentContext, AgentEndEvent, AgentPlugin, AgentStartEvent, BeforeAgentStartEvent,
-            BeforeAgentStartPatch, Command, CommandContext, CommandError, CommandOutcome,
-            CommandSpec, ContentBlock, ContextEvent, ContextPatch, InputContext, InputEvent,
-            InputPatch, MessageEndEvent, MessageStartEvent, MessageUpdateEvent, PluginContext,
-            PluginError, RegisterContext, Result, Tool, ToolCallEvent, ToolCallId, ToolCallPatch,
-            ToolContext, ToolError, ToolExecutionEndEvent, ToolExecutionStartEvent,
-            ToolExecutionUpdateEvent, ToolResult, ToolResultEvent, ToolResultPatch, ToolSpec,
-            ToolUpdateSink, TurnEndEvent, TurnStartEvent,
+            AgentContext, AgentEndEvent, AgentHook, AgentHookInterests, AgentPlugin,
+            AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch, Command, CommandContext,
+            CommandError, CommandOutcome, CommandSpec, ContentBlock, ContextEvent, ContextPatch,
+            InputContext, InputEvent, InputPatch, MessageEndEvent, MessageStartEvent,
+            MessageUpdateEvent, PluginContext, PluginError, RegisterContext, Result, Tool,
+            ToolCallEvent, ToolCallId, ToolCallPatch, ToolContext, ToolError,
+            ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResult,
+            ToolResultEvent, ToolResultPatch, ToolSpec, ToolUpdateSink, TurnEndEvent,
+            TurnStartEvent,
         };
         pub use serde_json::{Value, json};
     }

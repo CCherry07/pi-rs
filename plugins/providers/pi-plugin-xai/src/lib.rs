@@ -47,6 +47,7 @@ impl XAiPlugin {
     }
 }
 
+#[pi_core::provider_plugin]
 impl ProviderPlugin for XAiPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("xai-provider")

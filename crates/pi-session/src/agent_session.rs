@@ -2291,7 +2291,7 @@ mod tests {
         settled: Arc<AtomicUsize>,
     }
 
-    #[async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for FailingAgentSettledPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("failing-agent-settled")
@@ -2310,7 +2310,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for BlockingAgentSettledPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("blocking-agent-settled")
@@ -2327,7 +2327,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for CountingAgentLifecyclePlugin {
         fn id(&self) -> PluginId {
             PluginId::new("counting-agent-lifecycle")
@@ -2352,7 +2352,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for PersistMessageEndReplacement {
         fn id(&self) -> PluginId {
             PluginId::new("persist-message-end-replacement")
@@ -2465,7 +2465,7 @@ mod tests {
         assert!(empty.common_ancestor_id.is_none());
     }
 
-    #[async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for BeforeStartInjectionPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("before-start-injection")
@@ -2489,7 +2489,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[pi_core::agent_plugin]
     impl AgentPlugin for ExpandingCommandPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("expanding-command")
@@ -2876,7 +2876,7 @@ mod tests {
         }
     }
 
-    #[async_trait]
+    #[pi_session::session_plugin]
     impl SessionPlugin for LifecyclePlugin {
         fn id(&self) -> PluginId {
             PluginId::new("lifecycle")
@@ -3506,6 +3506,7 @@ mod tests {
     async fn new_session_preserves_a_custom_model_outside_the_catalog() {
         struct Catalog;
 
+        #[pi_core::provider_plugin]
         impl pi_core::ProviderPlugin for Catalog {
             fn id(&self) -> pi_core::PluginId {
                 pi_core::PluginId::new("catalog")
@@ -3549,6 +3550,7 @@ mod tests {
     async fn active_context_window_tracks_catalog_model_switches() {
         struct Catalog;
 
+        #[pi_core::provider_plugin]
         impl pi_core::ProviderPlugin for Catalog {
             fn id(&self) -> pi_core::PluginId {
                 pi_core::PluginId::new("catalog")
@@ -3645,6 +3647,7 @@ mod tests {
     async fn manual_compaction_uses_active_model_reasoning_and_output_limits() {
         struct LimitedCatalog;
 
+        #[pi_core::provider_plugin]
         impl pi_core::ProviderPlugin for LimitedCatalog {
             fn id(&self) -> pi_core::PluginId {
                 pi_core::PluginId::new("limited-catalog")

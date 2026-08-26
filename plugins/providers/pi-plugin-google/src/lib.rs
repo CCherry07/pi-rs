@@ -55,6 +55,7 @@ impl GooglePlugin {
     }
 }
 
+#[pi_core::provider_plugin]
 impl ProviderPlugin for GooglePlugin {
     fn id(&self) -> PluginId {
         PluginId::new("google-provider")
