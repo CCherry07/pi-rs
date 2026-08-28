@@ -299,11 +299,18 @@ pub fn get_last_assistant_usage(entries: &[SessionRecord]) -> Option<Usage> {
 }
 
 pub fn estimate_context_tokens(messages: &[AgentMessage]) -> ContextUsageEstimate {
-    let usage_info = messages
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(index, message)| assistant_usage(message).map(|usage| (index, usage)));
+    let mut latest_prefix_timestamp = i64::MIN;
+    let mut usage_info = None;
+    for (index, message) in messages.iter().enumerate() {
+        if message_timestamp(message).is_some_and(|timestamp| timestamp >= latest_prefix_timestamp)
+            && let Some(usage) = assistant_usage(message)
+        {
+            usage_info = Some((index, usage));
+        }
+        if let Some(timestamp) = message_timestamp(message) {
+            latest_prefix_timestamp = latest_prefix_timestamp.max(timestamp);
+        }
+    }
     let Some((index, usage)) = usage_info else {
         let estimated = messages.iter().map(estimate_tokens).sum();
         return ContextUsageEstimate {
@@ -346,6 +353,26 @@ pub fn estimate_session_context_tokens(
         trailing_tokens: estimated,
         last_usage_index: None,
     }
+}
+
+/// Returns the current context usage exposed to product frontends.
+///
+/// Immediately after compaction, retained assistant messages still carry
+/// usage for the larger pre-compaction prefix. Pi reports the current usage as
+/// unknown until a later successful assistant response establishes a new
+/// checkpoint.
+pub fn current_session_context_tokens(
+    path_entries: &[SessionRecord],
+    messages: &[AgentMessage],
+) -> Option<ContextUsageEstimate> {
+    let Some(compaction_index) = path_entries
+        .iter()
+        .rposition(|entry| matches!(entry.entry, SessionEntry::Compaction(_)))
+    else {
+        return Some(estimate_context_tokens(messages));
+    };
+    get_last_assistant_usage(&path_entries[compaction_index + 1..])
+        .map(|_| estimate_context_tokens(messages))
 }
 
 pub fn should_compact(
@@ -854,6 +881,25 @@ fn assistant_usage(message: &AgentMessage) -> Option<&Usage> {
         .then_some(&message.usage)
 }
 
+fn message_timestamp(message: &AgentMessage) -> Option<i64> {
+    match message.as_standard() {
+        Some(Message::User(message)) => Some(message.timestamp_ms),
+        Some(Message::Assistant(message)) => Some(message.timestamp_ms),
+        Some(Message::ToolResult(message)) => Some(message.timestamp_ms),
+        Some(Message::Custom(message)) => Some(message.timestamp_ms),
+        None => message
+            .as_custom()
+            .and_then(|value| value.get("timestamp"))
+            .and_then(|timestamp| {
+                timestamp.as_i64().or_else(|| {
+                    timestamp
+                        .as_u64()
+                        .and_then(|timestamp| i64::try_from(timestamp).ok())
+                })
+            }),
+    }
+}
+
 fn content_chars(content: &[ContentBlock]) -> usize {
     content
         .iter()
@@ -1046,6 +1092,10 @@ mod tests {
     }
 
     fn assistant(text: &str, total_tokens: u64) -> AgentMessage {
+        assistant_at(text, total_tokens, 0)
+    }
+
+    fn assistant_at(text: &str, total_tokens: u64, timestamp_ms: i64) -> AgentMessage {
         Message::assistant(AssistantMessage {
             content: vec![ContentBlock::Text(TextContent::new(text))],
             api: "scripted".to_string(),
@@ -1060,7 +1110,7 @@ mod tests {
             deferred: None,
             raw_stop_reason: None,
             end_turn: None,
-            timestamp_ms: 0,
+            timestamp_ms,
         })
         .into()
     }
@@ -1099,6 +1149,28 @@ mod tests {
         assert_eq!(estimate.last_usage_index, Some(0));
         assert!(estimate.trailing_tokens > 0);
         assert_eq!(estimate.tokens, 100 + estimate.trailing_tokens);
+    }
+
+    #[test]
+    fn estimate_ignores_usage_made_stale_by_a_newer_inserted_prefix() {
+        let messages = vec![
+            AgentMessage::custom(json!({
+                "role": "compactionSummary",
+                "summary": "short summary",
+                "tokensBefore": 9_500,
+                "timestamp": 200,
+            }))
+            .unwrap(),
+            assistant_at("retained answer", 9_500, 100),
+            Message::User(UserMessage::text("x".repeat(4_000), 300)).into(),
+        ];
+
+        let estimate = estimate_context_tokens(&messages);
+
+        assert_eq!(estimate.last_usage_index, None);
+        assert_eq!(estimate.usage_tokens, 0);
+        assert_eq!(estimate.tokens, estimate.trailing_tokens);
+        assert!(estimate.tokens < 2_000);
     }
 
     #[test]
@@ -1251,6 +1323,34 @@ mod tests {
         let estimate = estimate_session_context_tokens(&entries, &context.messages);
         assert_eq!(estimate.usage_tokens, 0);
         assert!(estimate.tokens < 100_000);
+        assert_eq!(
+            current_session_context_tokens(&entries, &context.messages),
+            None
+        );
+    }
+
+    #[test]
+    fn post_compaction_assistant_usage_restores_current_context_accounting() {
+        let entries = vec![
+            record(
+                0,
+                SessionEntry::Compaction(CompactionEntry {
+                    summary: "short summary".to_string(),
+                    retained_tail: vec![assistant_at("retained", 100_000, 1)],
+                    tokens_before: 100_000,
+                    details: None,
+                    usage: None,
+                }),
+            ),
+            message_record(1, Message::User(UserMessage::text("continue", 3)).into()),
+            message_record(2, assistant_at("fresh", 250, 4)),
+        ];
+        let context = build_session_context(&entries, &SessionContextBuildOptions::default());
+
+        let estimate = current_session_context_tokens(&entries, &context.messages).unwrap();
+
+        assert_eq!(estimate.tokens, 250);
+        assert_eq!(estimate.usage_tokens, 250);
     }
 
     #[test]

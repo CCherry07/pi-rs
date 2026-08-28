@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use pi_session::{
     AgentSession, AgentSessionReplacement, ExtensionNoticeLevel, ForkPosition, MAIN_LANE,
     PiSession, SessionDocument, SessionRecord, WeakPiSession, build_context_entries,
-    estimate_context_tokens,
+    current_session_context_tokens,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -472,15 +472,24 @@ impl ExtensionContextAccess for SessionExtensionContextAccess {
                     .log()
                     .load()
                     .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                let branch = document
+                    .branch()
+                    .map_err(|error| ExtensionContextError::Failed(error.to_string()))?
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let context = document
                     .context()
                     .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
-                let tokens = estimate_context_tokens(&context.messages).tokens;
-                let percent = if context_window == 0 {
-                    0.0
-                } else {
-                    tokens as f64 / context_window as f64 * 100.0
-                };
+                let usage = current_session_context_tokens(&branch, &context.messages);
+                let tokens = usage.map(|usage| usage.tokens);
+                let percent = tokens.map(|tokens| {
+                    if context_window == 0 {
+                        0.0
+                    } else {
+                        tokens as f64 / context_window as f64 * 100.0
+                    }
+                });
                 Ok(json!({
                     "tokens": tokens,
                     "contextWindow": context_window,

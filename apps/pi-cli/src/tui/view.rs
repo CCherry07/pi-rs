@@ -1219,48 +1219,28 @@ pub(super) fn assistant_error(message: &pi_core::AssistantMessage) -> Option<Str
     }
 }
 
-pub(super) fn assistant_token_usage(message: &pi_core::AssistantMessage) -> u64 {
-    let usage = &message.usage;
-    if usage.total_tokens > 0 {
-        usage.total_tokens
-    } else {
+pub(super) fn assistant_context_usage(message: &pi_core::AssistantMessage) -> u64 {
+    pi_session::calculate_context_tokens(&message.usage)
+}
+
+pub(super) fn session_entry_token_usage(entry: &SessionEntry) -> u64 {
+    pi_session::session_entry_usage(entry).map_or(0, |usage| {
         usage
             .input
             .saturating_add(usage.output)
             .saturating_add(usage.cache_read)
             .saturating_add(usage.cache_write)
-    }
+    })
 }
 
-pub(super) fn assistant_context_usage(message: &pi_core::AssistantMessage) -> u64 {
-    message
-        .usage
-        .input
-        .saturating_add(message.usage.cache_read)
-        .saturating_add(message.usage.cache_write)
-}
-
-pub(super) fn message_token_usage(message: &Message) -> u64 {
-    match message {
-        Message::Assistant(message) => assistant_token_usage(message),
-        Message::ToolResult(message) => {
-            message.usage.as_ref().map_or(0, |usage| usage.total_tokens)
-        }
-        Message::User(_) | Message::Custom(_) => 0,
-    }
-}
-
-pub(super) fn latest_context_usage(messages: &[Message]) -> u64 {
-    messages
-        .iter()
-        .rev()
-        .find_map(|message| match message {
-            Message::Assistant(message) if message.usage.total_tokens > 0 => {
-                Some(assistant_context_usage(message))
-            }
-            _ => None,
-        })
-        .unwrap_or(0)
+pub(super) fn latest_context_usage(messages: &[Message]) -> pi_session::ContextUsageEstimate {
+    pi_session::estimate_context_tokens(
+        &messages
+            .iter()
+            .cloned()
+            .map(pi_session::AgentMessage::from)
+            .collect::<Vec<_>>(),
+    )
 }
 
 pub(super) fn format_token_count(tokens: u64) -> String {
@@ -1282,21 +1262,24 @@ pub(super) fn context_window(app: &App) -> Option<u64> {
 
 pub(super) fn usage_footer(app: &App) -> String {
     let tokens = format!("tokens {}", format_token_count(app.session_tokens));
-    match context_window(app) {
-        Some(window) if window > 0 => {
-            let used_percent = app.context_tokens.saturating_mul(100) / window;
+    match (app.context_tokens, context_window(app)) {
+        (Some(context_tokens), Some(window)) if window > 0 => {
+            let used_percent = context_tokens.saturating_mul(100) / window;
             let remaining_percent = 100u64.saturating_sub(used_percent.min(100));
             format!(
                 "context {}/{} ({}% left) · {tokens}",
-                format_token_count(app.context_tokens),
+                format_token_count(context_tokens),
                 format_token_count(window),
                 remaining_percent
             )
         }
-        _ => format!(
-            "context {} · {tokens}",
-            format_token_count(app.context_tokens)
-        ),
+        (None, Some(window)) if window > 0 => {
+            format!("context ?/{} · {tokens}", format_token_count(window))
+        }
+        (Some(context_tokens), _) => {
+            format!("context {} · {tokens}", format_token_count(context_tokens))
+        }
+        (None, _) => format!("context ? · {tokens}"),
     }
 }
 

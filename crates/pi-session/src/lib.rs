@@ -28,6 +28,7 @@ mod session;
 mod session_plugin;
 mod state;
 mod types;
+mod usage;
 
 pub use agent_session::{
     AgentSession, AgentSessionOptions, PROMPT_SNAPSHOT_CUSTOM_TYPE, PreparedAgentSession,
@@ -72,6 +73,7 @@ pub use session_plugin::{
     SessionSwitchReason, SessionTreeEvent, SessionTreeSummary, TreePreparation,
 };
 pub use types::*;
+pub use usage::{aggregate_session_usage, session_entry_usage};
 
 pub(crate) fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};

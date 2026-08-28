@@ -23,7 +23,7 @@ use pi_core::{
 use pi_session::{
     AgentSession, AgentSessionEvent, AgentSessionSnapshot, EntryOrder, EntryQuery, ForkPosition,
     PiSession, QueueSnapshot, SessionEntry, SessionRuntimeInventory, ShellExecutionOptions,
-    SubmitOutcome,
+    SubmitOutcome, aggregate_session_usage, current_session_context_tokens,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -661,7 +661,7 @@ struct App {
     cwd: String,
     session_name: Option<String>,
     session_tokens: u64,
-    context_tokens: u64,
+    context_tokens: Option<u64>,
     is_running: bool,
     compacting: bool,
     tools_expanded: bool,
@@ -678,19 +678,33 @@ struct App {
 impl App {
     fn new(session: &AgentSession, snapshot: &AgentSessionSnapshot) -> Self {
         let mut transcript = Vec::new();
-        let mut session_tokens: u64 = 0;
+        let mut session_tokens = 0;
+        let mut context_tokens = Some(latest_context_usage(&snapshot.agent.messages).tokens);
         if let Ok(document) = session.log().load()
             && let Ok(branch) = document.branch()
         {
-            for record in branch {
+            for record in &branch {
                 push_history_entry(&mut transcript, &record.entry);
-                if let SessionEntry::Message(entry) = &record.entry {
-                    session_tokens = session_tokens
-                        .saturating_add(entry.message.as_standard().map_or(0, message_token_usage));
-                }
             }
+            session_tokens =
+                aggregate_session_usage(document.entries.iter().map(|record| &record.entry))
+                    .total_tokens;
+            let messages = snapshot
+                .agent
+                .messages
+                .iter()
+                .cloned()
+                .map(pi_session::AgentMessage::from)
+                .collect::<Vec<_>>();
+            context_tokens = current_session_context_tokens(
+                &branch
+                    .iter()
+                    .map(|record| (*record).clone())
+                    .collect::<Vec<_>>(),
+                &messages,
+            )
+            .map(|estimate| estimate.tokens);
         }
-        let context_tokens = latest_context_usage(&snapshot.agent.messages);
         let streaming_assistant = snapshot
             .agent
             .streaming_message
@@ -822,7 +836,10 @@ impl App {
         self.model = snapshot.agent.model_id.to_string();
         self.thinking = snapshot.agent.thinking_level.as_str().to_string();
         self.session_name = snapshot.name.clone();
-        self.context_tokens = latest_context_usage(&snapshot.agent.messages);
+        let estimate = latest_context_usage(&snapshot.agent.messages);
+        if self.context_tokens.is_some() {
+            self.context_tokens = Some(estimate.tokens);
+        }
         self.is_running = snapshot.agent.is_running;
         self.compacting = snapshot.compaction.is_some();
         if !self.is_running {
@@ -937,9 +954,22 @@ impl App {
                 self.compacting = true;
                 self.status = "Compacting context…".to_string();
             }
-            AgentSessionEvent::CompactionEnd { error_message, .. } => {
+            AgentSessionEvent::CompactionEnd {
+                result,
+                aborted,
+                error_message,
+                ..
+            } => {
                 self.compacting = false;
+                if result.is_some() && !aborted {
+                    self.context_tokens = None;
+                }
                 self.status = error_message.unwrap_or_else(|| "Compaction complete".to_string());
+            }
+            AgentSessionEvent::EntryAppended { entry } => {
+                self.session_tokens = self
+                    .session_tokens
+                    .saturating_add(session_entry_token_usage(&entry));
             }
             AgentSessionEvent::ThinkingLevelChanged { level } => {
                 self.status = format!("Thinking: {}", level.as_str());
@@ -1062,10 +1092,11 @@ impl App {
             AgentEvent::MessageEnd {
                 message: Message::Assistant(message),
             } => {
-                self.session_tokens = self
-                    .session_tokens
-                    .saturating_add(assistant_token_usage(&message));
-                self.context_tokens = assistant_context_usage(&message);
+                if !matches!(message.stop_reason, StopReason::Aborted | StopReason::Error)
+                    && pi_session::calculate_context_tokens(&message.usage) > 0
+                {
+                    self.context_tokens = Some(assistant_context_usage(&message));
+                }
                 let text = assistant_text(&Message::Assistant(message.clone())).unwrap_or_default();
                 let error = assistant_error(&message);
                 if let Some(index) = self.streaming_assistant.take() {
@@ -1809,7 +1840,10 @@ fn push_history_message(transcript: &mut Vec<TranscriptItem>, message: &pi_sessi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_session::{AgentSessionRuntimeRequest, AgentSessionRuntimeTarget, MultiSessionManager};
+    use pi_session::{
+        AgentSessionRuntimeRequest, AgentSessionRuntimeTarget, CompactionEntry,
+        MultiSessionManager, SessionHeader, SessionLog,
+    };
     use ratatui::backend::TestBackend;
     use ratatui::{TerminalOptions, Viewport};
 
@@ -1826,6 +1860,17 @@ mod tests {
     }
 
     struct FailingClipboard;
+
+    fn billed_usage(input: u64, output: u64, cache_read: u64, cache_write: u64) -> pi_core::Usage {
+        pi_core::Usage {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            total_tokens: input + output + cache_read + cache_write,
+            ..pi_core::Usage::default()
+        }
+    }
 
     impl ClipboardWriter for FailingClipboard {
         fn set_text(&mut self, _text: &str) -> Result<(), String> {
@@ -1897,7 +1942,7 @@ mod tests {
             cwd: "/workspace/project".to_string(),
             session_name: None,
             session_tokens: 12_450,
-            context_tokens: 8_192,
+            context_tokens: Some(8_192),
             is_running: false,
             compacting: false,
             tools_expanded: false,
@@ -4155,6 +4200,123 @@ mod tests {
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].invocation, "/skill:runtime-skill");
         assert_eq!(suggestions[0].description, "Loaded by the active runtime");
+        session.shutdown().await;
+    }
+
+    #[test]
+    fn live_usage_counts_tool_results_and_compaction_entries_once() {
+        let mut app = demo_app();
+        app.session_tokens = 0;
+        let mut tool_usage = billed_usage(20, 5, 6, 7);
+        tool_usage.total_tokens = 0;
+        app.apply_session_event(AgentSessionEvent::EntryAppended {
+            entry: SessionEntry::message(Message::tool_result(pi_core::ToolResultMessage {
+                tool_call_id: ToolCallId::new("metered-call"),
+                tool_name: "metered".to_string(),
+                content: vec![ContentBlock::Text(pi_core::TextContent::new("result"))],
+                details: None,
+                usage: Some(tool_usage),
+                added_tool_names: None,
+                is_error: false,
+                timestamp_ms: 2,
+            })),
+        });
+        let compaction = CompactionEntry {
+            summary: "summary".to_string(),
+            retained_tail: Vec::new(),
+            tokens_before: 1_000,
+            details: None,
+            usage: Some(billed_usage(30, 8, 9, 10)),
+        };
+        app.apply_session_event(AgentSessionEvent::EntryAppended {
+            entry: SessionEntry::Compaction(compaction.clone()),
+        });
+        app.apply_session_event(AgentSessionEvent::CompactionEnd {
+            reason: pi_session::CompactionReason::Manual,
+            result: Some(compaction),
+            aborted: false,
+            will_retry: false,
+            error_message: None,
+        });
+
+        assert_eq!(app.session_tokens, 95);
+        assert_eq!(app.context_tokens, None);
+        assert!(usage_footer(&app).contains("context ?"));
+    }
+
+    #[tokio::test]
+    async fn resumed_app_restores_all_entry_usage_and_unknown_compacted_context() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let log = SessionLog::create(&path, SessionHeader::new("usage-resume", directory.path()))
+            .unwrap();
+        let assistant = Message::assistant(pi_core::AssistantMessage {
+            content: vec![ContentBlock::Text(pi_core::TextContent::new("answer"))],
+            api: "openai-completions".to_string(),
+            provider: ProviderId::new("openai-compatible"),
+            model: ModelId::new("default"),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: billed_usage(10, 2, 3, 4),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            deferred: None,
+            raw_stop_reason: None,
+            end_turn: None,
+            timestamp_ms: 2,
+        });
+        log.append_message(Message::User(pi_core::UserMessage::text("hello", 1)))
+            .unwrap();
+        log.append_message(assistant.clone()).unwrap();
+        log.append_message(Message::tool_result(pi_core::ToolResultMessage {
+            tool_call_id: ToolCallId::new("metered-call"),
+            tool_name: "metered".to_string(),
+            content: vec![ContentBlock::Text(pi_core::TextContent::new("result"))],
+            details: None,
+            usage: Some(billed_usage(20, 5, 6, 7)),
+            added_tool_names: None,
+            is_error: false,
+            timestamp_ms: 3,
+        }))
+        .unwrap();
+        log.append(SessionEntry::Compaction(CompactionEntry {
+            summary: "summary".to_string(),
+            retained_tail: vec![assistant.clone().into()],
+            tokens_before: 10_000,
+            details: None,
+            usage: Some(billed_usage(30, 8, 9, 10)),
+        }))
+        .unwrap();
+        drop(log);
+
+        let runtime = pi_runtime::PiRuntime::builder()
+            .provider_plugin(
+                pi_plugin_openai::OpenAiCompatiblePlugin::new(
+                    pi_plugin_openai::OpenAiCompatibleConfig::without_api_key(
+                        "https://example.invalid/v1",
+                    ),
+                )
+                .unwrap(),
+            )
+            .agent_options(pi_agent::AgentOptions {
+                provider_id: ProviderId::new("openai-compatible"),
+                cwd: directory.path().to_path_buf(),
+                ..pi_agent::AgentOptions::default()
+            })
+            .system_prompt(pi_runtime::SystemPrompt::Final("test".to_string()))
+            .build()
+            .unwrap();
+        let session = AgentSession::open(runtime, &path).await.unwrap();
+
+        let mut app = App::new(&session, &session.snapshot());
+
+        assert_eq!(app.session_tokens, 114);
+        assert_eq!(app.context_tokens, None);
+        let mut stale_snapshot = session.snapshot();
+        stale_snapshot.agent.messages = vec![assistant];
+        app.sync_snapshot(&stale_snapshot);
+        assert_eq!(app.context_tokens, None);
         session.shutdown().await;
     }
 

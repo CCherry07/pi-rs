@@ -1042,6 +1042,8 @@ pub(super) async fn run_effect(
             .metadata()
             .map_err(|error| error.to_string())?;
         let stats = session.log().stats();
+        let document = session.log().load().map_err(|error| error.to_string())?;
+        let usage = aggregate_session_usage(document.entries.iter().map(|record| &record.entry));
         let name = session
             .log()
             .name()
@@ -1052,10 +1054,10 @@ pub(super) async fn run_effect(
             metadata.path.display(),
             metadata.id,
             stats.message_count,
-            stats.total_tokens,
-            stats.cached_tokens,
-            stats.uncached_tokens,
-            stats.cost_total,
+            usage.total_tokens,
+            usage.cache_read,
+            usage.input.saturating_add(usage.cache_write),
+            usage.cost.total,
         ));
     }
     if input == "/help" {

@@ -597,6 +597,12 @@ finishes, abort requests, step/tool attempts, queues, deferred writes, and attri
 latest-value facts hold the session name and entry labels. Statistics are reconstructed from message
 entries and the signed usage ledger across all lanes.
 
+Product-facing billed totals deliberately aggregate every usage-bearing tree entry, including
+assistant messages, metered tool results, compactions, and branch summaries. The scope is the whole
+session tree rather than only the selected branch, so resume and navigation do not erase work that
+was already billed. The signed v4 usage ledger remains the storage-level statistics contract for
+operation-attributed usage and adjustments.
+
 `Session<Storage>` is the small public façade shared by `InMemorySession` and `SessionLog`. It owns
 ID provisioning, validation, global queries, branch queries, lane views, records, and facts. The two
 repositories implement create/open/list/delete and branch/tree fork semantics. A branch fork copies
@@ -681,9 +687,12 @@ that does not mutate the agent transcript. `AgentSession::compact` performs manu
 `AgentSessionOptions::context_window` enables threshold compaction before/after runs. Recoverable
 context overflow removes the failed assistant from the prepared context, compacts, and retries once.
 Retained pre-compaction usage is ignored for subsequent threshold decisions so it cannot cause an
-immediate compaction loop. Each summary request is also constrained by the active generation's
-`ModelSpec`: non-reasoning models force thinking off, and the configured summary budget is clamped
-to the model's maximum output tokens.
+immediate compaction loop. It is also excluded from product context reporting: context usage is
+unknown immediately after compaction and becomes known again only after a later successful
+assistant response. Assistant usage is a valid estimate anchor only when its timestamp is not older
+than a prefix message inserted before it, such as a compaction summary. Each summary request is also
+constrained by the active generation's `ModelSpec`: non-reasoning models force thinking off, and the
+configured summary budget is clamped to the model's maximum output tokens.
 
 Session extensions use a third, session-owned lifecycle system. `SessionPlugin` mirrors Pi's ten
 `session_*` extension hooks: start, info change, before switch/fork/compact/tree, compact success or

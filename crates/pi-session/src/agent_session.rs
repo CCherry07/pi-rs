@@ -1752,6 +1752,8 @@ impl AgentSession {
             .load()?
             .context_with_options(&self.context_options)?;
         restore_runtime_context(&self.runtime, &context)?;
+        self.events
+            .publish_entry(SessionEntry::BranchSummary(summary.clone()));
         self.session_plugin_driver()
             .session_tree(&SessionTreeEvent {
                 new_leaf_id: self.log.leaf_id(),
@@ -2255,7 +2257,12 @@ mod tests {
     fn text_turn_with_usage(text: &str, total_tokens: u64) -> ScriptedTurn {
         ScriptedTurn::Events(vec![
             StreamEvent::Start {
-                metadata: ResponseMetadata::new("scripted".into(), "test".into(), "scripted", 0),
+                metadata: ResponseMetadata::new(
+                    "scripted".into(),
+                    "test".into(),
+                    "scripted",
+                    now_ms(),
+                ),
             },
             StreamEvent::TextStart { content_index: 0 },
             StreamEvent::TextDelta {
