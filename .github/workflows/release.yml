@@ -1,0 +1,214 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vX.Y.Z tag to release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  SOURCE_REF: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: packages/pi/package-lock.json
+
+      - name: Install release tooling
+        working-directory: packages/pi
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Validate version and tag
+        working-directory: packages/pi
+        run: npm run --silent release:check -- --tag "$RELEASE_TAG"
+
+      - name: Resolve build matrix
+        id: matrix
+        working-directory: packages/pi
+        run: echo "matrix=$(npm run --silent release:matrix)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: packages/pi/package-lock.json
+
+      - name: Install Node dependencies
+        working-directory: packages/pi
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Build, smoke-test, and package target
+        working-directory: packages/pi
+        run: npm run release:dist -- --target "${{ matrix.target }}" --tag "$env:RELEASE_TAG"
+        if: runner.os == 'Windows'
+
+      - name: Build, smoke-test, and package target
+        working-directory: packages/pi
+        run: npm run release:dist -- --target "${{ matrix.target }}" --tag "$RELEASE_TAG"
+        if: runner.os != 'Windows'
+
+      - name: Build Node host
+        working-directory: packages/pi
+        run: npm run build
+
+      - name: Smoke-test Node to NAPI to Rust
+        working-directory: packages/pi
+        env:
+          PI_RS_NATIVE_BINDING: ${{ github.workspace }}/dist/release/pi-napi.${{ matrix.napiSuffix }}.node
+        run: npm run test:native
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.napiSuffix }}
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+          cache: npm
+          cache-dependency-path: packages/pi/package-lock.json
+
+      - name: Install release tooling
+        working-directory: packages/pi
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist/release
+          merge-multiple: true
+
+      - name: Assemble and verify npm packages
+        working-directory: packages/pi
+        run: npm run release:assemble -- --artifacts dist/release --tag "$RELEASE_TAG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle-${{ env.RELEASE_TAG }}
+          path: |
+            dist/release/**
+            dist/npm/**
+          if-no-files-found: error
+          retention-days: 14
+
+  stage-github-release:
+    needs: assemble
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-bundle-${{ env.RELEASE_TAG }}
+          path: dist
+
+      - name: Create or reuse draft GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = "true"
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes --title "$RELEASE_TAG"
+          fi
+          gh release upload "$RELEASE_TAG" dist/release/* --clobber
+
+  publish-npm:
+    needs: stage-github-release
+    runs-on: ubuntu-22.04
+    environment: npm-publish
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: Use npm with trusted publishing support
+        run: npm install --global npm@12.0.2 --ignore-scripts
+
+      - name: Install release tooling
+        working-directory: packages/pi
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-bundle-${{ env.RELEASE_TAG }}
+          path: dist
+
+      - name: Publish and verify platform packages, then the root package
+        working-directory: packages/pi
+        run: npm run release:publish -- --npm-dir dist/npm
+
+  publish-github-release:
+    needs: publish-npm
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Publish staged GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "$RELEASE_TAG" --draft=false

@@ -1,0 +1,21 @@
+[package]
+name = "pi-plugin-anthropic"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-stream = "0.3.6"
+async-trait.workspace = true
+base64 = "0.22"
+futures.workspace = true
+rand = "0.8"
+reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
+sha2 = "0.10"
+pi-core.workspace = true
+pi-provider.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

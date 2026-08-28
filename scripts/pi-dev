@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+pi_script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+pi_workspace_dir=$(dirname -- "$pi_script_dir")
+pi_package_dir="$pi_workspace_dir/packages/pi"
+pi_tsx="$pi_package_dir/node_modules/.bin/tsx"
+
+if [[ ! -x "$pi_tsx" ]]; then
+  echo "pi-dev: JavaScript dependencies are missing; run \`npm install --prefix $pi_package_dir\`" >&2
+  exit 1
+fi
+
+pi_host_target=$(rustc -vV | sed -n 's/^host: //p')
+if [[ -z "$pi_host_target" ]]; then
+  echo "pi-dev: cannot determine the Rust host target" >&2
+  exit 1
+fi
+
+case "$(uname -s)" in
+  Darwin)
+    pi_native_library=libpi_napi.dylib
+    ;;
+  Linux)
+    pi_native_library=libpi_napi.so
+    ;;
+  CYGWIN*|MINGW*|MSYS*)
+    pi_native_library=pi_napi.dll
+    ;;
+  *)
+    echo "pi-dev: unsupported development host: $(uname -s)" >&2
+    exit 1
+    ;;
+esac
+
+pi_target_setting=${CARGO_TARGET_DIR:-target}
+if [[ "$pi_target_setting" = /* ]]; then
+  pi_target_dir=$pi_target_setting
+else
+  pi_target_dir="$pi_workspace_dir/$pi_target_setting"
+fi
+pi_native_binding="$pi_target_dir/$pi_host_target/debug/$pi_native_library"
+
+(
+  cd "$pi_workspace_dir"
+  cargo build --quiet --target "$pi_host_target" -p pi-napi
+)
+
+if [[ ! -f "$pi_native_binding" ]]; then
+  echo "pi-dev: NAPI build completed without producing $pi_native_binding" >&2
+  exit 1
+fi
+
+exec env PI_RS_NATIVE_BINDING="$pi_native_binding" "$pi_tsx" "$pi_package_dir/bin/pi.ts" "$@"

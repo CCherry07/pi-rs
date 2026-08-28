@@ -1,0 +1,11 @@
+[package]
+name = "native-fixture-session"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pi-plugin-sdk = { path = "../../../../../pi-plugin-sdk", features = ["session"] }

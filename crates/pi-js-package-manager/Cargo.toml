@@ -1,0 +1,26 @@
+[package]
+name = "pi-js-package-manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+futures.workspace = true
+glob = "0.3.3"
+hex = "0.4.3"
+ignore = "0.4.23"
+path-clean = "1.0.1"
+pathdiff = "0.2.3"
+percent-encoding = "2.3.2"
+node-semver = "2.2.0"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "time"] }
+url = "2.5.4"
+
+[dev-dependencies]
+tempfile = "3.21.0"

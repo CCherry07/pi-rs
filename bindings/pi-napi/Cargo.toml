@@ -1,0 +1,24 @@
+[package]
+name = "pi-napi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+async-trait.workspace = true
+dotenvy.workspace = true
+napi = { version = "=3.12.2", default-features = false, features = ["napi4", "tokio_rt"] }
+napi-derive = "=3.6.3"
+pi-cli = { path = "../../apps/pi-cli" }
+tokio.workspace = true
+pi-js-plugin.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+napi-build = "=2.4.1"

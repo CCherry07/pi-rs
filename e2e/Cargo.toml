@@ -1,0 +1,21 @@
+[package]
+name = "pi-e2e"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pi-agent.workspace = true
+pi-core.workspace = true
+pi-resources.workspace = true
+pi-runtime.workspace = true
+pi-session.workspace = true
+pi-test-support.workspace = true
+pi-plugin-skills.workspace = true
+pi-plugin-read.workspace = true
+pi-plugin-write.workspace = true
+serde_json.workspace = true
+tempfile = "3.21.0"
+tokio.workspace = true

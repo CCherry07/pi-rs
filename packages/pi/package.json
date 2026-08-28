@@ -1,0 +1,64 @@
+{
+  "name": "@pi-rs/cli",
+  "version": "0.7.0",
+  "description": "Rust-powered Pi coding-agent CLI with a Node host for JavaScript extensions",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CCherry07/pi-rs.git",
+    "directory": "packages/pi"
+  },
+  "bin": {
+    "pi": "dist/bin/pi.js",
+    "pi-rs": "dist/bin/pi.js"
+  },
+  "files": [
+    "dist/bin",
+    "dist/src",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc",
+    "build:native": "tsx ./scripts/release.ts native",
+    "build:native:release": "tsx ./scripts/release.ts native --release",
+    "check": "tsc --noEmit && tsc -p ../../e2e/product/tsconfig.json",
+    "prepack": "npm run build",
+    "release:check": "tsx ./scripts/release.ts check",
+    "release:sync-lock": "tsx ./scripts/release.ts sync-lock",
+    "release:matrix": "tsx ./scripts/release.ts matrix",
+    "release:dist": "tsx ./scripts/release.ts dist",
+    "release:assemble": "tsx ./scripts/release.ts assemble",
+    "release:verify": "tsx ./scripts/release.ts verify",
+    "release:publish": "tsx ./scripts/release.ts publish",
+    "release:verify-published": "tsx ./scripts/release.ts verify-published",
+    "test": "tsx --test ./test/*.test.ts",
+    "test:bridge": "npm run build && tsx --test ./test/*.smoke.ts",
+    "test:e2e": "npm run build && tsx --test ../../e2e/product/*.test.ts",
+    "test:e2e:node": "npm run build && tsx --test ../../e2e/product/node-napi.test.ts",
+    "test:native": "npm run test:bridge && npm run test:e2e:node",
+    "e2e": "npm run build:native && cargo build --locked -p pi-cli && cargo test --locked -p pi-e2e --test runtime_agent -- --nocapture && npm run test:bridge && npm run test:e2e",
+    "start": "tsx ./bin/pi.ts"
+  },
+  "dependencies": {
+    "jiti": "2.7.0",
+    "typebox": "1.3.7",
+    "zod": "4.1.11"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

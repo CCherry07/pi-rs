@@ -1,0 +1,14 @@
+schema = 1
+
+[plugin]
+id = "frontend-workflow"
+version = "0.1.0"
+kind = "agent"
+artifact = "target/debug/libfrontend_workflow.dylib"
+
+[options]
+command = "frontend-check"
+guidance = "Treat lint and production build failures as blocking before reporting frontend work complete."
+checks = ["npm run lint", "npm run build"]
+review_paths = ["src/", "public/", "index.html", "package.json"]
+ignore_paths = [".pi/", "dist/", "node_modules/"]

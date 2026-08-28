@@ -1,0 +1,13 @@
+[package]
+name = "native-fixture-provider"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pi-plugin-sdk = { path = "../../../../../pi-plugin-sdk", features = ["provider"] }
+schemars = "1.2.1"
+serde = { version = "1", features = ["derive"] }

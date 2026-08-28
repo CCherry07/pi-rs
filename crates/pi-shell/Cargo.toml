@@ -1,0 +1,13 @@
+[package]
+name = "pi-shell"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pi-core.workspace = true
+tempfile = "3.21.0"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "process"] }

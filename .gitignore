@@ -1,0 +1,16 @@
+target/
+legacy/
+node_modules/
+packages/pi/pi-napi.*.node
+
+.env
+.env.*
+!.env.example
+!.env.openai.example
+e2e/sessions/*.jsonl
+dist/
+**/.pi/plugins/store/
+**/.pi/plugins/installed/
+**/.pi/plugins/.installed-*/
+**/.pi/plugins.lock.guard
+.pi
