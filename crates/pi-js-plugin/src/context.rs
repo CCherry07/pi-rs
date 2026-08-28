@@ -588,6 +588,7 @@ impl ExtensionContextAccess for SessionExtensionContextAccess {
             ExtensionContextQuery::IsIdle => Ok(json!(
                 !runtime.agent().state().is_running
                     && snapshot.compaction.is_none()
+                    && snapshot.auto_retry.is_none()
                     && snapshot.bash.is_none()
             )),
             ExtensionContextQuery::HasPendingMessages => Ok(json!(

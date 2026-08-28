@@ -967,6 +967,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             thinking_level: ThinkingLevel::Off,
+            thinking_budgets: None,
             max_output_tokens: None,
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),

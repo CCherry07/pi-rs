@@ -22,6 +22,7 @@ pub struct SkillLoaderOptions {
     pub agent_dir: PathBuf,
     pub additional_paths: Vec<PathBuf>,
     pub include_defaults: bool,
+    pub enable_commands: bool,
     #[serde(default = "default_project_trusted")]
     pub project_trusted: bool,
 }
@@ -37,6 +38,7 @@ impl SkillLoaderOptions {
             agent_dir: agent_dir.into(),
             additional_paths: Vec::new(),
             include_defaults: true,
+            enable_commands: true,
             project_trusted: true,
         }
     }
@@ -100,6 +102,7 @@ pub struct SourcedSkillCatalog<T> {
 pub struct SkillsPlugin {
     skills: Vec<SkillInfo>,
     diagnostics: Vec<SkillDiagnostic>,
+    enable_commands: bool,
 }
 
 impl SkillsPlugin {
@@ -120,6 +123,7 @@ impl SkillsPlugin {
         Self {
             skills,
             diagnostics,
+            enable_commands: options.enable_commands,
         }
     }
 
@@ -127,6 +131,7 @@ impl SkillsPlugin {
         Self {
             skills: skills.into_iter().collect(),
             diagnostics: Vec::new(),
+            enable_commands: true,
         }
     }
 
@@ -237,6 +242,9 @@ impl AgentPlugin for SkillsPlugin {
     }
 
     fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+        if !self.enable_commands {
+            return Ok(());
+        }
         for skill in &self.skills {
             context.register_command(Arc::new(SkillCommand {
                 skill: skill.clone(),
@@ -559,6 +567,27 @@ mod tests {
         assert!(text.contains("<skill name=\"grill-me\""));
         assert!(!text.contains("disable-model-invocation"));
         assert!(text.ends_with("sharpen this design"));
+    }
+
+    #[test]
+    fn disabled_skill_commands_keep_the_catalog_without_registering_commands() {
+        let skill = SkillInfo {
+            name: "catalog-only".to_string(),
+            description: "Visible to the model".to_string(),
+            file_path: "/catalog-only/SKILL.md".into(),
+            content: "Use this skill when relevant.".to_string(),
+            disable_model_invocation: false,
+        };
+        let runtime = PiRuntime::builder()
+            .agent_plugin(SkillsPlugin {
+                skills: vec![skill],
+                diagnostics: Vec::new(),
+                enable_commands: false,
+            })
+            .build()
+            .unwrap();
+
+        assert!(runtime.command_specs().is_empty());
     }
 
     #[test]

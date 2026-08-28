@@ -12,7 +12,8 @@ use pi_core::{
     CommandOutcome, CommandSpec, ContentBlock, ImageContent, InputEvent, InputPatch, InputSource,
     InputStreamingBehavior, Message, ModelId, ModelSpec, PluginDiagnostic, PluginId,
     ProviderCallContext, ProviderId, ProviderPlugin, ProviderPluginDriver, ProviderRequest,
-    RegistriesBuilder, RunId, StreamEvent, TextContent, ThinkingLevel, UserMessage,
+    RegistriesBuilder, RunId, StreamEvent, TextContent, ThinkingBudgets, ThinkingLevel,
+    UserMessage, is_retryable_provider_error_message,
 };
 use pi_prompt::{BuildSystemPromptOptions, build_system_prompt};
 use pi_resources::{ResourceDiagnostic, ResourceLoaderOptions, load_resources};
@@ -63,7 +64,18 @@ pub struct RuntimeCompletionRequest {
     pub system_prompt: String,
     pub messages: Vec<Message>,
     pub thinking_level: ThinkingLevel,
+    pub thinking_budgets: Option<ThinkingBudgets>,
     pub max_output_tokens: Option<u64>,
+}
+
+/// Retry policy for standalone completions such as compaction and abandoned-
+/// branch summaries. Normal assistant turns remain session-owned because each
+/// failed message must be persisted before retrying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompletionRetryPolicy {
+    pub enabled: bool,
+    pub max_retries: u32,
+    pub base_delay_ms: u64,
 }
 
 pub enum TextSubmissionOutcome {
@@ -186,6 +198,8 @@ pub struct PiRuntimeBuilder {
     agent_options: AgentOptions,
     system_prompt: Option<SystemPrompt>,
     resources: Option<ResourceLoaderOptions>,
+    supplemental_diagnostics: Vec<ResourceDiagnostic>,
+    completion_retry_policy: Option<CompletionRetryPolicy>,
 }
 
 impl Default for PiRuntimeBuilder {
@@ -202,6 +216,8 @@ impl PiRuntimeBuilder {
             agent_options: AgentOptions::default(),
             system_prompt: None,
             resources: None,
+            supplemental_diagnostics: Vec::new(),
+            completion_retry_policy: None,
         }
     }
 
@@ -343,6 +359,21 @@ impl PiRuntimeBuilder {
         self
     }
 
+    /// Adds product-owned, presentation-neutral diagnostics to every runtime
+    /// generation alongside resource loader diagnostics.
+    pub fn supplemental_diagnostics(
+        mut self,
+        diagnostics: impl IntoIterator<Item = ResourceDiagnostic>,
+    ) -> Self {
+        self.supplemental_diagnostics.extend(diagnostics);
+        self
+    }
+
+    pub fn completion_retry_policy(mut self, policy: CompletionRetryPolicy) -> Self {
+        self.completion_retry_policy = Some(policy);
+        self
+    }
+
     pub fn build(mut self) -> Result<PiRuntime, RuntimeError> {
         let cwd = self.agent_options.cwd.clone();
         let blueprint = Arc::new(RuntimeBlueprint {
@@ -351,6 +382,8 @@ impl PiRuntimeBuilder {
             system_prompt: self.system_prompt,
             fallback_system_prompt: self.agent_options.system_prompt.clone(),
             resources: self.resources,
+            supplemental_diagnostics: self.supplemental_diagnostics,
+            completion_retry_policy: self.completion_retry_policy,
             cwd: cwd.clone(),
         });
         let generation = Arc::new(build_generation(
@@ -376,6 +409,8 @@ struct RuntimeBlueprint {
     system_prompt: Option<SystemPrompt>,
     fallback_system_prompt: String,
     resources: Option<ResourceLoaderOptions>,
+    supplemental_diagnostics: Vec<ResourceDiagnostic>,
+    completion_retry_policy: Option<CompletionRetryPolicy>,
     cwd: std::path::PathBuf,
 }
 
@@ -393,7 +428,7 @@ fn build_generation(
     active_tools: &[String],
 ) -> Result<RuntimeGeneration, RuntimeError> {
     let mut system_prompt = blueprint.system_prompt.clone();
-    let mut diagnostics = Vec::new();
+    let mut diagnostics = blueprint.supplemental_diagnostics.clone();
     let mut applied_resources = None;
     if let Some(mut resources) = blueprint.resources.clone() {
         if matches!(system_prompt, Some(SystemPrompt::Final(_))) {
@@ -404,7 +439,7 @@ fn build_generation(
         }
         resources.cwd = blueprint.cwd.clone();
         let loaded = load_resources(&resources);
-        diagnostics = loaded.diagnostics.clone();
+        diagnostics.extend(loaded.diagnostics.clone());
         let prompt = system_prompt.get_or_insert_with(|| SystemPrompt::Pi(Box::default()));
         let SystemPrompt::Pi(prompt) = prompt else {
             unreachable!("Final prompt rejected above")
@@ -494,6 +529,19 @@ fn parse_command(input: &str) -> Option<(&str, &str)> {
 
 fn normalize_snippet(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn completion_result_is_retryable(result: &Result<AssistantMessage, RuntimeError>) -> bool {
+    match result {
+        Ok(message) if message.stop_reason == pi_core::StopReason::Error => message
+            .error_message
+            .as_deref()
+            .is_some_and(is_retryable_provider_error_message),
+        Err(RuntimeError::Provider(message) | RuntimeError::Assembly(message)) => {
+            is_retryable_provider_error_message(message)
+        }
+        Ok(_) | Err(_) => false,
+    }
 }
 
 #[derive(Clone)]
@@ -1036,6 +1084,35 @@ impl PiRuntime {
         signal: AbortSignal,
     ) -> Result<AssistantMessage, RuntimeError> {
         let _reload_guard = self.reload_lock.lock().await;
+        let mut retry_attempt = 0_u32;
+        loop {
+            let result = self.complete_once_locked(&request, signal.clone()).await;
+            let Some(policy) = self.blueprint.completion_retry_policy else {
+                return result;
+            };
+            if !policy.enabled
+                || retry_attempt >= policy.max_retries
+                || !completion_result_is_retryable(&result)
+            {
+                return result;
+            }
+            retry_attempt = retry_attempt.saturating_add(1);
+            let multiplier = 1_u64
+                .checked_shl(retry_attempt.saturating_sub(1))
+                .unwrap_or(u64::MAX);
+            let delay_ms = policy.base_delay_ms.saturating_mul(multiplier);
+            tokio::select! {
+                () = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
+                () = signal.wait() => return Err(RuntimeError::Aborted),
+            }
+        }
+    }
+
+    async fn complete_once_locked(
+        &self,
+        request: &RuntimeCompletionRequest,
+        signal: AbortSignal,
+    ) -> Result<AssistantMessage, RuntimeError> {
         let runtime = self.agent.runtime();
         let state = self.agent.state();
         let provider = runtime
@@ -1059,12 +1136,13 @@ impl PiRuntime {
         let mut stream = provider
             .stream(
                 ProviderRequest {
-                    model_spec,
-                    model: state.model_id,
-                    system_prompt: request.system_prompt,
-                    messages: request.messages,
+                    model_spec: model_spec.clone(),
+                    model: state.model_id.clone(),
+                    system_prompt: request.system_prompt.clone(),
+                    messages: request.messages.clone(),
                     tools: Vec::new(),
                     thinking_level: request.thinking_level,
+                    thinking_budgets: request.thinking_budgets,
                     max_output_tokens: request.max_output_tokens,
                     headers: Default::default(),
                     sampling_params: Default::default(),
@@ -3047,6 +3125,45 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("Final prompt"));
+    }
+
+    #[tokio::test]
+    async fn standalone_completion_retries_transient_failures_with_runtime_policy() {
+        let scripted = ScriptedProviderPlugin::scripted([
+            ScriptedTurn::Error("stream ended before a terminal response event".to_string()),
+            ScriptedTurn::Text("summary recovered".to_string()),
+        ]);
+        let provider = scripted.provider();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(scripted)
+            .completion_retry_policy(CompletionRetryPolicy {
+                enabled: true,
+                max_retries: 2,
+                base_delay_ms: 0,
+            })
+            .build()
+            .unwrap();
+        let (_, signal) = AbortHandle::new();
+
+        let response = runtime
+            .complete(
+                RuntimeCompletionRequest {
+                    system_prompt: "summarize".to_string(),
+                    messages: vec![Message::User(UserMessage::text("history", 1))],
+                    thinking_level: ThinkingLevel::Off,
+                    thinking_budgets: None,
+                    max_output_tokens: Some(2_048),
+                },
+                signal,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(provider.requests().len(), 2);
+        assert!(matches!(
+            &response.content[0],
+            ContentBlock::Text(text) if text.text == "summary recovered"
+        ));
     }
 
     #[test]

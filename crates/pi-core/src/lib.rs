@@ -33,7 +33,8 @@ pub use message::{
     ImageContent, Message, TextContent, ThinkingContent, ToolCall, ToolResultMessage, UserMessage,
 };
 pub use model::{
-    ModelCost, ModelCostTier, ModelInput, ModelSpec, ResponseMetadata, StopReason, ThinkingLevel,
+    ModelCost, ModelCostTier, ModelInput, ModelSpec, ResponseMetadata, StopReason, ThinkingBudgets,
+    ThinkingLevel,
 };
 pub use model_runtime::{ModelRuntime, ProviderStatus};
 pub use pi_plugin_macros::{agent_plugin, provider_plugin};
@@ -48,7 +49,7 @@ pub use plugin::{
 };
 pub use provider::{
     Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderRequest,
-    ProviderStream,
+    ProviderStream, is_retryable_provider_error_message,
 };
 pub use provider_plugin::{
     AfterProviderResponseEvent, BeforeProviderHeadersEvent, BeforeProviderRequestEvent,

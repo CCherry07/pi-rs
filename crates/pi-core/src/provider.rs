@@ -8,7 +8,7 @@ use futures::Stream;
 
 use crate::{
     AbortSignal, Message, ModelId, ModelSpec, ProviderId, ProviderPluginDriver, StreamEvent,
-    ThinkingLevel, ToolSpec,
+    ThinkingBudgets, ThinkingLevel, ToolSpec,
 };
 
 #[derive(Debug, Clone)]
@@ -22,6 +22,7 @@ pub struct ProviderRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
     pub thinking_level: ThinkingLevel,
+    pub thinking_budgets: Option<ThinkingBudgets>,
     /// Optional output cap for standalone operations such as compaction.
     /// Providers that do not support a request-side cap may ignore it.
     pub max_output_tokens: Option<u64>,
@@ -207,4 +208,94 @@ pub trait Provider: Send + Sync {
         context: ProviderCallContext,
         signal: AbortSignal,
     ) -> Result<ProviderStream, ProviderError>;
+}
+
+/// Classifies transient provider/transport failure text using current Pi
+/// semantics. Context-overflow detection remains a caller concern because it
+/// depends on the active model window and compaction policy.
+pub fn is_retryable_provider_error_message(error: &str) -> bool {
+    let compact = error
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    let non_retryable = [
+        "gousagelimiterror",
+        "freeusagelimiterror",
+        "monthlyusagelimitreached",
+        "availablebalance",
+        "insufficientquota",
+        "outofbudget",
+        "quotaexceeded",
+        "billing",
+    ];
+    if non_retryable
+        .iter()
+        .any(|pattern| compact.contains(pattern))
+    {
+        return false;
+    }
+    [
+        "overloaded",
+        "ratelimit",
+        "toomanyrequests",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "524",
+        "serviceunavailable",
+        "servererror",
+        "internalerror",
+        "providerreturnederror",
+        "exceededrequestbufferlimitwhileretryingupstream",
+        "networkerror",
+        "connectionerror",
+        "connectionrefused",
+        "connectionlost",
+        "othersideclosed",
+        "fetchfailed",
+        "getaddrinfo",
+        "enotfound",
+        "eaiagain",
+        "upstreamconnect",
+        "resetbeforeheaders",
+        "sockethangup",
+        "socketconnectionwasclosed",
+        "timedout",
+        "timeout",
+        "terminated",
+        "websocketclosed",
+        "websocketerror",
+        "endedwithout",
+        "streamendedbeforemessagestop",
+        "streamendedbeforeaterminalresponseevent",
+        "http2requestdidnotgetaresponse",
+        "retrydelay",
+        "youcanretryyourrequest",
+        "tryyourrequestagain",
+        "pleaseretryyourrequest",
+        "resourceexhausted",
+    ]
+    .iter()
+    .any(|pattern| compact.contains(pattern))
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::is_retryable_provider_error_message;
+
+    #[test]
+    fn retry_classifier_prioritizes_terminal_quota_and_billing_failures() {
+        assert!(is_retryable_provider_error_message(
+            "503 service unavailable"
+        ));
+        assert!(is_retryable_provider_error_message(
+            "connection lost while reading stream"
+        ));
+        assert!(!is_retryable_provider_error_message(
+            "429 insufficient_quota: check billing"
+        ));
+    }
 }

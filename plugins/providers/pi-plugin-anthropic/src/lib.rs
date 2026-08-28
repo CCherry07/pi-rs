@@ -83,6 +83,13 @@ impl AnthropicPlugin {
     }
 
     pub fn from_stored(stored: Option<(&str, bool)>) -> Self {
+        Self::from_stored_with_transport(stored, Arc::new(ReqwestTransport::new()))
+    }
+
+    pub fn from_stored_with_transport(
+        stored: Option<(&str, bool)>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
         let credential = env("ANTHROPIC_AUTH_TOKEN")
             .map(AnthropicCredential::Bearer)
             .or_else(|| env("ANTHROPIC_OAUTH_TOKEN").map(AnthropicCredential::ClaudeCodeOAuth))
@@ -97,15 +104,23 @@ impl AnthropicPlugin {
                 })
             });
         Self {
-            provider: Arc::new(AnthropicProvider::new(credential)),
+            provider: Arc::new(AnthropicProvider::with_transport(credential, transport)),
         }
     }
 
     pub fn with_api_key(api_key: impl Into<String>) -> Self {
+        Self::with_api_key_and_transport(api_key, Arc::new(ReqwestTransport::new()))
+    }
+
+    pub fn with_api_key_and_transport(
+        api_key: impl Into<String>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
         Self {
-            provider: Arc::new(AnthropicProvider::new(Some(AnthropicCredential::ApiKey(
-                api_key.into(),
-            )))),
+            provider: Arc::new(AnthropicProvider::with_transport(
+                Some(AnthropicCredential::ApiKey(api_key.into())),
+                transport,
+            )),
         }
     }
 }
@@ -169,10 +184,6 @@ impl AnthropicCompatibleProvider {
 }
 
 impl AnthropicProvider {
-    fn new(credential: Option<AnthropicCredential>) -> Self {
-        Self::with_transport(credential, Arc::new(ReqwestTransport::new()))
-    }
-
     fn with_transport(
         credential: Option<AnthropicCredential>,
         transport: Arc<dyn HttpTransport>,
@@ -807,6 +818,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             thinking_level: ThinkingLevel::Off,
+            thinking_budgets: None,
             max_output_tokens: Some(4_096),
             headers: BTreeMap::from([
                 ("x-api-key".to_string(), "request-key".to_string()),

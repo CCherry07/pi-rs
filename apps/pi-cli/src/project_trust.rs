@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use fs2::FileExt;
-use serde::Deserialize;
+use pi_settings::DefaultProjectTrust;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
@@ -21,14 +21,6 @@ const TRUST_REQUIRING_PI_RESOURCES: &[&str] = &[
     "SYSTEM.md",
     "APPEND_SYSTEM.md",
 ];
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum DefaultProjectTrust {
-    #[default]
-    Ask,
-    Always,
-    Never,
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ProjectTrustUpdate {
@@ -90,13 +82,14 @@ impl ProjectTrustService {
         agent_dir: &Path,
         trust_override: Option<bool>,
         interactive: bool,
+        default_trust: DefaultProjectTrust,
     ) -> Result<(Self, mpsc::UnboundedReceiver<ProjectTrustPromptRequest>), ProjectTrustError> {
         let (prompt_sender, prompt_receiver) = mpsc::unbounded_channel();
         Ok((
             Self {
                 store: ProjectTrustStore::new(agent_dir),
                 trust_override,
-                default_trust: load_default_project_trust(agent_dir)?,
+                default_trust,
                 interactive,
                 decisions: Arc::new(Mutex::new(HashMap::new())),
                 prompt_sender,
@@ -423,38 +416,12 @@ fn normalize_path(path: &Path) -> Result<PathBuf, ProjectTrustError> {
     })
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TrustSettings {
-    default_project_trust: Option<String>,
-}
-
-fn load_default_project_trust(agent_dir: &Path) -> Result<DefaultProjectTrust, ProjectTrustError> {
-    let path = agent_dir.join("settings.json");
-    let json = match fs::read_to_string(&path) {
-        Ok(json) => json,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(DefaultProjectTrust::Ask);
-        }
-        Err(source) => return Err(ProjectTrustError::Io { path, source }),
-    };
-    let Ok(settings) = serde_json::from_str::<TrustSettings>(&json) else {
-        return Ok(DefaultProjectTrust::Ask);
-    };
-    match settings.default_project_trust.as_deref().unwrap_or("ask") {
-        "ask" => Ok(DefaultProjectTrust::Ask),
-        "always" => Ok(DefaultProjectTrust::Always),
-        "never" => Ok(DefaultProjectTrust::Never),
-        _ => Ok(DefaultProjectTrust::Ask),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn service(root: &Path) -> ProjectTrustService {
-        ProjectTrustService::new(&root.join("agent"), None, true)
+        ProjectTrustService::new(&root.join("agent"), None, true, DefaultProjectTrust::Ask)
             .unwrap()
             .0
     }
@@ -554,8 +521,13 @@ mod tests {
     fn noninteractive_ask_defaults_to_untrusted() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("project/.pi/skills")).unwrap();
-        let (service, _) =
-            ProjectTrustService::new(&root.path().join("agent"), None, false).unwrap();
+        let (service, _) = ProjectTrustService::new(
+            &root.path().join("agent"),
+            None,
+            false,
+            DefaultProjectTrust::Ask,
+        )
+        .unwrap();
 
         assert_eq!(
             service.evaluate(&root.path().join("project")).unwrap(),
@@ -576,7 +548,8 @@ mod tests {
         )
         .unwrap();
 
-        let (service, _) = ProjectTrustService::new(&agent, None, true).unwrap();
+        let (service, _) =
+            ProjectTrustService::new(&agent, None, true, DefaultProjectTrust::Always).unwrap();
 
         assert_eq!(
             service.evaluate(&project).unwrap(),
@@ -598,7 +571,8 @@ mod tests {
         )
         .unwrap();
 
-        let (service, _) = ProjectTrustService::new(&agent, None, true).unwrap();
+        let (service, _) =
+            ProjectTrustService::new(&agent, None, true, DefaultProjectTrust::Ask).unwrap();
 
         assert!(matches!(
             service.evaluate(&project).unwrap(),
@@ -611,8 +585,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("project");
         fs::create_dir_all(project.join(".pi/skills")).unwrap();
-        let (service, mut requests) =
-            ProjectTrustService::new(&root.path().join("agent"), None, true).unwrap();
+        let (service, mut requests) = ProjectTrustService::new(
+            &root.path().join("agent"),
+            None,
+            true,
+            DefaultProjectTrust::Ask,
+        )
+        .unwrap();
         let resolver = service.clone();
         let resolved_project = project.clone();
         let resolution = tokio::spawn(async move { resolver.resolve(&resolved_project).await });

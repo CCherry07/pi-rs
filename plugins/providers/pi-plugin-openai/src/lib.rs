@@ -9,7 +9,7 @@ mod request;
 pub mod responses;
 mod stream;
 
-pub use codex::{CodexCredentials, OpenAiCodexProvider};
+pub use codex::{CodexCredentials, CodexTransport, CodexTransportOptions, OpenAiCodexProvider};
 pub use config::{OpenAiCompatibleConfig, OpenAiConfig};
 pub use oauth::{
     DeviceAuthorization as OpenAiDeviceAuthorization, OAuthCredential as OpenAiOAuthCredential,

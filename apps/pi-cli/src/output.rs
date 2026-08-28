@@ -143,6 +143,7 @@ fn snapshot_json(snapshot: &pi_session::AgentSessionSnapshot) -> Value {
         "thinkingLevel": snapshot.agent.thinking_level,
         "queue": {"steering":snapshot.queue.steering,"followUp":snapshot.queue.follow_up},
         "compacting": snapshot.compaction.is_some(),
+        "retrying": snapshot.auto_retry.is_some(),
         "bashRunning": snapshot.bash.is_some(),
         "name": snapshot.name,
     })
@@ -168,6 +169,21 @@ fn event_json(event: RevisionedAgentSessionEvent) -> Value {
             ..
         } => {
             json!({"type":"compaction_end","aborted":aborted,"willRetry":will_retry,"error":error_message})
+        }
+        AgentSessionEvent::AutoRetryStart {
+            attempt,
+            max_attempts,
+            delay_ms,
+            error_message,
+        } => {
+            json!({"type":"auto_retry_start","attempt":attempt,"maxAttempts":max_attempts,"delayMs":delay_ms,"errorMessage":error_message})
+        }
+        AgentSessionEvent::AutoRetryEnd {
+            success,
+            attempt,
+            final_error,
+        } => {
+            json!({"type":"auto_retry_end","success":success,"attempt":attempt,"finalError":final_error})
         }
         AgentSessionEvent::EntryAppended { entry } => {
             json!({"type":"entry_appended","entry":entry})

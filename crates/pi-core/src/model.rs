@@ -236,6 +236,29 @@ impl ThinkingLevel {
     }
 }
 
+/// Optional current-settings overrides for token-budget based reasoning APIs.
+/// Providers with native effort levels may ignore these values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThinkingBudgets {
+    pub minimal: Option<u64>,
+    pub low: Option<u64>,
+    pub medium: Option<u64>,
+    pub high: Option<u64>,
+}
+
+impl ThinkingBudgets {
+    pub const fn for_level(self, level: ThinkingLevel) -> Option<u64> {
+        match level {
+            ThinkingLevel::Off => None,
+            ThinkingLevel::Minimal => self.minimal,
+            ThinkingLevel::Low => self.low,
+            ThinkingLevel::Medium => self.medium,
+            ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => self.high,
+        }
+    }
+}
+
 impl std::str::FromStr for ThinkingLevel {
     type Err = String;
 

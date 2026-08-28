@@ -56,6 +56,17 @@ pub enum AgentSessionEvent {
         will_retry: bool,
         error_message: Option<String>,
     },
+    AutoRetryStart {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        error_message: String,
+    },
+    AutoRetryEnd {
+        success: bool,
+        attempt: u32,
+        final_error: Option<String>,
+    },
     EntryAppended {
         entry: SessionEntry,
     },
@@ -105,6 +116,14 @@ pub struct BashExecutionSnapshot {
     pub output: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoRetrySnapshot {
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub delay_ms: u64,
+    pub error_message: String,
+}
+
 /// Authoritative state used to initialize a frontend or recover after a
 /// lagged broadcast receiver.
 #[derive(Debug, Clone)]
@@ -113,6 +132,7 @@ pub struct AgentSessionSnapshot {
     pub agent: AgentStateSnapshot,
     pub queue: QueueSnapshot,
     pub compaction: Option<CompactionSnapshot>,
+    pub auto_retry: Option<AutoRetrySnapshot>,
     pub bash: Option<BashExecutionSnapshot>,
     pub name: Option<String>,
 }
@@ -150,6 +170,7 @@ impl AgentSessionEventHub {
                 agent,
                 queue,
                 compaction: None,
+                auto_retry: None,
                 bash: None,
                 name,
             }),
@@ -228,6 +249,47 @@ impl AgentSessionEventHub {
                 error_message,
             },
             |snapshot| snapshot.compaction = None,
+        );
+    }
+
+    pub(crate) fn publish_auto_retry_start(
+        &self,
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        error_message: String,
+    ) {
+        self.publish(
+            AgentSessionEvent::AutoRetryStart {
+                attempt,
+                max_attempts,
+                delay_ms,
+                error_message: error_message.clone(),
+            },
+            |snapshot| {
+                snapshot.auto_retry = Some(AutoRetrySnapshot {
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    error_message,
+                });
+            },
+        );
+    }
+
+    pub(crate) fn publish_auto_retry_end(
+        &self,
+        success: bool,
+        attempt: u32,
+        final_error: Option<String>,
+    ) {
+        self.publish(
+            AgentSessionEvent::AutoRetryEnd {
+                success,
+                attempt,
+                final_error,
+            },
+            |snapshot| snapshot.auto_retry = None,
         );
     }
 

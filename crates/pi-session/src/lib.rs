@@ -31,9 +31,9 @@ mod types;
 mod usage;
 
 pub use agent_session::{
-    AgentSession, AgentSessionOptions, PROMPT_SNAPSHOT_CUSTOM_TYPE, PreparedAgentSession,
-    PromptSnapshot, RESOURCE_DIAGNOSTIC_CUSTOM_TYPE, ResourceSnapshot, SessionRuntimeInventory,
-    ShellExecutionOptions, SubmitOutcome, read_prompt_snapshot,
+    AgentSession, AgentSessionOptions, AutoRetrySettings, PROMPT_SNAPSHOT_CUSTOM_TYPE,
+    PreparedAgentSession, PromptSnapshot, RESOURCE_DIAGNOSTIC_CUSTOM_TYPE, ResourceSnapshot,
+    SessionRuntimeInventory, ShellExecutionOptions, SubmitOutcome, read_prompt_snapshot,
 };
 pub use agent_session_runtime::{
     AgentSessionReplacement, AgentSessionRuntime, AgentSessionRuntimeError,
@@ -47,8 +47,9 @@ pub use context::{
     default_context_entry_transform, session_entry_to_context_messages,
 };
 pub use event::{
-    AgentSessionEvent, AgentSessionSnapshot, AgentSessionSubscription, BashExecutionSnapshot,
-    CompactionSnapshot, ExtensionNoticeLevel, QueueSnapshot, RevisionedAgentSessionEvent,
+    AgentSessionEvent, AgentSessionSnapshot, AgentSessionSubscription, AutoRetrySnapshot,
+    BashExecutionSnapshot, CompactionSnapshot, ExtensionNoticeLevel, QueueSnapshot,
+    RevisionedAgentSessionEvent,
 };
 pub use jsonl::SessionLog;
 pub use memory::{InMemorySession, InMemorySessionRepo};

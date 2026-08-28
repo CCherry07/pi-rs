@@ -8,6 +8,7 @@ use crate::SessionModel;
 pub enum InitialModelSource {
     Requested,
     Session,
+    Settings,
     CatalogDefault,
     RuntimeDefault,
 }
@@ -27,6 +28,8 @@ pub struct InitialModelRequest {
     pub requested_provider: Option<ProviderId>,
     pub requested_model: Option<String>,
     pub session_model: Option<SessionModel>,
+    pub settings_provider: Option<ProviderId>,
+    pub settings_model: Option<String>,
 }
 
 impl InitialModelRequest {
@@ -38,6 +41,12 @@ impl InitialModelRequest {
 
     pub fn session(mut self, model: Option<SessionModel>) -> Self {
         self.session_model = model;
+        self
+    }
+
+    pub fn settings(mut self, provider: Option<ProviderId>, model: Option<String>) -> Self {
+        self.settings_provider = provider;
+        self.settings_model = model;
         self
     }
 }
@@ -56,9 +65,10 @@ pub enum InitialModelResolveError {
 
 /// Pure initial-model policy over one immutable runtime catalog snapshot.
 ///
-/// Priority is: explicit request, restorable session model, first catalog
-/// model, then the runtime's configured fallback. Loading models and resolving
-/// credentials remain responsibilities of provider/catalog plugins.
+/// Priority is: explicit request, restorable session model, the current
+/// settings default, first catalog model, then the runtime's configured
+/// fallback. Loading models and resolving credentials remain responsibilities
+/// of provider/catalog plugins.
 pub struct InitialModelResolver {
     models: Vec<ModelSpec>,
     runtime_default: SessionModel,
@@ -84,6 +94,7 @@ impl InitialModelResolver {
             return self.resolve_requested(request.requested_provider.as_ref(), reference);
         }
 
+        let mut fallback_message = None;
         if let Some(session_model) = request.session_model {
             if self.models.is_empty() || self.contains(&session_model) {
                 return Ok(InitialModelSelection {
@@ -92,31 +103,49 @@ impl InitialModelResolver {
                     fallback_message: None,
                 });
             }
+            fallback_message = Some(format!(
+                "Session model {}/{} is not in the registered catalog",
+                session_model.provider, session_model.model_id
+            ));
+        }
 
-            if let Some(model) = self.models.first() {
+        if let (Some(provider), Some(model_id)) =
+            (request.settings_provider, request.settings_model)
+        {
+            if let Some(model) = self
+                .models
+                .iter()
+                .find(|model| model.provider == provider && model.id.as_str() == model_id.trim())
+            {
                 return Ok(InitialModelSelection {
                     model: to_session_model(model),
-                    source: InitialModelSource::CatalogDefault,
-                    fallback_message: Some(format!(
-                        "Session model {}/{} is not in the registered catalog; using {}/{}",
-                        session_model.provider, session_model.model_id, model.provider, model.id
-                    )),
+                    source: InitialModelSource::Settings,
+                    fallback_message,
                 });
             }
+            let message = format!(
+                "Settings model {}/{} is not in the registered model catalog",
+                provider, model_id
+            );
+            fallback_message = Some(match fallback_message {
+                Some(existing) => format!("{existing}; {message}"),
+                None => message,
+            });
         }
 
         if let Some(model) = self.models.first() {
             return Ok(InitialModelSelection {
                 model: to_session_model(model),
                 source: InitialModelSource::CatalogDefault,
-                fallback_message: None,
+                fallback_message: fallback_message
+                    .map(|message| format!("{message}; using {}/{}", model.provider, model.id)),
             });
         }
 
         Ok(InitialModelSelection {
             model: self.runtime_default.clone(),
             source: InitialModelSource::RuntimeDefault,
-            fallback_message: None,
+            fallback_message,
         })
     }
 
@@ -419,6 +448,67 @@ mod tests {
 
         assert_eq!(selected.source, InitialModelSource::Session);
         assert_eq!(selected.model.provider.as_str(), "two");
+    }
+
+    #[test]
+    fn restorable_session_model_precedes_the_settings_default() {
+        let resolver = InitialModelResolver::new(
+            vec![model("one", "alpha", "Alpha"), model("two", "beta", "Beta")],
+            fallback(),
+        );
+
+        let selected = resolver
+            .resolve(
+                InitialModelRequest::default()
+                    .session(Some(SessionModel {
+                        provider: ProviderId::new("two"),
+                        model_id: ModelId::new("beta"),
+                    }))
+                    .settings(Some(ProviderId::new("one")), Some("alpha".to_string())),
+            )
+            .unwrap();
+
+        assert_eq!(selected.source, InitialModelSource::Session);
+        assert_eq!(selected.model.provider.as_str(), "two");
+        assert_eq!(selected.model.model_id.as_str(), "beta");
+    }
+
+    #[test]
+    fn settings_default_precedes_the_catalog_default() {
+        let resolver = InitialModelResolver::new(
+            vec![model("one", "alpha", "Alpha"), model("two", "beta", "Beta")],
+            fallback(),
+        );
+
+        let selected = resolver
+            .resolve(
+                InitialModelRequest::default()
+                    .settings(Some(ProviderId::new("two")), Some("beta".to_string())),
+            )
+            .unwrap();
+
+        assert_eq!(selected.source, InitialModelSource::Settings);
+        assert_eq!(selected.model.provider.as_str(), "two");
+        assert_eq!(selected.model.model_id.as_str(), "beta");
+    }
+
+    #[test]
+    fn missing_settings_default_falls_back_with_a_diagnostic() {
+        let resolver =
+            InitialModelResolver::new(vec![model("catalog", "first", "First")], fallback());
+
+        let selected = resolver
+            .resolve(
+                InitialModelRequest::default()
+                    .settings(Some(ProviderId::new("removed")), Some("old".to_string())),
+            )
+            .unwrap();
+
+        assert_eq!(selected.source, InitialModelSource::CatalogDefault);
+        assert_eq!(selected.model.provider.as_str(), "catalog");
+        let diagnostic = selected.fallback_message.expect("fallback diagnostic");
+        assert!(diagnostic.contains("Settings model removed/old"));
+        assert!(diagnostic.contains("using catalog/first"));
     }
 
     #[test]

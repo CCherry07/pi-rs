@@ -783,13 +783,16 @@ fn thinking_budget(request: &ProviderRequest) -> Option<u64> {
     {
         return None;
     }
-    let budget: u64 = match request.thinking_level {
-        ThinkingLevel::Minimal => 1_024,
-        ThinkingLevel::Low => 2_048,
-        ThinkingLevel::Medium => 8_192,
-        ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => 16_384,
-        ThinkingLevel::Off => return None,
-    };
+    let budget: u64 = request
+        .thinking_budgets
+        .and_then(|budgets| budgets.for_level(request.thinking_level))
+        .unwrap_or(match request.thinking_level {
+            ThinkingLevel::Minimal => 1_024,
+            ThinkingLevel::Low => 2_048,
+            ThinkingLevel::Medium => 8_192,
+            ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => 16_384,
+            ThinkingLevel::Off => 0,
+        });
     let ceiling = request
         .max_output_tokens
         .or_else(|| request.model_spec.as_ref().map(|model| model.max_tokens))?;
@@ -996,6 +999,7 @@ mod tests {
             system_prompt: String::new(),
             tools: vec![],
             thinking_level: pi_core::ThinkingLevel::Off,
+            thinking_budgets: None,
             max_output_tokens: Some(123),
             headers: Default::default(),
             sampling_params: std::collections::BTreeMap::from([(
@@ -1032,6 +1036,7 @@ mod tests {
             system_prompt: String::new(),
             tools: vec![],
             thinking_level: pi_core::ThinkingLevel::Off,
+            thinking_budgets: None,
             max_output_tokens: None,
             headers: Default::default(),
             sampling_params: Default::default(),
@@ -1125,6 +1130,7 @@ mod tests {
                 prompt_guidelines: Vec::new(),
             }],
             thinking_level: ThinkingLevel::High,
+            thinking_budgets: None,
             max_output_tokens: Some(4_096),
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),
@@ -1178,6 +1184,10 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             thinking_level: ThinkingLevel::Medium,
+            thinking_budgets: Some(pi_core::ThinkingBudgets {
+                medium: Some(3_072),
+                ..pi_core::ThinkingBudgets::default()
+            }),
             max_output_tokens: None,
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),
@@ -1187,7 +1197,7 @@ mod tests {
 
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
         assert_eq!(body["chat_template_kwargs"]["effort"], "medium");
-        assert_eq!(body["chat_template_kwargs"]["budget"], 8_192);
+        assert_eq!(body["chat_template_kwargs"]["budget"], 3_072);
         assert_eq!(body["chat_template_kwargs"]["literal"], 7);
     }
 }

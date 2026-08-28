@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,6 +16,38 @@ use pi_tool_support::{execution, invalid, require_str, spec};
 pub struct BashPlugin;
 pub struct BashTool;
 
+/// Immutable settings captured when a runtime generation is built.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BashToolOptions {
+    pub shell_path: Option<PathBuf>,
+    pub command_prefix: Option<String>,
+}
+
+impl BashToolOptions {
+    pub fn new(shell_path: Option<PathBuf>, command_prefix: Option<String>) -> Self {
+        Self {
+            shell_path,
+            command_prefix,
+        }
+    }
+}
+
+/// Configured form used by the product runtime. `BashPlugin` remains the
+/// zero-configuration public default for embedders and tests.
+pub struct ConfiguredBashPlugin {
+    options: BashToolOptions,
+}
+
+impl ConfiguredBashPlugin {
+    pub fn new(options: BashToolOptions) -> Self {
+        Self { options }
+    }
+}
+
+struct ConfiguredBashTool {
+    options: BashToolOptions,
+}
+
 #[pi_core::agent_plugin]
 impl pi_core::AgentPlugin for BashPlugin {
     fn id(&self) -> pi_core::PluginId {
@@ -22,6 +55,19 @@ impl pi_core::AgentPlugin for BashPlugin {
     }
     fn register(&self, context: &mut pi_core::RegisterContext<'_>) -> pi_core::Result<()> {
         context.register_tool(std::sync::Arc::new(BashTool))
+    }
+}
+
+#[pi_core::agent_plugin]
+impl pi_core::AgentPlugin for ConfiguredBashPlugin {
+    fn id(&self) -> pi_core::PluginId {
+        pi_core::PluginId::new("bash-tool")
+    }
+
+    fn register(&self, context: &mut pi_core::RegisterContext<'_>) -> pi_core::Result<()> {
+        context.register_tool(std::sync::Arc::new(ConfiguredBashTool {
+            options: self.options.clone(),
+        }))
     }
 }
 
@@ -45,84 +91,116 @@ impl Tool for BashTool {
     async fn execute(
         &self,
         context: ToolContext,
-        _id: ToolCallId,
+        id: ToolCallId,
         input: Value,
         updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
-        let command = require_str(&input, "command")?;
-        let timeout = match input.get("timeout") {
-            None | Some(Value::Null) => None,
-            Some(value) => {
-                const MAX_TIMEOUT_SECONDS: f64 = 2_147_483_647.0 / 1_000.0;
-                let seconds = value
-                    .as_f64()
-                    .filter(|value| value.is_finite() && *value > 0.0)
-                    .ok_or_else(|| {
-                        invalid("Invalid timeout: must be a finite number of seconds")
-                    })?;
-                if seconds > MAX_TIMEOUT_SECONDS {
-                    return Err(invalid(format!(
-                        "Invalid timeout: maximum is {MAX_TIMEOUT_SECONDS} seconds"
-                    )));
-                }
-                Some(Duration::from_secs_f64(seconds))
-            }
-        };
-        updates.send(ToolUpdate {
-            content: Vec::new(),
-            details: None,
-        });
-        let update_sink = updates.clone();
-        let update_state = Arc::new(Mutex::new(BashUpdateState::default()));
-        let callback_state = Arc::clone(&update_state);
-        let result = pi_shell::execute(ShellRequest {
-            command: command.to_string(),
-            cwd: context.cwd,
-            timeout,
-            shell_path: None,
-            abort_signal: context.abort_signal,
-            on_chunk: Some(Arc::new(move |chunk: ShellChunk| {
-                if let Ok(mut state) = callback_state.lock()
-                    && let Some(snapshot) = state.push(&chunk.text)
-                {
-                    update_sink.send(ToolUpdate {
-                        content: vec![ContentBlock::Text(TextContent::new(snapshot))],
-                        details: None,
-                    });
-                }
-            })),
-        })
-        .await
-        .map_err(|error| execution(error.to_string()))?;
-        let details = bash_details(&result);
-        let mut output = format_output(&result, "(no output)");
-        updates.send(ToolUpdate {
-            content: vec![ContentBlock::Text(TextContent::new(output.clone()))],
-            details: details.clone(),
-        });
-        if result.cancelled {
-            output.push_str(if output.is_empty() {
-                "Command aborted"
-            } else {
-                "\n\nCommand aborted"
-            });
-            return Err(execution(output));
-        }
-        if result.timed_out {
-            let seconds = input
-                .get("timeout")
-                .map_or_else(|| "unknown".to_string(), Value::to_string);
-            output.push_str(&format!("\n\nCommand timed out after {seconds} seconds"));
-            return Err(execution(output));
-        }
-        if let Some(code) = result.exit_code.filter(|code| *code != 0) {
-            output.push_str(&format!("\n\nCommand exited with code {code}"));
-            return Err(execution(output));
-        }
-        let mut tool_result = ToolResult::text(output);
-        tool_result.details = details;
-        Ok(tool_result)
+        execute_bash(&BashToolOptions::default(), context, id, input, updates).await
     }
+}
+
+#[async_trait]
+impl Tool for ConfiguredBashTool {
+    fn spec(&self) -> ToolSpec {
+        BashTool.spec()
+    }
+
+    async fn execute(
+        &self,
+        context: ToolContext,
+        id: ToolCallId,
+        input: Value,
+        updates: ToolUpdateSink,
+    ) -> Result<ToolResult, ToolError> {
+        execute_bash(&self.options, context, id, input, updates).await
+    }
+}
+
+async fn execute_bash(
+    options: &BashToolOptions,
+    context: ToolContext,
+    _id: ToolCallId,
+    input: Value,
+    updates: ToolUpdateSink,
+) -> Result<ToolResult, ToolError> {
+    let command = require_str(&input, "command")?;
+    let timeout = match input.get("timeout") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            const MAX_TIMEOUT_SECONDS: f64 = 2_147_483_647.0 / 1_000.0;
+            let seconds = value
+                .as_f64()
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .ok_or_else(|| invalid("Invalid timeout: must be a finite number of seconds"))?;
+            if seconds > MAX_TIMEOUT_SECONDS {
+                return Err(invalid(format!(
+                    "Invalid timeout: maximum is {MAX_TIMEOUT_SECONDS} seconds"
+                )));
+            }
+            Some(Duration::from_secs_f64(seconds))
+        }
+    };
+    updates.send(ToolUpdate {
+        content: Vec::new(),
+        details: None,
+    });
+    let update_sink = updates.clone();
+    let update_state = Arc::new(Mutex::new(BashUpdateState::default()));
+    let callback_state = Arc::clone(&update_state);
+    let result = pi_shell::execute(ShellRequest {
+        command: prefixed_command(options.command_prefix.as_deref(), command),
+        cwd: context.cwd,
+        timeout,
+        shell_path: options.shell_path.clone(),
+        abort_signal: context.abort_signal,
+        on_chunk: Some(Arc::new(move |chunk: ShellChunk| {
+            if let Ok(mut state) = callback_state.lock()
+                && let Some(snapshot) = state.push(&chunk.text)
+            {
+                update_sink.send(ToolUpdate {
+                    content: vec![ContentBlock::Text(TextContent::new(snapshot))],
+                    details: None,
+                });
+            }
+        })),
+    })
+    .await
+    .map_err(|error| execution(error.to_string()))?;
+    let details = bash_details(&result);
+    let mut output = format_output(&result, "(no output)");
+    updates.send(ToolUpdate {
+        content: vec![ContentBlock::Text(TextContent::new(output.clone()))],
+        details: details.clone(),
+    });
+    if result.cancelled {
+        output.push_str(if output.is_empty() {
+            "Command aborted"
+        } else {
+            "\n\nCommand aborted"
+        });
+        return Err(execution(output));
+    }
+    if result.timed_out {
+        let seconds = input
+            .get("timeout")
+            .map_or_else(|| "unknown".to_string(), Value::to_string);
+        output.push_str(&format!("\n\nCommand timed out after {seconds} seconds"));
+        return Err(execution(output));
+    }
+    if let Some(code) = result.exit_code.filter(|code| *code != 0) {
+        output.push_str(&format!("\n\nCommand exited with code {code}"));
+        return Err(execution(output));
+    }
+    let mut tool_result = ToolResult::text(output);
+    tool_result.details = details;
+    Ok(tool_result)
+}
+
+fn prefixed_command(prefix: Option<&str>, command: &str) -> String {
+    prefix.filter(|prefix| !prefix.is_empty()).map_or_else(
+        || command.to_string(),
+        |prefix| format!("{prefix}\n{command}"),
+    )
 }
 
 #[derive(Default)]
@@ -356,5 +434,58 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("timed out after 0.05 seconds"));
+    }
+
+    #[tokio::test]
+    async fn configured_tool_prepends_the_command_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let result = ConfiguredBashTool {
+            options: BashToolOptions::new(None, Some("configured_value=from-settings".to_string())),
+        }
+        .execute(
+            ToolContext {
+                cwd: dir.path().to_path_buf(),
+                abort_signal: signal,
+            },
+            ToolCallId::new("1"),
+            json!({"command":"printf '%s' \"$configured_value\""}),
+            updates,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            &result.content[0],
+            ContentBlock::Text(text) if text.text == "from-settings"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configured_tool_uses_the_selected_shell_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let result = ConfiguredBashTool {
+            options: BashToolOptions::new(Some("/bin/sh".into()), None),
+        }
+        .execute(
+            ToolContext {
+                cwd: dir.path().to_path_buf(),
+                abort_signal: signal,
+            },
+            ToolCallId::new("1"),
+            json!({"command":"printf '%s' \"$0\""}),
+            updates,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            &result.content[0],
+            ContentBlock::Text(text) if text.text == "/bin/sh"
+        ));
     }
 }

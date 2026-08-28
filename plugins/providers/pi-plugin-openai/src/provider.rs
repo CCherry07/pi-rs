@@ -231,6 +231,15 @@ impl OpenAiProvider {
             inner: OpenAiCompatibleProvider::new(config.compatible_config())?,
         })
     }
+
+    pub fn with_transport(
+        config: OpenAiConfig,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Result<Self, ProviderError> {
+        Ok(Self {
+            inner: OpenAiCompatibleProvider::with_transport(config.compatible_config(), transport)?,
+        })
+    }
 }
 
 #[async_trait]
@@ -418,6 +427,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             thinking_level: ThinkingLevel::Off,
+            thinking_budgets: None,
             max_output_tokens: None,
             headers: BTreeMap::from([("authorization".to_string(), "Bearer request".to_string())]),
             sampling_params: BTreeMap::new(),
@@ -463,6 +473,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             thinking_level: ThinkingLevel::Off,
+            thinking_budgets: None,
             max_output_tokens: None,
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),

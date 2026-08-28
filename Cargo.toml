@@ -9,6 +9,7 @@ members = [
     "crates/pi-resources",
     "crates/pi-session",
     "crates/pi-shell",
+    "crates/pi-settings",
     "apps/pi-md",
     "crates/pi-plugin-macros",
     "crates/pi-plugin-sdk",
@@ -67,6 +68,7 @@ pi-prompt = { path = "crates/pi-prompt" }
 pi-resources = { path = "crates/pi-resources" }
 pi-session = { path = "crates/pi-session" }
 pi-shell = { path = "crates/pi-shell" }
+pi-settings = { path = "crates/pi-settings" }
 pi-md = { path = "apps/pi-md" }
 pi-plugin-macros = { path = "crates/pi-plugin-macros" }
 pi-plugin-sdk = { path = "crates/pi-plugin-sdk" }

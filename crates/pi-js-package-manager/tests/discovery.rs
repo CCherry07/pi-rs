@@ -191,6 +191,57 @@ async fn no_extensions_preserves_explicit_local_directory_discovery() {
     assert_eq!(resolution.extension_paths, [first, second]);
 }
 
+#[tokio::test]
+async fn package_skill_and_prompt_filters_resolve_even_when_extensions_are_disabled() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = root.path().join("project");
+    let agent_dir = root.path().join("agent");
+    let package_root = agent_dir.join("resource-package");
+    let extension = package_root.join("extensions/index.ts");
+    let keep_skill = package_root.join("skills/keep/SKILL.md");
+    let skip_skill = package_root.join("skills/skip/SKILL.md");
+    let keep_prompt = package_root.join("prompts/keep.md");
+    let skip_prompt = package_root.join("prompts/skip.md");
+    for path in [
+        &extension,
+        &keep_skill,
+        &skip_skill,
+        &keep_prompt,
+        &skip_prompt,
+    ] {
+        touch(path);
+    }
+    write_json(
+        &package_root.join("package.json"),
+        json!({
+            "pi": {
+                "extensions": ["extensions/index.ts"],
+                "skills": ["skills"],
+                "prompts": ["prompts/*.md"]
+            }
+        }),
+    );
+    write_json(
+        &agent_dir.join("settings.json"),
+        json!({
+            "packages": [{
+                "source": "./resource-package",
+                "skills": ["skills/keep/SKILL.md"],
+                "prompts": ["prompts/keep.md"]
+            }]
+        }),
+    );
+
+    let resolution = PackageManager::new(request(&cwd, &agent_dir, Vec::new(), true, false))
+        .resolve()
+        .await
+        .unwrap();
+
+    assert!(resolution.extension_paths.is_empty());
+    assert_eq!(resolution.skill_paths, [keep_skill]);
+    assert_eq!(resolution.prompt_paths, [keep_prompt]);
+}
+
 #[test]
 fn javascript_host_requirement_probe_is_side_effect_free_and_respects_discovery() {
     let root = tempfile::tempdir().unwrap();

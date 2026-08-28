@@ -38,14 +38,28 @@ impl XAiPlugin {
     }
 
     pub fn from_stored(api_key: Option<String>) -> Self {
+        Self::from_stored_with_transport(api_key, Arc::new(ReqwestTransport::new()))
+    }
+
+    pub fn from_stored_with_transport(
+        api_key: Option<String>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
         Self {
-            provider: Arc::new(XAiProvider::new(env("XAI_API_KEY").or(api_key))),
+            provider: Arc::new(XAiProvider::with_transport(
+                env("XAI_API_KEY").or(api_key),
+                transport,
+            )),
         }
     }
 
     pub fn new(api_key: Option<String>) -> Self {
+        Self::new_with_transport(api_key, Arc::new(ReqwestTransport::new()))
+    }
+
+    pub fn new_with_transport(api_key: Option<String>, transport: Arc<dyn HttpTransport>) -> Self {
         Self {
-            provider: Arc::new(XAiProvider::new(api_key)),
+            provider: Arc::new(XAiProvider::with_transport(api_key, transport)),
         }
     }
 }
@@ -289,6 +303,7 @@ mod tests {
             messages: vec![Message::User(UserMessage::text("hello", 0))],
             tools: Vec::new(),
             thinking_level: ThinkingLevel::XHigh,
+            thinking_budgets: None,
             max_output_tokens: Some(8),
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),

@@ -19,6 +19,20 @@ use serde_json::{Value, json};
 pub struct ReadPlugin;
 pub struct ReadTool;
 
+pub struct ConfiguredReadPlugin {
+    auto_resize_images: bool,
+}
+
+impl ConfiguredReadPlugin {
+    pub fn new(auto_resize_images: bool) -> Self {
+        Self { auto_resize_images }
+    }
+}
+
+struct ConfiguredReadTool {
+    auto_resize_images: bool,
+}
+
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const MAX_OUTPUT_LINES: usize = 2_000;
 
@@ -29,6 +43,19 @@ impl AgentPlugin for ReadPlugin {
     }
     fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
         context.register_tool(Arc::new(ReadTool))
+    }
+}
+
+#[pi_core::agent_plugin]
+impl AgentPlugin for ConfiguredReadPlugin {
+    fn id(&self) -> PluginId {
+        PluginId::new("read")
+    }
+
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+        context.register_tool(Arc::new(ConfiguredReadTool {
+            auto_resize_images: self.auto_resize_images,
+        }))
     }
 }
 
@@ -54,128 +81,155 @@ impl Tool for ReadTool {
     async fn execute(
         &self,
         context: ToolContext,
-        _id: ToolCallId,
+        id: ToolCallId,
         input: Value,
-        _updates: ToolUpdateSink,
+        updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
-        context
-            .abort_signal
-            .check()
-            .map_err(|_| ToolError::Aborted)?;
-        let requested = require_str(&input, "path")?;
-        let path = resolve_read_path(&context.cwd, requested)?;
-        let offset = optional_positive_usize(&input, "offset", 1)?;
-        let limit = input
-            .get("limit")
-            .filter(|value| !value.is_null())
-            .map(|_| optional_positive_usize(&input, "limit", MAX_OUTPUT_LINES))
-            .transpose()?;
-        let hashline = input
-            .get("hashline")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let bytes = tokio::select! {
-            biased;
-            () = context.abort_signal.wait() => return Err(ToolError::Aborted),
-            result = tokio::fs::read(&path) => result
-                .map_err(|e| execution(format!("cannot read {requested}: {e}")))?,
-        };
-        if let Some(mime_type) = image_mime_type(&bytes) {
-            let processed = process_image(bytes, mime_type).await?;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&processed.bytes);
-            let mut note = format!("Read image file [{}]", processed.mime_type);
-            if let Some(hint) = processed.hint {
-                note.push('\n');
-                note.push_str(&hint);
-            }
-            let mut result = ToolResult::text(note);
-            result.content.push(ContentBlock::Image(ImageContent {
-                data: encoded,
-                mime_type: processed.mime_type.to_string(),
-            }));
-            return Ok(result);
+        execute_read(true, context, id, input, updates).await
+    }
+}
+
+#[async_trait]
+impl Tool for ConfiguredReadTool {
+    fn spec(&self) -> ToolSpec {
+        ReadTool.spec()
+    }
+
+    async fn execute(
+        &self,
+        context: ToolContext,
+        id: ToolCallId,
+        input: Value,
+        updates: ToolUpdateSink,
+    ) -> Result<ToolResult, ToolError> {
+        execute_read(self.auto_resize_images, context, id, input, updates).await
+    }
+}
+
+async fn execute_read(
+    auto_resize_images: bool,
+    context: ToolContext,
+    _id: ToolCallId,
+    input: Value,
+    _updates: ToolUpdateSink,
+) -> Result<ToolResult, ToolError> {
+    context
+        .abort_signal
+        .check()
+        .map_err(|_| ToolError::Aborted)?;
+    let requested = require_str(&input, "path")?;
+    let path = resolve_read_path(&context.cwd, requested)?;
+    let offset = optional_positive_usize(&input, "offset", 1)?;
+    let limit = input
+        .get("limit")
+        .filter(|value| !value.is_null())
+        .map(|_| optional_positive_usize(&input, "limit", MAX_OUTPUT_LINES))
+        .transpose()?;
+    let hashline = input
+        .get("hashline")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let bytes = tokio::select! {
+        biased;
+        () = context.abort_signal.wait() => return Err(ToolError::Aborted),
+        result = tokio::fs::read(&path) => result
+            .map_err(|e| execution(format!("cannot read {requested}: {e}")))?,
+    };
+    if let Some(mime_type) = image_mime_type(&bytes) {
+        let processed = process_image(bytes, mime_type, auto_resize_images).await?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&processed.bytes);
+        let mut note = format!("Read image file [{}]", processed.mime_type);
+        if let Some(hint) = processed.hint {
+            note.push('\n');
+            note.push_str(&hint);
         }
+        let mut result = ToolResult::text(note);
+        result.content.push(ContentBlock::Image(ImageContent {
+            data: encoded,
+            mime_type: processed.mime_type.to_string(),
+        }));
+        return Ok(result);
+    }
 
-        let text = String::from_utf8_lossy(&bytes);
-        let had_bom = text.starts_with('\u{feff}');
-        let lines = text.split('\n').collect::<Vec<_>>();
-        let start = offset - 1;
-        if start >= lines.len() {
-            return Err(execution(format!(
-                "Offset {offset} is beyond end of file ({} lines total)",
-                lines.len()
-            )));
-        }
+    let text = String::from_utf8_lossy(&bytes);
+    let had_bom = text.starts_with('\u{feff}');
+    let lines = text.split('\n').collect::<Vec<_>>();
+    let start = offset - 1;
+    if start >= lines.len() {
+        return Err(execution(format!(
+            "Offset {offset} is beyond end of file ({} lines total)",
+            lines.len()
+        )));
+    }
 
-        let selected_end = limit
-            .map(|limit| start.saturating_add(limit).min(lines.len()))
-            .unwrap_or(lines.len());
-        let selected = if hashline {
-            lines[start..selected_end]
-                .iter()
-                .enumerate()
-                .map(|(relative, line)| {
-                    let line_index = start + relative;
-                    let line = if had_bom && line_index == 0 {
-                        line.strip_prefix('\u{feff}').unwrap_or(line)
-                    } else {
-                        line
-                    };
-                    format!("{}:{}", hashline_tag(line_index, line, had_bom), line)
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            lines[start..selected_end].join("\n")
-        };
-        context
-            .abort_signal
-            .check()
-            .map_err(|_| ToolError::Aborted)?;
+    let selected_end = limit
+        .map(|limit| start.saturating_add(limit).min(lines.len()))
+        .unwrap_or(lines.len());
+    let selected = if hashline {
+        lines[start..selected_end]
+            .iter()
+            .enumerate()
+            .map(|(relative, line)| {
+                let line_index = start + relative;
+                let line = if had_bom && line_index == 0 {
+                    line.strip_prefix('\u{feff}').unwrap_or(line)
+                } else {
+                    line
+                };
+                format!("{}:{}", hashline_tag(line_index, line, had_bom), line)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        lines[start..selected_end].join("\n")
+    };
+    context
+        .abort_signal
+        .check()
+        .map_err(|_| ToolError::Aborted)?;
 
-        let truncation = truncate_head(&selected);
-        let mut details = None;
-        let mut output = if truncation.first_line_exceeds_limit {
-            details = Some(json!({"truncation": truncation.to_json()}));
-            let first_line_bytes = lines[start].len();
-            format!(
-                "[Line {offset} is {}, exceeds {} limit. Use bash: sed -n '{offset}p' {requested} | head -c {MAX_OUTPUT_BYTES}]",
-                format_size(first_line_bytes),
-                format_size(MAX_OUTPUT_BYTES)
-            )
-        } else if truncation.truncated {
-            let end_line = offset + truncation.output_lines.saturating_sub(1);
-            let next_offset = end_line + 1;
-            let mut output = truncation.content.clone();
-            if truncation.truncated_by == Some(TruncatedBy::Lines) {
-                output.push_str(&format!(
+    let truncation = truncate_head(&selected);
+    let mut details = None;
+    let mut output = if truncation.first_line_exceeds_limit {
+        details = Some(json!({"truncation": truncation.to_json()}));
+        let first_line_bytes = lines[start].len();
+        format!(
+            "[Line {offset} is {}, exceeds {} limit. Use bash: sed -n '{offset}p' {requested} | head -c {MAX_OUTPUT_BYTES}]",
+            format_size(first_line_bytes),
+            format_size(MAX_OUTPUT_BYTES)
+        )
+    } else if truncation.truncated {
+        let end_line = offset + truncation.output_lines.saturating_sub(1);
+        let next_offset = end_line + 1;
+        let mut output = truncation.content.clone();
+        if truncation.truncated_by == Some(TruncatedBy::Lines) {
+            output.push_str(&format!(
                     "\n\n[Showing lines {offset}-{end_line} of {}. Use offset={next_offset} to continue.]",
                     lines.len()
                 ));
-            } else {
-                output.push_str(&format!(
+        } else {
+            output.push_str(&format!(
                     "\n\n[Showing lines {offset}-{end_line} of {} ({} limit). Use offset={next_offset} to continue.]",
                     lines.len(),
                     format_size(MAX_OUTPUT_BYTES)
                 ));
-            }
-            details = Some(json!({"truncation": truncation.to_json()}));
-            output
-        } else {
-            truncation.content.clone()
-        };
-
-        if !truncation.truncated && limit.is_some() && selected_end < lines.len() {
-            let remaining = lines.len() - selected_end;
-            output.push_str(&format!(
-                "\n\n[{remaining} more lines in file. Use offset={} to continue.]",
-                selected_end + 1
-            ));
         }
-        let mut result = ToolResult::text(output);
-        result.details = details;
-        Ok(result)
+        details = Some(json!({"truncation": truncation.to_json()}));
+        output
+    } else {
+        truncation.content.clone()
+    };
+
+    if !truncation.truncated && limit.is_some() && selected_end < lines.len() {
+        let remaining = lines.len() - selected_end;
+        output.push_str(&format!(
+            "\n\n[{remaining} more lines in file. Use offset={} to continue.]",
+            selected_end + 1
+        ));
     }
+    let mut result = ToolResult::text(output);
+    result.details = details;
+    Ok(result)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,8 +362,12 @@ struct ProcessedImage {
 async fn process_image(
     bytes: Vec<u8>,
     mime_type: &'static str,
+    auto_resize_images: bool,
 ) -> Result<ProcessedImage, ToolError> {
-    if mime_type != "image/bmp" {
+    const MAX_DIMENSION: u32 = 2_000;
+    const MAX_BASE64_BYTES: usize = 4_718_592;
+
+    if !auto_resize_images && mime_type != "image/bmp" {
         return Ok(ProcessedImage {
             bytes,
             mime_type,
@@ -318,24 +376,101 @@ async fn process_image(
     }
 
     tokio::task::spawn_blocking(move || {
-        let image =
-            image::load_from_memory_with_format(&bytes, ImageFormat::Bmp).map_err(|_| {
-                execution(
+        let format = match mime_type {
+            "image/png" => ImageFormat::Png,
+            "image/jpeg" => ImageFormat::Jpeg,
+            "image/gif" => ImageFormat::Gif,
+            "image/webp" => ImageFormat::WebP,
+            "image/bmp" => ImageFormat::Bmp,
+            _ => {
+                return Err(execution(
                     "[Image omitted: could not be converted to a supported inline image format.]",
-                )
-            })?;
-        let mut output = Cursor::new(Vec::new());
-        image.write_to(&mut output, ImageFormat::Png).map_err(|_| {
-            execution("[Image omitted: could not be converted to a supported inline image format.]")
+                ));
+            }
+        };
+        let image = image::load_from_memory_with_format(&bytes, format).map_err(|_| {
+            execution(
+                "[Image omitted: could not be converted to a supported inline image format.]",
+            )
         })?;
-        Ok(ProcessedImage {
-            bytes: output.into_inner(),
-            mime_type: "image/png",
-            hint: Some("[Image converted from image/bmp to image/png.]".to_string()),
-        })
+        let original_width = image.width();
+        let original_height = image.height();
+        let within_dimensions =
+            original_width <= MAX_DIMENSION && original_height <= MAX_DIMENSION;
+        let within_size = base64_size(bytes.len()) < MAX_BASE64_BYTES;
+        if mime_type != "image/bmp" && within_dimensions && within_size {
+            return Ok(ProcessedImage {
+                bytes,
+                mime_type,
+                hint: None,
+            });
+        }
+
+        let (mut width, mut height) = fit_dimensions(
+            original_width,
+            original_height,
+            MAX_DIMENSION,
+            MAX_DIMENSION,
+        );
+        loop {
+            let resized = if width == original_width && height == original_height {
+                image.clone()
+            } else {
+                image.resize_exact(width, height, image::imageops::FilterType::Lanczos3)
+            };
+            let mut output = Cursor::new(Vec::new());
+            resized
+                .write_to(&mut output, ImageFormat::Png)
+                .map_err(|_| {
+                    execution(
+                        "[Image omitted: could not be resized below the inline image size limit.]",
+                    )
+                })?;
+            let encoded = output.into_inner();
+            if base64_size(encoded.len()) < MAX_BASE64_BYTES {
+                let mut hints = Vec::new();
+                if mime_type != "image/png" {
+                    hints.push(format!(
+                        "[Image converted from {mime_type} to image/png.]"
+                    ));
+                }
+                if width != original_width || height != original_height {
+                    let scale = f64::from(original_width) / f64::from(width);
+                    hints.push(format!(
+                        "[Image: original {original_width}x{original_height}, displayed at {width}x{height}. Multiply coordinates by {scale:.2} to map to original image.]"
+                    ));
+                }
+                return Ok(ProcessedImage {
+                    bytes: encoded,
+                    mime_type: "image/png",
+                    hint: (!hints.is_empty()).then(|| hints.join("\n")),
+                });
+            }
+            if width == 1 && height == 1 {
+                return Err(execution(
+                    "[Image omitted: could not be resized below the inline image size limit.]",
+                ));
+            }
+            width = (width.saturating_mul(3) / 4).max(1);
+            height = (height.saturating_mul(3) / 4).max(1);
+        }
     })
     .await
     .map_err(|error| execution(format!("image processing task failed: {error}")))?
+}
+
+fn base64_size(bytes: usize) -> usize {
+    bytes.div_ceil(3).saturating_mul(4)
+}
+
+fn fit_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
+    let scale = (f64::from(max_width) / f64::from(width))
+        .min(f64::from(max_height) / f64::from(height))
+        .min(1.0);
+    (
+        (f64::from(width) * scale).round().max(1.0) as u32,
+        (f64::from(height) * scale).round().max(1.0) as u32,
+    )
 }
 
 fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
@@ -451,6 +586,70 @@ mod tests {
             matches!(&result.content[1], ContentBlock::Image(image) if image.mime_type == "image/png" && base64::engine::general_purpose::STANDARD.decode(&image.data).unwrap() == bytes)
         );
         assert!(result.details.is_none());
+    }
+
+    #[tokio::test]
+    async fn configured_image_resize_setting_controls_dimension_processing() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2_001,
+            1,
+            image::Rgba([1, 2, 3, 255]),
+        ));
+        let mut encoded = Cursor::new(Vec::new());
+        image.write_to(&mut encoded, ImageFormat::Png).unwrap();
+        let original = encoded.into_inner();
+        std::fs::write(dir.path().join("wide.png"), &original).unwrap();
+
+        let execute = |auto_resize_images| {
+            let cwd = dir.path().to_path_buf();
+            async move {
+                let (_, signal) = AbortHandle::new();
+                let (updates, _) = ToolUpdateSink::channel();
+                ConfiguredReadTool { auto_resize_images }
+                    .execute(
+                        ToolContext {
+                            cwd,
+                            abort_signal: signal,
+                        },
+                        ToolCallId::new("1"),
+                        json!({"path":"wide.png"}),
+                        updates,
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let resized = execute(true).await;
+        let ContentBlock::Image(resized_image) = &resized.content[1] else {
+            panic!("expected image")
+        };
+        let resized_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&resized_image.data)
+            .unwrap();
+        let dimensions =
+            image::load_from_memory_with_format(&resized_bytes, ImageFormat::Png).unwrap();
+        assert_eq!((dimensions.width(), dimensions.height()), (2_000, 1));
+        assert!(matches!(
+            &resized.content[0],
+            ContentBlock::Text(text) if text.text.contains("original 2001x1, displayed at 2000x1")
+        ));
+
+        let unchanged = execute(false).await;
+        let ContentBlock::Image(unchanged_image) = &unchanged.content[1] else {
+            panic!("expected image")
+        };
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&unchanged_image.data)
+                .unwrap(),
+            original
+        );
+        assert!(matches!(
+            &unchanged.content[0],
+            ContentBlock::Text(text) if !text.text.contains("displayed at")
+        ));
     }
 
     #[tokio::test]

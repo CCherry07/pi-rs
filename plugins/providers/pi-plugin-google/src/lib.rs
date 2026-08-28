@@ -42,7 +42,21 @@ impl GooglePlugin {
         Self::new(env("GEMINI_API_KEY").or(api_key))
     }
 
+    pub fn from_stored_with_transport(
+        api_key: Option<String>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Result<Self, ProviderError> {
+        Self::new_with_transport(env("GEMINI_API_KEY").or(api_key), transport)
+    }
+
     pub fn new(api_key: Option<String>) -> Result<Self, ProviderError> {
+        Self::new_with_transport(api_key, Arc::new(ReqwestTransport::new()))
+    }
+
+    pub fn new_with_transport(
+        api_key: Option<String>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Result<Self, ProviderError> {
         let config = api_key
             .map_or_else(
                 || GoogleCompatibleConfig::without_api_key(GOOGLE_BASE_URL),
@@ -50,7 +64,7 @@ impl GooglePlugin {
             )
             .provider_id(GOOGLE_PROVIDER_ID);
         Ok(Self {
-            provider: Arc::new(GoogleCompatibleProvider::new(config)?),
+            provider: Arc::new(GoogleCompatibleProvider::with_transport(config, transport)?),
         })
     }
 }
@@ -468,7 +482,11 @@ fn google_thinking_config(request: &ProviderRequest) -> Value {
         json!({"includeThoughts": enabled, "thinkingLevel": level})
     } else {
         let budget = if enabled {
-            google_thinking_budget(&id, request.thinking_level)
+            request
+                .thinking_budgets
+                .and_then(|budgets| budgets.for_level(request.thinking_level))
+                .and_then(|budget| i64::try_from(budget).ok())
+                .unwrap_or_else(|| google_thinking_budget(&id, request.thinking_level))
         } else {
             0
         };
@@ -956,6 +974,7 @@ mod tests {
             messages: vec![Message::User(UserMessage::text("hello", 0))],
             tools: Vec::new(),
             thinking_level: ThinkingLevel::High,
+            thinking_budgets: None,
             max_output_tokens: Some(123),
             headers: BTreeMap::new(),
             sampling_params: BTreeMap::new(),

@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use pi_core::{
     AbortHandle, AssistantMessage, BeforeAgentStartEvent, FrozenRegistries, Message, ModelId,
-    PluginDriver, ProviderId, ProviderPluginDriver, RunId, ThinkingLevel, ToolCallId,
-    ToolExecutionMode, UserMessage,
+    PluginDriver, ProviderId, ProviderPluginDriver, RunId, ThinkingBudgets, ThinkingLevel,
+    ToolCallId, ToolExecutionMode, UserMessage,
 };
 use pi_telemetry::TelemetryContext;
 use tokio::sync::watch;
@@ -88,6 +88,8 @@ pub struct AgentOptions {
     pub provider_id: ProviderId,
     pub model_id: ModelId,
     pub thinking_level: ThinkingLevel,
+    pub thinking_budgets: Option<ThinkingBudgets>,
+    pub block_images: bool,
     pub active_tools: Vec<String>,
     pub messages: Vec<Message>,
     pub tool_execution: ToolExecutionMode,
@@ -107,6 +109,8 @@ impl Default for AgentOptions {
             provider_id: ProviderId::new("scripted"),
             model_id: ModelId::new("test"),
             thinking_level: ThinkingLevel::Off,
+            thinking_budgets: None,
+            block_images: false,
             active_tools: Vec::new(),
             messages: Vec::new(),
             tool_execution: ToolExecutionMode::Parallel,
@@ -267,6 +271,10 @@ impl Agent {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    pub fn thinking_budgets(&self) -> Option<ThinkingBudgets> {
+        self.inner.config.thinking_budgets
     }
 
     pub fn downgrade(&self) -> WeakAgent {
@@ -560,6 +568,30 @@ impl Agent {
         Ok(())
     }
 
+    /// Removes only the terminal failed assistant from live context before a
+    /// product-owned retry. Persistence remains the session layer's concern,
+    /// and pending steering/follow-up queues are deliberately preserved.
+    pub fn remove_last_failed_assistant(&self) -> Result<bool, AgentError> {
+        if self.state().is_running {
+            return Err(AgentError::ConfigureWhileRunning);
+        }
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let failed = matches!(
+            state.snapshot.messages.last(),
+            Some(Message::Assistant(message))
+                if matches!(message.stop_reason, pi_core::StopReason::Error | pi_core::StopReason::Length)
+        );
+        if failed {
+            state.snapshot.messages.pop();
+            state.snapshot.error_message = None;
+        }
+        Ok(failed)
+    }
+
     async fn run(&self, kind: RunKind) -> Result<AgentLoopOutcome, AgentError> {
         let _run_guard = self
             .inner
@@ -657,6 +689,8 @@ impl Agent {
             provider_id: snapshot.provider_id,
             model_id: snapshot.model_id,
             thinking_level: snapshot.thinking_level,
+            thinking_budgets: self.inner.config.thinking_budgets,
+            block_images: self.inner.config.block_images,
             tool_execution: self.inner.config.tool_execution,
             max_tool_iterations: self.inner.config.max_tool_iterations,
             max_parallel_tools: self.inner.config.max_parallel_tools,

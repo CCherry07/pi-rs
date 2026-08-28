@@ -28,6 +28,7 @@ crates/pi-provider              vendor-neutral HTTP transport and SSE framing
 crates/pi-prompt                pure Pi-style system prompt assembly
 crates/pi-resources             generic system/append prompts and project context discovery
 crates/pi-session               Pi v4 storage plus MultiSessionManager/PiSession product runtime
+crates/pi-settings              current-format settings documents, snapshots, and safe writes
 crates/pi-telemetry             typed Pi AI/harness span schemas and sink adapters
 apps/pi-md                     TUI-owned Markdown parsing, streaming repair, highlighting, and Ratatui rendering
 crates/pi-plugin-sdk            native plugin author interface and descriptor types
@@ -61,6 +62,7 @@ pi-provider          -> pi-core
 pi-prompt            -> standard library only
 pi-resources         -> pi-prompt
 pi-session           -> pi-core + pi-prompt + pi-resources + pi-runtime
+pi-settings          -> serde JSON + filesystem persistence only
 pi-plugin-openai     -> pi-core + pi-provider
 pi-plugin-anthropic  -> pi-core + pi-provider
 pi-plugin-xai        -> pi-core + pi-provider + pi-plugin-openai::responses
@@ -335,7 +337,10 @@ calls the deep Rust Module `pi-js-package-manager` through its
 construction from the same request.
 The Module merges explicit `-e` local/npm/git sources first,
 then trusted project settings entries, trusted project auto-discovery, user settings entries, user
-auto-discovery, and configured package resources in current Pi precedence. Package manifests and
+auto-discovery, and configured package resources in current Pi precedence. A package may contribute
+extensions, skills, and prompt templates from its current manifest/convention layout; the same
+`autoload` and per-resource include/exclude filters are applied before each resource is handed to
+its owning generation plugin. Package manifests and
 filters, ignore files, canonical-path deduplication, managed npm/git installation, custom
 `npmCommand`, and `PI_OFFLINE` are hidden behind that Interface. The Node Adapter receives only the
 ordered `extensionPaths` load list and loads TS/JS with Jiti `moduleCache: false`; it has no settings,
@@ -493,7 +498,7 @@ module exists, generation construction rejects Radius configuration explicitly.
 
 The independent `pi-plugin-anthropic` provider owns Anthropic Messages projection/SSE parsing, credential precedence, standard configurable routing, Claude Code request mode, browser PKCE authorization-code exchange/refresh, and its Claude catalog as one deep vendor Module. `ModelsPlugin` reuses its standard route for Anthropic-compatible custom providers without importing built-in Anthropic credential or OAuth policy. Claude Code mode preserves thinking signatures and applies OAuth identity headers, the required system identity, and bidirectional canonical tool-name mapping. `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, and Pi-compatible `<agent-dir>/auth.json` credentials are supported; explicit CLI credentials win, followed by environment credentials and stored credentials. The CLI owns secure credential persistence through `pi auth login/logout/status`: writes use a sibling lock, atomic replacement, and Unix mode `0600`, while status never emits secrets.
 
-The built-in `openai-codex` plugin is installed in every product generation rather than only when Codex is initially selected. It owns the explicit Pi-compatible model catalog, Codex Device OAuth/refresh, and a Codex Responses Adapter. Reusable OpenAI Responses message/tool projection and SSE adaptation live directly in `pi-plugin-openai::responses`; the separate `pi-plugin-xai` provider depends on that plugin crate while retaining its own lifecycle, credentials, headers, payload policy, OAuth device flow, refresh, and Grok catalog. xAI exposes the current Grok 4.5/4.6 Responses models, resolves `XAI_API_KEY` or Pi-compatible stored credentials when rebuilding a generation, supports explicit xAI Device OAuth through `pi auth login xai --oauth`, and proactively refreshes stored xAI OAuth credentials before application startup. The built-in `pi-plugin-google` provider owns the Google Generative AI projection and current Gemini catalog, resolves `GEMINI_API_KEY` before Pi-compatible stored credentials, and exposes API-key login as `pi auth login google`; Google OAuth identities are not part of this provider. Anthropic and OpenAI Codex stored OAuth credentials use the same startup refresh transaction. `pi auth login` without a provider builds its selector from built-ins, validated JSONC `models.json` provider IDs, and existing stored credentials; unknown third-party providers receive API-key auth unless a future provider-owned OAuth capability declares otherwise. Device authorization validates xAI HTTPS verification URLs before invoking the platform browser Adapter; token polling and refresh remain provider-owned while locked atomic `auth.json` persistence remains CLI-owned. At generation construction the Codex plugin credential-blindly probes Codex CLI credentials from `~/.codex/auth.json` and `~/.config/codex/auth.json`; a valid access-token JWT with `chatgpt_account_id` makes the provider selectable. Requests use the ChatGPT Codex Responses endpoint and its required bearer, account, beta, originator, and user-agent headers. This reuse does not write or refresh Codex CLI credentials and is not Pi's `/login` flow. The catalog supplies context windows, output limits, input modalities, reasoning support, and costs; it is not remote discovery. `ModelRuntime` keeps the complete registered catalog distinct from its credential-blind available view and exposes provider availability diagnostics. Providers report whether the current immutable generation has enough configuration to be selectable without resolving secret values. Initial selection and `/model` consume the available view, while restore and diagnostics can still inspect registered models. `AgentSession` derives compaction limits from the active generation's current `ModelSpec`, so model switches immediately change threshold and overflow decisions. An explicit session context-window option remains an embedding override.
+The built-in `openai-codex` plugin is installed in every product generation rather than only when Codex is initially selected. It owns the explicit Pi-compatible model catalog, Codex Device OAuth/refresh, and a Codex Responses Adapter. Reusable OpenAI Responses message/tool projection and SSE adaptation live directly in `pi-plugin-openai::responses`; the separate `pi-plugin-xai` provider depends on that plugin crate while retaining its own lifecycle, credentials, headers, payload policy, OAuth device flow, refresh, and Grok catalog. xAI exposes the current Grok 4.5/4.6 Responses models, resolves `XAI_API_KEY` or Pi-compatible stored credentials when rebuilding a generation, supports explicit xAI Device OAuth through `pi auth login xai --oauth`, and proactively refreshes stored xAI OAuth credentials before application startup. The built-in `pi-plugin-google` provider owns the Google Generative AI projection and current Gemini catalog, resolves `GEMINI_API_KEY` before Pi-compatible stored credentials, and exposes API-key login as `pi auth login google`; Google OAuth identities are not part of this provider. Anthropic and OpenAI Codex stored OAuth credentials use the same startup refresh transaction. `pi auth login` without a provider builds its selector from built-ins, validated JSONC `models.json` provider IDs, and existing stored credentials; unknown third-party providers receive API-key auth unless a future provider-owned OAuth capability declares otherwise. Device authorization validates xAI HTTPS verification URLs before invoking the platform browser Adapter; token polling and refresh remain provider-owned while locked atomic `auth.json` persistence remains CLI-owned. At generation construction the Codex plugin credential-blindly probes Codex CLI credentials from `~/.codex/auth.json` and `~/.config/codex/auth.json`; a valid access-token JWT with `chatgpt_account_id` makes the provider selectable. Requests use the ChatGPT Codex Responses endpoint and its required bearer, account, beta, originator, and user-agent headers. Its generation-local transport policy supports SSE, WebSocket, cached WebSocket continuation, and Pi's automatic preference: a WebSocket is reused by session/account, `previous_response_id` sends only a verified context suffix, and a transport failure before the first provider event activates SSE fallback for that session. Connect and per-frame idle waits remain abortable. An explicit HTTP proxy forces the proxied SSE path because the Rust WebSocket client has no proxy-tunnelling Adapter and must not bypass product proxy policy. This reuse does not write or refresh Codex CLI credentials and is not Pi's `/login` flow. The catalog supplies context windows, output limits, input modalities, reasoning support, and costs; it is not remote discovery. `ModelRuntime` keeps the complete registered catalog distinct from its credential-blind available view and exposes provider availability diagnostics. Providers report whether the current immutable generation has enough configuration to be selectable without resolving secret values. Initial selection and `/model` consume the available view, while restore and diagnostics can still inspect registered models. `AgentSession` derives compaction limits from the active generation's current `ModelSpec`, so model switches immediately change threshold and overflow decisions. An explicit session context-window option remains an embedding override.
 
 Initial selection is a separate product policy in `pi-session`. `ModelRuntimeServices` adapts the
 model portion of an assembled `PiRuntime` generation, while `InitialModelResolver` resolves an
@@ -502,6 +507,33 @@ order. The resolver never reads `models.json`, resolves credentials, or register
 keeps file/routing mechanics inside `ModelsPlugin`, immutable catalog lookup inside `ModelRuntime`,
 and new/resumed session policy above both. A removed session model falls back to the current catalog
 with a diagnostic instead of silently restoring an unregistered route.
+
+## Settings generations
+
+`pi-settings::SettingsManager` owns only the current `settings.json` shape. It deliberately has no
+legacy aliases or migration pass. Global `<agent-dir>/settings.json` is always eligible; project
+`<cwd>/.pi/settings.json` is not even read until the product trust service approves that cwd. A
+load retains each raw JSON object, recursively merges project objects over global objects while
+replacing arrays/scalars, validates the fields consumed by non-UI Rust modules, and publishes one
+immutable `SettingsSnapshot` for candidate generation construction. Unknown and UI-only fields
+remain in the raw documents so package writes do not erase settings owned by another frontend.
+Malformed reloads diagnose the scope and retain its last valid in-process document; field-level
+validation failures are localized rather than rejecting unrelated current settings.
+
+Settings persistence is a narrow field patch, not whole-object serialization. The package manager
+locks a stable sibling lock file, rereads the latest on-disk object, refuses to overwrite malformed
+JSON, replaces only `packages`, and commits through a synced temporary file and atomic rename.
+Project writes require the same trust decision used for reads. This lets the JS package manager,
+trust bootstrap, and runtime factory share one settings authority without making `pi-core` depend
+on filesystem or product policy.
+
+`ProductSessionFactory` resolves trust first and then maps the snapshot into one complete runtime
+candidate. Non-UI mappings include initial provider/model/thinking, thinking budgets, active tools,
+steering/follow-up queues, compaction and branch-summary budgets, assistant/standalone-completion
+retry, shell configuration, session storage, image blocking/resizing, skills/prompts/packages,
+provider timeout/retry, HTTP proxy, and Codex transport. The proxy is bootstrap/global policy and
+is intentionally not project-overridable. UI-only theme and selector settings are retained but do
+not create a second renderer settings implementation.
 
 ## Project trust
 
@@ -721,6 +753,16 @@ assistant response. Assistant usage is a valid estimate anchor only when its tim
 than a prefix message inserted before it, such as a compaction summary. Each summary request is also
 constrained by the active generation's `ModelSpec`: non-reasoning models force thinking off, and the
 configured summary budget is clamped to the model's maximum output tokens.
+
+Normal assistant turns classify provider failures with the same current Pi transient/terminal
+rules. An enabled retry persists the failed assistant for audit, removes only that terminal failure
+from the next live provider context, publishes retry start/end product events, and waits with an
+abortable exponential backoff. Context overflow takes the one compaction-recovery path before
+ordinary retries, so it cannot consume both policies or create a compaction loop. Standalone
+compaction and branch-summary completions reuse the generation's retry policy without mutating the
+agent transcript. Shared HTTP transport retries configured transport failures and retryable status
+codes independently at the wire boundary, honors server retry delays up to the configured cap, and
+keeps header/body timeouts abortable.
 
 Session extensions use a third, session-owned lifecycle system. `SessionPlugin` mirrors Pi's ten
 `session_*` extension hooks: start, info change, before switch/fork/compact/tree, compact success or

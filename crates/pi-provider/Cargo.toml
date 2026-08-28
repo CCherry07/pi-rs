@@ -10,6 +10,7 @@ publish = false
 async-stream = "0.3.6"
 async-trait.workspace = true
 futures.workspace = true
+httpdate = "1.0.3"
 pi-core.workspace = true
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde_json.workspace = true

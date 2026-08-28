@@ -1,6 +1,7 @@
 use std::io::IsTerminal;
 
 use pi_plugin_manager::{InstallScope, PluginManager, PluginManagerOptions};
+use pi_settings::SettingsManager;
 
 use crate::config::{AppConfig, Cli, PluginCommand};
 
@@ -8,6 +9,7 @@ pub(crate) async fn run(
     cli: &Cli,
     config: &AppConfig,
     command: &PluginCommand,
+    settings: &SettingsManager,
 ) -> Result<(), String> {
     let local = match command {
         PluginCommand::Install { local, .. }
@@ -20,6 +22,7 @@ pub(crate) async fn run(
             cli,
             config,
             std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+            settings,
         )
         .await?;
         if !trust.trusted() {

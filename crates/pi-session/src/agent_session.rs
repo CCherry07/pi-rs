@@ -186,11 +186,41 @@ pub struct AgentSessionOptions {
     /// Automatic compaction is enabled only when the model context window is
     /// known. Manual compaction remains available without this value.
     pub context_window: Option<u64>,
+    /// Tokens reserved outside abandoned-branch summary input. The selected
+    /// model context window supplies the total budget.
+    pub branch_summary_reserve_tokens: Option<u64>,
     /// Immutable product registration metadata prepared alongside the runtime
     /// and session plugin generations.
     pub runtime_inventory: SessionRuntimeInventory,
     /// Pi v3-compatible parent session path recorded for a new session.
     pub parent_session_path: Option<PathBuf>,
+    /// Generation-local defaults for shell shorthand execution. Explicit
+    /// per-call shell paths still take precedence.
+    pub shell_path: Option<PathBuf>,
+    pub shell_command_prefix: Option<String>,
+    /// Session-owned retry policy for transient assistant/provider failures.
+    pub retry: AutoRetrySettings,
+}
+
+/// Bounded, abortable retry policy used by normal assistant turns.
+///
+/// The initial provider call does not count toward `max_retries`; attempt one
+/// waits `base_delay_ms`, attempt two waits twice that amount, and so on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoRetrySettings {
+    pub enabled: bool,
+    pub max_retries: u32,
+    pub base_delay_ms: u64,
+}
+
+impl Default for AutoRetrySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_retries: 3,
+            base_delay_ms: 2_000,
+        }
+    }
 }
 
 impl AgentSessionOptions {
@@ -219,6 +249,11 @@ impl AgentSessionOptions {
         self
     }
 
+    pub fn branch_summary_reserve_tokens(mut self, reserve_tokens: u64) -> Self {
+        self.branch_summary_reserve_tokens = Some(reserve_tokens);
+        self
+    }
+
     pub fn runtime_inventory(mut self, inventory: SessionRuntimeInventory) -> Self {
         self.runtime_inventory = inventory;
         self
@@ -226,6 +261,17 @@ impl AgentSessionOptions {
 
     pub fn parent_session_path(mut self, path: Option<PathBuf>) -> Self {
         self.parent_session_path = path;
+        self
+    }
+
+    pub fn shell(mut self, shell_path: Option<PathBuf>, command_prefix: Option<String>) -> Self {
+        self.shell_path = shell_path;
+        self.shell_command_prefix = command_prefix;
+        self
+    }
+
+    pub fn retry(mut self, retry: AutoRetrySettings) -> Self {
+        self.retry = retry;
         self
     }
 }
@@ -267,11 +313,16 @@ pub struct AgentSession {
     operation_gate: Arc<tokio::sync::Mutex<()>>,
     compaction_settings: CompactionSettings,
     context_window: Option<u64>,
+    branch_summary_reserve_tokens: u64,
     compaction_abort: Arc<std::sync::Mutex<Option<AbortHandle>>>,
     lifecycle_state: Arc<AtomicU8>,
     events: Arc<AgentSessionEventHub>,
     activity: Arc<std::sync::Mutex<SessionActivity>>,
     bash_abort: Arc<std::sync::Mutex<Option<(String, AbortHandle)>>>,
+    retry_settings: AutoRetrySettings,
+    retry_abort: Arc<std::sync::Mutex<Option<AbortHandle>>>,
+    shell_path: Option<PathBuf>,
+    shell_command_prefix: Option<String>,
 }
 
 /// A fully constructed session whose `session_start` lifecycle event has not
@@ -422,11 +473,16 @@ impl AgentSession {
             operation_gate: Arc::new(tokio::sync::Mutex::new(())),
             compaction_settings: options.compaction,
             context_window: options.context_window,
+            branch_summary_reserve_tokens: options.branch_summary_reserve_tokens.unwrap_or(16_384),
             compaction_abort: Arc::new(std::sync::Mutex::new(None)),
             lifecycle_state: Arc::new(AtomicU8::new(SESSION_OPEN)),
             events,
             activity,
             bash_abort: Arc::new(std::sync::Mutex::new(None)),
+            retry_settings: options.retry,
+            retry_abort: Arc::new(std::sync::Mutex::new(None)),
+            shell_path: options.shell_path,
+            shell_command_prefix: options.shell_command_prefix,
         });
         session.attach_agent_bridge();
         Ok(PreparedAgentSession { session })
@@ -544,11 +600,16 @@ impl AgentSession {
             operation_gate: Arc::new(tokio::sync::Mutex::new(())),
             compaction_settings: options.compaction,
             context_window: options.context_window,
+            branch_summary_reserve_tokens: options.branch_summary_reserve_tokens.unwrap_or(16_384),
             compaction_abort: Arc::new(std::sync::Mutex::new(None)),
             lifecycle_state: Arc::new(AtomicU8::new(SESSION_OPEN)),
             events,
             activity,
             bash_abort: Arc::new(std::sync::Mutex::new(None)),
+            retry_settings: options.retry,
+            retry_abort: Arc::new(std::sync::Mutex::new(None)),
+            shell_path: options.shell_path,
+            shell_command_prefix: options.shell_command_prefix,
         });
         session.attach_agent_bridge();
         Ok(PreparedAgentSession { session })
@@ -889,7 +950,22 @@ impl AgentSession {
     /// Requests cancellation without waiting for the operation gate. Any
     /// undelivered queue items are retained for [`Self::clear_queue`].
     pub fn abort(&self) {
+        if let Some(retry) = self
+            .retry_abort
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            retry.abort();
+        }
         self.runtime.abort();
+    }
+
+    pub fn is_retrying(&self) -> bool {
+        self.retry_abort
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 
     pub async fn execute_shell(
@@ -928,13 +1004,18 @@ impl AgentSession {
         }
         self.events
             .publish_bash_start(id.clone(), command.clone(), options.exclude_from_context);
+        let resolved_command = self
+            .shell_command_prefix
+            .as_deref()
+            .filter(|prefix| !prefix.is_empty())
+            .map_or_else(|| command.clone(), |prefix| format!("{prefix}\n{command}"));
         let events = Arc::clone(&self.events);
         let update_id = id.clone();
         let execution = pi_shell::execute(ShellRequest {
-            command: command.clone(),
+            command: resolved_command,
             cwd: self.runtime.cwd().to_path_buf(),
             timeout: options.timeout,
-            shell_path: options.shell_path,
+            shell_path: options.shell_path.or_else(|| self.shell_path.clone()),
             abort_signal: signal,
             on_chunk: Some(Arc::new(move |chunk: ShellChunk| {
                 events.publish_bash_update(update_id.clone(), chunk.stream, chunk.text);
@@ -1265,20 +1346,105 @@ impl AgentSession {
         &self,
         recorded: RuntimePromptOutcome,
     ) -> Result<AgentLoopOutcome, SessionError> {
-        let outcome = self.record_prompt(recorded)?;
-        if self.compaction_settings.enabled && self.is_overflow_outcome(&outcome) {
-            if self
-                .run_compaction_locked(crate::CompactionReason::Overflow, true, None, true)
-                .await
-                .is_ok()
-                && let Ok(retried) = self.runtime.continue_recorded().await
-            {
-                return self.record_prompt(retried);
+        let mut recorded = recorded;
+        let mut retry_attempt = 0_u32;
+        let mut overflow_recovery_attempted = false;
+        loop {
+            let outcome = self.record_prompt(recorded)?;
+
+            if self.is_overflow_outcome(&outcome) {
+                if retry_attempt > 0 {
+                    self.events.publish_auto_retry_end(
+                        false,
+                        retry_attempt,
+                        assistant_error_message(&outcome).map(ToOwned::to_owned),
+                    );
+                    retry_attempt = 0;
+                }
+                if self.compaction_settings.enabled && !overflow_recovery_attempted {
+                    overflow_recovery_attempted = true;
+                    if self
+                        .run_compaction_locked(crate::CompactionReason::Overflow, true, None, true)
+                        .await
+                        .is_ok()
+                        && let Ok(retried) = self.runtime.continue_recorded().await
+                    {
+                        recorded = retried;
+                        continue;
+                    }
+                }
+                return Ok(outcome);
             }
+
+            if self.retry_settings.enabled
+                && retry_attempt < self.retry_settings.max_retries
+                && is_retryable_assistant_outcome(&outcome)
+            {
+                retry_attempt = retry_attempt.saturating_add(1);
+                let delay_ms = retry_delay_ms(self.retry_settings.base_delay_ms, retry_attempt);
+                self.events.publish_auto_retry_start(
+                    retry_attempt,
+                    self.retry_settings.max_retries,
+                    delay_ms,
+                    assistant_error_message(&outcome)
+                        .unwrap_or("Unknown error")
+                        .to_string(),
+                );
+                self.runtime
+                    .agent()
+                    .remove_last_failed_assistant()
+                    .map_err(|error| SessionError::Runtime(error.to_string()))?;
+                if !self.wait_for_retry_delay(delay_ms).await {
+                    self.events.publish_auto_retry_end(
+                        false,
+                        retry_attempt,
+                        Some("Retry cancelled".to_string()),
+                    );
+                    return Ok(outcome);
+                }
+                match self.runtime.continue_recorded().await {
+                    Ok(retried) => {
+                        recorded = retried;
+                        continue;
+                    }
+                    Err(error) => {
+                        self.events.publish_auto_retry_end(
+                            false,
+                            retry_attempt,
+                            Some(error.to_string()),
+                        );
+                        return Err(error.into());
+                    }
+                }
+            }
+
+            if retry_attempt > 0 {
+                self.events.publish_auto_retry_end(
+                    assistant_outcome_succeeded(&outcome),
+                    retry_attempt,
+                    assistant_error_message(&outcome).map(ToOwned::to_owned),
+                );
+            }
+            self.maybe_threshold_compact_locked().await;
             return Ok(outcome);
         }
-        self.maybe_threshold_compact_locked().await;
-        Ok(outcome)
+    }
+
+    async fn wait_for_retry_delay(&self, delay_ms: u64) -> bool {
+        let (abort, signal) = AbortHandle::new();
+        *self
+            .retry_abort
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(abort);
+        let cancelled = tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => false,
+            () = signal.wait() => true,
+        };
+        self.retry_abort
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        !cancelled
     }
 
     fn record_prompt(
@@ -1946,10 +2112,15 @@ impl AgentSession {
         let preparation = tree_preparation(&document, Some(leaf_id), true)?;
         let context =
             crate::build_session_context(&preparation.entries_to_summarize, &self.context_options);
-        let (summary, usage) = if context.messages.is_empty() {
+        let summary_messages = branch_summary_input_messages(
+            context.messages,
+            self.active_context_window().unwrap_or(128_000),
+            self.branch_summary_reserve_tokens,
+        );
+        let (summary, usage) = if summary_messages.is_empty() {
             ("No content to summarize".to_string(), None)
         } else {
-            let conversation = serde_json::to_string_pretty(&context.messages)
+            let conversation = serde_json::to_string_pretty(&summary_messages)
                 .map_err(|error| SessionError::InvalidPayload(error.to_string()))?;
             let instructions = match (custom_instructions, replace_instructions) {
                 (Some(custom), true) => custom,
@@ -1969,6 +2140,7 @@ impl AgentSession {
                             now_ms(),
                         ))],
                         thinking_level: self.runtime.agent().state().thinking_level,
+                        thinking_budgets: self.runtime.agent().thinking_budgets(),
                         max_output_tokens: Some(2_048),
                     },
                     signal,
@@ -2134,6 +2306,75 @@ fn input_user_message(text: &str, images: &[ImageContent], timestamp_ms: i64) ->
         content,
         timestamp_ms,
     }
+}
+
+fn last_assistant(outcome: &AgentLoopOutcome) -> Option<&pi_core::AssistantMessage> {
+    outcome
+        .final_context
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            Message::Assistant(message) => Some(message.as_ref()),
+            _ => None,
+        })
+}
+
+fn assistant_error_message(outcome: &AgentLoopOutcome) -> Option<&str> {
+    last_assistant(outcome)?.error_message.as_deref()
+}
+
+fn assistant_outcome_succeeded(outcome: &AgentLoopOutcome) -> bool {
+    last_assistant(outcome).is_some_and(|message| message.stop_reason != StopReason::Error)
+}
+
+fn retry_delay_ms(base_delay_ms: u64, attempt: u32) -> u64 {
+    let multiplier = 1_u64
+        .checked_shl(attempt.saturating_sub(1))
+        .unwrap_or(u64::MAX);
+    base_delay_ms.saturating_mul(multiplier)
+}
+
+fn is_retryable_assistant_outcome(outcome: &AgentLoopOutcome) -> bool {
+    let Some(message) = last_assistant(outcome) else {
+        return false;
+    };
+    if message.stop_reason != StopReason::Error {
+        return false;
+    }
+    let Some(error) = message.error_message.as_deref() else {
+        return false;
+    };
+    pi_core::is_retryable_provider_error_message(error)
+}
+
+fn branch_summary_input_messages(
+    messages: Vec<AgentMessage>,
+    context_window: u64,
+    reserve_tokens: u64,
+) -> Vec<AgentMessage> {
+    let messages = messages
+        .into_iter()
+        .filter(|message| !matches!(message.as_standard(), Some(Message::ToolResult(_))))
+        .collect::<Vec<_>>();
+    let Some(token_budget) = context_window.checked_sub(reserve_tokens) else {
+        return messages;
+    };
+    if token_budget == 0 {
+        return messages;
+    }
+    let mut total_tokens = 0_u64;
+    let mut selected = Vec::new();
+    for message in messages.into_iter().rev() {
+        let tokens = estimate_context_tokens(std::slice::from_ref(&message)).tokens;
+        if total_tokens.saturating_add(tokens) > token_budget {
+            break;
+        }
+        total_tokens = total_tokens.saturating_add(tokens);
+        selected.push(message);
+    }
+    selected.reverse();
+    selected
 }
 
 fn message_display_text(message: &Message) -> String {
@@ -2925,6 +3166,25 @@ mod tests {
         assert!(empty.common_ancestor_id.is_none());
     }
 
+    #[test]
+    fn branch_summary_reserve_keeps_newest_messages_within_model_budget() {
+        let selected = branch_summary_input_messages(
+            vec![
+                AgentMessage::from(Message::User(UserMessage::text("old ".repeat(200), 1))),
+                AgentMessage::from(Message::User(UserMessage::text("new", 2))),
+            ],
+            100,
+            90,
+        );
+
+        assert_eq!(selected.len(), 1);
+        assert!(matches!(
+            selected[0].as_standard(),
+            Some(Message::User(user))
+                if matches!(&user.content[0], ContentBlock::Text(text) if text.text == "new")
+        ));
+    }
+
     #[pi_core::agent_plugin]
     impl AgentPlugin for BeforeStartInjectionPlugin {
         fn id(&self) -> PluginId {
@@ -3310,6 +3570,43 @@ mod tests {
                 .iter()
                 .any(|message| { matches!(message.as_standard(), Some(Message::Assistant(_))) })
         );
+    }
+
+    #[tokio::test]
+    async fn shell_defaults_affect_execution_but_preserve_the_submitted_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("shell-settings.jsonl");
+        let original = "printf '%s' \"$configured_value\"";
+        let session = AgentSession::create_with_options(
+            scripted_runtime([]),
+            &path,
+            AgentSessionOptions::default().shell(
+                if cfg!(unix) {
+                    Some(PathBuf::from("/bin/sh"))
+                } else {
+                    None
+                },
+                Some("configured_value=from-settings".to_string()),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let result = session
+            .execute_shell(original, ShellExecutionOptions::default())
+            .await
+            .unwrap();
+
+        assert_eq!(result.output, "from-settings");
+        let message = session
+            .log()
+            .load()
+            .unwrap()
+            .messages()
+            .into_iter()
+            .find(|message| message.role() == "bashExecution")
+            .expect("bash execution message");
+        assert_eq!(message.as_custom().unwrap()["command"], original);
     }
 
     struct LifecyclePlugin {
@@ -4263,6 +4560,189 @@ mod tests {
         assert!(compaction.unwrap().retained_tail.iter().all(|message| {
             !matches!(message.as_standard(), Some(Message::Assistant(assistant)) if assistant.stop_reason == StopReason::Error)
         }));
+    }
+
+    #[tokio::test]
+    async fn transient_provider_failure_retries_without_reprojecting_failed_assistant() {
+        let directory = tempfile::tempdir().unwrap();
+        let provider_plugin = ScriptedProviderPlugin::scripted([
+            ScriptedTurn::Error("503 service unavailable".to_string()),
+            ScriptedTurn::Text("recovered".to_string()),
+        ]);
+        let provider = provider_plugin.provider();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(provider_plugin)
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("test"),
+                ..AgentOptions::default()
+            })
+            .build()
+            .unwrap();
+        let session = AgentSession::create_with_options(
+            runtime,
+            directory.path().join("session.jsonl"),
+            AgentSessionOptions::default().retry(AutoRetrySettings {
+                enabled: true,
+                max_retries: 3,
+                base_delay_ms: 0,
+            }),
+        )
+        .await
+        .unwrap();
+        let mut subscription = session.subscribe();
+
+        let outcome = session.prompt("recover this").await.unwrap();
+
+        assert_eq!(outcome.stop, AgentLoopStop::Completed);
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].messages.iter().all(|message| {
+            !matches!(message, Message::Assistant(assistant) if assistant.stop_reason == StopReason::Error)
+        }));
+        let messages = session
+            .log()
+            .load()
+            .unwrap()
+            .entries
+            .iter()
+            .filter_map(|record| match &record.entry {
+                SessionEntry::Message(message) => message.message.as_standard(),
+                _ => None,
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(messages.iter().any(|message| {
+            matches!(message, Message::Assistant(assistant) if assistant.stop_reason == StopReason::Error)
+        }));
+        assert!(messages.iter().any(|message| {
+            matches!(message, Message::Assistant(assistant) if assistant.stop_reason == StopReason::Stop)
+        }));
+
+        let mut starts = Vec::new();
+        let mut ends = Vec::new();
+        while let Ok(event) = subscription.events.try_recv() {
+            match event.event {
+                AgentSessionEvent::AutoRetryStart {
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    ..
+                } => starts.push((attempt, max_attempts, delay_ms)),
+                AgentSessionEvent::AutoRetryEnd {
+                    success, attempt, ..
+                } => ends.push((success, attempt)),
+                _ => {}
+            }
+        }
+        assert_eq!(starts, vec![(1, 3, 0)]);
+        assert_eq!(ends, vec![(true, 1)]);
+        assert!(session.snapshot().auto_retry.is_none());
+    }
+
+    #[tokio::test]
+    async fn quota_failure_is_not_retried() {
+        let directory = tempfile::tempdir().unwrap();
+        let provider_plugin = ScriptedProviderPlugin::scripted([ScriptedTurn::Error(
+            "429 insufficient_quota: check billing".to_string(),
+        )]);
+        let provider = provider_plugin.provider();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(provider_plugin)
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("test"),
+                ..AgentOptions::default()
+            })
+            .build()
+            .unwrap();
+        let session = AgentSession::create_with_options(
+            runtime,
+            directory.path().join("session.jsonl"),
+            AgentSessionOptions::default().retry(AutoRetrySettings {
+                enabled: true,
+                max_retries: 3,
+                base_delay_ms: 0,
+            }),
+        )
+        .await
+        .unwrap();
+        let mut subscription = session.subscribe();
+
+        let outcome = session.prompt("do not retry quota").await.unwrap();
+
+        assert_eq!(outcome.stop, AgentLoopStop::ProviderError);
+        assert_eq!(provider.requests().len(), 1);
+        assert!(
+            !std::iter::from_fn(|| subscription.events.try_recv().ok()).any(|event| {
+                matches!(
+                    event.event,
+                    AgentSessionEvent::AutoRetryStart { .. }
+                        | AgentSessionEvent::AutoRetryEnd { .. }
+                )
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_cancels_retry_backoff_without_starting_another_provider_call() {
+        let directory = tempfile::tempdir().unwrap();
+        let provider_plugin = ScriptedProviderPlugin::scripted([
+            ScriptedTurn::Error("connection lost".to_string()),
+            ScriptedTurn::Text("must not run".to_string()),
+        ]);
+        let provider = provider_plugin.provider();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(provider_plugin)
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("test"),
+                ..AgentOptions::default()
+            })
+            .build()
+            .unwrap();
+        let session = AgentSession::create_with_options(
+            runtime,
+            directory.path().join("session.jsonl"),
+            AgentSessionOptions::default().retry(AutoRetrySettings {
+                enabled: true,
+                max_retries: 3,
+                base_delay_ms: 30_000,
+            }),
+        )
+        .await
+        .unwrap();
+        let mut subscription = session.subscribe();
+        let prompting = tokio::spawn({
+            let session = session.clone();
+            async move { session.prompt("cancel retry").await }
+        });
+
+        loop {
+            let event = subscription.events.recv().await.unwrap();
+            if matches!(event.event, AgentSessionEvent::AutoRetryStart { .. }) {
+                break;
+            }
+        }
+        assert!(session.is_retrying());
+        session.abort();
+
+        let outcome = prompting.await.unwrap().unwrap();
+        assert_eq!(outcome.stop, AgentLoopStop::ProviderError);
+        assert_eq!(provider.requests().len(), 1);
+        assert!(!session.is_retrying());
+        let retry_end = loop {
+            let event = subscription.events.recv().await.unwrap();
+            if let AgentSessionEvent::AutoRetryEnd {
+                success,
+                attempt,
+                final_error,
+            } = event.event
+            {
+                break (success, attempt, final_error);
+            }
+        };
+        assert_eq!(retry_end, (false, 1, Some("Retry cancelled".to_string())));
     }
 
     #[tokio::test]

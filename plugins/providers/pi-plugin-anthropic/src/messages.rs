@@ -184,7 +184,10 @@ pub fn request_body(request: &ProviderRequest, mode: AnthropicMode) -> Value {
             }
         } else {
             let max_tokens = request.max_output_tokens.unwrap_or(16_384);
-            let budget = thinking_budget(request.thinking_level)
+            let budget = request
+                .thinking_budgets
+                .and_then(|budgets| budgets.for_level(request.thinking_level))
+                .unwrap_or_else(|| thinking_budget(request.thinking_level))
                 .min(max_tokens.saturating_sub(1_024))
                 .max(1);
             body["thinking"] = json!({
@@ -827,6 +830,7 @@ mod tests {
                 prompt_guidelines: Vec::new(),
             }],
             thinking_level: ThinkingLevel::High,
+            thinking_budgets: None,
             max_output_tokens: Some(100),
             headers: Default::default(),
             sampling_params: Default::default(),

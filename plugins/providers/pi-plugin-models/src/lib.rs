@@ -11,6 +11,7 @@ use std::sync::Arc;
 use pi_core::{
     PluginId, ProviderError, ProviderId, ProviderPlugin, ProviderRegisterContext, Result,
 };
+use pi_provider::{HttpTransport, ReqwestTransport};
 
 use config::{PreparedProvider, compile_extension_provider, load_models_file};
 use provider::ModelsJsonProvider;
@@ -93,6 +94,7 @@ pub enum ModelsPluginError {
 pub struct ModelsPlugin {
     providers: Vec<PreparedProviderLayers>,
     resolver: Arc<ConfigValueResolver>,
+    transport: Arc<dyn HttpTransport>,
 }
 
 struct PreparedProviderLayers {
@@ -102,6 +104,13 @@ struct PreparedProviderLayers {
 
 impl ModelsPlugin {
     pub fn load(options: ModelsPluginOptions) -> std::result::Result<Self, ModelsPluginError> {
+        Self::load_with_transport(options, Arc::new(ReqwestTransport::new()))
+    }
+
+    pub fn load_with_transport(
+        options: ModelsPluginOptions,
+        transport: Arc<dyn HttpTransport>,
+    ) -> std::result::Result<Self, ModelsPluginError> {
         let file_providers = load_models_file(&options.path, &options.runtime_api_keys)?;
         let mut providers = BTreeMap::<ProviderId, PreparedProviderLayers>::new();
         for provider in file_providers {
@@ -126,6 +135,7 @@ impl ModelsPlugin {
         Ok(Self {
             providers: providers.into_values().collect(),
             resolver: Arc::new(ConfigValueResolver::default()),
+            transport,
         })
     }
 
@@ -176,11 +186,12 @@ impl ProviderPlugin for ModelsPlugin {
             let configured = configured
                 .compose(&base_models)
                 .map_err(ProviderError::Failure)?;
-            context.register_provider_override(Arc::new(ModelsJsonProvider::new(
+            context.register_provider_override(Arc::new(ModelsJsonProvider::with_transport(
                 configured.clone(),
                 fallback,
                 fallback_apis,
                 Arc::clone(&self.resolver),
+                Arc::clone(&self.transport),
             )))?;
             if configured.replace_models {
                 context.replace_provider_models(

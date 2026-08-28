@@ -3,21 +3,30 @@ use std::io::IsTerminal;
 use pi_js_package_manager::{
     ManageOperation, ManageResult, PackageManager, PackageScope, ResolveRequest,
 };
+use pi_settings::SettingsManager;
 
 use crate::config::{AppConfig, Cli, CliCommand};
 
-pub(crate) async fn run(cli: &Cli, config: &AppConfig, command: &CliCommand) -> Result<(), String> {
+pub(crate) async fn run(
+    cli: &Cli,
+    config: &AppConfig,
+    command: &CliCommand,
+    settings: &SettingsManager,
+) -> Result<(), String> {
     let interactive = !matches!(command, CliCommand::Update { .. })
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal();
-    let trust = crate::resolve_project_trust(cli, config, interactive).await?;
-    let mut manager = PackageManager::new(ResolveRequest {
-        cwd: config.cwd.clone(),
-        agent_dir: config.agent_dir.clone(),
-        project_trusted: trust.trusted(),
-        explicit_sources: Vec::new(),
-        discover_extensions: true,
-    });
+    let trust = crate::resolve_project_trust(cli, config, interactive, settings).await?;
+    let mut manager = PackageManager::with_settings(
+        ResolveRequest {
+            cwd: config.cwd.clone(),
+            agent_dir: config.agent_dir.clone(),
+            project_trusted: trust.trusted(),
+            explicit_sources: Vec::new(),
+            discover_extensions: true,
+        },
+        settings.clone(),
+    );
 
     let operation = operation(command)?;
     let requested_update_source = match &operation {

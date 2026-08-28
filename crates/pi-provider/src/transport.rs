@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use async_stream::stream;
 use async_trait::async_trait;
@@ -78,11 +78,30 @@ pub async fn post_json_with_provider_hooks(
     Ok(response)
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReqwestTransportConfig {
     /// Overrides provider-aware defaults. `Some(Duration::ZERO)` disables timeouts.
     pub timeout: Option<Duration>,
     pub user_agent: Option<String>,
+    /// Explicit proxy used for both HTTP and HTTPS requests. When absent,
+    /// reqwest's normal environment proxy discovery remains active.
+    pub proxy: Option<String>,
+    /// Fresh request attempts after a retryable transport or HTTP failure.
+    pub max_retries: u32,
+    /// Maximum provider-requested retry delay. Zero disables the limit.
+    pub max_retry_delay: Duration,
+}
+
+impl Default for ReqwestTransportConfig {
+    fn default() -> Self {
+        Self {
+            timeout: None,
+            user_agent: None,
+            proxy: None,
+            max_retries: 0,
+            max_retry_delay: Duration::from_secs(60),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -101,6 +120,16 @@ impl ReqwestTransport {
         let mut builder = reqwest::Client::builder();
         if let Some(user_agent) = &config.user_agent {
             builder = builder.user_agent(user_agent);
+        }
+        if let Some(proxy) = config
+            .proxy
+            .as_deref()
+            .map(str::trim)
+            .filter(|proxy| !proxy.is_empty())
+        {
+            builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|error| {
+                TransportError::InvalidConfiguration(format!("invalid HTTP proxy: {error}"))
+            })?);
         }
         let client = builder
             .build()
@@ -161,24 +190,51 @@ impl HttpTransport for ReqwestTransport {
             request_headers.insert(name, value);
         }
 
-        let send = self
-            .client
-            .post(url)
-            .headers(request_headers)
-            .json(body)
-            .send();
-        let response = if let Some(timeout) = self.timeout_for(url) {
-            tokio::select! {
-                _ = signal.wait() => return Err(TransportError::Aborted),
-                result = tokio::time::timeout(timeout, send) => match result {
-                    Ok(result) => result.map_err(|error| TransportError::Request(error.to_string()))?,
-                    Err(_) => return Err(TransportError::Timeout { seconds: timeout.as_secs() }),
+        let mut retry_index = 0_u32;
+        let response = loop {
+            let send = self
+                .client
+                .post(url)
+                .headers(request_headers.clone())
+                .json(body)
+                .send();
+            let result = if let Some(timeout) = self.timeout_for(url) {
+                tokio::select! {
+                    _ = signal.wait() => return Err(TransportError::Aborted),
+                    result = tokio::time::timeout(timeout, send) => match result {
+                        Ok(result) => result.map_err(|error| TransportError::Request(error.to_string())),
+                        Err(_) => Err(TransportError::Timeout { seconds: timeout.as_secs() }),
+                    }
                 }
-            }
-        } else {
-            tokio::select! {
-                _ = signal.wait() => return Err(TransportError::Aborted),
-                result = send => result.map_err(|error| TransportError::Request(error.to_string()))?,
+            } else {
+                tokio::select! {
+                    _ = signal.wait() => return Err(TransportError::Aborted),
+                    result = send => result.map_err(|error| TransportError::Request(error.to_string())),
+                }
+            };
+            match result {
+                Ok(response)
+                    if retry_index < self.config.max_retries
+                        && response_is_retryable(
+                            response.status().as_u16(),
+                            response.headers(),
+                        ) =>
+                {
+                    let delay =
+                        retry_delay(response.headers(), retry_index, self.config.max_retry_delay)?;
+                    retry_index = retry_index.saturating_add(1);
+                    wait_for_retry(delay, &signal).await?;
+                }
+                Ok(response) => break response,
+                Err(error)
+                    if retry_index < self.config.max_retries
+                        && !matches!(error, TransportError::Aborted) =>
+                {
+                    let delay = exponential_retry_delay(retry_index);
+                    retry_index = retry_index.saturating_add(1);
+                    wait_for_retry(delay, &signal).await?;
+                }
+                Err(error) => return Err(error),
             }
         };
 
@@ -244,6 +300,69 @@ impl HttpTransport for ReqwestTransport {
     }
 }
 
+fn response_is_retryable(status: u16, headers: &HeaderMap) -> bool {
+    match headers
+        .get("x-should-retry")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some("true") => return true,
+        Some("false") => return false,
+        _ => {}
+    }
+    matches!(status, 408 | 409 | 429 | 500..=599)
+}
+
+fn retry_delay(
+    headers: &HeaderMap,
+    retry_index: u32,
+    max_retry_delay: Duration,
+) -> Result<Duration, TransportError> {
+    let requested = headers
+        .get("retry-after-ms")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|milliseconds| milliseconds.is_finite())
+        .map(|milliseconds| Duration::from_secs_f64((milliseconds.max(0.0)) / 1_000.0))
+        .or_else(|| {
+            headers
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| {
+                    value
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|seconds| seconds.is_finite())
+                        .map(|seconds| Duration::from_secs_f64(seconds.max(0.0)))
+                        .or_else(|| {
+                            httpdate::parse_http_date(value).ok().map(|date| {
+                                date.duration_since(SystemTime::now()).unwrap_or_default()
+                            })
+                        })
+                })
+        });
+    let delay = requested.unwrap_or_else(|| exponential_retry_delay(retry_index));
+    if !max_retry_delay.is_zero() && delay > max_retry_delay {
+        return Err(TransportError::Request(format!(
+            "server requested {}s retry delay (max: {}s)",
+            delay.as_secs_f64().ceil(),
+            max_retry_delay.as_secs_f64().ceil()
+        )));
+    }
+    Ok(delay)
+}
+
+fn exponential_retry_delay(retry_index: u32) -> Duration {
+    let exponent = retry_index.min(4);
+    Duration::from_millis(500_u64.saturating_mul(1_u64 << exponent).min(8_000))
+}
+
+async fn wait_for_retry(delay: Duration, signal: &AbortSignal) -> Result<(), TransportError> {
+    tokio::select! {
+        () = tokio::time::sleep(delay) => Ok(()),
+        () = signal.wait() => Err(TransportError::Aborted),
+    }
+}
+
 fn url_is_local(url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(url) else {
         return false;
@@ -279,7 +398,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::Poll;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime};
 
     use async_trait::async_trait;
     use futures::StreamExt;
@@ -288,11 +407,12 @@ mod tests {
         PluginId, ProviderCallContext, ProviderId, ProviderPlugin, ProviderPluginContext,
         ProviderPluginDriver,
     };
+    use reqwest::header::{HeaderMap, HeaderValue};
     use serde_json::{Value, json};
 
     use super::{
         DEFAULT_REMOTE_TIMEOUT, HttpResponse, HttpTransport, ReqwestTransport, TransportError,
-        post_json_with_provider_hooks,
+        post_json_with_provider_hooks, response_is_retryable, retry_delay,
     };
 
     struct CapturingTransport {
@@ -365,6 +485,45 @@ mod tests {
             ReqwestTransport::new().timeout_for("https://api.example.test/v1/chat/completions"),
             Some(Duration::from_secs(300))
         );
+    }
+
+    #[test]
+    fn provider_retry_policy_honors_status_overrides_and_delay_cap() {
+        let mut headers = HeaderMap::new();
+        assert!(response_is_retryable(503, &headers));
+        assert!(!response_is_retryable(400, &headers));
+
+        headers.insert("x-should-retry", HeaderValue::from_static("true"));
+        assert!(response_is_retryable(400, &headers));
+        headers.insert("x-should-retry", HeaderValue::from_static("false"));
+        assert!(!response_is_retryable(503, &headers));
+
+        headers.remove("x-should-retry");
+        headers.insert("retry-after-ms", HeaderValue::from_static("1500"));
+        assert!(matches!(
+            retry_delay(&headers, 0, Duration::from_secs(1)),
+            Err(TransportError::Request(message)) if message.contains("retry delay")
+        ));
+        assert_eq!(
+            retry_delay(&headers, 0, Duration::ZERO).unwrap(),
+            Duration::from_millis(1_500)
+        );
+
+        headers.remove("retry-after-ms");
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            HeaderValue::from_str(&httpdate::fmt_http_date(
+                SystemTime::now() + Duration::from_secs(120),
+            ))
+            .unwrap(),
+        );
+        assert!(matches!(
+            retry_delay(&headers, 0, Duration::from_secs(60)),
+            Err(TransportError::Request(message)) if message.contains("retry delay")
+        ));
+        let date_delay = retry_delay(&headers, 0, Duration::ZERO).unwrap();
+        assert!(date_delay >= Duration::from_secs(118));
+        assert!(date_delay <= Duration::from_secs(120));
     }
 
     #[tokio::test]

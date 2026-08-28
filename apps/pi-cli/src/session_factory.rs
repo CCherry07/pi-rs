@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_agent::AgentOptions;
-use pi_core::{ModelId, PluginId, ProviderId};
+use pi_agent::{AgentOptions, QueueMode};
+use pi_core::{ModelId, PluginId, ProviderId, ThinkingBudgets, ThinkingLevel};
 use pi_js_package_manager::{PackageManager as JsPackageManager, ResolvedExtensionIdentity};
 use pi_js_plugin::{
     ExtensionContextAccess, ExtensionProviderMutationAccess, ExtensionSessionBinding,
@@ -12,7 +12,7 @@ use pi_js_plugin::{
     SessionExtensionContextAccess,
 };
 use pi_plugin_anthropic::AnthropicPlugin;
-use pi_plugin_bash::BashPlugin;
+use pi_plugin_bash::{BashToolOptions, ConfiguredBashPlugin};
 use pi_plugin_edit::EditPlugin;
 use pi_plugin_find::FindPlugin;
 use pi_plugin_google::GooglePlugin;
@@ -24,18 +24,26 @@ use pi_plugin_manager::{
     InstallScope, PluginManager, PluginManagerOptions, PreparedPluginReconcile,
 };
 use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
-use pi_plugin_openai::{OpenAiCodexPlugin, OpenAiCompatibleConfig, OpenAiCompatiblePlugin};
+use pi_plugin_openai::{
+    CodexTransport, CodexTransportOptions, OpenAiCodexPlugin, OpenAiCompatibleConfig,
+    OpenAiCompatiblePlugin,
+};
 use pi_plugin_prompts::{PromptTemplateLoaderOptions, PromptTemplatesPlugin};
-use pi_plugin_read::ReadPlugin;
+use pi_plugin_read::ConfiguredReadPlugin;
 use pi_plugin_skills::{SkillLoaderOptions, SkillsPlugin};
 use pi_plugin_write::WritePlugin;
 use pi_plugin_xai::XAiPlugin;
+use pi_provider::{HttpTransport, ReqwestTransport, ReqwestTransportConfig};
 use pi_resources::ResourceLoaderOptions;
-use pi_runtime::{PiRuntime, RuntimeError, SystemPrompt};
+use pi_runtime::{CompletionRetryPolicy, PiRuntime, RuntimeError, SystemPrompt};
 use pi_session::{
     AgentSession, AgentSessionOptions, AgentSessionRuntimeFactory, AgentSessionRuntimeRequest,
-    AgentSessionRuntimeTarget, InitialModelRequest, ModelRuntimeServices, PreparedAgentSession,
-    SessionError, SessionPlugins, SessionRuntimeInventory,
+    AgentSessionRuntimeTarget, AutoRetrySettings, CompactionSettings as SessionCompactionSettings,
+    InitialModelRequest, ModelRuntimeServices, PreparedAgentSession, SessionError, SessionPlugins,
+    SessionRuntimeInventory,
+};
+use pi_settings::{
+    QueueModeSetting, SettingsContext, SettingsManager, ThinkingLevelSetting, TransportSetting,
 };
 
 use crate::auth::{StoredCredential, read_stored_credential};
@@ -43,10 +51,22 @@ use crate::config::AppConfig;
 use crate::dynamic_providers::{DynamicProviderCandidate, DynamicProviderOverlay};
 use crate::project_trust::ProjectTrustService;
 
+const BUILTIN_TOOL_NAMES: [&str; 8] = [
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "write",
+    "edit",
+    "hashline_edit",
+    "bash",
+];
+
 #[derive(Clone)]
 pub(crate) struct ProductSessionFactory {
     config: AppConfig,
     project_trust: ProjectTrustService,
+    settings: SettingsManager,
     js_plugin_host: Option<Arc<dyn JsPluginHost>>,
     js_session_binding: Option<ExtensionSessionBinding>,
     js_host_mode: JsHostMode,
@@ -54,10 +74,15 @@ pub(crate) struct ProductSessionFactory {
 }
 
 impl ProductSessionFactory {
-    pub(crate) fn new(config: AppConfig, project_trust: ProjectTrustService) -> Self {
+    pub(crate) fn new(
+        config: AppConfig,
+        project_trust: ProjectTrustService,
+        settings: SettingsManager,
+    ) -> Self {
         Self {
             config,
             project_trust,
+            settings,
             js_plugin_host: None,
             js_session_binding: None,
             js_host_mode: JsHostMode::Print,
@@ -113,6 +138,34 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             .resolve(&config.cwd)
             .await
             .map_err(|error| SessionError::Runtime(error.to_string()))?;
+        let settings = self
+            .settings
+            .load(&SettingsContext::new(&config.cwd, project_trusted));
+        config.runtime_settings = settings.effective().clone();
+        // Pi treats the proxy as process/bootstrap configuration. A trusted
+        // project may tune request behavior, but cannot redirect HTTP traffic.
+        config.runtime_settings.http_proxy = settings.global().http_proxy.clone();
+        config.settings_diagnostics = settings
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| pi_resources::ResourceDiagnostic {
+                kind: pi_resources::DiagnosticKind::Warning,
+                message: diagnostic.message.clone(),
+                path: diagnostic.path.clone(),
+            })
+            .collect();
+        config.settings_skill_paths = scoped_setting_paths(
+            &settings.global().skills,
+            &config.agent_dir,
+            &settings.project().skills,
+            &config.cwd.join(".pi"),
+        );
+        config.settings_prompt_paths = scoped_setting_paths(
+            &settings.global().prompts,
+            &config.agent_dir,
+            &settings.project().prompts,
+            &config.cwd.join(".pi"),
+        );
         let package_reconciliations = prepare_native_packages(&config, project_trusted).await?;
         let mut native_options = NativePluginLoaderOptions::new(&config.cwd, &config.agent_dir);
         native_options.project_trusted = project_trusted;
@@ -122,17 +175,25 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             .map_err(|error| SessionError::Runtime(error.to_string()))?;
         let configured_native_plugins =
             configured_native_plugin_ids(&package_reconciliations, &native_plugins);
+        let js_resolution = JsPackageManager::with_settings(
+            config.javascript_resolve_request(project_trusted),
+            self.settings.clone(),
+        )
+        .resolve()
+        .await
+        .map_err(|error| SessionError::Runtime(error.to_string()))?;
+        config
+            .settings_skill_paths
+            .extend(js_resolution.skill_paths.iter().cloned());
+        config
+            .settings_prompt_paths
+            .extend(js_resolution.prompt_paths.iter().cloned());
         let mut js_context = None;
         let mut js_extensions = Vec::new();
         let mut dynamic_provider_candidate = None;
         let js_generation = if let Some(host) = &self.js_plugin_host {
-            let resolution =
-                JsPackageManager::new(config.javascript_resolve_request(project_trusted))
-                    .resolve()
-                    .await
-                    .map_err(|error| SessionError::Runtime(error.to_string()))?;
-            let extension_labels = javascript_inventory_labels(&resolution.extension_identities);
-            let extension_paths = resolution.extension_paths;
+            let extension_labels = javascript_inventory_labels(&js_resolution.extension_identities);
+            let extension_paths = js_resolution.extension_paths;
             let manifest = host
                 .prepare_generation(JsGenerationRequest {
                     project_trusted,
@@ -210,11 +271,26 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
         }
         let session_options = AgentSessionOptions::default()
             .plugins(session_plugins)
+            .compaction(session_compaction_settings(&config))
+            .branch_summary_reserve_tokens(config.runtime_settings.branch_summary.reserve_tokens)
+            .retry(AutoRetrySettings {
+                enabled: config.runtime_settings.retry.enabled,
+                max_retries: config.runtime_settings.retry.max_retries,
+                base_delay_ms: config.runtime_settings.retry.base_delay_ms,
+            })
             .initial_model(initial_model_request(&config))
             .runtime_inventory(SessionRuntimeInventory::new(
                 js_extensions,
                 configured_native_plugins,
             ))
+            .shell(
+                config
+                    .runtime_settings
+                    .shell_path
+                    .as_deref()
+                    .map(expand_tilde_path),
+                config.runtime_settings.shell_command_prefix.clone(),
+            )
             .parent_session_path(parent_session);
         let prepared = if create {
             AgentSession::prepare_create_with_options(runtime, path, session_options).await
@@ -410,6 +486,8 @@ fn build_runtime_with_codex_credentials(
     dynamic_providers: Option<&DynamicProviderCandidate>,
     codex_credentials: Option<pi_plugin_openai::CodexCredentials>,
 ) -> Result<PiRuntime, RuntimeError> {
+    let transport = provider_transport(config)?;
+    let codex_transport_options = codex_transport_options(config);
     let stored_anthropic =
         read_stored_credential(&config.agent_dir, "anthropic").map_err(RuntimeError::Build)?;
     let stored_google =
@@ -435,9 +513,16 @@ fn build_runtime_with_codex_credentials(
         .provider_id(config.provider.clone());
     let mut skill_options = SkillLoaderOptions::new(&config.cwd, &config.agent_dir);
     skill_options.project_trusted = project_trusted;
+    skill_options.enable_commands = config.runtime_settings.enable_skill_commands;
+    skill_options
+        .additional_paths
+        .extend(config.settings_skill_paths.iter().cloned());
     let mut prompt_template_options =
         PromptTemplateLoaderOptions::new(&config.cwd, &config.agent_dir);
     prompt_template_options.project_trusted = project_trusted;
+    prompt_template_options
+        .additional_paths
+        .extend(config.settings_prompt_paths.iter().cloned());
     if let Some(home) = std::env::var_os("HOME") {
         skill_options
             .additional_paths
@@ -452,8 +537,22 @@ fn build_runtime_with_codex_credentials(
             model_options = model_options.extension_provider_config(provider, provider_config);
         }
     }
+    let bash_options = BashToolOptions::new(
+        config
+            .runtime_settings
+            .shell_path
+            .as_deref()
+            .map(expand_tilde_path),
+        config.runtime_settings.shell_command_prefix.clone(),
+    );
 
-    let builder = PiRuntime::builder();
+    let builder = PiRuntime::builder()
+        .supplemental_diagnostics(config.settings_diagnostics.clone())
+        .completion_retry_policy(CompletionRetryPolicy {
+            enabled: config.runtime_settings.retry.enabled,
+            max_retries: config.runtime_settings.retry.max_retries,
+            base_delay_ms: config.runtime_settings.retry.base_delay_ms,
+        });
     let codex_credentials = codex_credentials.unwrap_or_else(|| {
         stored_codex
             .as_ref()
@@ -463,17 +562,29 @@ fn build_runtime_with_codex_credentials(
     });
     let builder = if config.provider == "openai-codex" {
         let credentials = codex_credentials.clone();
-        builder.provider_plugin_factory(move || OpenAiCodexPlugin::new(credentials.clone()))
+        let transport = Arc::clone(&transport);
+        let transport_options = codex_transport_options.clone();
+        builder.provider_plugin_factory(move || {
+            OpenAiCodexPlugin::with_transport_options(
+                credentials.clone(),
+                Arc::clone(&transport),
+                transport_options.clone(),
+            )
+        })
     } else if config.provider == "xai" {
         let api_key = config.api_key.clone();
         let selected_xai = stored_xai.clone();
+        let transport = Arc::clone(&transport);
         builder.provider_plugin_factory(move || match &api_key {
-            Some(api_key) => XAiPlugin::new(Some(api_key.clone())),
-            None => XAiPlugin::from_stored(
+            Some(api_key) => {
+                XAiPlugin::new_with_transport(Some(api_key.clone()), Arc::clone(&transport))
+            }
+            None => XAiPlugin::from_stored_with_transport(
                 selected_xai
                     .as_ref()
                     .and_then(StoredCredential::secret)
                     .map(str::to_string),
+                Arc::clone(&transport),
             ),
         })
     } else if matches!(config.provider.as_str(), "anthropic" | "google") {
@@ -481,75 +592,106 @@ fn build_runtime_with_codex_credentials(
     } else {
         builder.try_provider_plugin_factory({
             let provider_config = provider_config.clone();
-            move || OpenAiCompatiblePlugin::new(provider_config.clone())
+            let transport = Arc::clone(&transport);
+            move || {
+                OpenAiCompatiblePlugin::with_transport(
+                    provider_config.clone(),
+                    Arc::clone(&transport),
+                )
+            }
         })
     };
     let builder = if config.provider == "anthropic" {
         let api_key = config.api_key.clone();
+        let transport = Arc::clone(&transport);
         builder.provider_plugin_factory(move || match &api_key {
-            Some(api_key) => AnthropicPlugin::with_api_key(api_key.clone()),
-            None => {
-                AnthropicPlugin::from_stored(stored_anthropic.as_ref().and_then(|credential| {
+            Some(api_key) => {
+                AnthropicPlugin::with_api_key_and_transport(api_key.clone(), Arc::clone(&transport))
+            }
+            None => AnthropicPlugin::from_stored_with_transport(
+                stored_anthropic.as_ref().and_then(|credential| {
                     credential
                         .secret()
                         .map(|secret| (secret, credential.is_oauth()))
-                }))
-            }
+                }),
+                Arc::clone(&transport),
+            ),
         })
     } else {
         let stored_anthropic = stored_anthropic.clone();
+        let transport = Arc::clone(&transport);
         builder.provider_plugin_factory(move || {
-            AnthropicPlugin::from_stored(stored_anthropic.as_ref().and_then(|credential| {
-                credential
-                    .secret()
-                    .map(|secret| (secret, credential.is_oauth()))
-            }))
+            AnthropicPlugin::from_stored_with_transport(
+                stored_anthropic.as_ref().and_then(|credential| {
+                    credential
+                        .secret()
+                        .map(|secret| (secret, credential.is_oauth()))
+                }),
+                Arc::clone(&transport),
+            )
         })
     };
     let builder = if config.provider == "openai-codex" {
         builder
     } else {
-        builder.provider_plugin_factory(move || OpenAiCodexPlugin::new(codex_credentials.clone()))
+        let transport = Arc::clone(&transport);
+        let transport_options = codex_transport_options;
+        builder.provider_plugin_factory(move || {
+            OpenAiCodexPlugin::with_transport_options(
+                codex_credentials.clone(),
+                Arc::clone(&transport),
+                transport_options.clone(),
+            )
+        })
     };
     let builder = if config.provider == "xai" {
         builder
     } else {
         let stored_xai = stored_xai.clone();
+        let transport = Arc::clone(&transport);
         builder.provider_plugin_factory(move || {
-            XAiPlugin::from_stored(
+            XAiPlugin::from_stored_with_transport(
                 stored_xai
                     .as_ref()
                     .and_then(StoredCredential::secret)
                     .map(str::to_string),
+                Arc::clone(&transport),
             )
         })
     };
     let builder = if config.provider == "google" {
         let explicit_api_key = config.api_key.clone();
         let stored_google = stored_google.clone();
+        let transport = Arc::clone(&transport);
         builder.try_provider_plugin_factory(move || match &explicit_api_key {
-            Some(api_key) => GooglePlugin::new(Some(api_key.clone())),
-            None => GooglePlugin::from_stored(
+            Some(api_key) => {
+                GooglePlugin::new_with_transport(Some(api_key.clone()), Arc::clone(&transport))
+            }
+            None => GooglePlugin::from_stored_with_transport(
                 stored_google
                     .as_ref()
                     .and_then(StoredCredential::secret)
                     .map(str::to_owned),
+                Arc::clone(&transport),
             ),
         })
     } else {
+        let transport = Arc::clone(&transport);
         builder.try_provider_plugin_factory(move || {
-            GooglePlugin::from_stored(
+            GooglePlugin::from_stored_with_transport(
                 stored_google
                     .as_ref()
                     .and_then(StoredCredential::secret)
                     .map(str::to_owned),
+                Arc::clone(&transport),
             )
         })
     };
     let builder = builder
         .try_provider_plugin_factory({
             let model_options = model_options.clone();
-            move || ModelsPlugin::load(model_options.clone())
+            let transport = Arc::clone(&transport);
+            move || ModelsPlugin::load_with_transport(model_options.clone(), Arc::clone(&transport))
         })
         .agent_plugin_factory({
             let prompt_template_options = prompt_template_options.clone();
@@ -559,14 +701,17 @@ fn build_runtime_with_codex_credentials(
             let skill_options = skill_options.clone();
             move || SkillsPlugin::load(skill_options.clone())
         })
-        .agent_plugin_factory(|| ReadPlugin)
+        .agent_plugin_factory({
+            let auto_resize_images = config.runtime_settings.images.auto_resize;
+            move || ConfiguredReadPlugin::new(auto_resize_images)
+        })
         .agent_plugin_factory(|| GrepPlugin)
         .agent_plugin_factory(|| FindPlugin)
         .agent_plugin_factory(|| LsPlugin)
         .agent_plugin_factory(|| WritePlugin)
         .agent_plugin_factory(|| EditPlugin)
         .agent_plugin_factory(|| HashlineEditPlugin)
-        .agent_plugin_factory(|| BashPlugin);
+        .agent_plugin_factory(move || ConfiguredBashPlugin::new(bash_options.clone()));
     let mut builder = native_plugins.apply_runtime(builder);
     if let Some(js_generation) = js_generation {
         for plugin in js_generation.agent_plugins() {
@@ -590,31 +735,34 @@ fn build_runtime_with_codex_credentials(
         .agent_options(AgentOptions {
             provider_id: ProviderId::new(config.provider.clone()),
             model_id: ModelId::new(config.model.as_deref().unwrap_or(&config.fallback_model)),
-            active_tools: vec![
-                "read".into(),
-                "grep".into(),
-                "find".into(),
-                "ls".into(),
-                "write".into(),
-                "edit".into(),
-                "hashline_edit".into(),
-                "bash".into(),
-            ],
+            thinking_level: settings_thinking_level(config),
+            thinking_budgets: settings_thinking_budgets(config),
+            block_images: config.runtime_settings.images.block_images,
+            active_tools: BUILTIN_TOOL_NAMES.map(str::to_string).to_vec(),
             cwd: config.cwd.clone(),
             max_tool_iterations: 100,
+            steering_mode: settings_queue_mode(config.runtime_settings.steering_mode),
+            follow_up_mode: settings_queue_mode(config.runtime_settings.follow_up_mode),
             ..AgentOptions::default()
         })
         .system_prompt(SystemPrompt::Pi(Box::default()))
         .resources(resources)
         .build()?;
 
-    let mut active_tools = runtime.active_tools();
-    let mut seen = active_tools
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
+    let registered_tools = runtime
+        .tool_specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<HashSet<_>>();
+    let mut active_tools = config
+        .runtime_settings
+        .default_tools
+        .as_ref()
+        .map_or_else(|| runtime.active_tools(), |configured| configured.clone());
+    active_tools.retain(|tool| registered_tools.contains(tool));
+    let mut seen = active_tools.iter().cloned().collect::<HashSet<_>>();
     for spec in runtime.tool_specs() {
-        if seen.insert(spec.name.clone()) {
+        if !BUILTIN_TOOL_NAMES.contains(&spec.name.as_str()) && seen.insert(spec.name.clone()) {
             active_tools.push(spec.name);
         }
     }
@@ -627,15 +775,143 @@ fn build_runtime_with_codex_credentials(
     Ok(runtime)
 }
 
+fn provider_transport(config: &AppConfig) -> Result<Arc<dyn HttpTransport>, RuntimeError> {
+    let transport = ReqwestTransport::with_config(provider_transport_config(config))
+        .map_err(|error| RuntimeError::Build(error.to_string()))?;
+    Ok(Arc::new(transport))
+}
+
+fn provider_transport_config(config: &AppConfig) -> ReqwestTransportConfig {
+    let provider_retry = config.runtime_settings.retry.provider;
+    let timeout_ms = provider_retry
+        .timeout_ms
+        .unwrap_or(config.runtime_settings.http_idle_timeout_ms);
+    ReqwestTransportConfig {
+        timeout: Some(std::time::Duration::from_millis(timeout_ms)),
+        user_agent: Some(format!("pi-rs/{}", env!("CARGO_PKG_VERSION"))),
+        proxy: config.runtime_settings.http_proxy.clone(),
+        max_retries: provider_retry.max_retries.unwrap_or(0),
+        max_retry_delay: std::time::Duration::from_millis(provider_retry.max_retry_delay_ms),
+    }
+}
+
+fn codex_transport_options(config: &AppConfig) -> CodexTransportOptions {
+    let timeout_ms = config
+        .runtime_settings
+        .retry
+        .provider
+        .timeout_ms
+        .unwrap_or(config.runtime_settings.http_idle_timeout_ms);
+    CodexTransportOptions {
+        transport: match config.runtime_settings.transport {
+            TransportSetting::Sse => CodexTransport::Sse,
+            TransportSetting::Websocket => CodexTransport::Websocket,
+            TransportSetting::WebsocketCached => CodexTransport::WebsocketCached,
+            TransportSetting::Auto => CodexTransport::Auto,
+        },
+        websocket_connect_timeout: config
+            .runtime_settings
+            .websocket_connect_timeout_ms
+            .map_or(Some(std::time::Duration::from_secs(15)), |timeout_ms| {
+                (timeout_ms != 0).then(|| std::time::Duration::from_millis(timeout_ms))
+            }),
+        websocket_idle_timeout: (timeout_ms != 0)
+            .then(|| std::time::Duration::from_millis(timeout_ms)),
+        http_proxy_configured: config
+            .runtime_settings
+            .http_proxy
+            .as_deref()
+            .is_some_and(|proxy| !proxy.trim().is_empty()),
+        base_url: None,
+    }
+}
+
 fn initial_model_request(config: &AppConfig) -> InitialModelRequest {
+    InitialModelRequest {
+        requested_provider: config.requested_provider.clone().map(ProviderId::new),
+        requested_model: config.model.clone(),
+        settings_provider: config
+            .runtime_settings
+            .default_provider
+            .clone()
+            .map(ProviderId::new),
+        settings_model: config.runtime_settings.default_model.clone(),
+        ..InitialModelRequest::default()
+    }
+}
+
+fn settings_queue_mode(mode: QueueModeSetting) -> QueueMode {
+    match mode {
+        QueueModeSetting::All => QueueMode::All,
+        QueueModeSetting::OneAtATime => QueueMode::OneAtATime,
+    }
+}
+
+fn settings_thinking_level(config: &AppConfig) -> ThinkingLevel {
+    match config.runtime_settings.default_thinking_level {
+        Some(ThinkingLevelSetting::Off) | None => ThinkingLevel::Off,
+        Some(ThinkingLevelSetting::Minimal) => ThinkingLevel::Minimal,
+        Some(ThinkingLevelSetting::Low) => ThinkingLevel::Low,
+        Some(ThinkingLevelSetting::Medium) => ThinkingLevel::Medium,
+        Some(ThinkingLevelSetting::High) => ThinkingLevel::High,
+        Some(ThinkingLevelSetting::XHigh) => ThinkingLevel::XHigh,
+        Some(ThinkingLevelSetting::Max) => ThinkingLevel::Max,
+    }
+}
+
+fn settings_thinking_budgets(config: &AppConfig) -> Option<ThinkingBudgets> {
     config
-        .model
-        .as_ref()
-        .map_or_else(InitialModelRequest::default, |model| InitialModelRequest {
-            requested_provider: config.requested_provider.clone().map(ProviderId::new),
-            requested_model: Some(model.clone()),
-            session_model: None,
+        .runtime_settings
+        .thinking_budgets
+        .map(|budgets| ThinkingBudgets {
+            minimal: budgets.minimal,
+            low: budgets.low,
+            medium: budgets.medium,
+            high: budgets.high,
         })
+}
+
+fn session_compaction_settings(config: &AppConfig) -> SessionCompactionSettings {
+    let settings = config.runtime_settings.compaction;
+    SessionCompactionSettings {
+        enabled: settings.enabled,
+        reserve_tokens: settings.reserve_tokens,
+        keep_recent_tokens: settings.keep_recent_tokens,
+    }
+}
+
+fn scoped_setting_paths(
+    global: &[String],
+    global_base: &std::path::Path,
+    project: &[String],
+    project_base: &std::path::Path,
+) -> Vec<PathBuf> {
+    global
+        .iter()
+        .map(|path| setting_path(path, global_base))
+        .chain(project.iter().map(|path| setting_path(path, project_base)))
+        .collect()
+}
+
+fn setting_path(path: &str, base: &std::path::Path) -> PathBuf {
+    let path = expand_tilde_path(path);
+    if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    }
+}
+
+fn expand_tilde_path(path: &str) -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        if path == "~" {
+            return PathBuf::from(home);
+        }
+        if let Some(relative) = path.strip_prefix("~/") {
+            return PathBuf::from(home).join(relative);
+        }
+    }
+    PathBuf::from(path)
 }
 
 #[cfg(test)]
@@ -832,6 +1108,144 @@ command = "fixture-command"
             extensions: Vec::new(),
             discover_extensions: true,
             extension_flag_values: std::collections::BTreeMap::new(),
+            runtime_settings: pi_settings::SettingsValues::default(),
+            settings_skill_paths: Vec::new(),
+            settings_prompt_paths: Vec::new(),
+            settings_diagnostics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn current_network_settings_build_generation_local_transport_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = app_config(directory.path(), None);
+        config.runtime_settings.http_proxy = Some("http://proxy.example:8080".to_string());
+        config.runtime_settings.http_idle_timeout_ms = 321_000;
+        config.runtime_settings.transport = TransportSetting::WebsocketCached;
+        config.runtime_settings.websocket_connect_timeout_ms = Some(9_876);
+        config.runtime_settings.retry.provider = pi_settings::ProviderRetrySettings {
+            timeout_ms: Some(12_345),
+            max_retries: Some(2),
+            max_retry_delay_ms: 4_567,
+        };
+
+        let transport = provider_transport_config(&config);
+
+        assert_eq!(
+            transport.timeout,
+            Some(std::time::Duration::from_millis(12_345))
+        );
+        assert_eq!(
+            transport.proxy.as_deref(),
+            Some("http://proxy.example:8080")
+        );
+        assert_eq!(transport.max_retries, 2);
+        assert_eq!(
+            transport.max_retry_delay,
+            std::time::Duration::from_millis(4_567)
+        );
+        let codex = codex_transport_options(&config);
+        assert_eq!(codex.transport, CodexTransport::WebsocketCached);
+        assert_eq!(
+            codex.websocket_connect_timeout,
+            Some(std::time::Duration::from_millis(9_876))
+        );
+        assert_eq!(
+            codex.websocket_idle_timeout,
+            Some(std::time::Duration::from_millis(12_345))
+        );
+        assert!(codex.http_proxy_configured);
+
+        config.runtime_settings.retry.provider.timeout_ms = None;
+        assert_eq!(
+            provider_transport_config(&config).timeout,
+            Some(std::time::Duration::from_millis(321_000))
+        );
+        config.runtime_settings.websocket_connect_timeout_ms = Some(0);
+        assert_eq!(
+            codex_transport_options(&config).websocket_connect_timeout,
+            None
+        );
+    }
+
+    #[test]
+    fn current_settings_configure_runtime_tools_thinking_queues_and_compaction() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = app_config(directory.path(), None);
+        config.runtime_settings.default_thinking_level = Some(ThinkingLevelSetting::High);
+        config.runtime_settings.thinking_budgets = Some(pi_settings::ThinkingBudgetsSettings {
+            minimal: Some(111),
+            low: None,
+            medium: None,
+            high: Some(999),
+        });
+        config.runtime_settings.default_tools =
+            Some(vec!["read".to_string(), "not-registered".to_string()]);
+        config.runtime_settings.steering_mode = QueueModeSetting::All;
+        config.runtime_settings.follow_up_mode = QueueModeSetting::OneAtATime;
+        config.runtime_settings.compaction = pi_settings::CompactionSettings {
+            enabled: false,
+            reserve_tokens: 123,
+            keep_recent_tokens: 456,
+        };
+
+        let runtime = build_runtime_with_codex_credentials(
+            &config,
+            false,
+            &NativePlugins::default(),
+            None,
+            None,
+            Some(pi_plugin_openai::CodexCredentials::default()),
+        )
+        .unwrap();
+        let state = runtime.agent().state();
+
+        assert_eq!(state.thinking_level, ThinkingLevel::High);
+        assert_eq!(
+            runtime.agent().thinking_budgets(),
+            Some(ThinkingBudgets {
+                minimal: Some(111),
+                low: None,
+                medium: None,
+                high: Some(999),
+            })
+        );
+        assert_eq!(state.active_tools, ["read"]);
+        assert_eq!(
+            settings_queue_mode(config.runtime_settings.steering_mode),
+            QueueMode::All
+        );
+        assert_eq!(
+            settings_queue_mode(config.runtime_settings.follow_up_mode),
+            QueueMode::OneAtATime
+        );
+        assert_eq!(
+            session_compaction_settings(&config),
+            SessionCompactionSettings {
+                enabled: false,
+                reserve_tokens: 123,
+                keep_recent_tokens: 456,
+            }
+        );
+    }
+
+    #[test]
+    fn current_setting_paths_use_scope_bases_and_expand_tilde() {
+        let directory = tempfile::tempdir().unwrap();
+        let global = directory.path().join("agent");
+        let project = directory.path().join("project/.pi");
+        let resolved = scoped_setting_paths(
+            &["skills/global".to_string()],
+            &global,
+            &["../shared".to_string(), "/absolute/skill".to_string()],
+            &project,
+        );
+
+        assert_eq!(resolved[0], global.join("skills/global"));
+        assert_eq!(resolved[1], project.join("../shared"));
+        assert_eq!(resolved[2], PathBuf::from("/absolute/skill"));
+        if let Some(home) = std::env::var_os("HOME") {
+            assert_eq!(expand_tilde_path("~"), PathBuf::from(home));
         }
     }
 
@@ -1233,13 +1647,21 @@ command = "fixture-command"
         config.cwd = project.clone();
         config.session_path = agent_dir.join("reload.jsonl");
         config.trust_override = Some(true);
-        let (trust, _) = ProjectTrustService::new(&agent_dir, Some(true), false).unwrap();
+        let (trust, _) = ProjectTrustService::new(
+            &agent_dir,
+            Some(true),
+            false,
+            pi_settings::DefaultProjectTrust::Ask,
+        )
+        .unwrap();
         let host = Arc::new(RecordingJsHost::default());
-        let factory = ProductSessionFactory::new(config.clone(), trust).with_js_plugin_host(
-            host.clone(),
-            JsHostMode::Tui,
-            ExtensionSessionBinding::new(),
-        );
+        let factory =
+            ProductSessionFactory::new(config.clone(), trust, SettingsManager::new(&agent_dir))
+                .with_js_plugin_host(
+                    host.clone(),
+                    JsHostMode::Tui,
+                    ExtensionSessionBinding::new(),
+                );
         let runtime = pi_session::AgentSessionRuntime::create(
             factory,
             AgentSessionRuntimeTarget::create(&project, &config.session_path),

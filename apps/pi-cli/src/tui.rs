@@ -1980,8 +1980,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("project");
         std::fs::create_dir_all(project.join(".pi/skills")).unwrap();
-        let (service, _) =
-            ProjectTrustService::new(&directory.path().join("agent"), None, true).unwrap();
+        let (service, _) = ProjectTrustService::new(
+            &directory.path().join("agent"),
+            None,
+            true,
+            pi_settings::DefaultProjectTrust::Ask,
+        )
+        .unwrap();
         let mut app = demo_app();
         app.trust_prompt = Some(TrustPromptState {
             cwd: project.clone(),
@@ -3293,8 +3298,13 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("project");
         std::fs::create_dir_all(project.join(".pi/skills")).unwrap();
-        let (service, _) =
-            ProjectTrustService::new(&directory.path().join("agent"), None, true).unwrap();
+        let (service, _) = ProjectTrustService::new(
+            &directory.path().join("agent"),
+            None,
+            true,
+            pi_settings::DefaultProjectTrust::Ask,
+        )
+        .unwrap();
         let mut app = demo_app();
         app.trust_prompt = Some(TrustPromptState {
             cwd: project.clone(),

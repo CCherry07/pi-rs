@@ -223,6 +223,10 @@ pub(crate) struct AppConfig {
     pub(crate) extensions: Vec<String>,
     pub(crate) discover_extensions: bool,
     pub(crate) extension_flag_values: BTreeMap<String, serde_json::Value>,
+    pub(crate) runtime_settings: pi_settings::SettingsValues,
+    pub(crate) settings_skill_paths: Vec<PathBuf>,
+    pub(crate) settings_prompt_paths: Vec<PathBuf>,
+    pub(crate) settings_diagnostics: Vec<pi_resources::ResourceDiagnostic>,
 }
 
 impl AppConfig {
@@ -279,6 +283,10 @@ impl AppConfig {
             extensions: cli.extensions.clone(),
             discover_extensions: !cli.no_extensions,
             extension_flag_values: BTreeMap::new(),
+            runtime_settings: pi_settings::SettingsValues::default(),
+            settings_skill_paths: Vec::new(),
+            settings_prompt_paths: Vec::new(),
+            settings_diagnostics: Vec::new(),
         })
     }
 
@@ -291,6 +299,36 @@ impl AppConfig {
             discover_extensions: self.discover_extensions,
         }
     }
+
+    /// Applies startup-only global settings that must be known before project
+    /// trust and the target session cwd can be resolved. An explicit session
+    /// path always wins.
+    pub(crate) fn apply_session_dir_setting(&mut self, session_dir: Option<&str>, explicit: bool) {
+        if explicit {
+            return;
+        }
+        let Some(session_dir) = session_dir.filter(|path| !path.trim().is_empty()) else {
+            return;
+        };
+        let directory = expand_tilde_path(session_dir);
+        let file_name = self.session_path.file_name().map_or_else(
+            || OsString::from(format!("{}.jsonl", uuid::Uuid::now_v7())),
+            OsString::from,
+        );
+        self.session_path = directory.join(file_name);
+    }
+}
+
+fn expand_tilde_path(path: &str) -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        if path == "~" {
+            return PathBuf::from(home);
+        }
+        if let Some(relative) = path.strip_prefix("~/") {
+            return PathBuf::from(home).join(relative);
+        }
+    }
+    PathBuf::from(path)
 }
 
 impl Cli {
@@ -390,6 +428,33 @@ mod tests {
         AppConfig::resolve(&cli).unwrap();
 
         assert!(!session_path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn session_dir_setting_rehomes_only_implicit_new_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let cli = Cli::try_parse_from([
+            "pi",
+            "--cwd",
+            directory.path().to_str().unwrap(),
+            "--agent-dir",
+            directory.path().join("agent").to_str().unwrap(),
+        ])
+        .unwrap();
+        let mut config = AppConfig::resolve(&cli).unwrap();
+        let original_name = config.session_path.file_name().unwrap().to_owned();
+
+        config.apply_session_dir_setting(Some("custom-sessions"), false);
+
+        assert_eq!(
+            config.session_path,
+            PathBuf::from("custom-sessions").join(original_name)
+        );
+
+        let explicit = directory.path().join("explicit.jsonl");
+        config.session_path = explicit.clone();
+        config.apply_session_dir_setting(Some("ignored"), true);
+        assert_eq!(config.session_path, explicit);
     }
 
     #[test]

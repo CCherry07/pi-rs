@@ -20,6 +20,7 @@ use config::{AppConfig, Cli, CliCommand};
 use pi_js_package_manager::PackageManager as JsPackageManager;
 use pi_js_plugin::{ExtensionSessionBinding, JsHostMode, JsPluginHost};
 use pi_session::{MultiSessionManager, PiSession, SessionLog};
+use pi_settings::{SettingsContext, SettingsManager};
 use project_trust::{ProjectTrustEvaluation, ProjectTrustPromptRequest, ProjectTrustService};
 use tokio::sync::mpsc;
 
@@ -107,6 +108,12 @@ async fn run(
 ) -> Result<(), String> {
     let mut config = AppConfig::resolve(&cli)?;
     config.extension_flag_values = extension_flag_values;
+    let settings = SettingsManager::new(&config.agent_dir);
+    let startup_settings = settings.load(&SettingsContext::new(&config.cwd, false));
+    config.apply_session_dir_setting(
+        startup_settings.global().session_dir.as_deref(),
+        cli.session.is_some(),
+    );
     if !matches!(cli.command, Some(CliCommand::Auth { .. })) {
         auth::refresh_oauth_if_needed(&config.agent_dir).await?;
     }
@@ -114,7 +121,7 @@ async fn run(
         return auth::run(&config.agent_dir, command).await;
     }
     if let Some(CliCommand::Plugin { command }) = &cli.command {
-        return plugin_commands::run(&cli, &config, command).await;
+        return plugin_commands::run(&cli, &config, command, &settings).await;
     }
     if let Some(
         command @ (CliCommand::Install { .. }
@@ -123,7 +130,7 @@ async fn run(
         | CliCommand::Update { .. }),
     ) = &cli.command
     {
-        return package_commands::run(&cli, &config, command).await;
+        return package_commands::run(&cli, &config, command, &settings).await;
     }
     let session_exists = config.session_path.exists();
     if session_exists {
@@ -139,12 +146,13 @@ async fn run(
     let stdin_is_terminal = std::io::stdin().is_terminal();
     let input = resolve_input(&cli, stdin_is_terminal)?;
     let cli_mode = CLIMode::resolve(&cli, input, stdin_is_terminal)?;
-    let trust = resolve_project_trust(&cli, &config, cli_mode.is_interactive()).await?;
-    ensure_javascript_host_available(&config, trust.trusted(), js_host.is_some())?;
+    let trust = resolve_project_trust(&cli, &config, cli_mode.is_interactive(), &settings).await?;
+    ensure_javascript_host_available(&config, trust.trusted(), js_host.is_some(), &settings)?;
     let cwd = config.cwd.clone();
     let agent_dir = config.agent_dir.clone();
     let session_path = config.session_path.clone();
-    let mut factory = session_factory::ProductSessionFactory::new(config, trust.service.clone());
+    let mut factory =
+        session_factory::ProductSessionFactory::new(config, trust.service.clone(), settings);
     let js_session_binding = js_host.as_ref().map(|_| ExtensionSessionBinding::new());
     if let (Some(js_host), Some(session_binding)) = (js_host, js_session_binding.clone()) {
         factory = factory.with_js_plugin_host(js_host, cli_mode.js_host_mode(), session_binding);
@@ -298,10 +306,14 @@ fn ensure_javascript_host_available(
     config: &AppConfig,
     project_trusted: bool,
     host_available: bool,
+    settings: &SettingsManager,
 ) -> Result<(), String> {
     if host_available
-        || !JsPackageManager::new(config.javascript_resolve_request(project_trusted))
-            .requires_javascript_host()
+        || !JsPackageManager::with_settings(
+            config.javascript_resolve_request(project_trusted),
+            settings.clone(),
+        )
+        .requires_javascript_host()
     {
         return Ok(());
     }
@@ -390,10 +402,18 @@ pub(crate) async fn resolve_project_trust(
     cli: &Cli,
     config: &AppConfig,
     interactive: bool,
+    settings: &SettingsManager,
 ) -> Result<ResolvedProjectTrust, String> {
-    let (project_trust, trust_requests) =
-        ProjectTrustService::new(&config.agent_dir, config.trust_override, interactive)
-            .map_err(|error| error.to_string())?;
+    let default_trust = settings
+        .load(&SettingsContext::new(&config.cwd, false))
+        .default_project_trust();
+    let (project_trust, trust_requests) = ProjectTrustService::new(
+        &config.agent_dir,
+        config.trust_override,
+        interactive,
+        default_trust,
+    )
+    .map_err(|error| error.to_string())?;
     let trusted = match project_trust
         .evaluate(&config.cwd)
         .map_err(|error| error.to_string())?
@@ -439,6 +459,7 @@ fn resolve_input(cli: &Cli, stdin_is_terminal: bool) -> Result<Option<String>, S
 mod tests {
     use std::fs;
 
+    use pi_settings::SettingsManager;
     use serde_json::json;
 
     use super::{
@@ -571,12 +592,13 @@ mod tests {
             agent_dir.to_str().unwrap(),
         ]))
         .unwrap();
+        let settings = SettingsManager::new(&agent_dir);
 
-        let error = ensure_javascript_host_available(&config, true, false).unwrap_err();
+        let error = ensure_javascript_host_available(&config, true, false, &settings).unwrap_err();
         assert!(error.contains("native-only Rust adapter"));
         assert!(error.contains("./scripts/pi-dev"));
         assert!(error.contains("--no-extensions"));
-        assert!(ensure_javascript_host_available(&config, true, true).is_ok());
+        assert!(ensure_javascript_host_available(&config, true, true, &settings).is_ok());
 
         let disabled = AppConfig::resolve(&cli(&[
             "--cwd",
@@ -586,7 +608,7 @@ mod tests {
             "--no-extensions",
         ]))
         .unwrap();
-        assert!(ensure_javascript_host_available(&disabled, true, false).is_ok());
+        assert!(ensure_javascript_host_available(&disabled, true, false, &settings).is_ok());
     }
 
     #[test]

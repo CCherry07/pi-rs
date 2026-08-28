@@ -17,7 +17,9 @@ use pi_plugin_openai::{
     OPENAI_RESPONSES_API, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
     OpenAiResponsesCompatibleProvider,
 };
-use pi_provider::{HttpTransport, ReqwestTransport};
+use pi_provider::HttpTransport;
+#[cfg(test)]
+use pi_provider::ReqwestTransport;
 
 use crate::config::{PreparedModel, PreparedOverride, PreparedProvider};
 use crate::resolver::{ConfigValueResolver, ResolveError};
@@ -36,6 +38,7 @@ struct ResolvedRequestConfig {
 }
 
 impl ModelsJsonProvider {
+    #[cfg(test)]
     pub fn new(
         configured: PreparedProvider,
         fallback: Option<Arc<dyn Provider>>,
@@ -51,7 +54,7 @@ impl ModelsJsonProvider {
         )
     }
 
-    fn with_transport(
+    pub(crate) fn with_transport(
         configured: PreparedProvider,
         fallback: Option<Arc<dyn Provider>>,
         fallback_apis: HashSet<String>,
@@ -516,6 +519,7 @@ mod tests {
                     messages: Vec::new(),
                     tools: Vec::new(),
                     thinking_level: ThinkingLevel::High,
+                    thinking_budgets: None,
                     max_output_tokens: None,
                     headers: BTreeMap::from([("X-Request".to_string(), "request".to_string())]),
                     sampling_params: BTreeMap::new(),
@@ -597,6 +601,7 @@ mod tests {
                     messages: Vec::new(),
                     tools: Vec::new(),
                     thinking_level: ThinkingLevel::Medium,
+                    thinking_budgets: None,
                     max_output_tokens: Some(2_048),
                     headers: BTreeMap::from([("X-Request".to_string(), "request".to_string())]),
                     sampling_params: BTreeMap::new(),
@@ -681,6 +686,7 @@ mod tests {
                     messages: Vec::new(),
                     tools: Vec::new(),
                     thinking_level: ThinkingLevel::High,
+                    thinking_budgets: None,
                     max_output_tokens: Some(8),
                     headers: BTreeMap::from([("X-Request".to_string(), "request".to_string())]),
                     sampling_params: BTreeMap::new(),
@@ -758,6 +764,7 @@ mod tests {
                     messages: Vec::new(),
                     tools: Vec::new(),
                     thinking_level: ThinkingLevel::High,
+                    thinking_budgets: None,
                     max_output_tokens: Some(1_024),
                     headers: BTreeMap::new(),
                     sampling_params: BTreeMap::new(),
@@ -838,6 +845,7 @@ mod tests {
                     messages: Vec::new(),
                     tools: Vec::new(),
                     thinking_level: ThinkingLevel::Off,
+                    thinking_budgets: None,
                     max_output_tokens: None,
                     headers: BTreeMap::new(),
                     sampling_params: BTreeMap::new(),

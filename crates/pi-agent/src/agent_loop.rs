@@ -8,8 +8,8 @@ use futures::StreamExt;
 use pi_core::{
     AbortSignal, AgentContext, AgentEvent, AssistantMessage, ContentBlock, FrozenRegistries,
     Message, ModelId, PluginDriver, ProviderCallContext, ProviderId, ProviderPluginDriver,
-    ProviderRequest, RunId, StopReason, StreamEvent, TextContent, ThinkingLevel, ToolExecutionMode,
-    ToolResult, ToolResultMessage, Usage,
+    ProviderRequest, RunId, StopReason, StreamEvent, TextContent, ThinkingBudgets, ThinkingLevel,
+    ToolExecutionMode, ToolResult, ToolResultMessage, Usage,
 };
 use pi_telemetry::{
     ActiveSpan, AiOperation, AiRequestEnd, AiRequestSpan, AiRequestStart, AiStopReason, SpanStatus,
@@ -43,6 +43,8 @@ pub struct AgentLoopConfig {
     pub provider_id: ProviderId,
     pub model_id: ModelId,
     pub thinking_level: ThinkingLevel,
+    pub thinking_budgets: Option<ThinkingBudgets>,
+    pub block_images: bool,
     pub tool_execution: ToolExecutionMode,
     pub max_tool_iterations: usize,
     pub max_parallel_tools: usize,
@@ -634,6 +636,7 @@ async fn stream_assistant_response(
         .map_err(|error| AgentLoopError::Event(error.to_string()))?
         .into_iter()
         .map(Message::into_provider_message)
+        .map(|message| filter_blocked_images(message, config.block_images))
         .collect();
     let model_spec = registries
         .model(&config.provider_id, &config.model_id)
@@ -649,6 +652,7 @@ async fn stream_assistant_response(
         messages: request_messages,
         tools,
         thinking_level: config.thinking_level,
+        thinking_budgets: config.thinking_budgets,
         max_output_tokens: None,
         headers: Default::default(),
         sampling_params: Default::default(),
@@ -848,6 +852,44 @@ async fn stream_assistant_response(
         time_to_first_chunk_ms,
     );
     Ok(final_message)
+}
+
+fn filter_blocked_images(mut message: Message, block_images: bool) -> Message {
+    if !block_images {
+        return message;
+    }
+    let content = match &mut message {
+        Message::User(message) => &mut message.content,
+        Message::ToolResult(message) => &mut Arc::make_mut(message).content,
+        Message::Assistant(_) | Message::Custom(_) => return message,
+    };
+    if !content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image(_)))
+    {
+        return message;
+    }
+    let mut previous_was_placeholder = false;
+    *content = std::mem::take(content)
+        .into_iter()
+        .filter_map(|block| {
+            let block = if matches!(block, ContentBlock::Image(_)) {
+                ContentBlock::Text(TextContent::new("Image reading is disabled."))
+            } else {
+                block
+            };
+            let is_placeholder = matches!(
+                &block,
+                ContentBlock::Text(text) if text.text == "Image reading is disabled."
+            );
+            if is_placeholder && previous_was_placeholder {
+                return None;
+            }
+            previous_was_placeholder = is_placeholder;
+            Some(block)
+        })
+        .collect();
+    message
 }
 
 fn finish_ai_request(
@@ -1155,4 +1197,53 @@ fn now_ms() -> i64 {
         .map_or(0, |duration| {
             i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pi_core::{ImageContent, ToolCallId, ToolResultMessage};
+
+    #[test]
+    fn blocked_images_are_replaced_only_in_the_provider_projection() {
+        let original = Message::tool_result(ToolResultMessage {
+            tool_call_id: ToolCallId::new("call"),
+            tool_name: "read".to_string(),
+            content: vec![
+                ContentBlock::Image(ImageContent {
+                    data: "one".to_string(),
+                    mime_type: "image/png".to_string(),
+                }),
+                ContentBlock::Image(ImageContent {
+                    data: "two".to_string(),
+                    mime_type: "image/png".to_string(),
+                }),
+                ContentBlock::Text(TextContent::new("kept")),
+            ],
+            details: None,
+            usage: None,
+            added_tool_names: None,
+            is_error: false,
+            timestamp_ms: 0,
+        });
+
+        let filtered = filter_blocked_images(original.clone(), true);
+
+        let Message::ToolResult(filtered) = filtered else {
+            panic!("expected tool result")
+        };
+        assert_eq!(filtered.content.len(), 2);
+        assert!(matches!(
+            &filtered.content[0],
+            ContentBlock::Text(text) if text.text == "Image reading is disabled."
+        ));
+        assert!(matches!(
+            &filtered.content[1],
+            ContentBlock::Text(text) if text.text == "kept"
+        ));
+        let Message::ToolResult(original) = original else {
+            panic!("expected tool result")
+        };
+        assert!(matches!(original.content[0], ContentBlock::Image(_)));
+    }
 }

@@ -239,6 +239,7 @@ impl CompactionCompleter for PiRuntime {
                         crate::now_ms(),
                     ))],
                     thinking_level: request.thinking_level,
+                    thinking_budgets: self.agent().thinking_budgets(),
                     max_output_tokens: Some(request.max_output_tokens),
                 },
                 signal,

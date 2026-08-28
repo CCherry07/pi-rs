@@ -4,8 +4,9 @@ use pi_core::{
     ModelCost, ModelCostTier, ModelInput, ModelSpec, PluginId, Provider, ProviderError,
     ProviderPlugin, ProviderRegisterContext,
 };
+use pi_provider::HttpTransport;
 
-use crate::codex::OpenAiCodexProvider;
+use crate::codex::{CodexTransportOptions, OpenAiCodexProvider};
 use crate::config::{OpenAiCompatibleConfig, OpenAiConfig};
 use crate::provider::{OpenAiCompatibleProvider, OpenAiProvider};
 
@@ -22,6 +23,29 @@ impl OpenAiCodexPlugin {
     pub fn new(credentials: crate::CodexCredentials) -> Self {
         Self {
             provider: Arc::new(OpenAiCodexProvider::new(credentials)),
+        }
+    }
+
+    pub fn with_transport(
+        credentials: crate::CodexCredentials,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
+        Self {
+            provider: Arc::new(OpenAiCodexProvider::with_transport(credentials, transport)),
+        }
+    }
+
+    pub fn with_transport_options(
+        credentials: crate::CodexCredentials,
+        transport: Arc<dyn HttpTransport>,
+        transport_options: CodexTransportOptions,
+    ) -> Self {
+        Self {
+            provider: Arc::new(OpenAiCodexProvider::with_transport_options(
+                credentials,
+                transport,
+                transport_options,
+            )),
         }
     }
 }
@@ -183,6 +207,15 @@ impl OpenAiCompatiblePlugin {
     pub fn provider(&self) -> Arc<OpenAiCompatibleProvider> {
         Arc::clone(&self.provider)
     }
+
+    pub fn with_transport(
+        config: OpenAiCompatibleConfig,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Result<Self, ProviderError> {
+        Ok(Self {
+            provider: Arc::new(OpenAiCompatibleProvider::with_transport(config, transport)?),
+        })
+    }
 }
 
 #[pi_core::provider_plugin]
@@ -209,6 +242,15 @@ impl OpenAiPlugin {
 
     pub fn provider(&self) -> Arc<OpenAiProvider> {
         Arc::clone(&self.provider)
+    }
+
+    pub fn with_transport(
+        config: OpenAiConfig,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Result<Self, ProviderError> {
+        Ok(Self {
+            provider: Arc::new(OpenAiProvider::with_transport(config, transport)?),
+        })
     }
 }
 

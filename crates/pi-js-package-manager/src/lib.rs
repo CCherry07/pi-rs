@@ -1,6 +1,6 @@
 //! Pi-compatible discovery and installation orchestration for JavaScript extensions.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,9 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use node_semver::{Range as VersionRange, Version};
 use path_clean::PathClean;
 use percent_encoding::percent_decode_str;
-use serde::{Deserialize, Serialize};
+use pi_settings::{
+    PackageFilter, PackageSource, SettingsContext, SettingsManager, SettingsScope, SettingsValues,
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::process::Command;
@@ -37,6 +39,14 @@ pub struct ResolveRequest {
 pub struct Resolution {
     pub extension_paths: Vec<PathBuf>,
     pub extension_identities: Vec<ResolvedExtensionIdentity>,
+    pub skill_paths: Vec<PathBuf>,
+    pub prompt_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResolvedPackageResources {
+    skills: Vec<PathBuf>,
+    prompts: Vec<PathBuf>,
 }
 
 /// User-facing identity for one or more resolved extension entry points.
@@ -118,14 +128,8 @@ pub enum PackageManagerError {
     ProjectNotTrusted,
     #[error("path does not exist: {0}")]
     MissingLocalSource(PathBuf),
-    #[error("cannot read settings {path}: {source}")]
-    ReadSettings {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("invalid settings {path}: {message}")]
-    InvalidSettings { path: PathBuf, message: String },
+    #[error(transparent)]
+    Settings(#[from] pi_settings::SettingsError),
     #[error("cannot write settings {path}: {source}")]
     WriteSettings {
         path: PathBuf,
@@ -145,27 +149,35 @@ pub struct PackageManager {
     project_trusted: bool,
     explicit_sources: Vec<String>,
     discover_extensions: bool,
-    user_settings: Settings,
-    project_settings: Settings,
+    settings_manager: SettingsManager,
+    settings_context: SettingsContext,
+    user_settings: SettingsValues,
+    project_settings: SettingsValues,
 }
 
 impl PackageManager {
     pub fn new(request: ResolveRequest) -> Self {
+        let settings_manager = SettingsManager::new(&request.agent_dir);
+        Self::with_settings(request, settings_manager)
+    }
+
+    /// Uses a product-owned settings manager so discovery and management
+    /// commands share its trust, recovery, and persistence behavior.
+    pub fn with_settings(request: ResolveRequest, settings_manager: SettingsManager) -> Self {
         let cwd = absolute_clean(&request.cwd, None);
         let agent_dir = absolute_clean(&request.agent_dir, Some(&cwd));
-        let user_settings = load_settings(&agent_dir.join("settings.json"), true);
-        let project_settings = load_settings(
-            &cwd.join(CONFIG_DIRECTORY).join("settings.json"),
-            request.project_trusted,
-        );
+        let settings_context = SettingsContext::new(&cwd, request.project_trusted);
+        let settings = settings_manager.load(&settings_context);
         Self {
             cwd,
             agent_dir,
             project_trusted: request.project_trusted,
             explicit_sources: request.explicit_sources,
             discover_extensions: request.discover_extensions,
-            user_settings,
-            project_settings,
+            settings_manager,
+            settings_context,
+            user_settings: settings.global().clone(),
+            project_settings: settings.project().clone(),
         }
     }
 
@@ -203,12 +215,9 @@ impl PackageManager {
 
     /// Resolves explicit CLI sources first, then all configured sources in Pi precedence.
     pub async fn resolve(&self) -> Result<Resolution, PackageManagerError> {
-        let explicit = self.resolve_explicit(&self.explicit_sources).await?;
-        let configured = if self.discover_extensions {
-            self.resolve_configured().await?
-        } else {
-            Vec::new()
-        };
+        let (explicit, mut explicit_resources) =
+            self.resolve_explicit(&self.explicit_sources).await?;
+        let (configured, configured_resources) = self.resolve_configured().await?;
 
         let mut seen_paths = HashSet::new();
         let extensions: Vec<_> = explicit
@@ -223,9 +232,17 @@ impl PackageManager {
             .filter(|identity| seen_identities.insert(identity.clone()))
             .collect();
         let extension_paths = extensions.into_iter().map(|entry| entry.path).collect();
+        explicit_resources
+            .skills
+            .extend(configured_resources.skills);
+        explicit_resources
+            .prompts
+            .extend(configured_resources.prompts);
         Ok(Resolution {
             extension_paths,
             extension_identities,
+            skill_paths: dedupe_paths(explicit_resources.skills),
+            prompt_paths: dedupe_paths(explicit_resources.prompts),
         })
     }
 
@@ -600,7 +617,7 @@ impl PackageManager {
             for result in results {
                 result?;
             }
-            Ok(())
+            Ok::<(), PackageManagerError>(())
         };
         let (npm_result, git_result) = futures::join!(npm_updates, git_updates);
         npm_result?;
@@ -684,7 +701,7 @@ impl PackageManager {
         self.install_npm_specs(&specs, scope).await
     }
 
-    fn settings_for_scope(&self, scope: SourceScope) -> &Settings {
+    fn settings_for_scope(&self, scope: SourceScope) -> &SettingsValues {
         match scope {
             SourceScope::User | SourceScope::Temporary => &self.user_settings,
             SourceScope::Project => &self.project_settings,
@@ -699,29 +716,30 @@ impl PackageManager {
         if scope == SourceScope::Project && !self.project_trusted {
             return Err(PackageManagerError::ProjectNotTrusted);
         }
-        let path = self.settings_path(scope);
-        persist_packages(&path, &packages)?;
-        match scope {
-            SourceScope::User | SourceScope::Temporary => self.user_settings.packages = packages,
-            SourceScope::Project => self.project_settings.packages = packages,
-        }
+        let settings_scope = match scope {
+            SourceScope::User | SourceScope::Temporary => SettingsScope::Global,
+            SourceScope::Project => SettingsScope::Project,
+        };
+        let settings = self.settings_manager.replace_packages(
+            &self.settings_context,
+            settings_scope,
+            &packages,
+        )?;
+        self.user_settings = settings.global().clone();
+        self.project_settings = settings.project().clone();
         Ok(())
     }
 
-    fn settings_path(&self, scope: SourceScope) -> PathBuf {
-        match scope {
-            SourceScope::User | SourceScope::Temporary => self.agent_dir.join("settings.json"),
-            SourceScope::Project => self.cwd.join(CONFIG_DIRECTORY).join("settings.json"),
-        }
-    }
-
-    async fn resolve_configured(&self) -> Result<Vec<ResolvedExtension>, PackageManagerError> {
+    async fn resolve_configured(
+        &self,
+    ) -> Result<(Vec<ResolvedExtension>, ResolvedPackageResources), PackageManagerError> {
         let mut extensions = Vec::new();
+        let mut resources = ResolvedPackageResources::default();
         let packages = self.configured_packages();
-        self.resolve_package_sources(&packages, &mut extensions, false)
+        self.resolve_package_sources(&packages, &mut extensions, &mut resources, false)
             .await?;
 
-        if self.project_trusted {
+        if self.discover_extensions && self.project_trusted {
             self.resolve_local_entries(
                 &self.project_settings.extensions,
                 &mut extensions,
@@ -729,13 +747,15 @@ impl PackageManager {
                 &self.cwd.join(CONFIG_DIRECTORY),
             );
         }
-        self.resolve_local_entries(
-            &self.user_settings.extensions,
-            &mut extensions,
-            SourceScope::User,
-            &self.agent_dir,
-        );
-        if self.project_trusted {
+        if self.discover_extensions {
+            self.resolve_local_entries(
+                &self.user_settings.extensions,
+                &mut extensions,
+                SourceScope::User,
+                &self.agent_dir,
+            );
+        }
+        if self.discover_extensions && self.project_trusted {
             self.add_automatic_entries(
                 &self.cwd.join(CONFIG_DIRECTORY).join("extensions"),
                 &self.project_settings.extensions,
@@ -744,25 +764,32 @@ impl PackageManager {
                 &self.cwd.join(CONFIG_DIRECTORY),
             );
         }
-        self.add_automatic_entries(
-            &self.agent_dir.join("extensions"),
-            &self.user_settings.extensions,
-            &mut extensions,
-            SourceScope::User,
-            &self.agent_dir,
-        );
+        if self.discover_extensions {
+            self.add_automatic_entries(
+                &self.agent_dir.join("extensions"),
+                &self.user_settings.extensions,
+                &mut extensions,
+                SourceScope::User,
+                &self.agent_dir,
+            );
+        }
 
-        Ok(sort_and_dedupe(extensions)
-            .into_iter()
-            .filter(|entry| entry.enabled)
-            .flat_map(expand_resolved_extension)
-            .collect())
+        let extensions = if self.discover_extensions {
+            sort_and_dedupe(extensions)
+                .into_iter()
+                .filter(|entry| entry.enabled)
+                .flat_map(expand_resolved_extension)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok((extensions, resources))
     }
 
     async fn resolve_explicit(
         &self,
         sources: &[String],
-    ) -> Result<Vec<ResolvedExtension>, PackageManagerError> {
+    ) -> Result<(Vec<ResolvedExtension>, ResolvedPackageResources), PackageManagerError> {
         let packages: Vec<_> = sources
             .iter()
             .cloned()
@@ -770,13 +797,17 @@ impl PackageManager {
             .map(|package| ScopedPackage::new(package, SourceScope::Temporary))
             .collect();
         let mut extensions = Vec::new();
-        self.resolve_package_sources(&packages, &mut extensions, true)
+        let mut resources = ResolvedPackageResources::default();
+        self.resolve_package_sources(&packages, &mut extensions, &mut resources, true)
             .await?;
-        Ok(sort_and_dedupe(extensions)
-            .into_iter()
-            .filter(|entry| entry.enabled)
-            .flat_map(expand_resolved_extension)
-            .collect())
+        Ok((
+            sort_and_dedupe(extensions)
+                .into_iter()
+                .filter(|entry| entry.enabled)
+                .flat_map(expand_resolved_extension)
+                .collect(),
+            resources,
+        ))
     }
 
     fn resolve_local_entries(
@@ -851,6 +882,7 @@ impl PackageManager {
         &self,
         sources: &[ScopedPackage],
         extensions: &mut Vec<ResolvedExtension>,
+        resources: &mut ResolvedPackageResources,
         explicit: bool,
     ) -> Result<(), PackageManagerError> {
         for entry in sources {
@@ -878,9 +910,10 @@ impl PackageManager {
                     };
                     let add_directly = metadata_fs.is_file()
                         || (metadata_fs.is_dir()
-                            && !collect_package_extensions(
+                            && !collect_package_contents(
                                 &path,
                                 extensions,
+                                resources,
                                 filter,
                                 metadata.clone(),
                             ));
@@ -897,7 +930,7 @@ impl PackageManager {
                         self.install_npm(&npm, resolved_scope).await?;
                         installed = self.npm_install_path(&npm, resolved_scope);
                     }
-                    collect_package_extensions(&installed, extensions, filter, metadata);
+                    collect_package_contents(&installed, extensions, resources, filter, metadata);
                 }
                 ParsedSource::Git(git) => {
                     let installed = self.git_install_path(&git, resolved_scope)?;
@@ -910,7 +943,7 @@ impl PackageManager {
                     {
                         self.refresh_temporary_git(&installed).await;
                     }
-                    collect_package_extensions(&installed, extensions, filter, metadata);
+                    collect_package_contents(&installed, extensions, resources, filter, metadata);
                 }
             }
         }
@@ -1499,73 +1532,11 @@ impl PackageManager {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-struct Settings {
-    extensions: Vec<String>,
-    packages: Vec<PackageSource>,
-    npm_command: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-enum PackageSource {
-    String(String),
-    Filter(PackageFilter),
-}
-
-impl PackageSource {
-    fn source(&self) -> &str {
-        match self {
-            Self::String(source) => source,
-            Self::Filter(filter) => &filter.source,
-        }
-    }
-
-    fn filter(&self) -> Option<&PackageFilter> {
-        match self {
-            Self::String(_) => None,
-            Self::Filter(filter) => Some(filter),
-        }
-    }
-
-    fn is_autoload_delta(&self) -> bool {
-        matches!(self, Self::Filter(filter) if filter.autoload == Some(false))
-    }
-
-    fn may_enable_extensions(&self) -> bool {
-        match self {
-            Self::String(_) => true,
-            Self::Filter(filter) => filter.extensions.as_ref().map_or_else(
-                || filter.autoload != Some(false),
-                |extensions| !extensions.is_empty(),
-            ),
-        }
-    }
-
-    fn set_source(&mut self, source: String) {
-        match self {
-            Self::String(existing) => *existing = source,
-            Self::Filter(filter) => filter.source = source,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PackageFilter {
-    source: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    autoload: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    extensions: Option<Vec<String>>,
-    #[serde(flatten)]
-    extra: BTreeMap<String, serde_json::Value>,
-}
-
 #[derive(Debug, Clone)]
 struct PiManifest {
     extensions: Option<Vec<String>>,
+    skills: Option<Vec<String>>,
+    prompts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1702,57 +1673,6 @@ enum ParsedSource {
     Git(GitSource),
 }
 
-fn load_settings(path: &Path, enabled: bool) -> Settings {
-    if !enabled {
-        return Settings::default();
-    }
-    fs::read(path)
-        .ok()
-        .and_then(|contents| serde_json::from_slice(&contents).ok())
-        .unwrap_or_default()
-}
-
-fn persist_packages(path: &Path, packages: &[PackageSource]) -> Result<(), PackageManagerError> {
-    let mut settings = if path.exists() {
-        let contents = fs::read(path).map_err(|source| PackageManagerError::ReadSettings {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&contents).map_err(
-            |error| PackageManagerError::InvalidSettings {
-                path: path.to_path_buf(),
-                message: error.to_string(),
-            },
-        )?
-    } else {
-        serde_json::Map::new()
-    };
-    settings.insert(
-        "packages".to_string(),
-        serde_json::to_value(packages).map_err(|error| PackageManagerError::InvalidSettings {
-            path: path.to_path_buf(),
-            message: error.to_string(),
-        })?,
-    );
-    let mut json = serde_json::to_string_pretty(&settings).map_err(|error| {
-        PackageManagerError::InvalidSettings {
-            path: path.to_path_buf(),
-            message: error.to_string(),
-        }
-    })?;
-    json.push('\n');
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| PackageManagerError::WriteSettings {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    }
-    fs::write(path, json).map_err(|source| PackageManagerError::WriteSettings {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
 fn installed_npm_version(installed: &Path) -> Option<Version> {
     let contents = fs::read(installed.join("package.json")).ok()?;
     let value: serde_json::Value = serde_json::from_slice(&contents).ok()?;
@@ -1822,14 +1742,18 @@ fn read_pi_manifest(directory: &Path) -> Option<PiManifest> {
     let value: serde_json::Value =
         serde_json::from_slice(&fs::read(directory.join("package.json")).ok()?).ok()?;
     let pi = value.get("pi")?.as_object()?;
-    let extensions = pi.get("extensions").and_then(|extensions| {
-        let values = extensions.as_array()?;
+    let string_list = |key: &str| {
+        let values = pi.get(key)?.as_array()?;
         values
             .iter()
             .map(|value| value.as_str().map(str::to_string))
             .collect::<Option<Vec<_>>>()
-    });
-    Some(PiManifest { extensions })
+    };
+    Some(PiManifest {
+        extensions: string_list("extensions"),
+        skills: string_list("skills"),
+        prompts: string_list("prompts"),
+    })
 }
 
 fn discover_extensions(directory: &Path) -> Vec<PathBuf> {
@@ -1955,6 +1879,183 @@ fn collect_package_extensions(
     true
 }
 
+fn collect_package_contents(
+    package_root: &Path,
+    extensions: &mut Vec<ResolvedExtension>,
+    resources: &mut ResolvedPackageResources,
+    filter: Option<&PackageFilter>,
+    metadata: ExtensionMetadata,
+) -> bool {
+    let recognized = collect_package_extensions(package_root, extensions, filter, metadata);
+    let skills = collect_package_resource_paths(package_root, ResourceKind::Skill, filter);
+    let prompts = collect_package_resource_paths(package_root, ResourceKind::Prompt, filter);
+    let has_resources = !skills.is_empty() || !prompts.is_empty();
+    resources.skills.extend(skills);
+    resources.prompts.extend(prompts);
+    recognized || has_resources || read_pi_manifest(package_root).is_some()
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ResourceKind {
+    Skill,
+    Prompt,
+}
+
+impl ResourceKind {
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Skill => "skills",
+            Self::Prompt => "prompts",
+        }
+    }
+
+    fn manifest_entries(self, manifest: &PiManifest) -> Option<&[String]> {
+        match self {
+            Self::Skill => manifest.skills.as_deref(),
+            Self::Prompt => manifest.prompts.as_deref(),
+        }
+    }
+
+    fn filter_patterns(self, filter: &PackageFilter) -> Option<&[String]> {
+        match self {
+            Self::Skill => filter.skills.as_deref(),
+            Self::Prompt => filter.prompts.as_deref(),
+        }
+    }
+}
+
+fn collect_package_resource_paths(
+    package_root: &Path,
+    kind: ResourceKind,
+    filter: Option<&PackageFilter>,
+) -> Vec<PathBuf> {
+    let manifest = read_pi_manifest(package_root);
+    let files = match (&manifest, filter) {
+        (Some(manifest), Some(_)) => kind.manifest_entries(manifest).map_or_else(
+            || collect_resource_files(&package_root.join(kind.directory()), kind),
+            |entries| manifest_resource_files(package_root, entries, kind),
+        ),
+        (Some(manifest), None) => kind
+            .manifest_entries(manifest)
+            .map_or_else(Vec::new, |entries| {
+                manifest_resource_files(package_root, entries, kind)
+            }),
+        (None, _) => collect_resource_files(&package_root.join(kind.directory()), kind),
+    };
+    let Some(filter) = filter else {
+        return files;
+    };
+    let patterns = kind.filter_patterns(filter);
+    if filter.autoload == Some(false) {
+        return apply_autoload_disabled_patterns(
+            &files,
+            patterns.unwrap_or_default(),
+            package_root,
+        )
+        .into_iter()
+        .filter_map(|(path, enabled)| enabled.then_some(path))
+        .collect();
+    }
+    let Some(patterns) = patterns else {
+        return files;
+    };
+    if patterns.is_empty() {
+        return Vec::new();
+    }
+    let enabled = apply_patterns(&files, patterns, package_root);
+    files
+        .into_iter()
+        .filter(|path| enabled.contains(path))
+        .collect()
+}
+
+fn manifest_resource_files(
+    package_root: &Path,
+    entries: &[String],
+    kind: ResourceKind,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for entry in entries.iter().filter(|entry| !is_override_pattern(entry)) {
+        if has_glob_pattern(entry) {
+            let pattern = package_root.join(entry).to_string_lossy().into_owned();
+            if let Ok(matches) = glob::glob(&pattern) {
+                paths.extend(matches.filter_map(Result::ok).map(|path| path.clean()));
+            }
+        } else {
+            paths.push(package_root.join(entry).clean());
+        }
+    }
+    let files = paths
+        .into_iter()
+        .flat_map(|path| collect_resource_files(&path, kind))
+        .collect::<Vec<_>>();
+    let overrides = entries
+        .iter()
+        .filter(|entry| is_override_pattern(entry))
+        .cloned()
+        .collect::<Vec<_>>();
+    if overrides.is_empty() {
+        files
+    } else {
+        let enabled = apply_patterns(&files, &overrides, package_root);
+        files
+            .into_iter()
+            .filter(|path| enabled.contains(path))
+            .collect()
+    }
+}
+
+fn collect_resource_files(path: &Path, kind: ResourceKind) -> Vec<PathBuf> {
+    if path.is_file() {
+        return (path.extension().is_some_and(|extension| extension == "md"))
+            .then(|| path.to_path_buf())
+            .into_iter()
+            .collect();
+    }
+    if !path.is_dir() {
+        return Vec::new();
+    }
+    let root = path.to_path_buf();
+    let mut output = Vec::new();
+    collect_resource_directory(path, &root, kind, &mut output);
+    output
+}
+
+fn collect_resource_directory(
+    directory: &Path,
+    root: &Path,
+    kind: ResourceKind,
+    output: &mut Vec<PathBuf>,
+) {
+    let mut entries = match fs::read_dir(directory) {
+        Ok(entries) => entries.filter_map(Result::ok).collect::<Vec<_>>(),
+        Err(_) => return,
+    };
+    entries.sort_by_key(fs::DirEntry::file_name);
+    if matches!(kind, ResourceKind::Skill) {
+        let declared = directory.join("SKILL.md");
+        if declared.is_file() {
+            output.push(declared);
+            return;
+        }
+    }
+    for entry in entries {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_resource_directory(&path, root, kind, output);
+        } else if path.extension().is_some_and(|extension| extension == "md")
+            && (matches!(kind, ResourceKind::Prompt) || directory == root)
+        {
+            output.push(path);
+        }
+    }
+}
+
 fn collect_manifest_files(package_root: &Path) -> Vec<PathBuf> {
     if let Some(entries) = read_pi_manifest(package_root).and_then(|manifest| manifest.extensions)
         && !entries.is_empty()
@@ -2034,6 +2135,14 @@ fn sort_and_dedupe(mut extensions: Vec<ResolvedExtension>) -> Vec<ResolvedExtens
     extensions
         .into_iter()
         .filter(|entry| seen.insert(canonical_or_original(&entry.path)))
+        .collect()
+}
+
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    paths
+        .into_iter()
+        .filter(|path| seen.insert(canonical_or_original(path)))
         .collect()
 }
 
@@ -2156,11 +2265,26 @@ fn matches_any_pattern(path: &Path, patterns: &[String], base: &Path) -> bool {
         .unwrap_or_default();
     let name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
     let absolute = posix_path(path);
+    let skill_parent = (name == "SKILL.md").then(|| path.parent()).flatten();
+    let skill_parent_relative = skill_parent
+        .and_then(|parent| pathdiff::diff_paths(parent, base))
+        .map(|path| posix_path(&path));
+    let skill_parent_name = skill_parent
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str);
+    let skill_parent_absolute = skill_parent.map(posix_path);
     patterns.iter().any(|pattern| {
         let pattern = pattern.replace('\\', "/");
         glob_matches(&relative, &pattern)
             || glob_matches(name, &pattern)
             || glob_matches(&absolute, &pattern)
+            || skill_parent_relative
+                .as_deref()
+                .is_some_and(|value| glob_matches(value, &pattern))
+            || skill_parent_name.is_some_and(|value| glob_matches(value, &pattern))
+            || skill_parent_absolute
+                .as_deref()
+                .is_some_and(|value| glob_matches(value, &pattern))
     })
 }
 
@@ -2169,13 +2293,25 @@ fn matches_any_exact_pattern(path: &Path, patterns: &[String], base: &Path) -> b
         .map(|path| posix_path(&path))
         .unwrap_or_default();
     let absolute = posix_path(path);
+    let skill_parent = path
+        .file_name()
+        .is_some_and(|name| name == "SKILL.md")
+        .then(|| path.parent())
+        .flatten();
+    let skill_parent_relative = skill_parent
+        .and_then(|parent| pathdiff::diff_paths(parent, base))
+        .map(|path| posix_path(&path));
+    let skill_parent_absolute = skill_parent.map(posix_path);
     patterns.iter().any(|pattern| {
         let normalized = pattern
             .strip_prefix("./")
             .or_else(|| pattern.strip_prefix(".\\"))
             .unwrap_or(pattern)
             .replace('\\', "/");
-        normalized == relative || normalized == absolute
+        normalized == relative
+            || normalized == absolute
+            || skill_parent_relative.as_deref() == Some(normalized.as_str())
+            || skill_parent_absolute.as_deref() == Some(normalized.as_str())
     })
 }
 
