@@ -24,9 +24,10 @@ pub(crate) struct PreparedProvider {
     pub api_key: Option<String>,
     pub runtime_api_key: Option<String>,
     pub headers: BTreeMap<String, String>,
-    pub auth_header: bool,
+    pub auth_header: Option<bool>,
     pub models: Vec<PreparedModel>,
     pub model_overrides: BTreeMap<ModelId, PreparedOverride>,
+    pub replace_models: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -86,9 +87,8 @@ struct ProviderDefinition {
     #[garde(custom(optional_object_value))]
     compat: Option<Value>,
     auth_header: Option<bool>,
-    #[serde(default)]
     #[garde(dive)]
-    models: Vec<ModelDefinition>,
+    models: Option<Vec<ModelDefinition>>,
     #[serde(default)]
     #[garde(custom(non_blank_map_keys), dive)]
     model_overrides: BTreeMap<String, ModelOverride>,
@@ -562,37 +562,158 @@ pub(crate) fn load_models_file(
         })
 }
 
+pub(crate) fn compile_extension_provider(
+    id: &ProviderId,
+    config: Value,
+    runtime_api_keys: &BTreeMap<ProviderId, String>,
+) -> Result<PreparedProvider, ModelsPluginError> {
+    let definition = serde_json::from_value::<ProviderDefinition>(config).map_err(|error| {
+        ModelsPluginError::InvalidExtension {
+            provider: id.clone(),
+            message: error.to_string(),
+        }
+    })?;
+    definition
+        .validate()
+        .map_err(|report| ModelsPluginError::InvalidExtension {
+            provider: id.clone(),
+            message: report.to_string(),
+        })?;
+    definition
+        .compile(
+            id.to_string(),
+            runtime_api_keys,
+            ProviderModelComposition::Replace,
+        )
+        .map_err(|message| ModelsPluginError::InvalidExtension {
+            provider: id.clone(),
+            message,
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderModelComposition {
+    Upsert,
+    Replace,
+}
+
 impl PreparedProvider {
     /// Composes one models.json provider over model metadata registered by
     /// earlier provider plugins, matching Pi's built-in/custom upsert order.
     pub(crate) fn compose_with_base(&self, base_models: &[ModelSpec]) -> Result<Self, String> {
-        let mut models = base_models
+        self.compose_with_base_without_overrides(base_models, true)
+    }
+
+    pub(crate) fn compose_with_base_without_model_overrides(
+        &self,
+        base_models: &[ModelSpec],
+    ) -> Result<Self, String> {
+        self.compose_with_base_without_overrides(base_models, false)
+    }
+
+    pub(crate) fn compose_with_prepared_base(
+        &self,
+        base_models: &[PreparedModel],
+    ) -> Result<Self, String> {
+        self.compose_prepared(base_models, true)
+    }
+
+    pub(crate) fn overlay_on(&self, lower: &Self) -> Self {
+        let mut overlay = self.clone();
+        if overlay.name.is_none() {
+            overlay.name.clone_from(&lower.name);
+        }
+        if overlay.api.is_none() {
+            overlay.api.clone_from(&lower.api);
+        }
+        if overlay.base_url.is_none() {
+            overlay.base_url.clone_from(&lower.base_url);
+        }
+        overlay.compat = merge_compat(lower.compat.clone(), overlay.compat.take());
+        if overlay.api_key.is_none() {
+            overlay.api_key.clone_from(&lower.api_key);
+        }
+        if overlay.runtime_api_key.is_none() {
+            overlay.runtime_api_key.clone_from(&lower.runtime_api_key);
+        }
+        let mut headers = lower.headers.clone();
+        headers.extend(std::mem::take(&mut overlay.headers));
+        overlay.headers = headers;
+        if overlay.auth_header.is_none() {
+            overlay.auth_header = lower.auth_header;
+        }
+        overlay
+    }
+
+    pub(crate) fn apply_model_overrides(&self, models: &mut [PreparedModel]) -> Result<(), String> {
+        for model in &mut *models {
+            let Some(model_override) = self.model_overrides.get(&model.id) else {
+                continue;
+            };
+            apply_override(&mut model.spec, model_override);
+            let mut headers = model_override.headers.clone();
+            // Pi gives the concrete custom model definition precedence over
+            // modelOverrides for request headers.
+            headers.extend(std::mem::take(&mut model.headers));
+            model.headers = headers;
+        }
+        for model in models {
+            validate_compat(&self.id, &model.spec)?;
+        }
+        Ok(())
+    }
+
+    fn compose_with_base_without_overrides(
+        &self,
+        base_models: &[ModelSpec],
+        apply_model_overrides: bool,
+    ) -> Result<Self, String> {
+        let prepared = base_models
             .iter()
             .cloned()
-            .map(|mut spec| {
-                if let Some(base_url) = &self.base_url {
-                    spec.base_url = Some(base_url.clone());
-                }
-                spec.compat = merge_compat(spec.compat.take(), self.compat.clone());
-                PreparedModel {
-                    id: spec.id.clone(),
-                    spec,
-                    headers: BTreeMap::new(),
-                }
+            .map(|spec| PreparedModel {
+                id: spec.id.clone(),
+                spec,
+                headers: BTreeMap::new(),
             })
             .collect::<Vec<_>>();
+        self.compose_prepared(&prepared, apply_model_overrides)
+    }
+
+    fn compose_prepared(
+        &self,
+        base_models: &[PreparedModel],
+        apply_model_overrides: bool,
+    ) -> Result<Self, String> {
+        let defaults = base_models
+            .iter()
+            .cloned()
+            .map(|mut model| {
+                if let Some(base_url) = &self.base_url {
+                    model.spec.base_url = Some(base_url.clone());
+                }
+                model.spec.compat = merge_compat(model.spec.compat.take(), self.compat.clone());
+                model
+            })
+            .collect::<Vec<_>>();
+        let mut models = if self.replace_models {
+            Vec::new()
+        } else {
+            defaults.clone()
+        };
 
         for configured in &self.models {
             let existing_index = models.iter().position(|model| model.id == configured.id);
-            let defaults = existing_index
-                .and_then(|index| models.get(index))
-                .or_else(|| models.first());
+            let default = defaults
+                .iter()
+                .find(|model| model.id == configured.id)
+                .or_else(|| defaults.first());
             let mut model = configured.clone();
             if model.spec.api.is_empty() {
                 model.spec.api = self
                     .api
                     .clone()
-                    .or_else(|| defaults.map(|model| model.spec.api.clone()))
+                    .or_else(|| default.map(|model| model.spec.api.clone()))
                     .ok_or_else(|| {
                         format!(
                             "provider {}, model {}: no api specified at model or provider level",
@@ -604,7 +725,7 @@ impl PreparedProvider {
                 model.spec.base_url = self
                     .base_url
                     .clone()
-                    .or_else(|| defaults.and_then(|model| model.spec.base_url.clone()));
+                    .or_else(|| default.and_then(|model| model.spec.base_url.clone()));
             }
             if model.spec.base_url.is_none() {
                 return Err(format!(
@@ -612,22 +733,19 @@ impl PreparedProvider {
                     self.id, model.id
                 ));
             }
+            let mut headers = default
+                .map(|model| model.headers.clone())
+                .unwrap_or_default();
+            headers.extend(std::mem::take(&mut model.headers));
+            model.headers = headers;
             match existing_index {
                 Some(index) => models[index] = model,
                 None => models.push(model),
             }
         }
 
-        for model in &mut models {
-            let Some(model_override) = self.model_overrides.get(&model.id) else {
-                continue;
-            };
-            apply_override(&mut model.spec, model_override);
-            let mut headers = model_override.headers.clone();
-            // Pi gives the concrete custom model definition precedence over
-            // modelOverrides for request headers.
-            headers.extend(std::mem::take(&mut model.headers));
-            model.headers = headers;
+        if apply_model_overrides {
+            self.apply_model_overrides(&mut models)?;
         }
         for model in &models {
             validate_compat(&self.id, &model.spec)?;
@@ -671,7 +789,9 @@ impl ModelsFile {
         self.validate().map_err(|report| report.to_string())?;
         self.providers
             .into_iter()
-            .map(|(id, provider)| provider.compile(id, runtime_api_keys))
+            .map(|(id, provider)| {
+                provider.compile(id, runtime_api_keys, ProviderModelComposition::Upsert)
+            })
             .collect()
     }
 }
@@ -681,6 +801,7 @@ impl ProviderDefinition {
         self,
         id: String,
         runtime_api_keys: &BTreeMap<ProviderId, String>,
+        composition: ProviderModelComposition,
     ) -> Result<PreparedProvider, String> {
         let provider = self;
         if provider.oauth.is_some() {
@@ -688,7 +809,9 @@ impl ProviderDefinition {
                 "provider {id}: oauth \"radius\" is not supported by pi-plugin-models yet"
             ));
         }
-        if provider.models.is_empty()
+        let has_models = provider.models.is_some();
+        if composition == ProviderModelComposition::Upsert
+            && !has_models
             && provider.base_url.is_none()
             && provider.api_key.is_none()
             && provider.api.is_none()
@@ -708,9 +831,10 @@ impl ProviderDefinition {
             .map(|api| normalize_api(&id, None, api))
             .transpose()?;
         let provider_compat = provider.compat.clone();
+        let definitions = provider.models.unwrap_or_default();
         let mut seen = HashSet::new();
-        let mut models = Vec::with_capacity(provider.models.len());
-        for definition in provider.models {
+        let mut models = Vec::with_capacity(definitions.len());
+        for definition in definitions {
             if !seen.insert(definition.id.clone()) {
                 return Err(format!(
                     "provider {id}: duplicate model id {:?}",
@@ -741,9 +865,10 @@ impl ProviderDefinition {
             compat: provider_compat,
             api_key: provider.api_key,
             headers: provider.headers.unwrap_or_default(),
-            auth_header: provider.auth_header.unwrap_or(false),
+            auth_header: provider.auth_header,
             models,
             model_overrides,
+            replace_models: composition == ProviderModelComposition::Replace && has_models,
         })
     }
 }
@@ -1119,7 +1244,7 @@ mod tests {
 
         let providers = parsed.compile(&BTreeMap::new()).unwrap();
         assert_eq!(providers.len(), 2);
-        assert!(!providers[0].auth_header);
+        assert_eq!(providers[0].auth_header, Some(false));
         assert!(providers[1].headers.is_empty());
     }
 

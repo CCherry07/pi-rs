@@ -52,6 +52,13 @@ const commandManifestSchema = z.strictObject({
   argumentHint: z.string().optional(),
 })
 
+const providerRegistrationManifestSchema = z.strictObject({
+  pluginId: z.string(),
+  path: z.string(),
+  name: z.string(),
+  config: jsonObjectSchema,
+})
+
 const generationManifestSchema = z.strictObject({
   generationId: z.string(),
   agentPlugins: z.array(
@@ -68,6 +75,7 @@ const generationManifestSchema = z.strictObject({
       hooks: z.array(hookManifestSchema),
     }),
   ),
+  providerRegistrations: z.array(providerRegistrationManifestSchema).default([]),
   sessionPlugins: z.array(
     z.strictObject({
       id: z.string(),
@@ -96,6 +104,7 @@ export type ToolManifest = z.infer<typeof toolManifestSchema>
 export type CommandManifest = z.infer<typeof commandManifestSchema>
 export type AgentPluginManifest = z.infer<typeof generationManifestSchema>['agentPlugins'][number]
 export type ProviderPluginManifest = z.infer<typeof generationManifestSchema>['providerPlugins'][number]
+export type ProviderRegistrationManifest = z.infer<typeof providerRegistrationManifestSchema>
 export type SessionPluginManifest = z.infer<typeof generationManifestSchema>['sessionPlugins'][number]
 export type ExtensionDiagnostic = z.infer<typeof generationManifestSchema>['diagnostics'][number]
 export type GenerationManifest = z.infer<typeof generationManifestSchema>

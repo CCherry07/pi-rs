@@ -157,6 +157,27 @@ pub enum ExtensionContextNotification {
     SetThinkingLevel {
         level: String,
     },
+    RegisterProvider {
+        name: String,
+        config: Value,
+    },
+    UnregisterProvider {
+        name: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExtensionProviderMutation {
+    Register { name: String, config: Value },
+    Unregister { name: String },
+}
+
+/// Generation-external staging seam for JavaScript provider mutations.
+/// Implementations keep published registries immutable and expose pending
+/// mutations to the next product generation transaction.
+pub trait ExtensionProviderMutationAccess: Send + Sync {
+    fn stage(&self, mutation: ExtensionProviderMutation) -> Result<(), String>;
+    fn has_pending(&self) -> bool;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,6 +486,8 @@ pub struct SessionExtensionContextAccess {
     generation_session: RwLock<Option<Weak<AgentSession>>>,
     binding: ExtensionSessionBinding,
     runtime: tokio::runtime::Handle,
+    provider_mutations: Option<Arc<dyn ExtensionProviderMutationAccess>>,
+    provider_reload_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl SessionExtensionContextAccess {
@@ -474,7 +497,17 @@ impl SessionExtensionContextAccess {
             generation_session: RwLock::new(None),
             binding,
             runtime: tokio::runtime::Handle::current(),
+            provider_mutations: None,
+            provider_reload_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    pub fn with_provider_mutations(
+        mut self,
+        access: Arc<dyn ExtensionProviderMutationAccess>,
+    ) -> Self {
+        self.provider_mutations = Some(access);
+        self
     }
 
     pub fn bind_generation_session(&self, session: Arc<AgentSession>) {
@@ -852,6 +885,12 @@ impl ExtensionContextAccess for SessionExtensionContextAccess {
                     .set_thinking_level(level)
                     .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
             }
+            ExtensionContextNotification::RegisterProvider { name, config } => {
+                self.stage_provider_mutation(ExtensionProviderMutation::Register { name, config })?;
+            }
+            ExtensionContextNotification::UnregisterProvider { name } => {
+                self.stage_provider_mutation(ExtensionProviderMutation::Unregister { name })?;
+            }
         }
         Ok(())
     }
@@ -1032,6 +1071,14 @@ impl ExtensionContextAccess for SessionExtensionContextAccess {
                 Ok(Value::Null)
             }
             ExtensionContextRequest::SetModel { provider, model_id } => {
+                let _provider_reload = if scope == ExtensionContextScope::Command {
+                    Some(self.provider_reload_gate.lock().await)
+                } else {
+                    None
+                };
+                if scope == ExtensionContextScope::Command {
+                    self.reload_pending_providers().await?;
+                }
                 let provider = ProviderId::new(provider);
                 let model_id = ModelId::new(model_id);
                 let session = self.session()?;
@@ -1054,6 +1101,52 @@ impl ExtensionContextAccess for SessionExtensionContextAccess {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
+    }
+}
+
+impl SessionExtensionContextAccess {
+    fn stage_provider_mutation(
+        &self,
+        mutation: ExtensionProviderMutation,
+    ) -> Result<(), ExtensionContextError> {
+        let access = self.provider_mutations.as_ref().ok_or_else(|| {
+            ExtensionContextError::Unavailable(
+                "dynamic provider registration is not configured".to_string(),
+            )
+        })?;
+        access
+            .stage(mutation)
+            .map_err(ExtensionContextError::Invalid)?;
+        let session = self.pi_session()?;
+        let access = Arc::clone(access);
+        let gate = Arc::clone(&self.provider_reload_gate);
+        self.runtime.spawn(async move {
+            let _reload = gate.lock().await;
+            if !access.has_pending() {
+                return;
+            }
+            if let Err(error) = session.reload().await {
+                session.current().notify_extension(
+                    format!("JavaScript provider update failed: {error}"),
+                    ExtensionNoticeLevel::Error,
+                );
+            }
+        });
+        Ok(())
+    }
+
+    async fn reload_pending_providers(&self) -> Result<(), ExtensionContextError> {
+        if !self
+            .provider_mutations
+            .as_ref()
+            .is_some_and(|mutations| mutations.has_pending())
+        {
+            return Ok(());
+        }
+        self.pi_session()?
+            .reload()
+            .await
+            .map_err(|error| ExtensionContextError::Failed(error.to_string()))
     }
 }
 

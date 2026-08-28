@@ -105,13 +105,13 @@ impl ModelsJsonProvider {
                 None => None,
             },
         };
-        if self.configured.auth_header && api_key.is_none() {
+        if self.configured.auth_header.unwrap_or(false) && api_key.is_none() {
             return Err(ProviderError::Failure(format!(
                 "provider {}: authHeader requires a resolved API key",
                 self.configured.id
             )));
         }
-        if self.configured.auth_header
+        if self.configured.auth_header.unwrap_or(false)
             && let Some(api_key) = &api_key
         {
             insert_header(&mut headers, "Authorization", format!("Bearer {api_key}"));
@@ -482,13 +482,14 @@ mod tests {
             api_key: Some("models-json-key".to_string()),
             runtime_api_key: Some("runtime-key".to_string()),
             headers: BTreeMap::from([("X-Provider".to_string(), "provider".to_string())]),
-            auth_header: false,
+            auth_header: Some(false),
             models: vec![PreparedModel {
                 id: ModelId::new("model"),
                 spec,
                 headers: BTreeMap::from([("X-Model".to_string(), "model".to_string())]),
             }],
             model_overrides: BTreeMap::new(),
+            replace_models: false,
         };
         let captured = Arc::new(Mutex::new(None));
         let fallback: Arc<dyn Provider> = Arc::new(CapturingProvider {
@@ -563,13 +564,14 @@ mod tests {
             api_key: Some("configured-key".to_string()),
             runtime_api_key: None,
             headers: BTreeMap::from([("X-Provider".to_string(), "provider".to_string())]),
-            auth_header: true,
+            auth_header: Some(true),
             models: vec![PreparedModel {
                 id: ModelId::new("custom-claude"),
                 spec,
                 headers: BTreeMap::from([("X-Model".to_string(), "model".to_string())]),
             }],
             model_overrides: BTreeMap::new(),
+            replace_models: false,
         };
         let transport = Arc::new(CapturingTransport::default());
         let provider = ModelsJsonProvider::with_transport(
@@ -646,13 +648,14 @@ mod tests {
             api_key: Some("xai-key".to_string()),
             runtime_api_key: None,
             headers: BTreeMap::from([("X-Provider".to_string(), "provider".to_string())]),
-            auth_header: false,
+            auth_header: Some(false),
             models: vec![PreparedModel {
                 id: ModelId::new("grok-custom"),
                 spec,
                 headers: BTreeMap::new(),
             }],
             model_overrides: BTreeMap::new(),
+            replace_models: false,
         };
         let transport = Arc::new(CapturingTransport::default());
         let provider = ModelsJsonProvider::with_transport(
@@ -728,13 +731,14 @@ mod tests {
             api_key: Some("google-key".to_string()),
             runtime_api_key: None,
             headers: BTreeMap::new(),
-            auth_header: false,
+            auth_header: Some(false),
             models: vec![PreparedModel {
                 id: ModelId::new("gemma-4-31b-it"),
                 spec,
                 headers: BTreeMap::new(),
             }],
             model_overrides: BTreeMap::new(),
+            replace_models: false,
         };
         let transport = Arc::new(CapturingTransport::default());
         let provider = ModelsJsonProvider::with_transport(
@@ -809,13 +813,14 @@ mod tests {
             api_key: None,
             runtime_api_key: None,
             headers: BTreeMap::new(),
-            auth_header: false,
+            auth_header: Some(false),
             models: vec![PreparedModel {
                 id: ModelId::new("model"),
                 spec,
                 headers: BTreeMap::new(),
             }],
             model_overrides: BTreeMap::new(),
+            replace_models: false,
         };
         let provider = ModelsJsonProvider::new(
             configured,

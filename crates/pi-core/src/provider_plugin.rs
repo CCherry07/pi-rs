@@ -120,6 +120,18 @@ impl<'a> ProviderRegisterContext<'a> {
         self.registries
             .register_model_override(self.owner.clone(), model)
     }
+
+    /// Replaces the complete model catalog for one provider while this
+    /// generation is being constructed. The published registry remains
+    /// immutable, and at most one plugin may replace a provider catalog.
+    pub fn replace_provider_models(
+        &mut self,
+        provider: ProviderId,
+        models: Vec<ModelSpec>,
+    ) -> Result<()> {
+        self.registries
+            .replace_provider_models(self.owner.clone(), provider, models)
+    }
 }
 
 /// A provider-system plugin that contributes providers, routing overlays,
@@ -384,6 +396,55 @@ mod tests {
 
     struct CatalogProviderPlugin;
 
+    struct BaseCatalogProviderPlugin;
+
+    #[pi_core::provider_plugin]
+    impl ProviderPlugin for BaseCatalogProviderPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("base-catalog")
+        }
+
+        fn register(&self, context: &mut ProviderRegisterContext<'_>) -> Result<()> {
+            context.register_provider(Arc::new(TestProvider("replaceable")))?;
+            context.register_model(ModelSpec::new(
+                "replaceable",
+                "first",
+                "First",
+                "openai-completions",
+            ))?;
+            context.register_model(ModelSpec::new(
+                "replaceable",
+                "second",
+                "Second",
+                "openai-completions",
+            ))
+        }
+    }
+
+    struct ReplacementCatalogProviderPlugin;
+
+    #[pi_core::provider_plugin]
+    impl ProviderPlugin for ReplacementCatalogProviderPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("replacement-catalog")
+        }
+
+        fn register(&self, context: &mut ProviderRegisterContext<'_>) -> Result<()> {
+            let provider = ProviderId::new("replaceable");
+            assert_eq!(context.base_models(&provider).len(), 2);
+            context.register_provider_override(Arc::new(TestProvider("replaceable")))?;
+            context.replace_provider_models(
+                provider,
+                vec![ModelSpec::new(
+                    "replaceable",
+                    "replacement",
+                    "Replacement",
+                    "openai-completions",
+                )],
+            )
+        }
+    }
+
     struct BaseProviderPlugin;
 
     struct PayloadPlugin {
@@ -542,6 +603,38 @@ mod tests {
         assert_eq!(
             registries.model_owner(&provider, &model),
             Some(&PluginId::new("models"))
+        );
+    }
+
+    #[test]
+    fn provider_catalog_replacement_removes_lower_layer_models_before_freeze() {
+        let (_, _, registries) = RegistriesBuilder::new()
+            .register_plugin_sets(
+                Vec::new(),
+                vec![
+                    Arc::new(BaseCatalogProviderPlugin),
+                    Arc::new(ReplacementCatalogProviderPlugin),
+                ],
+            )
+            .unwrap();
+        let provider = ProviderId::new("replaceable");
+
+        assert!(
+            registries
+                .model(&provider, &ModelId::new("first"))
+                .is_none()
+        );
+        assert!(
+            registries
+                .model(&provider, &ModelId::new("second"))
+                .is_none()
+        );
+        assert_eq!(
+            registries
+                .model(&provider, &ModelId::new("replacement"))
+                .unwrap()
+                .name,
+            "Replacement"
         );
     }
 

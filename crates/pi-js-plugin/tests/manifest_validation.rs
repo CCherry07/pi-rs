@@ -5,12 +5,68 @@ use pi_core::AgentHook;
 use pi_js_plugin::{
     JsAgentPluginManifest, JsCallbackDispatcher, JsCallbackError, JsGenerationManifest,
     JsHookManifest, JsInvocation, JsPluginGeneration, JsProviderPluginManifest,
+    JsProviderRegistration,
 };
 use serde_json::Value;
 
 #[derive(Default)]
 struct RetiringDispatcher {
     retired: Mutex<Vec<String>>,
+}
+
+#[test]
+fn configured_provider_registrations_are_validated_and_retained() {
+    let dispatcher = Arc::new(RetiringDispatcher::default());
+    let generation = JsPluginGeneration::prepare(
+        JsGenerationManifest {
+            generation_id: "js-provider-registration".to_string(),
+            agent_plugins: Vec::new(),
+            provider_plugins: Vec::new(),
+            provider_registrations: vec![JsProviderRegistration {
+                plugin_id: "js:0:provider.ts".to_string(),
+                path: "/provider.ts".to_string(),
+                name: "proxy".to_string(),
+                config: serde_json::json!({"baseUrl": "https://proxy.example/v1"}),
+            }],
+            session_plugins: Vec::new(),
+            diagnostics: Vec::new(),
+        },
+        dispatcher,
+    )
+    .unwrap();
+
+    assert_eq!(generation.provider_registrations()[0].name, "proxy");
+}
+
+#[test]
+fn malformed_provider_registration_retires_the_candidate_generation() {
+    let dispatcher = Arc::new(RetiringDispatcher::default());
+    let result = JsPluginGeneration::prepare(
+        JsGenerationManifest {
+            generation_id: "js-invalid-provider-registration".to_string(),
+            agent_plugins: Vec::new(),
+            provider_plugins: Vec::new(),
+            provider_registrations: vec![JsProviderRegistration {
+                plugin_id: "js:0:provider.ts".to_string(),
+                path: "/provider.ts".to_string(),
+                name: "proxy".to_string(),
+                config: serde_json::json!("not-an-object"),
+            }],
+            session_plugins: Vec::new(),
+            diagnostics: Vec::new(),
+        },
+        dispatcher.clone(),
+    );
+
+    let error = match result {
+        Ok(_) => panic!("malformed provider registration was accepted"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("config must be an object"));
+    assert_eq!(
+        *dispatcher.retired.lock().unwrap(),
+        ["js-invalid-provider-registration"]
+    );
 }
 
 #[async_trait]
@@ -48,6 +104,7 @@ fn agent_hook_interests_are_derived_from_the_validated_manifest() {
                 callback_id: "input-callback".to_string(),
             }])],
             provider_plugins: Vec::new(),
+            provider_registrations: Vec::new(),
             session_plugins: Vec::new(),
             diagnostics: Vec::new(),
         },
@@ -72,6 +129,7 @@ fn unsupported_hooks_fail_the_candidate_and_retire_its_host_generation() {
                 callback_id: "model-select".to_string(),
             }])],
             provider_plugins: Vec::new(),
+            provider_registrations: Vec::new(),
             session_plugins: Vec::new(),
             diagnostics: Vec::new(),
         },
@@ -103,6 +161,7 @@ fn callback_ids_are_unique_across_the_three_lifecycle_manifests() {
                     callback_id: "same-callback".to_string(),
                 }],
             }],
+            provider_registrations: Vec::new(),
             session_plugins: Vec::new(),
             diagnostics: Vec::new(),
         },

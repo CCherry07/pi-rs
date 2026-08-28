@@ -374,6 +374,16 @@ stays Node-owned because it is a process primitive, while messages, durable cust
 metadata, tool/model/thinking selection, and replacement setup flow through typed native
 operations into `AgentSession`. Node never edits a session file or reconstructs queue policy.
 
+Configuration-form `pi.registerProvider(name, config)` and `pi.unregisterProvider(name)` cross the
+same native capability without mutating a published registry. Load-time registrations are validated
+as part of the JavaScript manifest. Runtime calls stage ordered mutations in the generation-external
+`DynamicProviderOverlay`; `ProductSessionFactory` combines load-time registrations and staged
+mutations, prepares the complete replacement session/runtime generation, and commits the overlay
+only after preparation succeeds. Failure drops the staged batch and preserves the current
+generation. Calls made during an active run take effect at the next whole-run safe point, while a
+command's immediately following `setModel` acts as a flush barrier. Extension provider state is
+executable runtime state and is never serialized into Pi v4 JSONL.
+
 Tool argument preparation is an asynchronous method on the core `Tool` Interface. This preserves
 Pi ordering for JavaScript tools: prepare, validate, `tool_call` hooks, execute. Tool execution gets
 an invocation-local update sink on the NAPI context so partial results cross the Adapter directly
@@ -443,7 +453,7 @@ command-safe session operations described above. UI is an intentional product di
 JavaScript context reports `hasUI = false` and exposes one explicit inert UI object with
 Pi-compatible default return values. Its `notify` method crosses the native context as a transient
 `AgentSessionEvent::ExtensionNotice`; each Rust frontend owns presentation, and nothing is persisted
-to the v4 session log. UI registrations, renderers, flags, dynamic providers, resource discovery,
+to the v4 session log. UI registrations, renderers, and resource discovery,
 and other recognized-but-inactive facilities do not fail generation construction; they produce an
 `inactive` generation diagnostic and contribute no runtime callback. A hook name known to current
 Pi but not implemented follows the same inactive policy, while an unknown hook name remains a hard
@@ -454,8 +464,12 @@ trusted in-process Node code and share the process and OS authority of the produ
 
 `ModelsPlugin` is a provider plugin loaded after the base protocol provider. It loads one immutable,
 credential-blind `models.json` snapshot per generation and composes layers in Pi order: built-in
-catalog, provider `baseUrl`/`compat`, custom-model upsert, then one explicit model override. The
-registry exposes narrow, construction-only provider/model override seams; duplicate overrides and
+catalog, provider `baseUrl`/`compat`, custom-model upsert, JavaScript provider registration, then one
+explicit model override. A JavaScript registration with `models` replaces that provider's complete
+catalog; a registration without `models` preserves the lower catalog and may override routing,
+credentials, and headers. The registry exposes a construction-only whole-catalog replacement
+Interface for this case; frozen generations still have no removal or mutation surface. Its narrow
+construction-time provider/model seams reject duplicate overrides, and
 missing override targets fail candidate construction instead of mutating a published registry.
 Full model overrides preserve partial cost rates, tier replacement, input modalities, context and
 output limits, thinking maps, per-key sampling parameters, request headers, and Pi's four special

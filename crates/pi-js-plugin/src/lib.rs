@@ -41,9 +41,20 @@ pub struct JsGenerationManifest {
     #[serde(default)]
     pub provider_plugins: Vec<JsProviderPluginManifest>,
     #[serde(default)]
+    pub provider_registrations: Vec<JsProviderRegistration>,
+    #[serde(default)]
     pub session_plugins: Vec<JsSessionPluginManifest>,
     #[serde(default)]
     pub diagnostics: Vec<JsExtensionDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsProviderRegistration {
+    pub plugin_id: String,
+    pub path: String,
+    pub name: String,
+    pub config: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,6 +313,7 @@ pub enum JsPluginError {
 pub struct JsPluginGeneration {
     agent_plugins: Vec<Arc<dyn AgentPlugin>>,
     provider_plugins: Vec<Arc<dyn ProviderPlugin>>,
+    provider_registrations: Vec<JsProviderRegistration>,
     session_plugins: Vec<Arc<dyn SessionPlugin>>,
     diagnostics: Vec<JsExtensionDiagnostic>,
 }
@@ -346,6 +358,7 @@ impl JsPluginGeneration {
             generation_id,
             agent_plugins,
             provider_plugins,
+            provider_registrations,
             session_plugins,
             diagnostics,
         } = manifest;
@@ -358,6 +371,7 @@ impl JsPluginGeneration {
             &lease.generation_id,
             &agent_plugins,
             &provider_plugins,
+            &provider_registrations,
             &session_plugins,
         )?;
         let agent_plugins = agent_plugins
@@ -408,6 +422,7 @@ impl JsPluginGeneration {
         Ok(Self {
             agent_plugins,
             provider_plugins,
+            provider_registrations,
             session_plugins,
             diagnostics,
         })
@@ -419,6 +434,10 @@ impl JsPluginGeneration {
 
     pub fn provider_plugins(&self) -> Vec<Arc<dyn ProviderPlugin>> {
         self.provider_plugins.clone()
+    }
+
+    pub fn provider_registrations(&self) -> &[JsProviderRegistration] {
+        &self.provider_registrations
     }
 
     pub fn session_plugins(&self) -> Vec<Arc<dyn SessionPlugin>> {
@@ -493,6 +512,7 @@ fn validate_manifest(
     generation_id: &str,
     agent_plugins: &[JsAgentPluginManifest],
     provider_plugins: &[JsProviderPluginManifest],
+    provider_registrations: &[JsProviderRegistration],
     session_plugins: &[JsSessionPluginManifest],
 ) -> Result<(), JsPluginError> {
     if generation_id.trim().is_empty() {
@@ -526,6 +546,31 @@ fn validate_manifest(
             PROVIDER_HOOKS,
             &mut callback_ids,
         )?;
+    }
+    for registration in provider_registrations {
+        if registration.plugin_id.trim().is_empty() {
+            return Err(JsPluginError::InvalidManifest(
+                "provider registration pluginId must not be empty".to_string(),
+            ));
+        }
+        if registration.path.trim().is_empty() {
+            return Err(JsPluginError::InvalidManifest(format!(
+                "provider registration {} path must not be empty",
+                registration.plugin_id
+            )));
+        }
+        if registration.name.trim().is_empty() {
+            return Err(JsPluginError::InvalidManifest(format!(
+                "provider registration {} name must not be empty",
+                registration.plugin_id
+            )));
+        }
+        if !registration.config.is_object() {
+            return Err(JsPluginError::InvalidManifest(format!(
+                "provider registration {}/{} config must be an object",
+                registration.plugin_id, registration.name
+            )));
+        }
     }
     let mut session_ids = HashSet::new();
     for plugin in session_plugins {

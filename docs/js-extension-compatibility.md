@@ -46,7 +46,10 @@ models, idle/queue state, context usage, the effective system prompt, and the re
 `sessionManager` tree/branch/identity surface. `abort`, background compaction, and graceful product
 shutdown are native notifications. `modelRegistry` currently provides read-only
 `getAll`, `getAvailable`, `find`, `hasConfiguredAuth`, and `getProviderDisplayName`; provider auth,
-completion, refresh, and dynamic registration remain inactive.
+completion, and refresh remain inactive. Configuration-form `pi.registerProvider(name, config)` and
+`pi.unregisterProvider(name)` are active. A command's immediately following `pi.setModel` flushes a
+pending provider generation first; calls from active hooks become visible after that run settles so
+one run never mixes immutable generations.
 
 The generation-local `pi` API also exposes the active/all tool and command catalogs, model and
 thinking selection, session name/labels, custom context messages, user messages, durable custom
@@ -82,7 +85,13 @@ module evaluation and keep its tools, commands, and hooks. Renderer, widget, sho
 registrations remain inactive. Any other missing dependency is fatal so broken packages and
 installation mistakes are not hidden.
 
-The following registration surfaces are recognized and inactive: shortcuts, providers, and
+The configuration-form provider registration surface supports `name`, `baseUrl`, `apiKey`, `api`,
+`headers`, `authHeader`, and `models`. Supplying `models` replaces the provider catalog; omitting it
+preserves lower-layer models, and unregistering restores the built-in/`models.json` layers on the
+next safe generation. The full `Provider` object overload and the `streamSimple`, `refreshModels`,
+and OAuth callbacks are recognized and inactive.
+
+The following registration surfaces are recognized and inactive: shortcuts and
 message/Markdown/entry renderers. Extension flags are active; boolean flags use `--name` and string
 flags accept both `--name value` and `--name=value`; first registration wins for duplicate names,
 and unregistered flags fail generation construction. Tool

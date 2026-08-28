@@ -621,6 +621,113 @@ test('activates provider header mutation and response observation hooks', async 
   assert.equal(observed, null)
 })
 
+test('captures configured providers at load time and forwards runtime mutations', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-provider-registration-'))
+  const extension = join(root, 'provider-registration.ts')
+  await writeFile(extension, `
+    export default function (pi: any) {
+      pi.registerProvider("temporary", {
+        baseUrl: "https://temporary.example/v1",
+        api: "openai-responses",
+        models: [{ id: "temporary-model" }]
+      });
+      pi.unregisterProvider("temporary");
+      pi.registerProvider("proxy", {
+        name: "Proxy",
+        baseUrl: "https://proxy.example/v1",
+        apiKey: "$PROXY_API_KEY",
+        api: "openai-responses",
+        authHeader: true,
+        models: [{
+          id: "model-a",
+          name: "Model A",
+          reasoning: true,
+          input: ["text", "image"],
+          cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 },
+          contextWindow: 200000,
+          maxTokens: 8192,
+          headers: { "X-Model": "a" },
+          compat: { supportsDeveloperRole: true }
+        }]
+      });
+      pi.registerProvider("future", {
+        streamSimple() { throw new Error("inactive callback must not run"); }
+      });
+      pi.registerCommand("mutate-provider", {
+        handler() {
+          pi.registerProvider("proxy", { baseUrl: "https://runtime.example/v1" });
+          pi.unregisterProvider("proxy");
+        }
+      });
+    }
+  `)
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: {
+      projectTrusted: true,
+      extensionPaths: [extension],
+      mode: 'print',
+      cwd: root,
+    },
+  })))
+
+  assert.deepEqual(manifest.providerRegistrations, [{
+    pluginId: 'js:0:provider-registration.ts',
+    path: extension,
+    name: 'proxy',
+    config: {
+      name: 'Proxy',
+      baseUrl: 'https://proxy.example/v1',
+      apiKey: '$PROXY_API_KEY',
+      api: 'openai-responses',
+      authHeader: true,
+      models: [{
+        id: 'model-a',
+        name: 'Model A',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 },
+        contextWindow: 200000,
+        maxTokens: 8192,
+        headers: { 'X-Model': 'a' },
+        compat: { supportsDeveloperRole: true },
+      }],
+    },
+  }])
+  assert.deepEqual(
+    manifest.diagnostics.map(diagnostic => diagnostic.feature),
+    ['pi.registerProvider.streamSimple'],
+  )
+
+  const notifications: Record<string, unknown>[] = []
+  const command = manifest.agentPlugins[0]?.commands[0]
+  assert.ok(command)
+  await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'mutate-provider',
+      generationId: manifest.generationId,
+      callbackId: command.callbackId,
+      kind: 'command',
+      payload: { context: { cwd: root }, arguments: '' },
+    },
+  }), {
+    query: () => 'null',
+    notify: operation => notifications.push(parseJson(operation) as Record<string, unknown>),
+    request: async () => 'null',
+  })
+  assert.deepEqual(notifications, [
+    {
+      type: 'registerProvider',
+      name: 'proxy',
+      config: { baseUrl: 'https://runtime.example/v1' },
+    },
+    { type: 'unregisterProvider', name: 'proxy' },
+  ])
+})
+
 test('keeps inactive JavaScript UI registrations non-fatal while agent_settled stays active', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-inactive-'))
   const extension = join(root, 'inactive-extension.ts')

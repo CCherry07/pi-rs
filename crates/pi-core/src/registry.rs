@@ -14,6 +14,7 @@ pub struct RegistriesBuilder {
     provider_overrides: HashSet<ProviderId>,
     models: HashMap<(ProviderId, ModelId), (PluginId, ModelSpec)>,
     model_overrides: HashSet<(ProviderId, ModelId)>,
+    model_catalog_replacements: HashSet<ProviderId>,
 }
 
 impl RegistriesBuilder {
@@ -114,6 +115,46 @@ impl RegistriesBuilder {
             return Err(CoreError::DuplicateModelOverride(display));
         }
         self.models.insert(key, (owner, model));
+        Ok(())
+    }
+
+    pub(crate) fn replace_provider_models(
+        &mut self,
+        owner: PluginId,
+        provider: ProviderId,
+        models: Vec<ModelSpec>,
+    ) -> Result<()> {
+        if !self.providers.contains_key(&provider) {
+            return Err(CoreError::ProviderNotFound(provider.to_string()));
+        }
+        if !self.model_catalog_replacements.insert(provider.clone()) {
+            return Err(CoreError::DuplicateModelCatalogReplacement(
+                provider.to_string(),
+            ));
+        }
+        let mut seen = HashSet::new();
+        for model in &models {
+            if model.provider != provider {
+                return Err(CoreError::ModelProviderNotFound {
+                    provider: model.provider.to_string(),
+                    model: model.id.to_string(),
+                });
+            }
+            if !seen.insert(model.id.clone()) {
+                return Err(CoreError::DuplicateModel(format!(
+                    "{}/{}",
+                    provider, model.id
+                )));
+            }
+        }
+        self.models
+            .retain(|(candidate, _), _| candidate != &provider);
+        self.model_overrides
+            .retain(|(candidate, _)| candidate != &provider);
+        for model in models {
+            let key = (provider.clone(), model.id.clone());
+            self.models.insert(key, (owner.clone(), model));
+        }
         Ok(())
     }
 

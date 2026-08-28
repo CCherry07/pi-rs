@@ -20,6 +20,7 @@ import {
   type HostMode,
   type Invocation,
   type ProviderPluginManifest,
+  type ProviderRegistrationManifest,
   type SessionPluginManifest,
   type ToolExecutionMode,
   type ToolManifest,
@@ -101,6 +102,70 @@ const beforeAgentStartResultSchema = z.looseObject({
   systemPrompt: z.string().optional(),
 })
 const providerHeadersSchema = z.record(z.string(), z.union([z.string(), z.null()]))
+const providerCostSchema = z.looseObject({
+  input: z.number().optional(),
+  output: z.number().optional(),
+  cacheRead: z.number().optional(),
+  cacheWrite: z.number().optional(),
+  tiers: z.array(z.looseObject({
+    inputTokensAbove: z.number(),
+    input: z.number(),
+    output: z.number(),
+    cacheRead: z.number(),
+    cacheWrite: z.number(),
+  })).optional(),
+})
+const providerModelSchema = z.looseObject({
+  id: z.string().min(1),
+  name: z.string().optional(),
+  api: z.string().optional(),
+  baseUrl: z.string().optional(),
+  reasoning: z.boolean().optional(),
+  thinkingLevelMap: z.record(z.string(), z.string().nullable()).optional(),
+  input: z.array(z.enum(['text', 'image'])).optional(),
+  cost: providerCostSchema.optional(),
+  contextWindow: z.number().int().positive().optional(),
+  maxTokens: z.number().int().positive().optional(),
+  samplingParams: z.record(z.string(), z.unknown()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+  compat: jsonObjectSchema.optional(),
+})
+const providerConfigSchema = z.looseObject({
+  name: z.string().optional(),
+  baseUrl: z.string().optional(),
+  apiKey: z.string().optional(),
+  api: z.string().optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+  authHeader: z.boolean().optional(),
+  models: z.array(providerModelSchema).optional(),
+  streamSimple: callableSchema.optional(),
+  refreshModels: callableSchema.optional(),
+  oauth: z.unknown().optional(),
+})
+
+const SUPPORTED_PROVIDER_CONFIG_KEYS = new Set([
+  'name', 'baseUrl', 'apiKey', 'api', 'headers', 'authHeader', 'models',
+])
+const KNOWN_PROVIDER_CONFIG_KEYS = new Set([
+  ...SUPPORTED_PROVIDER_CONFIG_KEYS,
+  'streamSimple', 'refreshModels', 'oauth',
+])
+
+function normalizeProviderConfig(
+  value: unknown,
+  path: string,
+): { config: Record<string, unknown>; inactive: string[] } {
+  const parsed = parseExternal(providerConfigSchema, value, `pi.registerProvider config (${path})`)
+  const unknown = Object.keys(parsed).filter(key => !KNOWN_PROVIDER_CONFIG_KEYS.has(key))
+  if (unknown.length > 0) {
+    throw new Error(`pi.registerProvider config has unknown field${unknown.length === 1 ? '' : 's'} ${unknown.map(key => JSON.stringify(key)).join(', ')} (${path})`)
+  }
+  const config = Object.fromEntries(
+    Object.entries(parsed).filter(([key, entry]) => SUPPORTED_PROVIDER_CONFIG_KEYS.has(key) && entry !== undefined),
+  )
+  const inactive = ['streamSimple', 'refreshModels', 'oauth'].filter(key => parsed[key] !== undefined)
+  return { config, inactive }
+}
 
 function parseExternal<T>(schema: z.ZodType<T>, value: unknown, description: string): T {
   const result = schema.safeParse(value)
@@ -217,6 +282,8 @@ interface GenerationState {
   runtime: ExtensionRuntime
   flagValues: Map<string, boolean | string | undefined>
   registeredFlags: Map<string, 'boolean' | 'string'>
+  initializing: boolean
+  providerRegistrations: ProviderRegistrationManifest[]
 }
 
 interface ExtensionEventBus {
@@ -231,7 +298,7 @@ interface ExtensionApi {
   registerCommand(name: string, options: unknown): void
   registerShortcut(): void
   registerFlag(name: string, options: unknown): void
-  registerProvider(): void
+  registerProvider(nameOrProvider: string | Record<string, unknown>, config?: unknown): void
   registerMessageRenderer(): void
   registerMarkdownTransformer(): void
   registerEntryRenderer(): void
@@ -249,7 +316,7 @@ interface ExtensionApi {
   setModel(model: Record<string, unknown>): Promise<boolean>
   getThinkingLevel(): string
   setThinkingLevel(level: string): void
-  unregisterProvider(): void
+  unregisterProvider(name: string): void
   getFlag(name: string): boolean | string | undefined
   events: ExtensionEventBus
 }
@@ -364,6 +431,8 @@ export class ExtensionHost {
       runtime,
       flagValues: new Map(Object.entries(request.flagValues)),
       registeredFlags: new Map(),
+      initializing: true,
+      providerRegistrations: [],
     }
     this.#generations.set(generationId, state)
     try {
@@ -412,7 +481,16 @@ export class ExtensionHost {
         throw new Error(`Unknown JavaScript extension flag${unknownFlags.length === 1 ? '' : 's'}: ${unknownFlags.map(name => `--${name}`).join(', ')}`)
       }
 
-      return { generationId, agentPlugins, providerPlugins, sessionPlugins, diagnostics }
+      state.initializing = false
+
+      return {
+        generationId,
+        agentPlugins,
+        providerPlugins,
+        providerRegistrations: state.providerRegistrations,
+        sessionPlugins,
+        diagnostics,
+      }
     } catch (error) {
       this.#retireGeneration(generationId)
       throw error
@@ -574,7 +652,32 @@ export class ExtensionHost {
           state.flagValues.set(name, options.default)
         }
       },
-      registerProvider: () => inactive('pi.registerProvider'),
+      registerProvider: (nameOrProvider, value) => {
+        if (typeof nameOrProvider !== 'string') {
+          inactive('pi.registerProvider(Provider)')
+          return
+        }
+        if (!nameOrProvider.trim()) throw new Error(`registerProvider requires a non-empty name (${path})`)
+        if (value === undefined) throw new Error(`Provider config is required when registering by name (${path})`)
+        const normalized = normalizeProviderConfig(value, path)
+        for (const feature of normalized.inactive) inactive(`pi.registerProvider.${feature}`)
+        if (Object.keys(normalized.config).length === 0 && normalized.inactive.length > 0) return
+        const registration = {
+          pluginId,
+          path,
+          name: nameOrProvider,
+          config: normalized.config,
+        }
+        if (state.initializing) {
+          state.providerRegistrations.push(registration)
+        } else {
+          state.runtime.notify({
+            type: 'registerProvider',
+            name: nameOrProvider,
+            config: normalized.config,
+          })
+        }
+      },
       registerMessageRenderer: () => inactive('pi.registerMessageRenderer'),
       registerMarkdownTransformer: () => inactive('pi.registerMarkdownTransformer'),
       registerEntryRenderer: () => inactive('pi.registerEntryRenderer'),
@@ -620,7 +723,18 @@ export class ExtensionHost {
         () => 'off',
       ),
       setThinkingLevel: level => state.runtime.notify({ type: 'setThinkingLevel', level }),
-      unregisterProvider: () => inactive('pi.unregisterProvider'),
+      unregisterProvider: name => {
+        if (!name.trim()) throw new Error(`unregisterProvider requires a non-empty name (${path})`)
+        if (state.initializing) {
+          state.providerRegistrations.splice(
+            0,
+            state.providerRegistrations.length,
+            ...state.providerRegistrations.filter(registration => registration.name !== name),
+          )
+        } else {
+          state.runtime.notify({ type: 'unregisterProvider', name })
+        }
+      },
       getFlag: name => registeredFlags.has(name) ? state.flagValues.get(name) : undefined,
       events: state.events,
     }

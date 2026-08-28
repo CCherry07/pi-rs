@@ -155,6 +155,7 @@ fn generation(dispatcher: Arc<LifecycleDispatcher>) -> JsPluginGeneration {
                     },
                 ],
             }],
+            provider_registrations: Vec::new(),
             session_plugins: vec![JsSessionPluginManifest {
                 id: "extension".to_string(),
                 hooks: vec![

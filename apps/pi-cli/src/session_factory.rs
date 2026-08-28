@@ -7,8 +7,9 @@ use pi_agent::AgentOptions;
 use pi_core::{ModelId, PluginId, ProviderId};
 use pi_js_package_manager::{PackageManager as JsPackageManager, ResolvedExtensionIdentity};
 use pi_js_plugin::{
-    ExtensionContextAccess, ExtensionSessionBinding, JsGenerationRequest, JsHostMode,
-    JsPluginGeneration, JsPluginHost, SessionExtensionContextAccess,
+    ExtensionContextAccess, ExtensionProviderMutationAccess, ExtensionSessionBinding,
+    JsGenerationRequest, JsHostMode, JsPluginGeneration, JsPluginHost,
+    SessionExtensionContextAccess,
 };
 use pi_plugin_anthropic::AnthropicPlugin;
 use pi_plugin_bash::BashPlugin;
@@ -39,6 +40,7 @@ use pi_session::{
 
 use crate::auth::{StoredCredential, read_stored_credential};
 use crate::config::AppConfig;
+use crate::dynamic_providers::{DynamicProviderCandidate, DynamicProviderOverlay};
 use crate::project_trust::ProjectTrustService;
 
 #[derive(Clone)]
@@ -48,6 +50,7 @@ pub(crate) struct ProductSessionFactory {
     js_plugin_host: Option<Arc<dyn JsPluginHost>>,
     js_session_binding: Option<ExtensionSessionBinding>,
     js_host_mode: JsHostMode,
+    dynamic_providers: DynamicProviderOverlay,
 }
 
 impl ProductSessionFactory {
@@ -58,6 +61,7 @@ impl ProductSessionFactory {
             js_plugin_host: None,
             js_session_binding: None,
             js_host_mode: JsHostMode::Print,
+            dynamic_providers: DynamicProviderOverlay::default(),
         }
     }
 
@@ -101,6 +105,7 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
                 )
             }
         };
+        let mut dynamic_provider_preparation = self.dynamic_providers.begin_preparation();
         let mut config = self.config.clone();
         config.cwd = cwd;
         let project_trusted = self
@@ -119,6 +124,7 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             configured_native_plugin_ids(&package_reconciliations, &native_plugins);
         let mut js_context = None;
         let mut js_extensions = Vec::new();
+        let mut dynamic_provider_candidate = None;
         let js_generation = if let Some(host) = &self.js_plugin_host {
             let resolution =
                 JsPackageManager::new(config.javascript_resolve_request(project_trusted))
@@ -140,33 +146,59 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
                 })
                 .await
                 .map_err(|error| SessionError::Runtime(error.to_string()))?;
-            let context = Arc::new(SessionExtensionContextAccess::new(
-                project_trusted,
-                self.js_session_binding.clone().ok_or_else(|| {
-                    SessionError::Runtime(
+            let candidate = self
+                .dynamic_providers
+                .candidate(&manifest.provider_registrations)
+                .map_err(SessionError::Runtime)?;
+            let binding = match self.js_session_binding.clone() {
+                Some(binding) => binding,
+                None => {
+                    self.dynamic_providers.reject(&candidate);
+                    return Err(SessionError::Runtime(
                         "JavaScript plugin host is missing its session binding".to_string(),
-                    )
-                })?,
-            ));
+                    ));
+                }
+            };
+            let mutation_access: Arc<dyn ExtensionProviderMutationAccess> =
+                Arc::new(self.dynamic_providers.clone());
+            let context = Arc::new(
+                SessionExtensionContextAccess::new(project_trusted, binding)
+                    .with_provider_mutations(mutation_access),
+            );
             let context_access: Arc<dyn ExtensionContextAccess> = context.clone();
-            let generation = JsPluginGeneration::prepare_with_host_and_context(
+            let generation = match JsPluginGeneration::prepare_with_host_and_context(
                 manifest,
                 Arc::clone(host),
                 context_access,
-            )
-            .map_err(|error| SessionError::Runtime(error.to_string()))?;
+            ) {
+                Ok(generation) => generation,
+                Err(error) => {
+                    self.dynamic_providers.reject(&candidate);
+                    return Err(SessionError::Runtime(error.to_string()));
+                }
+            };
             js_extensions = extension_labels;
             js_context = Some(context);
+            dynamic_provider_candidate = Some(candidate);
             Some(generation)
         } else {
             None
         };
-        let runtime = build_runtime(
+        let runtime = match build_runtime(
             &config,
             project_trusted,
             &native_plugins,
             js_generation.as_ref(),
-        )?;
+            dynamic_provider_candidate.as_ref(),
+        ) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                if let Some(candidate) = &dynamic_provider_candidate {
+                    self.dynamic_providers.reject(candidate);
+                }
+                return Err(error.into());
+            }
+        };
         let mut session_plugins = native_plugins.apply_session(SessionPlugins::new());
         if let Some(js_generation) = &js_generation {
             for plugin in js_generation.session_plugins() {
@@ -199,9 +231,16 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
                 for reconciliation in package_reconciliations {
                     reconciliation.commit();
                 }
+                if let Some(candidate) = dynamic_provider_candidate {
+                    self.dynamic_providers.commit(candidate);
+                }
+                dynamic_provider_preparation.finish();
                 Ok(prepared)
             }
             Err(error) => {
+                if let Some(candidate) = &dynamic_provider_candidate {
+                    self.dynamic_providers.reject(candidate);
+                }
                 let mut rollback_errors = Vec::new();
                 for reconciliation in package_reconciliations.into_iter().rev() {
                     if let Err(rollback_error) = reconciliation.rollback() {
@@ -351,12 +390,14 @@ fn build_runtime(
     project_trusted: bool,
     native_plugins: &NativePlugins,
     js_generation: Option<&JsPluginGeneration>,
+    dynamic_providers: Option<&DynamicProviderCandidate>,
 ) -> Result<PiRuntime, RuntimeError> {
     build_runtime_with_codex_credentials(
         config,
         project_trusted,
         native_plugins,
         js_generation,
+        dynamic_providers,
         None,
     )
 }
@@ -366,6 +407,7 @@ fn build_runtime_with_codex_credentials(
     project_trusted: bool,
     native_plugins: &NativePlugins,
     js_generation: Option<&JsPluginGeneration>,
+    dynamic_providers: Option<&DynamicProviderCandidate>,
     codex_credentials: Option<pi_plugin_openai::CodexCredentials>,
 ) -> Result<PiRuntime, RuntimeError> {
     let stored_anthropic =
@@ -404,6 +446,11 @@ fn build_runtime_with_codex_credentials(
     let mut model_options = ModelsPluginOptions::for_agent_dir(&config.agent_dir);
     if let Some(api_key) = &effective_api_key {
         model_options = model_options.runtime_api_key(config.provider.clone(), api_key.clone());
+    }
+    if let Some(dynamic_providers) = dynamic_providers {
+        for (provider, provider_config) in dynamic_providers.provider_configs() {
+            model_options = model_options.extension_provider_config(provider, provider_config);
+        }
     }
 
     let builder = PiRuntime::builder();
@@ -640,6 +687,7 @@ mod tests {
                     }],
                 }],
                 provider_plugins: Vec::new(),
+                provider_registrations: Vec::new(),
                 session_plugins: Vec::new(),
                 diagnostics: Vec::new(),
             })
@@ -706,6 +754,56 @@ command = "fixture-command"
         );
     }
 
+    #[test]
+    fn javascript_provider_candidate_is_compiled_into_the_runtime_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let overlay = DynamicProviderOverlay::default();
+        let candidate = overlay
+            .candidate(&[pi_js_plugin::JsProviderRegistration {
+                plugin_id: "js:0:provider.ts".to_string(),
+                path: "/provider.ts".to_string(),
+                name: "extension-provider".to_string(),
+                config: serde_json::json!({
+                    "baseUrl": "https://extension.example/v1",
+                    "apiKey": "test-key",
+                    "api": "openai-responses",
+                    "models": [{
+                        "id": "extension-model",
+                        "name": "Extension Model",
+                        "reasoning": true,
+                        "input": ["text"],
+                        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                        "contextWindow": 64000,
+                        "maxTokens": 4096
+                    }]
+                }),
+            }])
+            .unwrap();
+
+        let runtime = build_runtime_with_codex_credentials(
+            &app_config(directory.path(), None),
+            false,
+            &NativePlugins::default(),
+            None,
+            Some(&candidate),
+            Some(pi_plugin_openai::CodexCredentials::default()),
+        )
+        .unwrap();
+        let model = runtime
+            .model(
+                &ProviderId::new("extension-provider"),
+                &ModelId::new("extension-model"),
+            )
+            .unwrap();
+
+        assert_eq!(model.name, "Extension Model");
+        assert_eq!(model.context_window, 64_000);
+        assert_eq!(
+            model.base_url.as_deref(),
+            Some("https://extension.example/v1")
+        );
+    }
+
     fn jwt(account_id: &str) -> String {
         use base64::Engine;
 
@@ -747,6 +845,7 @@ command = "fixture-command"
             false,
             &NativePlugins::default(),
             None,
+            None,
             Some(pi_plugin_openai::CodexCredentials::default()),
         )
         .unwrap();
@@ -768,6 +867,7 @@ command = "fixture-command"
             &config,
             false,
             &NativePlugins::default(),
+            None,
             None,
             Some(pi_plugin_openai::CodexCredentials::default()),
         )
@@ -797,6 +897,7 @@ command = "fixture-command"
             &config,
             false,
             &NativePlugins::default(),
+            None,
             None,
             Some(pi_plugin_openai::CodexCredentials::default()),
         )
@@ -829,6 +930,7 @@ command = "fixture-command"
             false,
             &NativePlugins::default(),
             None,
+            None,
             Some(pi_plugin_openai::CodexCredentials::default()),
         )
         .unwrap();
@@ -859,6 +961,7 @@ command = "fixture-command"
             &config,
             false,
             &NativePlugins::default(),
+            None,
             None,
             Some(pi_plugin_openai::CodexCredentials::default()),
         )
@@ -898,6 +1001,7 @@ command = "fixture-command"
             &NativePlugins::default(),
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -919,6 +1023,7 @@ command = "fixture-command"
             &config,
             false,
             &NativePlugins::default(),
+            None,
             None,
             Some(pi_plugin_openai::CodexCredentials::default()),
         )
@@ -957,6 +1062,7 @@ command = "fixture-command"
             true,
             &NativePlugins::default(),
             None,
+            None,
         )
         .unwrap();
         let state = runtime.agent().state();
@@ -991,6 +1097,7 @@ command = "fixture-command"
             true,
             &NativePlugins::default(),
             None,
+            None,
         )
         .unwrap();
         let state = runtime.agent().state();
@@ -1007,6 +1114,7 @@ command = "fixture-command"
             &app_config(directory.path(), None),
             true,
             &NativePlugins::default(),
+            None,
             None,
             Some(pi_plugin_openai::CodexCredentials::default()),
         )
@@ -1199,6 +1307,7 @@ command = "fixture-command"
                 true,
                 &NativePlugins::default(),
                 None,
+                None,
             )
             .unwrap(),
             &path,
@@ -1213,7 +1322,7 @@ command = "fixture-command"
 
         let config = app_config(directory.path(), Some("alpha"));
         let resumed = AgentSession::open_with_options(
-            build_runtime(&config, true, &NativePlugins::default(), None).unwrap(),
+            build_runtime(&config, true, &NativePlugins::default(), None, None).unwrap(),
             &path,
             AgentSessionOptions::default().initial_model(initial_model_request(&config)),
         )

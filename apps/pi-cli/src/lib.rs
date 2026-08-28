@@ -3,6 +3,7 @@
 mod auth;
 mod clipboard;
 mod config;
+mod dynamic_providers;
 mod output;
 mod package_commands;
 mod plugin_commands;
