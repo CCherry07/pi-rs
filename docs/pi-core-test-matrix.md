@@ -100,8 +100,9 @@ boundaries:
    still reports the originating exceptional error to its caller.
 5. `addedToolNames` survives tool execution, hook patches, JavaScript adaptation, and transcript
    messages, while native before/after tool hooks receive the batch `AgentContext` snapshot. This
-   trait-surface change was introduced in native ABI 2; the current ABI 3 additionally carries the
-   required hook-interest contract, and older artifacts are rejected before loading.
+   trait-surface change was introduced in native ABI 2; ABI 3 added the required hook-interest
+   contract, and ABI 4 adds provider header/response lifecycle hooks. Older artifacts are rejected
+   before loading.
 
 ## Updating this matrix
 

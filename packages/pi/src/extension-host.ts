@@ -8,6 +8,7 @@ import { z } from 'zod'
 
 import { CompatibilityResolver } from './compatibility-resolver.js'
 import { createExtensionContext } from './extension-context.js'
+import { ExtensionRuntime, type ExecOptions } from './extension-runtime.js'
 import type { PiExtensionCommandContext, PiExtensionContext } from './extension-api.js'
 import type { NativeExtensionContext } from './native-binding.js'
 import {
@@ -51,6 +52,11 @@ const toolResultSchema = z.looseObject({
   isError: z.boolean().default(false),
   terminate: z.boolean().default(false),
 })
+const toolUpdateSchema = z.looseObject({
+  content: z.array(z.unknown()),
+  details: z.unknown().optional(),
+})
+const optionalStringSchema = z.string().nullable().transform(value => value ?? undefined)
 const callableSchema = z.custom<(...arguments_: never[]) => unknown>(value => typeof value === 'function', 'expected a function')
 const toolDefinitionSchema = z.looseObject({
   name: z.string(),
@@ -60,7 +66,7 @@ const toolDefinitionSchema = z.looseObject({
   promptSnippet: z.string().optional(),
   promptGuidelines: z.array(z.string()).optional(),
   executionMode: toolExecutionModeSchema.optional(),
-  prepareArguments: z.unknown().optional(),
+  prepareArguments: callableSchema.optional(),
   execute: callableSchema,
 })
 const commandOptionsSchema = z.looseObject({
@@ -76,6 +82,7 @@ const toolInvocationPayloadSchema = z.looseObject({
   context: extensionContextInputSchema.extend({ toolCallId: z.string() }),
   input: z.unknown(),
 })
+const toolPreparationPayloadSchema = z.looseObject({ input: z.unknown() })
 const commandInvocationPayloadSchema = z.looseObject({
   context: extensionContextInputSchema,
   arguments: z.string(),
@@ -93,6 +100,7 @@ const beforeAgentStartResultSchema = z.looseObject({
   }).optional(),
   systemPrompt: z.string().optional(),
 })
+const providerHeadersSchema = z.record(z.string(), z.union([z.string(), z.null()]))
 
 function parseExternal<T>(schema: z.ZodType<T>, value: unknown, description: string): T {
   const result = schema.safeParse(value)
@@ -120,7 +128,11 @@ const AGENT_HOOKS = new Set([
   'tool_call',
   'tool_result',
 ])
-const PROVIDER_HOOKS = new Set(['before_provider_request'])
+const PROVIDER_HOOKS = new Set([
+  'before_provider_request',
+  'before_provider_headers',
+  'after_provider_response',
+])
 const SESSION_HOOKS = new Set([
   'session_start',
   'session_info_changed',
@@ -139,8 +151,6 @@ const KNOWN_HOOKS = new Set([
   ...AGENT_HOOKS,
   ...PROVIDER_HOOKS,
   ...SESSION_HOOKS,
-  'before_provider_headers',
-  'after_provider_response',
   'model_select',
   'thinking_level_select',
   'user_bash',
@@ -165,8 +175,8 @@ interface ToolDefinition {
   promptSnippet?: string
   promptGuidelines?: string[]
   executionMode?: ToolExecutionMode
-  prepareArguments?: unknown
-  execute(toolCallId: string, input: unknown, signal: AbortSignal, update: undefined, context: ExtensionContext): unknown | Promise<unknown>
+  prepareArguments?(input: unknown): unknown
+  execute(toolCallId: string, input: unknown, signal: AbortSignal, update: ((result: unknown) => void) | undefined, context: ExtensionContext): unknown | Promise<unknown>
 }
 
 interface CommandOptions {
@@ -204,6 +214,9 @@ interface GenerationState {
   events: ExtensionEventBus
   mode: HostMode
   projectTrusted: boolean
+  runtime: ExtensionRuntime
+  flagValues: Map<string, boolean | string | undefined>
+  registeredFlags: Map<string, 'boolean' | 'string'>
 }
 
 interface ExtensionEventBus {
@@ -217,27 +230,27 @@ interface ExtensionApi {
   on(event: string, handler: unknown): void
   registerCommand(name: string, options: unknown): void
   registerShortcut(): void
-  registerFlag(): void
+  registerFlag(name: string, options: unknown): void
   registerProvider(): void
   registerMessageRenderer(): void
   registerMarkdownTransformer(): void
   registerEntryRenderer(): void
-  sendMessage(): void
-  sendUserMessage(): void
-  appendEntry(): void
-  setSessionName(): void
-  setLabel(): void
-  getSessionName(): undefined
-  exec(): Promise<{ stdout: string; stderr: string; code: number; killed: boolean }>
-  getActiveTools(): never[]
-  getAllTools(): never[]
-  setActiveTools(): void
-  getCommands(): never[]
-  setModel(): Promise<false>
-  getThinkingLevel(): 'off'
-  setThinkingLevel(): void
+  sendMessage(message: unknown, options?: unknown): void
+  sendUserMessage(content: unknown, options?: unknown): void
+  appendEntry(customType: string, data?: unknown): void
+  setSessionName(name: string): void
+  setLabel(entryId: string, label: string | undefined): void
+  getSessionName(): string | undefined
+  exec(command: string, args: string[], options?: ExecOptions): Promise<{ stdout: string; stderr: string; code: number; killed: boolean }>
+  getActiveTools(): string[]
+  getAllTools(): Record<string, unknown>[]
+  setActiveTools(toolNames: string[]): void
+  getCommands(): Record<string, unknown>[]
+  setModel(model: Record<string, unknown>): Promise<boolean>
+  getThinkingLevel(): string
+  setThinkingLevel(level: string): void
   unregisterProvider(): void
-  getFlag(): undefined
+  getFlag(name: string): boolean | string | undefined
   events: ExtensionEventBus
 }
 
@@ -339,12 +352,18 @@ export class ExtensionHost {
 
   async #prepareGeneration(request: GenerationRequest): Promise<GenerationManifest> {
     const generationId = `js-${++this.#generation}`
+    const runtime = new ExtensionRuntime(request.cwd, () => {
+      this.#requireGeneration(generationId)
+    })
     const state: GenerationState = {
       callbacks: new Map(),
       active: new Map(),
       events: createExtensionEventBus(),
       mode: request.mode,
       projectTrusted: request.projectTrusted,
+      runtime,
+      flagValues: new Map(Object.entries(request.flagValues)),
+      registeredFlags: new Map(),
     }
     this.#generations.set(generationId, state)
     try {
@@ -388,6 +407,11 @@ export class ExtensionHost {
         }
       }
 
+      const unknownFlags = [...state.flagValues.keys()].filter(name => !state.registeredFlags.has(name))
+      if (unknownFlags.length > 0) {
+        throw new Error(`Unknown JavaScript extension flag${unknownFlags.length === 1 ? '' : 's'}: ${unknownFlags.map(name => `--${name}`).join(', ')}`)
+      }
+
       return { generationId, agentPlugins, providerPlugins, sessionPlugins, diagnostics }
     } catch (error) {
       this.#retireGeneration(generationId)
@@ -403,6 +427,7 @@ export class ExtensionHost {
     diagnostics: ExtensionDiagnostic[],
   ): ExtensionApi {
     const state = this.#requireGeneration(generationId)
+    const registeredFlags = new Set<string>()
     const inactive = (feature: string): void => {
       if (diagnostics.some(diagnostic => diagnostic.pluginId === pluginId && diagnostic.feature === feature)) return
       diagnostics.push({
@@ -416,17 +441,34 @@ export class ExtensionHost {
     return {
       registerTool: value => {
         const definition = parseToolDefinition(value, path)
-        if (definition.prepareArguments !== undefined) {
-          inactive(`prepareArguments for JavaScript tool ${definition.name}`)
-        }
         const callbackId = `${pluginId}:tool:${definition.name}`
+        const prepareCallbackId = definition.prepareArguments === undefined
+          ? undefined
+          : `${pluginId}:tool:${definition.name}:prepareArguments`
+        if (prepareCallbackId !== undefined) {
+          this.#registerCallback(state, prepareCallbackId, async invocation => {
+            const payload = parseExternal(
+              toolPreparationPayloadSchema,
+              invocation.payload,
+              `JavaScript tool ${definition.name} preparation payload`,
+            )
+            return definition.prepareArguments?.(payload.input)
+          })
+        }
         this.#registerCallback(state, callbackId, async (invocation, signal, nativeContext) => {
           const payload = parseExternal(toolInvocationPayloadSchema, invocation.payload, `JavaScript tool ${definition.name} invocation payload`)
-          const result = await definition.execute(payload.context.toolCallId, payload.input, signal, undefined, this.#extensionContext(payload.context, generationId, signal, nativeContext, false))
+          const update = nativeContext?.update === undefined
+            ? undefined
+            : (partial: unknown): void => {
+                const normalized = parseExternal(toolUpdateSchema, partial, `JavaScript tool ${definition.name} update`)
+                nativeContext.update?.(JSON.stringify(normalized))
+              }
+          const result = await definition.execute(payload.context.toolCallId, payload.input, signal, update, this.#extensionContext(payload.context, generationId, signal, nativeContext, false))
           return normalizeToolResult(result, definition.name)
         })
         contribution.tools.push({
           callbackId,
+          prepareCallbackId,
           name: definition.name,
           label: definition.label ?? definition.name,
           description: definition.description ?? '',
@@ -476,6 +518,14 @@ export class ExtensionHost {
           if (event === 'tool_call') {
             return { ...(resultRecord ?? {}), input: eventValue.input }
           }
+          if (event === 'before_provider_headers') {
+            return parseExternal(
+              providerHeadersSchema,
+              eventValue.headers,
+              `pi.on("before_provider_headers") mutated headers (${path})`,
+            )
+          }
+          if (event === 'after_provider_response') return null
           return result ?? null
         })
         target.push({ name: event, callbackId })
@@ -499,56 +549,79 @@ export class ExtensionHost {
         })
       },
       registerShortcut: () => inactive('pi.registerShortcut'),
-      registerFlag: () => inactive('pi.registerFlag'),
+      registerFlag: (name, value) => {
+        if (!name) throw new Error(`registerFlag requires a non-empty name (${path})`)
+        const options = parseExternal(z.looseObject({
+          type: z.enum(['boolean', 'string']),
+          default: z.union([z.boolean(), z.string()]).optional(),
+        }), value, `pi.registerFlag("${name}") options`)
+        if (options.default !== undefined && typeof options.default !== options.type) {
+          throw new Error(`pi.registerFlag("${name}") default must be ${options.type}`)
+        }
+        const existingType = state.registeredFlags.get(name)
+        if (existingType !== undefined) {
+          registeredFlags.add(name)
+          return
+        }
+        registeredFlags.add(name)
+        state.registeredFlags.set(name, options.type)
+        if (state.flagValues.has(name)) {
+          const value = state.flagValues.get(name)
+          if (typeof value !== options.type) {
+            throw new Error(`JavaScript extension flag --${name} requires a ${options.type} value`)
+          }
+        } else {
+          state.flagValues.set(name, options.default)
+        }
+      },
       registerProvider: () => inactive('pi.registerProvider'),
       registerMessageRenderer: () => inactive('pi.registerMessageRenderer'),
       registerMarkdownTransformer: () => inactive('pi.registerMarkdownTransformer'),
       registerEntryRenderer: () => inactive('pi.registerEntryRenderer'),
-      sendMessage: () => inactive('pi.sendMessage'),
-      sendUserMessage: () => inactive('pi.sendUserMessage'),
-      appendEntry: () => inactive('pi.appendEntry'),
-      setSessionName: () => inactive('pi.setSessionName'),
-      setLabel: () => inactive('pi.setLabel'),
-      getSessionName: () => {
-        inactive('pi.getSessionName')
-        return undefined
+      sendMessage: (message, options) => state.runtime.notify({ type: 'sendMessage', message, options }),
+      sendUserMessage: (content, options) => state.runtime.notify({ type: 'sendUserMessage', content, options }),
+      appendEntry: (customType, data) => state.runtime.notify({ type: 'appendEntry', customType, data }),
+      setSessionName: name => state.runtime.notify({ type: 'setSessionName', name }),
+      setLabel: (entryId, label) => state.runtime.notify({ type: 'setLabel', entryId, label }),
+      getSessionName: () => state.runtime.query(
+        { type: 'sessionName' },
+        optionalStringSchema,
+        () => undefined,
+      ),
+      exec: (command, args, options) => state.runtime.exec(command, args, options),
+      getActiveTools: () => state.runtime.query(
+        { type: 'activeTools' },
+        z.array(z.string()),
+        () => [],
+      ),
+      getAllTools: () => state.runtime.query(
+        { type: 'allTools' },
+        z.array(jsonObjectSchema),
+        () => [],
+      ),
+      setActiveTools: toolNames => state.runtime.notify({ type: 'setActiveTools', toolNames }),
+      getCommands: () => state.runtime.query(
+        { type: 'commands' },
+        z.array(jsonObjectSchema),
+        () => [],
+      ),
+      setModel: async model => {
+        const provider = typeof model.provider === 'string' ? model.provider : undefined
+        const modelId = typeof model.id === 'string' ? model.id : undefined
+        if (!provider || !modelId) return false
+        return state.runtime.request(
+          { type: 'setModel', provider, modelId },
+          z.boolean(),
+        )
       },
-      exec: async () => {
-        inactive('pi.exec')
-        return {
-          stdout: '',
-          stderr: 'pi.exec is inactive in the pi-rs JavaScript host',
-          code: 1,
-          killed: false,
-        }
-      },
-      getActiveTools: () => {
-        inactive('pi.getActiveTools')
-        return []
-      },
-      getAllTools: () => {
-        inactive('pi.getAllTools')
-        return []
-      },
-      setActiveTools: () => inactive('pi.setActiveTools'),
-      getCommands: () => {
-        inactive('pi.getCommands')
-        return []
-      },
-      setModel: async () => {
-        inactive('pi.setModel')
-        return false
-      },
-      getThinkingLevel: () => {
-        inactive('pi.getThinkingLevel')
-        return 'off'
-      },
-      setThinkingLevel: () => inactive('pi.setThinkingLevel'),
+      getThinkingLevel: () => state.runtime.query(
+        { type: 'thinkingLevel' },
+        z.string(),
+        () => 'off',
+      ),
+      setThinkingLevel: level => state.runtime.notify({ type: 'setThinkingLevel', level }),
       unregisterProvider: () => inactive('pi.unregisterProvider'),
-      getFlag: () => {
-        inactive('pi.getFlag')
-        return undefined
-      },
+      getFlag: name => registeredFlags.has(name) ? state.flagValues.get(name) : undefined,
       events: state.events,
     }
   }
@@ -601,6 +674,7 @@ export class ExtensionHost {
     nativeContext: NativeExtensionContext | undefined,
   ): Promise<unknown> {
     const state = this.#requireGeneration(invocation.generationId)
+    state.runtime.bind(nativeContext)
     const callback = state.callbacks.get(invocation.callbackId)
     if (!callback) throw new Error(`Unknown JavaScript callback: ${invocation.callbackId}`)
     const controller = new AbortController()
@@ -630,6 +704,7 @@ export class ExtensionHost {
     state.active.clear()
     state.callbacks.clear()
     state.events.clear()
+    state.runtime.retire()
     this.#generations.delete(generationId)
   }
 }

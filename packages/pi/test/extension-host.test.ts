@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
 import { ExtensionHost } from '../src/extension-host.js'
 import { isRecord, parseGenerationManifest, parseJson } from '../src/extension-protocol.js'
+import { execCommand } from '../src/extension-runtime.js'
 import type { NativeExtensionContext } from '../src/native-binding.js'
 
 test("rejects malformed host operations before dispatch", async () => {
@@ -22,15 +23,247 @@ test("rejects malformed host operations before dispatch", async () => {
     host.dispatch(JSON.stringify({
       type: "prepareGeneration",
       request: {
-        cwd: "/legacy-node-discovery",
+        cwd: "/workspace",
         projectTrusted: true,
         extensionPaths: [],
         mode: "print",
+        agentDir: "/legacy-node-discovery",
       },
     })),
-    /Unrecognized key: "cwd"/,
+    /Unrecognized key: "agentDir"/,
   );
 });
+
+test('pi.exec reports timeout and pre-aborted process termination', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pi-rs-js-exec-')))
+  const timedOut = await execCommand(
+    process.execPath,
+    ['-e', 'setInterval(() => {}, 1000)'],
+    root,
+    { timeout: 20 },
+  )
+  assert.equal(timedOut.killed, true)
+  assert.equal(timedOut.stdout, '')
+
+  const controller = new AbortController()
+  controller.abort()
+  const aborted = await execCommand(
+    process.execPath,
+    ['-e', 'setInterval(() => {}, 1000)'],
+    root,
+    { signal: controller.signal },
+  )
+  assert.equal(aborted.killed, true)
+  assert.equal(aborted.stdout, '')
+})
+
+test('extension flags accept Pi value forms, keep the first registration, and reject unknown names', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-flags-'))
+  const first = join(root, 'first.ts')
+  const second = join(root, 'second.ts')
+  await writeFile(first, `
+    export default function (pi: any) {
+      pi.registerFlag("shared", { type: "string", default: "first" });
+      pi.registerCommand("first-flag", {
+        handler: () => ({ action: "transform", text: String(pi.getFlag("shared")) })
+      });
+    }
+  `)
+  await writeFile(second, `
+    export default function (pi: any) {
+      pi.registerFlag("shared", { type: "boolean", default: false });
+      pi.registerCommand("second-flag", {
+        handler: () => ({ action: "transform", text: String(pi.getFlag("shared")) })
+      });
+    }
+  `)
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: {
+      projectTrusted: true,
+      extensionPaths: [first, second],
+      mode: 'print',
+      cwd: root,
+      flagValues: { shared: 'command-line' },
+    },
+  })))
+  assert.deepEqual(manifest.diagnostics, [])
+  for (const plugin of manifest.agentPlugins) {
+    const command = plugin.commands[0]
+    assert.ok(command)
+    const result = parseJson(await host.dispatch(JSON.stringify({
+      type: 'invoke',
+      invocation: {
+        invocationId: command.name,
+        generationId: manifest.generationId,
+        callbackId: command.callbackId,
+        kind: 'command',
+        payload: { context: { cwd: root }, arguments: '' },
+      },
+    }))) as { text: string }
+    assert.equal(result.text, 'command-line')
+  }
+
+  await assert.rejects(
+    host.dispatch(JSON.stringify({
+      type: 'prepareGeneration',
+      request: {
+        projectTrusted: true,
+        extensionPaths: [first],
+        mode: 'print',
+        cwd: root,
+        flagValues: { missing: true },
+      },
+    })),
+    /Unknown JavaScript extension flag: --missing/,
+  )
+})
+
+test('runs non-UI extension actions and streams prepared tool updates through the native seam', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-core-actions-'))
+  const extension = join(root, 'core-actions.ts')
+  await writeFile(extension, `
+    export default function (pi: any) {
+      pi.registerFlag("fixture-mode", { type: "string", default: "safe" });
+      pi.registerTool({
+        name: "prepared-tool",
+        description: "Exercises preparation and updates",
+        parameters: { type: "object", properties: { value: { type: "string" } } },
+        prepareArguments(input: any) {
+          return { ...input, value: String(input.value).toUpperCase() };
+        },
+        async execute(_id: string, input: any, _signal: AbortSignal, update: any) {
+          update({
+            content: [{ type: "text", text: "working:" + input.value }],
+            details: { phase: 1 }
+          });
+          return { content: [{ type: "text", text: "done:" + input.value }] };
+        }
+      });
+      pi.registerCommand("core-actions", {
+        async handler() {
+          pi.sendMessage({ customType: "fixture", content: "context" }, { triggerTurn: false });
+          pi.sendUserMessage("continue", { deliverAs: "followUp" });
+          pi.appendEntry("fixture-state", { count: 1 });
+          pi.setSessionName("Core actions");
+          pi.setLabel("entry-1", "checkpoint");
+          pi.setActiveTools(["prepared-tool"]);
+          pi.setThinkingLevel("high");
+          const selected = await pi.setModel({ provider: "scripted", id: "model-1" });
+          const executed = await pi.exec(process.execPath, ["-e", "process.stdout.write(process.cwd())"]);
+          return {
+            action: "transform",
+            text: JSON.stringify({
+              flag: pi.getFlag("fixture-mode"),
+              sessionName: pi.getSessionName(),
+              activeTools: pi.getActiveTools(),
+              tools: pi.getAllTools(),
+              commands: pi.getCommands(),
+              thinking: pi.getThinkingLevel(),
+              selected,
+              executed
+            })
+          };
+        }
+      });
+    }
+  `)
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: {
+      projectTrusted: true,
+      extensionPaths: [extension],
+      mode: 'print',
+      cwd: root,
+      flagValues: { 'fixture-mode': 'fast' },
+    },
+  })))
+  assert.deepEqual(manifest.diagnostics, [])
+
+  const notifications: Record<string, unknown>[] = []
+  const requests: Record<string, unknown>[] = []
+  const updates: Record<string, unknown>[] = []
+  const nativeContext: NativeExtensionContext = {
+    query(operation) {
+      const { type } = parseJson(operation) as { type: string }
+      const values: Record<string, unknown> = {
+        sessionName: 'Native session',
+        activeTools: ['read'],
+        allTools: [{ name: 'read' }],
+        commands: [{ name: 'help' }],
+        thinkingLevel: 'medium',
+      }
+      return JSON.stringify(values[type] ?? null)
+    },
+    notify(operation) { notifications.push(parseJson(operation) as Record<string, unknown>) },
+    async request(operation) {
+      requests.push(parseJson(operation) as Record<string, unknown>)
+      return 'true'
+    },
+    update(result) { updates.push(parseJson(result) as Record<string, unknown>) },
+  }
+
+  const tool = manifest.agentPlugins[0]?.tools[0]
+  assert.ok(tool)
+  assert.ok(tool.prepareCallbackId)
+  const preparedInput = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'prepare-tool', generationId: manifest.generationId,
+      callbackId: tool.prepareCallbackId, kind: 'toolPrepareArguments',
+      payload: { input: { value: 'hello' } },
+    },
+  }), nativeContext))
+  assert.deepEqual(preparedInput, { value: 'HELLO' })
+  const toolResult = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'prepared-tool', generationId: manifest.generationId,
+      callbackId: tool.callbackId, kind: 'tool',
+      payload: { context: { cwd: root, toolCallId: 'call-1' }, input: preparedInput },
+    },
+  }), nativeContext))
+  assert.deepEqual(toolResult, {
+    content: [{ type: 'text', text: 'done:HELLO' }],
+    isError: false,
+    terminate: false,
+  })
+  assert.deepEqual(updates, [{
+    content: [{ type: 'text', text: 'working:HELLO' }],
+    details: { phase: 1 },
+  }])
+
+  const command = manifest.agentPlugins[0]?.commands[0]
+  assert.ok(command)
+  const commandResult = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'core-actions', generationId: manifest.generationId,
+      callbackId: command.callbackId, kind: 'command',
+      payload: { context: { cwd: root }, arguments: '' },
+    },
+  }), nativeContext)) as { action: string; text: string }
+  assert.equal(commandResult.action, 'transform')
+  assert.deepEqual(JSON.parse(commandResult.text), {
+    flag: 'fast',
+    sessionName: 'Native session',
+    activeTools: ['read'],
+    tools: [{ name: 'read' }],
+    commands: [{ name: 'help' }],
+    thinking: 'medium',
+    selected: true,
+    executed: { stdout: await realpath(root), stderr: '', code: 0, killed: false },
+  })
+  assert.deepEqual(notifications.map(operation => operation.type), [
+    'sendMessage', 'sendUserMessage', 'appendEntry', 'setSessionName',
+    'setLabel', 'setActiveTools', 'setThinkingLevel',
+  ])
+  assert.deepEqual(requests, [{ type: 'setModel', provider: 'scripted', modelId: 'model-1' }])
+})
 
 test('loads a TypeScript Pi tool and retires its callback generation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-'))
@@ -304,6 +537,90 @@ test('resolves every non-UI module exposed by the current Pi extension loader', 
   )
 })
 
+test('activates provider header mutation and response observation hooks', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-provider-wire-hooks-'))
+  const extension = join(root, 'provider-wire-hooks.ts')
+  await writeFile(extension, `
+    export default function (pi: any) {
+      pi.on("before_provider_headers", (event: any) => {
+        event.headers["X-Trace"] = "trace-1";
+        event.headers["X-Remove"] = null;
+        return { ignored: true };
+      });
+      pi.on("after_provider_response", (event: any) => {
+        if (event.status !== 429 || event.headers["retry-after"] !== "2") {
+          throw new Error("unexpected provider response event");
+        }
+        return { ignored: true };
+      });
+    }
+  `)
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: {
+      projectTrusted: true,
+      extensionPaths: [extension],
+      mode: 'print',
+      cwd: root,
+    },
+  })))
+
+  assert.deepEqual(manifest.diagnostics, [])
+  assert.deepEqual(
+    manifest.providerPlugins[0]?.hooks.map(hook => hook.name),
+    ['before_provider_headers', 'after_provider_response'],
+  )
+
+  const headerHook = manifest.providerPlugins[0]?.hooks[0]
+  assert.ok(headerHook)
+  const headers = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'provider-headers',
+      generationId: manifest.generationId,
+      callbackId: headerHook.callbackId,
+      kind: 'providerHook',
+      payload: {
+        hook: 'before_provider_headers',
+        context: { cwd: root },
+        event: {
+          type: 'before_provider_headers',
+          headers: { Existing: 'yes', 'X-Remove': 'remove-me' },
+        },
+      },
+    },
+  })))
+  assert.deepEqual(headers, {
+    Existing: 'yes',
+    'X-Remove': null,
+    'X-Trace': 'trace-1',
+  })
+
+  const responseHook = manifest.providerPlugins[0]?.hooks[1]
+  assert.ok(responseHook)
+  const observed = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'provider-response',
+      generationId: manifest.generationId,
+      callbackId: responseHook.callbackId,
+      kind: 'providerHook',
+      payload: {
+        hook: 'after_provider_response',
+        context: { cwd: root },
+        event: {
+          type: 'after_provider_response',
+          status: 429,
+          headers: { 'retry-after': '2' },
+        },
+      },
+    },
+  })))
+  assert.equal(observed, null)
+})
+
 test('keeps inactive JavaScript UI registrations non-fatal while agent_settled stays active', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-inactive-'))
   const extension = join(root, 'inactive-extension.ts')
@@ -502,10 +819,24 @@ test('builds command context from the native query notify and request capability
             ctx.abort();
             ctx.compact({ customInstructions: "shorten" });
             await ctx.waitForIdle();
+            await ctx.navigateTree("entry-1", {
+              summarize: true,
+              customInstructions: "focus",
+              label: "branch"
+            });
             let replacementSessionId;
             const replacement = await ctx.newSession({
+              parentSession: "/sessions/parent.jsonl",
+              setup: async (manager: any) => {
+                manager.appendCustomEntry("initialized", { ready: true });
+              },
               withSession: async (next: any) => {
                 replacementSessionId = next.sessionManager.getSessionId();
+                await next.sendMessage(
+                  { customType: "replacement-state", content: "ready" },
+                  { triggerTurn: false }
+                );
+                await next.sendUserMessage("continue", { deliverAs: "followUp" });
               }
             });
             await ctx.reload();
@@ -566,6 +897,7 @@ test('builds command context from the native query notify and request capability
         sessionId = 'session-after'
         return JSON.stringify({ cancelled: false })
       }
+      if (operation.type === 'navigateTree') return JSON.stringify({ cancelled: false })
       return 'null'
     },
   }
@@ -627,11 +959,30 @@ test('builds command context from the native query notify and request capability
     { type: 'uiNotify', message: 'Extension notice', level: 'warning' },
     { type: 'abort' },
     { type: 'compact', customInstructions: 'shorten' },
+    { type: 'appendEntry', customType: 'initialized', data: { ready: true } },
   ])
-  assert.deepEqual(requests.map(request => request.type), [
-    'waitForIdle',
-    'newSession',
-    'reload',
+  assert.deepEqual(requests, [
+    { type: 'waitForIdle' },
+    {
+      type: 'navigateTree',
+      targetId: 'entry-1',
+      summarize: true,
+      customInstructions: 'focus',
+      replaceInstructions: false,
+      label: 'branch',
+    },
+    { type: 'newSession', parentSession: '/sessions/parent.jsonl' },
+    {
+      type: 'sendMessage',
+      message: { customType: 'replacement-state', content: 'ready' },
+      options: { triggerTurn: false },
+    },
+    {
+      type: 'sendUserMessage',
+      content: 'continue',
+      options: { deliverAs: 'followUp' },
+    },
+    { type: 'reload' },
   ])
   assert.ok(queries.includes('sessionId'))
 })

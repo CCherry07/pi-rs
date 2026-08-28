@@ -239,6 +239,24 @@ impl PiSession {
         Ok(self.runtime.new_session(cwd, path).await?)
     }
 
+    pub async fn new_session_with_parent(
+        &self,
+        cwd: impl Into<PathBuf>,
+        path: impl Into<PathBuf>,
+        parent_session: impl Into<PathBuf>,
+    ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
+        let cwd = cwd.into();
+        let path = path.into();
+        let manager = self.manager()?;
+        let _operation = manager.operation_gate.lock().await;
+        manager.ensure_open()?;
+        manager.ensure_path_available(self, &path)?;
+        Ok(self
+            .runtime
+            .new_session_with_parent(cwd, path, Some(parent_session.into()))
+            .await?)
+    }
+
     pub async fn resume_session(
         &self,
         path: impl Into<PathBuf>,
@@ -372,7 +390,7 @@ mod tests {
     fn test_manager() -> MultiSessionManager {
         MultiSessionManager::new(|request: AgentSessionRuntimeRequest| async move {
             let (cwd, path, create, reused_log) = match request.target {
-                AgentSessionRuntimeTarget::Create { cwd, path } => (cwd, path, true, None),
+                AgentSessionRuntimeTarget::Create { cwd, path, .. } => (cwd, path, true, None),
                 AgentSessionRuntimeTarget::Open { path } => {
                     let (_, document) = crate::SessionLog::open(&path)?;
                     (document.header.cwd, path, false, None)

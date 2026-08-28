@@ -12,7 +12,10 @@ use pi_core::{
 use pi_plugin_openai::responses::{
     request_body as responses_request_body, stream as responses_stream,
 };
-use pi_provider::{HttpTransport, ReqwestTransport, TransportError, collect_body_limited};
+use pi_provider::{
+    HttpTransport, ReqwestTransport, TransportError, collect_body_limited,
+    post_json_with_provider_hooks,
+};
 use serde_json::{Value, json};
 
 pub use oauth::{
@@ -130,11 +133,16 @@ impl Provider for XAiProvider {
             .and_then(|model| model.base_url.as_deref())
             .map(responses_endpoint)
             .unwrap_or_else(|| format!("{BASE_URL}/responses"));
-        let response = self
-            .transport
-            .post_json(&endpoint, &headers, &payload, signal.clone())
-            .await
-            .map_err(map_transport_error)?;
+        let response = post_json_with_provider_hooks(
+            self.transport.as_ref(),
+            &context,
+            &endpoint,
+            headers,
+            &payload,
+            signal.clone(),
+        )
+        .await
+        .map_err(map_transport_error)?;
         if !(200..300).contains(&response.status) {
             let status = response.status;
             let body = collect_body_limited(response.body, 64 * 1024)

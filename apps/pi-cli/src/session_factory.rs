@@ -80,11 +80,15 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
         &self,
         request: AgentSessionRuntimeRequest,
     ) -> Result<PreparedAgentSession, SessionError> {
-        let (path, create, cwd, reused_log) = match request.target {
-            AgentSessionRuntimeTarget::Create { cwd, path } => (path, true, cwd, None),
+        let (path, create, cwd, reused_log, parent_session) = match request.target {
+            AgentSessionRuntimeTarget::Create {
+                cwd,
+                path,
+                parent_session,
+            } => (path, true, cwd, None, parent_session),
             AgentSessionRuntimeTarget::Open { path } => {
                 let (_, document) = pi_session::SessionLog::open(&path)?;
-                (path, false, document.header.cwd, None)
+                (path, false, document.header.cwd, None, None)
             }
             AgentSessionRuntimeTarget::Reuse { log } => {
                 let document = log.load()?;
@@ -93,6 +97,7 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
                     false,
                     document.header.cwd,
                     Some(log),
+                    None,
                 )
             }
         };
@@ -130,6 +135,8 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
                         .map(|path| path.display().to_string())
                         .collect(),
                     mode: self.js_host_mode,
+                    cwd: config.cwd.display().to_string(),
+                    flag_values: config.extension_flag_values.clone(),
                 })
                 .await
                 .map_err(|error| SessionError::Runtime(error.to_string()))?;
@@ -175,7 +182,8 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             .runtime_inventory(SessionRuntimeInventory::new(
                 js_extensions,
                 configured_native_plugins,
-            ));
+            ))
+            .parent_session_path(parent_session);
         let prepared = if create {
             AgentSession::prepare_create_with_options(runtime, path, session_options).await
         } else if let Some(log) = reused_log {
@@ -725,6 +733,7 @@ command = "fixture-command"
             native_plugins: Vec::new(),
             extensions: Vec::new(),
             discover_extensions: true,
+            extension_flag_values: std::collections::BTreeMap::new(),
         }
     }
 

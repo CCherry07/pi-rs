@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use pi_core::AbortSignal;
+use pi_core::{AbortSignal, ProviderCallContext};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 
@@ -49,6 +49,33 @@ pub trait HttpTransport: Send + Sync {
         body: &Value,
         signal: AbortSignal,
     ) -> Result<HttpResponse, TransportError>;
+}
+
+/// Executes one JSON HTTP request through the provider wire-hook lifecycle.
+///
+/// Providers hand this function their fully assembled headers and payload. It
+/// guarantees that header hooks run immediately before transport and response
+/// observers run before any caller can consume the returned body stream.
+pub async fn post_json_with_provider_hooks(
+    transport: &dyn HttpTransport,
+    context: &ProviderCallContext,
+    url: &str,
+    headers: BTreeMap<String, String>,
+    body: &Value,
+    signal: AbortSignal,
+) -> Result<HttpResponse, TransportError> {
+    let headers = context.before_provider_headers(&signal, headers).await;
+    let response = transport
+        .post_json(url, &headers, body, signal.clone())
+        .await?;
+    context
+        .after_provider_response(
+            &signal,
+            response.status,
+            response.headers.iter().cloned().collect(),
+        )
+        .await;
+    Ok(response)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -248,8 +275,88 @@ pub async fn collect_body_limited(
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_REMOTE_TIMEOUT, ReqwestTransport};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::task::Poll;
     use std::time::Duration;
+
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use pi_core::{
+        AbortSignal, AfterProviderResponseEvent, BeforeProviderHeadersEvent, ModelId, PluginError,
+        PluginId, ProviderCallContext, ProviderId, ProviderPlugin, ProviderPluginContext,
+        ProviderPluginDriver,
+    };
+    use serde_json::{Value, json};
+
+    use super::{
+        DEFAULT_REMOTE_TIMEOUT, HttpResponse, HttpTransport, ReqwestTransport, TransportError,
+        post_json_with_provider_hooks,
+    };
+
+    struct CapturingTransport {
+        headers: Mutex<Option<BTreeMap<String, String>>>,
+        body_polls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl HttpTransport for CapturingTransport {
+        async fn post_json(
+            &self,
+            _url: &str,
+            headers: &BTreeMap<String, String>,
+            _body: &Value,
+            _signal: AbortSignal,
+        ) -> Result<HttpResponse, TransportError> {
+            *self.headers.lock().unwrap() = Some(headers.clone());
+            let body_polls = Arc::clone(&self.body_polls);
+            Ok(HttpResponse {
+                status: 429,
+                content_type: Some("text/event-stream".to_string()),
+                headers: vec![("retry-after".to_string(), "2".to_string())],
+                body: Box::pin(futures::stream::poll_fn(move |_context| {
+                    body_polls.fetch_add(1, Ordering::SeqCst);
+                    Poll::Ready(None)
+                })),
+            })
+        }
+    }
+
+    struct WireObserver {
+        observations: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[pi_core::provider_plugin]
+    impl ProviderPlugin for WireObserver {
+        fn id(&self) -> PluginId {
+            PluginId::new("wire-observer")
+        }
+
+        async fn before_provider_headers(
+            &self,
+            _context: ProviderPluginContext,
+            event: BeforeProviderHeadersEvent,
+        ) -> Result<Option<BTreeMap<String, Option<String>>>, PluginError> {
+            assert_eq!(event.headers["Existing"].as_deref(), Some("yes"));
+            let mut headers = event.headers;
+            headers.insert("X-Trace".to_string(), Some("trace-1".to_string()));
+            headers.insert("X-Remove".to_string(), None);
+            Ok(Some(headers))
+        }
+
+        async fn after_provider_response(
+            &self,
+            _context: ProviderPluginContext,
+            event: AfterProviderResponseEvent,
+        ) -> Result<(), PluginError> {
+            self.observations
+                .lock()
+                .unwrap()
+                .push(format!("{}:{}", event.status, event.headers["retry-after"]));
+            Ok(())
+        }
+    }
 
     #[test]
     fn remote_provider_default_idle_timeout_matches_pi() {
@@ -258,5 +365,53 @@ mod tests {
             ReqwestTransport::new().timeout_for("https://api.example.test/v1/chat/completions"),
             Some(Duration::from_secs(300))
         );
+    }
+
+    #[tokio::test]
+    async fn provider_hooks_wrap_transport_without_consuming_the_response_body() {
+        let body_polls = Arc::new(AtomicUsize::new(0));
+        let transport = CapturingTransport {
+            headers: Mutex::new(None),
+            body_polls: Arc::clone(&body_polls),
+        };
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let plugins = Arc::new(
+            ProviderPluginDriver::new(vec![Arc::new(WireObserver {
+                observations: Arc::clone(&observations),
+            })])
+            .unwrap(),
+        );
+        let context = ProviderCallContext::new(
+            9,
+            "/workspace",
+            ProviderId::new("provider"),
+            ModelId::new("model"),
+            plugins,
+        );
+        let (_, signal) = pi_core::AbortHandle::new();
+
+        let mut response = post_json_with_provider_hooks(
+            &transport,
+            &context,
+            "https://example.test/v1/messages",
+            BTreeMap::from([
+                ("Existing".to_string(), "yes".to_string()),
+                ("X-Remove".to_string(), "remove-me".to_string()),
+            ]),
+            &json!({"prompt": "hello"}),
+            signal,
+        )
+        .await
+        .unwrap();
+
+        let sent_headers = transport.headers.lock().unwrap().clone().unwrap();
+        assert_eq!(sent_headers["Existing"], "yes");
+        assert_eq!(sent_headers["X-Trace"], "trace-1");
+        assert!(!sent_headers.contains_key("X-Remove"));
+        assert_eq!(*observations.lock().unwrap(), vec!["429:2"]);
+        assert_eq!(body_polls.load(Ordering::SeqCst), 0);
+
+        assert!(response.body.next().await.is_none());
+        assert_eq!(body_polls.load(Ordering::SeqCst), 1);
     }
 }

@@ -213,7 +213,7 @@ impl Tool for PreparingTool {
         tool_spec("prepare")
     }
 
-    fn prepare_arguments(&self, input: Value) -> Result<Value, ToolError> {
+    async fn prepare_arguments(&self, input: Value) -> Result<Value, ToolError> {
         let Some(old_text) = input.get("oldText").and_then(Value::as_str) else {
             return Ok(input);
         };

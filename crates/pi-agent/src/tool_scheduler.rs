@@ -343,7 +343,7 @@ impl ToolScheduler {
             };
         };
 
-        let args = match tool.prepare_arguments(call.arguments.clone()) {
+        let args = match tool.prepare_arguments(call.arguments.clone()).await {
             Ok(args) => args,
             Err(error) => {
                 return PreparedToolCall::Immediate {

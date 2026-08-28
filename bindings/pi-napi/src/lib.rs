@@ -7,6 +7,7 @@ use napi::Status;
 use napi::bindgen_prelude::{FnArgs, Promise};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
+use pi_core::{ToolUpdate, ToolUpdateSink};
 use pi_js_plugin::{
     ExtensionContextHandle, ExtensionContextNotification, ExtensionContextQuery,
     ExtensionContextRequest, JsCallbackDispatcher, JsCallbackError, JsGenerationManifest,
@@ -25,6 +26,7 @@ type DispatchFunction =
 #[napi]
 pub struct NativeExtensionContext {
     handle: ExtensionContextHandle,
+    updates: Option<ToolUpdateSink>,
 }
 
 #[napi]
@@ -53,6 +55,30 @@ impl NativeExtensionContext {
             .await
             .map_err(context_error)?;
         encode_context_result(result)
+    }
+
+    #[napi]
+    pub fn update(&self, result: String) -> napi::Result<()> {
+        let update = serde_json::from_str::<ToolUpdate>(&result).map_err(|error| {
+            napi::Error::new(
+                Status::InvalidArg,
+                format!("invalid JavaScript tool update: {error}"),
+            )
+        })?;
+        let updates = self.updates.as_ref().ok_or_else(|| {
+            napi::Error::new(
+                Status::GenericFailure,
+                "tool updates are unavailable for this callback".to_string(),
+            )
+        })?;
+        if updates.send(update) {
+            Ok(())
+        } else {
+            Err(napi::Error::new(
+                Status::GenericFailure,
+                "tool update receiver is closed".to_string(),
+            ))
+        }
     }
 }
 
@@ -90,6 +116,7 @@ impl NativePiHost {
         &self,
         operation: JsHostOperation,
         context: Option<ExtensionContextHandle>,
+        updates: Option<ToolUpdateSink>,
     ) -> Result<Value, JsCallbackError> {
         let operation = serde_json::to_string(&operation).map_err(|error| {
             JsCallbackError::new(format!("cannot encode host operation: {error}"))
@@ -98,7 +125,7 @@ impl NativePiHost {
             .dispatch
             .call_async(FnArgs::from((
                 operation,
-                context.map(|handle| NativeExtensionContext { handle }),
+                context.map(|handle| NativeExtensionContext { handle, updates }),
             )))
             .await
             .map_err(napi_callback_error)?;
@@ -130,8 +157,22 @@ impl JsCallbackDispatcher for NativePiHost {
         invocation: JsInvocation,
         context: ExtensionContextHandle,
     ) -> Result<Value, JsCallbackError> {
-        self.request(JsHostOperation::Invoke { invocation }, Some(context))
+        self.request(JsHostOperation::Invoke { invocation }, Some(context), None)
             .await
+    }
+
+    async fn invoke_with_tool_updates(
+        &self,
+        invocation: JsInvocation,
+        context: ExtensionContextHandle,
+        updates: ToolUpdateSink,
+    ) -> Result<Value, JsCallbackError> {
+        self.request(
+            JsHostOperation::Invoke { invocation },
+            Some(context),
+            Some(updates),
+        )
+        .await
     }
 
     fn cancel(&self, invocation_id: &str) {
@@ -154,7 +195,7 @@ impl JsPluginHost for NativePiHost {
         request: JsGenerationRequest,
     ) -> Result<JsGenerationManifest, JsCallbackError> {
         let response = self
-            .request(JsHostOperation::PrepareGeneration { request }, None)
+            .request(JsHostOperation::PrepareGeneration { request }, None, None)
             .await?;
         serde_json::from_value(response).map_err(|error| {
             JsCallbackError::new(format!(

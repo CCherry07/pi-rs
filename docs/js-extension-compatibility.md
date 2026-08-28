@@ -19,13 +19,20 @@ diagnostics. Unknown names still fail construction.
 | Agent | `tool_call` | Active; in-place input mutation, blocking, reason, and terminate are supported. |
 | Agent | `tool_result` | Active; content, details, usage, `addedToolNames`, and error patches are supported. |
 | Provider | `before_provider_request` | Active; payload replacements chain in registration order. |
+| Provider | `before_provider_headers` | Active after a built-in HTTP provider assembles its final headers and immediately before transport. Handlers mutate the shared header object in registration order, return values are ignored, and `null` deletes a header. |
+| Provider | `after_provider_response` | Active after an HTTP response arrives and before its body stream is consumed; status and response headers are observable. |
 | Session | `session_start`, `session_info_changed`, `session_before_switch`, `session_before_fork`, `session_before_compact`, `session_compact`, `session_compact_failed`, `session_shutdown`, `session_before_tree`, `session_tree` | Active through the session plugin lifecycle. |
-| Product/UI | `project_trust`, `resources_discover`, `before_provider_headers`, `after_provider_response`, `model_select`, `thinking_level_select`, `user_bash` | Recognized and inactive. |
+| Product/UI | `project_trust`, `resources_discover`, `model_select`, `thinking_level_select`, `user_bash` | Recognized and inactive. |
 
 Supported callbacks run in registration order. A rejected callback, malformed patch, or invalid
 cross-role `message_end` replacement is recorded in the generation's diagnostics and later
 callbacks continue from the last valid value. `tool_call` is the deliberate exception: it remains
 fail-closed for the affected tool call, matching Pi's runner.
+
+Provider header and response hook failures follow the same diagnostic isolation rule. Header
+deletion tombstones remain visible to later hooks and are removed only when the final map crosses
+the transport seam. Response observers run for successful and error HTTP statuses before any
+provider parses or buffers the body.
 
 Native `AgentPlugin` tool hooks receive an `Arc<AgentContext>` batch snapshot. The JavaScript
 Adapter intentionally does not add that field to extension events because current Pi extension
@@ -41,15 +48,24 @@ shutdown are native notifications. `modelRegistry` currently provides read-only
 `getAll`, `getAvailable`, `find`, `hasConfiguredAuth`, and `getProviderDisplayName`; provider auth,
 completion, refresh, and dynamic registration remain inactive.
 
+The generation-local `pi` API also exposes the active/all tool and command catalogs, model and
+thinking selection, session name/labels, custom context messages, user messages, durable custom
+entries, and active-tool mutation through the same native session capability. These mutations use
+`AgentSession` rather than editing JSONL in Node, so queued custom messages are durable before the
+agent observes them and no-turn messages are reflected in both live and resumed context. `pi.exec`
+matches Pi's direct-spawn contract, including cwd override, abort, timeout, captured output, exit
+code, and killed status.
+
 During `before_agent_start`, `ctx.getSystemPrompt()` is invocation-local and returns the same
 chained value as `event.systemPrompt`; it does not fall back to the reusable base prompt queried
 from the current session.
 
 Command contexts additionally support `getSystemPromptOptions`, `waitForIdle`, `newSession`, `fork`,
-non-summarizing `navigateTree`, `switchSession`, and `reload`. `withSession` runs against the newly
-published `PiSession`. `newSession({ parentSession, setup })`, summarized tree navigation, and the
-replacement-only `sendMessage` / `sendUserMessage` surface are not implemented yet and fail at the
-point of use rather than corrupting session state.
+summarizing and non-summarizing `navigateTree`, `switchSession`, and `reload`. `parentSession` is
+preserved on the new Pi session header; `setup`, `withSession`, and the replacement-only
+`sendMessage` / `sendUserMessage` surface run against the newly published `PiSession`. Unlike Pi,
+the JavaScript `setup` callback runs after the replacement session's `session_start` hook because
+the Rust generation is prepared and activated atomically before the old command resumes.
 
 ## UI and registrations
 
@@ -66,12 +82,14 @@ module evaluation and keep its tools, commands, and hooks. Renderer, widget, sho
 registrations remain inactive. Any other missing dependency is fatal so broken packages and
 installation mistakes are not hidden.
 
-The following registration surfaces are recognized and inactive: shortcuts, flags, providers,
-message/Markdown/entry renderers, and tool `prepareArguments`. Extension-level send/append/session
-mutation helpers are also inactive. Their query-shaped counterparts return safe empty/default
-values, and `exec` returns a non-zero inactive result instead of throwing. Registered tools receive
-no streaming update callback; their final result remains supported. The generation-local
-`pi.events` bus is active, isolates listener failures, and drops all listeners on retirement.
+The following registration surfaces are recognized and inactive: shortcuts, providers, and
+message/Markdown/entry renderers. Extension flags are active; boolean flags use `--name` and string
+flags accept both `--name value` and `--name=value`; first registration wins for duplicate names,
+and unregistered flags fail generation construction. Tool
+`prepareArguments` runs before Rust validation through its own asynchronous adapter callback, and
+registered tools can publish partial content/details through their streaming update callback. The
+generation-local `pi.events` bus is active, isolates listener failures, and drops all listeners on
+retirement.
 
 ## Module compatibility
 

@@ -21,6 +21,15 @@ export interface PiReadonlySessionManager {
   getEntries(): unknown[];
   getTree(): unknown[];
   getSessionName(): string | undefined;
+  appendCustomEntry(customType: string, data?: unknown): void;
+  appendCustomMessageEntry(
+    customType: string,
+    content?: unknown,
+    display?: boolean,
+    details?: unknown,
+  ): void;
+  appendSessionInfo(name?: string): void;
+  setLabel(entryId: string, label: string | undefined): void;
 }
 
 export interface PiModelRegistry {
@@ -57,6 +66,7 @@ export interface PiExtensionCommandContext extends PiExtensionContext {
   waitForIdle(): Promise<void>;
   newSession(options?: {
     parentSession?: string;
+    setup?: (sessionManager: PiReadonlySessionManager) => Promise<void> | void;
     withSession?: (context: PiExtensionCommandContext) => Promise<void> | void;
   }): Promise<{ cancelled: boolean }>;
   fork(
@@ -82,6 +92,8 @@ export interface PiExtensionCommandContext extends PiExtensionContext {
     },
   ): Promise<{ cancelled: boolean }>;
   reload(): Promise<void>;
+  sendMessage(message: unknown, options?: unknown): Promise<void>;
+  sendUserMessage(content: unknown, options?: unknown): Promise<void>;
 }
 
 export interface PiToolResult {
@@ -100,11 +112,12 @@ export interface PiToolDefinition<TInput = Record<string, unknown>> {
   promptSnippet?: string;
   promptGuidelines?: string[];
   executionMode?: ToolExecutionMode;
+  prepareArguments?(input: TInput): TInput | Promise<TInput>;
   execute(
     toolCallId: string,
     input: TInput,
     signal: AbortSignal,
-    update: undefined,
+    update: ((result: Pick<PiToolResult, "content" | "details">) => void) | undefined,
     context: PiExtensionContext,
   ): PiToolResult | Promise<PiToolResult>;
 }
@@ -136,7 +149,7 @@ export interface PiExtensionApi {
   exec(
     command: string,
     args: string[],
-    options?: unknown,
+    options?: { signal?: AbortSignal; timeout?: number; cwd?: string },
   ): Promise<{ stdout: string; stderr: string; code: number; killed: boolean }>;
   getActiveTools(): string[];
   getAllTools(): unknown[];

@@ -10,6 +10,7 @@ use pi_core::{
 };
 use pi_provider::{
     HttpTransport, ReqwestTransport, SseDecoder, TransportError, collect_body_limited,
+    post_json_with_provider_hooks,
 };
 
 use crate::config::{OpenAiCompatibleConfig, OpenAiConfig, validate_config};
@@ -89,11 +90,16 @@ impl Provider for OpenAiCompatibleProvider {
         let payload = context
             .before_provider_request(&signal, request_body(&request))
             .await?;
-        let response = self
-            .transport
-            .post_json(&endpoint, &headers, &payload, signal.clone())
-            .await
-            .map_err(map_transport_error)?;
+        let response = post_json_with_provider_hooks(
+            self.transport.as_ref(),
+            &context,
+            &endpoint,
+            headers,
+            &payload,
+            signal.clone(),
+        )
+        .await
+        .map_err(map_transport_error)?;
         if !(200..300).contains(&response.status) {
             let status = response.status;
             let body = collect_body_limited(response.body, 64 * 1024)
@@ -273,8 +279,8 @@ mod tests {
     use std::sync::Mutex;
 
     use pi_core::{
-        BeforeProviderRequestEvent, PluginError, PluginId, ProviderPlugin, ProviderPluginContext,
-        ProviderPluginDriver,
+        AfterProviderResponseEvent, BeforeProviderHeadersEvent, BeforeProviderRequestEvent,
+        PluginError, PluginId, ProviderPlugin, ProviderPluginContext, ProviderPluginDriver,
     };
     use pi_provider::{HttpResponse, TransportError};
     use serde_json::{Value, json};
@@ -284,6 +290,7 @@ mod tests {
 
     struct CapturingTransport {
         body: Mutex<Option<Value>>,
+        headers: Mutex<Option<BTreeMap<String, String>>>,
     }
 
     #[async_trait]
@@ -291,7 +298,7 @@ mod tests {
         async fn post_json(
             &self,
             _url: &str,
-            _headers: &BTreeMap<String, String>,
+            headers: &BTreeMap<String, String>,
             body: &Value,
             _signal: AbortSignal,
         ) -> Result<HttpResponse, TransportError> {
@@ -299,16 +306,22 @@ mod tests {
                 .body
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(body.clone());
+            *self
+                .headers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(headers.clone());
             Ok(HttpResponse {
                 status: 200,
                 content_type: Some("text/event-stream".to_string()),
-                headers: Vec::new(),
+                headers: vec![("x-response-id".to_string(), "response-1".to_string())],
                 body: Box::pin(futures::stream::empty()),
             })
         }
     }
 
-    struct PayloadPlugin;
+    struct PayloadPlugin {
+        responses: Arc<Mutex<Vec<String>>>,
+    }
 
     #[pi_core::provider_plugin]
     impl ProviderPlugin for PayloadPlugin {
@@ -327,6 +340,36 @@ mod tests {
             let mut payload = event.payload;
             payload["hooked"] = json!(true);
             Ok(Some(payload))
+        }
+
+        async fn before_provider_headers(
+            &self,
+            _context: ProviderPluginContext,
+            event: BeforeProviderHeadersEvent,
+        ) -> std::result::Result<Option<BTreeMap<String, Option<String>>>, PluginError> {
+            assert_eq!(
+                event.headers["Accept"].as_deref(),
+                Some("text/event-stream")
+            );
+            assert_eq!(
+                event.headers["Content-Type"].as_deref(),
+                Some("application/json")
+            );
+            let mut headers = event.headers;
+            headers.insert("X-Hooked".to_string(), Some("yes".to_string()));
+            Ok(Some(headers))
+        }
+
+        async fn after_provider_response(
+            &self,
+            _context: ProviderPluginContext,
+            event: AfterProviderResponseEvent,
+        ) -> std::result::Result<(), PluginError> {
+            self.responses.lock().unwrap().push(format!(
+                "{}:{}",
+                event.status, event.headers["x-response-id"]
+            ));
+            Ok(())
         }
     }
 
@@ -391,6 +434,7 @@ mod tests {
     async fn request_hook_runs_after_serialization_and_before_transport() {
         let transport = Arc::new(CapturingTransport {
             body: Mutex::new(None),
+            headers: Mutex::new(None),
         });
         let provider = OpenAiCompatibleProvider::with_transport(
             OpenAiCompatibleConfig::without_api_key("https://example.test/v1")
@@ -398,8 +442,13 @@ mod tests {
             transport.clone(),
         )
         .unwrap();
-        let provider_plugins =
-            Arc::new(ProviderPluginDriver::new(vec![Arc::new(PayloadPlugin)]).unwrap());
+        let responses = Arc::new(Mutex::new(Vec::new()));
+        let provider_plugins = Arc::new(
+            ProviderPluginDriver::new(vec![Arc::new(PayloadPlugin {
+                responses: Arc::clone(&responses),
+            })])
+            .unwrap(),
+        );
         let call_context = ProviderCallContext::new(
             3,
             "/project",
@@ -434,5 +483,14 @@ mod tests {
             .unwrap();
         assert_eq!(body["model"], "model");
         assert_eq!(body["hooked"], true);
+        let headers = transport
+            .headers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap();
+        assert_eq!(headers["Accept"], "text/event-stream");
+        assert_eq!(headers["X-Hooked"], "yes");
+        assert_eq!(*responses.lock().unwrap(), vec!["200:response-1"]);
     }
 }

@@ -4,9 +4,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use async_trait::async_trait;
+use pi_core::{
+    ContentBlock, CustomMessage, CustomMessageContent, Message, ModelId, ProviderId, ThinkingLevel,
+    UserMessage,
+};
 use pi_session::{
     AgentSession, AgentSessionReplacement, ExtensionNoticeLevel, ForkPosition, MAIN_LANE,
-    PiSession, SessionDocument, SessionRecord, WeakPiSession, build_context_entries,
+    PiSession, QueueKind, SessionDocument, SessionRecord, WeakPiSession, build_context_entries,
     current_session_context_tokens,
 };
 use serde::{Deserialize, Serialize};
@@ -21,7 +25,7 @@ pub enum ExtensionContextScope {
 }
 
 /// Synchronous, side-effect-free reads exposed by `NativeExtensionContext.query`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -55,10 +59,59 @@ pub enum ExtensionContextQuery {
     SessionEntries,
     SessionTree,
     SessionName,
+    ActiveTools,
+    AllTools,
+    Commands,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionCustomMessage {
+    pub custom_type: String,
+    #[serde(default)]
+    pub content: CustomMessageContent,
+    #[serde(default)]
+    pub display: bool,
+    #[serde(default)]
+    pub details: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExtensionMessageDelivery {
+    #[default]
+    Steer,
+    FollowUp,
+    NextTurn,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionSendMessageOptions {
+    #[serde(default)]
+    pub trigger_turn: Option<bool>,
+    #[serde(default)]
+    pub deliver_as: Option<ExtensionMessageDelivery>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ExtensionUserMessageContent {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionSendUserMessageOptions {
+    #[serde(default)]
+    pub deliver_as: Option<ExtensionMessageDelivery>,
+    #[serde(default)]
+    pub expand_prompt_templates: bool,
 }
 
 /// Fire-and-forget commands exposed by `NativeExtensionContext.notify`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -75,6 +128,35 @@ pub enum ExtensionContextNotification {
         message: String,
         level: ExtensionNoticeLevel,
     },
+    SendMessage {
+        message: ExtensionCustomMessage,
+        #[serde(default)]
+        options: ExtensionSendMessageOptions,
+    },
+    SendUserMessage {
+        content: ExtensionUserMessageContent,
+        #[serde(default)]
+        options: ExtensionSendUserMessageOptions,
+    },
+    AppendEntry {
+        custom_type: String,
+        #[serde(default)]
+        data: Option<Value>,
+    },
+    SetSessionName {
+        name: String,
+    },
+    SetLabel {
+        entry_id: String,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    SetActiveTools {
+        tool_names: Vec<String>,
+    },
+    SetThinkingLevel {
+        level: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,7 +167,7 @@ pub enum ExtensionForkPosition {
 }
 
 /// Awaited commands exposed by `NativeExtensionContext.request`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -93,6 +175,16 @@ pub enum ExtensionForkPosition {
 )]
 pub enum ExtensionContextRequest {
     WaitForIdle,
+    SendMessage {
+        message: ExtensionCustomMessage,
+        #[serde(default)]
+        options: ExtensionSendMessageOptions,
+    },
+    SendUserMessage {
+        content: ExtensionUserMessageContent,
+        #[serde(default)]
+        options: ExtensionSendUserMessageOptions,
+    },
     NewSession {
         #[serde(default)]
         parent_session: Option<String>,
@@ -117,6 +209,10 @@ pub enum ExtensionContextRequest {
         session_path: PathBuf,
     },
     Reload,
+    SetModel {
+        provider: String,
+        model_id: String,
+    },
 }
 
 fn default_fork_position() -> ExtensionForkPosition {
@@ -576,6 +672,36 @@ impl ExtensionContextAccess for SessionExtensionContextAccess {
                 let (_, document) = self.document()?;
                 value(document.name)
             }
+            ExtensionContextQuery::ActiveTools => value(runtime.active_tools()),
+            ExtensionContextQuery::AllTools => Ok(Value::Array(
+                runtime
+                    .tool_specs()
+                    .into_iter()
+                    .map(|tool| {
+                        json!({
+                            "name": tool.name,
+                            "label": tool.label,
+                            "description": tool.description,
+                            "parameters": tool.parameters,
+                            "promptSnippet": tool.prompt_snippet,
+                            "promptGuidelines": tool.prompt_guidelines,
+                        })
+                    })
+                    .collect(),
+            )),
+            ExtensionContextQuery::Commands => Ok(Value::Array(
+                runtime
+                    .command_specs()
+                    .into_iter()
+                    .map(|command| {
+                        json!({
+                            "name": command.name,
+                            "description": command.description,
+                            "argumentHint": command.argument_hint,
+                        })
+                    })
+                    .collect(),
+            )),
         }
     }
 
@@ -603,6 +729,129 @@ impl ExtensionContextAccess for SessionExtensionContextAccess {
             ExtensionContextNotification::UiNotify { message, level } => {
                 self.session()?.notify_extension(message, level);
             }
+            ExtensionContextNotification::SendMessage { message, options } => {
+                let session = self.session()?;
+                let message = Message::custom(CustomMessage {
+                    custom_type: message.custom_type,
+                    content: message.content,
+                    display: message.display,
+                    details: message.details,
+                    timestamp_ms: unix_timestamp_ms(),
+                });
+                if options.deliver_as == Some(ExtensionMessageDelivery::NextTurn) {
+                    session
+                        .enqueue_extension_message(message, QueueKind::NextRun)
+                        .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                } else if session.snapshot().agent.is_running && options.trigger_turn != Some(false)
+                {
+                    let kind = match options.deliver_as {
+                        Some(ExtensionMessageDelivery::FollowUp) => QueueKind::FollowUp,
+                        _ => QueueKind::Steer,
+                    };
+                    session
+                        .enqueue_extension_message(message, kind)
+                        .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                } else if options.trigger_turn == Some(true) {
+                    self.runtime.spawn(async move {
+                        let _ = session.prompt(vec![message]).await;
+                    });
+                } else if session.snapshot().agent.is_running {
+                    self.runtime.spawn(async move {
+                        session.runtime().wait_for_idle().await;
+                        let Message::Custom(message) = message else {
+                            return;
+                        };
+                        let _ = session.append_custom_message((*message).clone());
+                    });
+                } else {
+                    let Message::Custom(message) = message else {
+                        unreachable!("extension custom messages always use the custom role");
+                    };
+                    session
+                        .append_custom_message((*message).clone())
+                        .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                }
+            }
+            ExtensionContextNotification::SendUserMessage { content, options } => {
+                let session = self.session()?;
+                if session.snapshot().agent.is_running && options.deliver_as.is_none() {
+                    session.notify_extension(
+                        "Agent is already processing. Specify deliverAs ('steer' or 'followUp') to queue the message."
+                            .to_string(),
+                        ExtensionNoticeLevel::Error,
+                    );
+                    return Ok(());
+                }
+                let runtime = self.runtime.clone();
+                runtime.spawn(async move {
+                    let (text, blocks) = extension_user_message(content);
+                    if session.snapshot().agent.is_running {
+                        let kind = match options.deliver_as {
+                            Some(ExtensionMessageDelivery::FollowUp) => QueueKind::FollowUp,
+                            _ => QueueKind::Steer,
+                        };
+                        let message = Message::User(UserMessage {
+                            content: blocks,
+                            timestamp_ms: unix_timestamp_ms(),
+                        });
+                        let _ = session.enqueue_extension_message(message, kind);
+                    } else if options.expand_prompt_templates {
+                        let _ = session.submit(text).await;
+                    } else {
+                        let message = Message::User(UserMessage {
+                            content: blocks,
+                            timestamp_ms: unix_timestamp_ms(),
+                        });
+                        let _ = session.prompt(vec![message]).await;
+                    }
+                });
+            }
+            ExtensionContextNotification::AppendEntry { custom_type, data } => {
+                self.session()?
+                    .append_custom_entry(custom_type, data)
+                    .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+            }
+            ExtensionContextNotification::SetSessionName { name } => {
+                let session = self.session()?;
+                let name = session
+                    .set_name_immediate(Some(name))
+                    .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                self.runtime.spawn(async move {
+                    session
+                        .session_plugin_driver()
+                        .session_info_changed(&pi_session::SessionInfoChangedEvent { name })
+                        .await;
+                });
+            }
+            ExtensionContextNotification::SetLabel { entry_id, label } => {
+                self.session()?
+                    .set_label(&entry_id, label)
+                    .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+            }
+            ExtensionContextNotification::SetActiveTools { tool_names } => {
+                let session = self.session()?;
+                let available = session
+                    .runtime()
+                    .tool_specs()
+                    .into_iter()
+                    .map(|tool| tool.name)
+                    .collect::<HashSet<_>>();
+                session
+                    .set_active_tools(
+                        tool_names
+                            .into_iter()
+                            .filter(|tool| available.contains(tool)),
+                    )
+                    .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+            }
+            ExtensionContextNotification::SetThinkingLevel { level } => {
+                let level = level
+                    .parse::<ThinkingLevel>()
+                    .map_err(ExtensionContextError::Invalid)?;
+                self.session()?
+                    .set_thinking_level(level)
+                    .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+            }
         }
         Ok(())
     }
@@ -612,19 +861,95 @@ impl ExtensionContextAccess for SessionExtensionContextAccess {
         scope: ExtensionContextScope,
         request: ExtensionContextRequest,
     ) -> Result<Value, ExtensionContextError> {
-        let operation = request.operation_name();
-        require_command(scope, operation)?;
         match request {
             ExtensionContextRequest::WaitForIdle => {
+                require_command(scope, "waitForIdle")?;
                 self.session()?.runtime().wait_for_idle().await;
                 Ok(Value::Null)
             }
-            ExtensionContextRequest::NewSession { parent_session } => {
-                if parent_session.is_some() {
-                    return Err(ExtensionContextError::Unavailable(
-                        "newSession({ parentSession })".to_string(),
+            ExtensionContextRequest::SendMessage { message, options } => {
+                require_command(scope, "sendMessage")?;
+                let session = self.session()?;
+                let message = Message::custom(CustomMessage {
+                    custom_type: message.custom_type,
+                    content: message.content,
+                    display: message.display,
+                    details: message.details,
+                    timestamp_ms: unix_timestamp_ms(),
+                });
+                if options.deliver_as == Some(ExtensionMessageDelivery::NextTurn) {
+                    session
+                        .enqueue_extension_message(message, QueueKind::NextRun)
+                        .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                } else if session.snapshot().agent.is_running && options.trigger_turn != Some(false)
+                {
+                    let kind = match options.deliver_as {
+                        Some(ExtensionMessageDelivery::FollowUp) => QueueKind::FollowUp,
+                        _ => QueueKind::Steer,
+                    };
+                    session
+                        .enqueue_extension_message(message, kind)
+                        .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                } else if options.trigger_turn == Some(true) {
+                    session
+                        .prompt(vec![message])
+                        .await
+                        .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                } else {
+                    if session.snapshot().agent.is_running {
+                        session.runtime().wait_for_idle().await;
+                    }
+                    let Message::Custom(message) = message else {
+                        unreachable!("extension custom messages always use the custom role");
+                    };
+                    session
+                        .append_custom_message((*message).clone())
+                        .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                }
+                Ok(Value::Null)
+            }
+            ExtensionContextRequest::SendUserMessage { content, options } => {
+                require_command(scope, "sendUserMessage")?;
+                let session = self.session()?;
+                if session.snapshot().agent.is_running && options.deliver_as.is_none() {
+                    return Err(ExtensionContextError::Invalid(
+                        "Agent is already processing. Specify deliverAs ('steer' or 'followUp') to queue the message."
+                            .to_string(),
                     ));
                 }
+                let (text, blocks) = extension_user_message(content);
+                if session.snapshot().agent.is_running {
+                    let kind = match options.deliver_as {
+                        Some(ExtensionMessageDelivery::FollowUp) => QueueKind::FollowUp,
+                        _ => QueueKind::Steer,
+                    };
+                    session
+                        .enqueue_extension_message(
+                            Message::User(UserMessage {
+                                content: blocks,
+                                timestamp_ms: unix_timestamp_ms(),
+                            }),
+                            kind,
+                        )
+                        .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                } else if options.expand_prompt_templates {
+                    session
+                        .submit(text)
+                        .await
+                        .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                } else {
+                    session
+                        .prompt(vec![Message::User(UserMessage {
+                            content: blocks,
+                            timestamp_ms: unix_timestamp_ms(),
+                        })])
+                        .await
+                        .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                }
+                Ok(Value::Null)
+            }
+            ExtensionContextRequest::NewSession { parent_session } => {
+                require_command(scope, "newSession")?;
                 let pi_session = self.pi_session()?;
                 let current = pi_session.current();
                 let directory = current
@@ -633,13 +958,19 @@ impl ExtensionContextAccess for SessionExtensionContextAccess {
                     .parent()
                     .unwrap_or_else(|| std::path::Path::new("."));
                 let path = directory.join(format!("{}.jsonl", uuid::Uuid::now_v7()));
-                let replacement = pi_session
-                    .new_session(current.runtime().cwd(), path)
-                    .await
-                    .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                let replacement = match parent_session {
+                    Some(parent) => {
+                        pi_session
+                            .new_session_with_parent(current.runtime().cwd(), path, parent)
+                            .await
+                    }
+                    None => pi_session.new_session(current.runtime().cwd(), path).await,
+                }
+                .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
                 replacement_value(replacement)
             }
             ExtensionContextRequest::Fork { entry_id, position } => {
+                require_command(scope, "fork")?;
                 let position = match position {
                     ExtensionForkPosition::Before => ForkPosition::Before,
                     ExtensionForkPosition::At => ForkPosition::At,
@@ -658,25 +989,33 @@ impl ExtensionContextAccess for SessionExtensionContextAccess {
                 replace_instructions,
                 label,
             } => {
-                if summarize || custom_instructions.is_some() || replace_instructions {
-                    return Err(ExtensionContextError::Unavailable(
-                        "summarized tree navigation".to_string(),
-                    ));
-                }
+                require_command(scope, "navigateTree")?;
                 let session = self.session()?;
-                session
-                    .checkout(Some(&target_id))
-                    .await
-                    .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
-                if let Some(label) = label {
+                if summarize {
                     session
-                        .log()
-                        .set_label(&target_id, Some(label))
+                        .summarize_branch_and_checkout(
+                            &target_id,
+                            custom_instructions,
+                            replace_instructions,
+                            label,
+                        )
+                        .await
                         .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                } else {
+                    session
+                        .checkout(Some(&target_id))
+                        .await
+                        .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                    if let Some(label) = label {
+                        session
+                            .set_label(&target_id, Some(label))
+                            .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                    }
                 }
                 Ok(json!({ "cancelled": false }))
             }
             ExtensionContextRequest::SwitchSession { session_path } => {
+                require_command(scope, "switchSession")?;
                 let replacement = self
                     .pi_session()?
                     .resume_session(session_path)
@@ -685,11 +1024,27 @@ impl ExtensionContextAccess for SessionExtensionContextAccess {
                 replacement_value(replacement)
             }
             ExtensionContextRequest::Reload => {
+                require_command(scope, "reload")?;
                 self.pi_session()?
                     .reload()
                     .await
                     .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
                 Ok(Value::Null)
+            }
+            ExtensionContextRequest::SetModel { provider, model_id } => {
+                let provider = ProviderId::new(provider);
+                let model_id = ModelId::new(model_id);
+                let session = self.session()?;
+                let runtime = session.runtime();
+                if runtime.model(&provider, &model_id).is_none()
+                    || !runtime.provider_is_available(&provider)
+                {
+                    return Ok(json!(false));
+                }
+                session
+                    .set_model(provider, model_id)
+                    .map_err(|error| ExtensionContextError::Failed(error.to_string()))?;
+                Ok(json!(true))
             }
         }
     }
@@ -699,19 +1054,6 @@ impl ExtensionContextAccess for SessionExtensionContextAccess {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-    }
-}
-
-impl ExtensionContextRequest {
-    fn operation_name(&self) -> &'static str {
-        match self {
-            Self::WaitForIdle => "waitForIdle",
-            Self::NewSession { .. } => "newSession",
-            Self::Fork { .. } => "fork",
-            Self::NavigateTree { .. } => "navigateTree",
-            Self::SwitchSession { .. } => "switchSession",
-            Self::Reload => "reload",
-        }
     }
 }
 
@@ -734,6 +1076,42 @@ fn replacement_value(replacement: AgentSessionReplacement) -> Result<Value, Exte
 
 fn value<T: Serialize>(value: T) -> Result<Value, ExtensionContextError> {
     serde_json::to_value(value).map_err(|error| ExtensionContextError::Failed(error.to_string()))
+}
+
+fn unix_timestamp_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
+fn extension_user_message(content: ExtensionUserMessageContent) -> (String, Vec<ContentBlock>) {
+    match content {
+        ExtensionUserMessageContent::Text(text) => {
+            let blocks = vec![ContentBlock::Text(pi_core::TextContent::new(&text))];
+            (text, blocks)
+        }
+        ExtensionUserMessageContent::Blocks(blocks) => {
+            let text = blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut normalized = vec![ContentBlock::Text(pi_core::TextContent::new(&text))];
+            normalized.extend(
+                blocks
+                    .into_iter()
+                    .filter(|block| matches!(block, ContentBlock::Image(_))),
+            );
+            (text, normalized)
+        }
+    }
 }
 
 #[derive(Serialize)]

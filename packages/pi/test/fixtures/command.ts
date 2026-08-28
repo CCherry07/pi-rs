@@ -24,8 +24,22 @@ export default function registerBridgeSmokeCommand(pi: PiExtensionApi) {
       const previousSessionId = context.sessionManager.getSessionId();
       let replacementSessionId: string | undefined;
       const replacement = await context.newSession({
+        setup: (manager) => {
+          manager.appendCustomEntry("bridge-setup", { ready: true });
+        },
         withSession: async (next) => {
           replacementSessionId = next.sessionManager.getSessionId();
+          await next.sendMessage(
+            { customType: "bridge-context", content: "ready", display: false },
+            { triggerTurn: false },
+          );
+          const entries = next.sessionManager.getEntries() as Array<Record<string, unknown>>;
+          if (!entries.some((entry) => entry.customType === "bridge-setup")) {
+            throw new Error("native setup did not mutate the replacement session");
+          }
+          if (!entries.some((entry) => entry.customType === "bridge-context")) {
+            throw new Error("native replacement sendMessage did not persist context");
+          }
         },
       });
       if (replacement.cancelled || !replacementSessionId || replacementSessionId === previousSessionId) {

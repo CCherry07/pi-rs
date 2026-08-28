@@ -15,9 +15,17 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub enum AgentSessionRuntimeTarget {
-    Create { cwd: PathBuf, path: PathBuf },
-    Open { path: PathBuf },
-    Reuse { log: SessionLog },
+    Create {
+        cwd: PathBuf,
+        path: PathBuf,
+        parent_session: Option<PathBuf>,
+    },
+    Open {
+        path: PathBuf,
+    },
+    Reuse {
+        log: SessionLog,
+    },
 }
 
 impl AgentSessionRuntimeTarget {
@@ -25,6 +33,19 @@ impl AgentSessionRuntimeTarget {
         Self::Create {
             cwd: cwd.into(),
             path: path.into(),
+            parent_session: None,
+        }
+    }
+
+    pub fn create_with_parent(
+        cwd: impl Into<PathBuf>,
+        path: impl Into<PathBuf>,
+        parent_session: impl Into<PathBuf>,
+    ) -> Self {
+        Self::Create {
+            cwd: cwd.into(),
+            path: path.into(),
+            parent_session: Some(parent_session.into()),
         }
     }
 
@@ -158,6 +179,15 @@ impl AgentSessionRuntime {
         cwd: impl Into<PathBuf>,
         path: impl Into<PathBuf>,
     ) -> Result<AgentSessionReplacement, AgentSessionRuntimeError> {
+        self.new_session_with_parent(cwd, path, None).await
+    }
+
+    pub async fn new_session_with_parent(
+        &self,
+        cwd: impl Into<PathBuf>,
+        path: impl Into<PathBuf>,
+        parent_session: Option<PathBuf>,
+    ) -> Result<AgentSessionReplacement, AgentSessionRuntimeError> {
         let _transition = self.transition_gate.lock().await;
         self.ensure_open()?;
         let current = self.session();
@@ -177,7 +207,12 @@ impl AgentSessionRuntime {
         self.replace_current(
             current,
             AgentSessionRuntimeRequest {
-                target: AgentSessionRuntimeTarget::create(cwd, &path),
+                target: match parent_session {
+                    Some(parent) => {
+                        AgentSessionRuntimeTarget::create_with_parent(cwd, &path, parent)
+                    }
+                    None => AgentSessionRuntimeTarget::create(cwd, &path),
+                },
                 start_event: SessionStartEvent {
                     reason: SessionStartReason::New,
                     previous_session_file: Some(previous_session_file),
@@ -492,7 +527,7 @@ mod tests {
             }
 
             let (cwd, path, create, reused_log) = match request.target {
-                AgentSessionRuntimeTarget::Create { cwd, path } => (cwd, path, true, None),
+                AgentSessionRuntimeTarget::Create { cwd, path, .. } => (cwd, path, true, None),
                 AgentSessionRuntimeTarget::Open { path } => {
                     let (_, document) = crate::SessionLog::open(&path)?;
                     (document.header.cwd, path, false, None)

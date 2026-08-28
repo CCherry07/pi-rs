@@ -70,7 +70,7 @@ impl Tool for EditTool {
         )
     }
 
-    fn prepare_arguments(&self, mut input: Value) -> Result<Value, ToolError> {
+    async fn prepare_arguments(&self, mut input: Value) -> Result<Value, ToolError> {
         let object = input
             .as_object_mut()
             .ok_or_else(|| invalid("arguments must be an object"))?;

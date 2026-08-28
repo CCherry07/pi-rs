@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -51,6 +52,23 @@ impl ProviderPluginContext {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeforeProviderRequestEvent {
     pub payload: Value,
+}
+
+/// Final provider HTTP headers immediately before transport dispatch.
+///
+/// `None` preserves Pi's JavaScript extension convention that assigning
+/// `null` deletes a header. The driver keeps tombstones visible while hooks
+/// chain and removes them only when returning the transport-ready map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeforeProviderHeadersEvent {
+    pub headers: BTreeMap<String, Option<String>>,
+}
+
+/// Provider response metadata observed before its body stream is consumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AfterProviderResponseEvent {
+    pub status: u16,
+    pub headers: BTreeMap<String, String>,
 }
 
 /// Registration surface reserved for provider plugins.
@@ -127,6 +145,28 @@ pub trait ProviderPlugin: Send + Sync {
         _event: BeforeProviderRequestEvent,
     ) -> std::result::Result<Option<Value>, PluginError> {
         Ok(None)
+    }
+
+    /// Runs after a concrete provider has assembled its final HTTP headers and
+    /// immediately before transport. Returning `None` preserves the current
+    /// map; returning `Some` replaces it for later plugins and transport.
+    async fn before_provider_headers(
+        &self,
+        _context: ProviderPluginContext,
+        _event: BeforeProviderHeadersEvent,
+    ) -> std::result::Result<Option<BTreeMap<String, Option<String>>>, PluginError> {
+        Ok(None)
+    }
+
+    /// Runs after an HTTP response arrives and before its body stream is
+    /// consumed. Observer failures are diagnostic and never replace the
+    /// provider result.
+    async fn after_provider_response(
+        &self,
+        _context: ProviderPluginContext,
+        _event: AfterProviderResponseEvent,
+    ) -> std::result::Result<(), PluginError> {
+        Ok(())
     }
 }
 
@@ -227,12 +267,102 @@ impl ProviderPluginDriver {
         }
         Ok(payload)
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn before_provider_headers(
+        &self,
+        generation: u64,
+        provider_id: &ProviderId,
+        model_id: &ModelId,
+        cwd: &std::path::Path,
+        signal: &AbortSignal,
+        headers: BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        let mut headers = headers
+            .into_iter()
+            .map(|(name, value)| (name, Some(value)))
+            .collect::<BTreeMap<_, _>>();
+        for registered in &self.plugins {
+            let event = BeforeProviderHeadersEvent {
+                headers: headers.clone(),
+            };
+            let replacement = registered
+                .plugin
+                .before_provider_headers(
+                    ProviderPluginContext {
+                        plugin_id: registered.id.clone(),
+                        generation,
+                        provider_id: provider_id.clone(),
+                        model_id: model_id.clone(),
+                        cwd: cwd.to_path_buf(),
+                        abort_signal: signal.clone(),
+                        diagnostics: self.diagnostics.clone(),
+                    },
+                    event,
+                )
+                .await;
+            match replacement {
+                Ok(Some(replacement)) => headers = replacement,
+                Ok(None) => {}
+                Err(error) => self.diagnostics.record(
+                    registered.id.clone(),
+                    "before_provider_headers",
+                    error.to_string(),
+                ),
+            }
+        }
+        headers
+            .into_iter()
+            .filter_map(|(name, value)| value.map(|value| (name, value)))
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn after_provider_response(
+        &self,
+        generation: u64,
+        provider_id: &ProviderId,
+        model_id: &ModelId,
+        cwd: &std::path::Path,
+        signal: &AbortSignal,
+        status: u16,
+        headers: BTreeMap<String, String>,
+    ) {
+        for registered in &self.plugins {
+            let result = registered
+                .plugin
+                .after_provider_response(
+                    ProviderPluginContext {
+                        plugin_id: registered.id.clone(),
+                        generation,
+                        provider_id: provider_id.clone(),
+                        model_id: model_id.clone(),
+                        cwd: cwd.to_path_buf(),
+                        abort_signal: signal.clone(),
+                        diagnostics: self.diagnostics.clone(),
+                    },
+                    AfterProviderResponseEvent {
+                        status,
+                        headers: headers.clone(),
+                    },
+                )
+                .await;
+            if let Err(error) = result {
+                self.diagnostics.record(
+                    registered.id.clone(),
+                    "after_provider_response",
+                    error.to_string(),
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{AbortSignal, ModelId, ProviderError, ProviderRequest, ProviderStream};
+    use std::sync::Mutex;
 
     struct TestProvider(&'static str);
 
@@ -263,6 +393,13 @@ mod tests {
 
     struct FailingPayloadPlugin;
 
+    struct WirePlugin {
+        id: &'static str,
+        observations: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct FailingWirePlugin;
+
     #[pi_core::provider_plugin]
     impl ProviderPlugin for PayloadPlugin {
         fn id(&self) -> PluginId {
@@ -292,6 +429,64 @@ mod tests {
             _event: BeforeProviderRequestEvent,
         ) -> std::result::Result<Option<Value>, PluginError> {
             Err(PluginError::Registration("intentional failure".to_string()))
+        }
+    }
+
+    #[pi_core::provider_plugin]
+    impl ProviderPlugin for WirePlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new(self.id)
+        }
+
+        async fn before_provider_headers(
+            &self,
+            _context: ProviderPluginContext,
+            event: BeforeProviderHeadersEvent,
+        ) -> std::result::Result<Option<BTreeMap<String, Option<String>>>, PluginError> {
+            if self.id == "second" {
+                assert_eq!(event.headers.get("X-Remove"), Some(&None));
+            }
+            let mut headers = event.headers;
+            headers.insert(format!("X-{}", self.id), Some(self.id.to_string()));
+            if self.id == "first" {
+                headers.insert("X-Remove".to_string(), None);
+            }
+            Ok(Some(headers))
+        }
+
+        async fn after_provider_response(
+            &self,
+            _context: ProviderPluginContext,
+            event: AfterProviderResponseEvent,
+        ) -> std::result::Result<(), PluginError> {
+            self.observations.lock().unwrap().push(format!(
+                "{}:{}:{}",
+                self.id, event.status, event.headers["x-request-id"]
+            ));
+            Ok(())
+        }
+    }
+
+    #[pi_core::provider_plugin]
+    impl ProviderPlugin for FailingWirePlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("failing-wire")
+        }
+
+        async fn before_provider_headers(
+            &self,
+            _context: ProviderPluginContext,
+            _event: BeforeProviderHeadersEvent,
+        ) -> std::result::Result<Option<BTreeMap<String, Option<String>>>, PluginError> {
+            Err(PluginError::Registration("header failure".to_string()))
+        }
+
+        async fn after_provider_response(
+            &self,
+            _context: ProviderPluginContext,
+            _event: AfterProviderResponseEvent,
+        ) -> std::result::Result<(), PluginError> {
+            Err(PluginError::Registration("response failure".to_string()))
         }
     }
 
@@ -423,6 +618,70 @@ mod tests {
             diagnostic.plugin_id == PluginId::new("failing")
                 && diagnostic.hook == "before_provider_request"
                 && diagnostic.message.contains("intentional failure")
+        }));
+    }
+
+    #[tokio::test]
+    async fn wire_hooks_chain_header_tombstones_and_isolate_observer_failures() {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let driver = ProviderPluginDriver::new(vec![
+            Arc::new(WirePlugin {
+                id: "first",
+                observations: Arc::clone(&observations),
+            }),
+            Arc::new(FailingWirePlugin),
+            Arc::new(WirePlugin {
+                id: "second",
+                observations: Arc::clone(&observations),
+            }),
+        ])
+        .unwrap();
+        let (_, signal) = crate::AbortHandle::new();
+        let provider = ProviderId::new("provider");
+        let model = ModelId::new("model");
+
+        let headers = driver
+            .before_provider_headers(
+                8,
+                &provider,
+                &model,
+                std::path::Path::new("/workspace"),
+                &signal,
+                BTreeMap::from([
+                    ("Existing".to_string(), "yes".to_string()),
+                    ("X-Remove".to_string(), "remove-me".to_string()),
+                ]),
+            )
+            .await;
+        assert_eq!(headers["Existing"], "yes");
+        assert_eq!(headers["X-first"], "first");
+        assert_eq!(headers["X-second"], "second");
+        assert!(!headers.contains_key("X-Remove"));
+
+        driver
+            .after_provider_response(
+                8,
+                &provider,
+                &model,
+                std::path::Path::new("/workspace"),
+                &signal,
+                429,
+                BTreeMap::from([("x-request-id".to_string(), "request-1".to_string())]),
+            )
+            .await;
+        assert_eq!(
+            *observations.lock().unwrap(),
+            vec!["first:429:request-1", "second:429:request-1"]
+        );
+        assert!(driver.diagnostics().iter().any(|diagnostic| {
+            diagnostic.plugin_id == PluginId::new("failing-wire")
+                && diagnostic.hook == "before_provider_headers"
+                && diagnostic.message.contains("header failure")
+        }));
+        assert!(driver.diagnostics().iter().any(|diagnostic| {
+            diagnostic.plugin_id == PluginId::new("failing-wire")
+                && diagnostic.hook == "after_provider_response"
+                && diagnostic.message.contains("response failure")
         }));
     }
 }

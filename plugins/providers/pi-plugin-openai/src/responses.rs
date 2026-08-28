@@ -15,7 +15,7 @@ use pi_core::{
 };
 use pi_provider::{
     HttpBodyStream, HttpTransport, ReqwestTransport, SseDecoder, TransportError,
-    collect_body_limited,
+    collect_body_limited, post_json_with_provider_hooks,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -153,11 +153,16 @@ impl Provider for OpenAiResponsesCompatibleProvider {
         let payload = context
             .before_provider_request(&signal, request_body(&request))
             .await?;
-        let response = self
-            .transport
-            .post_json(&endpoint, &headers, &payload, signal.clone())
-            .await
-            .map_err(map_transport_error)?;
+        let response = post_json_with_provider_hooks(
+            self.transport.as_ref(),
+            &context,
+            &endpoint,
+            headers,
+            &payload,
+            signal.clone(),
+        )
+        .await
+        .map_err(map_transport_error)?;
         if !(200..300).contains(&response.status) {
             let status = response.status;
             let body = collect_body_limited(response.body, 64 * 1024)

@@ -51,8 +51,8 @@ pub use provider::{
     ProviderStream,
 };
 pub use provider_plugin::{
-    BeforeProviderRequestEvent, ProviderPlugin, ProviderPluginContext, ProviderPluginDriver,
-    ProviderRegisterContext,
+    AfterProviderResponseEvent, BeforeProviderHeadersEvent, BeforeProviderRequestEvent,
+    ProviderPlugin, ProviderPluginContext, ProviderPluginDriver, ProviderRegisterContext,
 };
 pub use registry::{FrozenRegistries, RegistriesBuilder};
 pub use stream::{ContentMetadata, ResponseMetadataPatch, StreamEvent};

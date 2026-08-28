@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -221,6 +222,7 @@ pub(crate) struct AppConfig {
     pub(crate) native_plugins: Vec<PathBuf>,
     pub(crate) extensions: Vec<String>,
     pub(crate) discover_extensions: bool,
+    pub(crate) extension_flag_values: BTreeMap<String, serde_json::Value>,
 }
 
 impl AppConfig {
@@ -276,6 +278,7 @@ impl AppConfig {
             native_plugins: cli.native_plugins.clone(),
             extensions: cli.extensions.clone(),
             discover_extensions: !cli.no_extensions,
+            extension_flag_values: BTreeMap::new(),
         })
     }
 

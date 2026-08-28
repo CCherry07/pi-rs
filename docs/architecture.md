@@ -169,6 +169,7 @@ configuration files or plugin ID conventions.
 11. A native plugin is trusted in-process code; the loader and trait interfaces are not a sandbox.
 12. Registered slash commands own both their `CommandSpec` and execution. A `TransformInput` result then passes through `input` hooks in registration order before the agent run; `Handled` stops the submission. Text preprocessing retains both the product-facing submitted text and the effective model text rather than requiring a frontend to reverse an expansion.
 13. `before_provider_request` runs after a concrete provider has serialized its final wire payload and before transport. Replacements chain in provider-plugin order; hook errors are diagnosed and skipped so later provider hooks still receive the last valid payload.
+14. Built-in HTTP providers cross the shared `post_json_with_provider_hooks` Interface after assembling their final headers. `before_provider_headers` chains a header map in provider-plugin order, preserves `null` deletion tombstones until all hooks finish, and only then produces transport-ready strings. `after_provider_response` observes status and decoded response headers before the body stream can be consumed. Both hooks isolate failures as diagnostics and continue in registration order.
 
 ## Runtime generations and reload
 
@@ -191,11 +192,12 @@ while unchanged content reuses one process-pinned handle. Libraries remain pinne
 lifetime because plugin code may retain worker threads. Package metadata and artifact lifetime are
 loader concerns rather than a fourth lifecycle or cross-lifecycle bundle.
 
-Native ABI 3 adds the required `AgentPlugin` hook-interest contract to the ABI 2
-`AgentContext`/`added_tool_names` surface. The native agent export macro derives that contract from
-the callback methods in the annotated impl, so authors do not maintain a second hook list. The
-loader reads the stable C descriptor first and rejects older ABIs before resolving any v3 Rust
-constructor symbol, preventing a stale in-process plugin from crossing the changed trait boundary.
+Native ABI 4 adds `ProviderPlugin` header/response lifecycle hooks to the ABI 3 required
+`AgentPlugin` hook-interest contract and ABI 2 `AgentContext`/`added_tool_names` surface. The native
+agent export macro derives its contract from the callback methods in the annotated impl, so authors
+do not maintain a second hook list. The loader reads the stable C descriptor first and rejects older
+ABIs before resolving any v4 Rust constructor symbol, preventing a stale in-process plugin from
+crossing the changed trait boundary.
 
 Native package distribution is a separate deep module at `pi-plugin-manager`. Editable
 `plugins.json` contains ordered intent; target-specific `plugins.lock` is the exact resolution and
@@ -364,6 +366,18 @@ its prepared `AgentSession` closes, which lets Pi-compatible `withSession` callb
 replacement before the old JavaScript command returns. There is no `JsContextBroker`: lifetime and
 authority are explicit in the callback argument, while orchestration remains in
 `MultiSessionManager` / `PiSession`.
+
+The top-level JavaScript `pi` object retains a small generation-local `ExtensionRuntime` Adapter.
+Each callback rebinds that Adapter to the latest native context handle; the handle remains valid for
+the generation but resolves the current `PiSession` after new/resume/fork/reload. Process execution
+stays Node-owned because it is a process primitive, while messages, durable custom entries,
+metadata, tool/model/thinking selection, and replacement setup flow through typed native
+operations into `AgentSession`. Node never edits a session file or reconstructs queue policy.
+
+Tool argument preparation is an asynchronous method on the core `Tool` Interface. This preserves
+Pi ordering for JavaScript tools: prepare, validate, `tool_call` hooks, execute. Tool execution gets
+an invocation-local update sink on the NAPI context so partial results cross the Adapter directly
+into the existing semantic tool-update stream without adding a Node-owned event channel.
 
 Managed npm installation deliberately uses npm's legacy peer-dependency mode, matching current Pi:
 Pi extensions commonly declare the Pi SDK and TypeBox as peers, but those modules belong to the

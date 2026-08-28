@@ -21,9 +21,10 @@ pub use pi_session::SessionPlugin;
 
 /// Version of the trusted Rust-ABI plugin contract.
 ///
-/// ABI 3 adds the required `AgentPlugin` hook-interest contract. Hosts must
-/// reject older artifacts before resolving their Rust-ABI constructors.
-pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 3;
+/// ABI 4 adds provider header/response lifecycle hooks to `ProviderPlugin`.
+/// Hosts must reject older artifacts before resolving their Rust-ABI
+/// constructors.
+pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 4;
 pub const BUILD_FINGERPRINT: &str = env!("PI_PLUGIN_BUILD_FINGERPRINT");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -95,15 +96,15 @@ pub type PluginDescriptorFnV1 = unsafe extern "C" fn() -> *const NativePluginDes
 pub type PluginOptionsSchemaFnV1 = unsafe fn() -> String;
 
 #[cfg(feature = "agent")]
-pub type AgentPluginCreateV3 =
+pub type AgentPluginCreateV4 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn AgentPlugin>, PluginLoadError>;
 
 #[cfg(feature = "provider")]
-pub type ProviderPluginCreateV3 =
+pub type ProviderPluginCreateV4 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn ProviderPlugin>, PluginLoadError>;
 
 #[cfg(feature = "session")]
-pub type SessionPluginCreateV3 =
+pub type SessionPluginCreateV4 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn SessionPlugin>, PluginLoadError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,8 +253,9 @@ pub mod provider {
         };
         pub use async_trait::async_trait;
         pub use pi_core::{
-            BeforeProviderRequestEvent, ModelId, ModelSpec, PluginError, PluginId, Provider,
-            ProviderCallContext, ProviderError, ProviderId, ProviderPlugin, ProviderPluginContext,
+            AfterProviderResponseEvent, BeforeProviderHeadersEvent, BeforeProviderRequestEvent,
+            ModelId, ModelSpec, PluginError, PluginId, Provider, ProviderCallContext,
+            ProviderError, ProviderId, ProviderPlugin, ProviderPluginContext,
             ProviderRegisterContext, ProviderRequest, ProviderStream, Result, StreamEvent,
         };
         pub use serde_json::{Value, json};

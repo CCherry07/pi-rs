@@ -16,6 +16,7 @@ export interface NativeExtensionContext {
   query(operation: string): string;
   notify(operation: string): void;
   request(operation: string): Promise<string>;
+  update?(result: string): void;
 }
 
 export interface NativeBinding {

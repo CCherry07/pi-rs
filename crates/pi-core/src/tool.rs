@@ -54,7 +54,8 @@ impl ToolResult {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolUpdate {
     pub content: Vec<ContentBlock>,
     pub details: Option<Value>,
@@ -96,7 +97,7 @@ pub enum ToolError {
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
 
-    fn prepare_arguments(&self, input: Value) -> Result<Value, ToolError> {
+    async fn prepare_arguments(&self, input: Value) -> Result<Value, ToolError> {
         Ok(input)
     }
 

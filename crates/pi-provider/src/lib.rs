@@ -8,5 +8,5 @@ mod transport;
 pub use sse::{SseDecoder, SseEvent};
 pub use transport::{
     HttpBodyStream, HttpResponse, HttpTransport, REQUEST_TIMEOUT_ENV, ReqwestTransport,
-    ReqwestTransportConfig, TransportError, collect_body_limited,
+    ReqwestTransportConfig, TransportError, collect_body_limited, post_json_with_provider_hooks,
 };

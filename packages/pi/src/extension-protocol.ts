@@ -2,13 +2,15 @@ import { z } from 'zod'
 
 const jsonObjectSchema = z.looseObject({})
 const hostModeSchema = z.enum(['tui', 'print', 'json', 'rpc'])
-const invocationKindSchema = z.enum(['tool', 'command', 'agentHook', 'providerHook', 'sessionHook'])
+const invocationKindSchema = z.enum(['tool', 'toolPrepareArguments', 'command', 'agentHook', 'providerHook', 'sessionHook'])
 export const toolExecutionModeSchema = z.enum(['parallel', 'sequential'])
 
 const generationRequestSchema = z.strictObject({
   projectTrusted: z.boolean(),
   extensionPaths: z.array(z.string()),
   mode: hostModeSchema,
+  cwd: z.string().default(process.cwd()),
+  flagValues: z.record(z.string(), z.union([z.boolean(), z.string()])).default({}),
 })
 
 const invocationSchema = z.strictObject({
@@ -33,6 +35,7 @@ const hookManifestSchema = z.strictObject({
 
 const toolManifestSchema = z.strictObject({
   callbackId: z.string(),
+  prepareCallbackId: z.string().optional(),
   name: z.string(),
   label: z.string(),
   description: z.string(),

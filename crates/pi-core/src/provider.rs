@@ -126,6 +126,42 @@ impl ProviderCallContext {
             .await
             .map_err(|error| ProviderError::Failure(error.to_string()))
     }
+
+    pub async fn before_provider_headers(
+        &self,
+        signal: &AbortSignal,
+        headers: BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        self.provider_plugins
+            .before_provider_headers(
+                self.generation,
+                &self.provider_id,
+                &self.model_id,
+                &self.cwd,
+                signal,
+                headers,
+            )
+            .await
+    }
+
+    pub async fn after_provider_response(
+        &self,
+        signal: &AbortSignal,
+        status: u16,
+        headers: BTreeMap<String, String>,
+    ) {
+        self.provider_plugins
+            .after_provider_response(
+                self.generation,
+                &self.provider_id,
+                &self.model_id,
+                &self.cwd,
+                signal,
+                status,
+                headers,
+            )
+            .await;
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

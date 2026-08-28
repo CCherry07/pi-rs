@@ -11,6 +11,7 @@ mod session_factory;
 mod text_selection;
 mod tui;
 
+use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read};
 use std::sync::Arc;
 
@@ -72,7 +73,7 @@ impl CLIMode {
 
 /// Runs the product using the process argument vector and only native Rust plugins.
 pub async fn run_from_env() -> Result<(), String> {
-    run(Cli::parse_pi(), None).await
+    run(Cli::parse_pi(), None, BTreeMap::new()).await
 }
 
 /// Runs the product as a Node-hosted application. `arguments` excludes the
@@ -81,6 +82,7 @@ pub async fn run_with_js_host(
     arguments: Vec<String>,
     js_host: Arc<dyn JsPluginHost>,
 ) -> Result<(), String> {
+    let (arguments, extension_flag_values) = split_extension_flags(arguments);
     let cli = match Cli::try_parse_pi_from(arguments) {
         Ok(cli) => cli,
         Err(error)
@@ -94,11 +96,16 @@ pub async fn run_with_js_host(
         }
         Err(error) => return Err(error.to_string()),
     };
-    run(cli, Some(js_host)).await
+    run(cli, Some(js_host), extension_flag_values).await
 }
 
-async fn run(cli: Cli, js_host: Option<Arc<dyn JsPluginHost>>) -> Result<(), String> {
+async fn run(
+    cli: Cli,
+    js_host: Option<Arc<dyn JsPluginHost>>,
+    extension_flag_values: BTreeMap<String, serde_json::Value>,
+) -> Result<(), String> {
     let mut config = AppConfig::resolve(&cli)?;
+    config.extension_flag_values = extension_flag_values;
     if !matches!(cli.command, Some(CliCommand::Auth { .. })) {
         auth::refresh_oauth_if_needed(&config.agent_dir).await?;
     }
@@ -163,6 +170,127 @@ async fn run(cli: Cli, js_host: Option<Arc<dyn JsPluginHost>>) -> Result<(), Str
     .await;
     let shutdown = sessions.shutdown().await.map_err(|error| error.to_string());
     finish_run(result, shutdown)
+}
+
+fn split_extension_flags(
+    arguments: Vec<String>,
+) -> (Vec<String>, BTreeMap<String, serde_json::Value>) {
+    const SUBCOMMANDS: &[&str] = &[
+        "auth",
+        "plugin",
+        "install",
+        "remove",
+        "uninstall",
+        "list",
+        "update",
+    ];
+    const BUILT_IN_LONG_OPTIONS: &[&str] = &[
+        "help",
+        "version",
+        "print",
+        "json",
+        "fullscreen",
+        "no-fullscreen",
+        "cwd",
+        "session",
+        "model",
+        "base-url",
+        "api-key",
+        "provider",
+        "agent-dir",
+        "plugin",
+        "extension",
+        "no-extensions",
+        "approve",
+        "no-approve",
+    ];
+    const BUILT_IN_VALUE_OPTIONS: &[&str] = &[
+        "cwd",
+        "session",
+        "model",
+        "base-url",
+        "api-key",
+        "provider",
+        "agent-dir",
+        "plugin",
+        "extension",
+    ];
+    let forces_prompt = arguments
+        .iter()
+        .take_while(|argument| argument.as_str() != "--")
+        .any(|argument| matches!(argument.as_str(), "-p" | "--print" | "--json"));
+    let mut consumes_next = false;
+    let subcommand = arguments.iter().find_map(|argument| {
+        if consumes_next {
+            consumes_next = false;
+            return None;
+        }
+        if argument == "--" {
+            return Some(false);
+        }
+        if let Some(long) = argument.strip_prefix("--") {
+            let (name, has_value) = long
+                .split_once('=')
+                .map_or((long, false), |(name, _)| (name, true));
+            consumes_next = !has_value && BUILT_IN_VALUE_OPTIONS.contains(&name);
+            return None;
+        }
+        if argument == "-e" {
+            consumes_next = true;
+            return None;
+        }
+        if argument.starts_with('-') {
+            return None;
+        }
+        Some(!forces_prompt && SUBCOMMANDS.contains(&argument.as_str()))
+    });
+    if subcommand == Some(true) {
+        return (arguments, BTreeMap::new());
+    }
+
+    let mut cli_arguments = Vec::with_capacity(arguments.len());
+    let mut values = BTreeMap::new();
+    let mut positional_only = false;
+    let mut consumes_next = false;
+    let mut arguments = arguments.into_iter().peekable();
+    while let Some(argument) = arguments.next() {
+        if consumes_next {
+            consumes_next = false;
+            cli_arguments.push(argument);
+            continue;
+        }
+        if positional_only || argument == "--" {
+            positional_only = true;
+            cli_arguments.push(argument);
+            continue;
+        }
+        let Some(long) = argument.strip_prefix("--") else {
+            consumes_next = argument == "-e";
+            if !argument.starts_with('-') {
+                positional_only = true;
+            }
+            cli_arguments.push(argument);
+            continue;
+        };
+        let (name, explicit) = long
+            .split_once('=')
+            .map_or((long, None), |(name, value)| (name, Some(value)));
+        if BUILT_IN_LONG_OPTIONS.contains(&name) {
+            consumes_next = explicit.is_none() && BUILT_IN_VALUE_OPTIONS.contains(&name);
+            cli_arguments.push(argument);
+            continue;
+        }
+        let value = explicit.map_or_else(
+            || {
+                arguments
+                    .next_if(|next| !next.starts_with('-') && !next.starts_with('@'))
+                    .map_or(serde_json::Value::Bool(true), serde_json::Value::String)
+            },
+            |value| serde_json::Value::String(value.to_string()),
+        );
+        values.insert(name.to_string(), value);
+    }
+    (cli_arguments, values)
 }
 
 fn ensure_javascript_host_available(
@@ -312,7 +440,10 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{CLIMode, Cli, JsHostMode, ensure_javascript_host_available, finish_run};
+    use super::{
+        CLIMode, Cli, JsHostMode, ensure_javascript_host_available, finish_run,
+        split_extension_flags,
+    };
     use crate::config::AppConfig;
 
     fn cli(arguments: &[&str]) -> Cli {
@@ -323,6 +454,54 @@ mod tests {
                 .collect(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn node_adapter_extracts_extension_flags_without_stealing_builtin_options_or_prompts() {
+        let (arguments, values) = split_extension_flags(vec![
+            "--fixture-enabled".to_string(),
+            "--print".to_string(),
+            "--fixture-mode=safe".to_string(),
+            "hello".to_string(),
+        ]);
+        assert_eq!(arguments, vec!["--print", "hello"]);
+        assert_eq!(values.get("fixture-mode"), Some(&json!("safe")));
+        assert_eq!(values.get("fixture-enabled"), Some(&json!(true)));
+
+        let (arguments, values) = split_extension_flags(vec![
+            "--fixture-mode".to_string(),
+            "safe".to_string(),
+            "--print".to_string(),
+            "hello".to_string(),
+        ]);
+        assert_eq!(arguments, vec!["--print", "hello"]);
+        assert_eq!(values.get("fixture-mode"), Some(&json!("safe")));
+
+        let (prompt_named_like_subcommand, values) = split_extension_flags(vec![
+            "--fixture-enabled".to_string(),
+            "--print".to_string(),
+            "list".to_string(),
+        ]);
+        assert_eq!(prompt_named_like_subcommand, vec!["--print", "list"]);
+        assert_eq!(values.get("fixture-enabled"), Some(&json!(true)));
+
+        let (package_command, values) = split_extension_flags(vec![
+            "--cwd".to_string(),
+            ".".to_string(),
+            "install".to_string(),
+            "source".to_string(),
+            "--local".to_string(),
+        ]);
+        assert_eq!(
+            package_command,
+            vec!["--cwd", ".", "install", "source", "--local"]
+        );
+        assert!(values.is_empty());
+
+        let (escaped, values) =
+            split_extension_flags(vec!["--".to_string(), "--literal-prompt".to_string()]);
+        assert_eq!(escaped, vec!["--", "--literal-prompt"]);
+        assert!(values.is_empty());
     }
 
     #[test]

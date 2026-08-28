@@ -2214,6 +2214,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "pi-cli",
+ "pi-core",
  "pi-js-plugin",
  "serde",
  "serde_json",

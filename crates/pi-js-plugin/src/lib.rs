@@ -8,12 +8,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use pi_core::{
-    AbortSignal, AgentEndEvent, AgentHook, AgentHookInterests, AgentPlugin, AgentSettledEvent,
-    AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch, BeforeProviderRequestEvent,
-    Command, CommandContext, CommandError, CommandOutcome, CommandSpec, ContentBlock, ContextEvent,
-    ContextPatch, CustomMessage, CustomMessageContent, ImageContent, InputContext, InputEvent,
-    InputPatch, InputSource, InputStreamingBehavior, Message, MessageEndEvent, MessageEndPatch,
-    MessageStartEvent, MessageUpdateEvent, PluginContext, PluginError, PluginId, ProviderPlugin,
+    AbortSignal, AfterProviderResponseEvent, AgentEndEvent, AgentHook, AgentHookInterests,
+    AgentPlugin, AgentSettledEvent, AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch,
+    BeforeProviderHeadersEvent, BeforeProviderRequestEvent, Command, CommandContext, CommandError,
+    CommandOutcome, CommandSpec, ContentBlock, ContextEvent, ContextPatch, CustomMessage,
+    CustomMessageContent, ImageContent, InputContext, InputEvent, InputPatch, InputSource,
+    InputStreamingBehavior, Message, MessageEndEvent, MessageEndPatch, MessageStartEvent,
+    MessageUpdateEvent, PluginContext, PluginError, PluginId, ProviderPlugin,
     ProviderPluginContext, RegisterContext, Tool, ToolCallEvent, ToolCallId, ToolCallPatch,
     ToolContext, ToolError, ToolExecutionEndEvent, ToolExecutionMode, ToolExecutionStartEvent,
     ToolExecutionUpdateEvent, ToolResult, ToolResultEvent, ToolResultPatch, ToolSpec,
@@ -68,6 +69,9 @@ pub struct JsGenerationRequest {
     #[serde(default)]
     pub extension_paths: Vec<String>,
     pub mode: JsHostMode,
+    pub cwd: String,
+    #[serde(default)]
+    pub flag_values: std::collections::BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +99,7 @@ pub enum JsHostOperation {
 #[cfg(test)]
 mod wire_tests {
     use pi_core::AgentHook;
+    use serde_json::json;
 
     use super::{AGENT_HOOKS, JsGenerationRequest, JsHostMode, JsHostOperation};
 
@@ -132,6 +137,11 @@ mod wire_tests {
                 project_trusted: true,
                 extension_paths: vec!["/extensions/example.ts".to_string()],
                 mode: JsHostMode::Print,
+                cwd: "/workspace".to_string(),
+                flag_values: std::collections::BTreeMap::from([(
+                    "fixture".to_string(),
+                    json!(true),
+                )]),
             },
         })
         .unwrap();
@@ -139,7 +149,8 @@ mod wire_tests {
 
         assert_eq!(request["extensionPaths"][0], "/extensions/example.ts");
         assert_eq!(request["projectTrusted"], true);
-        assert!(request.get("cwd").is_none());
+        assert_eq!(request["cwd"], "/workspace");
+        assert_eq!(request["flagValues"]["fixture"], true);
         assert!(request.get("agentDir").is_none());
         assert!(request.get("explicitPaths").is_none());
         assert!(request.get("discoverExtensions").is_none());
@@ -195,6 +206,8 @@ pub struct JsCommandManifest {
 #[serde(rename_all = "camelCase")]
 pub struct JsToolManifest {
     pub callback_id: String,
+    #[serde(default)]
+    pub prepare_callback_id: Option<String>,
     pub name: String,
     pub label: String,
     pub description: String,
@@ -229,6 +242,7 @@ pub struct JsInvocation {
 #[serde(rename_all = "camelCase")]
 pub enum JsInvocationKind {
     Tool,
+    ToolPrepareArguments,
     Command,
     AgentHook,
     ProviderHook,
@@ -256,6 +270,15 @@ pub trait JsCallbackDispatcher: Send + Sync {
         invocation: JsInvocation,
         context: ExtensionContextHandle,
     ) -> Result<Value, JsCallbackError>;
+
+    async fn invoke_with_tool_updates(
+        &self,
+        invocation: JsInvocation,
+        context: ExtensionContextHandle,
+        _updates: ToolUpdateSink,
+    ) -> Result<Value, JsCallbackError> {
+        self.invoke(invocation, context).await
+    }
 
     fn cancel(&self, _invocation_id: &str) {}
 
@@ -448,7 +471,11 @@ const AGENT_HOOKS: &[&str] = &[
     "tool_call",
     "tool_result",
 ];
-const PROVIDER_HOOKS: &[&str] = &["before_provider_request"];
+const PROVIDER_HOOKS: &[&str] = &[
+    "before_provider_request",
+    "before_provider_headers",
+    "after_provider_response",
+];
 const SESSION_HOOKS: &[&str] = &[
     "session_start",
     "session_info_changed",
@@ -548,6 +575,15 @@ fn validate_agent_plugin(
             )));
         }
         validate_callback_id(&tool.callback_id, callback_ids)?;
+        if let Some(callback_id) = &tool.prepare_callback_id {
+            if callback_id.trim().is_empty() {
+                return Err(JsPluginError::InvalidManifest(format!(
+                    "tool {} prepareCallbackId must not be empty",
+                    tool.name
+                )));
+            }
+            validate_callback_id(callback_id, callback_ids)?;
+        }
     }
     for command in &plugin.commands {
         if command.callback_id.trim().is_empty() || command.name.trim().is_empty() {
@@ -631,6 +667,35 @@ impl JsGenerationLease {
         payload: Value,
         abort_signal: Option<&AbortSignal>,
     ) -> Result<Value, JsInvokeError> {
+        self.invoke_inner(callback_id, kind, payload, abort_signal, None)
+            .await
+    }
+
+    async fn invoke_tool(
+        &self,
+        callback_id: &str,
+        payload: Value,
+        abort_signal: &AbortSignal,
+        updates: ToolUpdateSink,
+    ) -> Result<Value, JsInvokeError> {
+        self.invoke_inner(
+            callback_id,
+            JsInvocationKind::Tool,
+            payload,
+            Some(abort_signal),
+            Some(updates),
+        )
+        .await
+    }
+
+    async fn invoke_inner(
+        &self,
+        callback_id: &str,
+        kind: JsInvocationKind,
+        payload: Value,
+        abort_signal: Option<&AbortSignal>,
+        updates: Option<ToolUpdateSink>,
+    ) -> Result<Value, JsInvokeError> {
         static NEXT_INVOCATION_ID: AtomicU64 = AtomicU64::new(1);
 
         let invocation_id = format!(
@@ -649,9 +714,19 @@ impl JsGenerationLease {
         } else {
             ExtensionContextScope::Base
         });
+        let response = async {
+            match updates {
+                Some(updates) => {
+                    self.dispatcher
+                        .invoke_with_tool_updates(invocation, context, updates)
+                        .await
+                }
+                None => self.dispatcher.invoke(invocation, context).await,
+            }
+        };
         if let Some(signal) = abort_signal {
             tokio::select! {
-                response = self.dispatcher.invoke(invocation, context) => {
+                response = response => {
                     response.map_err(JsInvokeError::Callback)
                 }
                 () = signal.wait() => {
@@ -660,10 +735,7 @@ impl JsGenerationLease {
                 }
             }
         } else {
-            self.dispatcher
-                .invoke(invocation, context)
-                .await
-                .map_err(JsInvokeError::Callback)
+            response.await.map_err(JsInvokeError::Callback)
         }
     }
 }
@@ -1659,6 +1731,108 @@ impl ProviderPlugin for JsProviderPlugin {
         }
         Ok((payload != original).then_some(payload))
     }
+
+    async fn before_provider_headers(
+        &self,
+        context: ProviderPluginContext,
+        event: BeforeProviderHeadersEvent,
+    ) -> Result<Option<std::collections::BTreeMap<String, Option<String>>>, PluginError> {
+        let original = event.headers;
+        let mut headers = original.clone();
+        for hook in self
+            .hooks
+            .iter()
+            .filter(|hook| hook.name == "before_provider_headers")
+        {
+            let result = match self
+                .lease
+                .invoke(
+                    &hook.callback_id,
+                    JsInvocationKind::ProviderHook,
+                    json!({
+                        "hook": "before_provider_headers",
+                        "context": provider_hook_context(&context),
+                        "event": {
+                            "type": "before_provider_headers",
+                            "headers": headers,
+                        },
+                    }),
+                    Some(&context.abort_signal),
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    report_provider_invoke_error(&context, "before_provider_headers", error);
+                    continue;
+                }
+            };
+            match serde_json::from_value(result) {
+                Ok(replacement) => headers = replacement,
+                Err(error) => context.report_hook_error(
+                    "before_provider_headers",
+                    format!("invalid JavaScript header result: {error}"),
+                ),
+            }
+        }
+        Ok((headers != original).then_some(headers))
+    }
+
+    async fn after_provider_response(
+        &self,
+        context: ProviderPluginContext,
+        event: AfterProviderResponseEvent,
+    ) -> Result<(), PluginError> {
+        for hook in self
+            .hooks
+            .iter()
+            .filter(|hook| hook.name == "after_provider_response")
+        {
+            if let Err(error) = self
+                .lease
+                .invoke(
+                    &hook.callback_id,
+                    JsInvocationKind::ProviderHook,
+                    json!({
+                        "hook": "after_provider_response",
+                        "context": provider_hook_context(&context),
+                        "event": {
+                            "type": "after_provider_response",
+                            "status": event.status,
+                            "headers": event.headers,
+                        },
+                    }),
+                    Some(&context.abort_signal),
+                )
+                .await
+            {
+                report_provider_invoke_error(&context, "after_provider_response", error);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn provider_hook_context(context: &ProviderPluginContext) -> Value {
+    json!({
+        "pluginId": context.plugin_id.as_str(),
+        "generation": context.generation,
+        "providerId": context.provider_id.as_str(),
+        "modelId": context.model_id.as_str(),
+        "cwd": context.cwd.to_string_lossy(),
+    })
+}
+
+fn report_provider_invoke_error(
+    context: &ProviderPluginContext,
+    hook: &'static str,
+    error: JsInvokeError,
+) {
+    let message = match error {
+        JsInvokeError::Aborted => "JavaScript hook was aborted".to_string(),
+        JsInvokeError::Callback(error) => error.to_string(),
+    };
+    context.report_hook_error(hook, message);
 }
 
 struct JsSessionPlugin {
@@ -2098,6 +2272,7 @@ fn session_fork_position(position: SessionForkPosition) -> &'static str {
 
 struct JsTool {
     callback_id: String,
+    prepare_callback_id: Option<String>,
     spec: ToolSpec,
     lease: Arc<JsGenerationLease>,
 }
@@ -2110,6 +2285,7 @@ impl JsTool {
         };
         Self {
             callback_id: manifest.callback_id,
+            prepare_callback_id: manifest.prepare_callback_id,
             spec: ToolSpec {
                 name: manifest.name,
                 label: manifest.label,
@@ -2210,18 +2386,35 @@ impl Tool for JsTool {
         self.spec.clone()
     }
 
+    async fn prepare_arguments(&self, input: Value) -> Result<Value, ToolError> {
+        let Some(callback_id) = &self.prepare_callback_id else {
+            return Ok(input);
+        };
+        self.lease
+            .invoke(
+                callback_id,
+                JsInvocationKind::ToolPrepareArguments,
+                json!({ "input": input }),
+                None,
+            )
+            .await
+            .map_err(|error| match error {
+                JsInvokeError::Aborted => ToolError::Aborted,
+                JsInvokeError::Callback(error) => ToolError::InvalidArguments(error.to_string()),
+            })
+    }
+
     async fn execute(
         &self,
         context: ToolContext,
         tool_call_id: ToolCallId,
         input: Value,
-        _updates: ToolUpdateSink,
+        updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
         let response = self
             .lease
-            .invoke(
+            .invoke_tool(
                 &self.callback_id,
-                JsInvocationKind::Tool,
                 json!({
                 "context": {
                     "cwd": context.cwd.to_string_lossy(),
@@ -2229,7 +2422,8 @@ impl Tool for JsTool {
                 },
                 "input": input,
                 }),
-                Some(&context.abort_signal),
+                &context.abort_signal,
+                updates,
             )
             .await
             .map_err(|error| match error {

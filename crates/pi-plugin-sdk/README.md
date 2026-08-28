@@ -133,11 +133,11 @@ trusted in-process code and are intentionally never unloaded during the process 
 loading, the host snapshots each artifact below `<agent-dir>/cache/plugins/artifacts/<sha256>`;
 unchanged content reuses one pinned handle, while a rebuilt artifact gets a new load path on reload.
 
-The current contract is native ABI **3**. It adds the required, macro-derived agent hook-interest
-contract to the ABI 2 shared `AgentContext` and `added_tool_names` surface, so older artifacts are
-rejected before any Rust-ABI constructor is resolved. The stable C descriptor remains
-`pi_plugin_descriptor_v1`; ABI 3 constructors use the
-`pi_{agent,provider,session}_plugin_create_v3` symbols. Rebuild every native plugin against the
+The current contract is native ABI **4**. It adds provider header/response lifecycle hooks to the
+ABI 3 macro-derived agent hook-interest contract and ABI 2 shared `AgentContext` /
+`added_tool_names` surface, so older artifacts are rejected before any Rust-ABI constructor is
+resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 4 constructors use the
+`pi_{agent,provider,session}_plugin_create_v4` symbols. Rebuild every native plugin against the
 current SDK after upgrading the host.
 
 Every factory call creates a fresh instance. Runtime and session reload continue to use the existing

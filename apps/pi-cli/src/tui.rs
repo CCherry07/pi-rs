@@ -2123,7 +2123,7 @@ mod tests {
     async fn name_and_session_commands_use_the_active_session_log() {
         let directory = tempfile::tempdir().unwrap();
         let sessions = MultiSessionManager::new(|request: AgentSessionRuntimeRequest| async move {
-            let AgentSessionRuntimeTarget::Create { cwd, path } = request.target else {
+            let AgentSessionRuntimeTarget::Create { cwd, path, .. } = request.target else {
                 unreachable!("this test does not replace the session")
             };
             let pi_runtime = pi_runtime::PiRuntime::builder()

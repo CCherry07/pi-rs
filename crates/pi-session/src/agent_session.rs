@@ -4,12 +4,14 @@ use std::sync::{Arc, RwLock};
 
 use pi_agent::{AgentLoopOutcome, AgentLoopStop, EventError, PromptInput};
 use pi_core::{
-    AbortHandle, AgentEvent, CommandOutcome, ContentBlock, ImageContent, InputStreamingBehavior,
-    Message, ModelId, PluginId, ProviderId, StopReason, ThinkingLevel, UserMessage,
+    AbortHandle, AgentEvent, CommandOutcome, ContentBlock, CustomMessage, ImageContent,
+    InputStreamingBehavior, Message, ModelId, PluginId, ProviderId, StopReason, ThinkingLevel,
+    UserMessage,
 };
 use pi_prompt::BuildSystemPromptOptions;
 use pi_runtime::{
-    PiRuntime, PreparedTextSubmission, QueuedTextOutcome, RuntimePromptOutcome, RuntimeRestoreState,
+    PiRuntime, PreparedTextSubmission, QueuedTextOutcome, RuntimeCompletionRequest,
+    RuntimePromptOutcome, RuntimeRestoreState,
 };
 use pi_shell::{DEFAULT_TIMEOUT, ShellChunk, ShellRequest, ShellResult};
 use pi_telemetry::{
@@ -187,6 +189,8 @@ pub struct AgentSessionOptions {
     /// Immutable product registration metadata prepared alongside the runtime
     /// and session plugin generations.
     pub runtime_inventory: SessionRuntimeInventory,
+    /// Pi v3-compatible parent session path recorded for a new session.
+    pub parent_session_path: Option<PathBuf>,
 }
 
 impl AgentSessionOptions {
@@ -217,6 +221,11 @@ impl AgentSessionOptions {
 
     pub fn runtime_inventory(mut self, inventory: SessionRuntimeInventory) -> Self {
         self.runtime_inventory = inventory;
+        self
+    }
+
+    pub fn parent_session_path(mut self, path: Option<PathBuf>) -> Self {
+        self.parent_session_path = path;
         self
     }
 }
@@ -360,7 +369,8 @@ impl AgentSession {
         let state = runtime.agent().state();
         let initial_model = crate::InitialModelRequest::default()
             .requested(state.provider_id.clone(), state.model_id.as_str());
-        let header = SessionHeader::new(next_unique_id("session"), runtime.cwd());
+        let mut header = SessionHeader::new(next_unique_id("session"), runtime.cwd());
+        header.legacy_parent_session_path = options.parent_session_path.clone();
         runtime.agent().set_session_id(Some(header.id.clone()));
         let identity = session_identity(&header, path.clone());
         let session_plugin_driver = Arc::new(options.plugins.build(identity)?);
@@ -762,6 +772,76 @@ impl AgentSession {
     /// Queues a follow-up message for the active run.
     pub async fn follow_up(&self, text: impl Into<String>) -> Result<SubmitOutcome, SessionError> {
         self.queue_text(text.into(), QueueKind::FollowUp).await
+    }
+
+    /// Enqueues an extension-created user or custom message without running
+    /// text preprocessing. The durable queue record is committed before the
+    /// live agent can observe steer/follow-up delivery.
+    pub fn enqueue_extension_message(
+        &self,
+        message: Message,
+        kind: QueueKind,
+    ) -> Result<SubmitOutcome, SessionError> {
+        self.ensure_open()?;
+        let display_text = message_display_text(&message);
+        let target = ProvisionedEntry {
+            id: next_unique_id("entry"),
+            entry: match &message {
+                Message::Custom(custom) => SessionEntry::custom_message(custom),
+                _ => SessionEntry::message(message.clone()),
+            },
+        };
+        let entry_id = target.id.clone();
+        let mut activity = self
+            .activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        if kind == QueueKind::NextRun {
+            self.log.append_record(NewLaneRecord {
+                id: next_unique_id("queue"),
+                lane: MAIN_LANE.to_string(),
+                record: LaneRecordEntry::QueueEnqueued {
+                    queue: kind,
+                    run_id: None,
+                    target: target.clone(),
+                },
+            })?;
+            activity.recovered_queue.push(PendingSessionMessage {
+                kind: Some(kind),
+                run_id: None,
+                display_text,
+                message: message.clone(),
+                target,
+            });
+        } else {
+            let run = activity.active_run.as_mut().ok_or(SessionError::Busy)?;
+            self.log.append_record(NewLaneRecord {
+                id: next_unique_id("queue"),
+                lane: MAIN_LANE.to_string(),
+                record: LaneRecordEntry::QueueEnqueued {
+                    queue: kind,
+                    run_id: Some(run.id.clone()),
+                    target: target.clone(),
+                },
+            })?;
+            run.pending.push(PendingSessionMessage {
+                kind: Some(kind),
+                run_id: Some(run.id.clone()),
+                display_text,
+                message: message.clone(),
+                target,
+            });
+        }
+        let snapshot = activity.queue_snapshot();
+        drop(activity);
+        self.events.publish_queue(snapshot);
+        match kind {
+            QueueKind::Steer => self.runtime.agent().steer(message),
+            QueueKind::FollowUp => self.runtime.agent().follow_up(message),
+            QueueKind::NextRun => {}
+        }
+        Ok(SubmitOutcome::Queued { kind, entry_id })
     }
 
     /// Clears queued messages and returns their editor-ready text. The
@@ -1225,6 +1305,57 @@ impl AgentSession {
         Ok(outcome)
     }
 
+    /// Persists extension state that is deliberately excluded from model
+    /// context and publishes the same semantic entry event as other session
+    /// mutations.
+    pub fn append_custom_entry(
+        &self,
+        custom_type: impl Into<String>,
+        data: Option<serde_json::Value>,
+    ) -> Result<String, SessionError> {
+        let _operation = self
+            .operation_gate
+            .try_lock()
+            .map_err(|_| SessionError::Busy)?;
+        self.ensure_open()?;
+        let entry = SessionEntry::Custom(CustomEntry {
+            custom_type: custom_type.into(),
+            data,
+        });
+        let id = self.log.append(entry.clone())?;
+        self.events.publish_entry(entry);
+        Ok(id)
+    }
+
+    /// Persists a custom agent message without triggering a provider turn.
+    /// Rebuilding runtime context keeps the next turn and resumed sessions in
+    /// agreement with the JSONL tree.
+    pub fn append_custom_message(&self, message: CustomMessage) -> Result<String, SessionError> {
+        let _operation = self
+            .operation_gate
+            .try_lock()
+            .map_err(|_| SessionError::Busy)?;
+        self.ensure_open()?;
+        let entry = SessionEntry::custom_message(&message);
+        let id = self.log.append(entry.clone())?;
+        let context = self
+            .log
+            .load()?
+            .context_with_options(&self.context_options)?;
+        restore_runtime_context(&self.runtime, &context)?;
+        self.events.publish_entry(entry);
+        Ok(id)
+    }
+
+    pub fn set_label(&self, entry_id: &str, label: Option<String>) -> Result<(), SessionError> {
+        let _operation = self
+            .operation_gate
+            .try_lock()
+            .map_err(|_| SessionError::Busy)?;
+        self.ensure_open()?;
+        self.log.set_label(entry_id, label)
+    }
+
     pub fn set_active_tools(
         &self,
         tools: impl IntoIterator<Item = impl Into<String>>,
@@ -1277,11 +1408,7 @@ impl AgentSession {
     pub async fn set_name(&self, name: Option<String>) -> Result<(), SessionError> {
         let _operation = self.operation_gate.lock().await;
         self.ensure_open()?;
-        let normalized = name.and_then(|name| {
-            let name = name.trim().to_string();
-            (!name.is_empty()).then_some(name)
-        });
-        self.log.set_name(normalized.clone())?;
+        let normalized = self.set_name_locked(name)?;
         self.session_plugin_driver()
             .session_info_changed(&SessionInfoChangedEvent {
                 name: normalized.clone(),
@@ -1289,6 +1416,42 @@ impl AgentSession {
             .await;
         self.events.publish_session_info(normalized);
         Ok(())
+    }
+
+    /// Applies the synchronous portion of a session-name change. Adapters
+    /// whose public API is synchronous can publish the metadata immediately
+    /// and dispatch the async session-plugin hook afterward.
+    pub fn set_name_immediate(&self, name: Option<String>) -> Result<Option<String>, SessionError> {
+        let _operation = self
+            .operation_gate
+            .try_lock()
+            .map_err(|_| SessionError::Busy)?;
+        self.ensure_open()?;
+        let normalized = self.set_name_locked(name)?;
+        self.events.publish_session_info(normalized.clone());
+        Ok(normalized)
+    }
+
+    fn set_name_locked(&self, name: Option<String>) -> Result<Option<String>, SessionError> {
+        let normalized = name.and_then(|name| {
+            let mut sanitized = String::with_capacity(name.len());
+            let mut newline_run = false;
+            for character in name.chars() {
+                if matches!(character, '\r' | '\n') {
+                    if !newline_run {
+                        sanitized.push(' ');
+                    }
+                    newline_run = true;
+                } else {
+                    sanitized.push(character);
+                    newline_run = false;
+                }
+            }
+            let name = sanitized.trim().to_string();
+            (!name.is_empty()).then_some(name)
+        });
+        self.log.set_name(normalized.clone())?;
+        Ok(normalized)
     }
 
     pub async fn checkout(&self, leaf_id: Option<&str>) -> Result<SessionContext, SessionError> {
@@ -1765,6 +1928,106 @@ impl AgentSession {
         Ok(id)
     }
 
+    /// Generates a Pi-compatible abandoned-branch summary with the selected
+    /// provider, checks out the target, and appends the summary as the new
+    /// leaf. Extension `session_before_tree` hooks may still replace it.
+    pub async fn summarize_branch_and_checkout(
+        &self,
+        leaf_id: &str,
+        custom_instructions: Option<String>,
+        replace_instructions: bool,
+        label: Option<String>,
+    ) -> Result<String, SessionError> {
+        const PREAMBLE: &str = "The user explored a different conversation branch before returning here.\nSummary of that exploration:\n\n";
+        const PROMPT: &str = "Create a structured summary of this conversation branch for context when returning later.\n\nUse this EXACT format:\n\n## Goal\n[What was the user trying to accomplish in this branch?]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Work that was started but not finished]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [What should happen next to continue this work]\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.";
+
+        self.ensure_open()?;
+        let document = self.log.load()?;
+        let preparation = tree_preparation(&document, Some(leaf_id), true)?;
+        let context =
+            crate::build_session_context(&preparation.entries_to_summarize, &self.context_options);
+        let (summary, usage) = if context.messages.is_empty() {
+            ("No content to summarize".to_string(), None)
+        } else {
+            let conversation = serde_json::to_string_pretty(&context.messages)
+                .map_err(|error| SessionError::InvalidPayload(error.to_string()))?;
+            let instructions = match (custom_instructions, replace_instructions) {
+                (Some(custom), true) => custom,
+                (Some(custom), false) => format!("{PROMPT}\n\nAdditional focus: {custom}"),
+                (None, _) => PROMPT.to_string(),
+            };
+            let (_, signal) = AbortHandle::new();
+            let response = self
+                .runtime
+                .complete(
+                    RuntimeCompletionRequest {
+                        system_prompt: crate::SUMMARIZATION_SYSTEM_PROMPT.to_string(),
+                        messages: vec![Message::User(UserMessage::text(
+                            format!(
+                                "<conversation>\n{conversation}\n</conversation>\n\n{instructions}"
+                            ),
+                            now_ms(),
+                        ))],
+                        thinking_level: self.runtime.agent().state().thinking_level,
+                        max_output_tokens: Some(2_048),
+                    },
+                    signal,
+                )
+                .await?;
+            if response.stop_reason == StopReason::Error {
+                return Err(SessionError::Runtime(
+                    response
+                        .error_message
+                        .unwrap_or_else(|| "branch summarization failed".to_string()),
+                ));
+            }
+            if response
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolCall(_)))
+            {
+                return Err(SessionError::Runtime(
+                    "branch summarization attempted to call a tool".to_string(),
+                ));
+            }
+            let text = response
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (
+                format!(
+                    "{PREAMBLE}{}",
+                    if text.is_empty() {
+                        "No summary generated"
+                    } else {
+                        &text
+                    }
+                ),
+                Some(response.usage),
+            )
+        };
+        let id = self
+            .branch_with_summary(
+                Some(leaf_id),
+                BranchSummaryEntry {
+                    from_id: String::new(),
+                    summary,
+                    details: None,
+                    usage,
+                },
+            )
+            .await?;
+        if let Some(label) = label {
+            self.set_label(&id, Some(label))?;
+        }
+        Ok(id)
+    }
+
     fn attach_agent_bridge(&self) {
         let log = self.log.clone();
         let events = Arc::clone(&self.events);
@@ -1873,6 +2136,25 @@ fn input_user_message(text: &str, images: &[ImageContent], timestamp_ms: i64) ->
     }
 }
 
+fn message_display_text(message: &Message) -> String {
+    let blocks = match message {
+        Message::User(message) => message.content.as_slice(),
+        Message::Custom(message) => match &message.content {
+            pi_core::CustomMessageContent::Text(text) => return text.clone(),
+            pi_core::CustomMessageContent::Blocks(blocks) => blocks.as_slice(),
+        },
+        Message::Assistant(_) | Message::ToolResult(_) => return String::new(),
+    };
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn pending_message_matches(pending: &PendingSessionMessage, message: &Message) -> bool {
     match (&pending.message, message) {
         (Message::User(_), Message::User(_)) => true,
@@ -1946,31 +2228,32 @@ fn pending_session_message(
     kind: QueueKind,
     run_id: Option<String>,
     target: ProvisionedEntry,
+    timestamp_ms: Option<i64>,
 ) -> Option<PendingSessionMessage> {
-    let SessionEntry::Message(message_entry) = &target.entry else {
-        return None;
+    let (message, display_text) = match &target.entry {
+        SessionEntry::Message(message_entry) => {
+            let message = message_entry.message.as_standard()?.clone();
+            if !matches!(message, Message::User(_)) {
+                return None;
+            }
+            let display_text = message_entry
+                .message
+                .display_text()
+                .map(str::to_string)
+                .unwrap_or_else(|| message_display_text(&message));
+            (message, display_text)
+        }
+        SessionEntry::CustomMessage(custom) => {
+            let message = custom.to_message(timestamp_ms.unwrap_or_else(now_ms));
+            let display_text = message_display_text(&message);
+            (message, display_text)
+        }
+        _ => return None,
     };
-    let message = message_entry.message.as_standard()?.clone();
-    let Message::User(user) = &message else {
-        return None;
-    };
-    let text = user
-        .content
-        .iter()
-        .filter_map(|content| match content {
-            ContentBlock::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
     Some(PendingSessionMessage {
         kind: Some(kind),
         run_id,
-        display_text: message_entry
-            .message
-            .display_text()
-            .unwrap_or(&text)
-            .to_string(),
+        display_text,
         message,
         target,
     })
@@ -2005,7 +2288,12 @@ fn recover_pending_queue(document: &SessionDocument) -> Vec<PendingSessionMessag
             if persisted.contains(target.id.as_str()) || cancelled.contains(target.id.as_str()) {
                 return None;
             }
-            pending_session_message(*queue, run_id.clone(), target.clone())
+            pending_session_message(
+                *queue,
+                run_id.clone(),
+                target.clone(),
+                Some(record.timestamp_ms),
+            )
         })
         .collect()
 }
@@ -2106,7 +2394,7 @@ fn recover_interrupted_state(
                 target: target.clone(),
             },
         })?;
-        if let Some(item) = pending_session_message(QueueKind::NextRun, None, target) {
+        if let Some(item) = pending_session_message(QueueKind::NextRun, None, target, None) {
             recovered.push(item);
         }
     }
@@ -2261,7 +2549,7 @@ mod tests {
                     "scripted".into(),
                     "test".into(),
                     "scripted",
-                    now_ms(),
+                    now_ms().saturating_add(60_000),
                 ),
             },
             StreamEvent::TextStart { content_index: 0 },
@@ -2400,6 +2688,171 @@ mod tests {
             .system_prompt(SystemPrompt::Pi(Box::default()))
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn extension_messages_and_entries_update_live_and_resumed_session_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let provider_plugin =
+            ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".to_string())]);
+        let provider = provider_plugin.provider();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(provider_plugin)
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("test"),
+                ..AgentOptions::default()
+            })
+            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .build()
+            .unwrap();
+        let session = AgentSession::create(runtime, &path).await.unwrap();
+        let custom = CustomMessage {
+            custom_type: "fixture-context".to_string(),
+            content: CustomMessageContent::Text("remember this".to_string()),
+            display: true,
+            details: Some(serde_json::json!({"source": "extension"})),
+            timestamp_ms: now_ms(),
+        };
+
+        let custom_id = session.append_custom_message(custom.clone()).unwrap();
+        assert_eq!(
+            session
+                .set_name_immediate(Some("  Core\r\n\n session  ".to_string()))
+                .unwrap()
+                .as_deref(),
+            Some("Core  session")
+        );
+        assert!(session.runtime().agent().state().messages.iter().any(
+            |message| matches!(message, Message::Custom(value)
+                    if value.custom_type == custom.custom_type
+                        && value.content == custom.content
+                        && value.display == custom.display
+                        && value.details == custom.details)
+        ));
+        let state_id = session
+            .append_custom_entry("fixture-state", Some(serde_json::json!({"count": 1})))
+            .unwrap();
+        session
+            .set_label(&custom_id, Some("checkpoint".to_string()))
+            .unwrap();
+        session.prompt("continue").await.unwrap();
+
+        assert!(provider.requests()[0].messages.iter().any(|message| {
+            matches!(message, Message::User(user)
+                if user.content.iter().any(|block| matches!(block,
+                    ContentBlock::Text(text) if text.text == "remember this")))
+        }));
+        let document = session.log().load().unwrap();
+        assert_eq!(document.name.as_deref(), Some("Core  session"));
+        assert_eq!(
+            document.labels.get(&custom_id).map(String::as_str),
+            Some("checkpoint")
+        );
+        assert!(document.entries.iter().any(|record| {
+            record.id == state_id
+                && matches!(&record.entry, SessionEntry::Custom(entry)
+                    if entry.custom_type == "fixture-state")
+        }));
+
+        let queued = Message::custom(CustomMessage {
+            custom_type: "fixture-next".to_string(),
+            content: CustomMessageContent::Text("next run".to_string()),
+            display: false,
+            details: None,
+            timestamp_ms: now_ms(),
+        });
+        session
+            .enqueue_extension_message(queued, QueueKind::NextRun)
+            .unwrap();
+        let queued_at = session
+            .log()
+            .load()
+            .unwrap()
+            .records
+            .into_iter()
+            .find_map(|record| {
+                matches!(
+                    &record.record,
+                    LaneRecordEntry::QueueEnqueued {
+                        queue: QueueKind::NextRun,
+                        ..
+                    }
+                )
+                .then_some(record.timestamp_ms)
+            })
+            .unwrap();
+        drop(session);
+
+        let reopened = AgentSession::open(scripted_runtime([]), &path)
+            .await
+            .unwrap();
+        assert_eq!(reopened.snapshot().queue.follow_up, vec!["next run"]);
+        let activity = reopened
+            .activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(matches!(
+            activity.recovered_queue.first().map(|item| &item.message),
+            Some(Message::Custom(custom)) if custom.timestamp_ms == queued_at
+        ));
+    }
+
+    #[tokio::test]
+    async fn new_session_options_preserve_the_pi_parent_session_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("parent.jsonl");
+        let session = AgentSession::create_with_options(
+            scripted_runtime([]),
+            directory.path().join("child.jsonl"),
+            AgentSessionOptions::default().parent_session_path(Some(parent.clone())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            session.log().header().legacy_parent_session_path,
+            Some(parent)
+        );
+    }
+
+    #[tokio::test]
+    async fn summarized_tree_navigation_uses_a_standalone_provider_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = scripted_runtime([
+            ScriptedTurn::Text("root answer".to_string()),
+            ScriptedTurn::Text("branch answer".to_string()),
+            ScriptedTurn::Text("## Goal\nPreserve the branch".to_string()),
+        ]);
+        let session = AgentSession::create(runtime, directory.path().join("session.jsonl"))
+            .await
+            .unwrap();
+        session.prompt("root").await.unwrap();
+        let target = session.log().leaf_id().unwrap();
+        session.prompt("branch work").await.unwrap();
+
+        let summary_id = session
+            .summarize_branch_and_checkout(
+                &target,
+                Some("Focus on decisions".to_string()),
+                false,
+                Some("abandoned work".to_string()),
+            )
+            .await
+            .unwrap();
+        let document = session.log().load().unwrap();
+        assert_eq!(
+            document.labels.get(&summary_id).map(String::as_str),
+            Some("abandoned work")
+        );
+        assert!(document.entries.iter().any(|record| {
+            record.id == summary_id
+                && matches!(&record.entry, SessionEntry::BranchSummary(summary)
+                    if summary.summary.starts_with(
+                        "The user explored a different conversation branch"
+                    ) && summary.summary.contains("Preserve the branch"))
+        }));
     }
 
     struct ExpandingCommandPlugin;

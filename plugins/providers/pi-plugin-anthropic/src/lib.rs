@@ -15,7 +15,10 @@ use pi_core::{
     ProviderCallContext, ProviderError, ProviderId, ProviderPlugin, ProviderRegisterContext,
     ProviderRequest, ProviderStream,
 };
-use pi_provider::{HttpTransport, ReqwestTransport, TransportError, collect_body_limited};
+use pi_provider::{
+    HttpTransport, ReqwestTransport, TransportError, collect_body_limited,
+    post_json_with_provider_hooks,
+};
 use serde_json::json;
 
 pub use messages::AnthropicMessagesCompat;
@@ -515,10 +518,16 @@ async fn stream_messages(
     let payload = context
         .before_provider_request(&signal, request_body(&request, mode))
         .await?;
-    let response = transport
-        .post_json(endpoint, &headers, &payload, signal.clone())
-        .await
-        .map_err(map_transport_error)?;
+    let response = post_json_with_provider_hooks(
+        transport.as_ref(),
+        &context,
+        endpoint,
+        headers,
+        &payload,
+        signal.clone(),
+    )
+    .await
+    .map_err(map_transport_error)?;
     if !(200..300).contains(&response.status) {
         let status = response.status;
         let body = collect_body_limited(response.body, 64 * 1024)

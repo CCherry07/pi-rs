@@ -9,7 +9,10 @@ use pi_core::{
     AbortSignal, Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderId,
     ProviderRequest, ProviderStream,
 };
-use pi_provider::{HttpTransport, ReqwestTransport, TransportError, collect_body_limited};
+use pi_provider::{
+    HttpTransport, ReqwestTransport, TransportError, collect_body_limited,
+    post_json_with_provider_hooks,
+};
 use serde_json::{Value, json};
 
 const PROVIDER_ID: &str = "openai-codex";
@@ -187,11 +190,16 @@ impl Provider for OpenAiCodexProvider {
         let payload = context
             .before_provider_request(&signal, responses_request_body(&request))
             .await?;
-        let response = self
-            .transport
-            .post_json(CODEX_RESPONSES_URL, &headers, &payload, signal.clone())
-            .await
-            .map_err(map_transport_error)?;
+        let response = post_json_with_provider_hooks(
+            self.transport.as_ref(),
+            &context,
+            CODEX_RESPONSES_URL,
+            headers,
+            &payload,
+            signal.clone(),
+        )
+        .await
+        .map_err(map_transport_error)?;
         if !(200..300).contains(&response.status) {
             let status = response.status;
             let body = collect_body_limited(response.body, 64 * 1024)

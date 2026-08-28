@@ -154,7 +154,7 @@ function createInactiveExtensionUI(
 
 interface NewSessionOptions {
   parentSession?: string
-  setup?: unknown
+  setup?: (sessionManager: PiReadonlySessionManager) => unknown | Promise<unknown>
   withSession?: (context: PiExtensionCommandContext) => unknown | Promise<unknown>
 }
 
@@ -218,6 +218,14 @@ export function createExtensionContext(
     getEntries: () => query({ type: 'sessionEntries' }, unknownArraySchema, () => []).map(normalizeSessionEntry),
     getTree: () => query({ type: 'sessionTree' }, unknownArraySchema, () => []).map(normalizeSessionTreeNode),
     getSessionName: () => query({ type: 'sessionName' }, optionalStringSchema, () => undefined),
+    appendCustomEntry: (customType, data) => notify({ type: 'appendEntry', customType, data }),
+    appendCustomMessageEntry: (customType, content, display, details) => notify({
+      type: 'sendMessage',
+      message: { customType, content, display, details },
+      options: { triggerTurn: false },
+    }),
+    appendSessionInfo: name => notify({ type: 'setSessionName', name: name ?? '' }),
+    setLabel: (entryId, label) => notify({ type: 'setLabel', entryId, label }),
   }
 
   const models = (available: boolean): Record<string, unknown>[] => query(
@@ -303,16 +311,16 @@ export function createExtensionContext(
     await request({ type: 'waitForIdle' }, z.null())
   }
   commandContext.newSession = async (newSessionOptions?: NewSessionOptions) => {
-    if (newSessionOptions?.setup !== undefined) {
-      throw new Error('newSession({ setup }) is not supported by the pi-rs JavaScript host')
-    }
     const result = await request({
       type: 'newSession',
       ...(newSessionOptions?.parentSession === undefined
         ? {}
         : { parentSession: newSessionOptions.parentSession }),
     }, replacementSchema)
-    if (!result.cancelled) await newSessionOptions?.withSession?.(commandContext)
+    if (!result.cancelled) {
+      await newSessionOptions?.setup?.(sessionManager)
+      await newSessionOptions?.withSession?.(commandContext)
+    }
     return result
   }
   commandContext.fork = async (entryId: string, forkOptions?: ForkOptions) => {
@@ -341,6 +349,12 @@ export function createExtensionContext(
   }
   commandContext.reload = async () => {
     await request({ type: 'reload' }, z.null())
+  }
+  commandContext.sendMessage = async (message: unknown, sendOptions?: unknown) => {
+    await request({ type: 'sendMessage', message, options: sendOptions }, z.null())
+  }
+  commandContext.sendUserMessage = async (content: unknown, sendOptions?: unknown) => {
+    await request({ type: 'sendUserMessage', content, options: sendOptions }, z.null())
   }
   return commandContext
 }
