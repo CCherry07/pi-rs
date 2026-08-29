@@ -10,8 +10,16 @@ use pi_core::{
 use pi_plugin_anthropic::{
     ANTHROPIC_MESSAGES_API, AnthropicCompatibleConfig, AnthropicCompatibleProvider,
 };
+use pi_plugin_azure_openai::{
+    AZURE_OPENAI_RESPONSES_API, AzureOpenAiResponsesConfig, AzureOpenAiResponsesProvider,
+};
+use pi_plugin_bedrock::{AmazonBedrockProvider, BEDROCK_CONVERSE_STREAM_API, BedrockConfig};
 use pi_plugin_google::{
-    GOOGLE_GENERATIVE_AI_API, GoogleCompatibleConfig, GoogleCompatibleProvider,
+    GOOGLE_GENERATIVE_AI_API, GOOGLE_VERTEX_API, GoogleCompatibleConfig, GoogleCompatibleProvider,
+    GoogleVertexCompatibleConfig, GoogleVertexCompatibleProvider,
+};
+use pi_plugin_mistral::{
+    MISTRAL_CONVERSATIONS_API, MistralCompatibleConfig, MistralCompatibleProvider,
 };
 use pi_plugin_openai::{
     OPENAI_RESPONSES_API, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
@@ -166,14 +174,21 @@ impl ModelsJsonProvider {
         }
 
         // Pi only applies free-form samplingParams to OpenAI-compatible APIs.
-        let mut sampling_params =
-            if matches!(api, Some("openai-completions" | OPENAI_RESPONSES_API)) {
-                model
-                    .map(|model| model.spec.sampling_params.clone())
-                    .unwrap_or_default()
-            } else {
-                BTreeMap::new()
-            };
+        let mut sampling_params = if matches!(
+            api,
+            Some(
+                "openai-completions"
+                    | OPENAI_RESPONSES_API
+                    | AZURE_OPENAI_RESPONSES_API
+                    | MISTRAL_CONVERSATIONS_API
+            )
+        ) {
+            model
+                .map(|model| model.spec.sampling_params.clone())
+                .unwrap_or_default()
+        } else {
+            BTreeMap::new()
+        };
         sampling_params.extend(std::mem::take(&mut request.sampling_params));
         request.sampling_params = sampling_params;
         if let Some(model) = model {
@@ -281,6 +296,34 @@ impl Provider for ModelsJsonProvider {
                     )?;
                     provider.stream(request, context, signal).await
                 }
+                AZURE_OPENAI_RESPONSES_API => {
+                    let config = resolved
+                        .api_key
+                        .map_or_else(
+                            || AzureOpenAiResponsesConfig::without_api_key(base_url),
+                            |api_key| AzureOpenAiResponsesConfig::new(base_url, api_key),
+                        )
+                        .provider_id(self.configured.id.clone());
+                    let provider = AzureOpenAiResponsesProvider::with_transport(
+                        config,
+                        Arc::clone(&self.transport),
+                    )?;
+                    provider.stream(request, context, signal).await
+                }
+                MISTRAL_CONVERSATIONS_API => {
+                    let config = resolved
+                        .api_key
+                        .map_or_else(
+                            || MistralCompatibleConfig::without_api_key(base_url),
+                            |api_key| MistralCompatibleConfig::new(base_url, api_key),
+                        )
+                        .provider_id(self.configured.id.clone());
+                    let provider = MistralCompatibleProvider::with_transport(
+                        config,
+                        Arc::clone(&self.transport),
+                    )?;
+                    provider.stream(request, context, signal).await
+                }
                 ANTHROPIC_MESSAGES_API => {
                     let config = resolved.api_key.map_or_else(
                         || AnthropicCompatibleConfig::without_api_key(base_url),
@@ -298,6 +341,26 @@ impl Provider for ModelsJsonProvider {
                         |api_key| GoogleCompatibleConfig::new(base_url, api_key),
                     );
                     let provider = GoogleCompatibleProvider::with_transport(
+                        config.provider_id(self.configured.id.clone()),
+                        Arc::clone(&self.transport),
+                    )?;
+                    provider.stream(request, context, signal).await
+                }
+                GOOGLE_VERTEX_API => {
+                    let mut config =
+                        GoogleVertexCompatibleConfig::from_environment(resolved.api_key)?;
+                    config.base_url = Some(base_url.to_string());
+                    let provider = GoogleVertexCompatibleProvider::with_transport(
+                        config.provider_id(self.configured.id.clone()),
+                        Arc::clone(&self.transport),
+                    )?;
+                    provider.stream(request, context, signal).await
+                }
+                BEDROCK_CONVERSE_STREAM_API => {
+                    let mut config =
+                        BedrockConfig::from_environment(resolved.api_key, BTreeMap::new())?;
+                    config.base_url = Some(base_url.to_string());
+                    let provider = AmazonBedrockProvider::with_transport(
                         config.provider_id(self.configured.id.clone()),
                         Arc::clone(&self.transport),
                     )?;
@@ -440,7 +503,14 @@ mod tests {
             };
             Ok(HttpResponse {
                 status: 200,
-                content_type: Some("text/event-stream".to_string()),
+                content_type: Some(
+                    if url.ends_with("/converse-stream") {
+                        "application/vnd.amazon.eventstream"
+                    } else {
+                        "text/event-stream"
+                    }
+                    .to_string(),
+                ),
                 headers: Vec::new(),
                 body: Box::pin(stream::empty()),
             })
@@ -793,6 +863,111 @@ mod tests {
             captured.body.as_ref().unwrap()["systemInstruction"]["parts"][0]["text"],
             "system"
         );
+    }
+
+    #[tokio::test]
+    async fn routing_dispatches_all_new_models_json_protocols() {
+        for (api, base_url, expected_url, auth_header) in [
+            (
+                MISTRAL_CONVERSATIONS_API,
+                "https://mistral.example",
+                "https://mistral.example/v1/chat/completions",
+                "Authorization",
+            ),
+            (
+                AZURE_OPENAI_RESPONSES_API,
+                "https://demo.openai.azure.com",
+                "https://demo.openai.azure.com/openai/v1/responses?api-version=v1",
+                "api-key",
+            ),
+            (
+                GOOGLE_VERTEX_API,
+                "https://vertex.example/v1",
+                "https://vertex.example/v1/publishers/google/models/custom-model:streamGenerateContent?alt=sse",
+                "x-goog-api-key",
+            ),
+            (
+                BEDROCK_CONVERSE_STREAM_API,
+                "https://bedrock.example",
+                "https://bedrock.example/model/custom-model/converse-stream",
+                "Authorization",
+            ),
+        ] {
+            let mut spec = ModelSpec::new("custom", "custom-model", "Custom Model", api);
+            spec.base_url = Some(base_url.to_string());
+            spec.sampling_params
+                .insert("temperature".to_string(), json!(0.25));
+            let configured = PreparedProvider {
+                id: ProviderId::new("custom"),
+                name: None,
+                api: Some(api.to_string()),
+                base_url: Some(base_url.to_string()),
+                compat: None,
+                api_key: Some("provider-secret".to_string()),
+                runtime_api_key: None,
+                headers: BTreeMap::new(),
+                auth_header: Some(false),
+                models: vec![PreparedModel {
+                    id: ModelId::new("custom-model"),
+                    spec,
+                    headers: BTreeMap::new(),
+                }],
+                model_overrides: BTreeMap::new(),
+                replace_models: false,
+            };
+            let transport = Arc::new(CapturingTransport::default());
+            let provider = ModelsJsonProvider::with_transport(
+                configured,
+                None,
+                HashSet::new(),
+                Arc::new(ConfigValueResolver::default()),
+                transport.clone(),
+            );
+            let (_, signal) = AbortHandle::new();
+            let _stream = provider
+                .stream(
+                    ProviderRequest {
+                        model: ModelId::new("custom-model"),
+                        model_spec: None,
+                        system_prompt: "system".to_string(),
+                        messages: Vec::new(),
+                        tools: Vec::new(),
+                        thinking_level: ThinkingLevel::Off,
+                        thinking_budgets: None,
+                        max_output_tokens: Some(1_024),
+                        headers: BTreeMap::new(),
+                        sampling_params: BTreeMap::new(),
+                        session_id: Some("session-1".to_string()),
+                    },
+                    ProviderCallContext::without_plugins(
+                        "/project",
+                        ProviderId::new("custom"),
+                        ModelId::new("custom-model"),
+                    ),
+                    signal,
+                )
+                .await
+                .unwrap();
+            let captured = transport
+                .request
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(captured.url, expected_url, "API {api}");
+            assert!(
+                captured
+                    .headers
+                    .get(auth_header)
+                    .is_some_and(|value| value.contains("provider-secret")),
+                "API {api}: {:?}",
+                captured.headers
+            );
+            let body = captured.body.as_ref().unwrap();
+            if matches!(api, MISTRAL_CONVERSATIONS_API | AZURE_OPENAI_RESPONSES_API) {
+                assert_eq!(body["temperature"], 0.25, "API {api}");
+            } else {
+                assert!(body.get("temperature").is_none(), "API {api}");
+            }
+        }
     }
 
     #[tokio::test]

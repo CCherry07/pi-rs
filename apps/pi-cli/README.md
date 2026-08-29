@@ -15,8 +15,9 @@ plugins all use the same production runtime.
   clipboard copy.
 - **Repository-aware agent** — built-in `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`,
   `find`, and `ls` tools for understanding and changing real projects.
-- **Multiple providers and models** — built-in OpenAI-compatible, OpenAI Codex, Anthropic, Google,
-  and xAI integrations, plus custom providers and models declared in `models.json`.
+- **Multiple providers and models** — built-in OpenAI-compatible, OpenAI Codex, Anthropic, Google
+  Gemini and Vertex, xAI, Mistral, Azure OpenAI, Amazon Bedrock, OpenRouter, and GitHub Copilot
+  integrations, plus custom providers and models declared in `models.json`.
 - **Authentication in the product** — `/login` and `/logout` manage Pi-compatible credentials from
   the TUI; browser/device OAuth and hidden API-key prompts are supported.
 - **Persistent Pi v4 sessions** — resume previous work, queue steering or follow-up messages, branch
@@ -93,7 +94,13 @@ pi auth login
 # Start a browser/device OAuth flow directly
 pi auth login anthropic --oauth
 pi auth login openai-codex --oauth
+pi auth login github-copilot --oauth
+pi auth login openrouter --oauth
 pi auth login xai --oauth
+
+# Configure a cloud credential chain
+pi auth login amazon-bedrock
+pi auth login google-vertex
 
 # Prompt for an API key without echo
 pi auth login anthropic --api-key
@@ -111,8 +118,10 @@ replacement, and mode `0600` on Unix. `/logout` removes stored credentials only;
 variables and credentials declared in `models.json` remain unchanged.
 
 Environment variables are supported as an alternative, including `OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`, `GEMINI_API_KEY`, and
-`XAI_API_KEY`. Explicit CLI credentials take precedence over stored credentials.
+`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_CLOUD_API_KEY`, `XAI_API_KEY`, `MISTRAL_API_KEY`,
+`AZURE_OPENAI_API_KEY`, `OPENROUTER_API_KEY`, and `COPILOT_GITHUB_TOKEN`. Vertex also supports ADC
+and a service-account file; Bedrock supports its AWS profile/static credential chain and
+`AWS_BEARER_TOKEN_BEDROCK`. Explicit CLI credentials take precedence over stored credentials.
 
 ## Product modes
 
@@ -239,11 +248,10 @@ Register custom providers and models in `<agent-dir>/models.json`:
 
 Environment references and shell-command values in model configuration are resolved only when a
 request is sent; credentials are not copied into the public model catalog. Custom routes support
-`openai-completions`, `openai-responses`, `anthropic-messages`, and `google-generative-ai`.
-xAI-compatible Responses gateways use bearer authentication and accept an API base URL (typically
-ending in `/v1`) or a complete `/responses` `baseUrl`. Anthropic-compatible gateways accept a
-service-root, `/v1`, or complete `/v1/messages` URL and use `x-api-key`; Google routes use
-`x-goog-api-key` and the Generative AI streaming endpoint.
+`openai-completions`, `openai-responses`, `azure-openai-responses`, `mistral-conversations`,
+`anthropic-messages`, `google-generative-ai`, `google-vertex`, and
+`bedrock-converse-stream`. These routes retain their protocol-specific endpoint, authentication,
+thinking, image, tool, and streaming behavior instead of treating every service as generic OpenAI.
 
 Pi-compatible provider/model/upsert/override precedence is preserved. Model overrides support all
 catalog fields, including partial cost updates, per-key `samplingParams`, headers, and typed

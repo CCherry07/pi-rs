@@ -13,6 +13,10 @@ const OPENAI_COMPLETIONS_API: &str = "openai-completions";
 const OPENAI_RESPONSES_API: &str = "openai-responses";
 const ANTHROPIC_MESSAGES_API: &str = "anthropic-messages";
 const GOOGLE_GENERATIVE_AI_API: &str = "google-generative-ai";
+const GOOGLE_VERTEX_API: &str = "google-vertex";
+const MISTRAL_CONVERSATIONS_API: &str = "mistral-conversations";
+const AZURE_OPENAI_RESPONSES_API: &str = "azure-openai-responses";
+const BEDROCK_CONVERSE_STREAM_API: &str = "bedrock-converse-stream";
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedProvider {
@@ -768,6 +772,9 @@ fn validate_compat(provider: &ProviderId, model: &ModelSpec) -> Result<(), Strin
         OPENAI_RESPONSES_API => {
             serde_json::from_value::<OpenAiResponsesCompatSchema>(compat.clone()).map(|_| ())
         }
+        AZURE_OPENAI_RESPONSES_API => {
+            serde_json::from_value::<OpenAiResponsesCompatSchema>(compat.clone()).map(|_| ())
+        }
         ANTHROPIC_MESSAGES_API => {
             serde_json::from_value::<AnthropicMessagesCompatSchema>(compat.clone()).map(|_| ())
         }
@@ -974,13 +981,17 @@ fn normalize_api(provider: &str, model: Option<&str>, api: &str) -> Result<Strin
         OPENAI_RESPONSES_API => OPENAI_RESPONSES_API,
         ANTHROPIC_MESSAGES_API => ANTHROPIC_MESSAGES_API,
         GOOGLE_GENERATIVE_AI_API => GOOGLE_GENERATIVE_AI_API,
+        GOOGLE_VERTEX_API => GOOGLE_VERTEX_API,
+        MISTRAL_CONVERSATIONS_API => MISTRAL_CONVERSATIONS_API,
+        AZURE_OPENAI_RESPONSES_API => AZURE_OPENAI_RESPONSES_API,
+        BEDROCK_CONVERSE_STREAM_API => BEDROCK_CONVERSE_STREAM_API,
         other => {
             let target = model.map_or_else(
                 || format!("provider {provider}"),
                 |model| format!("provider {provider}, model {model}"),
             );
             return Err(format!(
-                "{target}: unsupported api {other:?}; this build supports openai-completions, openai-responses, anthropic-messages, and google-generative-ai"
+                "{target}: unsupported api {other:?}; this build supports openai-completions, openai-responses, azure-openai-responses, mistral-conversations, anthropic-messages, google-generative-ai, google-vertex, and bedrock-converse-stream"
             ));
         }
     };
@@ -1280,6 +1291,10 @@ mod tests {
             OPENAI_RESPONSES_API,
             ANTHROPIC_MESSAGES_API,
             GOOGLE_GENERATIVE_AI_API,
+            GOOGLE_VERTEX_API,
+            MISTRAL_CONVERSATIONS_API,
+            AZURE_OPENAI_RESPONSES_API,
+            BEDROCK_CONVERSE_STREAM_API,
         ] {
             let parsed: ModelsFile = serde_json::from_value(json!({
                 "providers": {

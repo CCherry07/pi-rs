@@ -9,7 +9,8 @@ pi-rs 的核心已经不是“库级原型”：agent loop、基础文本交互�
 1. 没有 Pi 的 RPC / server / client 自动化面；现有 NDJSON 也不是 Pi wire format。
 2. Rust 只接受 v4 JSONL，而当前 `pi-coding-agent` 产品仍写 v3，缺少导入/迁移桥。
 3. JavaScript 扩展的非 UI 主干能运行，但 Pi 扩展 UI、shortcut、renderer 和若干 hook/provider 能力仍是 inactive 或不识别。
-4. 内置供应商、API 协议和 OAuth 覆盖明显少于 Pi。
+4. Bedrock、Vertex、Mistral、Azure、Copilot、OpenRouter 等主流 Provider 已补入；剩余差距
+   转为长尾 Provider、完整远端模型目录、Kimi/Radius OAuth 与真实账号 smoke matrix。
 5. CLI 启动参数、多模态输入、settings/themes/keybindings/scoped-models 等完整产品工作流尚未对齐；v4 import、JSONL/HTML export 和 GitHub Gist share 已补齐，但 Pi 的 Radius share 路径尚未实现。
 
 优先级定义：P0 表示阻止 drop-in 替换、自动化接入、现有会话迁移或主流扩展运行；P1 表示高频产品能力明显缺失；P2 表示管理、发布或次要 SDK/体验能力。
@@ -20,7 +21,7 @@ pi-rs 的核心已经不是“库级原型”：agent loop、基础文本交互�
 | P0 | 部分对齐 | JSON/NDJSON wire format | 现有 Pi JSON/RPC 消费端不能直接复用，流式事件还会丢信息 |
 | P0 | 有意差异（桥接缺失） | Rust v4 与当前 coding-agent v3 会话格式 | 现有 Pi 会话不能直接 resume 到 pi-rs |
 | P0 | 部分对齐 | JavaScript 扩展 UI、shortcut、renderer | 大量交互型 Pi 扩展会降级、静默 no-op 或加载失败 |
-| P1 | 部分对齐 | provider/API/OAuth/catalog 覆盖 | Bedrock、Vertex、Mistral、Azure、Copilot、OpenRouter 等不能获得同等开箱体验 |
+| P1 | 部分对齐 | provider/API/OAuth/catalog 覆盖 | 主流专用协议已有开箱路径，但长尾 Provider、完整目录和 Kimi/Radius 仍未对齐 |
 | P1 | 部分对齐 | CLI 启动参数和输入管线 | 缺少 continue/resume/fork、prompt/tool/resource override、`@file` 等脚本接口 |
 | P1 | 部分对齐 | 图片/文件用户输入与图片输出显示 | provider/tool 类型支持图片，但 CLI/TUI 用户路径没有贯通 |
 | P1 | 部分对齐 | 完整 slash command / session workflow | 缺少 settings、scoped-models、changelog、hotkeys 和 Radius share 等 |
@@ -93,17 +94,31 @@ Pi 扩展上下文在 TUI/RPC 中应有 `hasUI` 和真实 `ExtensionUIContext`�
 
 ## P1
 
-### P1-1：provider、API 协议、模型目录和 OAuth 覆盖不足
+### P1-1：provider 广度、完整模型目录和 OAuth 仍未完全覆盖
 
 **状态：部分对齐。**
 
 Pi AI 层定义了 10 种已知 completion API，包括 Mistral conversations、Azure/OpenAI Responses、Bedrock Converse、Google Vertex 和 `pi-messages`（`legacy/pi/packages/ai/src/types.ts:17-27`），并默认构造约 40 个 provider（`legacy/pi/packages/ai/src/providers/all.ts:88-131`）。OAuth loader 覆盖 Anthropic、OpenAI Codex、GitHub Copilot、OpenRouter、Kimi Coding、xAI 和 Radius（`legacy/pi/packages/ai/src/auth/oauth/load.ts:14-67`）。
 
-pi-rs 产品 generation 当前直接注册 OpenAI-compatible、Anthropic、OpenAI Codex、xAI、Google 和 `models.json` plugin（`apps/pi-cli/src/session_factory.rs:489-513,563-714`）。但 `models.json` 最终只接受 `openai-completions`、`openai-responses`、`anthropic-messages`、`google-generative-ai` 四类 API（`plugins/providers/pi-plugin-models/src/config.rs:969-984`），并显式拒绝 Radius OAuth（同文件 `:799-811`）。browser/device OAuth 登录和刷新只覆盖 xAI、Anthropic、OpenAI Codex（`apps/pi-cli/src/auth.rs:87-139,142-187`）。
+pi-rs 产品 generation 现在会同时注册 OpenAI-compatible、Anthropic、OpenAI Codex、xAI、
+Google Gemini/Vertex、Mistral、Azure OpenAI Responses、OpenRouter、GitHub Copilot、Amazon
+Bedrock 与 `models.json` plugin（`apps/pi-cli/src/session_factory.rs:689-928`）。`models.json`
+接受 `openai-completions`、`openai-responses`、`azure-openai-responses`、
+`mistral-conversations`、`anthropic-messages`、`google-generative-ai`、`google-vertex` 和
+`bedrock-converse-stream` 八类 API（`plugins/providers/pi-plugin-models/src/config.rs:976-995`）；
+OpenAI Codex 的专用 Responses 协议继续由内置 plugin 拥有。浏览器/device OAuth 已覆盖
+Anthropic、OpenAI Codex、GitHub Copilot、OpenRouter 和 xAI（`apps/pi-cli/src/auth.rs:652-656`）。
+Vertex 支持 API key、ADC 和服务账号，Bedrock 支持 bearer、AWS profile/静态凭据与
+SigV4；Copilot 会读取账号 `/models` 结果过滤目录。
 
-OpenAI-compatible 路由可以手工接入一部分 Pi provider，但不能替代 Bedrock、Vertex、Mistral、Azure 等专用协议，也没有同等的内置 model metadata、env/auth discovery 和 OAuth 登录体验。
+因此 Bedrock、Vertex、Mistral、Azure 等不再是“只能用 OpenAI-compatible 手工接入”的
+缺口。尚未对齐的是 Pi 约 40 个内置 Provider 的完整广度、各 Provider 的完整/动态模型
+目录、Kimi Coding 和 Radius OAuth、`pi-messages`、Radius 远端目录，以及 OpenRouter image
+generation。当前新目录是经过选择的高价值子集，不能写成完整 Pi catalog parity。
 
-**建议验收顺序：**先按使用量补协议（Bedrock/Vertex/Mistral/Azure），再补 catalog/env/auth；将“可通过 OpenAI-compatible 手工接入”与“Pi 内置完全兼容”分开标记。
+**建议验收顺序：**先用真实隔离账号跑新增 Provider/OAuth smoke matrix，再从 Pi 当前模型
+生成源补齐目录和长尾 Provider；随后单独实现 Kimi/Radius 的 OAuth、远端目录与
+`pi-messages` 生命周期。
 
 ### P1-2：CLI 启动参数和输入管线只覆盖了 Pi 的子集
 
@@ -188,7 +203,7 @@ Pi 会实际调用 `ModelRuntime.refresh()` 更新远程 model catalogs（`legac
 
 ### 1. 真实 provider/OAuth 流的完整兼容性
 
-**状态：不确定需实机验证。** 当前产品 E2E 使用本地 scripted OpenAI server，测试 harness 明确注入 provider turns（`e2e/product/harness.ts:60-132`）；Rust runtime agent 测试也使用 scripted provider（`e2e/tests/runtime_agent.rs:123-167`）。这能验证协议编排，但不能证明 Anthropic/Codex/xAI/Google 的当前线上流式、错误、限流、OAuth refresh 行为都与 Pi 相同。需要用隔离凭证做 smoke matrix，且不能把凭证写入 fixture/log。
+**状态：不确定需实机验证。** 当前产品 E2E 使用本地 scripted OpenAI server，测试 harness 明确注入 provider turns（`e2e/product/harness.ts:60-132`）；Rust runtime agent 测试也使用 scripted provider（`e2e/tests/runtime_agent.rs:123-167`）。这能验证协议编排，但不能证明 Anthropic、Codex、xAI、Google/Vertex、Mistral、Azure、Bedrock、OpenRouter 和 Copilot 的当前线上流式、错误、限流、credential refresh 与账号模型策略都与 Pi 相同。需要用隔离凭证做 smoke matrix，且不能把凭证写入 fixture/log。
 
 ### 2. 真实 PTY 下的跨平台 TUI parity
 

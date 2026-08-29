@@ -3,8 +3,13 @@
 //! Google AI Studio provider/catalog and reusable Generative AI wire adapter.
 
 mod catalog;
+mod vertex;
 
 pub use catalog::google_models;
+pub use vertex::{
+    GOOGLE_VERTEX_API, GoogleVertexCompatibleConfig, GoogleVertexCompatibleProvider,
+    GoogleVertexPlugin, google_vertex_models,
+};
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -497,15 +502,30 @@ fn google_thinking_config(request: &ProviderRequest) -> Value {
 fn google_stream(
     provider: ProviderId,
     model: pi_core::ModelId,
+    body: HttpBodyStream,
+    signal: AbortSignal,
+) -> ProviderStream {
+    stream_response(provider, model, GOOGLE_GENERATIVE_AI_API, body, signal)
+}
+
+/// Adapts Google GenerateContent SSE into the semantic provider stream.
+///
+/// AI Studio and Vertex share the response vocabulary but retain distinct
+/// provider/API identities and authentication adapters.
+pub fn stream_response(
+    provider: ProviderId,
+    model: pi_core::ModelId,
+    api: impl Into<String>,
     mut body: HttpBodyStream,
     signal: AbortSignal,
 ) -> ProviderStream {
+    let api = api.into();
     Box::pin(stream! {
         yield Ok(StreamEvent::Start {
             metadata: ResponseMetadata::new(
                 provider,
                 model.clone(),
-                GOOGLE_GENERATIVE_AI_API,
+                api,
                 now_ms(),
             ),
         });

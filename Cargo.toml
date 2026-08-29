@@ -28,6 +28,11 @@ members = [
     "plugins/providers/pi-plugin-openai",
     "plugins/providers/pi-plugin-xai",
     "plugins/providers/pi-plugin-google",
+    "plugins/providers/pi-plugin-mistral",
+    "plugins/providers/pi-plugin-azure-openai",
+    "plugins/providers/pi-plugin-openrouter",
+    "plugins/providers/pi-plugin-copilot",
+    "plugins/providers/pi-plugin-bedrock",
     "crates/pi-tool-support",
     "plugins/tools/pi-plugin-read",
     "plugins/tools/pi-plugin-write",
@@ -49,6 +54,7 @@ license = "MIT"
 [workspace.dependencies]
 async-trait = "0.1.89"
 futures = "0.3.31"
+gcp_auth = "0.12.7"
 garde = { version = "0.22.0", features = ["derive"] }
 schemars = "1.2.1"
 serde = { version = "1.0.219", features = ["derive", "rc"] }
@@ -85,6 +91,11 @@ pi-plugin-anthropic = { path = "plugins/providers/pi-plugin-anthropic" }
 pi-plugin-openai = { path = "plugins/providers/pi-plugin-openai" }
 pi-plugin-xai = { path = "plugins/providers/pi-plugin-xai" }
 pi-plugin-google = { path = "plugins/providers/pi-plugin-google" }
+pi-plugin-mistral = { path = "plugins/providers/pi-plugin-mistral" }
+pi-plugin-azure-openai = { path = "plugins/providers/pi-plugin-azure-openai" }
+pi-plugin-openrouter = { path = "plugins/providers/pi-plugin-openrouter" }
+pi-plugin-copilot = { path = "plugins/providers/pi-plugin-copilot" }
+pi-plugin-bedrock = { path = "plugins/providers/pi-plugin-bedrock" }
 pi-tool-support = { path = "crates/pi-tool-support" }
 pi-plugin-read = { path = "plugins/tools/pi-plugin-read" }
 pi-plugin-write = { path = "plugins/tools/pi-plugin-write" }

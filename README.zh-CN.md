@@ -36,7 +36,8 @@ Pi 清晰的产品理念、克制的核心设计与 extension-first 架构，正
   extension，包括托管的本地/npm/git package；Rust runtime 与 Ratatui 产品仍是唯一权威
   实现。
 - **模型与 Provider**：内置 OpenAI-compatible、OpenAI Codex、Anthropic/Claude Code、
-  Google Gemini 和 xAI Grok；`models.json` 统一管理自定义模型、endpoint、请求参数、
+  Google Gemini/Vertex、xAI Grok、Mistral、Azure OpenAI Responses、Amazon Bedrock、
+  OpenRouter 和 GitHub Copilot；`models.json` 统一管理自定义模型、endpoint、请求参数、
   headers 和凭据解析。
 - **凭据管理**：`/login`、`/logout` 与 `pi auth` 管理 Pi 兼容的 API key 和 OAuth 凭据，
   不会在 TUI 中回显 secret。
@@ -144,7 +145,13 @@ pi auth login
 # 启动内置 Provider 的浏览器或 device OAuth
 pi auth login anthropic --oauth
 pi auth login openai-codex --oauth
+pi auth login github-copilot --oauth
+pi auth login openrouter --oauth
 pi auth login xai --oauth
+
+# 配置云厂商 credential chain
+pi auth login amazon-bedrock
+pi auth login google-vertex
 
 # 不回显地输入 API key
 pi auth login anthropic --api-key
@@ -155,9 +162,11 @@ pi auth status
 pi auth logout anthropic
 ```
 
-也可以使用 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、
-`ANTHROPIC_OAUTH_TOKEN`、`GEMINI_API_KEY` 和 `XAI_API_KEY` 等环境变量。显式 `--api-key`
-优先于已保存凭据与 Provider 环境变量。受支持的 OAuth 凭据会在临近过期时自动刷新。
+也可以使用 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`GEMINI_API_KEY`、
+`GOOGLE_CLOUD_API_KEY`、`XAI_API_KEY`、`MISTRAL_API_KEY`、`AZURE_OPENAI_API_KEY`、
+`OPENROUTER_API_KEY` 和 `COPILOT_GITHUB_TOKEN` 等环境变量。Vertex 支持 ADC/服务账号，
+Bedrock 支持 AWS profile/静态凭据链和 bearer token。显式 `--api-key` 优先于已保存凭据与
+Provider 环境变量；Anthropic、Codex、Copilot 和 xAI 的 OAuth 凭据会在临近过期时刷新。
 
 ## JavaScript extension package
 
@@ -208,6 +217,11 @@ pi remove npm:example-extension
 
 `apiKey`、headers 和其他字符串配置在请求发送时才解析环境变量；也支持以 `!` 开头的
 shell command value。凭据不会进入公开的模型目录。
+
+自定义路由支持 `openai-completions`、`openai-responses`、`azure-openai-responses`、
+`mistral-conversations`、`anthropic-messages`、`google-generative-ai`、`google-vertex` 和
+`bedrock-converse-stream` 八种 wire API，并保留各协议自己的 endpoint、认证、thinking、
+图片、工具调用和流式语义。
 
 模型选择优先级为：
 

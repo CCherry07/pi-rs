@@ -12,10 +12,13 @@ use pi_js_plugin::{
     SessionExtensionContextAccess,
 };
 use pi_plugin_anthropic::AnthropicPlugin;
+use pi_plugin_azure_openai::AzureOpenAiPlugin;
 use pi_plugin_bash::{BashToolOptions, ConfiguredBashPlugin};
+use pi_plugin_bedrock::AmazonBedrockPlugin;
+use pi_plugin_copilot::{GitHubCopilotPlugin, GitHubCopilotStoredCredential};
 use pi_plugin_edit::EditPlugin;
 use pi_plugin_find::FindPlugin;
-use pi_plugin_google::GooglePlugin;
+use pi_plugin_google::{GooglePlugin, GoogleVertexPlugin};
 use pi_plugin_grep::GrepPlugin;
 use pi_plugin_hashline_edit::HashlineEditPlugin;
 use pi_plugin_loader::{NativePluginLoader, NativePluginLoaderOptions, NativePlugins};
@@ -23,11 +26,13 @@ use pi_plugin_ls::LsPlugin;
 use pi_plugin_manager::{
     InstallScope, PluginManager, PluginManagerOptions, PreparedPluginReconcile,
 };
+use pi_plugin_mistral::MistralPlugin;
 use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
 use pi_plugin_openai::{
     CodexTransport, CodexTransportOptions, OpenAiCodexPlugin, OpenAiCompatibleConfig,
     OpenAiCompatiblePlugin,
 };
+use pi_plugin_openrouter::OpenRouterPlugin;
 use pi_plugin_prompts::{PromptTemplateLoaderOptions, PromptTemplatesPlugin};
 use pi_plugin_read::ConfiguredReadPlugin;
 use pi_plugin_skills::{SkillLoaderOptions, SkillsPlugin};
@@ -492,8 +497,20 @@ fn build_runtime_with_codex_credentials(
         read_stored_credential(&config.agent_dir, "anthropic").map_err(RuntimeError::Build)?;
     let stored_google =
         read_stored_credential(&config.agent_dir, "google").map_err(RuntimeError::Build)?;
+    let stored_google_vertex =
+        read_stored_credential(&config.agent_dir, "google-vertex").map_err(RuntimeError::Build)?;
     let stored_xai =
         read_stored_credential(&config.agent_dir, "xai").map_err(RuntimeError::Build)?;
+    let stored_mistral =
+        read_stored_credential(&config.agent_dir, "mistral").map_err(RuntimeError::Build)?;
+    let stored_azure = read_stored_credential(&config.agent_dir, "azure-openai-responses")
+        .map_err(RuntimeError::Build)?;
+    let stored_openrouter =
+        read_stored_credential(&config.agent_dir, "openrouter").map_err(RuntimeError::Build)?;
+    let stored_copilot =
+        read_stored_credential(&config.agent_dir, "github-copilot").map_err(RuntimeError::Build)?;
+    let stored_bedrock =
+        read_stored_credential(&config.agent_dir, "amazon-bedrock").map_err(RuntimeError::Build)?;
     let stored_codex =
         read_stored_credential(&config.agent_dir, "openai-codex").map_err(RuntimeError::Build)?;
     let stored_compatible =
@@ -587,7 +604,17 @@ fn build_runtime_with_codex_credentials(
                 Arc::clone(&transport),
             ),
         })
-    } else if matches!(config.provider.as_str(), "anthropic" | "google") {
+    } else if matches!(
+        config.provider.as_str(),
+        "amazon-bedrock"
+            | "anthropic"
+            | "google"
+            | "google-vertex"
+            | "github-copilot"
+            | "mistral"
+            | "azure-openai-responses"
+            | "openrouter"
+    ) {
         builder
     } else {
         builder.try_provider_plugin_factory({
@@ -683,6 +710,218 @@ fn build_runtime_with_codex_credentials(
                     .as_ref()
                     .and_then(StoredCredential::secret)
                     .map(str::to_owned),
+                Arc::clone(&transport),
+            )
+        })
+    };
+    let builder = if config.provider == "google-vertex" {
+        let explicit_api_key = config.api_key.clone();
+        let stored_google_vertex = stored_google_vertex.clone();
+        let transport = Arc::clone(&transport);
+        builder.try_provider_plugin_factory(move || match &explicit_api_key {
+            Some(api_key) => GoogleVertexPlugin::new_with_transport(
+                Some(api_key.clone()),
+                Arc::clone(&transport),
+            ),
+            None => GoogleVertexPlugin::from_stored_with_environment_and_transport(
+                stored_google_vertex
+                    .as_ref()
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_owned),
+                stored_google_vertex
+                    .as_ref()
+                    .and_then(StoredCredential::environment)
+                    .cloned()
+                    .unwrap_or_default(),
+                Arc::clone(&transport),
+            ),
+        })
+    } else {
+        let transport = Arc::clone(&transport);
+        builder.try_provider_plugin_factory(move || {
+            GoogleVertexPlugin::from_stored_with_environment_and_transport(
+                stored_google_vertex
+                    .as_ref()
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_owned),
+                stored_google_vertex
+                    .as_ref()
+                    .and_then(StoredCredential::environment)
+                    .cloned()
+                    .unwrap_or_default(),
+                Arc::clone(&transport),
+            )
+        })
+    };
+    let builder = if config.provider == "mistral" {
+        let explicit_api_key = config.api_key.clone();
+        let stored_mistral = stored_mistral.clone();
+        let transport = Arc::clone(&transport);
+        builder.try_provider_plugin_factory(move || match &explicit_api_key {
+            Some(api_key) => {
+                MistralPlugin::new_with_transport(Some(api_key.clone()), Arc::clone(&transport))
+            }
+            None => MistralPlugin::from_stored_with_transport(
+                stored_mistral
+                    .as_ref()
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_owned),
+                Arc::clone(&transport),
+            ),
+        })
+    } else {
+        let transport = Arc::clone(&transport);
+        builder.try_provider_plugin_factory(move || {
+            MistralPlugin::from_stored_with_transport(
+                stored_mistral
+                    .as_ref()
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_owned),
+                Arc::clone(&transport),
+            )
+        })
+    };
+    let builder = if config.provider == "azure-openai-responses" {
+        let explicit_api_key = config.api_key.clone();
+        let stored_azure = stored_azure.clone();
+        let transport = Arc::clone(&transport);
+        builder.try_provider_plugin_factory(move || match &explicit_api_key {
+            Some(api_key) => {
+                AzureOpenAiPlugin::new_with_transport(Some(api_key.clone()), Arc::clone(&transport))
+            }
+            None => AzureOpenAiPlugin::from_stored_with_transport(
+                stored_azure
+                    .as_ref()
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_owned),
+                Arc::clone(&transport),
+            ),
+        })
+    } else {
+        let transport = Arc::clone(&transport);
+        builder.try_provider_plugin_factory(move || {
+            AzureOpenAiPlugin::from_stored_with_transport(
+                stored_azure
+                    .as_ref()
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_owned),
+                Arc::clone(&transport),
+            )
+        })
+    };
+    let builder = if config.provider == "openrouter" {
+        let explicit_api_key = config.api_key.clone();
+        let stored_openrouter = stored_openrouter.clone();
+        let transport = Arc::clone(&transport);
+        builder.try_provider_plugin_factory(move || match &explicit_api_key {
+            Some(api_key) => {
+                OpenRouterPlugin::new_with_transport(Some(api_key.clone()), Arc::clone(&transport))
+            }
+            None => OpenRouterPlugin::from_stored_with_transport(
+                stored_openrouter
+                    .as_ref()
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_owned),
+                Arc::clone(&transport),
+            ),
+        })
+    } else {
+        let transport = Arc::clone(&transport);
+        builder.try_provider_plugin_factory(move || {
+            OpenRouterPlugin::from_stored_with_transport(
+                stored_openrouter
+                    .as_ref()
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_owned),
+                Arc::clone(&transport),
+            )
+        })
+    };
+    let builder = if config.provider == "github-copilot" {
+        let explicit_token = config.api_key.clone();
+        let stored_copilot = stored_copilot.clone();
+        let transport = Arc::clone(&transport);
+        builder.try_provider_plugin_factory(move || match &explicit_token {
+            Some(token) => GitHubCopilotPlugin::new_with_transport(
+                Some(token.clone()),
+                None,
+                Arc::clone(&transport),
+            ),
+            None => {
+                let available_models = stored_copilot
+                    .as_ref()
+                    .filter(|credential| credential.is_oauth())
+                    .and_then(|credential| credential.extra_strings("availableModelIds"));
+                GitHubCopilotPlugin::from_stored_catalog_with_transport(
+                    stored_copilot.as_ref().and_then(|credential| {
+                        credential
+                            .secret()
+                            .map(|token| GitHubCopilotStoredCredential {
+                                token,
+                                enterprise_domain: credential.extra_string("enterpriseUrl"),
+                                available_model_ids: available_models.as_deref(),
+                            })
+                    }),
+                    Arc::clone(&transport),
+                )
+            }
+        })
+    } else {
+        let transport = Arc::clone(&transport);
+        builder.try_provider_plugin_factory(move || {
+            let available_models = stored_copilot
+                .as_ref()
+                .filter(|credential| credential.is_oauth())
+                .and_then(|credential| credential.extra_strings("availableModelIds"));
+            GitHubCopilotPlugin::from_stored_catalog_with_transport(
+                stored_copilot.as_ref().and_then(|credential| {
+                    credential
+                        .secret()
+                        .map(|token| GitHubCopilotStoredCredential {
+                            token,
+                            enterprise_domain: credential.extra_string("enterpriseUrl"),
+                            available_model_ids: available_models.as_deref(),
+                        })
+                }),
+                Arc::clone(&transport),
+            )
+        })
+    };
+    let builder = if config.provider == "amazon-bedrock" {
+        let explicit_token = config.api_key.clone();
+        let stored_bedrock = stored_bedrock.clone();
+        let transport = Arc::clone(&transport);
+        builder.try_provider_plugin_factory(move || {
+            let token = explicit_token.clone().or_else(|| {
+                stored_bedrock
+                    .as_ref()
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_owned)
+            });
+            let environment = stored_bedrock
+                .as_ref()
+                .and_then(StoredCredential::environment)
+                .cloned()
+                .unwrap_or_default();
+            AmazonBedrockPlugin::from_stored_with_transport(
+                token,
+                environment,
+                Arc::clone(&transport),
+            )
+        })
+    } else {
+        let transport = Arc::clone(&transport);
+        builder.try_provider_plugin_factory(move || {
+            AmazonBedrockPlugin::from_stored_with_transport(
+                stored_bedrock
+                    .as_ref()
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_owned),
+                stored_bedrock
+                    .as_ref()
+                    .and_then(StoredCredential::environment)
+                    .cloned()
+                    .unwrap_or_default(),
                 Arc::clone(&transport),
             )
         })
@@ -1361,6 +1600,80 @@ command = "fixture-command"
             model.provider == ProviderId::new("google")
                 && model.id == ModelId::new("gemini-3.1-pro-preview")
         }));
+    }
+
+    #[test]
+    fn expanded_provider_catalogs_use_stored_auth_and_copilot_account_filtering() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("auth.json"),
+            serde_json::json!({
+                "amazon-bedrock": {"type": "api_key", "key": "bedrock-bearer"},
+                "google-vertex": {"type": "api_key", "key": "vertex-key"},
+                "mistral": {"type": "api_key", "key": "mistral-key"},
+                "openrouter": {
+                    "type": "oauth",
+                    "access": "openrouter-key",
+                    "refresh": "",
+                    "expires": 9_007_199_254_740_991_f64
+                },
+                "github-copilot": {
+                    "type": "oauth",
+                    "access": "copilot-token",
+                    "refresh": "github-token",
+                    "expires": 4_102_444_800_000_f64,
+                    "availableModelIds": ["gpt-4.1"]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let runtime = build_runtime_with_codex_credentials(
+            &app_config(directory.path(), None),
+            false,
+            &NativePlugins::default(),
+            None,
+            None,
+            Some(pi_plugin_openai::CodexCredentials::default()),
+        )
+        .unwrap();
+
+        for (provider, model) in [
+            ("amazon-bedrock", "amazon.nova-2-lite-v1:0"),
+            ("azure-openai-responses", "gpt-5.4"),
+            ("google-vertex", "gemini-2.5-flash"),
+            ("mistral", "mistral-small-latest"),
+            ("openrouter", "openai/gpt-5.4"),
+            ("github-copilot", "gpt-4.1"),
+        ] {
+            assert!(
+                runtime
+                    .model(&ProviderId::new(provider), &ModelId::new(model))
+                    .is_some(),
+                "missing {provider}/{model}"
+            );
+        }
+        for provider in [
+            "amazon-bedrock",
+            "google-vertex",
+            "mistral",
+            "openrouter",
+            "github-copilot",
+        ] {
+            assert!(
+                runtime
+                    .available_models()
+                    .iter()
+                    .any(|model| model.provider == ProviderId::new(provider)),
+                "{provider} should be available"
+            );
+        }
+        assert!(
+            runtime
+                .model(&ProviderId::new("github-copilot"), &ModelId::new("gpt-5.4"))
+                .is_none()
+        );
     }
 
     #[test]

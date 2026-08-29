@@ -39,9 +39,10 @@ behavior, and being explicit whenever the Rust product diverges.
 - **Pi JS/TS extensions**: an optional Node 20 + NAPI-RS launcher discovers and reloads Pi-style
   extensions, including managed local/npm/git packages, while the Rust runtime and Ratatui product
   remain authoritative.
-- **Models and providers**: OpenAI-compatible APIs, built-in OpenAI Codex, Anthropic/Claude Code,
-  Google Gemini, and xAI Grok providers, plus a `models.json` catalog for endpoints, request
-  parameters, headers, credentials, and model metadata.
+- **Models and providers**: OpenAI-compatible APIs plus built-in OpenAI Codex, Anthropic/Claude
+  Code, Google Gemini and Vertex, xAI Grok, Mistral, Azure OpenAI Responses, Amazon Bedrock,
+  OpenRouter, and GitHub Copilot providers. A `models.json` catalog configures custom endpoints,
+  request parameters, headers, credentials, and model metadata.
 - **Authentication**: `/login`, `/logout`, and `pi auth` manage Pi-compatible API-key and OAuth
   credentials without exposing secrets in the TUI.
 - **Production tools**: `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`, `find`, and `ls`.
@@ -140,7 +141,13 @@ pi auth login
 # Browser/subscription OAuth for built-in providers
 pi auth login anthropic --oauth
 pi auth login openai-codex --oauth
+pi auth login github-copilot --oauth
+pi auth login openrouter --oauth
 pi auth login xai --oauth
+
+# Provider-specific credential-chain setup
+pi auth login amazon-bedrock
+pi auth login google-vertex
 
 # Prompt for an API key without echo
 pi auth login anthropic --api-key
@@ -149,6 +156,8 @@ pi auth login xai --api-key
 # Store an existing OAuth access token when importing credentials
 pi auth login anthropic --oauth-token
 pi auth login openai-codex --oauth-token
+pi auth login github-copilot --oauth-token
+pi auth login openrouter --oauth-token
 pi auth login xai --oauth-token
 
 # Authorize with an xAI/Grok subscription in the browser
@@ -179,9 +188,10 @@ Credentials may also be persisted in Pi's `<agent-dir>/auth.json` format:
 }
 ```
 
-Stored OAuth credentials for Anthropic, OpenAI Codex, and xAI are refreshed automatically shortly
-before expiry. After changing credentials from another process while the TUI is running, use
-`/reload` to rebuild the provider generation.
+Stored OAuth credentials for Anthropic, OpenAI Codex, GitHub Copilot, and xAI are refreshed
+automatically shortly before expiry. OpenRouter's browser flow returns a persistent API key rather
+than a refresh token. After changing credentials from another process while the TUI is running,
+use `/reload` to rebuild the provider generation.
 
 The built-in xAI provider uses `https://api.x.ai/v1/responses` and exposes the current Grok 4.5
 and Grok 4.6 catalog. Without `XAI_API_KEY`, these models remain registered for diagnostics but are
@@ -271,13 +281,14 @@ Environment variables in `apiKey`, headers, and other string settings are resolv
 request is sent. Shell-command values prefixed with `!` are also supported. Credentials are never
 copied into the public model catalog.
 
-Custom routes support all four APIs accepted by current Pi `models.json` catalogs:
-`openai-completions`, `openai-responses`, `anthropic-messages`, and `google-generative-ai`. xAI and
-other Responses-compatible gateways use `openai-responses`; their `baseUrl` may be the API base URL
-(typically ending in `/v1`) or the complete `/responses` endpoint. Anthropic-compatible routes
-accept a service root, `/v1`, or complete `/v1/messages` URL and send API keys as `x-api-key`;
-`authHeader: true` additionally sends a bearer header. Google routes use
-`<baseUrl>/models/<model>:streamGenerateContent?alt=sse` and `x-goog-api-key`.
+Custom routes support eight wire APIs: `openai-completions`, `openai-responses`,
+`azure-openai-responses`, `mistral-conversations`, `anthropic-messages`,
+`google-generative-ai`, `google-vertex`, and `bedrock-converse-stream`. xAI and other
+Responses-compatible gateways use `openai-responses`; their `baseUrl` may be the API base URL or
+the complete `/responses` endpoint. Anthropic routes use Messages, Google routes use Gemini SSE,
+Mistral uses its native chat stream, Azure applies deployment and `api-version` routing, Vertex
+supports API-key express mode or Google application credentials, and Bedrock supports bearer auth
+or SigV4 credentials.
 
 Provider, model, and `modelOverrides` layers follow Pi's merge order. Overrides cover `name`,
 `reasoning`, `thinkingLevelMap`, `input`, partial `cost`, `contextWindow`, `maxTokens`, merged

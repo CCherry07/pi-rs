@@ -42,6 +42,32 @@ impl StoredCredential {
         matches!(self, Self::Oauth { .. })
     }
 
+    pub(crate) fn extra_string(&self, name: &str) -> Option<&str> {
+        let extra = match self {
+            Self::ApiKey { extra, .. } | Self::Oauth { extra, .. } => extra,
+        };
+        extra.get(name).and_then(serde_json::Value::as_str)
+    }
+
+    pub(crate) fn extra_strings(&self, name: &str) -> Option<Vec<String>> {
+        let extra = match self {
+            Self::ApiKey { extra, .. } | Self::Oauth { extra, .. } => extra,
+        };
+        extra
+            .get(name)?
+            .as_array()?
+            .iter()
+            .map(|value| value.as_str().map(str::to_string))
+            .collect()
+    }
+
+    pub(crate) fn environment(&self) -> Option<&BTreeMap<String, String>> {
+        match self {
+            Self::ApiKey { env, .. } => Some(env),
+            Self::Oauth { .. } => None,
+        }
+    }
+
     fn kind(&self) -> &'static str {
         if self.is_oauth() { "oauth" } else { "api_key" }
     }
@@ -85,7 +111,7 @@ pub(crate) fn logout_provider_catalog(agent_dir: &Path) -> Result<Vec<AuthProvid
 }
 
 pub(crate) async fn refresh_oauth_if_needed(agent_dir: &Path) -> Result<(), String> {
-    for provider in ["xai", "anthropic", "openai-codex"] {
+    for provider in ["xai", "anthropic", "openai-codex", "github-copilot"] {
         refresh_provider_if_needed(agent_dir, provider).await?;
     }
     Ok(())
@@ -94,7 +120,10 @@ pub(crate) async fn refresh_oauth_if_needed(agent_dir: &Path) -> Result<(), Stri
 async fn refresh_provider_if_needed(agent_dir: &Path, provider: &str) -> Result<(), String> {
     let path = agent_dir.join("auth.json");
     let Some(StoredCredential::Oauth {
-        refresh, expires, ..
+        refresh,
+        expires,
+        extra,
+        ..
     }) = read_credentials(&path)?.get(provider).cloned()
     else {
         return Ok(());
@@ -110,6 +139,7 @@ async fn refresh_provider_if_needed(agent_dir: &Path, provider: &str) -> Result<
             "stored {provider} OAuth token is expired and has no refresh token; run `pi auth login {provider} --oauth` again"
         ));
     }
+    let mut extra = extra;
     let (access, refresh, expires) = match provider {
         "xai" => {
             let credential = pi_plugin_xai::refresh(&refresh).await?;
@@ -123,6 +153,19 @@ async fn refresh_provider_if_needed(agent_dir: &Path, provider: &str) -> Result<
             let credential = pi_plugin_openai::refresh_openai_oauth(&refresh).await?;
             (credential.access, credential.refresh, credential.expires)
         }
+        "github-copilot" => {
+            let enterprise_domain = extra
+                .get("enterpriseUrl")
+                .and_then(serde_json::Value::as_str);
+            let credential =
+                pi_plugin_copilot::refresh_github_copilot_oauth(&refresh, enterprise_domain)
+                    .await?;
+            extra.insert(
+                "availableModelIds".to_string(),
+                serde_json::json!(credential.available_model_ids),
+            );
+            (credential.access, credential.refresh, credential.expires)
+        }
         _ => return Ok(()),
     };
     modify_credentials(agent_dir, |credentials| {
@@ -132,7 +175,7 @@ async fn refresh_provider_if_needed(agent_dir: &Path, provider: &str) -> Result<
                 access,
                 refresh,
                 expires: expires as f64,
-                extra: BTreeMap::new(),
+                extra,
             },
         );
     })?;
@@ -156,6 +199,8 @@ pub(crate) async fn run(agent_dir: &Path, command: &AuthCommand) -> Result<(), S
                     "xai" => run_xai_oauth().await?,
                     "anthropic" => run_anthropic_oauth().await?,
                     "openai-codex" => run_openai_oauth().await?,
+                    "github-copilot" => run_github_copilot_oauth().await?,
+                    "openrouter" => run_openrouter_oauth().await?,
                     _ => {
                         return Err(format!(
                             "provider {provider:?} does not support browser/device OAuth"
@@ -168,10 +213,29 @@ pub(crate) async fn run(agent_dir: &Path, command: &AuthCommand) -> Result<(), S
                 println!("OAuth login successful for {provider}.");
                 return Ok(());
             }
-            if *oauth_token && !matches!(provider.as_str(), "anthropic" | "xai" | "openai-codex") {
+            if *oauth_token
+                && !matches!(
+                    provider.as_str(),
+                    "anthropic" | "xai" | "openai-codex" | "github-copilot" | "openrouter"
+                )
+            {
                 return Err(format!(
                     "provider {provider:?} does not support stored OAuth tokens"
                 ));
+            }
+            if !*api_key && !*oauth_token && token.is_none() {
+                let credential = match provider.as_str() {
+                    "amazon-bedrock" => Some(run_amazon_bedrock_auth()?),
+                    "google-vertex" => Some(run_google_vertex_auth()?),
+                    _ => None,
+                };
+                if let Some(credential) = credential {
+                    modify_credentials(agent_dir, |credentials| {
+                        credentials.insert(provider.clone(), credential);
+                    })?;
+                    println!("Stored authentication configuration for {provider}.");
+                    return Ok(());
+                }
             }
             let use_oauth = if !*api_key && !*oauth_token && token.is_none() {
                 select_auth_type(&provider)?
@@ -183,6 +247,8 @@ pub(crate) async fn run(agent_dir: &Path, command: &AuthCommand) -> Result<(), S
                     "xai" => run_xai_oauth().await?,
                     "anthropic" => run_anthropic_oauth().await?,
                     "openai-codex" => run_openai_oauth().await?,
+                    "github-copilot" => run_github_copilot_oauth().await?,
+                    "openrouter" => run_openrouter_oauth().await?,
                     _ => unreachable!("OAuth support checked by select_auth_type"),
                 };
                 modify_credentials(agent_dir, |credentials| {
@@ -331,6 +397,163 @@ async fn run_xai_oauth() -> Result<StoredCredential, String> {
     })
 }
 
+async fn run_github_copilot_oauth() -> Result<StoredCredential, String> {
+    let enterprise = prompt_line("GitHub Enterprise URL/domain (blank for github.com): ")?;
+    let enterprise_domain = pi_plugin_copilot::normalize_enterprise_domain(&enterprise)?;
+    let authorization =
+        pi_plugin_copilot::start_github_copilot_device_authorization(enterprise_domain.as_deref())
+            .await?;
+    println!(
+        "Open this URL to authorize GitHub Copilot:\n{}",
+        authorization.verification_uri
+    );
+    println!("Verification code: {}", authorization.user_code);
+    if let Err(error) = open_browser(&authorization.verification_uri) {
+        eprintln!("Could not open the browser automatically: {error}");
+    }
+    let credential =
+        pi_plugin_copilot::poll_github_copilot_device_authorization(&authorization).await?;
+    let mut extra = BTreeMap::new();
+    if let Some(domain) = &credential.enterprise_domain {
+        extra.insert(
+            "enterpriseUrl".to_string(),
+            serde_json::Value::String(domain.clone()),
+        );
+    }
+    extra.insert(
+        "availableModelIds".to_string(),
+        serde_json::json!(credential.available_model_ids),
+    );
+    Ok(StoredCredential::Oauth {
+        access: credential.access,
+        refresh: credential.refresh,
+        expires: credential.expires as f64,
+        extra,
+    })
+}
+
+async fn run_openrouter_oauth() -> Result<StoredCredential, String> {
+    let login = pi_plugin_openrouter::start_openrouter_oauth().await?;
+    println!(
+        "Open this URL to authorize OpenRouter:\n{}\nListening for the callback on {}",
+        login.url, login.callback_url
+    );
+    if let Err(error) = open_browser(&login.url) {
+        eprintln!("Could not open the browser automatically: {error}");
+    }
+    let credential = login.wait_for_credential().await?;
+    Ok(StoredCredential::Oauth {
+        access: credential.access,
+        refresh: credential.refresh,
+        expires: credential.expires as f64,
+        extra: BTreeMap::new(),
+    })
+}
+
+fn run_amazon_bedrock_auth() -> Result<StoredCredential, String> {
+    require_interactive_auth("Amazon Bedrock")?;
+    println!(
+        "Select Amazon Bedrock authentication method:\n  1) Bearer token\n  2) AWS profile\n  3) Existing AWS credential chain"
+    );
+    match prompt_line("Authentication number: ")?.as_str() {
+        "1" | "bearer" | "bearer-token" => {
+            let token = rpassword::prompt_password("Amazon Bedrock bearer token: ")
+                .map_err(|error| format!("failed to read bearer token: {error}"))?;
+            let token = token.trim();
+            if token.is_empty() {
+                return Err("Amazon Bedrock bearer token cannot be empty".to_string());
+            }
+            Ok(StoredCredential::ApiKey {
+                key: Some(token.to_string()),
+                env: BTreeMap::new(),
+                extra: BTreeMap::new(),
+            })
+        }
+        "2" | "profile" | "aws-profile" => {
+            let profile = prompt_line("AWS profile name: ")?;
+            validate_environment_value("AWS profile", &profile)?;
+            Ok(StoredCredential::ApiKey {
+                key: None,
+                env: BTreeMap::from([("AWS_PROFILE".to_string(), profile)]),
+                extra: BTreeMap::new(),
+            })
+        }
+        "3" | "chain" | "credential-chain" => Ok(StoredCredential::ApiKey {
+            key: None,
+            env: BTreeMap::new(),
+            extra: BTreeMap::new(),
+        }),
+        value => Err(format!(
+            "unknown Amazon Bedrock authentication selection {value:?}"
+        )),
+    }
+}
+
+fn run_google_vertex_auth() -> Result<StoredCredential, String> {
+    require_interactive_auth("Google Vertex AI")?;
+    println!(
+        "Select Google Vertex AI authentication method:\n  1) Google Cloud API key\n  2) Application Default Credentials\n  3) Service account credentials file"
+    );
+    let method = prompt_line("Authentication number: ")?;
+    if matches!(method.as_str(), "1" | "api" | "api-key") {
+        let key = rpassword::prompt_password("Google Cloud API key: ")
+            .map_err(|error| format!("failed to read API key: {error}"))?;
+        let key = key.trim();
+        if key.is_empty() {
+            return Err("Google Cloud API key cannot be empty".to_string());
+        }
+        return Ok(StoredCredential::ApiKey {
+            key: Some(key.to_string()),
+            env: BTreeMap::new(),
+            extra: BTreeMap::new(),
+        });
+    }
+    let service_account = matches!(method.as_str(), "3" | "service" | "service-account");
+    if !service_account && !matches!(method.as_str(), "2" | "adc") {
+        return Err(format!(
+            "unknown Google Vertex AI authentication selection {method:?}"
+        ));
+    }
+    let project = prompt_line("Google Cloud project ID: ")?;
+    validate_environment_value("Google Cloud project ID", &project)?;
+    let location = prompt_line("Google Cloud location: ")?;
+    validate_environment_value("Google Cloud location", &location)?;
+    let mut env = BTreeMap::from([
+        ("GOOGLE_CLOUD_PROJECT".to_string(), project),
+        ("GOOGLE_CLOUD_LOCATION".to_string(), location),
+    ]);
+    if service_account {
+        let path = prompt_line("Service account credentials file path: ")?;
+        validate_environment_value("service account credentials path", &path)?;
+        env.insert("GOOGLE_APPLICATION_CREDENTIALS".to_string(), path);
+    }
+    Ok(StoredCredential::ApiKey {
+        key: None,
+        env,
+        extra: BTreeMap::new(),
+    })
+}
+
+fn require_interactive_auth(provider: &str) -> Result<(), String> {
+    if std::io::stdin().is_terminal() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{provider} authentication setup requires a terminal; use --api-key --token for a bearer/API key"
+        ))
+    }
+}
+
+fn validate_environment_value(label: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() || value.contains(['\r', '\n', '\0']) {
+        Err(format!(
+            "{label} cannot be empty or contain control characters"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn open_browser(url: &str) -> Result<(), String> {
     let status = if cfg!(target_os = "macos") {
         std::process::Command::new("open").arg(url).status()
@@ -360,10 +583,11 @@ fn select_provider(agent_dir: &Path, requested: Option<&str>) -> Result<String, 
     let providers = provider_catalog(agent_dir)?;
     println!("Select provider to configure:");
     for (index, provider) in providers.iter().enumerate() {
-        let methods = if oauth_supported(provider) {
-            "OAuth or API key"
-        } else {
-            "API key"
+        let methods = match provider.as_str() {
+            "amazon-bedrock" => "AWS credentials or bearer token",
+            "google-vertex" => "API key, ADC, or service account",
+            _ if oauth_supported(provider) => "OAuth or API key",
+            _ => "API key",
         };
         println!("  {}) {provider} ({methods})", index + 1);
     }
@@ -379,10 +603,16 @@ fn select_provider(agent_dir: &Path, requested: Option<&str>) -> Result<String, 
 
 fn provider_catalog(agent_dir: &Path) -> Result<Vec<String>, String> {
     let mut providers = [
+        "amazon-bedrock",
         "anthropic",
+        "azure-openai-responses",
+        "github-copilot",
         "google",
+        "google-vertex",
+        "mistral",
         "openai-codex",
         "openai-compatible",
+        "openrouter",
         "xai",
     ]
     .into_iter()
@@ -420,7 +650,10 @@ fn select_auth_type(provider: &str) -> Result<bool, String> {
 }
 
 fn oauth_supported(provider: &str) -> bool {
-    matches!(provider, "anthropic" | "openai-codex" | "xai")
+    matches!(
+        provider,
+        "anthropic" | "github-copilot" | "openai-codex" | "openrouter" | "xai"
+    )
 }
 
 fn prompt_line(prompt: &str) -> Result<String, String> {
@@ -537,17 +770,38 @@ mod tests {
     }
 
     #[test]
-    fn login_catalog_includes_builtin_google_api_key_provider() {
+    fn login_catalog_includes_all_builtin_provider_auth_surfaces() {
         let directory = tempfile::tempdir().unwrap();
 
-        let google = login_provider_catalog(directory.path())
-            .unwrap()
-            .into_iter()
-            .find(|provider| provider.id == "google")
-            .expect("Google must be available from /login without models.json");
+        let catalog = login_provider_catalog(directory.path()).unwrap();
+        for provider in [
+            "amazon-bedrock",
+            "azure-openai-responses",
+            "github-copilot",
+            "google",
+            "google-vertex",
+            "mistral",
+            "openrouter",
+        ] {
+            assert!(
+                catalog.iter().any(|candidate| candidate.id == provider),
+                "missing {provider}"
+            );
+        }
 
+        let google = catalog
+            .iter()
+            .find(|provider| provider.id == "google")
+            .unwrap();
         assert!(!google.supports_oauth);
         assert_eq!(google.stored_kind, None);
+        assert!(
+            catalog
+                .iter()
+                .find(|provider| provider.id == "openrouter")
+                .unwrap()
+                .supports_oauth
+        );
     }
 
     #[test]
@@ -586,7 +840,8 @@ mod tests {
             directory.path().join("auth.json"),
             r#"{
               "anthropic": {"type":"oauth","access":"token","refresh":"refresh","expires":123},
-              "xai": {"type":"api_key","key":"xai-key","env":{"region":"test"}}
+              "xai": {"type":"api_key","key":"xai-key","env":{"region":"test"}},
+              "github-copilot": {"type":"oauth","access":"copilot","refresh":"github","expires":123,"availableModelIds":["gpt-4.1"]}
             }"#,
         )
         .unwrap();
@@ -601,6 +856,13 @@ mod tests {
             .unwrap();
         assert!(!xai.is_oauth());
         assert_eq!(xai.secret(), Some("xai-key"));
+        let copilot = read_stored_credential(directory.path(), "github-copilot")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            copilot.extra_strings("availableModelIds"),
+            Some(vec!["gpt-4.1".to_string()])
+        );
     }
 
     #[tokio::test]
