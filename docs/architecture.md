@@ -795,9 +795,17 @@ active agent, prepares the complete next session, emits old `session_shutdown`, 
 `session_start`, and only then publishes the new generation through a Tokio watch channel.
 Cancellation performs no preparation. Preparation failure leaves the current session open, while a
 successful replacement closes stale `AgentSession` handles so they reject later mutations. New,
-resume, reload, and fork all use this transaction. Fork creates a Pi v4 branch copy before
-preparation and removes it if candidate preparation fails; import remains outside the live
-replacement path.
+resume, reload, fork, and import all use this transaction. Fork creates a Pi v4 branch copy before
+preparation and removes it if candidate preparation fails. Import validates a copied v4 JSONL file,
+stages it in the current session directory, and rolls back both the staged file and any overwritten
+inactive destination if candidate preparation fails. It deliberately uses Pi's resume lifecycle
+reasons rather than adding an import-only session hook.
+
+Portable JSONL export is a storage operation on `SessionLog`: it atomically writes the selected
+main-lane branch, applicable name/label facts, and a parent-free v4 header without mutating the live
+log. HTML export and GitHub-Gist sharing remain app-owned presentation/integration policy in
+`apps/pi-cli`; neither terminal rendering nor external upload commands are dependencies of
+`pi-session`.
 
 ## Event ordering
 

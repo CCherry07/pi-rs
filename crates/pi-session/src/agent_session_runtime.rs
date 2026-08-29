@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -121,6 +121,86 @@ pub struct AgentSessionRuntime {
     factory: Arc<dyn AgentSessionRuntimeFactory>,
     transition_gate: Arc<Mutex<()>>,
     closed: Arc<AtomicBool>,
+}
+
+struct ImportedFileTransaction {
+    destination: PathBuf,
+    backup: Option<PathBuf>,
+    owns_destination: bool,
+    committed: bool,
+}
+
+impl ImportedFileTransaction {
+    fn stage(source: &Path, destination: &Path) -> Result<Self, SessionError> {
+        if comparable_path(source) == comparable_path(destination) {
+            SessionLog::open(source)?;
+            return Ok(Self {
+                destination: destination.to_path_buf(),
+                backup: None,
+                owns_destination: false,
+                committed: false,
+            });
+        }
+        if destination.is_dir() {
+            return Err(SessionError::Storage(format!(
+                "import destination is a directory: {}",
+                destination.display()
+            )));
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let temporary = sibling_transaction_path(destination, "import");
+        let backup = destination
+            .exists()
+            .then(|| sibling_transaction_path(destination, "backup"));
+        let staged = (|| {
+            std::fs::copy(source, &temporary)?;
+            // Validate and repair only the copied file. The user's source is
+            // never mutated by import.
+            SessionLog::open(&temporary)?;
+            if let Some(backup) = &backup {
+                std::fs::rename(destination, backup)?;
+            }
+            if let Err(error) = std::fs::rename(&temporary, destination) {
+                if let Some(backup) = &backup {
+                    let _ = std::fs::rename(backup, destination);
+                }
+                return Err(error.into());
+            }
+            Ok::<(), SessionError>(())
+        })();
+        if staged.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        staged?;
+        Ok(Self {
+            destination: destination.to_path_buf(),
+            backup,
+            owns_destination: true,
+            committed: false,
+        })
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+        if let Some(backup) = &self.backup {
+            let _ = std::fs::remove_file(backup);
+        }
+    }
+}
+
+impl Drop for ImportedFileTransaction {
+    fn drop(&mut self) {
+        if self.committed || !self.owns_destination {
+            return;
+        }
+        let _ = std::fs::remove_file(&self.destination);
+        if let Some(backup) = &self.backup {
+            let _ = std::fs::rename(backup, &self.destination);
+        }
+    }
 }
 
 impl AgentSessionRuntime {
@@ -262,6 +342,50 @@ impl AgentSessionRuntime {
             },
         )
         .await?;
+        Ok(AgentSessionReplacement::Replaced)
+    }
+
+    /// Copies a validated v4 JSONL session into product storage and switches
+    /// to it through the same lifecycle transaction as resume.
+    pub async fn import_session(
+        &self,
+        source: impl Into<PathBuf>,
+        destination: impl Into<PathBuf>,
+    ) -> Result<AgentSessionReplacement, AgentSessionRuntimeError> {
+        let _transition = self.transition_gate.lock().await;
+        self.ensure_open()?;
+        let current = self.session();
+        let source = source.into();
+        let destination = destination.into();
+        let before = current
+            .session_plugin_driver()
+            .session_before_switch(&SessionBeforeSwitchEvent {
+                reason: SessionSwitchReason::Resume,
+                target_session_file: Some(destination.clone()),
+            })
+            .await;
+        if before.is_some_and(|result| result.cancel) {
+            return Ok(AgentSessionReplacement::Cancelled);
+        }
+
+        let imported = ImportedFileTransaction::stage(&source, &destination)?;
+        let previous_session_file = current.log().path().to_path_buf();
+        self.replace_current(
+            current,
+            AgentSessionRuntimeRequest {
+                target: AgentSessionRuntimeTarget::open(&destination),
+                start_event: SessionStartEvent {
+                    reason: SessionStartReason::Resume,
+                    previous_session_file: Some(previous_session_file),
+                },
+            },
+            SessionShutdownEvent {
+                reason: SessionShutdownReason::Resume,
+                target_session_file: Some(destination),
+            },
+        )
+        .await?;
+        imported.commit();
         Ok(AgentSessionReplacement::Replaced)
     }
 
@@ -409,6 +533,33 @@ impl AgentSessionRuntime {
         } else {
             Ok(())
         }
+    }
+}
+
+fn sibling_transaction_path(path: &Path, purpose: &str) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map_or_else(|| "session".into(), |name| name.to_os_string());
+    name.push(format!(".{purpose}-{}.tmp", uuid::Uuid::now_v7()));
+    path.with_file_name(name)
+}
+
+fn comparable_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    match (absolute.parent(), absolute.file_name()) {
+        (Some(parent), Some(file_name)) => std::fs::canonicalize(parent)
+            .map(|parent| parent.join(file_name))
+            .unwrap_or(absolute),
+        _ => absolute,
     }
 }
 
@@ -645,6 +796,78 @@ mod tests {
                 "start:Resume",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn import_copies_a_valid_v4_session_and_uses_resume_lifecycle() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_directory = tempfile::tempdir().unwrap();
+        let current_path = directory.path().join("current.jsonl");
+        let destination = directory.path().join("imported.jsonl");
+        let source = source_directory.path().join("imported.jsonl");
+        let imported_log =
+            SessionLog::create(&source, SessionHeader::new("imported", directory.path())).unwrap();
+        imported_log
+            .append_message(Message::User(UserMessage::text("portable", 1)))
+            .unwrap();
+        let factory = TestFactory::new();
+        let runtime = AgentSessionRuntime::create(
+            factory.clone(),
+            AgentSessionRuntimeTarget::create(directory.path(), &current_path),
+        )
+        .await
+        .unwrap();
+        let current = runtime.session();
+
+        let outcome = runtime.import_session(&source, &destination).await.unwrap();
+
+        assert_eq!(outcome, AgentSessionReplacement::Replaced);
+        assert!(current.is_closed());
+        assert_eq!(runtime.session().log().path(), destination);
+        assert_eq!(runtime.session().log().header().id, "imported");
+        assert_eq!(runtime.session().log().load().unwrap().messages().len(), 1);
+        assert!(source.exists());
+        assert_eq!(
+            factory.events(),
+            vec![
+                "prepare:Startup",
+                "start:Startup",
+                "before:Resume",
+                "prepare:Resume",
+                "shutdown:Resume",
+                "start:Resume",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_import_leaves_the_source_and_current_session_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let current_path = directory.path().join("current.jsonl");
+        let destination = directory.path().join("legacy.jsonl");
+        let source = directory.path().join("outside-legacy.jsonl");
+        let legacy = r#"{"type":"session","version":3,"id":"legacy"}
+"#;
+        std::fs::write(&source, legacy).unwrap();
+        let factory = TestFactory::new();
+        let runtime = AgentSessionRuntime::create(
+            factory,
+            AgentSessionRuntimeTarget::create(directory.path(), &current_path),
+        )
+        .await
+        .unwrap();
+        let current = runtime.session();
+
+        let error = runtime
+            .import_session(&source, &destination)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AgentSessionRuntimeError::Session(_)));
+        assert!(Arc::ptr_eq(&current, &runtime.session()));
+        assert!(!current.is_closed());
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read_to_string(source).unwrap(), legacy);
     }
 
     #[tokio::test]

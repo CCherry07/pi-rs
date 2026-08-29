@@ -284,7 +284,9 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, app: &App, palette: UiPalette
     if root.is_empty() {
         return;
     }
-    if let Some(prompt) = &app.trust_prompt {
+    if let Some(prompt) = &app.import_prompt {
+        draw_import_prompt(frame, &prompt.source);
+    } else if let Some(prompt) = &app.trust_prompt {
         draw_project_trust_prompt(frame, &prompt.cwd, &prompt.options, prompt.selected);
     } else {
         let areas = ui_areas(root, app);
@@ -312,6 +314,33 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, app: &App, palette: UiPalette
             selection_background(palette.terminal_appearance),
         );
     }
+}
+
+pub(super) fn draw_import_prompt(frame: &mut ratatui::Frame<'_>, source: &Path) {
+    let root = frame.area();
+    frame.render_widget(Clear, root);
+    let area = inset(root, horizontal_gutter(root.width).saturating_add(1));
+    let lines = vec![
+        Line::from(Span::styled(
+            "Import session?",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            source.display().to_string(),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::default(),
+        Line::from("The current session in this view will be replaced by the imported v4 session."),
+        Line::from(
+            "The source file is kept. An inactive session with the same filename may be replaced.",
+        ),
+        Line::default(),
+        Line::from(Span::styled(
+            "enter confirm · esc cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 pub(super) fn draw_bottom_pane_view(

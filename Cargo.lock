@@ -2223,6 +2223,7 @@ dependencies = [
  "pi-runtime",
  "pi-session",
  "pi-settings",
+ "pulldown-cmark",
  "ratatui",
  "ratatui-textarea",
  "rpassword",

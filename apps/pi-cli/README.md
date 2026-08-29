@@ -158,6 +158,9 @@ Common commands:
 | `/thinking <level>`           | Change reasoning depth for the active model                           |
 | `/new [path]`                 | Start a new session                                                   |
 | `/resume [query\|path]`       | Find and continue a previous session                                  |
+| `/export [file]`              | Export the active branch as HTML or `.jsonl`                           |
+| `/import <file.jsonl>`        | Copy and resume a pi-rs v4 session                                    |
+| `/share`                      | Share an HTML snapshot through a secret GitHub Gist                    |
 | `/compact [instructions]`     | Compact the current context, optionally with guidance                 |
 | `/fork`                       | Branch before a selected previous user message                        |
 | `/clone`                      | Clone the session at its current position                             |
@@ -268,12 +271,24 @@ only shell shorthand, does not leave an empty resume entry.
 The product supports:
 
 - session discovery and `/resume`;
+- portable active-branch JSONL export and transactional v4 JSONL import;
+- self-contained HTML export and secret-Gist sharing through the authenticated GitHub CLI;
 - durable steering and follow-up queues;
 - branching with `/fork`, `/clone`, and `/tree`;
 - manual and automatic context compaction;
 - model and thinking-level restoration;
 - interrupted-state reduction and provider-context repair;
 - preservation of matching tool calls and tool results across persistence and replay.
+
+`/export` writes HTML by default; a destination ending in `.jsonl` writes a portable v4 session.
+`/import` copies a validated v4 JSONL file into the current session directory and rebuilds the
+complete runtime generation before switching. Legacy Pi v1-v3 files are detected and rejected with
+an explicit migration error until the v3→v4 bridge is implemented.
+
+`/share` requires an authenticated `gh` CLI (`gh auth login`). It exports a temporary HTML snapshot,
+creates a non-public Gist, and prints both the viewer and Gist URLs. Set `PI_SHARE_VIEWER_URL` to
+override the default `https://pi.dev/session/` viewer. Review the transcript before sharing because
+tool output can contain source code, local paths, or credentials.
 
 ## Skills, resources, and project trust
 

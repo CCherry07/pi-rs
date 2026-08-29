@@ -670,6 +670,7 @@ struct App {
     scroll_input: ScrollInputNormalizer,
     screen_selection: Option<ScreenSelection>,
     trust_prompt: Option<TrustPromptState>,
+    import_prompt: Option<ImportPromptState>,
     pending_auth: Option<AuthRequest>,
     epoch: u64,
     quit: bool,
@@ -790,6 +791,7 @@ impl App {
             scroll_input: ScrollInputNormalizer::for_terminal(),
             screen_selection: None,
             trust_prompt: None,
+            import_prompt: None,
             pending_auth: None,
             epoch: 1,
             quit: false,
@@ -1237,6 +1239,11 @@ struct TrustPromptState {
     response: Option<tokio::sync::oneshot::Sender<Option<usize>>>,
 }
 
+struct ImportPromptState {
+    command: String,
+    source: PathBuf,
+}
+
 impl From<ProjectTrustPromptRequest> for TrustPromptState {
     fn from(request: ProjectTrustPromptRequest) -> Self {
         Self {
@@ -1400,7 +1407,9 @@ async fn run_loop(
                     Some(Ok(Event::Mouse(mouse))) if terminal.fullscreen => {
                         handle_mouse_event(mouse, &mut app, &surface, &mut clipboard);
                     }
-                    Some(Ok(Event::Paste(text))) if app.trust_prompt.is_none() => {
+                    Some(Ok(Event::Paste(text)))
+                        if app.trust_prompt.is_none() && app.import_prompt.is_none() =>
+                    {
                         app.screen_selection = None;
                         app.input.insert_str(text);
                         app.input_history.reset_navigation();
@@ -1431,6 +1440,7 @@ async fn run_loop(
                     let tools_expanded = app.tools_expanded;
                     let scroll_from_bottom = app.scroll_from_bottom;
                     let trust_prompt = app.trust_prompt.take();
+                    let import_prompt = app.import_prompt.take();
                     let mut recovered = app_for_session(&session, &snapshot, &agent_dir);
                     recovered.input = input;
                     recovered.input_history = input_history;
@@ -1439,6 +1449,7 @@ async fn run_loop(
                     recovered.tools_expanded = tools_expanded;
                     recovered.scroll_from_bottom = scroll_from_bottom;
                     recovered.trust_prompt = trust_prompt;
+                    recovered.import_prompt = import_prompt;
                     recovered.status = "Caught up after UI lag".to_string();
                     app = recovered;
                 }
@@ -1567,6 +1578,13 @@ fn command_suggestions(input: &str, command_specs: &[CommandSpec]) -> Vec<Comman
     let builtins = [
         ("/new", "new session", Some("[path]")),
         ("/resume", "list or open sessions", Some("[query|path]")),
+        ("/export", "export session as HTML or JSONL", Some("[file]")),
+        (
+            "/import",
+            "import and resume a v4 session",
+            Some("<file.jsonl>"),
+        ),
+        ("/share", "share session as a secret GitHub gist", None),
         ("/reload", "reload all plugins/resources", None),
         ("/trust", "change trust for this project", None),
         (
@@ -1951,6 +1969,7 @@ mod tests {
             scroll_input: ScrollInputNormalizer::with_events_per_tick(1),
             screen_selection: None,
             trust_prompt: None,
+            import_prompt: None,
             pending_auth: None,
             epoch: 1,
             quit: false,
@@ -2111,6 +2130,9 @@ mod tests {
         assert!(suggestions.iter().any(|item| item.invocation == "/fork"));
         assert!(suggestions.iter().any(|item| item.invocation == "/clone"));
         assert!(suggestions.iter().any(|item| item.invocation == "/tree"));
+        assert!(suggestions.iter().any(|item| item.invocation == "/export"));
+        assert!(suggestions.iter().any(|item| item.invocation == "/import"));
+        assert!(suggestions.iter().any(|item| item.invocation == "/share"));
     }
 
     #[test]
@@ -2122,6 +2144,156 @@ mod tests {
         assert!(help.lines().any(|line| line.starts_with("- `/help`")));
         assert!(help.lines().any(|line| line.starts_with("- `!cmd`")));
         assert!(help.lines().count() > 10);
+    }
+
+    #[test]
+    fn import_and_export_paths_support_spaces_and_quotes() {
+        assert_eq!(
+            path_command_argument("/export path with spaces/session.html", "/export").unwrap(),
+            Some("path with spaces/session.html".to_string())
+        );
+        assert_eq!(
+            path_command_argument("/import \"path with spaces/session.jsonl\"", "/import").unwrap(),
+            Some("path with spaces/session.jsonl".to_string())
+        );
+        assert_eq!(path_command_argument("/export", "/export").unwrap(), None);
+        assert!(
+            path_command_argument("/import \"unterminated", "/import")
+                .unwrap_err()
+                .contains("unterminated")
+        );
+        assert!(!path_command_matches("/exporter out.html", "/export"));
+    }
+
+    #[tokio::test]
+    async fn export_and_import_commands_round_trip_the_active_branch() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let session_directory = directory.path().join("sessions");
+        let export_directory = directory.path().join("portable files");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&session_directory).unwrap();
+        let sessions = MultiSessionManager::new(|request: AgentSessionRuntimeRequest| async move {
+            let (cwd, path, create) = match request.target {
+                AgentSessionRuntimeTarget::Create { cwd, path, .. } => (cwd, path, true),
+                AgentSessionRuntimeTarget::Open { path } => {
+                    let (_, document) = SessionLog::open(&path)?;
+                    (document.header.cwd, path, false)
+                }
+                AgentSessionRuntimeTarget::Reuse { .. } => unreachable!("test does not reuse logs"),
+            };
+            let pi_runtime = pi_runtime::PiRuntime::builder()
+                .provider_plugin(
+                    pi_plugin_openai::OpenAiCompatiblePlugin::new(
+                        pi_plugin_openai::OpenAiCompatibleConfig::without_api_key(
+                            "https://example.invalid/v1",
+                        ),
+                    )
+                    .unwrap(),
+                )
+                .agent_options(pi_agent::AgentOptions {
+                    provider_id: ProviderId::new("openai-compatible"),
+                    cwd,
+                    ..pi_agent::AgentOptions::default()
+                })
+                .system_prompt(pi_runtime::SystemPrompt::Final("test".to_string()))
+                .build()?;
+            if create {
+                AgentSession::prepare_create(pi_runtime, path).await
+            } else {
+                AgentSession::prepare_open(pi_runtime, path).await
+            }
+        });
+        let handle = sessions
+            .create_session(&workspace, session_directory.join("current.jsonl"))
+            .await
+            .unwrap();
+        let current = handle.current();
+        current
+            .log()
+            .append_message(Message::User(pi_core::UserMessage::text(
+                "portable conversation",
+                1,
+            )))
+            .unwrap();
+        current.log().materialize().unwrap();
+        let jsonl = export_directory.join("portable session.jsonl");
+        let html = export_directory.join("portable session.html");
+
+        let json_status = run_effect(
+            &handle,
+            &current,
+            format!("/export \"{}\"", jsonl.display()),
+            EffectMode::Submit,
+        )
+        .await
+        .unwrap();
+        let html_status = run_effect(
+            &handle,
+            &current,
+            format!("/export \"{}\"", html.display()),
+            EffectMode::Submit,
+        )
+        .await
+        .unwrap();
+
+        assert!(json_status.contains(jsonl.to_string_lossy().as_ref()));
+        assert!(html_status.contains(html.to_string_lossy().as_ref()));
+        assert!(
+            std::fs::read_to_string(&html)
+                .unwrap()
+                .contains("portable conversation")
+        );
+        let (trust, _) = ProjectTrustService::new(
+            &directory.path().join("agent"),
+            None,
+            true,
+            pi_settings::DefaultProjectTrust::Ask,
+        )
+        .unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut clipboard = RecordingClipboard::default();
+        let mut app = App::new(&current, &current.snapshot());
+        app.input
+            .set_text(format!("/import \"{}\"", jsonl.display()));
+        submit_editor(
+            &mut app,
+            &current,
+            &handle,
+            &trust,
+            &sender,
+            &mut clipboard,
+            EffectMode::Submit,
+        );
+        assert!(app.import_prompt.is_some());
+        let confirmation = render_app(&app, 100, 20);
+        assert!(confirmation.contains("Import session?"));
+        assert!(confirmation.contains("enter confirm · esc cancel"));
+        assert!(handle_import_prompt_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut app,
+            &current,
+            &handle,
+            &sender,
+        ));
+        assert!(app.import_prompt.is_none());
+        assert!(receiver.try_recv().is_err());
+        let import_status = run_effect(
+            &handle,
+            &current,
+            format!("/import \"{}\"", jsonl.display()),
+            EffectMode::Submit,
+        )
+        .await
+        .unwrap();
+
+        assert!(import_status.contains(jsonl.to_string_lossy().as_ref()));
+        assert_eq!(
+            handle.path(),
+            session_directory.join("portable session.jsonl")
+        );
+        assert_eq!(handle.current().log().load().unwrap().messages().len(), 1);
+        sessions.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -4142,8 +4314,15 @@ mod tests {
     fn completion_uses_the_selected_command() {
         let mut app = demo_app();
         app.input.set_text("/");
-        app.command_palette.get_mut().reconcile_len(3);
-        app.command_palette.get_mut().select(2);
+        let suggestions = suggestions_for_app(&app);
+        let reload = suggestions
+            .iter()
+            .position(|suggestion| suggestion.invocation == "/reload")
+            .unwrap();
+        app.command_palette
+            .get_mut()
+            .reconcile_len(suggestions.len());
+        app.command_palette.get_mut().select(reload);
 
         assert!(complete_selected_command(&mut app));
         assert_eq!(app.input.text(), "/reload");

@@ -8,7 +8,9 @@ mod output;
 mod package_commands;
 mod plugin_commands;
 mod project_trust;
+mod session_export;
 mod session_factory;
+mod session_share;
 mod text_selection;
 mod tui;
 

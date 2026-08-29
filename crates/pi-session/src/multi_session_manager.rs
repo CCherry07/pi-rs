@@ -59,6 +59,10 @@ pub enum MultiSessionManagerError {
     UnknownSession,
     #[error("session path is already active: {0}")]
     SessionAlreadyActive(PathBuf),
+    #[error("import path has no file name: {0}")]
+    InvalidImportPath(PathBuf),
+    #[error("cannot import over the active session file: {0}")]
+    ImportWouldReplaceCurrent(PathBuf),
 }
 
 #[derive(Clone)]
@@ -267,6 +271,34 @@ impl PiSession {
         manager.ensure_open()?;
         manager.ensure_path_available(self, &path)?;
         Ok(self.runtime.switch_session(path).await?)
+    }
+
+    /// Imports a v4 JSONL file into the current session directory and switches
+    /// this handle to the imported copy. Import uses resume lifecycle events.
+    pub async fn import_session(
+        &self,
+        source: impl Into<PathBuf>,
+    ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
+        let source = source.into();
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| MultiSessionManagerError::InvalidImportPath(source.clone()))?;
+        let current_path = self.path();
+        let destination = current_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(file_name);
+        if comparable_path(&current_path) == comparable_path(&destination) {
+            return Err(MultiSessionManagerError::ImportWouldReplaceCurrent(
+                destination,
+            ));
+        }
+
+        let manager = self.manager()?;
+        let _operation = manager.operation_gate.lock().await;
+        manager.ensure_open()?;
+        manager.ensure_path_available(self, &destination)?;
+        Ok(self.runtime.import_session(source, destination).await?)
     }
 
     pub async fn fork_session(
