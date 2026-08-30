@@ -6,7 +6,7 @@ use super::*;
 /// rendering modules only observe the resulting `App` state.
 pub(super) enum AppMessage {
     SessionEvent {
-        event: AgentSessionEvent,
+        event: Box<AgentSessionEvent>,
         snapshot: Box<AgentSessionSnapshot>,
     },
     EffectCompleted(EffectDone),

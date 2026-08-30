@@ -4,13 +4,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
+use pi_core::AgentPlugin;
+use pi_runtime::PiRuntimeBuilder;
 use tokio::sync::{Mutex, watch};
 
 use crate::{
     AgentSession, ForkOptions, ForkPosition, PreparedAgentSession, SessionBeforeForkEvent,
     SessionBeforeSwitchEvent, SessionError, SessionForkPosition, SessionHeader, SessionLog,
     SessionShutdownEvent, SessionShutdownReason, SessionStartEvent, SessionStartReason,
-    SessionSwitchReason,
+    SessionSwitchReason, import_session_file,
 };
 
 #[derive(Debug, Clone)]
@@ -65,10 +67,57 @@ impl AgentSessionRuntimeTarget {
     }
 }
 
+type OverlayAgentPlugin = Arc<dyn Fn() -> Arc<dyn AgentPlugin> + Send + Sync>;
+
+/// Session-local additions layered onto every product runtime generation.
+///
+/// The overlay is deliberately transient: it survives new/resume/fork/reload
+/// replacements on the live handle, but is never serialized into the v4 log.
+#[derive(Clone, Default)]
+pub struct SessionGenerationOverlay {
+    agent_plugins: Vec<OverlayAgentPlugin>,
+}
+
+impl std::fmt::Debug for SessionGenerationOverlay {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionGenerationOverlay")
+            .field("agent_plugins", &self.agent_plugins.len())
+            .finish()
+    }
+}
+
+impl SessionGenerationOverlay {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds one session-local agent plugin that is rebuilt for every runtime generation.
+    pub fn with_agent_plugin<F>(mut self, plugin: F) -> Self
+    where
+        F: Fn() -> Arc<dyn AgentPlugin> + Send + Sync + 'static,
+    {
+        self.agent_plugins.push(Arc::new(plugin));
+        self
+    }
+
+    /// Applies the opaque session-local additions to a product runtime builder.
+    pub fn apply_to(&self, mut builder: PiRuntimeBuilder) -> PiRuntimeBuilder {
+        for plugin in &self.agent_plugins {
+            let plugin = Arc::clone(plugin);
+            builder = builder.try_agent_plugin_arc_factory(move || {
+                Ok::<Arc<dyn AgentPlugin>, std::convert::Infallible>(plugin())
+            });
+        }
+        builder
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentSessionRuntimeRequest {
     pub target: AgentSessionRuntimeTarget,
     pub start_event: SessionStartEvent,
+    pub generation_overlay: SessionGenerationOverlay,
 }
 
 #[async_trait]
@@ -119,6 +168,7 @@ pub enum AgentSessionRuntimeError {
 pub struct AgentSessionRuntime {
     current: watch::Sender<Arc<AgentSession>>,
     factory: Arc<dyn AgentSessionRuntimeFactory>,
+    generation_overlay: SessionGenerationOverlay,
     transition_gate: Arc<Mutex<()>>,
     closed: Arc<AtomicBool>,
 }
@@ -156,10 +206,10 @@ impl ImportedFileTransaction {
             .exists()
             .then(|| sibling_transaction_path(destination, "backup"));
         let staged = (|| {
-            std::fs::copy(source, &temporary)?;
-            // Validate and repair only the copied file. The user's source is
-            // never mutated by import.
-            SessionLog::open(&temporary)?;
+            // Copy current v4 files or migrate coding-agent v1-v3 into the
+            // staging path. Validation and torn-tail repair apply only to the
+            // staged file; the user's source is never mutated by import.
+            import_session_file(source, &temporary)?;
             if let Some(backup) = &backup {
                 std::fs::rename(destination, backup)?;
             }
@@ -211,6 +261,18 @@ impl AgentSessionRuntime {
     where
         F: AgentSessionRuntimeFactory + 'static,
     {
+        Self::create_with_overlay(factory, initial_target, SessionGenerationOverlay::default())
+            .await
+    }
+
+    pub async fn create_with_overlay<F>(
+        factory: F,
+        initial_target: AgentSessionRuntimeTarget,
+        generation_overlay: SessionGenerationOverlay,
+    ) -> Result<Self, AgentSessionRuntimeError>
+    where
+        F: AgentSessionRuntimeFactory + 'static,
+    {
         let factory: Arc<dyn AgentSessionRuntimeFactory> = Arc::new(factory);
         let start_event = SessionStartEvent {
             reason: SessionStartReason::Startup,
@@ -220,27 +282,34 @@ impl AgentSessionRuntime {
             .prepare(AgentSessionRuntimeRequest {
                 target: initial_target,
                 start_event: start_event.clone(),
+                generation_overlay: generation_overlay.clone(),
             })
             .await?;
         let session = prepared.activate(start_event).await;
-        Ok(Self::from_parts(session, factory))
+        Ok(Self::from_parts(session, factory, generation_overlay))
     }
 
     pub fn from_session<F>(session: AgentSession, factory: F) -> Self
     where
         F: AgentSessionRuntimeFactory + 'static,
     {
-        Self::from_parts(Arc::new(session), Arc::new(factory))
+        Self::from_parts(
+            Arc::new(session),
+            Arc::new(factory),
+            SessionGenerationOverlay::default(),
+        )
     }
 
     fn from_parts(
         session: Arc<AgentSession>,
         factory: Arc<dyn AgentSessionRuntimeFactory>,
+        generation_overlay: SessionGenerationOverlay,
     ) -> Self {
         let (current, _) = watch::channel(session);
         Self {
             current,
             factory,
+            generation_overlay,
             transition_gate: Arc::new(Mutex::new(())),
             closed: Arc::new(AtomicBool::new(false)),
         }
@@ -297,6 +366,7 @@ impl AgentSessionRuntime {
                     reason: SessionStartReason::New,
                     previous_session_file: Some(previous_session_file),
                 },
+                generation_overlay: self.generation_overlay.clone(),
             },
             SessionShutdownEvent {
                 reason: SessionShutdownReason::New,
@@ -335,6 +405,7 @@ impl AgentSessionRuntime {
                     reason: SessionStartReason::Resume,
                     previous_session_file: Some(previous_session_file),
                 },
+                generation_overlay: self.generation_overlay.clone(),
             },
             SessionShutdownEvent {
                 reason: SessionShutdownReason::Resume,
@@ -345,8 +416,8 @@ impl AgentSessionRuntime {
         Ok(AgentSessionReplacement::Replaced)
     }
 
-    /// Copies a validated v4 JSONL session into product storage and switches
-    /// to it through the same lifecycle transaction as resume.
+    /// Copies a validated v4 JSONL session, or migrates coding-agent v1-v3,
+    /// into product storage and switches through the resume transaction.
     pub async fn import_session(
         &self,
         source: impl Into<PathBuf>,
@@ -378,6 +449,7 @@ impl AgentSessionRuntime {
                     reason: SessionStartReason::Resume,
                     previous_session_file: Some(previous_session_file),
                 },
+                generation_overlay: self.generation_overlay.clone(),
             },
             SessionShutdownEvent {
                 reason: SessionShutdownReason::Resume,
@@ -444,6 +516,7 @@ impl AgentSessionRuntime {
             .prepare(AgentSessionRuntimeRequest {
                 target: AgentSessionRuntimeTarget::reuse_log(fork),
                 start_event: start_event.clone(),
+                generation_overlay: self.generation_overlay.clone(),
             })
             .await
         {
@@ -485,6 +558,7 @@ impl AgentSessionRuntime {
                     reason: SessionStartReason::Reload,
                     previous_session_file: None,
                 },
+                generation_overlay: self.generation_overlay.clone(),
             },
             SessionShutdownEvent {
                 reason: SessionShutdownReason::Reload,
@@ -569,7 +643,9 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use pi_agent::AgentOptions;
-    use pi_core::{Message, ModelId, PluginId, ProviderId, UserMessage};
+    use pi_core::{
+        AgentPlugin, Message, ModelId, PluginId, ProviderId, RegisterContext, UserMessage,
+    };
     use pi_runtime::PiRuntime;
     use pi_test_support::ScriptedProviderPlugin;
     use tokio::sync::Notify;
@@ -616,6 +692,19 @@ mod tests {
     struct LifecyclePlugin {
         events: Arc<StdMutex<Vec<String>>>,
         cancel_switch: Arc<AtomicBool>,
+    }
+
+    struct OverlayPlugin;
+
+    #[pi_core::agent_plugin]
+    impl AgentPlugin for OverlayPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("session-overlay")
+        }
+
+        fn register(&self, _context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+            Ok(())
+        }
     }
 
     impl LifecyclePlugin {
@@ -677,6 +766,7 @@ mod tests {
                 ));
             }
 
+            let generation_overlay = request.generation_overlay;
             let (cwd, path, create, reused_log) = match request.target {
                 AgentSessionRuntimeTarget::Create { cwd, path, .. } => (cwd, path, true, None),
                 AgentSessionRuntimeTarget::Open { path } => {
@@ -693,15 +783,16 @@ mod tests {
                     )
                 }
             };
-            let runtime = PiRuntime::builder()
+            let mut builder = PiRuntime::builder()
                 .provider_plugin(ScriptedProviderPlugin::scripted([]))
                 .agent_options(AgentOptions {
                     provider_id: ProviderId::new("scripted"),
                     model_id: ModelId::new("test"),
                     cwd,
                     ..AgentOptions::default()
-                })
-                .build()?;
+                });
+            builder = generation_overlay.apply_to(builder);
+            let runtime = builder.build()?;
             let options = AgentSessionOptions::default().plugins(SessionPlugins::new().plugin(
                 LifecyclePlugin {
                     events: Arc::clone(&self.events),
@@ -716,6 +807,57 @@ mod tests {
                 AgentSession::prepare_open_with_options(runtime, path, options).await
             }
         }
+    }
+
+    #[tokio::test]
+    async fn transient_generation_overlay_is_rebuilt_across_reload_and_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("first.jsonl");
+        let loads = Arc::new(AtomicUsize::new(0));
+        let factory_loads = Arc::clone(&loads);
+        let overlay = SessionGenerationOverlay::new().with_agent_plugin(move || {
+            factory_loads.fetch_add(1, Ordering::AcqRel);
+            Arc::new(OverlayPlugin)
+        });
+        let runtime = AgentSessionRuntime::create_with_overlay(
+            TestFactory::new(),
+            AgentSessionRuntimeTarget::create(directory.path(), &path),
+            overlay,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            runtime
+                .session()
+                .runtime()
+                .plugin_order()
+                .contains(&PluginId::new("session-overlay"))
+        );
+        assert_eq!(loads.load(Ordering::Acquire), 1);
+
+        runtime.reload().await.unwrap();
+        assert!(
+            runtime
+                .session()
+                .runtime()
+                .plugin_order()
+                .contains(&PluginId::new("session-overlay"))
+        );
+        assert_eq!(loads.load(Ordering::Acquire), 2);
+
+        runtime
+            .new_session(directory.path(), directory.path().join("second.jsonl"))
+            .await
+            .unwrap();
+        assert!(
+            runtime
+                .session()
+                .runtime()
+                .plugin_order()
+                .contains(&PluginId::new("session-overlay"))
+        );
+        assert_eq!(loads.load(Ordering::Acquire), 3);
     }
 
     #[derive(Clone)]

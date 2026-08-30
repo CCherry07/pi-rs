@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
-use pi_agent::{AgentLoopOutcome, AgentLoopStop, EventError, PromptInput};
+use pi_agent::{AgentLoopOutcome, AgentLoopStop, EventError, PromptInput, QueueMode};
 use pi_core::{
     AbortHandle, AgentEvent, CommandOutcome, ContentBlock, CustomMessage, ImageContent,
     InputStreamingBehavior, Message, ModelId, PluginId, ProviderId, StopReason, ThinkingLevel,
@@ -30,10 +30,11 @@ use crate::{
     SessionCompactEvent, SessionCompactFailedEvent, SessionContext, SessionContextBuildOptions,
     SessionDocument, SessionEntry, SessionError, SessionHeader, SessionIdentity,
     SessionInfoChangedEvent, SessionLog, SessionModel, SessionPluginDriver,
-    SessionPluginReloadReport, SessionPlugins, SessionShutdownEvent, SessionShutdownReason,
-    SessionStartEvent, SessionStartReason, SessionTreeEvent, ThinkingLevelEntry, TreePreparation,
-    compact as generate_compaction, estimate_context_tokens, estimate_session_context_tokens,
-    next_unique_id, now_ms, prepare_compaction, reduce_lane_state, should_compact,
+    SessionPluginReloadReport, SessionPlugins, SessionRecord, SessionShutdownEvent,
+    SessionShutdownReason, SessionStartEvent, SessionStartReason, SessionTreeEvent,
+    ThinkingLevelEntry, TreePreparation, compact as generate_compaction, estimate_context_tokens,
+    estimate_session_context_tokens, next_unique_id, now_ms, prepare_compaction, reduce_lane_state,
+    should_compact,
 };
 
 pub const PROMPT_SNAPSHOT_CUSTOM_TYPE: &str = "pi.prompt_snapshot";
@@ -51,6 +52,8 @@ pub struct ResourceSnapshot {
 
 #[derive(Debug, Clone)]
 pub struct ShellExecutionOptions {
+    /// Optional caller correlation ID (used by Pi RPC bash events).
+    pub id: Option<String>,
     pub exclude_from_context: bool,
     pub timeout: Option<std::time::Duration>,
     pub shell_path: Option<PathBuf>,
@@ -59,6 +62,7 @@ pub struct ShellExecutionOptions {
 impl Default for ShellExecutionOptions {
     fn default() -> Self {
         Self {
+            id: None,
             exclude_from_context: false,
             timeout: Some(DEFAULT_TIMEOUT),
             shell_path: None,
@@ -311,7 +315,7 @@ pub struct AgentSession {
     session_plugin_sources: SessionPlugins,
     session_plugin_driver: Arc<RwLock<Arc<SessionPluginDriver>>>,
     operation_gate: Arc<tokio::sync::Mutex<()>>,
-    compaction_settings: CompactionSettings,
+    compaction_settings: Arc<RwLock<CompactionSettings>>,
     context_window: Option<u64>,
     branch_summary_reserve_tokens: u64,
     compaction_abort: Arc<std::sync::Mutex<Option<AbortHandle>>>,
@@ -319,7 +323,8 @@ pub struct AgentSession {
     events: Arc<AgentSessionEventHub>,
     activity: Arc<std::sync::Mutex<SessionActivity>>,
     bash_abort: Arc<std::sync::Mutex<Option<(String, AbortHandle)>>>,
-    retry_settings: AutoRetrySettings,
+    retry_settings: Arc<RwLock<AutoRetrySettings>>,
+    retry_attempt: Arc<AtomicU32>,
     retry_abort: Arc<std::sync::Mutex<Option<AbortHandle>>>,
     shell_path: Option<PathBuf>,
     shell_command_prefix: Option<String>,
@@ -471,7 +476,7 @@ impl AgentSession {
             session_plugin_sources: options.plugins,
             session_plugin_driver: Arc::new(RwLock::new(session_plugin_driver)),
             operation_gate: Arc::new(tokio::sync::Mutex::new(())),
-            compaction_settings: options.compaction,
+            compaction_settings: Arc::new(RwLock::new(options.compaction)),
             context_window: options.context_window,
             branch_summary_reserve_tokens: options.branch_summary_reserve_tokens.unwrap_or(16_384),
             compaction_abort: Arc::new(std::sync::Mutex::new(None)),
@@ -479,7 +484,8 @@ impl AgentSession {
             events,
             activity,
             bash_abort: Arc::new(std::sync::Mutex::new(None)),
-            retry_settings: options.retry,
+            retry_settings: Arc::new(RwLock::new(options.retry)),
+            retry_attempt: Arc::new(AtomicU32::new(0)),
             retry_abort: Arc::new(std::sync::Mutex::new(None)),
             shell_path: options.shell_path,
             shell_command_prefix: options.shell_command_prefix,
@@ -598,7 +604,7 @@ impl AgentSession {
             session_plugin_sources: options.plugins,
             session_plugin_driver: Arc::new(RwLock::new(session_plugin_driver)),
             operation_gate: Arc::new(tokio::sync::Mutex::new(())),
-            compaction_settings: options.compaction,
+            compaction_settings: Arc::new(RwLock::new(options.compaction)),
             context_window: options.context_window,
             branch_summary_reserve_tokens: options.branch_summary_reserve_tokens.unwrap_or(16_384),
             compaction_abort: Arc::new(std::sync::Mutex::new(None)),
@@ -606,7 +612,8 @@ impl AgentSession {
             events,
             activity,
             bash_abort: Arc::new(std::sync::Mutex::new(None)),
-            retry_settings: options.retry,
+            retry_settings: Arc::new(RwLock::new(options.retry)),
+            retry_attempt: Arc::new(AtomicU32::new(0)),
             retry_abort: Arc::new(std::sync::Mutex::new(None)),
             shell_path: options.shell_path,
             shell_command_prefix: options.shell_command_prefix,
@@ -950,6 +957,11 @@ impl AgentSession {
     /// Requests cancellation without waiting for the operation gate. Any
     /// undelivered queue items are retained for [`Self::clear_queue`].
     pub fn abort(&self) {
+        self.abort_retry();
+        self.runtime.abort();
+    }
+
+    pub fn abort_retry(&self) {
         if let Some(retry) = self
             .retry_abort
             .lock()
@@ -958,7 +970,6 @@ impl AgentSession {
         {
             retry.abort();
         }
-        self.runtime.abort();
     }
 
     pub fn is_retrying(&self) -> bool {
@@ -966,6 +977,58 @@ impl AgentSession {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_some()
+    }
+
+    pub fn auto_compaction_enabled(&self) -> bool {
+        self.compaction_settings().enabled
+    }
+
+    pub fn set_auto_compaction_enabled(&self, enabled: bool) {
+        self.compaction_settings
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .enabled = enabled;
+    }
+
+    pub fn auto_retry_enabled(&self) -> bool {
+        self.retry_settings().enabled
+    }
+
+    pub fn set_auto_retry_enabled(&self, enabled: bool) {
+        self.retry_settings
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .enabled = enabled;
+    }
+
+    pub fn steering_mode(&self) -> QueueMode {
+        self.runtime.agent().steering_mode()
+    }
+
+    pub fn set_steering_mode(&self, mode: QueueMode) {
+        self.runtime.agent().set_steering_mode(mode);
+    }
+
+    pub fn follow_up_mode(&self) -> QueueMode {
+        self.runtime.agent().follow_up_mode()
+    }
+
+    pub fn set_follow_up_mode(&self, mode: QueueMode) {
+        self.runtime.agent().set_follow_up_mode(mode);
+    }
+
+    fn compaction_settings(&self) -> CompactionSettings {
+        *self
+            .compaction_settings
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn retry_settings(&self) -> AutoRetrySettings {
+        *self
+            .retry_settings
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub async fn execute_shell(
@@ -990,7 +1053,7 @@ impl AgentSession {
                 "shell command cannot be empty".to_string(),
             ));
         }
-        let id = next_unique_id("bash");
+        let id = options.id.unwrap_or_else(|| next_unique_id("bash"));
         let (abort, signal) = AbortHandle::new();
         {
             let mut current = self
@@ -1043,19 +1106,23 @@ impl AgentSession {
             "excludeFromContext": options.exclude_from_context,
         }))?;
         let entry = SessionEntry::message(message);
-        if let Err(error) = (|| -> Result<(), SessionError> {
-            self.log.append(entry.clone())?;
+        let record = match (|| -> Result<SessionRecord, SessionError> {
+            let record = self.log.append_session_record(entry)?;
             let context = self
                 .log
                 .load()?
                 .context_with_options(&self.context_options)?;
-            restore_runtime_context(&self.runtime, &context)
+            restore_runtime_context(&self.runtime, &context)?;
+            Ok(record)
         })() {
-            self.events
-                .publish_bash_end(id, Some(result), Some(error.to_string()));
-            return Err(error);
-        }
-        self.events.publish_entry(entry);
+            Ok(record) => record,
+            Err(error) => {
+                self.events
+                    .publish_bash_end(id, Some(result), Some(error.to_string()));
+                return Err(error);
+            }
+        };
+        self.events.publish_entry(record);
         self.events.publish_bash_end(id, Some(result.clone()), None);
         Ok(result)
     }
@@ -1336,6 +1403,18 @@ impl AgentSession {
         result
     }
 
+    /// Runs a protocol-neutral, already-structured message batch.
+    ///
+    /// External adapters use this when their prompt vocabulary contains
+    /// images or other blocks that cannot be represented by [`Self::submit`]'s
+    /// text-only interface.
+    pub async fn prompt_messages(
+        &self,
+        messages: Vec<Message>,
+    ) -> Result<AgentLoopOutcome, SessionError> {
+        self.prompt(PromptInput::Messages(messages)).await
+    }
+
     async fn emit_agent_settled(&self) {
         self.runtime.dispatch_agent_settled().await;
         self.events
@@ -1346,6 +1425,8 @@ impl AgentSession {
         &self,
         recorded: RuntimePromptOutcome,
     ) -> Result<AgentLoopOutcome, SessionError> {
+        self.retry_attempt.store(0, Ordering::Release);
+        let _retry_attempt_reset = RetryAttemptReset(&self.retry_attempt);
         let mut recorded = recorded;
         let mut retry_attempt = 0_u32;
         let mut overflow_recovery_attempted = false;
@@ -1360,8 +1441,9 @@ impl AgentSession {
                         assistant_error_message(&outcome).map(ToOwned::to_owned),
                     );
                     retry_attempt = 0;
+                    self.retry_attempt.store(0, Ordering::Release);
                 }
-                if self.compaction_settings.enabled && !overflow_recovery_attempted {
+                if self.compaction_settings().enabled && !overflow_recovery_attempted {
                     overflow_recovery_attempted = true;
                     if self
                         .run_compaction_locked(crate::CompactionReason::Overflow, true, None, true)
@@ -1376,15 +1458,17 @@ impl AgentSession {
                 return Ok(outcome);
             }
 
-            if self.retry_settings.enabled
-                && retry_attempt < self.retry_settings.max_retries
+            let retry_settings = self.retry_settings();
+            if retry_settings.enabled
+                && retry_attempt < retry_settings.max_retries
                 && is_retryable_assistant_outcome(&outcome)
             {
                 retry_attempt = retry_attempt.saturating_add(1);
-                let delay_ms = retry_delay_ms(self.retry_settings.base_delay_ms, retry_attempt);
+                self.retry_attempt.store(retry_attempt, Ordering::Release);
+                let delay_ms = retry_delay_ms(retry_settings.base_delay_ms, retry_attempt);
                 self.events.publish_auto_retry_start(
                     retry_attempt,
-                    self.retry_settings.max_retries,
+                    retry_settings.max_retries,
                     delay_ms,
                     assistant_error_message(&outcome)
                         .unwrap_or("Unknown error")
@@ -1466,8 +1550,8 @@ impl AgentSession {
                     .map_err(|error| SessionError::InvalidPayload(error.to_string()))?,
             ),
         });
-        self.log.append(entry.clone())?;
-        self.events.publish_entry(entry);
+        let record = self.log.append_session_record(entry)?;
+        self.events.publish_entry(record);
         Ok(outcome)
     }
 
@@ -1488,8 +1572,9 @@ impl AgentSession {
             custom_type: custom_type.into(),
             data,
         });
-        let id = self.log.append(entry.clone())?;
-        self.events.publish_entry(entry);
+        let record = self.log.append_session_record(entry)?;
+        let id = record.id.clone();
+        self.events.publish_entry(record);
         Ok(id)
     }
 
@@ -1503,13 +1588,14 @@ impl AgentSession {
             .map_err(|_| SessionError::Busy)?;
         self.ensure_open()?;
         let entry = SessionEntry::custom_message(&message);
-        let id = self.log.append(entry.clone())?;
+        let record = self.log.append_session_record(entry)?;
+        let id = record.id.clone();
         let context = self
             .log
             .load()?
             .context_with_options(&self.context_options)?;
         restore_runtime_context(&self.runtime, &context)?;
-        self.events.publish_entry(entry);
+        self.events.publish_entry(record);
         Ok(id)
     }
 
@@ -1536,8 +1622,8 @@ impl AgentSession {
         let entry = SessionEntry::ActiveToolsChange(ActiveToolsEntry {
             active_tool_names: self.runtime.active_tools(),
         });
-        self.log.append(entry.clone())?;
-        self.events.publish_entry(entry);
+        let record = self.log.append_session_record(entry)?;
+        self.events.publish_entry(record);
         Ok(())
     }
 
@@ -1549,8 +1635,8 @@ impl AgentSession {
         self.ensure_open()?;
         self.runtime.set_model(provider.clone(), model_id.clone())?;
         let entry = SessionEntry::ModelChange(ModelChangeEntry { provider, model_id });
-        self.log.append(entry.clone())?;
-        self.events.publish_entry(entry);
+        let record = self.log.append_session_record(entry)?;
+        self.events.publish_entry(record);
         Ok(())
     }
 
@@ -1564,8 +1650,8 @@ impl AgentSession {
         let entry = SessionEntry::ThinkingLevelChange(ThinkingLevelEntry {
             thinking_level: thinking_level.as_str().to_string(),
         });
-        self.log.append(entry.clone())?;
-        self.events.publish_entry(entry);
+        let record = self.log.append_session_record(entry)?;
+        self.events.publish_entry(record);
         self.events
             .publish_thinking(thinking_level, self.runtime.agent().state());
         Ok(())
@@ -1673,21 +1759,19 @@ impl AgentSession {
         let reason = crate::CompactionReason::Manual;
         let document = self.log.load()?;
         let branch_entries = document.branch()?.into_iter().cloned().collect::<Vec<_>>();
-        let preparation = prepare_compaction(
-            &branch_entries,
-            self.compaction_settings,
-            &self.context_options,
-        )
-        .unwrap_or_else(|| CompactionPreparation {
-            messages_to_summarize: Vec::new(),
-            turn_prefix_messages: Vec::new(),
-            retained_tail: compaction.retained_tail.clone(),
-            is_split_turn: false,
-            tokens_before: compaction.tokens_before,
-            previous_summary: None,
-            file_ops: FileOperations::default(),
-            settings: self.compaction_settings,
-        });
+        let compaction_settings = self.compaction_settings();
+        let preparation =
+            prepare_compaction(&branch_entries, compaction_settings, &self.context_options)
+                .unwrap_or_else(|| CompactionPreparation {
+                    messages_to_summarize: Vec::new(),
+                    turn_prefix_messages: Vec::new(),
+                    retained_tail: compaction.retained_tail.clone(),
+                    is_split_turn: false,
+                    tokens_before: compaction.tokens_before,
+                    previous_summary: None,
+                    file_ops: FileOperations::default(),
+                    settings: compaction_settings,
+                });
         self.events.publish_compaction_start(reason);
         let (_, signal) = AbortHandle::new();
         let before = self
@@ -1720,22 +1804,22 @@ impl AgentSession {
             .map(|replacement| compaction = replacement)
             .is_some();
 
-        let result: Result<String, SessionError> = (|| {
-            let id = self
+        let result: Result<SessionRecord, SessionError> = (|| {
+            let record = self
                 .log
-                .append(SessionEntry::Compaction(compaction.clone()))?;
+                .append_session_record(SessionEntry::Compaction(compaction.clone()))?;
             let context = self
                 .log
                 .load()?
                 .context_with_options(&self.context_options)?;
             restore_runtime_context(&self.runtime, &context)?;
-            Ok(id)
+            Ok(record)
         })();
 
         match result {
-            Ok(id) => {
-                let entry = SessionEntry::Compaction(compaction.clone());
-                self.events.publish_entry(entry);
+            Ok(record) => {
+                let id = record.id.clone();
+                self.events.publish_entry(record.clone());
                 self.session_plugin_driver()
                     .session_compact(&SessionCompactEvent {
                         compaction_entry: compaction.clone(),
@@ -1745,7 +1829,7 @@ impl AgentSession {
                     })
                     .await;
                 self.events
-                    .publish_compaction_end(reason, Some(compaction), false, false, None);
+                    .publish_compaction_end(reason, Some(record), false, false, None);
                 Ok(id)
             }
             Err(error) => {
@@ -1813,7 +1897,7 @@ impl AgentSession {
         let entries = branch.into_iter().cloned().collect::<Vec<_>>();
         let context = crate::build_session_context(&entries, &self.context_options);
         let tokens = estimate_session_context_tokens(&entries, &context.messages).tokens;
-        if should_compact(tokens, context_window, self.compaction_settings) {
+        if should_compact(tokens, context_window, self.compaction_settings()) {
             let _ = self
                 .run_compaction_locked(crate::CompactionReason::Threshold, false, None, false)
                 .await;
@@ -1851,7 +1935,7 @@ impl AgentSession {
                 )
                 .tokens,
                 context_window,
-                self.compaction_settings,
+                self.compaction_settings(),
             )
     }
 
@@ -1882,7 +1966,7 @@ impl AgentSession {
         }
         let Some(preparation) = prepare_compaction(
             &preparation_entries,
-            self.compaction_settings,
+            self.compaction_settings(),
             &self.context_options,
         ) else {
             return Err(SessionError::InvalidEntry(
@@ -1966,21 +2050,21 @@ impl AgentSession {
             }
         };
 
-        let persisted: Result<String, SessionError> = (|| {
-            let id = self
+        let persisted: Result<SessionRecord, SessionError> = (|| {
+            let record = self
                 .log
-                .append(SessionEntry::Compaction(compaction.clone()))?;
+                .append_session_record(SessionEntry::Compaction(compaction.clone()))?;
             let context = self
                 .log
                 .load()?
                 .context_with_options(&self.context_options)?;
             restore_runtime_context(&self.runtime, &context)?;
-            Ok(id)
+            Ok(record)
         })();
         match persisted {
-            Ok(id) => {
-                self.events
-                    .publish_entry(SessionEntry::Compaction(compaction.clone()));
+            Ok(record) => {
+                let id = record.id.clone();
+                self.events.publish_entry(record.clone());
                 self.session_plugin_driver()
                     .session_compact(&SessionCompactEvent {
                         compaction_entry: compaction.clone(),
@@ -1989,13 +2073,8 @@ impl AgentSession {
                         will_retry,
                     })
                     .await;
-                self.events.publish_compaction_end(
-                    reason,
-                    Some(compaction.clone()),
-                    false,
-                    will_retry,
-                    None,
-                );
+                self.events
+                    .publish_compaction_end(reason, Some(record), false, will_retry, None);
                 Ok((id, compaction))
             }
             Err(error) => {
@@ -2070,9 +2149,10 @@ impl AgentSession {
         }
         self.log.move_lane(crate::MAIN_LANE, leaf_id)?;
         summary.from_id = previous_leaf.clone().unwrap_or_else(|| "root".to_string());
-        let id = self
+        let record = self
             .log
-            .append(SessionEntry::BranchSummary(summary.clone()))?;
+            .append_session_record(SessionEntry::BranchSummary(summary.clone()))?;
+        let id = record.id.clone();
         if let Some(label) = label {
             self.log.set_label(&id, Some(label))?;
         }
@@ -2081,8 +2161,7 @@ impl AgentSession {
             .load()?
             .context_with_options(&self.context_options)?;
         restore_runtime_context(&self.runtime, &context)?;
-        self.events
-            .publish_entry(SessionEntry::BranchSummary(summary.clone()));
+        self.events.publish_entry(record);
         self.session_plugin_driver()
             .session_tree(&SessionTreeEvent {
                 new_leaf_id: self.log.leaf_id(),
@@ -2205,12 +2284,16 @@ impl AgentSession {
         let events = Arc::clone(&self.events);
         let agent = self.runtime.agent().downgrade();
         let activity = Arc::clone(&self.activity);
+        let retry_settings = Arc::clone(&self.retry_settings);
+        let retry_attempt = Arc::clone(&self.retry_attempt);
         self.runtime.agent().subscribe(Arc::new(
             move |event: AgentEvent, _signal: pi_core::AbortSignal| {
                 let log = log.clone();
                 let events = Arc::clone(&events);
                 let agent = agent.clone();
                 let activity = Arc::clone(&activity);
+                let retry_settings = Arc::clone(&retry_settings);
+                let retry_attempt = Arc::clone(&retry_attempt);
                 async move {
                     let display_text = product_display_text(&activity, &event);
                     let (persisted_entry, queue_snapshot) = if let AgentEvent::MessageEnd {
@@ -2252,19 +2335,21 @@ impl AgentSession {
                                     .map_err(|error| EventError(error.to_string()))?;
                                 }
                             }
-                            log.append_entry(target.clone(), MAIN_LANE)
+                            let record = log
+                                .append_entry(target.clone(), MAIN_LANE)
                                 .map_err(|error| EventError(error.to_string()))?;
                             let queue_snapshot =
                                 pending.kind.is_some().then(|| activity.queue_snapshot());
-                            (Some(target.entry), queue_snapshot)
+                            (Some(record), queue_snapshot)
                         } else {
                             let entry = match message {
                                 Message::Custom(message) => SessionEntry::custom_message(message),
                                 message => SessionEntry::message(message.clone()),
                             };
-                            log.append(entry.clone())
+                            let record = log
+                                .append_session_record(entry)
                                 .map_err(|error| EventError(error.to_string()))?;
-                            (Some(entry), None)
+                            (Some(record), None)
                         }
                     } else {
                         (None, None)
@@ -2280,10 +2365,20 @@ impl AgentSession {
                     let Some(agent_state) = agent.state() else {
                         return Ok(());
                     };
-                    events.publish_agent(
-                        project_product_user_event(event, display_text.as_deref()),
-                        agent_state,
-                    );
+                    match project_product_user_event(event, display_text.as_deref()) {
+                        AgentEvent::AgentEnd { messages } => {
+                            let settings = *retry_settings
+                                .read()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let will_retry = will_retry_after_agent_end(
+                                &messages,
+                                settings,
+                                retry_attempt.load(Ordering::Acquire),
+                            );
+                            events.publish_agent_end(messages, will_retry, agent_state);
+                        }
+                        event => events.publish_agent(event, agent_state),
+                    }
                     if let Some(snapshot) = queue_snapshot {
                         events.publish_queue(snapshot);
                     }
@@ -2326,6 +2421,34 @@ fn assistant_error_message(outcome: &AgentLoopOutcome) -> Option<&str> {
 
 fn assistant_outcome_succeeded(outcome: &AgentLoopOutcome) -> bool {
     last_assistant(outcome).is_some_and(|message| message.stop_reason != StopReason::Error)
+}
+
+struct RetryAttemptReset<'a>(&'a AtomicU32);
+
+impl Drop for RetryAttemptReset<'_> {
+    fn drop(&mut self) {
+        self.0.store(0, Ordering::Release);
+    }
+}
+
+fn will_retry_after_agent_end(
+    messages: &[Message],
+    settings: AutoRetrySettings,
+    attempt: u32,
+) -> bool {
+    if !settings.enabled || attempt >= settings.max_retries {
+        return false;
+    }
+    messages.iter().rev().find_map(|message| match message {
+        Message::Assistant(message) => Some(
+            message.stop_reason == StopReason::Error
+                && message
+                    .error_message
+                    .as_deref()
+                    .is_some_and(pi_core::is_retryable_provider_error_message),
+        ),
+        _ => None,
+    }) == Some(true)
 }
 
 fn retry_delay_ms(base_delay_ms: u64, attempt: u32) -> u64 {
@@ -4621,8 +4744,12 @@ mod tests {
 
         let mut starts = Vec::new();
         let mut ends = Vec::new();
+        let mut agent_ends = Vec::new();
         while let Ok(event) = subscription.events.try_recv() {
             match event.event {
+                AgentSessionEvent::AgentEnd { will_retry, .. } => {
+                    agent_ends.push(will_retry);
+                }
                 AgentSessionEvent::AutoRetryStart {
                     attempt,
                     max_attempts,
@@ -4637,6 +4764,7 @@ mod tests {
         }
         assert_eq!(starts, vec![(1, 3, 0)]);
         assert_eq!(ends, vec![(true, 1)]);
+        assert_eq!(agent_ends, vec![true, false]);
         assert!(session.snapshot().auto_retry.is_none());
     }
 

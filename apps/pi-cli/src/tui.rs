@@ -807,7 +807,7 @@ impl App {
         match message {
             AppMessage::SessionEvent { event, snapshot } => {
                 self.screen_selection = None;
-                self.apply_session_event(event);
+                self.apply_session_event(*event);
                 self.sync_snapshot(&snapshot);
             }
             AppMessage::EffectCompleted(done) if done.epoch == self.epoch => {
@@ -930,6 +930,9 @@ impl App {
     fn apply_session_event(&mut self, event: AgentSessionEvent) {
         match event {
             AgentSessionEvent::Agent(event) => self.apply_agent_event(*event),
+            AgentSessionEvent::AgentEnd { messages, .. } => {
+                self.apply_agent_event(AgentEvent::AgentEnd { messages });
+            }
             AgentSessionEvent::AgentSettled => {
                 self.awaiting_assistant = false;
                 self.working_started_at = None;
@@ -971,7 +974,7 @@ impl App {
             AgentSessionEvent::EntryAppended { entry } => {
                 self.session_tokens = self
                     .session_tokens
-                    .saturating_add(session_entry_token_usage(&entry));
+                    .saturating_add(session_entry_token_usage(&entry.entry));
             }
             AgentSessionEvent::ThinkingLevelChanged { level } => {
                 self.status = format!("Thinking: {}", level.as_str());
@@ -1425,7 +1428,7 @@ async fn run_loop(
                 Ok(event) if event.revision > subscription.snapshot.revision => {
                     subscription.snapshot.revision = event.revision;
                     app.update(AppMessage::SessionEvent {
-                        event: event.event,
+                        event: Box::new(event.event),
                         snapshot: Box::new(session.snapshot()),
                     });
                 }
@@ -1860,7 +1863,7 @@ mod tests {
     use super::*;
     use pi_session::{
         AgentSessionRuntimeRequest, AgentSessionRuntimeTarget, CompactionEntry,
-        MultiSessionManager, SessionHeader, SessionLog,
+        MultiSessionManager, SessionHeader, SessionLog, SessionRecord,
     };
     use ratatui::backend::TestBackend;
     use ratatui::{TerminalOptions, Viewport};
@@ -4399,16 +4402,22 @@ mod tests {
         let mut tool_usage = billed_usage(20, 5, 6, 7);
         tool_usage.total_tokens = 0;
         app.apply_session_event(AgentSessionEvent::EntryAppended {
-            entry: SessionEntry::message(Message::tool_result(pi_core::ToolResultMessage {
-                tool_call_id: ToolCallId::new("metered-call"),
-                tool_name: "metered".to_string(),
-                content: vec![ContentBlock::Text(pi_core::TextContent::new("result"))],
-                details: None,
-                usage: Some(tool_usage),
-                added_tool_names: None,
-                is_error: false,
+            entry: SessionRecord {
+                id: "tool-entry".to_string(),
+                seq: 1,
+                parent_id: None,
                 timestamp_ms: 2,
-            })),
+                entry: SessionEntry::message(Message::tool_result(pi_core::ToolResultMessage {
+                    tool_call_id: ToolCallId::new("metered-call"),
+                    tool_name: "metered".to_string(),
+                    content: vec![ContentBlock::Text(pi_core::TextContent::new("result"))],
+                    details: None,
+                    usage: Some(tool_usage),
+                    added_tool_names: None,
+                    is_error: false,
+                    timestamp_ms: 2,
+                })),
+            },
         });
         let compaction = CompactionEntry {
             summary: "summary".to_string(),
@@ -4418,11 +4427,23 @@ mod tests {
             usage: Some(billed_usage(30, 8, 9, 10)),
         };
         app.apply_session_event(AgentSessionEvent::EntryAppended {
-            entry: SessionEntry::Compaction(compaction.clone()),
+            entry: SessionRecord {
+                id: "compaction-entry".to_string(),
+                seq: 2,
+                parent_id: Some("tool-entry".to_string()),
+                timestamp_ms: 3,
+                entry: SessionEntry::Compaction(compaction.clone()),
+            },
         });
         app.apply_session_event(AgentSessionEvent::CompactionEnd {
             reason: pi_session::CompactionReason::Manual,
-            result: Some(compaction),
+            result: Some(SessionRecord {
+                id: "compaction-entry".to_string(),
+                seq: 2,
+                parent_id: Some("tool-entry".to_string()),
+                timestamp_ms: 3,
+                entry: SessionEntry::Compaction(compaction),
+            }),
             aborted: false,
             will_retry: false,
             error_message: None,

@@ -132,6 +132,8 @@ checks that descriptor before resolving a Rust-ABI trait-object constructor. Nat
 trusted in-process code and are intentionally never unloaded during the process lifetime. Before
 loading, the host snapshots each artifact below `<agent-dir>/cache/plugins/artifacts/<sha256>`;
 unchanged content reuses one pinned handle, while a rebuilt artifact gets a new load path on reload.
+The SDK also pins the `serde_json::Value` map representation used by constructor options, so feature
+unification in a host workspace cannot silently change that Rust-ABI type's layout.
 
 The current contract is native ABI **4**. It adds provider header/response lifecycle hooks to the
 ABI 3 macro-derived agent hook-interest contract and ABI 2 shared `AgentContext` /

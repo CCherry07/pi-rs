@@ -19,6 +19,7 @@ mod compaction;
 mod context;
 mod event;
 mod jsonl;
+mod legacy_import;
 mod memory;
 mod model_runtime_services;
 mod multi_session_manager;
@@ -38,6 +39,7 @@ pub use agent_session::{
 pub use agent_session_runtime::{
     AgentSessionReplacement, AgentSessionRuntime, AgentSessionRuntimeError,
     AgentSessionRuntimeFactory, AgentSessionRuntimeRequest, AgentSessionRuntimeTarget,
+    SessionGenerationOverlay,
 };
 pub use compaction::*;
 pub use context::{
@@ -52,6 +54,9 @@ pub use event::{
     RevisionedAgentSessionEvent,
 };
 pub use jsonl::SessionLog;
+pub use legacy_import::{
+    LegacySessionImportReport, SessionFileFormat, import_session_file, inspect_session_file,
+};
 pub use memory::{InMemorySession, InMemorySessionRepo};
 pub use model_runtime_services::{
     InitialModelRequest, InitialModelResolveError, InitialModelResolver, InitialModelSelection,

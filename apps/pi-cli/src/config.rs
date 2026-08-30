@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use pi_js_package_manager::ResolveRequest as JsResolveRequest;
 
 #[derive(Debug, Parser)]
@@ -22,6 +22,17 @@ pub(crate) struct Cli {
     /// Emit newline-delimited product events.
     #[arg(long)]
     pub(crate) json: bool,
+
+    /// Output/control mode compatible with Pi: text, json, or rpc.
+    #[arg(long, value_enum)]
+    pub(crate) mode: Option<OutputMode>,
+
+    /// Serve Agent Client Protocol stable v1 over stdin/stdout.
+    #[arg(
+        long,
+        conflicts_with_all = ["print", "json", "mode", "session", "prompt"]
+    )]
+    pub(crate) acp: bool,
 
     /// Use the terminal alternate screen. This is the default.
     #[arg(long)]
@@ -81,6 +92,13 @@ pub(crate) struct Cli {
     /// Do not trust project-local settings or resources.
     #[arg(long, conflicts_with = "approve", global = true)]
     pub(crate) no_approve: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum OutputMode {
+    Text,
+    Json,
+    Rpc,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -401,6 +419,15 @@ mod tests {
     }
 
     #[test]
+    fn acp_is_a_dedicated_stdio_mode() {
+        assert!(Cli::try_parse_from(["pi", "--acp"]).unwrap().acp);
+        assert!(Cli::try_parse_from(["pi", "--acp", "--print", "hello"]).is_err());
+        assert!(Cli::try_parse_from(["pi", "--acp", "--mode", "rpc"]).is_err());
+        assert!(Cli::try_parse_from(["pi", "--acp", "--session", "old.jsonl"]).is_err());
+        assert!(Cli::try_parse_from(["pi", "--acp", "hello"]).is_err());
+    }
+
+    #[test]
     fn resolving_a_new_session_does_not_create_its_directory() {
         let directory = tempfile::tempdir().unwrap();
         let session_path = directory.path().join("agent/sessions/new.jsonl");
@@ -409,6 +436,8 @@ mod tests {
             prompt: Vec::new(),
             print: false,
             json: false,
+            mode: None,
+            acp: false,
             fullscreen: false,
             no_fullscreen: false,
             cwd: directory.path().to_path_buf(),

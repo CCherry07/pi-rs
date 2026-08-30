@@ -368,6 +368,22 @@ impl Agent {
         self.inner.follow_up.clear();
     }
 
+    pub fn steering_mode(&self) -> QueueMode {
+        self.inner.steering.mode()
+    }
+
+    pub fn set_steering_mode(&self, mode: QueueMode) {
+        self.inner.steering.set_mode(mode);
+    }
+
+    pub fn follow_up_mode(&self) -> QueueMode {
+        self.inner.follow_up.mode()
+    }
+
+    pub fn set_follow_up_mode(&self, mode: QueueMode) {
+        self.inner.follow_up.set_mode(mode);
+    }
+
     pub fn abort(&self) {
         if let Some(active) = self
             .inner

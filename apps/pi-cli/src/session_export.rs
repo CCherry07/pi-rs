@@ -1,11 +1,11 @@
 use std::fmt::Write as _;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write as _};
+use std::fs::OpenOptions;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use pi_core::{ContentBlock, CustomMessageContent, Message};
 use pi_session::{
-    AgentMessage, AgentSession, SESSION_SCHEMA_VERSION, SessionDocument, SessionEntry, SessionError,
+    AgentMessage, AgentSession, SessionDocument, SessionEntry, SessionError, inspect_session_file,
 };
 use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
 use serde_json::Value;
@@ -53,33 +53,9 @@ pub(crate) fn resolve_user_path(cwd: &Path, input: &str) -> PathBuf {
 }
 
 pub(crate) fn validate_v4_import(path: &Path) -> Result<(), String> {
-    let file = File::open(path)
-        .map_err(|error| format!("cannot open session {}: {error}", path.display()))?;
-    let mut first_line = String::new();
-    BufReader::new(file)
-        .read_line(&mut first_line)
-        .map_err(|error| format!("cannot read session {}: {error}", path.display()))?;
-    let header: Value = serde_json::from_str(first_line.trim_end())
-        .map_err(|error| format!("invalid session header in {}: {error}", path.display()))?;
-    let version = header.get("version").and_then(Value::as_u64);
-    if header.get("kind").and_then(Value::as_str) == Some("header")
-        && version == Some(u64::from(SESSION_SCHEMA_VERSION))
-    {
-        return Ok(());
-    }
-    if header.get("type").and_then(Value::as_str) == Some("session")
-        && version.is_some_and(|version| version <= 3)
-    {
-        return Err(format!(
-            "Pi v{} session import requires the v3→v4 migration bridge, which is not implemented yet",
-            version.unwrap_or_default()
-        ));
-    }
-    Err(format!(
-        "unsupported session format in {}; expected pi-rs v{} JSONL",
-        path.display(),
-        SESSION_SCHEMA_VERSION
-    ))
+    inspect_session_file(path)
+        .map(|_| ())
+        .map_err(|error| format!("unsupported session format in {}: {error}", path.display()))
 }
 
 pub(crate) fn export_jsonl(
@@ -549,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn import_validation_distinguishes_legacy_and_v4_headers() {
+    fn import_validation_accepts_legacy_and_v4_headers() {
         let directory = tempfile::tempdir().unwrap();
         let legacy = directory.path().join("legacy.jsonl");
         std::fs::write(
@@ -561,9 +537,7 @@ mod tests {
         let current = directory.path().join("current.jsonl");
         SessionLog::create(&current, SessionHeader::new("current", directory.path())).unwrap();
 
-        let error = validate_v4_import(&legacy).unwrap_err();
-
-        assert!(error.contains("v3→v4 migration bridge"));
+        assert!(validate_v4_import(&legacy).is_ok());
         assert!(validate_v4_import(&current).is_ok());
     }
 }

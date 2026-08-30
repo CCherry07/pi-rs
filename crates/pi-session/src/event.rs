@@ -1,11 +1,11 @@
 use std::sync::{Arc, RwLock};
 
 use pi_agent::AgentStateSnapshot;
-use pi_core::{AgentEvent, ThinkingLevel};
+use pi_core::{AgentEvent, Message, ThinkingLevel};
 use pi_shell::{ShellResult, ShellStream};
 use tokio::sync::broadcast;
 
-use crate::{CompactionEntry, CompactionReason, SessionEntry};
+use crate::{CompactionReason, SessionRecord};
 
 const DEFAULT_EVENT_CAPACITY: usize = 512;
 
@@ -41,6 +41,12 @@ impl ExtensionNoticeLevel {
 #[non_exhaustive]
 pub enum AgentSessionEvent {
     Agent(Box<AgentEvent>),
+    /// Session-authoritative agent end. The low-level agent cannot know
+    /// whether the session retry policy will continue the run.
+    AgentEnd {
+        messages: Vec<Message>,
+        will_retry: bool,
+    },
     AgentSettled,
     QueueUpdate {
         steering: Vec<String>,
@@ -51,7 +57,9 @@ pub enum AgentSessionEvent {
     },
     CompactionEnd {
         reason: CompactionReason,
-        result: Option<CompactionEntry>,
+        /// The committed compaction record. Keeping its tree identity lets
+        /// Pi JSON/RPC consumers recover `firstKeptEntryId` exactly.
+        result: Option<SessionRecord>,
         aborted: bool,
         will_retry: bool,
         error_message: Option<String>,
@@ -68,7 +76,7 @@ pub enum AgentSessionEvent {
         final_error: Option<String>,
     },
     EntryAppended {
-        entry: SessionEntry,
+        entry: SessionRecord,
     },
     SessionInfoChanged {
         name: Option<String>,
@@ -201,13 +209,28 @@ impl AgentSessionEventHub {
         });
     }
 
+    pub(crate) fn publish_agent_end(
+        &self,
+        messages: Vec<Message>,
+        will_retry: bool,
+        agent: AgentStateSnapshot,
+    ) {
+        self.publish(
+            AgentSessionEvent::AgentEnd {
+                messages,
+                will_retry,
+            },
+            |snapshot| snapshot.agent = agent,
+        );
+    }
+
     pub(crate) fn publish_agent_settled(&self, agent: AgentStateSnapshot) {
         self.publish(AgentSessionEvent::AgentSettled, |snapshot| {
             snapshot.agent = agent;
         });
     }
 
-    pub(crate) fn publish_entry(&self, entry: SessionEntry) {
+    pub(crate) fn publish_entry(&self, entry: SessionRecord) {
         self.publish(
             AgentSessionEvent::EntryAppended {
                 entry: entry.clone(),
@@ -235,7 +258,7 @@ impl AgentSessionEventHub {
     pub(crate) fn publish_compaction_end(
         &self,
         reason: CompactionReason,
-        result: Option<CompactionEntry>,
+        result: Option<SessionRecord>,
         aborted: bool,
         will_retry: bool,
         error_message: Option<String>,

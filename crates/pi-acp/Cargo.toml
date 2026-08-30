@@ -1,0 +1,23 @@
+[package]
+name = "pi-acp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-client-protocol = { version = "2.0.0", default-features = false }
+pi-agent.workspace = true
+pi-core.workspace = true
+pi-mcp.workspace = true
+pi-session.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-std"] }
+uuid = { version = "1.18.1", features = ["v7"] }
+
+[dev-dependencies]
+pi-runtime.workspace = true
+pi-test-support.workspace = true
+tempfile = "3.22.0"
+tokio-util = { workspace = true, features = ["compat"] }

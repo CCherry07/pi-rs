@@ -6,8 +6,8 @@
 参照，提供可实际使用的全屏 TUI、模型与 Provider 配置、工具调用、Skills、项目 Trust，
 以及可恢复的 Pi v4 会话。
 
-这不是只有 agent loop 的库移植：交互 TUI、单次输出、NDJSON 事件流、会话恢复、上下文
-压缩和插件热重载共享同一套产品运行时。
+这不是只有 agent loop 的库移植：交互 TUI、单次输出、Pi 兼容 NDJSON、stdin/stdout RPC、
+会话恢复、上下文压缩和插件热重载共享同一套产品运行时。
 
 > 当前状态：已经形成可运行的产品基线，仍在持续补齐 current-Pi conformance、中断操作的
 > 显式安全重放，以及具备发布者认证的原生插件分发。
@@ -26,7 +26,8 @@ Pi 清晰的产品理念、克制的核心设计与 extension-first 架构，正
 
 - **终端产品**：基于 Ratatui、Crossterm 和 Tokio 的全屏 TUI，支持 Markdown、代码高亮、
   中文 IME、复制选择、历史记录、滚动和命令选择器。
-- **三种运行模式**：交互 TUI、`--print` 单次输出、`--json` NDJSON 产品事件流。
+- **五种运行模式**：交互 TUI、`--print` 单次输出、`--json` Pi 兼容 NDJSON、
+  `--mode rpc` 双向 stdin/stdout RPC，以及 `--acp` ACP stable v1。
 - **插件优先**：`AgentPlugin`、`ProviderPlugin`、`SessionPlugin` 三套窄生命周期；插件按
   generation 构建并原子 reload，失败时保留上一代。
 - **原生插件**：版本锁定的 Rust `cdylib` 可从全局 manifest、可信项目 manifest 或重复
@@ -45,8 +46,8 @@ Pi 清晰的产品理念、克制的核心设计与 extension-first 架构，正
 - **Skills 与 prompt templates**：自动发现全局和项目 Skills、注册 `/skill:<name>`，并从
   Markdown prompt template 注册 slash command，在每次 agent run 生成系统 prompt
   contribution。
-- **Pi v4 会话**：支持延迟首次落盘、`/resume`、队列、分支/树语义、压缩、上下文修复和
-  recovery reduction。
+- **Pi v4 会话**：支持延迟首次落盘、`/resume`、队列、分支/树语义、压缩、上下文修复、
+  recovery reduction，以及非破坏式导入 Pi coding-agent v1/v2/v3 会话。
 - **项目 Trust**：使用 `<agent-dir>/trust.json` 保存最近祖先决策，统一控制项目 settings、
   prompt、skills、extensions 和原生插件的加载。
 
@@ -99,6 +100,12 @@ pi --print "summarize this repository"
 
 # 输出 NDJSON 产品事件
 pi --json "list the Rust crates"
+
+# 启动双向 Pi stdin/stdout RPC adapter
+pi --mode rpc
+
+# 为 Zed 或其他 ACP client 启动 ACP stable v1
+pi --acp --no-extensions
 
 # 从 stdin 读取 prompt
 printf 'explain this project' | pi --print
@@ -361,25 +368,27 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 
 ## 架构
 
-| 目录                                        | 职责                                                                |
-| ------------------------------------------- | ------------------------------------------------------------------- |
-| `apps/pi-cli`                               | CLI、TUI、终端生命周期、Project Trust 和产品装配                    |
-| `crates/pi-core`                            | 强类型 contracts、registries 和插件 drivers                         |
-| `crates/pi-agent`                           | Agent façade、agent loop、stream assembly 和工具调度                |
-| `crates/pi-runtime`                         | generation 构建、prompt 装配和原子 reload                           |
-| `crates/pi-session`                         | Pi v4 JSONL、树/分支、压缩、恢复 reducer 和 session runtime         |
-| `crates/pi-telemetry`                       | 强类型 Provider/harness span schema 与 sink adapter                 |
-| `crates/pi-provider`                        | Provider-neutral HTTP transport 与 SSE                              |
-| `crates/pi-prompt` / `pi-resources`         | 系统 prompt 和项目上下文发现                                        |
-| `apps/pi-md`                                | TUI 所有的 Markdown 解析、streaming mend、语法高亮和 Ratatui 渲染   |
-| `crates/pi-plugin-sdk` / `pi-plugin-loader` | 原生插件作者 interface、兼容校验、发现与 factory adapter            |
-| `crates/pi-plugin-manager`                  | Package intent/lock、静态 Registry、target 选择和 CAS 安装          |
-| `crates/pi-js-package-manager`              | Pi 兼容的 JS/TS 发现与本地/npm/git package 管理                     |
-| `crates/pi-js-plugin` / `bindings/pi-napi`  | 强类型 JS lifecycle adapter 与 Node/NAPI 边界                       |
-| `packages/pi`                               | Node 启动层、Pi extension 发现、Jiti loader 和 callback generations |
-| `plugins/`                                  | Prompt/Skill features、Provider catalog 和独立生产工具插件          |
-| `legacy/pi`                                 | 当前 TypeScript Pi 行为参照                                         |
-| `e2e`                                       | runtime acceptance、黑盒产品 E2E 与示例项目                         |
+| 目录                                             | 职责                                                                |
+| ------------------------------------------------ | ------------------------------------------------------------------- |
+| `apps/pi-cli`                                    | CLI、TUI、终端生命周期、Project Trust 和产品装配                    |
+| `crates/pi-core`                                 | 强类型 contracts、registries 和插件 drivers                         |
+| `crates/pi-agent`                                | Agent façade、agent loop、stream assembly 和工具调度                |
+| `crates/pi-runtime`                              | generation 构建、prompt 装配和原子 reload                           |
+| `crates/pi-session`                              | Pi v4 JSONL、树/分支、压缩、恢复 reducer 和 session runtime         |
+| `crates/pi-rpc`                                  | Pi JSON 投影与 stdin/stdout RPC                                     |
+| `crates/pi-acp` / `pi-mcp`                      | ACP stable-v1 会话与协议无关的 MCP client/工具集成                  |
+| `crates/pi-telemetry`                            | 强类型 Provider/harness span schema 与 sink adapter                 |
+| `crates/pi-provider`                             | Provider-neutral HTTP transport 与 SSE                              |
+| `crates/pi-prompt` / `pi-resources`              | 系统 prompt 和项目上下文发现                                        |
+| `apps/pi-md`                                     | TUI 所有的 Markdown 解析、streaming mend、语法高亮和 Ratatui 渲染   |
+| `crates/pi-plugin-sdk` / `pi-plugin-loader`      | 原生插件作者 interface、兼容校验、发现与 factory adapter            |
+| `crates/pi-plugin-manager`                       | Package intent/lock、静态 Registry、target 选择和 CAS 安装          |
+| `crates/pi-js-package-manager`                   | Pi 兼容的 JS/TS 发现与本地/npm/git package 管理                     |
+| `crates/pi-js-plugin` / `bindings/pi-napi`       | 强类型 JS lifecycle adapter 与 Node/NAPI 边界                       |
+| `packages/pi`                                    | Node 启动层、Pi extension 发现、Jiti loader 和 callback generations |
+| `plugins/`                                       | Prompt/Skill features、Provider catalog 和独立生产工具插件          |
+| `legacy/pi`                                      | 当前 TypeScript Pi 行为参照                                         |
+| `e2e`                                            | runtime acceptance、黑盒产品 E2E 与示例项目                         |
 
 依赖保持向内：核心 contracts 不拥有终端、文件发现、会话存储或厂商路由策略。详细设计、
 hook 顺序和持久化不变量见 [docs/architecture.md](docs/architecture.md)。

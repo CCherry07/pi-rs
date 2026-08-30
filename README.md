@@ -6,8 +6,9 @@
 current TypeScript Pi as its behavioral reference and provides a usable fullscreen TUI, model and
 provider configuration, tool execution, skills, project trust, and resumable Pi v4 sessions.
 
-This is more than an agent-loop library port. The interactive TUI, one-shot output, NDJSON event
-stream, session restore, context compaction, and plugin reload all run on the same product runtime.
+This is more than an agent-loop library port. The interactive TUI, one-shot output, Pi-compatible
+NDJSON and stdin/stdout RPC, session restore, context compaction, and plugin reload all run on the
+same product runtime.
 
 > Status: the repository contains a usable product baseline. Current work continues on current-Pi
 > conformance, opt-in safe replay after interrupted operations, and authenticated native plugin
@@ -29,8 +30,8 @@ behavior, and being explicit whenever the Rust product diverges.
 - **Terminal product**: a fullscreen TUI built with Ratatui, Crossterm, and Tokio, with Markdown,
   syntax highlighting, CJK IME input, copy selection, input history, scrolling, and command
   selectors.
-- **Three frontend modes**: interactive TUI, one-shot `--print`, and an NDJSON product-event stream
-  with `--json`.
+- **Five frontend modes**: interactive TUI, one-shot `--print`, Pi-compatible NDJSON with `--json`,
+  bidirectional stdin/stdout RPC with `--mode rpc`, and ACP stable v1 with `--acp`.
 - **Plugin-first runtime**: narrow `AgentPlugin`, `ProviderPlugin`, and `SessionPlugin` lifecycles;
   plugins are built as immutable generations and reloaded atomically, with rollback on failure.
 - **Native plugins**: version-locked Rust `cdylib` plugins load from global manifests, trusted
@@ -49,7 +50,8 @@ behavior, and being explicit whenever the Rust product diverges.
 - **Skills and prompt templates**: global and project discovery, `/skill:<name>` commands, Markdown
   prompt-template slash commands, and generation-time system prompt contributions.
 - **Pi v4 sessions**: lazy first-response persistence, `/resume`, durable queues, branch/tree
-  semantics, compaction, context repair, and recovery reduction.
+  semantics, compaction, context repair, recovery reduction, and non-destructive import of Pi
+  coding-agent v1/v2/v3 sessions.
 - **Project trust**: nearest-ancestor decisions persisted in `<agent-dir>/trust.json`, shared by
   project settings, prompts, skills, extensions, and native plugins.
 
@@ -103,6 +105,12 @@ pi --print "summarize this repository"
 
 # Emit NDJSON product events
 pi --json "list the Rust crates"
+
+# Start the bidirectional Pi stdin/stdout RPC adapter
+pi --mode rpc
+
+# Serve ACP stable v1 for Zed or another ACP client
+pi --acp --no-extensions
 
 # Read a prompt from stdin
 printf 'explain this project' | pi --print
@@ -447,25 +455,27 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 
 ## Architecture
 
-| Directory                                   | Responsibility                                                                           |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `apps/pi-cli`                               | CLI, TUI, terminal lifecycle, project trust, and product assembly                        |
-| `crates/pi-core`                            | Strongly typed contracts, registries, and plugin drivers                                 |
-| `crates/pi-agent`                           | Agent façade, agent loop, stream assembly, and tool scheduling                           |
-| `crates/pi-runtime`                         | Generation construction, prompt assembly, and atomic reload                              |
-| `crates/pi-session`                         | Pi v4 JSONL, tree/branch state, compaction, recovery reducer, and session runtime        |
-| `crates/pi-telemetry`                       | Typed provider/harness span schemas and sink adapters                                    |
-| `crates/pi-provider`                        | Provider-neutral HTTP transport and SSE                                                  |
-| `crates/pi-prompt` / `pi-resources`         | System prompt and project context discovery                                              |
-| `apps/pi-md`                                | TUI-owned Markdown parsing, streaming repair, syntax highlighting, and Ratatui rendering |
-| `crates/pi-plugin-sdk` / `pi-plugin-loader` | Native author interface, compatibility checks, discovery, and factory adapters           |
-| `crates/pi-plugin-manager`                  | Package intent/lock, static Registry resolution, target selection, and CAS installation  |
-| `crates/pi-js-package-manager`              | Pi-compatible JS/TS discovery and local/npm/git package management                       |
-| `crates/pi-js-plugin` / `bindings/pi-napi`  | Typed JS lifecycle adapters and the Node/NAPI boundary                                   |
-| `packages/pi`                               | Node launcher, Pi extension discovery, Jiti loader, and callback generations             |
-| `plugins/`                                  | Prompt/skill features, provider catalog, and independent production tool plugins         |
-| `legacy/pi`                                 | Current TypeScript Pi behavioral oracle                                                  |
-| `e2e`                                       | Runtime acceptance, black-box product E2E, and example projects                          |
+| Directory                                        | Responsibility                                                                           |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| `apps/pi-cli`                                    | CLI, TUI, terminal lifecycle, project trust, and product assembly                        |
+| `crates/pi-core`                                 | Strongly typed contracts, registries, and plugin drivers                                 |
+| `crates/pi-agent`                                | Agent façade, agent loop, stream assembly, and tool scheduling                           |
+| `crates/pi-runtime`                              | Generation construction, prompt assembly, and atomic reload                              |
+| `crates/pi-session`                              | Pi v4 JSONL, tree/branch state, compaction, recovery reducer, and session runtime        |
+| `crates/pi-rpc`                                  | Pi JSON projection and stdin/stdout RPC                                                   |
+| `crates/pi-acp` / `pi-mcp`                      | ACP stable-v1 sessions and protocol-neutral MCP client/tool integration                  |
+| `crates/pi-telemetry`                            | Typed provider/harness span schemas and sink adapters                                    |
+| `crates/pi-provider`                             | Provider-neutral HTTP transport and SSE                                                  |
+| `crates/pi-prompt` / `pi-resources`              | System prompt and project context discovery                                              |
+| `apps/pi-md`                                     | TUI-owned Markdown parsing, streaming repair, syntax highlighting, and Ratatui rendering |
+| `crates/pi-plugin-sdk` / `pi-plugin-loader`      | Native author interface, compatibility checks, discovery, and factory adapters           |
+| `crates/pi-plugin-manager`                       | Package intent/lock, static Registry resolution, target selection, and CAS installation  |
+| `crates/pi-js-package-manager`                   | Pi-compatible JS/TS discovery and local/npm/git package management                       |
+| `crates/pi-js-plugin` / `bindings/pi-napi`       | Typed JS lifecycle adapters and the Node/NAPI boundary                                   |
+| `packages/pi`                                    | Node launcher, Pi extension discovery, Jiti loader, and callback generations             |
+| `plugins/`                                       | Prompt/skill features, provider catalog, and independent production tool plugins         |
+| `legacy/pi`                                      | Current TypeScript Pi behavioral oracle                                                  |
+| `e2e`                                            | Runtime acceptance, black-box product E2E, and example projects                          |
 
 Dependencies point inward: core contracts do not own terminal behavior, filesystem discovery,
 session storage, or vendor routing policy. See [docs/architecture.md](docs/architecture.md) for hook

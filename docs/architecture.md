@@ -3,8 +3,9 @@
 ## Scope
 
 The current product is a plugin-first Rust coding agent with one `MultiSessionManager` / `PiSession`
-Interface behind interactive TUI, print, and NDJSON modes. Both the standalone binary and the Node
-extension host delegate interactive terminal ownership to the Ratatui frontend in `apps/pi-cli`.
+Interface behind interactive TUI, print, Pi-compatible NDJSON, and stdin/stdout RPC modes. Both the
+standalone binary and the Node extension host delegate interactive terminal ownership to the
+Ratatui frontend in `apps/pi-cli`.
 Its core implements the deterministic:
 
 ```text
@@ -30,6 +31,9 @@ crates/pi-resources             generic system/append prompts and project contex
 crates/pi-session               Pi v4 storage plus MultiSessionManager/PiSession product runtime
 crates/pi-settings              current-format settings documents, snapshots, and safe writes
 crates/pi-telemetry             typed Pi AI/harness span schemas and sink adapters
+crates/pi-rpc                   Pi JSON projector and stdin/stdout RPC adapter
+crates/pi-mcp                   protocol-neutral MCP client, tool projection, and process ownership
+crates/pi-acp                   official stable-v1 ACP adapter and ACP session policy
 apps/pi-md                     TUI-owned Markdown parsing, streaming repair, highlighting, and Ratatui rendering
 crates/pi-plugin-sdk            native plugin author interface and descriptor types
 crates/pi-plugin-macros         static plugin preparation, agent hook-interest derivation, and native exports
@@ -63,6 +67,9 @@ pi-prompt            -> standard library only
 pi-resources         -> pi-prompt
 pi-session           -> pi-core + pi-prompt + pi-resources + pi-runtime
 pi-settings          -> serde JSON + filesystem persistence only
+pi-rpc               -> pi-agent + pi-core + pi-session
+pi-mcp               -> pi-core + rmcp
+pi-acp               -> pi-agent + pi-core + pi-mcp + pi-session + official ACP SDK
 pi-plugin-openai     -> pi-core + pi-provider
 pi-plugin-anthropic  -> pi-core + pi-provider
 pi-plugin-xai        -> pi-core + pi-provider + pi-plugin-openai::responses
@@ -75,7 +82,7 @@ plugins/providers/pi-plugin-models
                      -> pi-core + pi-plugin-openai (credential-blind catalog and routing)
 other plugins/*      -> pi-core
 pi-runtime           -> pi-core + pi-agent + pi-prompt
-apps/pi-cli          -> pi-md + product runtimes and plugins
+apps/pi-cli          -> pi-md + pi-rpc + pi-acp + product runtimes and plugins
 apps/pi-md           -> Ratatui presentation dependencies only
 pi-plugin-manager    -> HTTP + filesystem package source adapters
 pi-js-package-manager -> filesystem + npm/git process adapters (no Node dependency)
@@ -120,7 +127,7 @@ bounded OSC 52 for terminal-mediated copying. SSH deliberately skips the remote 
 copied text reaches the user's local terminal.
 
 `packages/pi` does not own a terminal frontend. Its executable creates the JavaScript extension host
-and invokes the NAPI `runPi` entry; interactive, print, JSON, piped-input, and plugin-management
+and invokes the NAPI `runPi` entry; interactive, print, JSON, RPC, piped-input, and plugin-management
 arguments are forwarded unchanged. This keeps extension callbacks in Node without allowing Node and
 Rust to compete for raw mode, stdout, editor state, or transcript projection.
 
@@ -139,9 +146,33 @@ cloneable per-frontend handle for current-session events and new/resume/fork/rel
 There is deliberately no public `SessionRegistry`: duplicate-path checks and handle bookkeeping are
 implementation details of `MultiSessionManager`. `AgentSessionRuntime` remains the lower-level replacement
 transaction used inside each `PiSession`, rather than a type frontend adapters coordinate directly.
-The print and NDJSON Adapters pin `PiSession::current()` for one invocation; the longer-lived TUI
-also watches the handle's replacement stream. This keeps generation changes behind the same
+The print and NDJSON Adapters pin `PiSession::current()` for one invocation; the longer-lived TUI and
+RPC adapters watch the handle's replacement stream. This keeps generation changes behind the same
 Interface while preventing a single in-flight submission from crossing generations.
+
+`pi-rpc` is one external protocol-adapter Module above this session Interface. Its Pi JSON
+projector is the single erasure seam for both `--json` and Pi RPC: it emits the coding-agent v3
+header, delta-only assistant updates, exact tool metadata/results, committed v4 entry identity, and
+optional-field omission without exposing Rust revision envelopes or `Debug` strings. The RPC
+adapter owns strict LF-delimited input, command correlation, synchronized stdout, session
+replacement subscription, queue/model/thinking/compaction/retry/shell/session commands, and a
+narrow injected HTML-export callback.
+
+`pi-acp` is a sibling external adapter rather than an RPC submodule. It uses the official ACP SDK's
+stable-v1 schema and maps ACP connection/session capability negotiation onto
+`MultiSessionManager`/`PiSession`. Its multi-session ownership, asynchronous prompt responders,
+cancel notifications, transcript replay, and model/thinking configuration stay independent of Pi
+RPC commands and wire types. `pi-mcp` is deeper and protocol-neutral: it owns stdio MCP process
+lifetime, discovery, qualified tool names, invocation, result projection, and cancellation. ACP
+converts per-session `mcpServers` into `pi-mcp` configuration and injects the resulting plugin by a
+`SessionGenerationOverlay`. The overlay is carried across live new/resume/fork/reload generation
+replacement but is never serialized; reopening a session requires the external adapter to provide
+its transient MCP configuration again. This preserves Pi v4 storage and keeps ACP and MCP policy out
+of `pi-core` and `pi-session`.
+
+Pi's experimental framed-CBOR server/client protocol is intentionally outside the pi-rs product
+surface. Process integrations use the supported Pi stdin/stdout RPC or ACP adapters rather than a
+second proprietary multi-session transport with no CLI entry point.
 
 The TUI startup card reads immutable `SessionRuntimeInventory` metadata from the prepared
 `AgentSession`. `pi-js-package-manager::Resolution` retains the source identity already attached to
@@ -290,8 +321,8 @@ separate future target rather than an alias for glibc.
 
 One tag produces two delivery adapters from the same Rust product:
 
-- GitHub Release archives contain the standalone `pi` binary. They support TUI, print, NDJSON, and
-  native plugins, but no JavaScript VM or JS/TS extensions.
+- GitHub Release archives contain the standalone `pi` binary. They support TUI, print, NDJSON, RPC,
+  and native plugins, but no JavaScript VM or JS/TS extensions.
 - The `@pi-rs/cli` npm root contains only JavaScript and declarations. Exact-version optional
   packages such as `@pi-rs/cli-darwin-arm64` and `@pi-rs/cli-linux-x64-gnu` each contain one NAPI
   artifact selected by OS, CPU, and libc. Platform packages publish first and the root package
@@ -312,7 +343,7 @@ runtime concerns.
 
 The JavaScript extension path deliberately has one Rust product runtime, not a Node sidecar protocol
 and not a fourth plugin lifecycle. Node is the executable launcher and JavaScript VM. It loads one
-platform `.node` artifact and invokes `runPi` for Ratatui, print, JSON, piped-input, and management
+platform `.node` artifact and invokes `runPi` for Ratatui, print, JSON, RPC, piped-input, and management
 modes. Extension callback generations remain in Node; provider, tool, trust, session, and terminal
 authority remain in Rust. `crates/pi-js-plugin` contains only semantic wire values and adapters and
 therefore has no NAPI, Node, Jiti, or terminal dependency.
@@ -809,10 +840,14 @@ active agent, prepares the complete next session, emits old `session_shutdown`, 
 Cancellation performs no preparation. Preparation failure leaves the current session open, while a
 successful replacement closes stale `AgentSession` handles so they reject later mutations. New,
 resume, reload, fork, and import all use this transaction. Fork creates a Pi v4 branch copy before
-preparation and removes it if candidate preparation fails. Import validates a copied v4 JSONL file,
-stages it in the current session directory, and rolls back both the staged file and any overwritten
-inactive destination if candidate preparation fails. It deliberately uses Pi's resume lifecycle
-reasons rather than adding an import-only session hook.
+preparation and removes it if candidate preparation fails. Import first inspects the source as
+native v4 or Pi coding-agent v1/v2/v3. Native files are validated and copied; legacy files are
+converted into a newly created v4 destination while preserving source files, tree IDs and parents,
+timestamps, parent-session paths, custom messages, compaction context, and unknown agent-message
+extensions. v1 compaction indices become entry IDs, v2 hook messages become custom messages, and v3
+retained tails are materialized explicitly. Every line is validated before publication; a failed
+conversion or candidate generation removes the staged destination. Import deliberately uses Pi's
+resume lifecycle reasons rather than adding an import-only session hook.
 
 Portable JSONL export is a storage operation on `SessionLog`: it atomically writes the selected
 main-lane branch, applicable name/label facts, and a parent-free v4 header without mutating the live

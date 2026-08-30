@@ -4,32 +4,30 @@
 
 这次核对以 `legacy/pi` 中当前 TypeScript 源码和测试为行为基准，并逐项检查当前 Rust、Node 桥接层和现有测试；没有从 `docs/incomplete-handoff.md` 推导结论。
 
-pi-rs 的核心已经不是“库级原型”：agent loop、基础文本交互、读写/编辑/搜索/shell 工具、项目 trust、skills / prompts / `models.json`、会话分支/压缩/恢复、插件 generation/reload，以及可用的全屏 Ratatui TUI 都已落地。当前最影响“可替换 Pi”的差距集中在核心之外的兼容接口：
+pi-rs 的核心已经不是“库级原型”：agent loop、基础文本交互、读写/编辑/搜索/shell 工具、项目 trust、skills / prompts / `models.json`、会话分支/压缩/恢复、插件 generation/reload，以及可用的全屏 Ratatui TUI 都已落地。最初识别出的自动化/迁移 P0 中，Pi stdin/stdout RPC、JSON/NDJSON wire，以及 coding-agent v1/v2/v3 → v4 importer 已在同日后续实现；上游仍属 experimental 且没有 pi-rs 产品入口的 protocol v1 server/client 则有意不纳入当前架构。当前最影响“可替换 Pi”的剩余差距是：
 
-1. 没有 Pi 的 RPC / server / client 自动化面；现有 NDJSON 也不是 Pi wire format。
-2. Rust 只接受 v4 JSONL，而当前 `pi-coding-agent` 产品仍写 v3，缺少导入/迁移桥。
-3. JavaScript 扩展的非 UI 主干能运行，但 Pi 扩展 UI、shortcut、renderer 和若干 hook/provider 能力仍是 inactive 或不识别。
-4. Bedrock、Vertex、Mistral、Azure、Copilot、OpenRouter 等主流 Provider 已补入；剩余差距
+1. JavaScript 扩展的非 UI 主干能运行，但 Pi 扩展 UI、shortcut、renderer 和若干 hook/provider 能力仍是 inactive 或不识别。
+2. Bedrock、Vertex、Mistral、Azure、Copilot、OpenRouter 等主流 Provider 已补入；剩余差距
    转为长尾 Provider、完整远端模型目录、Kimi/Radius OAuth 与真实账号 smoke matrix。
-5. CLI 启动参数、多模态输入、settings/themes/keybindings/scoped-models 等完整产品工作流尚未对齐；v4 import、JSONL/HTML export 和 GitHub Gist share 已补齐，但 Pi 的 Radius share 路径尚未实现。
+3. CLI 启动参数、多模态输入、settings/themes/keybindings/scoped-models 等完整产品工作流尚未对齐；v1-v4 import、JSONL/HTML export 和 GitHub Gist share 已补齐，但 Pi 的 Radius share 路径尚未实现。
 
 优先级定义：P0 表示阻止 drop-in 替换、自动化接入、现有会话迁移或主流扩展运行；P1 表示高频产品能力明显缺失；P2 表示管理、发布或次要 SDK/体验能力。
 
-| 优先级 | 状态 | 能力差距 | 直接影响 |
-| --- | --- | --- | --- |
-| P0 | 缺失 | RPC、常驻 server 与 client session lease API | 不能按 Pi 协议嵌入 IDE、后台服务或其他进程 |
-| P0 | 部分对齐 | JSON/NDJSON wire format | 现有 Pi JSON/RPC 消费端不能直接复用，流式事件还会丢信息 |
-| P0 | 有意差异（桥接缺失） | Rust v4 与当前 coding-agent v3 会话格式 | 现有 Pi 会话不能直接 resume 到 pi-rs |
-| P0 | 部分对齐 | JavaScript 扩展 UI、shortcut、renderer | 大量交互型 Pi 扩展会降级、静默 no-op 或加载失败 |
-| P1 | 部分对齐 | provider/API/OAuth/catalog 覆盖 | 主流专用协议已有开箱路径，但长尾 Provider、完整目录和 Kimi/Radius 仍未对齐 |
-| P1 | 部分对齐 | CLI 启动参数和输入管线 | 缺少 continue/resume/fork、prompt/tool/resource override、`@file` 等脚本接口 |
-| P1 | 部分对齐 | 图片/文件用户输入与图片输出显示 | provider/tool 类型支持图片，但 CLI/TUI 用户路径没有贯通 |
-| P1 | 部分对齐 | 完整 slash command / session workflow | 缺少 settings、scoped-models、changelog、hotkeys 和 Radius share 等 |
-| P1 | 部分对齐 | settings、themes、keybindings、模型 scope | 一部分字段只解析不消费，TUI 仍主要是固定行为 |
-| P1 | 部分对齐 | 扩展 hook、provider 和 ModelRegistry 高级 API | 非 UI 扩展可用，但并非 Pi extension API 的完整实现 |
-| P1 | 部分对齐 | JavaScript programmatic SDK | Rust 有原生 crate API，但 npm 包不是 Pi JS SDK 的 drop-in 替代 |
-| P2 | 部分对齐 | package/config/update/auth 管理命令 | 扩展包管理可用，自更新、模型目录刷新和资源配置 TUI 不可用 |
-| P2 | 缺失 | image-generation provider API | `pi-ai` 的 OpenRouter image generation 面没有 Rust 对应物 |
+| 优先级 | 状态             | 能力差距                                            | 直接影响                                                                          |
+| ------ | ---------------- | --------------------------------------------------- | --------------------------------------------------------------------------------- |
+| P0     | 部分对齐         | RPC 与 experimental server/client                  | Pi RPC 可直接运行；有意不实现没有产品入口的 experimental server/client           |
+| P0     | 已对齐           | JSON/NDJSON wire format                             | JSON 与 RPC 共用 Pi projector，保留 delta、usage、tool metadata 和 entry identity |
+| P0     | 已桥接           | Rust v4 与当前 coding-agent v1-v3 会话格式          | `/import` 非破坏式转换旧会话并事务式切换到 v4                                     |
+| P0     | 部分对齐         | JavaScript 扩展 UI、shortcut、renderer              | 大量交互型 Pi 扩展会降级、静默 no-op 或加载失败                                   |
+| P1     | 部分对齐         | provider/API/OAuth/catalog 覆盖                     | 主流专用协议已有开箱路径，但长尾 Provider、完整目录和 Kimi/Radius 仍未对齐        |
+| P1     | 部分对齐         | CLI 启动参数和输入管线                              | 缺少 continue/resume/fork、prompt/tool/resource override、`@file` 等脚本接口      |
+| P1     | 部分对齐         | 图片/文件用户输入与图片输出显示                     | provider/tool 类型支持图片，但 CLI/TUI 用户路径没有贯通                           |
+| P1     | 部分对齐         | 完整 slash command / session workflow               | 缺少 settings、scoped-models、changelog、hotkeys 和 Radius share 等               |
+| P1     | 部分对齐         | settings、themes、keybindings、模型 scope           | 一部分字段只解析不消费，TUI 仍主要是固定行为                                      |
+| P1     | 部分对齐         | 扩展 hook、provider 和 ModelRegistry 高级 API       | 非 UI 扩展可用，但并非 Pi extension API 的完整实现                                |
+| P1     | 部分对齐         | JavaScript programmatic SDK                         | Rust 有原生 crate API，但 npm 包不是 Pi JS SDK 的 drop-in 替代                    |
+| P2     | 部分对齐         | package/config/update/auth 管理命令                 | 扩展包管理可用，自更新、模型目录刷新和资源配置 TUI 不可用                         |
+| P2     | 缺失             | image-generation provider API                       | `pi-ai` 的 OpenRouter image generation 面没有 Rust 对应物                         |
 
 ## 已排除的过期差距
 
@@ -43,42 +41,37 @@ pi-rs 的核心已经不是“库级原型”：agent loop、基础文本交互�
 
 ## P0
 
-### P0-1：RPC、server 和 client API 缺失
+### P0-1：RPC 与 experimental server/client
 
-**状态：缺失。**
+**状态：RPC 已实现；experimental server/client 有意不实现；扩展 UI 通道仍归 P0-4。**
 
 Pi 的 `--mode rpc` 是有请求关联 ID、response、event、extension UI request/response 的 stdin/stdout 双向协议；`runRpcMode()` 明确用于把 agent 嵌入其他应用（`legacy/pi/packages/coding-agent/src/modes/rpc/rpc-mode.ts:1-12,50-61`），并为扩展的 `select` / `confirm` / `input` 等 UI 建立 request-response 通道（同文件 `:79-160`）。Pi 还已有实验性 `server` 命令（`legacy/pi/packages/coding-agent/src/cli/experimental/commands/server.ts:13-44`），以及支持连接、列举/创建/attach session 的 `PiClient`（`legacy/pi/packages/client/src/client.ts:51-77,96-149`）和带 `prompt` / `steer` / `abort` / `setModel` / `setThinking` 的 session lease（`legacy/pi/packages/client/src/session-handle.ts:13-35,88-106`）。
 
-pi-rs 的 `CLIMode` 只有 `Tui`、`Print`、`Json`（`apps/pi-cli/src/lib.rs:39-73`），Node binding 也只暴露启动整个 CLI 的 `run_pi()`（`bindings/pi-napi/src/lib.rs:208-219`）；npm 根导出只是 `PiNodeHost.run()` 和 extension host（`packages/pi/src/index.ts:21-45`）。因此当前没有 Pi RPC、常驻多会话 server、remote client 或 session lease 等价面。
+pi-rs 现有 `CLIMode::Rpc` 与 `--mode rpc`。`crates/pi-rpc/src/rpc.rs` 实现严格 LF-delimited JSON、请求 ID 关联、同步 stdout、session replacement 事件重绑，以及 Pi 当前 prompt/queue/model/thinking/compaction/retry/bash/session/tree/export 命令；JSON 与 RPC 共用同一 projector。JavaScript extension UI request/response 尚未贯通，收到无对应请求的 `extension_ui_response` 会忽略，因此该子项仍在 P0-4 追踪。
 
-**建议验收边界：**先做 Pi stdin/stdout RPC wire conformance，再决定是否同时追上仍属 experimental 的 server/client transport；不要用当前单向 `--json` 冒充 RPC。
+Pi 的 `server` CLI 本身仍是 experimental parser。pi-rs 删除了没有产品调用者的 framed-CBOR protocol/server/client 库，避免同时维护第二套专有多会话传输；进程集成以已支持的 Pi stdin/stdout RPC 和 ACP 为准。这是有意的产品范围收缩，而不是 RPC 行为缺失。
 
-### P0-2：JSON/NDJSON 事件格式与 Pi 不兼容且有信息损失
+ACP 后续作为有意新增的 Rust 产品能力落在独立 `pi-acp` crate，而没有塞进 `pi-rpc`：它通过官方 SDK 实现 stable v1 的 initialize/new/prompt/cancel/load/resume/list/close、流式消息与工具事件、模型/思考级别选项，以及 session-local stdio MCP。协议无关的 MCP client/tool adapter 位于 `pi-mcp`；ACP 只负责把 `mcpServers` 转换成不会写入 v4 的 transient generation overlay。
 
-**状态：部分对齐。** pi-rs 有 NDJSON 输出，但它是自己的 product-event envelope，不是 Pi JSON wire。
+### P0-2：JSON/NDJSON 事件格式
+
+**状态：已对齐。** `--json` 与 RPC 现在共用 Pi wire projector。
 
 Pi JSON 模式先写 session header，再原样流出经 `toJsonEvent()` 处理的 `AgentSessionEvent`（`legacy/pi/packages/coding-agent/src/modes/print-mode.ts:108-132`）。其中 `message_update` 明确定义为 delta-only，并保留结构化 `usage`、assistant event、tool-call id/name（`legacy/pi/packages/coding-agent/src/modes/json-event.ts:10-18,40-60`）；回归测试还锁住了线性字节增长、usage 和 tool-call 元数据（`legacy/pi/packages/coding-agent/test/suite/regressions/7290-json-stream-linear.test.ts:22-42`、`7911-json-stream-usage.test.ts:19-30`、`7925-toolcall-start-metadata.test.ts:25-41`）。
 
-pi-rs 则先输出自定义 `snapshot`（`apps/pi-cli/src/output.rs:81-85`），每条事件再包成 `{revision,event}`（同文件 `:152-224`）。几个实质性不兼容点：
+`crates/pi-rpc/src/json_wire.rs` 现在先输出 coding-agent v3 session header，再显式投影 Pi event union。`message_update` 只携带 delta，并保留结构化 assistant event、usage 与 tool-call id/name；tool updates 保留 args/content/details/usage；tool result、compaction、retry 与 session optional fields 按 Pi 的 omission 规则编码。Rust 自有 revision envelope、snapshot、`Debug` 字符串和 `unknown` catch-all 都不会越过 wire。
 
-- 未显式处理的 session event 被压成 `{"type":"unknown"}`（`apps/pi-cli/src/output.rs:221-224`）。
-- `message_update` 带累计 message，并把增量事件写成 Rust `Debug` 字符串（同文件 `:226-240`），既非稳定 schema，也会重引入 Pi 已修复的超线性流量问题。
-- `tool_execution_update` 只保留 `isError`，丢掉 partial result 的 content/details（同文件 `:249-256`）。
-- 当前 Rust 侧唯一聚焦 NDJSON 的单元测试只覆盖 extension notice severity（同文件 `:300-324`），没有 Pi wire conformance fixtures。
+v4 `EntryAppended` 与 compaction event 携带提交后的 `SessionRecord`，projector 因而能输出精确的 v3 tree ID、parent ID、ISO timestamp 和 `firstKeptEntryId`。session-owned `AgentEnd` 还提供真实 `willRetry`，避免低层 agent event 猜测 orchestration 状态。focused fixtures 覆盖 header、delta、tool metadata/update、entry identity，以及 JSON/RPC 共用路径。
 
-**建议验收边界：**以 Pi `JsonAgentSessionEvent` 建 fixture；JSON 和未来 RPC 共用一个 wire projector，并删除 `Debug` 序列化及 `unknown` 吞事件路径。
+### P0-3：当前 Pi coding-agent v1/v2/v3 → Rust v4 会话迁移
 
-### P0-3：当前 Pi coding-agent v3 会话不能直接迁移到 Rust v4
-
-**状态：有意差异（迁移桥缺失）。**
+**状态：v4 仍是有意架构差异，迁移桥已实现。**
 
 当前 `legacy/pi/packages/coding-agent` 仍声明 `CURRENT_SESSION_VERSION = 3`，header 是 `{type:"session", version, id, timestamp, cwd, parentSession}`（`legacy/pi/packages/coding-agent/src/core/session-manager.ts:30-39`），并内置 v1→v2→v3 迁移（同文件 `:231-295`）。与此同时，较新的低层 agent harness 已定义 `{kind:"header", version:4, createdAt, parentSessionId}`（`legacy/pi/packages/agent/src/harness/session/jsonl/types.ts:47-56`）。
 
-pi-rs 明确选择 v4（`crates/pi-session/src/types.rs:10-15`），而 decoder 严格要求 `kind == "header"` 和 `version == 4`，否则返回 unsupported version（`crates/pi-session/src/jsonl.rs:636-663`）。仓库中仍没有 coding-agent v1/v2/v3 → v4 converter；Rust TUI 现有 `/import` 只接受原生 v4，会明确识别并拒绝 legacy v1-v3，提示先迁移（见 P1-4）。
+pi-rs 核心继续严格使用 v4；`crates/pi-session/src/legacy_import.rs` 在存储 seam 外提供一次性 converter。`inspect_session_file` 识别 native v4 和 coding-agent v1/v2/v3，`import_session_file` 总是创建新 destination 且不修改 source。它保留 tree IDs、parent links、timestamps、parentSession/branchedFrom path、custom messages、未知 agent-message wire extensions 和 compaction context；v1 `firstKeptEntryIndex` 转换成 entry ID，v2 `hookMessage` 转换成 custom entry，v3 retained tail 显式落入 v4 compaction。
 
-这符合 pi-rs 已选择的 generation/v4 架构方向，但对“替换当前 Pi”有直接迁移阻断：用户已有 JSONL 无法直接 `--session`/`/resume`。因此差异本身是有意的，缺少迁移桥则是 P0。
-
-**建议验收边界：**增加一次性、非破坏式 v3 importer，保留原文件，转换 parent path、tree IDs、custom messages 和未知扩展字段；用 `legacy/pi/packages/coding-agent` 实际产出的 v1/v2/v3 fixtures 验证。
+`/import`、`AgentSessionRuntime` 与 `MultiSessionManager` 已接入 converter。所有行先完整校验，malformed middle line 会硬失败；写入或 generation prepare/switch 失败会删除 staged destination 并保持当前会话不变。native v4 仍走同一事务式 copy/resume 路径。focused tests 覆盖 v1/v3 转换、未知字段保留、非法中间行回滚，以及 runtime 导入失败不改变当前会话。
 
 ### P0-4：JavaScript 扩展 UI、shortcut 和 renderer 仍未激活
 
@@ -144,7 +137,7 @@ Rust 公开的普通提交入口只有 `submit(text)`（`crates/pi-session/src/a
 
 Rust 已有 `/new`、`/resume`、`/reload`、`/trust`、`/login`、`/logout`、`/model`、`/thinking`、`/compact`、`/fork`、`/clone`、`/tree`、`/name`、`/session`、`/copy`、`/export`、`/import`、`/share`、`/clear`、`/help`、`/quit`；相关 effect 是真实 session 操作，不只是 UI stub。
 
-Pi 还提供 `/settings`、`/scoped-models`、`/changelog`、`/hotkeys`（`legacy/pi/packages/coding-agent/src/core/slash-commands.ts:19-42`），这些命令在 Rust 中尚无对应实现。当前 Rust `/export` 可将活动分支导出为 portable v4 JSONL 或安全的单文件 HTML；`/import` 会确认后把 v4 会话事务式复制到当前 session 目录，并在 generation 重建失败时回滚；`/share` 通过已登录的 `gh` 上传 non-public Gist。Pi 优先使用 Radius artifact、再 fallback 到 Gist，Rust 当前只有 Gist 路径。Pi 的 resume selector 还支持 named filter、path/sort toggle、rename/delete；tree selector 支持 label/timestamp/filter，而 Rust selector主要完成搜索和选择。
+Pi 还提供 `/settings`、`/scoped-models`、`/changelog`、`/hotkeys`（`legacy/pi/packages/coding-agent/src/core/slash-commands.ts:19-42`），这些命令在 Rust 中尚无对应实现。当前 Rust `/export` 可将活动分支导出为 portable v4 JSONL 或安全的单文件 HTML；`/import` 会确认后非破坏式转换 Pi v1/v2/v3 或复制 native v4，再事务式切换并在 generation 重建失败时回滚；`/share` 通过已登录的 `gh` 上传 non-public Gist。Pi 优先使用 Radius artifact、再 fallback 到 Gist，Rust 当前只有 Gist 路径。Pi 的 resume selector 还支持 named filter、path/sort toggle、rename/delete；tree selector 支持 label/timestamp/filter，而 Rust selector主要完成搜索和选择。
 
 ### P1-5：settings、themes、keybindings 和 scoped models 多为子集或 parse-only
 
@@ -215,18 +208,22 @@ Pi 会实际调用 `ModelRuntime.refresh()` 更新远程 model catalogs（`legac
 
 ## 建议实施顺序
 
-1. **先锁协议：**Pi JSON projector + stdin/stdout RPC；建立从同一 session event 到 JSON/RPC 的 conformance fixtures。
-2. **再解迁移：**实现 v3→v4 converter 并接入现有 `/import`，让现有用户能无损切换。
-3. **打通扩展交互层：**dialog/status/widget/shortcut/renderer，再补 UI prompt hooks；用 Pi 示例做 E2E。
-4. **扩 provider 协议：**优先 Bedrock/Vertex/Mistral/Azure，再补 catalog/OAuth breadth。
+1. **已完成协议主干：**Pi JSON projector 与 stdin/stdout RPC；experimental framed-CBOR server/client 已从产品范围移除。
+2. **已完成迁移桥：**v1/v2/v3→v4 converter 已接入 `/import`，现有会话可非破坏式切换。
+3. **下一步打通扩展交互层：**dialog/status/widget/shortcut/renderer，再补 UI prompt hooks；用 Pi 示例做 E2E。
+4. **继续扩 provider breadth：**补完整 catalog、Kimi/Radius OAuth、`pi-messages` 与真实账号 smoke matrix。
 5. **补产品工作流：**CLI override、`@file`/图片、Radius share、settings/themes/keybindings/scoped-models。
 6. **最后补管理/SDK：**model refresh、config TUI、自更新、auth automation 和 JS programmatic SDK。
 
 ## 本次验证记录
 
+- `cargo fmt --all -- --check`：通过。
+- `cargo test --workspace`：通过，包含 JSON/RPC projector、legacy importer 与现有全 workspace 测试。
+- `cargo clippy --workspace --all-targets -- -D warnings`：通过。
+- `git diff --check`：通过。
 - `cargo test -p pi-cli config::tests::fullscreen_is_default_and_can_be_disabled_explicitly -- --exact`：通过（1 passed）。
 - 执行 `packages/pi` tests 时，相关的 provider-registration 与 inactive JavaScript UI tests 均通过，确认报告所述 inactive 行为；但命令同时跑了完整 npm 测试集，其中 2 个 release tests 因 `pi-settings` workspace/Cargo.lock 预期不一致失败（31 passed, 2 failed）。这是现有 release-test 基线问题，不作为上述 Pi parity 结论的证据，也未在本次调研中修改。
 
 ### 实现更新
 
-同日后续实现了原生 v4 `/import`、活动分支 `/export`（JSONL/HTML）和 GitHub Gist `/share`。`cargo test --workspace` 与 `cargo clippy --workspace --all-targets -- -D warnings` 均通过；legacy v1-v3 → v4 converter 和 Radius share 仍是上述差距。
+同日后续先实现了原生 v4 `/import`、活动分支 `/export`（JSONL/HTML）和 GitHub Gist `/share`，随后补齐 Pi JSON/RPC projector、`--mode rpc`，以及 legacy v1/v2/v3 → v4 transactional importer。曾加入但没有产品入口的 protocol v1 CBOR/server/client/session lease 后续作为架构减法删除。RPC/JSON 位于 `pi-rpc`；其后的 ACP stable-v1 adapter 与 MCP client 分别位于 `pi-acp`、`pi-mcp`，共享 protocol-neutral `PiSession` seam，但不共享 wire enum。Radius share 和 P0-4 扩展交互层仍是上述差距。

@@ -366,19 +366,35 @@ impl SessionLog {
     }
 
     pub fn append_to_lane(&self, entry: SessionEntry, lane: &str) -> Result<String, SessionError> {
-        let id = next_unique_id("entry");
+        Ok(self.append_session_record_to_lane(entry, lane)?.id)
+    }
+
+    /// Appends an entry and returns the authoritative tree record that was
+    /// committed. Frontend wire adapters use this to preserve Pi entry IDs,
+    /// parents, and timestamps without re-reading mutable session state.
+    pub fn append_session_record_to_lane(
+        &self,
+        entry: SessionEntry,
+        lane: &str,
+    ) -> Result<SessionRecord, SessionError> {
         self.append_entry(
             ProvisionedEntry {
-                id: id.clone(),
+                id: next_unique_id("entry"),
                 entry,
             },
             lane,
-        )?;
-        Ok(id)
+        )
     }
 
     pub fn append(&self, entry: SessionEntry) -> Result<String, SessionError> {
         self.append_to_lane(entry, MAIN_LANE)
+    }
+
+    pub fn append_session_record(
+        &self,
+        entry: SessionEntry,
+    ) -> Result<SessionRecord, SessionError> {
+        self.append_session_record_to_lane(entry, MAIN_LANE)
     }
 
     pub fn append_message(&self, message: impl Into<AgentMessage>) -> Result<String, SessionError> {

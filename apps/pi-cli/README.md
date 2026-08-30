@@ -5,8 +5,8 @@ run commands, search code, manage long-running sessions, and work with multiple 
 one interactive terminal interface.
 
 The CLI is a Rust implementation of current Pi behavior rather than only an agent-loop library. Its
-fullscreen TUI, one-shot output, NDJSON event stream, tools, sessions, model catalog, skills, and
-plugins all use the same production runtime.
+fullscreen TUI, one-shot output, Pi-compatible NDJSON and stdin/stdout RPC, tools, sessions, model
+catalog, skills, and plugins all use the same production runtime.
 
 ## Product highlights
 
@@ -20,14 +20,16 @@ plugins all use the same production runtime.
   integrations, plus custom providers and models declared in `models.json`.
 - **Authentication in the product** — `/login` and `/logout` manage Pi-compatible credentials from
   the TUI; browser/device OAuth and hidden API-key prompts are supported.
-- **Persistent Pi v4 sessions** — resume previous work, queue steering or follow-up messages, branch
-  from earlier messages, navigate the session tree, and compact long contexts.
+- **Persistent Pi v4 sessions** — resume previous work, import Pi coding-agent v1/v2/v3 files,
+  queue steering or follow-up messages, branch from earlier messages, navigate the session tree,
+  and compact long contexts.
 - **Plugin-first customization** — Rust native plugins, Pi-compatible JavaScript/TypeScript
   extensions, skills, commands, provider hooks, and session lifecycle hooks.
 - **Project safety** — nearest-ancestor project-trust decisions gate project `.pi` resources,
   extensions, skills, and native plugins before they load.
 - **Automation-friendly frontends** — use the same agent through the interactive TUI, final-text
-  `--print` output, or structured NDJSON `--json` events.
+  `--print` output, Pi-compatible NDJSON `--json` events, bidirectional `--mode rpc`, or ACP stable
+  v1 with `--acp`.
 
 ## Install and start
 
@@ -131,9 +133,24 @@ and a service-account file; Bedrock supports its AWS profile/static credential c
 | Main-screen TUI | `pi --no-fullscreen`            | Terminal-native selection and main-screen output            |
 | Final text      | `pi --print "prompt"`           | Shell scripts and one-shot answers                          |
 | NDJSON events   | `pi --json "prompt"`            | Integrations that consume structured product events         |
+| Stdio RPC       | `pi --mode rpc`                  | Long-lived bidirectional Pi protocol integrations           |
+| ACP stable v1   | `pi --acp --no-extensions`       | Zed and other Agent Client Protocol clients                  |
 | Piped input     | `printf 'prompt' \| pi --print` | Unix pipelines and generated prompts                        |
 
-Shell shorthand works in every frontend and does not require provider credentials:
+`--json` writes the Pi coding-agent v3 session header followed by delta-only Pi session events.
+`--mode rpc` accepts strict LF-delimited JSON commands and emits correlated responses plus the same
+event projection. JavaScript extension UI request/response remains a separate compatibility gap;
+unsolicited `extension_ui_response` messages are currently ignored.
+
+`--acp` serves the official ACP stable-v1 JSON-RPC protocol over stdin/stdout. It supports new,
+prompt, cancel, load, resume, list, and close, streams text/thought/tool updates, exposes model and
+thinking selectors, and accepts per-session stdio MCP servers. ACP sessions use the normal Pi v4
+store, while client-provided MCP configuration is transient and must be provided again on
+load/resume. ACP mode currently requires `--no-extensions` when JavaScript/TypeScript extensions
+would otherwise be active; native Rust plugins continue to work.
+
+Shell shorthand works in interactive and one-shot frontends and does not require provider
+credentials; RPC exposes the corresponding `bash` command:
 
 ```bash
 # Run a command and include its output in agent context
@@ -168,7 +185,7 @@ Common commands:
 | `/new [path]`                 | Start a new session                                                   |
 | `/resume [query\|path]`       | Find and continue a previous session                                  |
 | `/export [file]`              | Export the active branch as HTML or `.jsonl`                           |
-| `/import <file.jsonl>`        | Copy and resume a pi-rs v4 session                                    |
+| `/import <file.jsonl>`        | Import and resume a Pi v1/v2/v3 or pi-rs v4 session                   |
 | `/share`                      | Share an HTML snapshot through a secret GitHub Gist                    |
 | `/compact [instructions]`     | Compact the current context, optionally with guidance                 |
 | `/fork`                       | Branch before a selected previous user message                        |
@@ -279,7 +296,7 @@ only shell shorthand, does not leave an empty resume entry.
 The product supports:
 
 - session discovery and `/resume`;
-- portable active-branch JSONL export and transactional v4 JSONL import;
+- portable active-branch JSONL export and transactional Pi v1/v2/v3 or pi-rs v4 JSONL import;
 - self-contained HTML export and secret-Gist sharing through the authenticated GitHub CLI;
 - durable steering and follow-up queues;
 - branching with `/fork`, `/clone`, and `/tree`;
@@ -289,9 +306,10 @@ The product supports:
 - preservation of matching tool calls and tool results across persistence and replay.
 
 `/export` writes HTML by default; a destination ending in `.jsonl` writes a portable v4 session.
-`/import` copies a validated v4 JSONL file into the current session directory and rebuilds the
-complete runtime generation before switching. Legacy Pi v1-v3 files are detected and rejected with
-an explicit migration error until the v3→v4 bridge is implemented.
+`/import` accepts Pi coding-agent v1/v2/v3 and native pi-rs v4 JSONL. Legacy files are converted into
+a new v4 destination without modifying the source; tree identity, parent links, custom messages,
+compaction context, and unknown agent-message extensions are retained. The complete runtime
+generation is prepared before switching, and a failed replacement removes the staged destination.
 
 `/share` requires an authenticated `gh` CLI (`gh auth login`). It exports a temporary HTML snapshot,
 creates a non-public Gist, and prints both the viewer and Gist URLs. Set `PI_SHARE_VIEWER_URL` to

@@ -44,8 +44,8 @@ use pi_runtime::{CompletionRetryPolicy, PiRuntime, RuntimeError, SystemPrompt};
 use pi_session::{
     AgentSession, AgentSessionOptions, AgentSessionRuntimeFactory, AgentSessionRuntimeRequest,
     AgentSessionRuntimeTarget, AutoRetrySettings, CompactionSettings as SessionCompactionSettings,
-    InitialModelRequest, ModelRuntimeServices, PreparedAgentSession, SessionError, SessionPlugins,
-    SessionRuntimeInventory,
+    InitialModelRequest, ModelRuntimeServices, PreparedAgentSession, SessionError,
+    SessionGenerationOverlay, SessionPlugins, SessionRuntimeInventory,
 };
 use pi_settings::{
     QueueModeSetting, SettingsContext, SettingsManager, ThinkingLevelSetting, TransportSetting,
@@ -114,6 +114,7 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
         &self,
         request: AgentSessionRuntimeRequest,
     ) -> Result<PreparedAgentSession, SessionError> {
+        let generation_overlay = request.generation_overlay;
         let (path, create, cwd, reused_log, parent_session) = match request.target {
             AgentSessionRuntimeTarget::Create {
                 cwd,
@@ -250,12 +251,13 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
         } else {
             None
         };
-        let runtime = match build_runtime(
+        let runtime = match build_runtime_with_generation_overlay(
             &config,
             project_trusted,
             &native_plugins,
             js_generation.as_ref(),
             dynamic_provider_candidate.as_ref(),
+            &generation_overlay,
         ) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -466,6 +468,7 @@ async fn prepare_native_packages(
     Ok(prepared)
 }
 
+#[cfg(test)]
 fn build_runtime(
     config: &AppConfig,
     project_trusted: bool,
@@ -483,12 +486,52 @@ fn build_runtime(
     )
 }
 
+fn build_runtime_with_generation_overlay(
+    config: &AppConfig,
+    project_trusted: bool,
+    native_plugins: &NativePlugins,
+    js_generation: Option<&JsPluginGeneration>,
+    dynamic_providers: Option<&DynamicProviderCandidate>,
+    generation_overlay: &SessionGenerationOverlay,
+) -> Result<PiRuntime, RuntimeError> {
+    build_runtime_inner(
+        config,
+        project_trusted,
+        native_plugins,
+        js_generation,
+        dynamic_providers,
+        generation_overlay,
+        None,
+    )
+}
+
+#[cfg(test)]
 fn build_runtime_with_codex_credentials(
     config: &AppConfig,
     project_trusted: bool,
     native_plugins: &NativePlugins,
     js_generation: Option<&JsPluginGeneration>,
     dynamic_providers: Option<&DynamicProviderCandidate>,
+    codex_credentials: Option<pi_plugin_openai::CodexCredentials>,
+) -> Result<PiRuntime, RuntimeError> {
+    build_runtime_inner(
+        config,
+        project_trusted,
+        native_plugins,
+        js_generation,
+        dynamic_providers,
+        &SessionGenerationOverlay::default(),
+        codex_credentials,
+    )
+}
+
+fn build_runtime_inner(
+    config: &AppConfig,
+    project_trusted: bool,
+    native_plugins: &NativePlugins,
+    js_generation: Option<&JsPluginGeneration>,
+    dynamic_providers: Option<&DynamicProviderCandidate>,
+    generation_overlay: &SessionGenerationOverlay,
     codex_credentials: Option<pi_plugin_openai::CodexCredentials>,
 ) -> Result<PiRuntime, RuntimeError> {
     let transport = provider_transport(config)?;
@@ -966,6 +1009,7 @@ fn build_runtime_with_codex_credentials(
             });
         }
     }
+    builder = generation_overlay.apply_to(builder);
 
     let mut resources = ResourceLoaderOptions::new(&config.cwd, &config.agent_dir);
     resources.project_trusted = project_trusted;

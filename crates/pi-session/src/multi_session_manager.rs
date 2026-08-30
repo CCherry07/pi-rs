@@ -9,7 +9,8 @@ use tokio::sync::watch;
 use crate::{
     AgentSession, AgentSessionReplacement, AgentSessionRuntime, AgentSessionRuntimeError,
     AgentSessionRuntimeFactory, AgentSessionRuntimeRequest, AgentSessionRuntimeTarget,
-    ForkPosition, PreparedAgentSession, SessionError,
+    ForkPosition, PreparedAgentSession, SessionError, SessionFileFormat, SessionGenerationOverlay,
+    inspect_session_file,
 };
 
 /// Owns and coordinates multiple active Pi sessions.
@@ -101,6 +102,23 @@ impl MultiSessionManager {
         self.acquire(
             AgentSessionRuntimeTarget::create(cwd, path),
             ExistingSessionPolicy::Reject,
+            SessionGenerationOverlay::default(),
+        )
+        .await
+    }
+
+    /// Creates a session with transient factories layered onto every runtime
+    /// generation owned by the returned handle.
+    pub async fn create_session_with_overlay(
+        &self,
+        cwd: impl Into<PathBuf>,
+        path: impl Into<PathBuf>,
+        generation_overlay: SessionGenerationOverlay,
+    ) -> Result<PiSession, MultiSessionManagerError> {
+        self.acquire(
+            AgentSessionRuntimeTarget::create(cwd, path),
+            ExistingSessionPolicy::Reject,
+            generation_overlay,
         )
         .await
     }
@@ -112,6 +130,21 @@ impl MultiSessionManager {
         self.acquire(
             AgentSessionRuntimeTarget::open(path),
             ExistingSessionPolicy::Reuse,
+            SessionGenerationOverlay::default(),
+        )
+        .await
+    }
+
+    /// Opens a persisted session with transient generation-local factories.
+    pub async fn open_session_with_overlay(
+        &self,
+        path: impl Into<PathBuf>,
+        generation_overlay: SessionGenerationOverlay,
+    ) -> Result<PiSession, MultiSessionManagerError> {
+        self.acquire(
+            AgentSessionRuntimeTarget::open(path),
+            ExistingSessionPolicy::Reuse,
+            generation_overlay,
         )
         .await
     }
@@ -169,6 +202,7 @@ impl MultiSessionManager {
         &self,
         target: AgentSessionRuntimeTarget,
         existing: ExistingSessionPolicy,
+        generation_overlay: SessionGenerationOverlay,
     ) -> Result<PiSession, MultiSessionManagerError> {
         let _operation = self.inner.operation_gate.lock().await;
         self.inner.ensure_open()?;
@@ -181,9 +215,12 @@ impl MultiSessionManager {
                 }
             };
         }
-        let runtime =
-            AgentSessionRuntime::create(SharedFactory(Arc::clone(&self.inner.factory)), target)
-                .await?;
+        let runtime = AgentSessionRuntime::create_with_overlay(
+            SharedFactory(Arc::clone(&self.inner.factory)),
+            target,
+            generation_overlay,
+        )
+        .await?;
         let registration_id: Arc<str> = Arc::from(uuid::Uuid::now_v7().to_string());
         let session = PiSession {
             registration_id: Arc::clone(&registration_id),
@@ -273,8 +310,8 @@ impl PiSession {
         Ok(self.runtime.switch_session(path).await?)
     }
 
-    /// Imports a v4 JSONL file into the current session directory and switches
-    /// this handle to the imported copy. Import uses resume lifecycle events.
+    /// Imports a v4 JSONL file, or migrates a coding-agent v1-v3 file, into the
+    /// current session directory and switches to it using resume lifecycle events.
     pub async fn import_session(
         &self,
         source: impl Into<PathBuf>,
@@ -284,10 +321,18 @@ impl PiSession {
             .file_name()
             .ok_or_else(|| MultiSessionManagerError::InvalidImportPath(source.clone()))?;
         let current_path = self.path();
-        let destination = current_path
+        let mut destination = current_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(file_name);
+        if comparable_path(&source) == comparable_path(&destination)
+            && matches!(
+                inspect_session_file(&source).map_err(AgentSessionRuntimeError::from)?,
+                SessionFileFormat::Legacy { .. }
+            )
+        {
+            destination = legacy_import_destination(&destination);
+        }
         if comparable_path(&current_path) == comparable_path(&destination) {
             return Err(MultiSessionManagerError::ImportWouldReplaceCurrent(
                 destination,
@@ -329,6 +374,18 @@ impl PiSession {
             .upgrade()
             .ok_or(MultiSessionManagerError::Closed)
     }
+}
+
+fn legacy_import_destination(source: &Path) -> PathBuf {
+    let stem = source
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("session");
+    let candidate = source.with_file_name(format!("{stem}.v4.jsonl"));
+    if !candidate.exists() {
+        return candidate;
+    }
+    source.with_file_name(format!("{stem}.v4-{}.jsonl", uuid::Uuid::now_v7()))
 }
 
 impl WeakPiSession {

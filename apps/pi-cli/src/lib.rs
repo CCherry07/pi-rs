@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read};
 use std::sync::Arc;
 
-use config::{AppConfig, Cli, CliCommand};
+use config::{AppConfig, Cli, CliCommand, OutputMode};
 use pi_js_package_manager::PackageManager as JsPackageManager;
 use pi_js_plugin::{ExtensionSessionBinding, JsHostMode, JsPluginHost};
 use pi_session::{MultiSessionManager, PiSession, SessionLog};
@@ -43,19 +43,37 @@ enum CLIMode {
     Tui { initial_prompt: Option<String> },
     Print { input: String },
     Json { input: String },
+    Rpc,
+    Acp,
 }
 
 impl CLIMode {
     fn resolve(cli: &Cli, input: Option<String>, stdin_is_terminal: bool) -> Result<Self, String> {
-        if cli.json {
+        if cli.acp {
+            return Ok(Self::Acp);
+        }
+        if cli.mode == Some(OutputMode::Rpc) {
+            return Ok(Self::Rpc);
+        }
+        if cli.json || cli.mode == Some(OutputMode::Json) {
+            let error = if cli.json {
+                "--json requires a prompt or stdin"
+            } else {
+                "JSON mode requires a prompt or stdin"
+            };
             return input
                 .map(|input| Self::Json { input })
-                .ok_or_else(|| "--json requires a prompt or stdin".to_string());
+                .ok_or_else(|| error.to_string());
         }
-        if cli.print || !stdin_is_terminal {
+        if cli.print || cli.mode == Some(OutputMode::Text) || !stdin_is_terminal {
+            let error = if cli.print || !stdin_is_terminal {
+                "--print requires a prompt or stdin"
+            } else {
+                "text mode requires a prompt or stdin"
+            };
             return input
                 .map(|input| Self::Print { input })
-                .ok_or_else(|| "--print requires a prompt or stdin".to_string());
+                .ok_or_else(|| error.to_string());
         }
         Ok(Self::Tui {
             initial_prompt: input,
@@ -71,6 +89,7 @@ impl CLIMode {
             Self::Tui { .. } => JsHostMode::Tui,
             Self::Print { .. } => JsHostMode::Print,
             Self::Json { .. } => JsHostMode::Json,
+            Self::Rpc | Self::Acp => JsHostMode::Rpc,
         }
     }
 }
@@ -134,7 +153,7 @@ async fn run(
     {
         return package_commands::run(&cli, &config, command, &settings).await;
     }
-    let session_exists = config.session_path.exists();
+    let session_exists = !cli.acp && config.session_path.exists();
     if session_exists {
         let (_, document) =
             SessionLog::open(&config.session_path).map_err(|error| error.to_string())?;
@@ -146,9 +165,21 @@ async fn run(
         })?;
     }
     let stdin_is_terminal = std::io::stdin().is_terminal();
-    let input = resolve_input(&cli, stdin_is_terminal)?;
+    let input = if cli.acp || cli.mode == Some(OutputMode::Rpc) {
+        None
+    } else {
+        resolve_input(&cli, stdin_is_terminal)?
+    };
     let cli_mode = CLIMode::resolve(&cli, input, stdin_is_terminal)?;
     let trust = resolve_project_trust(&cli, &config, cli_mode.is_interactive(), &settings).await?;
+    if matches!(cli_mode, CLIMode::Acp)
+        && javascript_host_required(&config, trust.trusted(), &settings)
+    {
+        return Err(
+            "ACP sessions currently support native Rust plugins and client-provided MCP servers, but not JavaScript/TypeScript extensions. Pass --no-extensions and remove explicit -e/--extension sources for this run."
+                .to_string(),
+        );
+    }
     ensure_javascript_host_available(&config, trust.trusted(), js_host.is_some(), &settings)?;
     let cwd = config.cwd.clone();
     let agent_dir = config.agent_dir.clone();
@@ -160,6 +191,19 @@ async fn run(
         factory = factory.with_js_plugin_host(js_host, cli_mode.js_host_mode(), session_binding);
     }
     let sessions = MultiSessionManager::new(factory);
+    if matches!(cli_mode, CLIMode::Acp) {
+        let sessions_dir = session_path
+            .parent()
+            .map_or_else(|| agent_dir.join("sessions"), std::path::Path::to_path_buf);
+        // Keep the receiver alive so per-session trust resolution retains its
+        // normal non-interactive request channel semantics.
+        let _trust_requests = trust.requests;
+        let result = pi_acp::serve_stdio(sessions.clone(), pi_acp::AcpOptions::new(sessions_dir))
+            .await
+            .map_err(|error| error.to_string());
+        let shutdown = sessions.shutdown().await.map_err(|error| error.to_string());
+        return finish_run(result, shutdown);
+    }
     let session = if session_exists {
         sessions.open_session(&session_path).await
     } else {
@@ -200,6 +244,8 @@ fn split_extension_flags(
         "version",
         "print",
         "json",
+        "acp",
+        "mode",
         "fullscreen",
         "no-fullscreen",
         "cwd",
@@ -216,6 +262,7 @@ fn split_extension_flags(
         "no-approve",
     ];
     const BUILT_IN_VALUE_OPTIONS: &[&str] = &[
+        "mode",
         "cwd",
         "session",
         "model",
@@ -310,13 +357,7 @@ fn ensure_javascript_host_available(
     host_available: bool,
     settings: &SettingsManager,
 ) -> Result<(), String> {
-    if host_available
-        || !JsPackageManager::with_settings(
-            config.javascript_resolve_request(project_trusted),
-            settings.clone(),
-        )
-        .requires_javascript_host()
-    {
+    if host_available || !javascript_host_required(config, project_trusted, settings) {
         return Ok(());
     }
     Err(
@@ -325,6 +366,18 @@ From a pi-rs source checkout, run `./scripts/pi-dev ...`; installed users should
 Pass `--no-extensions` to disable configured and automatic extensions; explicit `-e`/`--extension` sources must also be removed."
             .to_string(),
     )
+}
+
+fn javascript_host_required(
+    config: &AppConfig,
+    project_trusted: bool,
+    settings: &SettingsManager,
+) -> bool {
+    JsPackageManager::with_settings(
+        config.javascript_resolve_request(project_trusted),
+        settings.clone(),
+    )
+    .requires_javascript_host()
 }
 
 async fn run_cli_with_shutdown(
@@ -375,6 +428,8 @@ async fn run_cli(
 ) -> Result<(), String> {
     match mode {
         CLIMode::Json { input } => output::run_json(session, input).await,
+        CLIMode::Rpc => pi_rpc::rpc::run(session, session_export::export_html).await,
+        CLIMode::Acp => Err("ACP mode must start before creating a CLI session".to_string()),
         CLIMode::Print { input } => output::run_print(session, input).await,
         CLIMode::Tui { initial_prompt } => {
             tui::run(
@@ -492,6 +547,14 @@ mod tests {
         assert_eq!(values.get("fixture-mode"), Some(&json!("safe")));
         assert_eq!(values.get("fixture-enabled"), Some(&json!(true)));
 
+        let (rpc, values) = split_extension_flags(vec![
+            "--mode".to_string(),
+            "rpc".to_string(),
+            "--fixture-enabled".to_string(),
+        ]);
+        assert_eq!(rpc, vec!["--mode", "rpc"]);
+        assert_eq!(values.get("fixture-enabled"), Some(&json!(true)));
+
         let (arguments, values) = split_extension_flags(vec![
             "--fixture-mode".to_string(),
             "safe".to_string(),
@@ -557,6 +620,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(json.js_host_mode(), JsHostMode::Json);
+
+        let rpc = CLIMode::resolve(&cli(&["--mode", "rpc"]), None, true).unwrap();
+        assert_eq!(rpc, CLIMode::Rpc);
+        assert!(!rpc.is_interactive());
+        assert_eq!(rpc.js_host_mode(), JsHostMode::Rpc);
+
+        let acp = CLIMode::resolve(&cli(&["--acp"]), None, false).unwrap();
+        assert_eq!(acp, CLIMode::Acp);
+        assert!(!acp.is_interactive());
+        assert_eq!(acp.js_host_mode(), JsHostMode::Rpc);
     }
 
     #[test]
@@ -572,6 +645,14 @@ mod tests {
         assert_eq!(
             CLIMode::resolve(&cli(&[]), None, false),
             Err("--print requires a prompt or stdin".to_string())
+        );
+        assert_eq!(
+            CLIMode::resolve(&cli(&["--mode", "json"]), None, true),
+            Err("JSON mode requires a prompt or stdin".to_string())
+        );
+        assert_eq!(
+            CLIMode::resolve(&cli(&["--mode", "text"]), None, true),
+            Err("text mode requires a prompt or stdin".to_string())
         );
     }
 

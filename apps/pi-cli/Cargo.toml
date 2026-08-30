@@ -21,6 +21,8 @@ futures.workspace = true
 fs2 = "0.4.3"
 rpassword = "7.4"
 pi-agent.workspace = true
+pi-acp.workspace = true
+pi-rpc.workspace = true
 pi-md.workspace = true
 pi-core.workspace = true
 pi-plugin-loader.workspace = true
@@ -60,7 +62,7 @@ serde_json.workspace = true
 termina = "0.3.3"
 tempfile = "3.21.0"
 thiserror.workspace = true
-tokio = { workspace = true, features = ["signal"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "signal"] }
 tui-realm-stdlib = "4.1.0"
 tuirealm = { version = "4.1.0", default-features = false }
 unicode-width = "0.2"
