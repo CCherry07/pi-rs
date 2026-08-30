@@ -18,7 +18,7 @@ use futures::StreamExt;
 use pi_agent::AgentLoopStop;
 use pi_core::{
     AgentEvent, CommandSpec, ContentBlock, Message, ModelId, ModelSpec, ProviderId, StopReason,
-    ThinkingLevel, ToolCallId,
+    StreamEvent, ThinkingLevel, ToolCallId,
 };
 use pi_session::{
     AgentSession, AgentSessionEvent, AgentSessionSnapshot, EntryOrder, EntryQuery, ForkPosition,
@@ -710,8 +710,9 @@ impl App {
             .agent
             .streaming_message
             .as_ref()
+            .and_then(|stream| stream.snapshot())
             .and_then(|message| {
-                let text = assistant_text(&Message::assistant(message.clone()))?;
+                let text = assistant_text(&Message::Assistant(Arc::new(message)))?;
                 if text.is_empty() {
                     return None;
                 }
@@ -1032,7 +1033,7 @@ impl App {
                     |name| format!("Session: {name}"),
                 );
             }
-            AgentSessionEvent::ExtensionNotice { message, .. } => {
+            AgentSessionEvent::PluginNotice { message, .. } => {
                 self.status.clone_from(&message);
                 self.transcript.push(TranscriptItem::Notice(message));
             }
@@ -1073,24 +1074,16 @@ impl App {
                     }
                 }
             },
-            AgentEvent::MessageUpdate { message, .. } => {
-                let text = message
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Text(text) => Some(text.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
-                if let Some(index) = self.streaming_assistant
+            AgentEvent::MessageUpdate { update, .. } => {
+                if let StreamEvent::TextDelta { delta, .. } = update.as_ref()
+                    && let Some(index) = self.streaming_assistant
                     && let Some(TranscriptItem::Assistant {
                         text: current,
                         streaming,
                         ..
                     }) = self.transcript.get_mut(index)
                 {
-                    *current = text;
+                    current.push_str(delta);
                     *streaming = true;
                 }
             }
@@ -2944,9 +2937,9 @@ mod tests {
         let mut app = demo_app();
         app.transcript.clear();
 
-        app.apply_session_event(AgentSessionEvent::ExtensionNotice {
+        app.apply_session_event(AgentSessionEvent::PluginNotice {
             message: "/todos requires interactive mode".to_string(),
-            level: pi_session::ExtensionNoticeLevel::Error,
+            level: pi_session::NoticeLevel::Error,
         });
 
         assert_eq!(

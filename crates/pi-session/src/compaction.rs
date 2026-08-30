@@ -5,12 +5,12 @@ use pi_core::{
     AbortSignal, ContentBlock, Message, StopReason, ThinkingLevel, Usage, UsageCost, UserMessage,
 };
 use pi_runtime::{PiRuntime, RuntimeCompletionRequest, RuntimeError};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    AgentMessage, CompactionEntry, SessionContextBuildOptions, SessionEntry, SessionRecord,
-    agent_message_to_provider_message, build_session_context,
+    AgentMessage, CompactionEntry, CompactionPreparation, CompactionSettings, FileOperations,
+    SessionContextBuildOptions, SessionEntry, SessionRecord, agent_message_to_provider_message,
+    build_session_context,
 };
 
 pub const SUMMARIZATION_SYSTEM_PROMPT: &str = r#"You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.
@@ -107,49 +107,12 @@ Be concise. Focus on what's needed to understand the kept suffix."#;
 const ESTIMATED_IMAGE_CHARS: usize = 4_800;
 const TOOL_RESULT_MAX_CHARS: usize = 2_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompactionSettings {
-    pub enabled: bool,
-    pub reserve_tokens: u64,
-    pub keep_recent_tokens: u64,
-}
-
-impl Default for CompactionSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            reserve_tokens: 16_384,
-            keep_recent_tokens: 20_000,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextUsageEstimate {
     pub tokens: u64,
     pub usage_tokens: u64,
     pub trailing_tokens: u64,
     pub last_usage_index: Option<usize>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct FileOperations {
-    pub read: HashSet<String>,
-    pub written: HashSet<String>,
-    pub edited: HashSet<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CompactionPreparation {
-    pub messages_to_summarize: Vec<AgentMessage>,
-    pub turn_prefix_messages: Vec<AgentMessage>,
-    pub retained_tail: Vec<AgentMessage>,
-    pub is_split_turn: bool,
-    pub tokens_before: u64,
-    pub previous_summary: Option<String>,
-    pub file_ops: FileOperations,
-    pub settings: CompactionSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

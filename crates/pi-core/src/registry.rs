@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::{
-    AgentPlugin, Command, CoreError, ModelId, ModelRuntime, ModelSpec, PluginDriver, PluginId,
-    Provider, ProviderId, ProviderPlugin, ProviderPluginDriver, Result, Tool,
+    AgentPlugin, Command, CoreError, ModelId, ModelRuntime, ModelSpec, PluginContextEpoch,
+    PluginDriver, PluginId, Provider, ProviderId, ProviderPlugin, ProviderPluginDriver, Result,
+    Tool,
 };
 
 #[derive(Default)]
@@ -168,13 +169,27 @@ impl RegistriesBuilder {
     }
 
     pub fn register_plugin_sets(
-        mut self,
+        self,
         plugins: Vec<Arc<dyn AgentPlugin>>,
         provider_plugins: Vec<Arc<dyn ProviderPlugin>>,
     ) -> Result<(PluginDriver, ProviderPluginDriver, FrozenRegistries)> {
-        let plugin_driver = PluginDriver::new(plugins)?;
+        self.register_plugin_sets_with_context(
+            plugins,
+            provider_plugins,
+            PluginContextEpoch::unavailable(),
+        )
+    }
+
+    pub fn register_plugin_sets_with_context(
+        mut self,
+        plugins: Vec<Arc<dyn AgentPlugin>>,
+        provider_plugins: Vec<Arc<dyn ProviderPlugin>>,
+        context_epoch: PluginContextEpoch,
+    ) -> Result<(PluginDriver, ProviderPluginDriver, FrozenRegistries)> {
+        let plugin_driver = PluginDriver::new_with_context(plugins, context_epoch.clone())?;
         plugin_driver.register_all(&mut self)?;
-        let provider_plugin_driver = ProviderPluginDriver::new(provider_plugins)?;
+        let provider_plugin_driver =
+            ProviderPluginDriver::new_with_context(provider_plugins, context_epoch)?;
         provider_plugin_driver.register_all(&mut self)?;
         Ok((plugin_driver, provider_plugin_driver, self.freeze()))
     }

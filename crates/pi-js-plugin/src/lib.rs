@@ -2,23 +2,24 @@ mod context;
 
 pub use context::*;
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use pi_core::{
     AbortSignal, AfterProviderResponseEvent, AgentEndEvent, AgentHook, AgentHookInterests,
-    AgentPlugin, AgentSettledEvent, AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch,
-    BeforeProviderHeadersEvent, BeforeProviderRequestEvent, Command, CommandContext, CommandError,
-    CommandOutcome, CommandSpec, ContentBlock, ContextEvent, ContextPatch, CustomMessage,
-    CustomMessageContent, ImageContent, InputContext, InputEvent, InputPatch, InputSource,
-    InputStreamingBehavior, Message, MessageEndEvent, MessageEndPatch, MessageStartEvent,
-    MessageUpdateEvent, PluginContext, PluginError, PluginId, ProviderPlugin,
-    ProviderPluginContext, RegisterContext, Tool, ToolCallEvent, ToolCallId, ToolCallPatch,
-    ToolContext, ToolError, ToolExecutionEndEvent, ToolExecutionMode, ToolExecutionStartEvent,
-    ToolExecutionUpdateEvent, ToolResult, ToolResultEvent, ToolResultPatch, ToolSpec,
-    ToolUpdateSink, TurnEndEvent, TurnStartEvent, Usage,
+    AgentPlugin, AgentPluginContext, AgentSettledEvent, AgentStartEvent, AssistantMessage,
+    AssistantStreamId, BeforeAgentStartEvent, BeforeAgentStartPatch, BeforeProviderHeadersEvent,
+    BeforeProviderRequestEvent, Command, CommandContext, CommandError, CommandOutcome, CommandSpec,
+    ContentBlock, ContextEvent, ContextPatch, CustomMessage, CustomMessageContent, ImageContent,
+    InputContext, InputEvent, InputPatch, InputSource, InputStreamingBehavior, Message,
+    MessageEndEvent, MessageEndPatch, MessageStartEvent, MessageUpdateEvent, PluginError, PluginId,
+    ProviderPlugin, ProviderPluginContext, RegisterContext, RunId, StreamEvent, Tool,
+    ToolCallEvent, ToolCallId, ToolCallPatch, ToolContext, ToolError, ToolExecutionEndEvent,
+    ToolExecutionMode, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResult,
+    ToolResultEvent, ToolResultPatch, ToolSpec, ToolUpdateSink, TurnEndEvent, TurnStartEvent,
+    Usage,
 };
 use pi_session::{
     CompactionEntry, SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent,
@@ -31,6 +32,8 @@ use pi_session::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+static NEXT_JS_INVOCATION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,19 +82,10 @@ pub struct JsGenerationRequest {
     pub project_trusted: bool,
     #[serde(default)]
     pub extension_paths: Vec<String>,
-    pub mode: JsHostMode,
+    pub mode: PresentationMode,
     pub cwd: String,
     #[serde(default)]
     pub flag_values: std::collections::BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum JsHostMode {
-    Tui,
-    Print,
-    Json,
-    Rpc,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -101,18 +95,41 @@ pub enum JsHostMode {
     rename_all_fields = "camelCase"
 )]
 pub enum JsHostOperation {
-    PrepareGeneration { request: JsGenerationRequest },
-    Invoke { invocation: JsInvocation },
-    Cancel { invocation_id: String },
-    RetireGeneration { generation_id: String },
+    PrepareGeneration {
+        request: JsGenerationRequest,
+    },
+    Invoke {
+        invocation: JsInvocation,
+    },
+    InvokeHookBatch {
+        invocation: JsHookBatchInvocation,
+    },
+    InvokeStreamHookBatch {
+        invocation: JsStreamHookBatchInvocation,
+    },
+    ReleaseStream {
+        generation_id: String,
+        stream_id: String,
+    },
+    Cancel {
+        invocation_id: String,
+    },
+    RetireGeneration {
+        generation_id: String,
+    },
 }
 
 #[cfg(test)]
 mod wire_tests {
-    use pi_core::AgentHook;
+    use std::sync::Arc;
+
+    use pi_core::{AgentHook, PresentationMode, StreamEvent, ToolExecutionMode};
     use serde_json::json;
 
-    use super::{AGENT_HOOKS, JsGenerationRequest, JsHostMode, JsHostOperation};
+    use super::{
+        AGENT_HOOKS, JsGenerationRequest, JsHookBatchCallback, JsHookBatchInvocation,
+        JsHostOperation, JsStreamHookBatchInvocation,
+    };
 
     #[test]
     fn every_validated_agent_hook_has_a_core_route() {
@@ -139,6 +156,45 @@ mod wire_tests {
         .unwrap();
         assert_eq!(retire["generationId"], "generation-1");
         assert!(retire.get("generation_id").is_none());
+
+        let batch = serde_json::to_value(JsHostOperation::InvokeHookBatch {
+            invocation: JsHookBatchInvocation {
+                invocation_id: "invocation-2".to_string(),
+                generation_id: "generation-1".to_string(),
+                hook: "message_update".to_string(),
+                callbacks: vec![JsHookBatchCallback {
+                    callback_id: "callback-1".to_string(),
+                    context: json!({ "pluginId": "extension" }),
+                }],
+                event: json!({ "type": "message_update" }),
+            },
+        })
+        .unwrap();
+        assert_eq!(batch["type"], "invokeHookBatch");
+        assert_eq!(batch["invocation"]["invocationId"], "invocation-2");
+        assert_eq!(
+            batch["invocation"]["callbacks"][0]["callbackId"],
+            "callback-1"
+        );
+
+        let stream = serde_json::to_value(JsHostOperation::InvokeStreamHookBatch {
+            invocation: JsStreamHookBatchInvocation {
+                invocation_id: "invocation-3".to_string(),
+                generation_id: "generation-1".to_string(),
+                callbacks: Vec::new().into(),
+                stream_id: "stream-1".to_string(),
+                initial_message: None,
+                update: Arc::new(StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: "delta".to_string(),
+                }),
+            },
+        })
+        .unwrap();
+        assert_eq!(stream["type"], "invokeStreamHookBatch");
+        assert_eq!(stream["invocation"]["streamId"], "stream-1");
+        assert!(stream["invocation"].get("initialMessage").is_none());
+        assert_eq!(stream["invocation"]["update"]["type"], "textDelta");
     }
 
     #[test]
@@ -147,7 +203,7 @@ mod wire_tests {
             request: JsGenerationRequest {
                 project_trusted: true,
                 extension_paths: vec!["/extensions/example.ts".to_string()],
-                mode: JsHostMode::Print,
+                mode: PresentationMode::Print,
                 cwd: "/workspace".to_string(),
                 flag_values: std::collections::BTreeMap::from([(
                     "fixture".to_string(),
@@ -160,11 +216,20 @@ mod wire_tests {
 
         assert_eq!(request["extensionPaths"][0], "/extensions/example.ts");
         assert_eq!(request["projectTrusted"], true);
+        assert_eq!(request["mode"], "print");
         assert_eq!(request["cwd"], "/workspace");
         assert_eq!(request["flagValues"]["fixture"], true);
         assert!(request.get("agentDir").is_none());
         assert!(request.get("explicitPaths").is_none());
         assert!(request.get("discoverExtensions").is_none());
+    }
+
+    #[test]
+    fn canonical_contract_types_keep_javascript_wire_shape() {
+        assert_eq!(
+            serde_json::to_value(ToolExecutionMode::Sequential).unwrap(),
+            json!("sequential")
+        );
     }
 }
 
@@ -228,15 +293,7 @@ pub struct JsToolManifest {
     #[serde(default)]
     pub prompt_guidelines: Vec<String>,
     #[serde(default)]
-    pub execution_mode: JsToolExecutionMode,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum JsToolExecutionMode {
-    Sequential,
-    #[default]
-    Parallel,
+    pub execution_mode: ToolExecutionMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -247,6 +304,55 @@ pub struct JsInvocation {
     pub callback_id: String,
     pub kind: JsInvocationKind,
     pub payload: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsHookBatchInvocation {
+    pub invocation_id: String,
+    pub generation_id: String,
+    pub hook: String,
+    pub callbacks: Vec<JsHookBatchCallback>,
+    pub event: Value,
+}
+
+/// Compact wire payload for high-frequency assistant stream hooks.
+///
+/// The cumulative message is sent only when a stream is first observed. Each
+/// subsequent invocation carries the provider delta directly, allowing the JS
+/// host to retain chunked state and materialize a snapshot only when a callback
+/// actually reads one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsStreamHookBatchInvocation {
+    pub invocation_id: String,
+    pub generation_id: String,
+    pub callbacks: Arc<[JsHookBatchCallback]>,
+    pub stream_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_message: Option<Box<AssistantMessage>>,
+    pub update: Arc<StreamEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsHookBatchCallback {
+    pub callback_id: String,
+    pub context: Value,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsHookBatchResult {
+    #[serde(default)]
+    pub errors: Vec<JsHookBatchError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsHookBatchError {
+    pub callback_id: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,19 +385,82 @@ pub trait JsCallbackDispatcher: Send + Sync {
     async fn invoke(
         &self,
         invocation: JsInvocation,
-        context: ExtensionContextHandle,
+        context: PluginContextHandle,
     ) -> Result<Value, JsCallbackError>;
 
     async fn invoke_with_tool_updates(
         &self,
         invocation: JsInvocation,
-        context: ExtensionContextHandle,
+        context: PluginContextHandle,
         _updates: ToolUpdateSink,
     ) -> Result<Value, JsCallbackError> {
         self.invoke(invocation, context).await
     }
 
+    /// Executes observer hooks in registration order. Dispatchers that cross
+    /// a process or language seam can override this to encode the shared event
+    /// once; the default keeps lightweight in-process adapters compatible.
+    async fn invoke_hook_batch(
+        &self,
+        invocation: JsHookBatchInvocation,
+        context: PluginContextHandle,
+    ) -> Result<JsHookBatchResult, JsCallbackError> {
+        let mut errors = Vec::new();
+        for callback in invocation.callbacks {
+            let callback_id = callback.callback_id;
+            let result = self
+                .invoke(
+                    JsInvocation {
+                        invocation_id: invocation.invocation_id.clone(),
+                        generation_id: invocation.generation_id.clone(),
+                        callback_id: callback_id.clone(),
+                        kind: JsInvocationKind::AgentHook,
+                        payload: json!({
+                            "hook": invocation.hook.clone(),
+                            "context": callback.context,
+                            "event": invocation.event.clone(),
+                        }),
+                    },
+                    context.clone(),
+                )
+                .await;
+            if let Err(error) = result {
+                errors.push(JsHookBatchError {
+                    callback_id,
+                    message: error.message,
+                });
+            }
+        }
+        Ok(JsHookBatchResult { errors })
+    }
+
+    async fn invoke_stream_hook_batch(
+        &self,
+        invocation: JsStreamHookBatchInvocation,
+        context: PluginContextHandle,
+    ) -> Result<JsHookBatchResult, JsCallbackError> {
+        let event = json!({
+            "type": "message_update",
+            "streamId": invocation.stream_id,
+            "initialMessage": invocation.initial_message,
+            "update": invocation.update,
+        });
+        self.invoke_hook_batch(
+            JsHookBatchInvocation {
+                invocation_id: invocation.invocation_id,
+                generation_id: invocation.generation_id,
+                hook: "message_update".to_string(),
+                callbacks: invocation.callbacks.to_vec(),
+                event,
+            },
+            context,
+        )
+        .await
+    }
+
     fn cancel(&self, _invocation_id: &str) {}
+
+    fn release_stream(&self, _generation_id: &str, _stream_id: &str) {}
 
     fn retire_generation(&self, _generation_id: &str) {}
 }
@@ -323,36 +492,12 @@ impl JsPluginGeneration {
         manifest: JsGenerationManifest,
         host: Arc<dyn JsPluginHost>,
     ) -> Result<Self, JsPluginError> {
-        Self::prepare_with_host_and_context(
-            manifest,
-            host,
-            Arc::new(UnavailableExtensionContextAccess),
-        )
-    }
-
-    pub fn prepare_with_host_and_context(
-        manifest: JsGenerationManifest,
-        host: Arc<dyn JsPluginHost>,
-        context: Arc<dyn ExtensionContextAccess>,
-    ) -> Result<Self, JsPluginError> {
-        Self::prepare_with_context(manifest, Arc::new(HostCallbackDispatcher { host }), context)
+        Self::prepare(manifest, Arc::new(HostCallbackDispatcher { host }))
     }
 
     pub fn prepare(
         manifest: JsGenerationManifest,
         dispatcher: Arc<dyn JsCallbackDispatcher>,
-    ) -> Result<Self, JsPluginError> {
-        Self::prepare_with_context(
-            manifest,
-            dispatcher,
-            Arc::new(UnavailableExtensionContextAccess),
-        )
-    }
-
-    pub fn prepare_with_context(
-        manifest: JsGenerationManifest,
-        dispatcher: Arc<dyn JsCallbackDispatcher>,
-        context: Arc<dyn ExtensionContextAccess>,
     ) -> Result<Self, JsPluginError> {
         let JsGenerationManifest {
             generation_id,
@@ -365,7 +510,6 @@ impl JsPluginGeneration {
         let lease = Arc::new(JsGenerationLease {
             generation_id,
             dispatcher,
-            context: ExtensionContextEpoch::new(context),
         });
         validate_manifest(
             &lease.generation_id,
@@ -374,27 +518,67 @@ impl JsPluginGeneration {
             &provider_registrations,
             &session_plugins,
         )?;
+        // JavaScript extensions are one contiguous generation contribution.
+        // Route only observer hooks through the first adapter so callbacks can
+        // share one encoded event and one host crossing. Chained/mutating hooks
+        // remain on their owning adapter and retain the typed driver semantics.
+        let mut generation_observer_hooks = Some(
+            agent_plugins
+                .iter()
+                .flat_map(|plugin| {
+                    let plugin_id = PluginId::new(plugin.id.clone());
+                    plugin
+                        .hooks
+                        .iter()
+                        .filter(|hook| is_batched_agent_observer(&hook.name))
+                        .map(move |hook| JsAgentHook {
+                            plugin_id: plugin_id.clone(),
+                            name: hook.name.clone(),
+                            callback_id: hook.callback_id.clone(),
+                        })
+                })
+                .collect::<Vec<_>>(),
+        );
         let agent_plugins = agent_plugins
             .into_iter()
-            .map(|plugin| {
-                let tools = plugin
-                    .tools
+            .enumerate()
+            .map(|(index, plugin)| {
+                let JsAgentPluginManifest {
+                    id,
+                    tools,
+                    commands,
+                    hooks,
+                } = plugin;
+                let plugin_id = PluginId::new(id);
+                let tools = tools
                     .into_iter()
                     .map(|tool| Arc::new(JsTool::new(tool, Arc::clone(&lease))) as Arc<dyn Tool>)
                     .collect();
-                let commands = plugin
-                    .commands
+                let commands = commands
                     .into_iter()
                     .map(|command| {
                         Arc::new(JsCommand::new(command, Arc::clone(&lease))) as Arc<dyn Command>
                     })
                     .collect();
+                let mut hooks = hooks
+                    .into_iter()
+                    .filter(|hook| !is_batched_agent_observer(&hook.name))
+                    .map(|hook| JsAgentHook {
+                        plugin_id: plugin_id.clone(),
+                        name: hook.name,
+                        callback_id: hook.callback_id,
+                    })
+                    .collect::<Vec<_>>();
+                if index == 0 {
+                    hooks.extend(generation_observer_hooks.take().unwrap_or_default());
+                }
                 Arc::new(JsAgentPlugin {
-                    id: PluginId::new(plugin.id),
+                    id: plugin_id,
                     tools,
                     commands,
-                    hooks: plugin.hooks,
+                    hooks,
                     lease: Arc::clone(&lease),
+                    active_streams: Mutex::new(HashMap::new()),
                 }) as Arc<dyn AgentPlugin>
             })
             .collect();
@@ -458,13 +642,35 @@ impl JsCallbackDispatcher for HostCallbackDispatcher {
     async fn invoke(
         &self,
         invocation: JsInvocation,
-        context: ExtensionContextHandle,
+        context: PluginContextHandle,
     ) -> Result<Value, JsCallbackError> {
         self.host.invoke(invocation, context).await
     }
 
+    async fn invoke_hook_batch(
+        &self,
+        invocation: JsHookBatchInvocation,
+        context: PluginContextHandle,
+    ) -> Result<JsHookBatchResult, JsCallbackError> {
+        self.host.invoke_hook_batch(invocation, context).await
+    }
+
+    async fn invoke_stream_hook_batch(
+        &self,
+        invocation: JsStreamHookBatchInvocation,
+        context: PluginContextHandle,
+    ) -> Result<JsHookBatchResult, JsCallbackError> {
+        self.host
+            .invoke_stream_hook_batch(invocation, context)
+            .await
+    }
+
     fn cancel(&self, invocation_id: &str) {
         self.host.cancel(invocation_id);
+    }
+
+    fn release_stream(&self, generation_id: &str, stream_id: &str) {
+        self.host.release_stream(generation_id, stream_id);
     }
 
     fn retire_generation(&self, generation_id: &str) {
@@ -490,6 +696,23 @@ const AGENT_HOOKS: &[&str] = &[
     "tool_call",
     "tool_result",
 ];
+
+fn is_batched_agent_observer(name: &str) -> bool {
+    matches!(
+        name,
+        "agent_start"
+            | "agent_end"
+            | "agent_settled"
+            | "turn_start"
+            | "turn_end"
+            | "message_start"
+            | "message_update"
+            | "tool_execution_start"
+            | "tool_execution_update"
+            | "tool_execution_end"
+    )
+}
+
 const PROVIDER_HOOKS: &[&str] = &[
     "before_provider_request",
     "before_provider_headers",
@@ -696,7 +919,6 @@ fn validate_callback_id(
 struct JsGenerationLease {
     generation_id: String,
     dispatcher: Arc<dyn JsCallbackDispatcher>,
-    context: ExtensionContextEpoch,
 }
 
 enum JsInvokeError {
@@ -710,9 +932,10 @@ impl JsGenerationLease {
         callback_id: &str,
         kind: JsInvocationKind,
         payload: Value,
+        context: PluginContextHandle,
         abort_signal: Option<&AbortSignal>,
     ) -> Result<Value, JsInvokeError> {
-        self.invoke_inner(callback_id, kind, payload, abort_signal, None)
+        self.invoke_inner(callback_id, kind, payload, context, abort_signal, None)
             .await
     }
 
@@ -720,6 +943,7 @@ impl JsGenerationLease {
         &self,
         callback_id: &str,
         payload: Value,
+        context: PluginContextHandle,
         abort_signal: &AbortSignal,
         updates: ToolUpdateSink,
     ) -> Result<Value, JsInvokeError> {
@@ -727,10 +951,78 @@ impl JsGenerationLease {
             callback_id,
             JsInvocationKind::Tool,
             payload,
+            context,
             Some(abort_signal),
             Some(updates),
         )
         .await
+    }
+
+    async fn invoke_hook_batch(
+        &self,
+        hook: &'static str,
+        callbacks: Vec<JsHookBatchCallback>,
+        event: Value,
+        context: PluginContextHandle,
+        abort_signal: &AbortSignal,
+    ) -> Result<JsHookBatchResult, JsInvokeError> {
+        let invocation_id = format!(
+            "js-invocation-{}",
+            NEXT_JS_INVOCATION_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let invocation = JsHookBatchInvocation {
+            invocation_id: invocation_id.clone(),
+            generation_id: self.generation_id.clone(),
+            hook: hook.to_string(),
+            callbacks,
+            event,
+        };
+        tokio::select! {
+            response = self.dispatcher.invoke_hook_batch(invocation, context) => {
+                response.map_err(JsInvokeError::Callback)
+            }
+            () = abort_signal.wait() => {
+                self.dispatcher.cancel(&invocation_id);
+                Err(JsInvokeError::Aborted)
+            }
+        }
+    }
+
+    async fn invoke_stream_hook_batch(
+        &self,
+        callbacks: Arc<[JsHookBatchCallback]>,
+        stream_id: String,
+        initial_message: Option<AssistantMessage>,
+        update: Arc<StreamEvent>,
+        context: PluginContextHandle,
+        abort_signal: &AbortSignal,
+    ) -> Result<JsHookBatchResult, JsInvokeError> {
+        let invocation_id = format!(
+            "js-invocation-{}",
+            NEXT_JS_INVOCATION_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let invocation = JsStreamHookBatchInvocation {
+            invocation_id: invocation_id.clone(),
+            generation_id: self.generation_id.clone(),
+            callbacks,
+            stream_id,
+            initial_message: initial_message.map(Box::new),
+            update,
+        };
+        tokio::select! {
+            response = self.dispatcher.invoke_stream_hook_batch(invocation, context) => {
+                response.map_err(JsInvokeError::Callback)
+            }
+            () = abort_signal.wait() => {
+                self.dispatcher.cancel(&invocation_id);
+                Err(JsInvokeError::Aborted)
+            }
+        }
+    }
+
+    fn release_stream(&self, stream_id: &AssistantStreamId) {
+        self.dispatcher
+            .release_stream(&self.generation_id, stream_id.as_str());
     }
 
     async fn invoke_inner(
@@ -738,14 +1030,13 @@ impl JsGenerationLease {
         callback_id: &str,
         kind: JsInvocationKind,
         payload: Value,
+        context: PluginContextHandle,
         abort_signal: Option<&AbortSignal>,
         updates: Option<ToolUpdateSink>,
     ) -> Result<Value, JsInvokeError> {
-        static NEXT_INVOCATION_ID: AtomicU64 = AtomicU64::new(1);
-
         let invocation_id = format!(
             "js-invocation-{}",
-            NEXT_INVOCATION_ID.fetch_add(1, Ordering::Relaxed)
+            NEXT_JS_INVOCATION_ID.fetch_add(1, Ordering::Relaxed)
         );
         let invocation = JsInvocation {
             invocation_id: invocation_id.clone(),
@@ -754,11 +1045,6 @@ impl JsGenerationLease {
             kind,
             payload,
         };
-        let context = self.context.handle(if kind == JsInvocationKind::Command {
-            ExtensionContextScope::Command
-        } else {
-            ExtensionContextScope::Base
-        });
         let response = async {
             match updates {
                 Some(updates) => {
@@ -787,7 +1073,6 @@ impl JsGenerationLease {
 
 impl Drop for JsGenerationLease {
     fn drop(&mut self) {
-        self.context.retire();
         self.dispatcher.retire_generation(&self.generation_id);
     }
 }
@@ -796,36 +1081,48 @@ struct JsAgentPlugin {
     id: PluginId,
     tools: Vec<Arc<dyn Tool>>,
     commands: Vec<Arc<dyn Command>>,
-    hooks: Vec<JsHookManifest>,
+    hooks: Vec<JsAgentHook>,
     lease: Arc<JsGenerationLease>,
+    active_streams: Mutex<HashMap<RunId, ActiveJsStream>>,
+}
+
+struct ActiveJsStream {
+    id: AssistantStreamId,
+    callbacks: Arc<[JsHookBatchCallback]>,
+}
+
+#[derive(Clone)]
+struct JsAgentHook {
+    plugin_id: PluginId,
+    name: String,
+    callback_id: String,
 }
 
 impl JsAgentPlugin {
-    fn hook_callbacks<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> {
-        self.hooks
-            .iter()
-            .filter(move |hook| hook.name == name)
-            .map(|hook| hook.callback_id.as_str())
+    fn hook_callbacks<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a JsAgentHook> {
+        self.hooks.iter().filter(move |hook| hook.name == name)
     }
 
     async fn invoke_hook(
         &self,
         name: &'static str,
-        callback_id: &str,
+        hook: &JsAgentHook,
+        native_context: PluginContextHandle,
         context: Value,
         event: Value,
         signal: &AbortSignal,
     ) -> Result<Value, PluginError> {
         self.lease
             .invoke(
-                callback_id,
+                &hook.callback_id,
                 JsInvocationKind::AgentHook,
                 json!({ "hook": name, "context": context, "event": event }),
+                native_context,
                 Some(signal),
             )
             .await
             .map_err(|error| PluginError::Hook {
-                plugin_id: self.id.clone(),
+                plugin_id: hook.plugin_id.clone(),
                 hook: name,
                 message: match error {
                     JsInvokeError::Aborted => "JavaScript hook was aborted".to_string(),
@@ -837,33 +1134,180 @@ impl JsAgentPlugin {
     async fn notify_hooks(
         &self,
         name: &'static str,
-        context: &PluginContext,
+        context: &AgentPluginContext,
         event: Value,
     ) -> Result<(), PluginError> {
-        let context_value = plugin_context_value(context);
-        for callback_id in self.hook_callbacks(name) {
-            if let Err(error) = self
-                .invoke_hook(
-                    name,
-                    callback_id,
-                    context_value.clone(),
-                    event.clone(),
-                    &context.abort_signal,
-                )
-                .await
+        let hooks = self.hook_callbacks(name).cloned().collect::<Vec<_>>();
+        if hooks.is_empty() {
+            return Ok(());
+        }
+        let callbacks = hooks
+            .iter()
+            .map(|hook| {
+                let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+                JsHookBatchCallback {
+                    callback_id: hook.callback_id.clone(),
+                    context: agent_plugin_context_value(&callback_context),
+                }
+            })
+            .collect();
+        let result = self
+            .lease
+            .invoke_hook_batch(
+                name,
+                callbacks,
+                event,
+                context.plugin_context_handle(),
+                context.signal(),
+            )
+            .await;
+        match result {
+            Ok(result) => {
+                for error in result.errors {
+                    let Some(hook) = hooks
+                        .iter()
+                        .find(|hook| hook.callback_id == error.callback_id)
+                    else {
+                        continue;
+                    };
+                    report_agent_hook_error(context, name, hook, error.message);
+                }
+            }
+            Err(error) => {
+                let message = match error {
+                    JsInvokeError::Aborted => "JavaScript hook batch was aborted".to_string(),
+                    JsInvokeError::Callback(error) => error.to_string(),
+                };
+                for hook in &hooks {
+                    report_agent_hook_error(context, name, hook, message.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn notify_stream_hooks(
+        &self,
+        context: &AgentPluginContext,
+        event: MessageUpdateEvent,
+    ) -> Result<(), PluginError> {
+        const HOOK: &str = "message_update";
+        let hooks = self.hook_callbacks(HOOK).collect::<Vec<_>>();
+        if hooks.is_empty() {
+            return Ok(());
+        }
+        let stream_id = event.stream.id().clone();
+        let (initial_message, callbacks) = {
+            let mut active = self
+                .active_streams
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(active_stream) = active
+                .get(context.run_id())
+                .filter(|active_stream| active_stream.id == stream_id)
             {
-                context.report_hook_error(name, error.to_string());
+                (None, Arc::clone(&active_stream.callbacks))
+            } else {
+                let callbacks = hooks
+                    .iter()
+                    .map(|hook| {
+                        let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+                        JsHookBatchCallback {
+                            callback_id: hook.callback_id.clone(),
+                            context: agent_plugin_context_value(&callback_context),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .into();
+                active.insert(
+                    context.run_id().clone(),
+                    ActiveJsStream {
+                        id: stream_id.clone(),
+                        callbacks: Arc::clone(&callbacks),
+                    },
+                );
+                (event.stream.snapshot(), callbacks)
+            }
+        };
+        let is_done = matches!(event.update.as_ref(), StreamEvent::Done { .. });
+        let result = self
+            .lease
+            .invoke_stream_hook_batch(
+                callbacks,
+                stream_id.clone().to_string(),
+                initial_message,
+                event.update,
+                context.plugin_context_handle(),
+                context.signal(),
+            )
+            .await;
+        let reset_stream = result.is_err();
+        if is_done || reset_stream {
+            let mut active = self
+                .active_streams
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if active
+                .get(context.run_id())
+                .is_some_and(|active_stream| active_stream.id == stream_id)
+            {
+                active.remove(context.run_id());
+            }
+        }
+        if reset_stream {
+            self.lease.release_stream(&stream_id);
+        }
+        match result {
+            Ok(result) => {
+                for error in result.errors {
+                    let Some(hook) = hooks
+                        .iter()
+                        .find(|hook| hook.callback_id == error.callback_id)
+                    else {
+                        continue;
+                    };
+                    report_agent_hook_error(context, HOOK, hook, error.message);
+                }
+            }
+            Err(error) => {
+                let message = match error {
+                    JsInvokeError::Aborted => {
+                        "JavaScript stream hook batch was aborted".to_string()
+                    }
+                    JsInvokeError::Callback(error) => error.to_string(),
+                };
+                for hook in &hooks {
+                    report_agent_hook_error(context, HOOK, hook, message.clone());
+                }
             }
         }
         Ok(())
     }
 }
 
-fn plugin_context_value(context: &PluginContext) -> Value {
+fn report_agent_hook_error(
+    context: &AgentPluginContext,
+    name: &'static str,
+    hook: &JsAgentHook,
+    message: impl Into<String>,
+) {
+    let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+    callback_context.report_hook_error(
+        name,
+        PluginError::Hook {
+            plugin_id: hook.plugin_id.clone(),
+            hook: name,
+            message: message.into(),
+        }
+        .to_string(),
+    );
+}
+
+fn agent_plugin_context_value(context: &AgentPluginContext) -> Value {
     json!({
-        "pluginId": context.plugin_id.as_str(),
-        "runId": context.run_id.as_str(),
-        "cwd": context.cwd.to_string_lossy(),
+        "pluginId": context.plugin_id().as_str(),
+        "runId": context.run_id().as_str(),
+        "cwd": context.cwd().to_string_lossy(),
     })
 }
 
@@ -1017,7 +1461,7 @@ impl AgentPlugin for JsAgentPlugin {
     }
 
     fn hook_interests(&self) -> AgentHookInterests {
-        let hooks: Vec<_> = self
+        let mut hooks: Vec<_> = self
             .hooks
             .iter()
             .map(|hook| {
@@ -1025,6 +1469,9 @@ impl AgentPlugin for JsAgentPlugin {
                     .expect("validated JavaScript agent hook must have a core route")
             })
             .collect();
+        if hooks.contains(&AgentHook::MessageUpdate) && !hooks.contains(&AgentHook::MessageEnd) {
+            hooks.push(AgentHook::MessageEnd);
+        }
         AgentHookInterests::from_hooks(&hooks)
     }
 
@@ -1047,10 +1494,10 @@ impl AgentPlugin for JsAgentPlugin {
         let mut text = event.text;
         let mut images = event.images;
         let context_value = json!({
-            "pluginId": context.plugin_id.as_str(),
-            "cwd": context.cwd.to_string_lossy(),
+            "pluginId": context.plugin_id().as_str(),
+            "cwd": context.cwd().to_string_lossy(),
         });
-        for callback_id in self.hook_callbacks("input") {
+        for hook in self.hook_callbacks("input") {
             let mut event_value = json!({
                 "type": "input",
                 "text": text,
@@ -1074,10 +1521,11 @@ impl AgentPlugin for JsAgentPlugin {
             let result = match self
                 .invoke_hook(
                     "input",
-                    callback_id,
+                    hook,
+                    context.plugin_context_handle(),
                     context_value.clone(),
                     event_value,
-                    &context.abort_signal,
+                    context.signal(),
                 )
                 .await
             {
@@ -1122,20 +1570,20 @@ impl AgentPlugin for JsAgentPlugin {
 
     async fn before_agent_start(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         event: BeforeAgentStartEvent,
     ) -> Result<BeforeAgentStartPatch, PluginError> {
         let original_system_prompt = event.system_prompt;
         let mut system_prompt = original_system_prompt.clone();
         let mut messages = Vec::new();
-        let context_value = plugin_context_value(&context);
         let (prompt, images) = pi_prompt_input(&event.input_messages);
-        let system_prompt_options = self
-            .lease
-            .context
-            .query_for_adapter(ExtensionContextQuery::SystemPromptOptions)
-            .unwrap_or_else(|_| json!({ "cwd": context.cwd }));
-        for callback_id in self.hook_callbacks("before_agent_start") {
+        let plugin_context = context.plugin_context_handle();
+        let system_prompt_options = plugin_context
+            .access_for_adapter()
+            .and_then(|access| access.system_prompt_options(PluginContextScope::Command))
+            .unwrap_or_else(|_| json!({ "cwd": context.cwd() }));
+        for hook in self.hook_callbacks("before_agent_start") {
+            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
             let mut event_value = json!({
                 "type": "before_agent_start",
                 "prompt": prompt,
@@ -1155,16 +1603,17 @@ impl AgentPlugin for JsAgentPlugin {
             let result = match self
                 .invoke_hook(
                     "before_agent_start",
-                    callback_id,
-                    context_value.clone(),
+                    hook,
+                    callback_context.plugin_context_handle(),
+                    agent_plugin_context_value(&callback_context),
                     event_value,
-                    &context.abort_signal,
+                    callback_context.signal(),
                 )
                 .await
             {
                 Ok(result) => result,
                 Err(error) => {
-                    context.report_hook_error("before_agent_start", error.to_string());
+                    callback_context.report_hook_error("before_agent_start", error.to_string());
                     continue;
                 }
             };
@@ -1175,7 +1624,7 @@ impl AgentPlugin for JsAgentPlugin {
                 match before_agent_start_message(message) {
                     Ok(message) => messages.push(message),
                     Err(error) => {
-                        context.report_hook_error("before_agent_start", error);
+                        callback_context.report_hook_error("before_agent_start", error);
                     }
                 }
             }
@@ -1188,7 +1637,7 @@ impl AgentPlugin for JsAgentPlugin {
 
     async fn agent_start(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         _event: AgentStartEvent,
     ) -> Result<(), PluginError> {
         self.notify_hooks("agent_start", &context, json!({ "type": "agent_start" }))
@@ -1197,7 +1646,7 @@ impl AgentPlugin for JsAgentPlugin {
 
     async fn agent_end(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         event: AgentEndEvent,
     ) -> Result<(), PluginError> {
         self.notify_hooks(
@@ -1210,7 +1659,7 @@ impl AgentPlugin for JsAgentPlugin {
 
     async fn agent_settled(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         _event: AgentSettledEvent,
     ) -> Result<(), PluginError> {
         self.notify_hooks(
@@ -1223,7 +1672,7 @@ impl AgentPlugin for JsAgentPlugin {
 
     async fn turn_start(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         event: TurnStartEvent,
     ) -> Result<(), PluginError> {
         self.notify_hooks(
@@ -1240,7 +1689,7 @@ impl AgentPlugin for JsAgentPlugin {
 
     async fn turn_end(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         event: TurnEndEvent,
     ) -> Result<(), PluginError> {
         self.notify_hooks(
@@ -1258,7 +1707,7 @@ impl AgentPlugin for JsAgentPlugin {
 
     async fn message_start(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         event: MessageStartEvent,
     ) -> Result<(), PluginError> {
         self.notify_hooks(
@@ -1271,44 +1720,43 @@ impl AgentPlugin for JsAgentPlugin {
 
     async fn message_update(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         event: MessageUpdateEvent,
     ) -> Result<(), PluginError> {
-        let assistant_message_event = assistant_message_event_value(&event);
-        self.notify_hooks(
-            "message_update",
-            &context,
-            json!({
-                "type": "message_update",
-                "message": event.message,
-                "assistantMessageEvent": assistant_message_event,
-            }),
-        )
-        .await
+        self.notify_stream_hooks(&context, event).await
     }
 
     async fn message_end(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         event: MessageEndEvent,
     ) -> Result<MessageEndPatch, PluginError> {
+        if let Some(active_stream) = self
+            .active_streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(context.run_id())
+        {
+            self.lease.release_stream(&active_stream.id);
+        }
         let original = event.message;
         let mut message = original.clone();
-        let context_value = plugin_context_value(&context);
-        for callback_id in self.hook_callbacks("message_end") {
+        for hook in self.hook_callbacks("message_end") {
+            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
             let result = match self
                 .invoke_hook(
                     "message_end",
-                    callback_id,
-                    context_value.clone(),
+                    hook,
+                    callback_context.plugin_context_handle(),
+                    agent_plugin_context_value(&callback_context),
                     json!({ "type": "message_end", "message": message }),
-                    &context.abort_signal,
+                    callback_context.signal(),
                 )
                 .await
             {
                 Ok(result) => result,
                 Err(error) => {
-                    context.report_hook_error("message_end", error.to_string());
+                    callback_context.report_hook_error("message_end", error.to_string());
                     continue;
                 }
             };
@@ -1318,14 +1766,14 @@ impl AgentPlugin for JsAgentPlugin {
             let replacement = match message_end_replacement(replacement) {
                 Ok(replacement) => replacement,
                 Err(error) => {
-                    context.report_hook_error("message_end", error);
+                    callback_context.report_hook_error("message_end", error);
                     continue;
                 }
             };
             if same_message_role(&message, &replacement) {
                 message = replacement;
             } else {
-                context.report_hook_error(
+                callback_context.report_hook_error(
                     "message_end",
                     "message_end handlers must return a message with the same role",
                 );
@@ -1338,7 +1786,7 @@ impl AgentPlugin for JsAgentPlugin {
 
     async fn tool_execution_start(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         event: ToolExecutionStartEvent,
     ) -> Result<(), PluginError> {
         self.notify_hooks(
@@ -1356,7 +1804,7 @@ impl AgentPlugin for JsAgentPlugin {
 
     async fn tool_execution_update(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         event: ToolExecutionUpdateEvent,
     ) -> Result<(), PluginError> {
         self.notify_hooks(
@@ -1375,7 +1823,7 @@ impl AgentPlugin for JsAgentPlugin {
 
     async fn tool_execution_end(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         event: ToolExecutionEndEvent,
     ) -> Result<(), PluginError> {
         self.notify_hooks(
@@ -1394,33 +1842,34 @@ impl AgentPlugin for JsAgentPlugin {
 
     async fn context(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         event: ContextEvent,
     ) -> Result<ContextPatch, PluginError> {
         let original = event.messages;
         let mut messages = original.clone();
-        let context_value = plugin_context_value(&context);
-        for callback_id in self.hook_callbacks("context") {
+        for hook in self.hook_callbacks("context") {
+            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
             let result = match self
                 .invoke_hook(
                     "context",
-                    callback_id,
-                    context_value.clone(),
+                    hook,
+                    callback_context.plugin_context_handle(),
+                    agent_plugin_context_value(&callback_context),
                     json!({ "type": "context", "messages": messages }),
-                    &context.abort_signal,
+                    callback_context.signal(),
                 )
                 .await
             {
                 Ok(result) => result,
                 Err(error) => {
-                    context.report_hook_error("context", error.to_string());
+                    callback_context.report_hook_error("context", error.to_string());
                     continue;
                 }
             };
             if let Some(replacement) = result.get("messages") {
                 match serde_json::from_value::<Vec<Message>>(replacement.clone()) {
                     Ok(replacement) => messages = replacement,
-                    Err(error) => context
+                    Err(error) => callback_context
                         .report_hook_error("context", format!("invalid messages result: {error}")),
                 }
             }
@@ -1432,25 +1881,26 @@ impl AgentPlugin for JsAgentPlugin {
 
     async fn tool_call(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         event: ToolCallEvent,
     ) -> Result<ToolCallPatch, PluginError> {
         let original_arguments = event.validated_args;
         let mut arguments = original_arguments.clone();
-        let context_value = plugin_context_value(&context);
-        for callback_id in self.hook_callbacks("tool_call") {
+        for hook in self.hook_callbacks("tool_call") {
+            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
             let result = self
                 .invoke_hook(
                     "tool_call",
-                    callback_id,
-                    context_value.clone(),
+                    hook,
+                    callback_context.plugin_context_handle(),
+                    agent_plugin_context_value(&callback_context),
                     json!({
                         "type": "tool_call",
                         "toolCallId": event.tool_call.id.as_str(),
                         "toolName": event.tool_call.name,
                         "input": arguments,
                     }),
-                    &context.abort_signal,
+                    callback_context.signal(),
                 )
                 .await?;
             if let Some(input) = result.get("input") {
@@ -1481,18 +1931,19 @@ impl AgentPlugin for JsAgentPlugin {
 
     async fn tool_result(
         &self,
-        context: PluginContext,
+        context: AgentPluginContext,
         event: ToolResultEvent,
     ) -> Result<ToolResultPatch, PluginError> {
         let mut result = event.result;
         let mut aggregate = JsToolResultPatch::default();
-        let context_value = plugin_context_value(&context);
-        for callback_id in self.hook_callbacks("tool_result") {
+        for hook in self.hook_callbacks("tool_result") {
+            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
             let patch = match self
                 .invoke_hook(
                     "tool_result",
-                    callback_id,
-                    context_value.clone(),
+                    hook,
+                    callback_context.plugin_context_handle(),
+                    agent_plugin_context_value(&callback_context),
                     json!({
                         "type": "tool_result",
                         "toolCallId": event.tool_call.id.as_str(),
@@ -1504,20 +1955,20 @@ impl AgentPlugin for JsAgentPlugin {
                         "addedToolNames": result.added_tool_names,
                         "isError": result.is_error,
                     }),
-                    &context.abort_signal,
+                    callback_context.signal(),
                 )
                 .await
             {
                 Ok(patch) => patch,
                 Err(error) => {
-                    context.report_hook_error("tool_result", error.to_string());
+                    callback_context.report_hook_error("tool_result", error.to_string());
                     continue;
                 }
             };
             let parsed = match serde_json::from_value::<JsToolResultPatch>(patch) {
                 Ok(parsed) => parsed,
                 Err(error) => {
-                    context.report_hook_error(
+                    callback_context.report_hook_error(
                         "tool_result",
                         format!("invalid tool result patch: {error}"),
                     );
@@ -1528,114 +1979,6 @@ impl AgentPlugin for JsAgentPlugin {
             aggregate.merge(&parsed);
         }
         Ok(aggregate.into_core())
-    }
-}
-
-fn assistant_message_event_value(event: &MessageUpdateEvent) -> Value {
-    use pi_core::AssistantMessageEvent;
-
-    let partial = &event.message;
-    match &event.event {
-        AssistantMessageEvent::Start => json!({ "type": "start", "partial": partial }),
-        AssistantMessageEvent::TextStart { content_index } => json!({
-            "type": "text_start",
-            "contentIndex": content_index,
-            "partial": partial,
-        }),
-        AssistantMessageEvent::TextDelta {
-            content_index,
-            delta,
-        } => json!({
-            "type": "text_delta",
-            "contentIndex": content_index,
-            "delta": delta,
-            "partial": partial,
-        }),
-        AssistantMessageEvent::TextEnd { content_index } => json!({
-            "type": "text_end",
-            "contentIndex": content_index,
-            "content": content_block_text(partial.content.get(*content_index)),
-            "partial": partial,
-        }),
-        AssistantMessageEvent::ThinkingStart { content_index } => json!({
-            "type": "thinking_start",
-            "contentIndex": content_index,
-            "partial": partial,
-        }),
-        AssistantMessageEvent::ThinkingDelta {
-            content_index,
-            delta,
-        } => json!({
-            "type": "thinking_delta",
-            "contentIndex": content_index,
-            "delta": delta,
-            "partial": partial,
-        }),
-        AssistantMessageEvent::ThinkingEnd { content_index } => json!({
-            "type": "thinking_end",
-            "contentIndex": content_index,
-            "content": content_block_thinking(partial.content.get(*content_index)),
-            "partial": partial,
-        }),
-        AssistantMessageEvent::ToolCallStart { content_index } => json!({
-            "type": "toolcall_start",
-            "contentIndex": content_index,
-            "partial": partial,
-        }),
-        AssistantMessageEvent::ToolCallDelta {
-            content_index,
-            delta,
-        } => json!({
-            "type": "toolcall_delta",
-            "contentIndex": content_index,
-            "delta": delta,
-            "partial": partial,
-        }),
-        AssistantMessageEvent::ToolCallEnd { content_index } => json!({
-            "type": "toolcall_end",
-            "contentIndex": content_index,
-            "toolCall": content_block_tool_call(partial.content.get(*content_index)),
-            "partial": partial,
-        }),
-        AssistantMessageEvent::Done => {
-            if matches!(
-                partial.stop_reason,
-                pi_core::StopReason::Error | pi_core::StopReason::Aborted
-            ) {
-                json!({
-                    "type": "error",
-                    "reason": partial.stop_reason,
-                    "error": partial,
-                })
-            } else {
-                json!({
-                    "type": "done",
-                    "reason": partial.stop_reason,
-                    "message": partial,
-                })
-            }
-        }
-    }
-}
-
-fn content_block_text(block: Option<&ContentBlock>) -> &str {
-    match block {
-        Some(ContentBlock::Text(content)) => &content.text,
-        _ => "",
-    }
-}
-
-fn content_block_thinking(block: Option<&ContentBlock>) -> &str {
-    match block {
-        Some(ContentBlock::Thinking(content)) => &content.thinking,
-        _ => "",
-    }
-}
-
-fn content_block_tool_call(block: Option<&ContentBlock>) -> Option<&pi_core::ToolCall> {
-    match block {
-        Some(ContentBlock::ToolCall(tool_call)) => Some(tool_call),
-        _ => None,
     }
 }
 
@@ -1694,10 +2037,11 @@ impl Command for JsCommand {
                 &self.callback_id,
                 JsInvocationKind::Command,
                 json!({
-                    "context": { "cwd": context.cwd.to_string_lossy() },
+                    "context": { "cwd": context.cwd().to_string_lossy() },
                     "arguments": arguments,
                 }),
-                Some(&context.abort_signal),
+                context.plugin_context_handle(),
+                Some(context.signal()),
             )
             .await
             .map_err(|error| match error {
@@ -1745,18 +2089,19 @@ impl ProviderPlugin for JsProviderPlugin {
                     json!({
                         "hook": "before_provider_request",
                         "context": {
-                            "pluginId": context.plugin_id.as_str(),
-                            "generation": context.generation,
-                            "providerId": context.provider_id.as_str(),
-                            "modelId": context.model_id.as_str(),
-                            "cwd": context.cwd.to_string_lossy(),
+                            "pluginId": context.plugin_id().as_str(),
+                            "generation": context.generation(),
+                            "providerId": context.provider_id().as_str(),
+                            "modelId": context.model_id().as_str(),
+                            "cwd": context.cwd().to_string_lossy(),
                         },
                         "event": {
                             "type": "before_provider_request",
                             "payload": payload,
                         },
                     }),
-                    Some(&context.abort_signal),
+                    context.plugin_context_handle(),
+                    Some(context.signal()),
                 )
                 .await
             {
@@ -1802,7 +2147,8 @@ impl ProviderPlugin for JsProviderPlugin {
                             "headers": headers,
                         },
                     }),
-                    Some(&context.abort_signal),
+                    context.plugin_context_handle(),
+                    Some(context.signal()),
                 )
                 .await
             {
@@ -1847,7 +2193,8 @@ impl ProviderPlugin for JsProviderPlugin {
                             "headers": event.headers,
                         },
                     }),
-                    Some(&context.abort_signal),
+                    context.plugin_context_handle(),
+                    Some(context.signal()),
                 )
                 .await
             {
@@ -1860,11 +2207,11 @@ impl ProviderPlugin for JsProviderPlugin {
 
 fn provider_hook_context(context: &ProviderPluginContext) -> Value {
     json!({
-        "pluginId": context.plugin_id.as_str(),
-        "generation": context.generation,
-        "providerId": context.provider_id.as_str(),
-        "modelId": context.model_id.as_str(),
-        "cwd": context.cwd.to_string_lossy(),
+        "pluginId": context.plugin_id().as_str(),
+        "generation": context.generation(),
+        "providerId": context.provider_id().as_str(),
+        "modelId": context.model_id().as_str(),
+        "cwd": context.cwd().to_string_lossy(),
     })
 }
 
@@ -1906,6 +2253,7 @@ impl JsSessionPlugin {
                         "context": session_context_value(context),
                         "event": event,
                     }),
+                    context.plugin_context_handle(),
                     signal,
                 )
                 .await
@@ -1937,14 +2285,15 @@ impl JsSessionPlugin {
 }
 
 fn session_context_value(context: &SessionPluginContext) -> Value {
+    let identity = context.identity();
     json!({
-        "pluginId": context.plugin_id.as_str(),
-        "generation": context.generation,
+        "pluginId": context.plugin_id().as_str(),
+        "generation": context.generation(),
         "session": {
-            "id": context.session.id,
-            "path": context.session.path,
-            "cwd": context.session.cwd,
-            "parentSessionId": context.session.parent_session_id,
+            "id": identity.id,
+            "path": identity.path,
+            "cwd": identity.cwd,
+            "parentSessionId": identity.parent_session_id,
         },
     })
 }
@@ -2324,10 +2673,6 @@ struct JsTool {
 
 impl JsTool {
     fn new(manifest: JsToolManifest, lease: Arc<JsGenerationLease>) -> Self {
-        let execution_mode = match manifest.execution_mode {
-            JsToolExecutionMode::Sequential => ToolExecutionMode::Sequential,
-            JsToolExecutionMode::Parallel => ToolExecutionMode::Parallel,
-        };
         Self {
             callback_id: manifest.callback_id,
             prepare_callback_id: manifest.prepare_callback_id,
@@ -2336,7 +2681,7 @@ impl JsTool {
                 label: manifest.label,
                 description: manifest.description,
                 parameters: manifest.parameters,
-                execution_mode,
+                execution_mode: manifest.execution_mode,
                 prompt_snippet: manifest.prompt_snippet,
                 prompt_guidelines: manifest.prompt_guidelines,
             },
@@ -2431,7 +2776,11 @@ impl Tool for JsTool {
         self.spec.clone()
     }
 
-    async fn prepare_arguments(&self, input: Value) -> Result<Value, ToolError> {
+    async fn prepare_arguments(
+        &self,
+        context: &ToolContext,
+        input: Value,
+    ) -> Result<Value, ToolError> {
         let Some(callback_id) = &self.prepare_callback_id else {
             return Ok(input);
         };
@@ -2440,6 +2789,7 @@ impl Tool for JsTool {
                 callback_id,
                 JsInvocationKind::ToolPrepareArguments,
                 json!({ "input": input }),
+                context.plugin_context_handle(),
                 None,
             )
             .await
@@ -2462,12 +2812,13 @@ impl Tool for JsTool {
                 &self.callback_id,
                 json!({
                 "context": {
-                    "cwd": context.cwd.to_string_lossy(),
+                    "cwd": context.cwd().to_string_lossy(),
                     "toolCallId": tool_call_id.as_str(),
                 },
                 "input": input,
                 }),
-                &context.abort_signal,
+                context.plugin_context_handle(),
+                context.signal(),
                 updates,
             )
             .await

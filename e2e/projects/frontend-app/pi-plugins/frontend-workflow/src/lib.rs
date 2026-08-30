@@ -60,9 +60,13 @@ impl AgentPlugin for FrontendWorkflowPlugin {
 
     async fn before_agent_start(
         &self,
-        _context: PluginContext,
+        context: AgentPluginContext,
         event: BeforeAgentStartEvent,
     ) -> std::result::Result<BeforeAgentStartPatch, PluginError> {
+        let _mode = context.ui.mode()?;
+        let _trusted = context.session.is_project_trusted()?;
+        let _session_id = context.session.id()?;
+        let _model = context.models.current()?;
         let checks = bullet_list(&self.options.checks);
         Ok(BeforeAgentStartPatch {
             system_prompt: Some(format!(

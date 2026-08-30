@@ -4,21 +4,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_agent::{AgentOptions, QueueMode};
-use pi_core::{ModelId, PluginId, ProviderId, ThinkingBudgets, ThinkingLevel};
-use pi_js_package_manager::{PackageManager as JsPackageManager, ResolvedExtensionIdentity};
-use pi_js_plugin::{
-    ExtensionContextAccess, ExtensionProviderMutationAccess, ExtensionSessionBinding,
-    JsGenerationRequest, JsHostMode, JsPluginGeneration, JsPluginHost,
-    SessionExtensionContextAccess,
+use pi_core::{
+    ModelId, PluginContext, PluginId, PresentationMode, ProviderId, ThinkingBudgets, ThinkingLevel,
 };
-use pi_plugin_anthropic::AnthropicPlugin;
-use pi_plugin_azure_openai::AzureOpenAiPlugin;
+use pi_js_package_manager::{PackageManager as JsPackageManager, ResolvedExtensionIdentity};
+use pi_js_plugin::{JsGenerationRequest, JsPluginGeneration, JsPluginHost};
 use pi_plugin_bash::{BashToolOptions, ConfiguredBashPlugin};
-use pi_plugin_bedrock::AmazonBedrockPlugin;
-use pi_plugin_copilot::{GitHubCopilotPlugin, GitHubCopilotStoredCredential};
 use pi_plugin_edit::EditPlugin;
 use pi_plugin_find::FindPlugin;
-use pi_plugin_google::{GooglePlugin, GoogleVertexPlugin};
 use pi_plugin_grep::GrepPlugin;
 use pi_plugin_hashline_edit::HashlineEditPlugin;
 use pi_plugin_loader::{NativePluginLoader, NativePluginLoaderOptions, NativePlugins};
@@ -26,32 +19,27 @@ use pi_plugin_ls::LsPlugin;
 use pi_plugin_manager::{
     InstallScope, PluginManager, PluginManagerOptions, PreparedPluginReconcile,
 };
-use pi_plugin_mistral::MistralPlugin;
 use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
-use pi_plugin_openai::{
-    CodexTransport, CodexTransportOptions, OpenAiCodexPlugin, OpenAiCompatibleConfig,
-    OpenAiCompatiblePlugin,
-};
-use pi_plugin_openrouter::OpenRouterPlugin;
+use pi_plugin_openai::{CodexTransport, CodexTransportOptions};
 use pi_plugin_prompts::{PromptTemplateLoaderOptions, PromptTemplatesPlugin};
 use pi_plugin_read::ConfiguredReadPlugin;
 use pi_plugin_skills::{SkillLoaderOptions, SkillsPlugin};
 use pi_plugin_write::WritePlugin;
-use pi_plugin_xai::XAiPlugin;
 use pi_provider::{HttpTransport, ReqwestTransport, ReqwestTransportConfig};
 use pi_resources::ResourceLoaderOptions;
 use pi_runtime::{CompletionRetryPolicy, PiRuntime, RuntimeError, SystemPrompt};
 use pi_session::{
     AgentSession, AgentSessionOptions, AgentSessionRuntimeFactory, AgentSessionRuntimeRequest,
     AgentSessionRuntimeTarget, AutoRetrySettings, CompactionSettings as SessionCompactionSettings,
-    InitialModelRequest, ModelRuntimeServices, PreparedAgentSession, SessionError,
-    SessionGenerationOverlay, SessionPlugins, SessionRuntimeInventory,
+    InitialModelRequest, ModelRuntimeServices, PiPluginContext, PluginContextBinding,
+    PluginProviderMutationAccess, PreparedAgentSession, SessionError, SessionGenerationOverlay,
+    SessionPlugins, SessionRuntimeInventory,
 };
 use pi_settings::{
     QueueModeSetting, SettingsContext, SettingsManager, ThinkingLevelSetting, TransportSetting,
 };
 
-use crate::auth::{StoredCredential, read_stored_credential};
+use crate::builtin_providers::BuiltinProviderSet;
 use crate::config::AppConfig;
 use crate::dynamic_providers::{DynamicProviderCandidate, DynamicProviderOverlay};
 use crate::project_trust::ProjectTrustService;
@@ -73,8 +61,8 @@ pub(crate) struct ProductSessionFactory {
     project_trust: ProjectTrustService,
     settings: SettingsManager,
     js_plugin_host: Option<Arc<dyn JsPluginHost>>,
-    js_session_binding: Option<ExtensionSessionBinding>,
-    js_host_mode: JsHostMode,
+    plugin_context_binding: PluginContextBinding,
+    presentation_mode: PresentationMode,
     dynamic_providers: DynamicProviderOverlay,
 }
 
@@ -89,27 +77,34 @@ impl ProductSessionFactory {
             project_trust,
             settings,
             js_plugin_host: None,
-            js_session_binding: None,
-            js_host_mode: JsHostMode::Print,
+            plugin_context_binding: PluginContextBinding::new(),
+            presentation_mode: PresentationMode::Print,
             dynamic_providers: DynamicProviderOverlay::default(),
         }
     }
 
-    pub(crate) fn with_js_plugin_host(
-        mut self,
-        host: Arc<dyn JsPluginHost>,
-        mode: JsHostMode,
-        session_binding: ExtensionSessionBinding,
-    ) -> Self {
+    pub(crate) fn with_js_plugin_host(mut self, host: Arc<dyn JsPluginHost>) -> Self {
         self.js_plugin_host = Some(host);
-        self.js_session_binding = Some(session_binding);
-        self.js_host_mode = mode;
+        self
+    }
+
+    pub(crate) fn with_plugin_context(
+        mut self,
+        mode: PresentationMode,
+        session_binding: PluginContextBinding,
+    ) -> Self {
+        self.presentation_mode = mode;
+        self.plugin_context_binding = session_binding;
         self
     }
 }
 
 #[async_trait]
 impl AgentSessionRuntimeFactory for ProductSessionFactory {
+    fn session_registered(&self, session: &pi_session::PiSession) {
+        self.plugin_context_binding.bind(session.clone());
+    }
+
     async fn prepare(
         &self,
         request: AgentSessionRuntimeRequest,
@@ -194,7 +189,24 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
         config
             .settings_prompt_paths
             .extend(js_resolution.prompt_paths.iter().cloned());
-        let mut js_context = None;
+        let mutation_access: Arc<dyn PluginProviderMutationAccess> =
+            Arc::new(self.dynamic_providers.clone());
+        let plugin_context = Arc::new(
+            PiPluginContext::new(
+                self.presentation_mode,
+                project_trusted,
+                self.plugin_context_binding.clone(),
+            )
+            .with_model_scope(
+                config
+                    .runtime_settings
+                    .enabled_models
+                    .clone()
+                    .unwrap_or_default(),
+            )
+            .with_provider_mutations(mutation_access),
+        );
+        let context_access: Arc<dyn PluginContext> = plugin_context.clone();
         let mut js_extensions = Vec::new();
         let mut dynamic_provider_candidate = None;
         let js_generation = if let Some(host) = &self.js_plugin_host {
@@ -207,7 +219,7 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
                         .iter()
                         .map(|path| path.display().to_string())
                         .collect(),
-                    mode: self.js_host_mode,
+                    mode: self.presentation_mode,
                     cwd: config.cwd.display().to_string(),
                     flag_values: config.extension_flag_values.clone(),
                 })
@@ -217,27 +229,8 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
                 .dynamic_providers
                 .candidate(&manifest.provider_registrations)
                 .map_err(SessionError::Runtime)?;
-            let binding = match self.js_session_binding.clone() {
-                Some(binding) => binding,
-                None => {
-                    self.dynamic_providers.reject(&candidate);
-                    return Err(SessionError::Runtime(
-                        "JavaScript plugin host is missing its session binding".to_string(),
-                    ));
-                }
-            };
-            let mutation_access: Arc<dyn ExtensionProviderMutationAccess> =
-                Arc::new(self.dynamic_providers.clone());
-            let context = Arc::new(
-                SessionExtensionContextAccess::new(project_trusted, binding)
-                    .with_provider_mutations(mutation_access),
-            );
-            let context_access: Arc<dyn ExtensionContextAccess> = context.clone();
-            let generation = match JsPluginGeneration::prepare_with_host_and_context(
-                manifest,
-                Arc::clone(host),
-                context_access,
-            ) {
+            let generation = match JsPluginGeneration::prepare_with_host(manifest, Arc::clone(host))
+            {
                 Ok(generation) => generation,
                 Err(error) => {
                     self.dynamic_providers.reject(&candidate);
@@ -245,7 +238,6 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
                 }
             };
             js_extensions = extension_labels;
-            js_context = Some(context);
             dynamic_provider_candidate = Some(candidate);
             Some(generation)
         } else {
@@ -258,6 +250,7 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             js_generation.as_ref(),
             dynamic_provider_candidate.as_ref(),
             &generation_overlay,
+            Arc::clone(&context_access),
         ) {
             Ok(runtime) => runtime,
             Err(error) => {
@@ -308,9 +301,7 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
         };
         match prepared {
             Ok(prepared) => {
-                if let Some(context) = &js_context {
-                    context.bind_generation_session(prepared.session());
-                }
+                plugin_context.bind_generation_session(prepared.session());
                 for reconciliation in package_reconciliations {
                     reconciliation.commit();
                 }
@@ -493,6 +484,7 @@ fn build_runtime_with_generation_overlay(
     js_generation: Option<&JsPluginGeneration>,
     dynamic_providers: Option<&DynamicProviderCandidate>,
     generation_overlay: &SessionGenerationOverlay,
+    plugin_context: Arc<dyn PluginContext>,
 ) -> Result<PiRuntime, RuntimeError> {
     build_runtime_inner(
         config,
@@ -500,8 +492,11 @@ fn build_runtime_with_generation_overlay(
         native_plugins,
         js_generation,
         dynamic_providers,
-        generation_overlay,
-        None,
+        RuntimeBuildExtras {
+            generation_overlay,
+            codex_credentials: None,
+            plugin_context: Some(plugin_context),
+        },
     )
 }
 
@@ -520,9 +515,18 @@ fn build_runtime_with_codex_credentials(
         native_plugins,
         js_generation,
         dynamic_providers,
-        &SessionGenerationOverlay::default(),
-        codex_credentials,
+        RuntimeBuildExtras {
+            generation_overlay: &SessionGenerationOverlay::default(),
+            codex_credentials,
+            plugin_context: None,
+        },
     )
+}
+
+struct RuntimeBuildExtras<'a> {
+    generation_overlay: &'a SessionGenerationOverlay,
+    codex_credentials: Option<pi_plugin_openai::CodexCredentials>,
+    plugin_context: Option<Arc<dyn PluginContext>>,
 }
 
 fn build_runtime_inner(
@@ -531,46 +535,12 @@ fn build_runtime_inner(
     native_plugins: &NativePlugins,
     js_generation: Option<&JsPluginGeneration>,
     dynamic_providers: Option<&DynamicProviderCandidate>,
-    generation_overlay: &SessionGenerationOverlay,
-    codex_credentials: Option<pi_plugin_openai::CodexCredentials>,
+    extras: RuntimeBuildExtras<'_>,
 ) -> Result<PiRuntime, RuntimeError> {
     let transport = provider_transport(config)?;
     let codex_transport_options = codex_transport_options(config);
-    let stored_anthropic =
-        read_stored_credential(&config.agent_dir, "anthropic").map_err(RuntimeError::Build)?;
-    let stored_google =
-        read_stored_credential(&config.agent_dir, "google").map_err(RuntimeError::Build)?;
-    let stored_google_vertex =
-        read_stored_credential(&config.agent_dir, "google-vertex").map_err(RuntimeError::Build)?;
-    let stored_xai =
-        read_stored_credential(&config.agent_dir, "xai").map_err(RuntimeError::Build)?;
-    let stored_mistral =
-        read_stored_credential(&config.agent_dir, "mistral").map_err(RuntimeError::Build)?;
-    let stored_azure = read_stored_credential(&config.agent_dir, "azure-openai-responses")
-        .map_err(RuntimeError::Build)?;
-    let stored_openrouter =
-        read_stored_credential(&config.agent_dir, "openrouter").map_err(RuntimeError::Build)?;
-    let stored_copilot =
-        read_stored_credential(&config.agent_dir, "github-copilot").map_err(RuntimeError::Build)?;
-    let stored_bedrock =
-        read_stored_credential(&config.agent_dir, "amazon-bedrock").map_err(RuntimeError::Build)?;
-    let stored_codex =
-        read_stored_credential(&config.agent_dir, "openai-codex").map_err(RuntimeError::Build)?;
-    let stored_compatible =
-        read_stored_credential(&config.agent_dir, &config.provider).map_err(RuntimeError::Build)?;
-    let effective_api_key = config.api_key.clone().or_else(|| {
-        stored_compatible
-            .as_ref()
-            .and_then(StoredCredential::secret)
-            .map(str::to_string)
-    });
-    let provider_config = effective_api_key
-        .as_ref()
-        .map_or_else(
-            || OpenAiCompatibleConfig::without_api_key(&config.base_url),
-            |api_key| OpenAiCompatibleConfig::new(&config.base_url, api_key),
-        )
-        .provider_id(config.provider.clone());
+    let builtin_providers = BuiltinProviderSet::load(config, extras.codex_credentials.clone())?;
+    let effective_api_key = builtin_providers.effective_api_key().map(str::to_string);
     let mut skill_options = SkillLoaderOptions::new(&config.cwd, &config.agent_dir);
     skill_options.project_trusted = project_trusted;
     skill_options.enable_commands = config.runtime_settings.enable_skill_commands;
@@ -613,362 +583,16 @@ fn build_runtime_inner(
             max_retries: config.runtime_settings.retry.max_retries,
             base_delay_ms: config.runtime_settings.retry.base_delay_ms,
         });
-    let codex_credentials = codex_credentials.unwrap_or_else(|| {
-        stored_codex
-            .as_ref()
-            .and_then(StoredCredential::secret)
-            .map(pi_plugin_openai::CodexCredentials::from_access_token)
-            .unwrap_or_else(pi_plugin_openai::CodexCredentials::discover)
-    });
-    let builder = if config.provider == "openai-codex" {
-        let credentials = codex_credentials.clone();
-        let transport = Arc::clone(&transport);
-        let transport_options = codex_transport_options.clone();
-        builder.provider_plugin_factory(move || {
-            OpenAiCodexPlugin::with_transport_options(
-                credentials.clone(),
-                Arc::clone(&transport),
-                transport_options.clone(),
-            )
-        })
-    } else if config.provider == "xai" {
-        let api_key = config.api_key.clone();
-        let selected_xai = stored_xai.clone();
-        let transport = Arc::clone(&transport);
-        builder.provider_plugin_factory(move || match &api_key {
-            Some(api_key) => {
-                XAiPlugin::new_with_transport(Some(api_key.clone()), Arc::clone(&transport))
-            }
-            None => XAiPlugin::from_stored_with_transport(
-                selected_xai
-                    .as_ref()
-                    .and_then(StoredCredential::secret)
-                    .map(str::to_string),
-                Arc::clone(&transport),
-            ),
-        })
-    } else if matches!(
-        config.provider.as_str(),
-        "amazon-bedrock"
-            | "anthropic"
-            | "google"
-            | "google-vertex"
-            | "github-copilot"
-            | "mistral"
-            | "azure-openai-responses"
-            | "openrouter"
-    ) {
-        builder
-    } else {
-        builder.try_provider_plugin_factory({
-            let provider_config = provider_config.clone();
-            let transport = Arc::clone(&transport);
-            move || {
-                OpenAiCompatiblePlugin::with_transport(
-                    provider_config.clone(),
-                    Arc::clone(&transport),
-                )
-            }
-        })
+    let builder = match extras.plugin_context {
+        Some(plugin_context) => builder.plugin_context(plugin_context),
+        None => builder,
     };
-    let builder = if config.provider == "anthropic" {
-        let api_key = config.api_key.clone();
-        let transport = Arc::clone(&transport);
-        builder.provider_plugin_factory(move || match &api_key {
-            Some(api_key) => {
-                AnthropicPlugin::with_api_key_and_transport(api_key.clone(), Arc::clone(&transport))
-            }
-            None => AnthropicPlugin::from_stored_with_transport(
-                stored_anthropic.as_ref().and_then(|credential| {
-                    credential
-                        .secret()
-                        .map(|secret| (secret, credential.is_oauth()))
-                }),
-                Arc::clone(&transport),
-            ),
-        })
-    } else {
-        let stored_anthropic = stored_anthropic.clone();
-        let transport = Arc::clone(&transport);
-        builder.provider_plugin_factory(move || {
-            AnthropicPlugin::from_stored_with_transport(
-                stored_anthropic.as_ref().and_then(|credential| {
-                    credential
-                        .secret()
-                        .map(|secret| (secret, credential.is_oauth()))
-                }),
-                Arc::clone(&transport),
-            )
-        })
-    };
-    let builder = if config.provider == "openai-codex" {
-        builder
-    } else {
-        let transport = Arc::clone(&transport);
-        let transport_options = codex_transport_options;
-        builder.provider_plugin_factory(move || {
-            OpenAiCodexPlugin::with_transport_options(
-                codex_credentials.clone(),
-                Arc::clone(&transport),
-                transport_options.clone(),
-            )
-        })
-    };
-    let builder = if config.provider == "xai" {
-        builder
-    } else {
-        let stored_xai = stored_xai.clone();
-        let transport = Arc::clone(&transport);
-        builder.provider_plugin_factory(move || {
-            XAiPlugin::from_stored_with_transport(
-                stored_xai
-                    .as_ref()
-                    .and_then(StoredCredential::secret)
-                    .map(str::to_string),
-                Arc::clone(&transport),
-            )
-        })
-    };
-    let builder = if config.provider == "google" {
-        let explicit_api_key = config.api_key.clone();
-        let stored_google = stored_google.clone();
-        let transport = Arc::clone(&transport);
-        builder.try_provider_plugin_factory(move || match &explicit_api_key {
-            Some(api_key) => {
-                GooglePlugin::new_with_transport(Some(api_key.clone()), Arc::clone(&transport))
-            }
-            None => GooglePlugin::from_stored_with_transport(
-                stored_google
-                    .as_ref()
-                    .and_then(StoredCredential::secret)
-                    .map(str::to_owned),
-                Arc::clone(&transport),
-            ),
-        })
-    } else {
-        let transport = Arc::clone(&transport);
-        builder.try_provider_plugin_factory(move || {
-            GooglePlugin::from_stored_with_transport(
-                stored_google
-                    .as_ref()
-                    .and_then(StoredCredential::secret)
-                    .map(str::to_owned),
-                Arc::clone(&transport),
-            )
-        })
-    };
-    let builder = if config.provider == "google-vertex" {
-        let explicit_api_key = config.api_key.clone();
-        let stored_google_vertex = stored_google_vertex.clone();
-        let transport = Arc::clone(&transport);
-        builder.try_provider_plugin_factory(move || match &explicit_api_key {
-            Some(api_key) => GoogleVertexPlugin::new_with_transport(
-                Some(api_key.clone()),
-                Arc::clone(&transport),
-            ),
-            None => GoogleVertexPlugin::from_stored_with_environment_and_transport(
-                stored_google_vertex
-                    .as_ref()
-                    .and_then(StoredCredential::secret)
-                    .map(str::to_owned),
-                stored_google_vertex
-                    .as_ref()
-                    .and_then(StoredCredential::environment)
-                    .cloned()
-                    .unwrap_or_default(),
-                Arc::clone(&transport),
-            ),
-        })
-    } else {
-        let transport = Arc::clone(&transport);
-        builder.try_provider_plugin_factory(move || {
-            GoogleVertexPlugin::from_stored_with_environment_and_transport(
-                stored_google_vertex
-                    .as_ref()
-                    .and_then(StoredCredential::secret)
-                    .map(str::to_owned),
-                stored_google_vertex
-                    .as_ref()
-                    .and_then(StoredCredential::environment)
-                    .cloned()
-                    .unwrap_or_default(),
-                Arc::clone(&transport),
-            )
-        })
-    };
-    let builder = if config.provider == "mistral" {
-        let explicit_api_key = config.api_key.clone();
-        let stored_mistral = stored_mistral.clone();
-        let transport = Arc::clone(&transport);
-        builder.try_provider_plugin_factory(move || match &explicit_api_key {
-            Some(api_key) => {
-                MistralPlugin::new_with_transport(Some(api_key.clone()), Arc::clone(&transport))
-            }
-            None => MistralPlugin::from_stored_with_transport(
-                stored_mistral
-                    .as_ref()
-                    .and_then(StoredCredential::secret)
-                    .map(str::to_owned),
-                Arc::clone(&transport),
-            ),
-        })
-    } else {
-        let transport = Arc::clone(&transport);
-        builder.try_provider_plugin_factory(move || {
-            MistralPlugin::from_stored_with_transport(
-                stored_mistral
-                    .as_ref()
-                    .and_then(StoredCredential::secret)
-                    .map(str::to_owned),
-                Arc::clone(&transport),
-            )
-        })
-    };
-    let builder = if config.provider == "azure-openai-responses" {
-        let explicit_api_key = config.api_key.clone();
-        let stored_azure = stored_azure.clone();
-        let transport = Arc::clone(&transport);
-        builder.try_provider_plugin_factory(move || match &explicit_api_key {
-            Some(api_key) => {
-                AzureOpenAiPlugin::new_with_transport(Some(api_key.clone()), Arc::clone(&transport))
-            }
-            None => AzureOpenAiPlugin::from_stored_with_transport(
-                stored_azure
-                    .as_ref()
-                    .and_then(StoredCredential::secret)
-                    .map(str::to_owned),
-                Arc::clone(&transport),
-            ),
-        })
-    } else {
-        let transport = Arc::clone(&transport);
-        builder.try_provider_plugin_factory(move || {
-            AzureOpenAiPlugin::from_stored_with_transport(
-                stored_azure
-                    .as_ref()
-                    .and_then(StoredCredential::secret)
-                    .map(str::to_owned),
-                Arc::clone(&transport),
-            )
-        })
-    };
-    let builder = if config.provider == "openrouter" {
-        let explicit_api_key = config.api_key.clone();
-        let stored_openrouter = stored_openrouter.clone();
-        let transport = Arc::clone(&transport);
-        builder.try_provider_plugin_factory(move || match &explicit_api_key {
-            Some(api_key) => {
-                OpenRouterPlugin::new_with_transport(Some(api_key.clone()), Arc::clone(&transport))
-            }
-            None => OpenRouterPlugin::from_stored_with_transport(
-                stored_openrouter
-                    .as_ref()
-                    .and_then(StoredCredential::secret)
-                    .map(str::to_owned),
-                Arc::clone(&transport),
-            ),
-        })
-    } else {
-        let transport = Arc::clone(&transport);
-        builder.try_provider_plugin_factory(move || {
-            OpenRouterPlugin::from_stored_with_transport(
-                stored_openrouter
-                    .as_ref()
-                    .and_then(StoredCredential::secret)
-                    .map(str::to_owned),
-                Arc::clone(&transport),
-            )
-        })
-    };
-    let builder = if config.provider == "github-copilot" {
-        let explicit_token = config.api_key.clone();
-        let stored_copilot = stored_copilot.clone();
-        let transport = Arc::clone(&transport);
-        builder.try_provider_plugin_factory(move || match &explicit_token {
-            Some(token) => GitHubCopilotPlugin::new_with_transport(
-                Some(token.clone()),
-                None,
-                Arc::clone(&transport),
-            ),
-            None => {
-                let available_models = stored_copilot
-                    .as_ref()
-                    .filter(|credential| credential.is_oauth())
-                    .and_then(|credential| credential.extra_strings("availableModelIds"));
-                GitHubCopilotPlugin::from_stored_catalog_with_transport(
-                    stored_copilot.as_ref().and_then(|credential| {
-                        credential
-                            .secret()
-                            .map(|token| GitHubCopilotStoredCredential {
-                                token,
-                                enterprise_domain: credential.extra_string("enterpriseUrl"),
-                                available_model_ids: available_models.as_deref(),
-                            })
-                    }),
-                    Arc::clone(&transport),
-                )
-            }
-        })
-    } else {
-        let transport = Arc::clone(&transport);
-        builder.try_provider_plugin_factory(move || {
-            let available_models = stored_copilot
-                .as_ref()
-                .filter(|credential| credential.is_oauth())
-                .and_then(|credential| credential.extra_strings("availableModelIds"));
-            GitHubCopilotPlugin::from_stored_catalog_with_transport(
-                stored_copilot.as_ref().and_then(|credential| {
-                    credential
-                        .secret()
-                        .map(|token| GitHubCopilotStoredCredential {
-                            token,
-                            enterprise_domain: credential.extra_string("enterpriseUrl"),
-                            available_model_ids: available_models.as_deref(),
-                        })
-                }),
-                Arc::clone(&transport),
-            )
-        })
-    };
-    let builder = if config.provider == "amazon-bedrock" {
-        let explicit_token = config.api_key.clone();
-        let stored_bedrock = stored_bedrock.clone();
-        let transport = Arc::clone(&transport);
-        builder.try_provider_plugin_factory(move || {
-            let token = explicit_token.clone().or_else(|| {
-                stored_bedrock
-                    .as_ref()
-                    .and_then(StoredCredential::secret)
-                    .map(str::to_owned)
-            });
-            let environment = stored_bedrock
-                .as_ref()
-                .and_then(StoredCredential::environment)
-                .cloned()
-                .unwrap_or_default();
-            AmazonBedrockPlugin::from_stored_with_transport(
-                token,
-                environment,
-                Arc::clone(&transport),
-            )
-        })
-    } else {
-        let transport = Arc::clone(&transport);
-        builder.try_provider_plugin_factory(move || {
-            AmazonBedrockPlugin::from_stored_with_transport(
-                stored_bedrock
-                    .as_ref()
-                    .and_then(StoredCredential::secret)
-                    .map(str::to_owned),
-                stored_bedrock
-                    .as_ref()
-                    .and_then(StoredCredential::environment)
-                    .cloned()
-                    .unwrap_or_default(),
-                Arc::clone(&transport),
-            )
-        })
-    };
+    let builder = builtin_providers.register(
+        builder,
+        config,
+        Arc::clone(&transport),
+        codex_transport_options,
+    );
     let builder = builder
         .try_provider_plugin_factory({
             let model_options = model_options.clone();
@@ -1009,7 +633,7 @@ fn build_runtime_inner(
             });
         }
     }
-    builder = generation_overlay.apply_to(builder);
+    builder = extras.generation_overlay.apply_to(builder);
 
     let mut resources = ResourceLoaderOptions::new(&config.cwd, &config.agent_dir);
     resources.project_trusted = project_trusted;
@@ -1216,7 +840,7 @@ mod tests {
         async fn invoke(
             &self,
             _invocation: pi_js_plugin::JsInvocation,
-            _context: pi_js_plugin::ExtensionContextHandle,
+            _context: pi_js_plugin::PluginContextHandle,
         ) -> Result<serde_json::Value, pi_js_plugin::JsCallbackError> {
             Ok(serde_json::json!({ "action": "continue" }))
         }
@@ -1396,6 +1020,60 @@ command = "fixture-command"
             settings_prompt_paths: Vec::new(),
             settings_diagnostics: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn shared_factory_binds_plugin_context_to_each_managed_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent_dir = directory.path().join("agent");
+        let first_cwd = directory.path().join("first");
+        let second_cwd = directory.path().join("second");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(&first_cwd).unwrap();
+        std::fs::create_dir_all(&second_cwd).unwrap();
+        let mut config = app_config(&agent_dir, None);
+        config.trust_override = Some(true);
+        let (trust, _) = ProjectTrustService::new(
+            &agent_dir,
+            Some(true),
+            false,
+            pi_settings::DefaultProjectTrust::Ask,
+        )
+        .unwrap();
+        let binding = PluginContextBinding::new();
+        let factory = ProductSessionFactory::new(config, trust, SettingsManager::new(&agent_dir))
+            .with_plugin_context(PresentationMode::Tui, binding);
+        let sessions = pi_session::MultiSessionManager::new(factory);
+        let first = sessions
+            .create_session(&first_cwd, agent_dir.join("first.jsonl"))
+            .await
+            .unwrap();
+        let second = sessions
+            .create_session(&second_cwd, agent_dir.join("second.jsonl"))
+            .await
+            .unwrap();
+        let first_id = first.id();
+        let second_id = second.id();
+
+        let context = pi_core::CommandContextParts::new(
+            first
+                .current()
+                .runtime()
+                .plugin_context_handle(pi_core::PluginContextScope::Command),
+        );
+        let replacement = context
+            .session
+            .create(pi_core::NewSessionOptions::default())
+            .await
+            .unwrap();
+        let pi_core::SessionReplacement::Replaced(replacement) = replacement else {
+            panic!("new session should replace the first managed handle");
+        };
+
+        assert_ne!(first.id(), first_id);
+        assert_eq!(replacement.session.id().unwrap(), first.id());
+        assert_eq!(second.id(), second_id);
+        sessions.shutdown().await.unwrap();
     }
 
     #[test]
@@ -2014,11 +1692,8 @@ command = "fixture-command"
         let host = Arc::new(RecordingJsHost::default());
         let factory =
             ProductSessionFactory::new(config.clone(), trust, SettingsManager::new(&agent_dir))
-                .with_js_plugin_host(
-                    host.clone(),
-                    JsHostMode::Tui,
-                    ExtensionSessionBinding::new(),
-                );
+                .with_plugin_context(PresentationMode::Tui, PluginContextBinding::new())
+                .with_js_plugin_host(host.clone());
         let runtime = pi_session::AgentSessionRuntime::create(
             factory,
             AgentSessionRuntimeTarget::create(&project, &config.session_path),
@@ -2045,7 +1720,7 @@ command = "fixture-command"
         assert!(
             requests
                 .iter()
-                .all(|request| request.mode == JsHostMode::Tui)
+                .all(|request| request.mode == PresentationMode::Tui)
         );
         assert!(requests.iter().all(|request| request.project_trusted));
         assert!(

@@ -9,8 +9,8 @@ use pi_runtime::PiRuntimeBuilder;
 use tokio::sync::{Mutex, watch};
 
 use crate::{
-    AgentSession, ForkOptions, ForkPosition, PreparedAgentSession, SessionBeforeForkEvent,
-    SessionBeforeSwitchEvent, SessionError, SessionForkPosition, SessionHeader, SessionLog,
+    AgentSession, ForkOptions, ForkPosition, PiSession, PreparedAgentSession,
+    SessionBeforeForkEvent, SessionBeforeSwitchEvent, SessionError, SessionHeader, SessionLog,
     SessionShutdownEvent, SessionShutdownReason, SessionStartEvent, SessionStartReason,
     SessionSwitchReason, import_session_file,
 };
@@ -127,6 +127,11 @@ pub trait AgentSessionRuntimeFactory: Send + Sync {
         &self,
         request: AgentSessionRuntimeRequest,
     ) -> Result<PreparedAgentSession, SessionError>;
+
+    /// Observe a stable frontend handle after the multi-session manager has
+    /// registered it. Product adapters use this lifecycle seam to bind outer
+    /// capabilities without requiring callers to perform a second setup step.
+    fn session_registered(&self, _session: &PiSession) {}
 }
 
 #[async_trait]
@@ -472,15 +477,11 @@ impl AgentSessionRuntime {
         self.ensure_open()?;
         let current = self.session();
         let entry_id = entry_id.into();
-        let plugin_position = match position {
-            ForkPosition::Before => SessionForkPosition::Before,
-            ForkPosition::At => SessionForkPosition::At,
-        };
         let before = current
             .session_plugin_driver()
             .session_before_fork(&SessionBeforeForkEvent {
                 entry_id: entry_id.clone(),
-                position: plugin_position,
+                position,
             })
             .await;
         if before.is_some_and(|result| result.cancel) {

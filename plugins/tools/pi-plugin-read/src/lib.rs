@@ -113,12 +113,9 @@ async fn execute_read(
     input: Value,
     _updates: ToolUpdateSink,
 ) -> Result<ToolResult, ToolError> {
-    context
-        .abort_signal
-        .check()
-        .map_err(|_| ToolError::Aborted)?;
+    context.signal().check().map_err(|_| ToolError::Aborted)?;
     let requested = require_str(&input, "path")?;
-    let path = resolve_read_path(&context.cwd, requested)?;
+    let path = resolve_read_path(context.cwd(), requested)?;
     let offset = optional_positive_usize(&input, "offset", 1)?;
     let limit = input
         .get("limit")
@@ -131,7 +128,7 @@ async fn execute_read(
         .unwrap_or(false);
     let bytes = tokio::select! {
         biased;
-        () = context.abort_signal.wait() => return Err(ToolError::Aborted),
+        () = context.signal().wait() => return Err(ToolError::Aborted),
         result = tokio::fs::read(&path) => result
             .map_err(|e| execution(format!("cannot read {requested}: {e}")))?,
     };
@@ -183,10 +180,7 @@ async fn execute_read(
     } else {
         lines[start..selected_end].join("\n")
     };
-    context
-        .abort_signal
-        .check()
-        .map_err(|_| ToolError::Aborted)?;
+    context.signal().check().map_err(|_| ToolError::Aborted)?;
 
     let truncation = truncate_head(&selected);
     let mut details = None;
@@ -572,10 +566,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         let result = ReadTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
                 json!({"path":"a.png"}),
                 updates,
@@ -608,10 +599,7 @@ mod tests {
                 let (updates, _) = ToolUpdateSink::channel();
                 ConfiguredReadTool { auto_resize_images }
                     .execute(
-                        ToolContext {
-                            cwd,
-                            abort_signal: signal,
-                        },
+                        ToolContext::standalone(cwd, signal),
                         ToolCallId::new("1"),
                         json!({"path":"wide.png"}),
                         updates,
@@ -660,10 +648,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         let result = ReadTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
                 json!({"path":"a.txt","offset":2,"limit":1,"hashline":true}),
                 updates,
@@ -686,10 +671,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         let result = ReadTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
                 json!({"path":"a.txt"}),
                 updates,
@@ -717,10 +699,7 @@ mod tests {
 
         let result = ReadTool
             .execute(
-                ToolContext {
-                    cwd,
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(cwd, signal),
                 ToolCallId::new("1"),
                 json!({"path":target}),
                 updates,
@@ -741,10 +720,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         let result = ReadTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
                 json!({"path":"a.txt"}),
                 updates,
@@ -779,10 +755,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         let result = ReadTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
                 json!({"path":"large.txt"}),
                 updates,
@@ -835,10 +808,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         let result = ReadTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
                 json!({"path":"a.txt","offset":2,"limit":2}),
                 updates,
@@ -870,10 +840,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         let result = ReadTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
                 json!({"path":"a.bmp"}),
                 updates,

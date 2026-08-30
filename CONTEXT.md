@@ -16,6 +16,26 @@ _Avoid_: SessionManager, AgentSession
 One concrete generation of an active coding-agent conversation.
 _Avoid_: PiSession
 
+**PluginContext**:
+The generation-scoped capability source shared by Rust plugins and Pi-compatible extensions.
+_Avoid_: ProductContext, AgentPluginContext
+
+**AgentPluginContext**:
+The callback context for one agent-plugin hook invocation, including run identity, cancellation, diagnostics, and typed capabilities.
+_Avoid_: PluginContext, AgentContext
+
+**PluginContextError**:
+A failure to use a plugin capability because its generation retired, its session is unbound, its scope is insufficient, or the requested operation failed.
+_Avoid_: ExtensionContextError, ContextError
+
+**PresentationMode**:
+The product surface currently presenting a plugin-backed session, such as TUI, print, JSON, or RPC.
+_Avoid_: ExtensionMode, UiMode
+
+**SessionSnapshot**:
+An immutable plugin-facing view of one session's identity, current branch, entries, labels, and unknown wire data.
+_Avoid_: SessionDocument, SessionState
+
 **SessionManager**:
 The Pi-compatible view of one session's entries, tree, branch, labels, and persistence identity, exposed to JavaScript extensions as `ctx.sessionManager`.
 _Avoid_: MultiSessionManager, SessionRegistry

@@ -276,11 +276,13 @@ impl std::str::FromStr for ThinkingLevel {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResponseMetadata {
     pub provider: ProviderId,
     pub model: ModelId,
     pub api: String,
+    #[serde(rename = "timestamp")]
     pub timestamp_ms: i64,
     pub response_model: Option<String>,
     pub response_id: Option<String>,

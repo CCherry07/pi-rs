@@ -83,10 +83,7 @@ impl Tool for HashlineEditTool {
         input: Value,
         _updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
-        context
-            .abort_signal
-            .check()
-            .map_err(|_| ToolError::Aborted)?;
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
         let requested = require_str(&input, "path")?;
         let edits: Vec<EditOp> = serde_json::from_value(
             input
@@ -98,7 +95,7 @@ impl Tool for HashlineEditTool {
         if edits.is_empty() {
             return Err(invalid("no edits provided"));
         }
-        let path = resolve_to_cwd(&context.cwd, requested)?;
+        let path = resolve_to_cwd(context.cwd(), requested)?;
         let metadata = tokio::fs::symlink_metadata(&path)
             .await
             .map_err(|e| execution(e.to_string()))?;
@@ -134,10 +131,7 @@ impl Tool for HashlineEditTool {
         let mut resolved = Vec::new();
         let mut seen = HashSet::new();
         for edit in edits {
-            context
-                .abort_signal
-                .check()
-                .map_err(|_| ToolError::Aborted)?;
+            context.signal().check().map_err(|_| ToolError::Aborted)?;
             let replacement = extract_lines(edit.lines.as_ref())
                 .into_iter()
                 .map(|line| strip_prefix(&line).to_string())
@@ -216,10 +210,7 @@ impl Tool for HashlineEditTool {
         if output.len() > MAX_WRITE_BYTES {
             return Err(execution("edited file is too large"));
         }
-        context
-            .abort_signal
-            .check()
-            .map_err(|_| ToolError::Aborted)?;
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
         let path_copy = path.clone();
         let bytes = output.into_bytes();
         tokio::task::spawn_blocking(move || {
@@ -311,7 +302,15 @@ mod tests {
         let c = hashline_tag(2, "three", false);
         let (_, signal) = AbortHandle::new();
         let (updates, _) = ToolUpdateSink::channel();
-        HashlineEditTool.execute(ToolContext{cwd:d.path().into(),abort_signal:signal},ToolCallId::new("1"),json!({"path":"a","edits":[{"op":"replace","pos":a,"lines":"ONE"},{"op":"append","pos":c,"lines":["four"]}]}),updates).await.unwrap();
+        HashlineEditTool
+            .execute(
+                ToolContext::standalone(d.path().into(), signal),
+                ToolCallId::new("1"),
+                json!({"path":"a","edits":[{"op":"replace","pos":a,"lines":"ONE"},{"op":"append","pos":c,"lines":["four"]}]}),
+                updates,
+            )
+            .await
+            .unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "ONE\ntwo\nthree\nfour\n"

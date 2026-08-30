@@ -61,7 +61,7 @@ impl Tool for GrepTool {
     ) -> Result<ToolResult, ToolError> {
         let pattern = require_str(&input, "pattern")?.to_string();
         let path = resolve_to_cwd(
-            &context.cwd,
+            context.cwd(),
             input.get("path").and_then(Value::as_str).unwrap_or("."),
         )?;
         let glob = input.get("glob").and_then(Value::as_str).map(str::to_owned);
@@ -94,7 +94,7 @@ impl Tool for GrepTool {
                 path.display()
             )));
         }
-        let signal = context.abort_signal.clone();
+        let signal = context.signal().clone();
         let result = tokio::task::spawn_blocking(move || {
             search_files(&path, glob.as_deref(), &matcher, limit, &signal)
         })
@@ -496,10 +496,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         GrepTool
             .execute(
-                ToolContext {
-                    cwd: cwd.to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(cwd.to_path_buf(), signal),
                 ToolCallId::new("test"),
                 input,
                 updates,
@@ -526,10 +523,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         let result = GrepTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
                 json!({"pattern":"hello","glob":"*.txt"}),
                 updates,

@@ -1,4 +1,5 @@
-use pi_core::{ModelId, ModelSpec, ProviderId};
+use globset::GlobBuilder;
+use pi_core::{ModelId, ModelSpec, ProviderId, ScopedModel, ThinkingLevel};
 use pi_runtime::PiRuntime;
 
 use crate::SessionModel;
@@ -290,6 +291,12 @@ impl<'a> ModelRuntimeServices<'a> {
         self.resolver().resolve(request)
     }
 
+    /// Resolves Pi `enabledModels`/`--models` patterns against the immutable
+    /// available catalogue while preserving pattern and catalogue order.
+    pub fn resolve_model_scope(&self, patterns: &[String]) -> Vec<ScopedModel> {
+        resolve_model_scope(patterns, &self.runtime.available_models())
+    }
+
     pub fn select_initial_model(
         &self,
         request: InitialModelRequest,
@@ -308,6 +315,86 @@ impl<'a> ModelRuntimeServices<'a> {
         }
         Ok(selection)
     }
+}
+
+pub fn resolve_model_scope(patterns: &[String], models: &[ModelSpec]) -> Vec<ScopedModel> {
+    let mut scoped = Vec::new();
+    for raw_pattern in patterns {
+        let pattern = raw_pattern.trim();
+        if pattern.is_empty() {
+            continue;
+        }
+        let (model_pattern, thinking_level) = split_thinking_level(pattern, models);
+        let has_glob = model_pattern
+            .chars()
+            .any(|character| matches!(character, '*' | '?' | '['));
+        if has_glob {
+            let Ok(glob) = GlobBuilder::new(model_pattern)
+                .case_insensitive(true)
+                .literal_separator(false)
+                .build()
+            else {
+                continue;
+            };
+            let matcher = glob.compile_matcher();
+            for model in models {
+                let full_id = format!("{}/{}", model.provider, model.id);
+                if matcher.is_match(&full_id) || matcher.is_match(model.id.as_str()) {
+                    push_scoped_model(&mut scoped, model, thinking_level);
+                }
+            }
+        } else if let Some(model) = models.iter().find(|model| {
+            eq_ignore_case(model.id.as_str(), model_pattern)
+                || eq_ignore_case(&model.name, model_pattern)
+                || eq_ignore_case(&format!("{}/{}", model.provider, model.id), model_pattern)
+        }) {
+            push_scoped_model(&mut scoped, model, thinking_level);
+        }
+    }
+    scoped
+}
+
+fn split_thinking_level<'a>(
+    pattern: &'a str,
+    models: &[ModelSpec],
+) -> (&'a str, Option<ThinkingLevel>) {
+    let full_pattern_is_model = models.iter().any(|model| {
+        eq_ignore_case(model.id.as_str(), pattern)
+            || eq_ignore_case(&format!("{}/{}", model.provider, model.id), pattern)
+    });
+    if full_pattern_is_model {
+        return (pattern, None);
+    }
+    let Some((model_pattern, suffix)) = pattern.rsplit_once(':') else {
+        return (pattern, None);
+    };
+    let level = match suffix.to_ascii_lowercase().as_str() {
+        "off" => ThinkingLevel::Off,
+        "minimal" => ThinkingLevel::Minimal,
+        "low" => ThinkingLevel::Low,
+        "medium" => ThinkingLevel::Medium,
+        "high" => ThinkingLevel::High,
+        "xhigh" => ThinkingLevel::XHigh,
+        "max" => ThinkingLevel::Max,
+        _ => return (pattern, None),
+    };
+    (model_pattern, Some(level))
+}
+
+fn push_scoped_model(
+    scoped: &mut Vec<ScopedModel>,
+    model: &ModelSpec,
+    thinking_level: Option<ThinkingLevel>,
+) {
+    if scoped.iter().any(|candidate| {
+        candidate.model.provider == model.provider && candidate.model.id == model.id
+    }) {
+        return;
+    }
+    scoped.push(ScopedModel {
+        model: model.clone(),
+        thinking_level,
+    });
 }
 
 fn requested_selection(provider: ProviderId, reference: &str) -> InitialModelSelection {
@@ -355,6 +442,32 @@ mod tests {
             provider: ProviderId::new("fallback"),
             model_id: ModelId::new("fallback-model"),
         }
+    }
+
+    #[test]
+    fn model_scope_preserves_pattern_order_thinking_levels_and_deduplicates() {
+        let models = vec![
+            model("anthropic", "claude-sonnet", "Sonnet"),
+            model("anthropic", "claude-haiku", "Haiku"),
+            model("gateway", "model:exact", "Colon Model"),
+        ];
+
+        let scoped = resolve_model_scope(
+            &[
+                "anthropic/*:high".to_string(),
+                "model:exact".to_string(),
+                "claude-sonnet".to_string(),
+            ],
+            &models,
+        );
+
+        assert_eq!(scoped.len(), 3);
+        assert_eq!(scoped[0].model.id.as_str(), "claude-sonnet");
+        assert_eq!(scoped[0].thinking_level, Some(ThinkingLevel::High));
+        assert_eq!(scoped[1].model.id.as_str(), "claude-haiku");
+        assert_eq!(scoped[1].thinking_level, Some(ThinkingLevel::High));
+        assert_eq!(scoped[2].model.id.as_str(), "model:exact");
+        assert_eq!(scoped[2].thinking_level, None);
     }
 
     #[test]

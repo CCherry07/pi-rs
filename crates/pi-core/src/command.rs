@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 
-use crate::AbortSignal;
+use crate::{
+    AbortSignal, CommandContextParts, CommandModelsContext, CommandSessionContext,
+    PluginContextHandle, UiContext,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSpec {
@@ -13,8 +16,49 @@ pub struct CommandSpec {
 
 #[derive(Clone)]
 pub struct CommandContext {
-    pub cwd: PathBuf,
-    pub abort_signal: AbortSignal,
+    cwd: PathBuf,
+    abort_signal: AbortSignal,
+    pub session: CommandSessionContext,
+    pub models: CommandModelsContext,
+    pub ui: UiContext,
+}
+
+impl CommandContext {
+    /// Constructs a context for running a command outside a Pi session.
+    ///
+    /// Session, model, and presentation capabilities are intentionally
+    /// unavailable on standalone contexts.
+    pub fn standalone(cwd: PathBuf, abort_signal: AbortSignal) -> Self {
+        Self::with_plugin_context(cwd, abort_signal, CommandContextParts::unavailable())
+    }
+
+    #[doc(hidden)]
+    pub fn with_plugin_context(
+        cwd: PathBuf,
+        abort_signal: AbortSignal,
+        context: CommandContextParts,
+    ) -> Self {
+        Self {
+            cwd,
+            abort_signal,
+            session: context.session,
+            models: context.models,
+            ui: context.ui,
+        }
+    }
+
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
+    pub fn signal(&self) -> &AbortSignal {
+        &self.abort_signal
+    }
+
+    #[doc(hidden)]
+    pub fn plugin_context_handle(&self) -> PluginContextHandle {
+        self.session.handle_for_adapter()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +77,8 @@ pub enum CommandError {
     InvalidArguments(String),
     #[error("command failed: {0}")]
     Execution(String),
+    #[error(transparent)]
+    Context(#[from] crate::PluginContextError),
 }
 
 #[async_trait]

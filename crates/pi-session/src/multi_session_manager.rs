@@ -232,6 +232,7 @@ impl MultiSessionManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(registration_id.to_string(), session.clone());
+        self.inner.factory.session_registered(&session);
         Ok(session)
     }
 }
@@ -397,6 +398,10 @@ impl WeakPiSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(self.registration_id.as_ref())
             .cloned()
+    }
+
+    pub(crate) fn registration_id(&self) -> &str {
+        &self.registration_id
     }
 }
 

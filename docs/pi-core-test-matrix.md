@@ -40,7 +40,7 @@ the required CI gate.
 
 | Legacy suite (static declarations) | Rust ownership and executable evidence | Status |
 | --- | --- | --- |
-| `agent-loop.test.ts` (23) | `pi-agent` stream/loop/scheduler tests and `pi-runtime::tests::{full_plugin_first_tool_loop_preserves_result_order,sequential_tool_forces_source_order_execution,...}` | **Redistributed.** Covers full response/content stream metadata, partial failures and incomplete EOF, strict sequential per-call lifecycle, parallel source/completion ordering, `addedToolNames`, shared tool-hook context, queues, truncated calls, argument preparation, termination, errors, continuation, and the exact `turn_end -> prepare_next_turn -> should_stop_after_turn -> queue poll` ordering. Turn and tool callbacks share immutable `Arc` snapshots instead of cloning transcripts. The legacy default-stream fallback is not part of the plugin-first Provider contract. Patched tool arguments are deliberately revalidated in Rust. |
+| `agent-loop.test.ts` (23) | `pi-agent` stream/loop/scheduler tests and `pi-runtime::tests::{full_plugin_first_tool_loop_preserves_result_order,sequential_tool_forces_source_order_execution,...}` | **Redistributed.** Covers full response/content stream metadata, partial failures and incomplete EOF, strict sequential per-call lifecycle, parallel source/completion ordering, `addedToolNames`, shared tool-hook context, queues, truncated calls, argument preparation, termination, errors, continuation, and the exact `turn_end -> prepare_next_turn -> should_stop_after_turn -> queue poll` ordering. Turn and tool callbacks share immutable `Arc` snapshots instead of cloning transcripts; preparation and execution share one generation-bound `ToolContext`. The legacy default-stream fallback is not part of the plugin-first Provider contract. Patched tool arguments are deliberately revalidated in Rust. |
 | `agent.test.ts` (23) | [`crates/pi-agent/src/conformance_tests.rs`](../crates/pi-agent/src/conformance_tests.rs), `pending_queue.rs`, and runtime lifecycle tests | **Covered for the Rust Agent Interface.** Includes state/restore, subscribe/unsubscribe, async settlement, active abort signals, late updates (including a parallel batch), running guards, queueing, assistant-tail steering/follow-up continuation, pre-turn abort closure, exceptional failure lifecycle, mutable session ID, and run-local turn-control replacements that do not mutate Agent configuration. `FnTurnControl` covers ordinary async-closure use without exposing future boxing. |
 | `e2e.test.ts` (10) | `pi-agent` thinking/continue regressions, `pi-runtime` scripted-provider tests, and [`e2e/tests/runtime_agent.rs`](../e2e/tests/runtime_agent.rs) | **Covered.** Basic text, tools, pending state, abort, lifecycle, multi-turn context, thinking blocks, and valid/invalid continuation tails are deterministic and offline. |
 | `harness/agent-harness-scaffold.test.ts` (4) | `pi-session` reducer, durable queue recovery, deferred JSONL, and `agent_session::tests::open_reconciles_interrupted_run_from_reducer_without_replaying_side_effects` | **Divergence, stronger restore.** The current TypeScript scaffold explicitly rejects every recorded-session restore. Rust reducer-reconciles accepted deferred writes, missing initial input, run queues, and interrupted-operation closure idempotently. Open deliberately performs no provider I/O or blind tool side-effect replay. |
@@ -101,8 +101,10 @@ boundaries:
 5. `addedToolNames` survives tool execution, hook patches, JavaScript adaptation, and transcript
    messages, while native before/after tool hooks receive the batch `AgentContext` snapshot. This
    trait-surface change was introduced in native ABI 2; ABI 3 added the required hook-interest
-   contract, and ABI 4 adds provider header/response lifecycle hooks. Older artifacts are rejected
-   before loading.
+   contract, ABI 4 adds provider header/response lifecycle hooks, ABI 5 adds the shared
+   generation-bound Pi product context (including tool argument preparation), ABI 6 shares
+   cumulative assistant messages, and ABI 7 replaces per-update cumulative messages with a shared
+   live stream handle plus typed delta. Older artifacts are rejected before loading.
 
 ## Updating this matrix
 

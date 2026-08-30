@@ -4,12 +4,12 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use pi_core::{
     AbortHandle, ContentBlock, ModelId, ProviderId, ProviderPluginDriver, RegistriesBuilder,
-    ToolCallId, ToolContext, ToolUpdate, ToolUpdateSink,
+    ToolCallId, ToolContext, ToolExecutionMode, ToolUpdate, ToolUpdateSink,
 };
 use pi_js_plugin::{
     JsAgentPluginManifest, JsCallbackDispatcher, JsCallbackError, JsGenerationManifest,
     JsHookManifest, JsInvocation, JsInvocationKind, JsPluginGeneration, JsProviderPluginManifest,
-    JsToolExecutionMode, JsToolManifest,
+    JsToolManifest,
 };
 use serde_json::{Value, json};
 
@@ -28,7 +28,7 @@ impl JsCallbackDispatcher for ProviderDispatcher {
     async fn invoke(
         &self,
         invocation: JsInvocation,
-        _context: pi_js_plugin::ExtensionContextHandle,
+        _context: pi_js_plugin::PluginContextHandle,
     ) -> Result<Value, JsCallbackError> {
         self.invocations.lock().unwrap().push(invocation.clone());
         match invocation.callback_id.as_str() {
@@ -61,7 +61,7 @@ impl JsCallbackDispatcher for RecordingDispatcher {
     async fn invoke(
         &self,
         invocation: JsInvocation,
-        _context: pi_js_plugin::ExtensionContextHandle,
+        _context: pi_js_plugin::PluginContextHandle,
     ) -> Result<Value, JsCallbackError> {
         let kind = invocation.kind;
         self.invocations.lock().unwrap().push(invocation);
@@ -79,7 +79,7 @@ impl JsCallbackDispatcher for RecordingDispatcher {
     async fn invoke_with_tool_updates(
         &self,
         invocation: JsInvocation,
-        context: pi_js_plugin::ExtensionContextHandle,
+        context: pi_js_plugin::PluginContextHandle,
         updates: ToolUpdateSink,
     ) -> Result<Value, JsCallbackError> {
         assert!(updates.send(ToolUpdate {
@@ -111,7 +111,7 @@ async fn manifest_tool_registers_and_dispatches_through_the_public_tool_interfac
                     }),
                     prompt_snippet: Some("Greet a person".to_string()),
                     prompt_guidelines: vec!["Use the greet tool when asked.".to_string()],
-                    execution_mode: JsToolExecutionMode::Sequential,
+                    execution_mode: ToolExecutionMode::Sequential,
                 }],
                 commands: Vec::new(),
                 hooks: Vec::new(),
@@ -134,21 +134,14 @@ async fn manifest_tool_registers_and_dispatches_through_the_public_tool_interfac
     assert_eq!(spec.prompt_snippet.as_deref(), Some("Greet a person"));
     let (_, abort_signal) = AbortHandle::new();
     let (updates, mut update_receiver) = ToolUpdateSink::channel();
+    let tool_context = ToolContext::standalone("/workspace".into(), abort_signal);
     let prepared = tool
-        .prepare_arguments(json!({"name": "Cherry"}))
+        .prepare_arguments(&tool_context, json!({"name": "Cherry"}))
         .await
         .unwrap();
     assert_eq!(prepared, json!({"name": "CHERRY"}));
     let result = tool
-        .execute(
-            ToolContext {
-                cwd: "/workspace".into(),
-                abort_signal,
-            },
-            ToolCallId::new("call-1"),
-            prepared,
-            updates,
-        )
+        .execute(tool_context, ToolCallId::new("call-1"), prepared, updates)
         .await
         .unwrap();
 

@@ -24,43 +24,40 @@ test("release configuration keeps Cargo and npm product versions together", () =
 });
 
 test("release builds synchronize inherited workspace versions in Cargo.lock", () => {
+  const packageNames = workspaceVersionPackageNames();
+  const workspacePackages = packageNames.map((name) => `[[package]]
+name = "${name}"
+version = "0.1.0"
+dependencies = []
+`).join("\n");
   const lock = `version = 4
 
-[[package]]
-name = "pi-cli"
-version = "0.1.0"
-dependencies = []
-
-[[package]]
-name = "pi-napi"
-version = "0.1.0"
-dependencies = []
-
-[[package]]
-name = "pi-js-package-manager"
-version = "0.1.0"
-dependencies = []
-
+${workspacePackages}
 [[package]]
 name = "third-party"
 version = "0.1.0"
 `;
 
-  const synchronized = synchronizeCargoLockWorkspaceVersions(lock, "0.2.1");
+  const synchronized = synchronizeCargoLockWorkspaceVersions(lock, "0.2.1", packageNames);
 
-  assert.match(synchronized, /name = "pi-cli"\nversion = "0\.2\.1"/);
-  assert.match(synchronized, /name = "pi-napi"\nversion = "0\.2\.1"/);
-  assert.match(
-    synchronized,
-    /name = "pi-js-package-manager"\nversion = "0\.2\.1"/,
-  );
+  for (const name of packageNames) {
+    assert.match(synchronized, new RegExp(`name = "${name}"\\nversion = "0\\.2\\.1"`));
+  }
   assert.match(synchronized, /name = "third-party"\nversion = "0\.1\.0"/);
 });
 
 test("release builds discover every crate inheriting the workspace version", () => {
   assert.deepEqual(
     new Set(workspaceVersionPackageNames()),
-    new Set(["pi-cli", "pi-js-package-manager", "pi-napi"]),
+    new Set([
+      "pi-acp",
+      "pi-cli",
+      "pi-js-package-manager",
+      "pi-mcp",
+      "pi-napi",
+      "pi-rpc",
+      "pi-settings",
+    ]),
   );
 });
 

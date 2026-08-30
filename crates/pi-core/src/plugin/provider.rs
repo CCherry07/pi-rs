@@ -5,26 +5,33 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::plugin::PluginDiagnosticSink;
+use super::agent::{PluginDiagnostic, PluginDiagnosticSink, PluginError};
+use super::capabilities::{
+    ContextParts, ModelsContext, PluginContextEpoch, PluginContextHandle, SessionContext, UiContext,
+};
 use crate::{
-    AbortSignal, CoreError, ModelId, ModelSpec, PluginDiagnostic, PluginError, PluginId, Provider,
-    ProviderId, RegistriesBuilder, Result,
+    AbortSignal, CoreError, ModelId, ModelSpec, PluginId, Provider, ProviderId, RegistriesBuilder,
+    Result,
 };
 
 #[derive(Clone)]
 pub struct ProviderPluginContext {
-    pub plugin_id: PluginId,
-    pub generation: u64,
-    pub provider_id: ProviderId,
-    pub model_id: ModelId,
-    pub cwd: PathBuf,
-    pub abort_signal: AbortSignal,
+    plugin_id: PluginId,
+    generation: u64,
+    provider_id: ProviderId,
+    model_id: ModelId,
+    cwd: PathBuf,
+    abort_signal: AbortSignal,
+    pub session: SessionContext,
+    pub models: ModelsContext,
+    pub ui: UiContext,
     diagnostics: PluginDiagnosticSink,
 }
 
 impl ProviderPluginContext {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    #[doc(hidden)]
+    pub fn unavailable_for_testing(
         plugin_id: PluginId,
         generation: u64,
         provider_id: ProviderId,
@@ -32,6 +39,7 @@ impl ProviderPluginContext {
         cwd: PathBuf,
         abort_signal: AbortSignal,
     ) -> Self {
+        let context = ContextParts::unavailable();
         Self {
             plugin_id,
             generation,
@@ -39,13 +47,45 @@ impl ProviderPluginContext {
             model_id,
             cwd,
             abort_signal,
+            session: context.session,
+            models: context.models,
+            ui: context.ui,
             diagnostics: PluginDiagnosticSink::default(),
         }
+    }
+
+    pub fn plugin_id(&self) -> &PluginId {
+        &self.plugin_id
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn provider_id(&self) -> &ProviderId {
+        &self.provider_id
+    }
+
+    pub fn model_id(&self) -> &ModelId {
+        &self.model_id
+    }
+
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
+    pub fn signal(&self) -> &AbortSignal {
+        &self.abort_signal
     }
 
     pub fn report_hook_error(&self, hook: &'static str, message: impl Into<String>) {
         self.diagnostics
             .record(self.plugin_id.clone(), hook, message);
+    }
+
+    #[doc(hidden)]
+    pub fn plugin_context_handle(&self) -> PluginContextHandle {
+        self.session.handle_for_adapter()
     }
 }
 
@@ -191,10 +231,18 @@ struct RegisteredProviderPlugin {
 pub struct ProviderPluginDriver {
     plugins: Vec<RegisteredProviderPlugin>,
     diagnostics: PluginDiagnosticSink,
+    context_epoch: PluginContextEpoch,
 }
 
 impl ProviderPluginDriver {
     pub fn new(plugins: Vec<Arc<dyn ProviderPlugin>>) -> Result<Self> {
+        Self::new_with_context(plugins, PluginContextEpoch::unavailable())
+    }
+
+    pub fn new_with_context(
+        plugins: Vec<Arc<dyn ProviderPlugin>>,
+        context_epoch: PluginContextEpoch,
+    ) -> Result<Self> {
         let mut seen = std::collections::HashSet::new();
         let mut registered = Vec::with_capacity(plugins.len());
         for plugin in plugins {
@@ -207,6 +255,7 @@ impl ProviderPluginDriver {
         Ok(Self {
             plugins: registered,
             diagnostics: PluginDiagnosticSink::default(),
+            context_epoch,
         })
     }
 
@@ -244,6 +293,7 @@ impl ProviderPluginDriver {
         mut payload: Value,
     ) -> std::result::Result<Value, PluginError> {
         for registered in &self.plugins {
+            let context = self.context_epoch.context();
             let event = BeforeProviderRequestEvent {
                 payload: payload.clone(),
             };
@@ -257,6 +307,9 @@ impl ProviderPluginDriver {
                         model_id: model_id.clone(),
                         cwd: cwd.to_path_buf(),
                         abort_signal: signal.clone(),
+                        session: context.session,
+                        models: context.models,
+                        ui: context.ui,
                         diagnostics: self.diagnostics.clone(),
                     },
                     event,
@@ -295,6 +348,7 @@ impl ProviderPluginDriver {
             .map(|(name, value)| (name, Some(value)))
             .collect::<BTreeMap<_, _>>();
         for registered in &self.plugins {
+            let context = self.context_epoch.context();
             let event = BeforeProviderHeadersEvent {
                 headers: headers.clone(),
             };
@@ -308,6 +362,9 @@ impl ProviderPluginDriver {
                         model_id: model_id.clone(),
                         cwd: cwd.to_path_buf(),
                         abort_signal: signal.clone(),
+                        session: context.session,
+                        models: context.models,
+                        ui: context.ui,
                         diagnostics: self.diagnostics.clone(),
                     },
                     event,
@@ -341,6 +398,7 @@ impl ProviderPluginDriver {
         headers: BTreeMap<String, String>,
     ) {
         for registered in &self.plugins {
+            let context = self.context_epoch.context();
             let result = registered
                 .plugin
                 .after_provider_response(
@@ -351,6 +409,9 @@ impl ProviderPluginDriver {
                         model_id: model_id.clone(),
                         cwd: cwd.to_path_buf(),
                         abort_signal: signal.clone(),
+                        session: context.session,
+                        models: context.models,
+                        ui: context.ui,
                         diagnostics: self.diagnostics.clone(),
                     },
                     AfterProviderResponseEvent {

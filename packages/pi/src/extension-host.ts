@@ -16,12 +16,15 @@ import {
   type CommandManifest,
   type GenerationManifest,
   type GenerationRequest,
+  type HookBatchInvocation,
   type HookManifest,
   type HostMode,
   type Invocation,
   type ProviderPluginManifest,
   type ProviderRegistrationManifest,
   type SessionPluginManifest,
+  type StreamHookBatchInvocation,
+  type StreamUpdate,
   type ToolExecutionMode,
   type ToolManifest,
   isRecord,
@@ -284,6 +287,18 @@ interface GenerationState {
   registeredFlags: Map<string, 'boolean' | 'string'>
   initializing: boolean
   providerRegistrations: ProviderRegistrationManifest[]
+  streams: Map<string, AssistantStreamState>
+}
+
+type AssistantStreamBlock =
+  | { kind: 'text'; base: Record<string, unknown>; chunks: string[] }
+  | { kind: 'thinking'; base: Record<string, unknown>; chunks: string[] }
+  | { kind: 'toolCall'; base: Record<string, unknown>; argumentChunks: string[] }
+  | { kind: 'static'; base: Record<string, unknown> }
+
+interface AssistantStreamState {
+  header: Record<string, unknown>
+  content: (AssistantStreamBlock | undefined)[]
 }
 
 interface ExtensionEventBus {
@@ -366,6 +381,228 @@ function callDynamic(callback: unknown, thisArgument: unknown, arguments_: reado
   return Reflect.apply(callback, thisArgument, arguments_)
 }
 
+function streamBlock(value: unknown): AssistantStreamBlock {
+  if (!isRecord(value) || typeof value.type !== 'string') {
+    throw new Error('assistant stream initial content contains an invalid block')
+  }
+  const base = { ...value }
+  switch (value.type) {
+    case 'text':
+      return { kind: 'text', base, chunks: [typeof value.text === 'string' ? value.text : ''] }
+    case 'thinking':
+      return { kind: 'thinking', base, chunks: [typeof value.thinking === 'string' ? value.thinking : ''] }
+    case 'toolCall':
+      return { kind: 'toolCall', base, argumentChunks: [] }
+    default:
+      return { kind: 'static', base }
+  }
+}
+
+function createAssistantStream(initialMessage: Record<string, unknown>): AssistantStreamState {
+  if (!Array.isArray(initialMessage.content)) {
+    throw new Error('assistant stream initial message is missing content')
+  }
+  const { content, ...header } = initialMessage
+  return { header, content: content.map(streamBlock) }
+}
+
+function requireStreamBlock<K extends AssistantStreamBlock['kind']>(
+  state: AssistantStreamState,
+  index: number,
+  kind: K,
+): Extract<AssistantStreamBlock, { kind: K }> {
+  const block = state.content[index]
+  if (!block || block.kind !== kind) {
+    throw new Error(`assistant stream content ${index} is not ${kind}`)
+  }
+  return block as Extract<AssistantStreamBlock, { kind: K }>
+}
+
+function setOptional(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (value === null || value === undefined) delete target[key]
+  else target[key] = value
+}
+
+function applyStreamUpdate(state: AssistantStreamState, update: StreamUpdate): void {
+  switch (update.type) {
+    case 'start': {
+      const metadata = update.metadata
+      state.header.api = metadata.api
+      state.header.provider = metadata.provider
+      state.header.model = metadata.model
+      state.header.timestamp = metadata.timestamp
+      for (const key of ['responseModel', 'responseId', 'diagnostics', 'deferred', 'rawStopReason', 'endTurn']) {
+        setOptional(state.header, key, metadata[key])
+      }
+      return
+    }
+    case 'metadata':
+      for (const [key, value] of Object.entries(update.patch)) {
+        if (value !== null) setOptional(state.header, key, value)
+      }
+      return
+    case 'contentMetadata': {
+      const metadata = update.metadata
+      if (metadata.type === 'thinking') {
+        setOptional(requireStreamBlock(state, update.contentIndex, 'thinking').base, 'redacted', metadata.redacted)
+      } else {
+        setOptional(requireStreamBlock(state, update.contentIndex, 'toolCall').base, 'namespace', metadata.namespace)
+      }
+      return
+    }
+    case 'textStart':
+      state.content[update.contentIndex] ??= {
+        kind: 'text',
+        base: { type: 'text' },
+        chunks: [],
+      }
+      return
+    case 'textDelta':
+      requireStreamBlock(state, update.contentIndex, 'text').chunks.push(update.delta)
+      return
+    case 'textEnd':
+      setOptional(requireStreamBlock(state, update.contentIndex, 'text').base, 'textSignature', update.textSignature)
+      return
+    case 'thinkingStart':
+      state.content[update.contentIndex] ??= {
+        kind: 'thinking',
+        base: { type: 'thinking' },
+        chunks: [],
+      }
+      return
+    case 'thinkingDelta':
+      requireStreamBlock(state, update.contentIndex, 'thinking').chunks.push(update.delta)
+      return
+    case 'thinkingEnd':
+      setOptional(requireStreamBlock(state, update.contentIndex, 'thinking').base, 'thinkingSignature', update.thinkingSignature)
+      return
+    case 'toolCallStart':
+      state.content[update.contentIndex] ??= {
+        kind: 'toolCall',
+        base: { type: 'toolCall', id: update.id, name: update.name, arguments: null },
+        argumentChunks: [],
+      }
+      return
+    case 'toolCallDelta':
+      requireStreamBlock(state, update.contentIndex, 'toolCall').argumentChunks.push(update.argumentsDelta)
+      return
+    case 'toolCallEnd': {
+      const block = requireStreamBlock(state, update.contentIndex, 'toolCall')
+      const rawArguments = block.argumentChunks.join('')
+      try {
+        block.base.arguments = rawArguments.length === 0 ? {} : JSON.parse(rawArguments)
+      } catch {
+        block.base.arguments = null
+      }
+      setOptional(block.base, 'thoughtSignature', update.thoughtSignature)
+      return
+    }
+    case 'done':
+      state.header.usage = structuredClone(update.usage)
+      state.header.stopReason = update.reason
+  }
+}
+
+function materializeStreamBlock(block: AssistantStreamBlock): Record<string, unknown> {
+  switch (block.kind) {
+    case 'text':
+      return { ...structuredClone(block.base), text: block.chunks.join('') }
+    case 'thinking':
+      return { ...structuredClone(block.base), thinking: block.chunks.join('') }
+    case 'toolCall':
+    case 'static':
+      return structuredClone(block.base)
+  }
+}
+
+function materializeAssistantStream(state: AssistantStreamState): Record<string, unknown> {
+  return {
+    ...structuredClone(state.header),
+    content: state.content.map((block, index) => {
+      if (!block) throw new Error(`assistant stream content ${index} is missing`)
+      return materializeStreamBlock(block)
+    }),
+  }
+}
+
+function defineLazy(target: Record<string, unknown>, key: string, get: () => unknown): void {
+  Object.defineProperty(target, key, { enumerable: true, get })
+}
+
+function createStreamHookEvent(
+  streamId: string,
+  state: AssistantStreamState,
+  update: StreamUpdate,
+): Record<string, unknown> | undefined {
+  if (update.type === 'metadata' || update.type === 'contentMetadata') return undefined
+  let message: Record<string, unknown> | undefined
+  let partial: Record<string, unknown> | undefined
+  const ensureSnapshot = (): void => {
+    if (partial) return
+    partial = materializeAssistantStream(state)
+    message = { ...partial }
+  }
+  const getMessage = (): Record<string, unknown> => {
+    ensureSnapshot()
+    return message as Record<string, unknown>
+  }
+  const getPartial = (): Record<string, unknown> => {
+    ensureSnapshot()
+    return partial as Record<string, unknown>
+  }
+  const assistantMessageEvent: Record<string, unknown> = (() => {
+    switch (update.type) {
+      case 'start': return { type: 'start' }
+      case 'textStart': return { type: 'text_start', contentIndex: update.contentIndex }
+      case 'textDelta': return { type: 'text_delta', contentIndex: update.contentIndex, delta: update.delta }
+      case 'textEnd': {
+        const projected: Record<string, unknown> = { type: 'text_end', contentIndex: update.contentIndex }
+        defineLazy(projected, 'content', () => (getMessage().content as Record<string, unknown>[])[update.contentIndex]?.text ?? '')
+        return projected
+      }
+      case 'thinkingStart': return { type: 'thinking_start', contentIndex: update.contentIndex }
+      case 'thinkingDelta': return { type: 'thinking_delta', contentIndex: update.contentIndex, delta: update.delta }
+      case 'thinkingEnd': {
+        const projected: Record<string, unknown> = { type: 'thinking_end', contentIndex: update.contentIndex }
+        defineLazy(projected, 'content', () => (getMessage().content as Record<string, unknown>[])[update.contentIndex]?.thinking ?? '')
+        return projected
+      }
+      case 'toolCallStart': return {
+        type: 'toolcall_start', contentIndex: update.contentIndex, id: update.id, toolName: update.name,
+      }
+      case 'toolCallDelta': return {
+        type: 'toolcall_delta', contentIndex: update.contentIndex, delta: update.argumentsDelta,
+      }
+      case 'toolCallEnd': {
+        const projected: Record<string, unknown> = { type: 'toolcall_end', contentIndex: update.contentIndex }
+        defineLazy(projected, 'toolCall', () => (getMessage().content as Record<string, unknown>[])[update.contentIndex])
+        return projected
+      }
+      case 'done': return {
+        type: update.reason === 'error' || update.reason === 'aborted' ? 'error' : 'done',
+        reason: update.reason,
+      }
+    }
+  })()
+  if (update.type === 'done') {
+    defineLazy(assistantMessageEvent, assistantMessageEvent.type === 'error' ? 'error' : 'message', getPartial)
+  } else {
+    defineLazy(assistantMessageEvent, 'partial', getPartial)
+  }
+  const event: Record<string, unknown> = {
+    type: 'message_update',
+    streamId,
+    update,
+    assistantMessageEvent,
+  }
+  defineLazy(event, 'message', getMessage)
+  return event
+}
+
+function callbackErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 function parseToolDefinition(value: unknown, path: string): ToolDefinition {
   const result = toolDefinitionSchema.safeParse(value)
   if (!result.success) {
@@ -408,6 +645,13 @@ export class ExtensionHost {
         return JSON.stringify(await this.#prepareGeneration(operation.request))
       case 'invoke':
         return JSON.stringify(await this.#invoke(operation.invocation, nativeContext))
+      case 'invokeHookBatch':
+        return JSON.stringify(await this.#invokeHookBatch(operation.invocation, nativeContext))
+      case 'invokeStreamHookBatch':
+        return JSON.stringify(await this.#invokeStreamHookBatch(operation.invocation, nativeContext))
+      case 'releaseStream':
+        this.#releaseStream(operation.generationId, operation.streamId)
+        return 'null'
       case 'cancel':
         this.#cancel(operation.invocationId)
         return 'null'
@@ -433,6 +677,7 @@ export class ExtensionHost {
       registeredFlags: new Map(),
       initializing: true,
       providerRegistrations: [],
+      streams: new Map(),
     }
     this.#generations.set(generationId, state)
     try {
@@ -570,7 +815,10 @@ export class ExtensionHost {
         const callbackId = `${pluginId}:hook:${event}:${target.length}`
         this.#registerCallback(state, callbackId, async (invocation, signal, nativeContext) => {
           const payload = parseExternal(hookInvocationPayloadSchema, invocation.payload, `JavaScript hook ${event} invocation payload`)
-          const eventValue = payload.event
+          // Zod validates the payload, but handlers must receive the exact
+          // generation event object so mutations remain visible to the next
+          // callback in registration order, as in Pi's extension runner.
+          const eventValue = isRecord(invocation.payload.event) ? invocation.payload.event : payload.event
           const chainedSystemPrompt = event === 'before_agent_start' && typeof eventValue.systemPrompt === 'string'
             ? eventValue.systemPrompt
             : undefined
@@ -801,6 +1049,111 @@ export class ExtensionHost {
     }
   }
 
+  async #invokeHookBatch(
+    invocation: HookBatchInvocation,
+    nativeContext: NativeExtensionContext | undefined,
+  ): Promise<{ errors: { callbackId: string; message: string }[] }> {
+    const state = this.#requireGeneration(invocation.generationId)
+    state.runtime.bind(nativeContext)
+    const controller = new AbortController()
+    state.active.set(invocation.invocationId, controller)
+    const event = invocation.event
+    const errors: { callbackId: string; message: string }[] = []
+    try {
+      for (const entry of invocation.callbacks) {
+        if (controller.signal.aborted) break
+        const callback = state.callbacks.get(entry.callbackId)
+        if (!callback) {
+          errors.push({
+            callbackId: entry.callbackId,
+            message: `Unknown JavaScript callback: ${entry.callbackId}`,
+          })
+          continue
+        }
+        const callbackInvocation: Invocation = {
+          invocationId: invocation.invocationId,
+          generationId: invocation.generationId,
+          callbackId: entry.callbackId,
+          kind: 'agentHook',
+          payload: {
+            hook: invocation.hook,
+            context: entry.context,
+            event,
+          },
+        }
+        try {
+          await callback(callbackInvocation, controller.signal, nativeContext)
+        } catch (error) {
+          errors.push({ callbackId: entry.callbackId, message: callbackErrorMessage(error) })
+        }
+      }
+      return { errors }
+    } finally {
+      controller.abort()
+      state.active.delete(invocation.invocationId)
+    }
+  }
+
+  async #invokeStreamHookBatch(
+    invocation: StreamHookBatchInvocation,
+    nativeContext: NativeExtensionContext | undefined,
+  ): Promise<{ errors: { callbackId: string; message: string }[] }> {
+    const generation = this.#requireGeneration(invocation.generationId)
+    generation.runtime.bind(nativeContext)
+    let stream: AssistantStreamState
+    if (invocation.initialMessage) {
+      stream = createAssistantStream(invocation.initialMessage)
+      generation.streams.set(invocation.streamId, stream)
+    } else {
+      const current = generation.streams.get(invocation.streamId)
+      if (!current) {
+        throw new Error(`Assistant stream ${invocation.streamId} has no initial message`)
+      }
+      stream = current
+      applyStreamUpdate(stream, invocation.update)
+    }
+    const event = createStreamHookEvent(invocation.streamId, stream, invocation.update)
+    if (!event) return { errors: [] }
+
+    const controller = new AbortController()
+    generation.active.set(invocation.invocationId, controller)
+    const errors: { callbackId: string; message: string }[] = []
+    try {
+      for (const entry of invocation.callbacks) {
+        if (controller.signal.aborted) break
+        const callback = generation.callbacks.get(entry.callbackId)
+        if (!callback) {
+          errors.push({
+            callbackId: entry.callbackId,
+            message: `Unknown JavaScript callback: ${entry.callbackId}`,
+          })
+          continue
+        }
+        const callbackInvocation: Invocation = {
+          invocationId: invocation.invocationId,
+          generationId: invocation.generationId,
+          callbackId: entry.callbackId,
+          kind: 'agentHook',
+          payload: {
+            hook: 'message_update',
+            context: entry.context,
+            event,
+          },
+        }
+        try {
+          await callback(callbackInvocation, controller.signal, nativeContext)
+        } catch (error) {
+          errors.push({ callbackId: entry.callbackId, message: callbackErrorMessage(error) })
+        }
+      }
+      return { errors }
+    } finally {
+      controller.abort()
+      generation.active.delete(invocation.invocationId)
+      if (invocation.update.type === 'done') generation.streams.delete(invocation.streamId)
+    }
+  }
+
   #cancel(invocationId: string): void {
     for (const state of this.#generations.values()) {
       const controller = state.active.get(invocationId)
@@ -811,12 +1164,17 @@ export class ExtensionHost {
     }
   }
 
+  #releaseStream(generationId: string, streamId: string): void {
+    this.#generations.get(generationId)?.streams.delete(streamId)
+  }
+
   #retireGeneration(generationId: string): void {
     const state = this.#generations.get(generationId)
     if (!state) return
     for (const controller of state.active.values()) controller.abort()
     state.active.clear()
     state.callbacks.clear()
+    state.streams.clear()
     state.events.clear()
     state.runtime.retire()
     this.#generations.delete(generationId)

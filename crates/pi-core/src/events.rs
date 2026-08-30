@@ -1,19 +1,9 @@
-use crate::{AssistantMessage, Message, ToolCallId, ToolResult, ToolResultMessage};
+use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum AssistantMessageEvent {
-    Start,
-    TextStart { content_index: usize },
-    TextDelta { content_index: usize, delta: String },
-    TextEnd { content_index: usize },
-    ThinkingStart { content_index: usize },
-    ThinkingDelta { content_index: usize, delta: String },
-    ThinkingEnd { content_index: usize },
-    ToolCallStart { content_index: usize },
-    ToolCallDelta { content_index: usize, delta: String },
-    ToolCallEnd { content_index: usize },
-    Done,
-}
+use crate::{
+    AssistantMessage, AssistantStream, Message, StreamEvent, ToolCallId, ToolResult,
+    ToolResultMessage,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
@@ -23,15 +13,15 @@ pub enum AgentEvent {
     },
     TurnStart,
     TurnEnd {
-        message: AssistantMessage,
+        message: Arc<AssistantMessage>,
         tool_results: Vec<ToolResultMessage>,
     },
     MessageStart {
         message: Message,
     },
     MessageUpdate {
-        message: AssistantMessage,
-        event: AssistantMessageEvent,
+        stream: AssistantStream,
+        update: Arc<StreamEvent>,
     },
     MessageEnd {
         message: Message,

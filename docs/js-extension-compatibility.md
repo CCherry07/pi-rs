@@ -29,6 +29,13 @@ cross-role `message_end` replacement is recorded in the generation's diagnostics
 callbacks continue from the last valid value. `tool_call` is the deliberate exception: it remains
 fail-closed for the affected tool call, matching Pi's runner.
 
+Agent observer hooks are dispatched as one generation batch per event. Handlers still await
+sequentially, share the same event object, and isolate failures. `message_update` uses a compact
+stream wire: Rust sends the initial assistant message once, then only a stream ID and typed delta.
+Node retains chunk arrays and exposes lazy `message` and `assistantMessageEvent` snapshot getters.
+An empty hook never copies the accumulated text; if any handler reads a snapshot, the whole batch
+shares that single detached materialization.
+
 Provider header and response hook failures follow the same diagnostic isolation rule. Header
 deletion tombstones remain visible to later hooks and are removed only when the final map crosses
 the transport seam. Response observers run for successful and error HTTP statuses before any
@@ -42,9 +49,10 @@ lower-level before/after-tool callback contract.
 ## Context capabilities
 
 Base contexts support lazy reads for cwd, project trust, current model/thinking level, available
-models, idle/queue state, context usage, the effective system prompt, and the read-only
-`sessionManager` tree/branch/identity surface. `abort`, background compaction, and graceful product
-shutdown are native notifications. `modelRegistry` currently provides read-only
+models (including the resolved `enabledModels` scope), idle/queue state, context usage, the effective
+system prompt, and the read-only `sessionManager` tree/branch/identity surface. `abort`, background
+compaction, and graceful product shutdown are explicit non-replacing controls. `modelRegistry`
+provides read-only
 `getAll`, `getAvailable`, `find`, `hasConfiguredAuth`, and `getProviderDisplayName`; provider auth,
 completion, and refresh remain inactive. Configuration-form `pi.registerProvider(name, config)` and
 `pi.unregisterProvider(name)` are active. A command's immediately following `pi.setModel` flushes a
@@ -95,7 +103,8 @@ The following registration surfaces are recognized and inactive: shortcuts and
 message/Markdown/entry renderers. Extension flags are active; boolean flags use `--name` and string
 flags accept both `--name value` and `--name=value`; first registration wins for duplicate names,
 and unregistered flags fail generation construction. Tool
-`prepareArguments` runs before Rust validation through its own asynchronous adapter callback, and
+`prepareArguments` runs before Rust validation through its own asynchronous adapter callback using
+the same runtime-generation native context as tool execution, and
 registered tools can publish partial content/details through their streaming update callback. The
 generation-local `pi.events` bus is active, isolates listener failures, and drops all listeners on
 retirement.

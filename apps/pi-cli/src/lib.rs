@@ -1,6 +1,7 @@
 #![warn(unreachable_pub)]
 
 mod auth;
+mod builtin_providers;
 mod clipboard;
 mod config;
 mod dynamic_providers;
@@ -19,9 +20,10 @@ use std::io::{IsTerminal, Read};
 use std::sync::Arc;
 
 use config::{AppConfig, Cli, CliCommand, OutputMode};
+use pi_core::PresentationMode;
 use pi_js_package_manager::PackageManager as JsPackageManager;
-use pi_js_plugin::{ExtensionSessionBinding, JsHostMode, JsPluginHost};
-use pi_session::{MultiSessionManager, PiSession, SessionLog};
+use pi_js_plugin::JsPluginHost;
+use pi_session::{MultiSessionManager, PiSession, PluginContextBinding, SessionLog};
 use pi_settings::{SettingsContext, SettingsManager};
 use project_trust::{ProjectTrustEvaluation, ProjectTrustPromptRequest, ProjectTrustService};
 use tokio::sync::mpsc;
@@ -84,12 +86,12 @@ impl CLIMode {
         matches!(self, Self::Tui { .. })
     }
 
-    fn js_host_mode(&self) -> JsHostMode {
+    fn presentation_mode(&self) -> PresentationMode {
         match self {
-            Self::Tui { .. } => JsHostMode::Tui,
-            Self::Print { .. } => JsHostMode::Print,
-            Self::Json { .. } => JsHostMode::Json,
-            Self::Rpc | Self::Acp => JsHostMode::Rpc,
+            Self::Tui { .. } => PresentationMode::Tui,
+            Self::Print { .. } => PresentationMode::Print,
+            Self::Json { .. } => PresentationMode::Json,
+            Self::Rpc | Self::Acp => PresentationMode::Rpc,
         }
     }
 }
@@ -184,11 +186,12 @@ async fn run(
     let cwd = config.cwd.clone();
     let agent_dir = config.agent_dir.clone();
     let session_path = config.session_path.clone();
+    let plugin_context_binding = PluginContextBinding::new();
     let mut factory =
-        session_factory::ProductSessionFactory::new(config, trust.service.clone(), settings);
-    let js_session_binding = js_host.as_ref().map(|_| ExtensionSessionBinding::new());
-    if let (Some(js_host), Some(session_binding)) = (js_host, js_session_binding.clone()) {
-        factory = factory.with_js_plugin_host(js_host, cli_mode.js_host_mode(), session_binding);
+        session_factory::ProductSessionFactory::new(config, trust.service.clone(), settings)
+            .with_plugin_context(cli_mode.presentation_mode(), plugin_context_binding.clone());
+    if let Some(js_host) = js_host {
+        factory = factory.with_js_plugin_host(js_host);
     }
     let sessions = MultiSessionManager::new(factory);
     if matches!(cli_mode, CLIMode::Acp) {
@@ -198,9 +201,13 @@ async fn run(
         // Keep the receiver alive so per-session trust resolution retains its
         // normal non-interactive request channel semantics.
         let _trust_requests = trust.requests;
-        let result = pi_acp::serve_stdio(sessions.clone(), pi_acp::AcpOptions::new(sessions_dir))
-            .await
-            .map_err(|error| error.to_string());
+        let result = tokio::select! {
+            result = pi_acp::serve_stdio(
+                sessions.clone(),
+                pi_acp::AcpOptions::new(sessions_dir),
+            ) => result.map_err(|error| error.to_string()),
+            () = plugin_context_binding.wait_for_shutdown() => Ok(()),
+        };
         let shutdown = sessions.shutdown().await.map_err(|error| error.to_string());
         return finish_run(result, shutdown);
     }
@@ -210,9 +217,6 @@ async fn run(
         sessions.create_session(&cwd, &session_path).await
     }
     .map_err(|error| error.to_string())?;
-    if let Some(binding) = &js_session_binding {
-        binding.bind(session.clone());
-    }
     let result = run_cli_with_shutdown(
         cli_mode,
         session,
@@ -220,7 +224,7 @@ async fn run(
         trust.service,
         trust.requests,
         agent_dir,
-        js_session_binding,
+        Some(plugin_context_binding),
     )
     .await;
     let shutdown = sessions.shutdown().await.map_err(|error| error.to_string());
@@ -387,7 +391,7 @@ async fn run_cli_with_shutdown(
     project_trust: ProjectTrustService,
     trust_requests: mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
     agent_dir: std::path::PathBuf,
-    shutdown: Option<ExtensionSessionBinding>,
+    shutdown: Option<PluginContextBinding>,
 ) -> Result<(), String> {
     if let Some(shutdown) = shutdown {
         let abort_session = session.clone();
@@ -520,7 +524,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        CLIMode, Cli, JsHostMode, ensure_javascript_host_available, finish_run,
+        CLIMode, Cli, PresentationMode, ensure_javascript_host_available, finish_run,
         split_extension_flags,
     };
     use crate::config::AppConfig;
@@ -601,7 +605,7 @@ mod tests {
             }
         );
         assert!(tui.is_interactive());
-        assert_eq!(tui.js_host_mode(), JsHostMode::Tui);
+        assert_eq!(tui.presentation_mode(), PresentationMode::Tui);
 
         let print = CLIMode::resolve(&cli(&[]), Some("piped".to_string()), false).unwrap();
         assert_eq!(
@@ -611,7 +615,7 @@ mod tests {
             }
         );
         assert!(!print.is_interactive());
-        assert_eq!(print.js_host_mode(), JsHostMode::Print);
+        assert_eq!(print.presentation_mode(), PresentationMode::Print);
 
         let json = CLIMode::resolve(
             &cli(&["--print", "--json"]),
@@ -619,17 +623,17 @@ mod tests {
             true,
         )
         .unwrap();
-        assert_eq!(json.js_host_mode(), JsHostMode::Json);
+        assert_eq!(json.presentation_mode(), PresentationMode::Json);
 
         let rpc = CLIMode::resolve(&cli(&["--mode", "rpc"]), None, true).unwrap();
         assert_eq!(rpc, CLIMode::Rpc);
         assert!(!rpc.is_interactive());
-        assert_eq!(rpc.js_host_mode(), JsHostMode::Rpc);
+        assert_eq!(rpc.presentation_mode(), PresentationMode::Rpc);
 
         let acp = CLIMode::resolve(&cli(&["--acp"]), None, false).unwrap();
         assert_eq!(acp, CLIMode::Acp);
         assert!(!acp.is_interactive());
-        assert_eq!(acp.js_host_mode(), JsHostMode::Rpc);
+        assert_eq!(acp.presentation_mode(), PresentationMode::Rpc);
     }
 
     #[test]

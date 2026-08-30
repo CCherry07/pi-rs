@@ -412,7 +412,7 @@ async fn run_loop(
                 emit(
                     &events,
                     AgentEvent::TurnEnd {
-                        message: assistant,
+                        message: assistant.into(),
                         tool_results: Vec::new(),
                     },
                     &signal,
@@ -439,7 +439,7 @@ async fn run_loop(
                 emit(
                     &events,
                     AgentEvent::TurnEnd {
-                        message: assistant.clone(),
+                        message: assistant.clone().into(),
                         tool_results: Vec::new(),
                     },
                     &signal,
@@ -482,7 +482,7 @@ async fn run_loop(
                     emit(
                         &events,
                         AgentEvent::TurnEnd {
-                            message: assistant,
+                            message: assistant.into(),
                             tool_results,
                         },
                         &signal,
@@ -522,7 +522,7 @@ async fn run_loop(
             emit(
                 &events,
                 AgentEvent::TurnEnd {
-                    message: assistant.clone(),
+                    message: assistant.clone().into(),
                     tool_results: tool_results.clone(),
                 },
                 &signal,
@@ -781,29 +781,29 @@ async fn stream_assistant_response(
             }
         };
         if update.started && !started {
-            let partial = assembler
-                .snapshot()
-                .map_err(|error| AgentLoopError::Assembly(error.to_string()))?;
-            context.messages.push(Message::assistant(partial.clone()));
+            let partial = Arc::new(
+                assembler
+                    .snapshot()
+                    .map_err(|error| AgentLoopError::Assembly(error.to_string()))?,
+            );
+            context
+                .messages
+                .push(Message::Assistant(Arc::clone(&partial)));
             emit(
                 &events,
                 AgentEvent::MessageStart {
-                    message: Message::assistant(partial),
+                    message: Message::Assistant(partial),
                 },
                 &signal,
             )
             .await?;
             started = true;
-        } else if let Some(message_event) = update.message_event {
-            let partial = assembler
-                .snapshot()
-                .map_err(|error| AgentLoopError::Assembly(error.to_string()))?;
-            replace_last_assistant(context, partial.clone());
+        } else if let Some(stream_update) = update.update {
             emit(
                 &events,
                 AgentEvent::MessageUpdate {
-                    message: partial,
-                    event: message_event,
+                    stream: assembler.stream(),
+                    update: stream_update,
                 },
                 &signal,
             )
@@ -960,10 +960,14 @@ async fn commit_failed_assistant(
 }
 
 fn replace_last_assistant(context: &mut AgentContext, message: AssistantMessage) {
+    replace_last_assistant_shared(context, Arc::new(message));
+}
+
+fn replace_last_assistant_shared(context: &mut AgentContext, message: Arc<AssistantMessage>) {
     if let Some(last) = context.messages.last_mut()
         && last.is_assistant()
     {
-        *last = Message::assistant(message);
+        *last = Message::Assistant(message);
     }
 }
 
@@ -1031,7 +1035,7 @@ pub(crate) async fn emit_run_failure_lifecycle(
     let _ = events
         .emit(
             AgentEvent::TurnEnd {
-                message: assistant.clone(),
+                message: assistant.clone().into(),
                 tool_results: Vec::new(),
             },
             signal.clone(),

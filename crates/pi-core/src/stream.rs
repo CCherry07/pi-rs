@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{DeferredHandle, ResponseMetadata, StopReason, ToolCallId, Usage};
@@ -8,7 +9,8 @@ use crate::{DeferredHandle, ResponseMetadata, StopReason, ToolCallId, Usage};
 /// values leave prior state unchanged. Providers should emit a patch as soon
 /// as upstream supplies the value so failures retain all metadata observed
 /// before the terminal event.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResponseMetadataPatch {
     pub response_model: Option<String>,
     pub response_id: Option<String>,
@@ -18,13 +20,19 @@ pub struct ResponseMetadataPatch {
     pub end_turn: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum ContentMetadata {
     Thinking { redacted: Option<bool> },
     ToolCall { namespace: Option<String> },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum StreamEvent {
     Start {
         metadata: ResponseMetadata,

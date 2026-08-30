@@ -21,9 +21,102 @@ const invocationSchema = z.strictObject({
   payload: jsonObjectSchema,
 })
 
+const hookBatchInvocationSchema = z.strictObject({
+  invocationId: z.string(),
+  generationId: z.string(),
+  hook: z.string(),
+  callbacks: z.array(z.strictObject({
+    callbackId: z.string(),
+    context: jsonObjectSchema,
+  })),
+  event: jsonObjectSchema,
+})
+
+const responseMetadataPatchSchema = z.strictObject({
+  responseModel: z.string().nullable(),
+  responseId: z.string().nullable(),
+  diagnostics: z.array(z.unknown()).nullable(),
+  deferred: jsonObjectSchema.nullable(),
+  rawStopReason: z.string().nullable(),
+  endTurn: z.boolean().nullable(),
+})
+
+const contentMetadataSchema = z.discriminatedUnion('type', [
+  z.strictObject({ type: z.literal('thinking'), redacted: z.boolean().nullable() }),
+  z.strictObject({ type: z.literal('toolCall'), namespace: z.string().nullable() }),
+])
+
+const streamUpdateSchema = z.discriminatedUnion('type', [
+  z.strictObject({ type: z.literal('start'), metadata: jsonObjectSchema }),
+  z.strictObject({ type: z.literal('metadata'), patch: responseMetadataPatchSchema }),
+  z.strictObject({
+    type: z.literal('contentMetadata'),
+    contentIndex: z.number().int().nonnegative(),
+    metadata: contentMetadataSchema,
+  }),
+  z.strictObject({ type: z.literal('textStart'), contentIndex: z.number().int().nonnegative() }),
+  z.strictObject({
+    type: z.literal('textDelta'),
+    contentIndex: z.number().int().nonnegative(),
+    delta: z.string(),
+  }),
+  z.strictObject({
+    type: z.literal('textEnd'),
+    contentIndex: z.number().int().nonnegative(),
+    textSignature: z.string().nullable(),
+  }),
+  z.strictObject({ type: z.literal('thinkingStart'), contentIndex: z.number().int().nonnegative() }),
+  z.strictObject({
+    type: z.literal('thinkingDelta'),
+    contentIndex: z.number().int().nonnegative(),
+    delta: z.string(),
+  }),
+  z.strictObject({
+    type: z.literal('thinkingEnd'),
+    contentIndex: z.number().int().nonnegative(),
+    thinkingSignature: z.string().nullable(),
+  }),
+  z.strictObject({
+    type: z.literal('toolCallStart'),
+    contentIndex: z.number().int().nonnegative(),
+    id: z.string(),
+    name: z.string(),
+  }),
+  z.strictObject({
+    type: z.literal('toolCallDelta'),
+    contentIndex: z.number().int().nonnegative(),
+    argumentsDelta: z.string(),
+  }),
+  z.strictObject({
+    type: z.literal('toolCallEnd'),
+    contentIndex: z.number().int().nonnegative(),
+    thoughtSignature: z.string().nullable(),
+  }),
+  z.strictObject({
+    type: z.literal('done'),
+    reason: z.enum(['stop', 'pending', 'length', 'toolUse', 'error', 'aborted', 'deferred']),
+    usage: jsonObjectSchema,
+  }),
+])
+
+const streamHookBatchInvocationSchema = z.strictObject({
+  invocationId: z.string(),
+  generationId: z.string(),
+  callbacks: z.array(z.strictObject({
+    callbackId: z.string(),
+    context: jsonObjectSchema,
+  })),
+  streamId: z.string(),
+  initialMessage: jsonObjectSchema.optional(),
+  update: streamUpdateSchema,
+})
+
 const hostOperationSchema = z.discriminatedUnion('type', [
   z.strictObject({ type: z.literal('prepareGeneration'), request: generationRequestSchema }),
   z.strictObject({ type: z.literal('invoke'), invocation: invocationSchema }),
+  z.strictObject({ type: z.literal('invokeHookBatch'), invocation: hookBatchInvocationSchema }),
+  z.strictObject({ type: z.literal('invokeStreamHookBatch'), invocation: streamHookBatchInvocationSchema }),
+  z.strictObject({ type: z.literal('releaseStream'), generationId: z.string(), streamId: z.string() }),
   z.strictObject({ type: z.literal('cancel'), invocationId: z.string() }),
   z.strictObject({ type: z.literal('retireGeneration'), generationId: z.string() }),
 ])
@@ -98,6 +191,9 @@ export type InvocationKind = z.infer<typeof invocationKindSchema>
 export type ToolExecutionMode = z.infer<typeof toolExecutionModeSchema>
 export type GenerationRequest = z.infer<typeof generationRequestSchema>
 export type Invocation = z.infer<typeof invocationSchema>
+export type HookBatchInvocation = z.infer<typeof hookBatchInvocationSchema>
+export type StreamUpdate = z.infer<typeof streamUpdateSchema>
+export type StreamHookBatchInvocation = z.infer<typeof streamHookBatchInvocationSchema>
 export type HostOperation = z.infer<typeof hostOperationSchema>
 export type HookManifest = z.infer<typeof hookManifestSchema>
 export type ToolManifest = z.infer<typeof toolManifestSchema>

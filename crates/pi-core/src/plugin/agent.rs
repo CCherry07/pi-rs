@@ -5,9 +5,13 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::capabilities::{
+    CommandContextParts, ContextParts, ModelsContext, PluginContextEpoch, PluginContextError,
+    PluginContextHandle, SessionContext, UiContext,
+};
 use crate::{
-    AbortSignal, AssistantMessage, AssistantMessageEvent, ContentBlock, CoreError, Message,
-    ModelId, PluginId, ProviderId, RegistriesBuilder, Result, RunId, ToolCall, ToolCallId,
+    AbortSignal, AssistantMessage, AssistantStream, ContentBlock, CoreError, Message, ModelId,
+    PluginId, ProviderId, RegistriesBuilder, Result, RunId, StreamEvent, ToolCall, ToolCallId,
     ToolResult, ToolResultMessage, Usage,
 };
 
@@ -21,6 +25,8 @@ pub enum PluginError {
     },
     #[error("plugin registration failed: {0}")]
     Registration(String),
+    #[error(transparent)]
+    Context(#[from] PluginContextError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,48 +77,106 @@ impl PluginDiagnosticSink {
 }
 
 #[derive(Clone)]
-pub struct PluginContext {
-    pub plugin_id: PluginId,
-    pub run_id: RunId,
-    pub cwd: PathBuf,
-    pub abort_signal: AbortSignal,
+pub struct AgentPluginContext {
+    plugin_id: PluginId,
+    run_id: RunId,
+    cwd: PathBuf,
+    abort_signal: AbortSignal,
+    pub session: SessionContext,
+    pub models: ModelsContext,
+    pub ui: UiContext,
     diagnostics: PluginDiagnosticSink,
 }
 
-impl PluginContext {
-    pub fn new(
+impl AgentPluginContext {
+    #[doc(hidden)]
+    pub fn unavailable_for_testing(
         plugin_id: PluginId,
         run_id: RunId,
         cwd: PathBuf,
         abort_signal: AbortSignal,
     ) -> Self {
+        let context = ContextParts::unavailable();
         Self {
             plugin_id,
             run_id,
             cwd,
             abort_signal,
+            session: context.session,
+            models: context.models,
+            ui: context.ui,
             diagnostics: PluginDiagnosticSink::default(),
         }
+    }
+
+    pub fn plugin_id(&self) -> &PluginId {
+        &self.plugin_id
+    }
+
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
+    pub fn signal(&self) -> &AbortSignal {
+        &self.abort_signal
     }
 
     pub fn report_hook_error(&self, hook: &'static str, message: impl Into<String>) {
         self.diagnostics
             .record(self.plugin_id.clone(), hook, message);
+    }
+
+    #[doc(hidden)]
+    pub fn plugin_context_handle(&self) -> PluginContextHandle {
+        self.session.handle_for_adapter()
+    }
+
+    /// Rebinds adapter-owned metadata while retaining the generation-scoped
+    /// capabilities and diagnostic sink.
+    #[doc(hidden)]
+    pub fn for_adapter_plugin(&self, plugin_id: PluginId) -> Self {
+        let mut context = self.clone();
+        context.plugin_id = plugin_id;
+        context
     }
 }
 
 #[derive(Clone)]
 pub struct InputContext {
-    pub plugin_id: PluginId,
-    pub cwd: PathBuf,
-    pub abort_signal: AbortSignal,
+    plugin_id: PluginId,
+    cwd: PathBuf,
+    abort_signal: AbortSignal,
+    pub session: SessionContext,
+    pub models: ModelsContext,
+    pub ui: UiContext,
     diagnostics: PluginDiagnosticSink,
 }
 
 impl InputContext {
+    pub fn plugin_id(&self) -> &PluginId {
+        &self.plugin_id
+    }
+
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
+    pub fn signal(&self) -> &AbortSignal {
+        &self.abort_signal
+    }
+
     pub fn report_hook_error(&self, hook: &'static str, message: impl Into<String>) {
         self.diagnostics
             .record(self.plugin_id.clone(), hook, message);
+    }
+
+    #[doc(hidden)]
+    pub fn plugin_context_handle(&self) -> PluginContextHandle {
+        self.session.handle_for_adapter()
     }
 }
 
@@ -206,7 +270,7 @@ pub struct TurnStartEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnEndEvent {
     pub turn_index: u64,
-    pub message: AssistantMessage,
+    pub message: Arc<AssistantMessage>,
     pub tool_results: Vec<ToolResultMessage>,
 }
 
@@ -217,8 +281,21 @@ pub struct MessageStartEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MessageUpdateEvent {
-    pub message: AssistantMessage,
-    pub event: AssistantMessageEvent,
+    /// O(1) handle to the live cumulative partial. Materialize only when a
+    /// hook genuinely needs the complete message.
+    pub stream: AssistantStream,
+    /// Shared current delta. Cloning the hook event never clones delta bytes.
+    pub update: Arc<StreamEvent>,
+}
+
+impl MessageUpdateEvent {
+    pub fn update(&self) -> &StreamEvent {
+        self.update.as_ref()
+    }
+
+    pub fn snapshot(&self) -> Option<AssistantMessage> {
+        self.stream.snapshot()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -446,7 +523,7 @@ pub trait AgentPlugin: Send + Sync {
 
     async fn before_agent_start(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: BeforeAgentStartEvent,
     ) -> std::result::Result<BeforeAgentStartPatch, PluginError> {
         Ok(BeforeAgentStartPatch::default())
@@ -454,77 +531,77 @@ pub trait AgentPlugin: Send + Sync {
 
     async fn agent_start(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: AgentStartEvent,
     ) -> std::result::Result<(), PluginError> {
         Ok(())
     }
     async fn agent_end(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: AgentEndEvent,
     ) -> std::result::Result<(), PluginError> {
         Ok(())
     }
     async fn agent_settled(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: AgentSettledEvent,
     ) -> std::result::Result<(), PluginError> {
         Ok(())
     }
     async fn turn_start(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: TurnStartEvent,
     ) -> std::result::Result<(), PluginError> {
         Ok(())
     }
     async fn turn_end(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: TurnEndEvent,
     ) -> std::result::Result<(), PluginError> {
         Ok(())
     }
     async fn message_start(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: MessageStartEvent,
     ) -> std::result::Result<(), PluginError> {
         Ok(())
     }
     async fn message_update(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: MessageUpdateEvent,
     ) -> std::result::Result<(), PluginError> {
         Ok(())
     }
     async fn message_end(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: MessageEndEvent,
     ) -> std::result::Result<MessageEndPatch, PluginError> {
         Ok(MessageEndPatch::default())
     }
     async fn tool_execution_start(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: ToolExecutionStartEvent,
     ) -> std::result::Result<(), PluginError> {
         Ok(())
     }
     async fn tool_execution_update(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: ToolExecutionUpdateEvent,
     ) -> std::result::Result<(), PluginError> {
         Ok(())
     }
     async fn tool_execution_end(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: ToolExecutionEndEvent,
     ) -> std::result::Result<(), PluginError> {
         Ok(())
@@ -532,7 +609,7 @@ pub trait AgentPlugin: Send + Sync {
 
     async fn context(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: ContextEvent,
     ) -> std::result::Result<ContextPatch, PluginError> {
         Ok(ContextPatch::default())
@@ -540,7 +617,7 @@ pub trait AgentPlugin: Send + Sync {
 
     async fn tool_call(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: ToolCallEvent,
     ) -> std::result::Result<ToolCallPatch, PluginError> {
         Ok(ToolCallPatch::default())
@@ -548,7 +625,7 @@ pub trait AgentPlugin: Send + Sync {
 
     async fn tool_result(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: ToolResultEvent,
     ) -> std::result::Result<ToolResultPatch, PluginError> {
         Ok(ToolResultPatch::default())
@@ -596,10 +673,18 @@ pub struct PluginDriver {
     plugins: Vec<RegisteredPlugin>,
     routes: AgentHookRoutes,
     diagnostics: PluginDiagnosticSink,
+    context_epoch: PluginContextEpoch,
 }
 
 impl PluginDriver {
     pub fn new(plugins: Vec<Arc<dyn AgentPlugin>>) -> Result<Self> {
+        Self::new_with_context(plugins, PluginContextEpoch::unavailable())
+    }
+
+    pub fn new_with_context(
+        plugins: Vec<Arc<dyn AgentPlugin>>,
+        context_epoch: PluginContextEpoch,
+    ) -> Result<Self> {
         let mut seen = std::collections::HashSet::new();
         let mut registered = Vec::with_capacity(plugins.len());
         let mut routes = AgentHookRoutes::default();
@@ -622,7 +707,16 @@ impl PluginDriver {
             plugins: registered,
             routes,
             diagnostics,
+            context_epoch,
         })
+    }
+
+    pub fn context_parts(&self) -> ContextParts {
+        self.context_epoch.context()
+    }
+
+    pub fn command_context_parts(&self) -> CommandContextParts {
+        self.context_epoch.command_context()
     }
 
     pub fn plugin_order(&self) -> Vec<PluginId> {
@@ -647,18 +741,22 @@ impl PluginDriver {
             .map(|&index| &self.plugins[index])
     }
 
-    fn plugin_context(
+    fn agent_plugin_context(
         &self,
         registered: &RegisteredPlugin,
         run_id: &RunId,
         cwd: &std::path::Path,
         signal: &AbortSignal,
-    ) -> PluginContext {
-        PluginContext {
+    ) -> AgentPluginContext {
+        let context = self.context_parts();
+        AgentPluginContext {
             plugin_id: registered.id.clone(),
             run_id: run_id.clone(),
             cwd: cwd.to_path_buf(),
             abort_signal: signal.clone(),
+            session: context.session,
+            models: context.models,
+            ui: context.ui,
             diagnostics: self.diagnostics.clone(),
         }
     }
@@ -683,10 +781,14 @@ impl PluginDriver {
     ) -> std::result::Result<InputPatch, PluginError> {
         let original = event.clone();
         for registered in self.interested_plugins(AgentHook::Input) {
+            let context = self.context_parts();
             let context = InputContext {
                 plugin_id: registered.id.clone(),
                 cwd: cwd.to_path_buf(),
                 abort_signal: signal.clone(),
+                session: context.session,
+                models: context.models,
+                ui: context.ui,
                 diagnostics: self.diagnostics.clone(),
             };
             let patch = match registered.plugin.input(context, event.clone()).await {
@@ -737,7 +839,7 @@ impl PluginDriver {
             let patch = match registered
                 .plugin
                 .before_agent_start(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
                 .await
@@ -770,7 +872,7 @@ impl PluginDriver {
             if let Err(error) = registered
                 .plugin
                 .agent_start(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
                 .await
@@ -791,7 +893,7 @@ impl PluginDriver {
             if let Err(error) = registered
                 .plugin
                 .agent_end(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
                 .await
@@ -812,7 +914,7 @@ impl PluginDriver {
             if let Err(error) = registered
                 .plugin
                 .agent_settled(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
                 .await
@@ -833,7 +935,7 @@ impl PluginDriver {
             if let Err(error) = registered
                 .plugin
                 .turn_start(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
                 .await
@@ -854,7 +956,7 @@ impl PluginDriver {
             if let Err(error) = registered
                 .plugin
                 .turn_end(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
                 .await
@@ -875,7 +977,7 @@ impl PluginDriver {
             if let Err(error) = registered
                 .plugin
                 .message_start(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
                 .await
@@ -896,7 +998,7 @@ impl PluginDriver {
             if let Err(error) = registered
                 .plugin
                 .message_update(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
                 .await
@@ -917,7 +1019,7 @@ impl PluginDriver {
             let patch = match registered
                 .plugin
                 .message_end(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
                 .await
@@ -954,7 +1056,7 @@ impl PluginDriver {
             if let Err(error) = registered
                 .plugin
                 .tool_execution_start(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
                 .await
@@ -975,7 +1077,7 @@ impl PluginDriver {
             if let Err(error) = registered
                 .plugin
                 .tool_execution_update(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
                 .await
@@ -996,7 +1098,7 @@ impl PluginDriver {
             if let Err(error) = registered
                 .plugin
                 .tool_execution_end(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     event.clone(),
                 )
                 .await
@@ -1017,7 +1119,7 @@ impl PluginDriver {
             let patch = match registered
                 .plugin
                 .context(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     ContextEvent {
                         messages: messages.clone(),
                     },
@@ -1049,7 +1151,7 @@ impl PluginDriver {
             let patch = registered
                 .plugin
                 .tool_call(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     ToolCallEvent {
                         assistant_message: event.assistant_message.clone(),
                         tool_call: event.tool_call.clone(),
@@ -1098,7 +1200,7 @@ impl PluginDriver {
             match registered
                 .plugin
                 .tool_result(
-                    self.plugin_context(registered, run_id, cwd, signal),
+                    self.agent_plugin_context(registered, run_id, cwd, signal),
                     current_event,
                 )
                 .await
@@ -1116,7 +1218,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::AbortHandle;
+    use crate::{AbortHandle, AssistantStreamId, AssistantStreamView};
 
     struct RegistrationOnlyPlugin {
         registrations: Arc<AtomicUsize>,
@@ -1138,6 +1240,38 @@ mod tests {
         id: &'static str,
         suffix: &'static str,
         calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    struct MessageUpdateProbe {
+        id: &'static str,
+        stream_ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct StaticAssistantStream(AssistantMessage);
+
+    impl AssistantStreamView for StaticAssistantStream {
+        fn snapshot(&self) -> Option<AssistantMessage> {
+            Some(self.0.clone())
+        }
+    }
+
+    #[pi_core::agent_plugin]
+    impl AgentPlugin for MessageUpdateProbe {
+        fn id(&self) -> PluginId {
+            PluginId::new(self.id)
+        }
+
+        async fn message_update(
+            &self,
+            _context: AgentPluginContext,
+            event: MessageUpdateEvent,
+        ) -> std::result::Result<(), PluginError> {
+            self.stream_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.stream.id().to_string());
+            Ok(())
+        }
     }
 
     #[pi_core::agent_plugin]
@@ -1215,6 +1349,65 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec!["first-input", "second-input"]
+        );
+    }
+
+    #[tokio::test]
+    async fn message_update_hooks_share_one_live_stream_handle() {
+        let stream_ids = Arc::new(Mutex::new(Vec::new()));
+        let driver = PluginDriver::new(vec![
+            Arc::new(MessageUpdateProbe {
+                id: "first-update-probe",
+                stream_ids: Arc::clone(&stream_ids),
+            }),
+            Arc::new(MessageUpdateProbe {
+                id: "second-update-probe",
+                stream_ids: Arc::clone(&stream_ids),
+            }),
+        ])
+        .unwrap();
+        let message = Arc::new(AssistantMessage {
+            content: Vec::new(),
+            api: "test".to_string(),
+            provider: ProviderId::new("scripted"),
+            model: ModelId::new("test"),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: Usage::default(),
+            stop_reason: crate::StopReason::Pending,
+            error_message: None,
+            deferred: None,
+            raw_stop_reason: None,
+            end_turn: None,
+            timestamp_ms: 0,
+        });
+        let stream = AssistantStream::new(
+            AssistantStreamId::new("stream-1"),
+            Arc::new(StaticAssistantStream((*message).clone())),
+        );
+        let (_abort, signal) = AbortHandle::new();
+
+        driver
+            .message_update(
+                &RunId::next(),
+                std::path::Path::new("."),
+                &signal,
+                MessageUpdateEvent {
+                    stream,
+                    update: Arc::new(StreamEvent::TextDelta {
+                        content_index: 0,
+                        delta: "x".to_string(),
+                    }),
+                },
+            )
+            .await;
+
+        assert_eq!(
+            *stream_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["stream-1", "stream-1"]
         );
     }
 

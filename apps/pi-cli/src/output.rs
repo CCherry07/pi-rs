@@ -74,7 +74,7 @@ fn print_extension_notice(
     if event.revision <= subscription.snapshot.revision {
         return;
     }
-    if let AgentSessionEvent::ExtensionNotice { message, .. } = event.event {
+    if let AgentSessionEvent::PluginNotice { message, .. } = event.event {
         println!("{message}");
     }
 }

@@ -18,8 +18,8 @@ use agent_client_protocol::{
 };
 use pi_agent::AgentLoopStop;
 use pi_core::{
-    AgentEvent, AssistantMessageEvent, ContentBlock as PiContentBlock, Message, ModelId,
-    ProviderId, TextContent as PiTextContent, ThinkingLevel, UserMessage,
+    AgentEvent, ContentBlock as PiContentBlock, Message, ModelId, ProviderId, StreamEvent,
+    TextContent as PiTextContent, ThinkingLevel, UserMessage,
 };
 use pi_mcp::{McpServerConfig, McpToolSet};
 use pi_session::{
@@ -802,13 +802,13 @@ fn pi_content_to_acp(content: &PiContentBlock) -> Option<acp::ContentBlock> {
 fn project_event(event: &AgentSessionEvent) -> Option<acp::SessionUpdate> {
     match event {
         AgentSessionEvent::Agent(event) => match event.as_ref() {
-            AgentEvent::MessageUpdate { event, .. } => match event {
-                AssistantMessageEvent::TextDelta { delta, .. } => Some(
+            AgentEvent::MessageUpdate { update, .. } => match update.as_ref() {
+                StreamEvent::TextDelta { delta, .. } => Some(
                     acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
                         acp::ContentBlock::Text(acp::TextContent::new(delta.clone())),
                     )),
                 ),
-                AssistantMessageEvent::ThinkingDelta { delta, .. } => Some(
+                StreamEvent::ThinkingDelta { delta, .. } => Some(
                     acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(
                         acp::ContentBlock::Text(acp::TextContent::new(delta.clone())),
                     )),

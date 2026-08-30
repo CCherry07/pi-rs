@@ -47,16 +47,13 @@ impl Tool for WriteTool {
         input: Value,
         _updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
-        context
-            .abort_signal
-            .check()
-            .map_err(|_| ToolError::Aborted)?;
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
         let requested = require_str(&input, "path")?;
         let content = require_str(&input, "content")?;
         if content.len() > MAX_WRITE_BYTES {
             return Err(invalid(format!("content exceeds {MAX_WRITE_BYTES} bytes")));
         }
-        let path = resolve_to_cwd(&context.cwd, requested)?;
+        let path = resolve_to_cwd(context.cwd(), requested)?;
         tokio::fs::create_dir_all(path.parent().ok_or_else(|| execution("missing parent"))?)
             .await
             .map_err(|e| execution(e.to_string()))?;
@@ -95,10 +92,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         WriteTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().into(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().into(), signal),
                 ToolCallId::new("1"),
                 json!({"path":"a/b.txt","content":"ok"}),
                 updates,

@@ -1,12 +1,17 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::{AbortSignal, ContentBlock, ToolCallId, Usage};
+use crate::{
+    AbortSignal, ContentBlock, ContextParts, ModelsContext, PluginContextHandle, SessionContext,
+    ToolCallId, UiContext, Usage,
+};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ToolExecutionMode {
     Sequential,
     #[default]
@@ -79,8 +84,49 @@ impl ToolUpdateSink {
 
 #[derive(Clone)]
 pub struct ToolContext {
-    pub cwd: PathBuf,
-    pub abort_signal: AbortSignal,
+    cwd: PathBuf,
+    abort_signal: AbortSignal,
+    pub session: SessionContext,
+    pub models: ModelsContext,
+    pub ui: UiContext,
+}
+
+impl ToolContext {
+    /// Constructs a context for running a tool outside a Pi session.
+    ///
+    /// Session, model, and presentation capabilities are intentionally
+    /// unavailable on standalone contexts.
+    pub fn standalone(cwd: PathBuf, abort_signal: AbortSignal) -> Self {
+        Self::with_plugin_context(cwd, abort_signal, ContextParts::unavailable())
+    }
+
+    #[doc(hidden)]
+    pub fn with_plugin_context(
+        cwd: PathBuf,
+        abort_signal: AbortSignal,
+        context: ContextParts,
+    ) -> Self {
+        Self {
+            cwd,
+            abort_signal,
+            session: context.session,
+            models: context.models,
+            ui: context.ui,
+        }
+    }
+
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
+    pub fn signal(&self) -> &AbortSignal {
+        &self.abort_signal
+    }
+
+    #[doc(hidden)]
+    pub fn plugin_context_handle(&self) -> PluginContextHandle {
+        self.session.handle_for_adapter()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -91,13 +137,19 @@ pub enum ToolError {
     InvalidArguments(String),
     #[error("tool failed: {0}")]
     Execution(String),
+    #[error(transparent)]
+    Context(#[from] crate::PluginContextError),
 }
 
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
 
-    async fn prepare_arguments(&self, input: Value) -> Result<Value, ToolError> {
+    async fn prepare_arguments(
+        &self,
+        _context: &ToolContext,
+        input: Value,
+    ) -> Result<Value, ToolError> {
         Ok(input)
     }
 

@@ -429,7 +429,11 @@ impl AgentSession {
         header.legacy_parent_session_path = options.parent_session_path.clone();
         runtime.agent().set_session_id(Some(header.id.clone()));
         let identity = session_identity(&header, path.clone());
-        let session_plugin_driver = Arc::new(options.plugins.build(identity)?);
+        let session_plugin_driver = Arc::new(
+            options
+                .plugins
+                .build_with_context(identity, runtime.context_parts())?,
+        );
         let log = SessionLog::create_deferred(path, header)?;
 
         let mut initial_entries = vec![
@@ -580,7 +584,11 @@ impl AgentSession {
             .agent()
             .set_session_id(Some(document.header.id.clone()));
         let identity = session_identity(&document.header, log.path().to_path_buf());
-        let session_plugin_driver = Arc::new(options.plugins.build(identity)?);
+        let session_plugin_driver = Arc::new(
+            options
+                .plugins
+                .build_with_context(identity, runtime.context_parts())?,
+        );
         let context = document.context_with_options(&options.context)?;
         restore_runtime_context_with_request(
             &runtime,
@@ -632,10 +640,10 @@ impl AgentSession {
 
     /// Returns the context window used by compaction for the active model.
     pub fn active_context_window(&self) -> Option<u64> {
-        let state = self.runtime.agent().state();
+        let (provider_id, model_id) = self.runtime.agent().model_selection();
         self.context_window.or_else(|| {
             self.runtime
-                .model(&state.provider_id, &state.model_id)
+                .model(&provider_id, &model_id)
                 .map(|model| model.context_window)
         })
     }
@@ -649,6 +657,16 @@ impl AgentSession {
         self.events.snapshot()
     }
 
+    /// Returns product-level idleness without cloning the frontend snapshot.
+    pub fn is_idle(&self) -> bool {
+        !self.runtime.agent().is_running() && !self.events.has_active_operation()
+    }
+
+    /// Returns whether either product message queue contains pending input.
+    pub fn has_pending_messages(&self) -> bool {
+        self.events.has_pending_messages()
+    }
+
     /// Atomically captures initial state and subscribes to subsequent product
     /// events. Consumers should ignore revisions at or below the snapshot's
     /// revision and refresh via [`Self::snapshot`] after receiver lag.
@@ -659,7 +677,7 @@ impl AgentSession {
     /// Publishes a transient, presentation-neutral notice from an extension.
     /// The notice is delivered to active frontend subscribers and is not
     /// written into the session log.
-    pub fn notify_extension(&self, message: String, level: crate::ExtensionNoticeLevel) {
+    pub fn notify_plugin(&self, message: String, level: crate::NoticeLevel) {
         self.events.publish_extension_notice(message, level);
     }
 
@@ -717,6 +735,7 @@ impl AgentSession {
             return;
         }
         self.session_plugin_driver().session_shutdown(&event).await;
+        self.runtime.retire_plugin_context();
     }
 
     pub fn is_closed(&self) -> bool {
@@ -845,7 +864,7 @@ impl AgentSession {
     /// Enqueues an extension-created user or custom message without running
     /// text preprocessing. The durable queue record is committed before the
     /// live agent can observe steer/follow-up delivery.
-    pub fn enqueue_extension_message(
+    pub fn enqueue_message(
         &self,
         message: Message,
         kind: QueueKind,
@@ -2887,11 +2906,11 @@ mod tests {
     use async_trait::async_trait;
     use pi_agent::{AgentLoopStop, AgentOptions};
     use pi_core::{
-        AgentPlugin, AgentSettledEvent, BeforeAgentStartEvent, BeforeAgentStartPatch, Command,
-        CommandContext, CommandError, CommandOutcome, CommandSpec, ContentBlock, CustomMessage,
-        CustomMessageContent, Message, MessageEndEvent, MessageEndPatch, PluginContext,
-        PluginError, PluginId, RegisterContext, ResponseMetadata, StreamEvent, TextContent, Usage,
-        UserMessage,
+        AgentPlugin, AgentPluginContext, AgentSettledEvent, BeforeAgentStartEvent,
+        BeforeAgentStartPatch, Command, CommandContext, CommandError, CommandOutcome, CommandSpec,
+        ContentBlock, CustomMessage, CustomMessageContent, Message, MessageEndEvent,
+        MessageEndPatch, PluginError, PluginId, RegisterContext, ResponseMetadata, StreamEvent,
+        TextContent, Usage, UserMessage,
     };
     use pi_runtime::SystemPrompt;
     use pi_test_support::TestToolsPlugin;
@@ -2958,7 +2977,7 @@ mod tests {
 
         async fn agent_settled(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             _event: AgentSettledEvent,
         ) -> Result<(), PluginError> {
             Err(PluginError::Hook {
@@ -2977,7 +2996,7 @@ mod tests {
 
         async fn agent_settled(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             _event: AgentSettledEvent,
         ) -> Result<(), PluginError> {
             self.entered.notify_one();
@@ -2994,7 +3013,7 @@ mod tests {
 
         async fn agent_end(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             _event: pi_core::AgentEndEvent,
         ) -> Result<(), PluginError> {
             self.ends.fetch_add(1, Ordering::SeqCst);
@@ -3003,7 +3022,7 @@ mod tests {
 
         async fn agent_settled(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             _event: AgentSettledEvent,
         ) -> Result<(), PluginError> {
             self.settled.fetch_add(1, Ordering::SeqCst);
@@ -3019,7 +3038,7 @@ mod tests {
 
         async fn message_end(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             event: MessageEndEvent,
         ) -> Result<MessageEndPatch, PluginError> {
             let message = match event.message {
@@ -3127,9 +3146,7 @@ mod tests {
             details: None,
             timestamp_ms: now_ms(),
         });
-        session
-            .enqueue_extension_message(queued, QueueKind::NextRun)
-            .unwrap();
+        session.enqueue_message(queued, QueueKind::NextRun).unwrap();
         let queued_at = session
             .log()
             .load()
@@ -3316,7 +3333,7 @@ mod tests {
 
         async fn before_agent_start(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             event: BeforeAgentStartEvent,
         ) -> Result<BeforeAgentStartPatch, PluginError> {
             Ok(BeforeAgentStartPatch {
@@ -4256,13 +4273,13 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(contexts.len(), 3);
-        assert_eq!(contexts[0].plugin_id, PluginId::new("lifecycle"));
-        assert_eq!(contexts[0].generation, 1);
-        assert_eq!(contexts[1].generation, 1);
-        assert_eq!(contexts[2].generation, 2);
-        assert_eq!(contexts[0].session.id, session.log().header().id);
-        assert_eq!(contexts[0].session.path, path);
-        assert_eq!(contexts[0].session.cwd, directory.path());
+        assert_eq!(contexts[0].plugin_id(), &PluginId::new("lifecycle"));
+        assert_eq!(contexts[0].generation(), 1);
+        assert_eq!(contexts[1].generation(), 1);
+        assert_eq!(contexts[2].generation(), 2);
+        assert_eq!(contexts[0].identity().id, session.log().header().id);
+        assert_eq!(contexts[0].identity().path, path);
+        assert_eq!(contexts[0].identity().cwd, directory.path());
     }
 
     #[tokio::test]

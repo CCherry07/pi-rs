@@ -2,17 +2,21 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use pi_core::{
-    AbortHandle, AgentSettledEvent, AssistantMessage, BeforeAgentStartEvent,
-    BeforeProviderRequestEvent, CommandContext, CommandOutcome, ContentBlock, CustomMessageContent,
-    ImageContent, InputEvent, InputPatch, InputSource, InputStreamingBehavior, Message,
-    MessageEndEvent, ModelId, PluginId, ProviderId, ProviderPluginContext, RegistriesBuilder,
-    RunId, StopReason, TextContent, ToolResultMessage, TurnEndEvent, TurnStartEvent, Usage,
-    UserMessage,
+    AbortHandle, AgentSettledEvent, AssistantMessage, AssistantStream, AssistantStreamId,
+    AssistantStreamView, BeforeAgentStartEvent, BeforeProviderRequestEvent, CommandContext,
+    CommandOutcome, ContentBlock, CustomMessageContent, ImageContent, InputEvent, InputPatch,
+    InputSource, InputStreamingBehavior, Message, MessageEndEvent, MessageUpdateEvent, ModelId,
+    ModelsContextAccess, PluginContext, PluginContextEpoch, PluginContextError,
+    PluginContextHandle, PluginId, PresentationMode, ProviderId, ProviderPluginContext,
+    RegistriesBuilder, RunId, SessionContextAccess, StopReason, StreamEvent, TextContent,
+    ToolResultMessage, TurnEndEvent, TurnStartEvent, UiContextAccess, Usage, UserMessage,
 };
 use pi_js_plugin::{
-    ExtensionContextScope, JsAgentPluginManifest, JsCallbackDispatcher, JsCallbackError,
-    JsCommandManifest, JsGenerationManifest, JsHookManifest, JsInvocation, JsPluginGeneration,
-    JsProviderPluginManifest, JsSessionPluginManifest,
+    ExtensionContextQuery, JsAgentPluginManifest, JsCallbackDispatcher, JsCallbackError,
+    JsCommandManifest, JsGenerationManifest, JsHookBatchError, JsHookBatchInvocation,
+    JsHookBatchResult, JsHookManifest, JsInvocation, JsPluginGeneration, JsProviderPluginManifest,
+    JsSessionPluginManifest, JsStreamHookBatchInvocation, PluginContextScope,
+    execute_context_query,
 };
 use pi_session::{
     SessionBeforeSwitchEvent, SessionIdentity, SessionPluginContext, SessionStartEvent,
@@ -23,7 +27,68 @@ use serde_json::{Value, json};
 #[derive(Default)]
 struct LifecycleDispatcher {
     invocations: Mutex<Vec<JsInvocation>>,
-    scopes: Mutex<Vec<ExtensionContextScope>>,
+    scopes: Mutex<Vec<PluginContextScope>>,
+    contexts: Mutex<Vec<PluginContextHandle>>,
+}
+
+#[derive(Default)]
+struct HookBatchDispatcher {
+    batches: Mutex<Vec<JsHookBatchInvocation>>,
+    stream_batches: Mutex<Vec<JsStreamHookBatchInvocation>>,
+}
+
+#[async_trait]
+impl JsCallbackDispatcher for HookBatchDispatcher {
+    async fn invoke(
+        &self,
+        invocation: JsInvocation,
+        _context: PluginContextHandle,
+    ) -> Result<Value, JsCallbackError> {
+        panic!("observer callbacks should use one hook batch, got {invocation:?}")
+    }
+
+    async fn invoke_hook_batch(
+        &self,
+        invocation: JsHookBatchInvocation,
+        _context: PluginContextHandle,
+    ) -> Result<JsHookBatchResult, JsCallbackError> {
+        self.batches.lock().unwrap().push(invocation);
+        Ok(JsHookBatchResult {
+            errors: vec![JsHookBatchError {
+                callback_id: "message-update:first".to_string(),
+                message: "intentional observer failure".to_string(),
+            }],
+        })
+    }
+
+    async fn invoke_stream_hook_batch(
+        &self,
+        invocation: JsStreamHookBatchInvocation,
+        _context: PluginContextHandle,
+    ) -> Result<JsHookBatchResult, JsCallbackError> {
+        self.stream_batches.lock().unwrap().push(invocation);
+        Ok(JsHookBatchResult {
+            errors: vec![JsHookBatchError {
+                callback_id: "message-update:first".to_string(),
+                message: "intentional observer failure".to_string(),
+            }],
+        })
+    }
+}
+
+struct FixedAssistantStream(AssistantMessage);
+
+impl AssistantStreamView for FixedAssistantStream {
+    fn snapshot(&self) -> Option<AssistantMessage> {
+        Some(self.0.clone())
+    }
+}
+
+fn assistant_stream(message: AssistantMessage) -> AssistantStream {
+    AssistantStream::new(
+        AssistantStreamId::new("test-stream"),
+        Arc::new(FixedAssistantStream(message)),
+    )
 }
 
 #[async_trait]
@@ -31,7 +96,7 @@ impl JsCallbackDispatcher for LifecycleDispatcher {
     async fn invoke(
         &self,
         invocation: JsInvocation,
-        context: pi_js_plugin::ExtensionContextHandle,
+        context: pi_js_plugin::PluginContextHandle,
     ) -> Result<Value, JsCallbackError> {
         let response = match invocation.callback_id.as_str() {
             "command" => json!({ "action": "transform", "text": "from command" }),
@@ -81,8 +146,22 @@ impl JsCallbackDispatcher for LifecycleDispatcher {
             }
         };
         self.scopes.lock().unwrap().push(context.scope());
+        self.contexts.lock().unwrap().push(context);
         self.invocations.lock().unwrap().push(invocation);
         Ok(response)
+    }
+}
+
+struct ModeContext;
+
+impl ModelsContextAccess for ModeContext {}
+
+#[async_trait]
+impl SessionContextAccess for ModeContext {}
+
+impl UiContextAccess for ModeContext {
+    fn mode(&self) -> Result<PresentationMode, PluginContextError> {
+        Ok(PresentationMode::Print)
     }
 }
 
@@ -196,6 +275,47 @@ fn assistant(text: &str) -> AssistantMessage {
 }
 
 #[tokio::test]
+async fn javascript_callbacks_use_the_runtime_plugin_context_epoch() {
+    let dispatcher = Arc::new(LifecycleDispatcher::default());
+    let generation = generation(Arc::clone(&dispatcher));
+    let plugin_access: Arc<dyn PluginContext> = Arc::new(ModeContext);
+    let epoch = PluginContextEpoch::new(plugin_access);
+    let (driver, _, _) = RegistriesBuilder::new()
+        .register_plugin_sets_with_context(
+            generation.agent_plugins(),
+            generation.provider_plugins(),
+            epoch.clone(),
+        )
+        .unwrap();
+    let (_, signal) = AbortHandle::new();
+
+    driver
+        .input(
+            std::path::Path::new("/workspace"),
+            &signal,
+            InputEvent {
+                text: "original".to_string(),
+                images: None,
+                source: InputSource::Rpc,
+                streaming_behavior: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let handle = dispatcher.contexts.lock().unwrap().last().unwrap().clone();
+    assert_eq!(
+        execute_context_query(&handle, ExtensionContextQuery::Mode).unwrap(),
+        json!("print")
+    );
+    epoch.retire();
+    assert!(matches!(
+        execute_context_query(&handle, ExtensionContextQuery::Mode),
+        Err(PluginContextError::Retired)
+    ));
+}
+
+#[tokio::test]
 async fn before_agent_start_exposes_pi_prompt_and_images_to_javascript() {
     let dispatcher = Arc::new(LifecycleDispatcher::default());
     let generation = generation(Arc::clone(&dispatcher));
@@ -280,10 +400,7 @@ async fn one_javascript_source_materializes_as_three_narrow_plugin_lifecycles() 
     assert_eq!(
         command
             .execute(
-                CommandContext {
-                    cwd: "/workspace".into(),
-                    abort_signal: signal.clone(),
-                },
+                CommandContext::standalone("/workspace".into(), signal.clone()),
                 "original".to_string(),
             )
             .await
@@ -320,7 +437,7 @@ async fn one_javascript_source_materializes_as_three_narrow_plugin_lifecycles() 
     assert_eq!(
         provider
             .before_provider_request(
-                ProviderPluginContext::new(
+                ProviderPluginContext::unavailable_for_testing(
                     PluginId::new("extension"),
                     3,
                     ProviderId::new("provider"),
@@ -339,16 +456,16 @@ async fn one_javascript_source_materializes_as_three_narrow_plugin_lifecycles() 
 
     generation.session_plugins()[0]
         .session_start(
-            &SessionPluginContext {
-                plugin_id: PluginId::new("extension"),
-                generation: 2,
-                session: SessionIdentity {
+            &SessionPluginContext::unavailable_for_testing(
+                PluginId::new("extension"),
+                2,
+                SessionIdentity {
                     id: "session".to_string(),
                     path: "/sessions/session.jsonl".into(),
                     cwd: "/workspace".into(),
                     parent_session_id: None,
                 },
-            },
+            ),
             &SessionStartEvent {
                 reason: SessionStartReason::Startup,
                 previous_session_file: None,
@@ -359,16 +476,16 @@ async fn one_javascript_source_materializes_as_three_narrow_plugin_lifecycles() 
 
     let switch_result = generation.session_plugins()[0]
         .session_before_switch(
-            &SessionPluginContext {
-                plugin_id: PluginId::new("extension"),
-                generation: 2,
-                session: SessionIdentity {
+            &SessionPluginContext::unavailable_for_testing(
+                PluginId::new("extension"),
+                2,
+                SessionIdentity {
                     id: "session".to_string(),
                     path: "/sessions/session.jsonl".into(),
                     cwd: "/workspace".into(),
                     parent_session_id: None,
                 },
-            },
+            ),
             &SessionBeforeSwitchEvent {
                 reason: SessionSwitchReason::Resume,
                 target_session_file: Some("/sessions/next.jsonl".into()),
@@ -386,11 +503,11 @@ async fn one_javascript_source_materializes_as_three_narrow_plugin_lifecycles() 
     assert_eq!(
         *dispatcher.scopes.lock().unwrap(),
         [
-            ExtensionContextScope::Command,
-            ExtensionContextScope::Base,
-            ExtensionContextScope::Base,
-            ExtensionContextScope::Base,
-            ExtensionContextScope::Base,
+            PluginContextScope::Command,
+            PluginContextScope::Base,
+            PluginContextScope::Base,
+            PluginContextScope::Base,
+            PluginContextScope::Base,
         ]
     );
 
@@ -439,7 +556,7 @@ async fn turn_metadata_and_message_end_replacement_match_pi() {
             &signal,
             TurnEndEvent {
                 turn_index: 3,
-                message: assistant("done"),
+                message: assistant("done").into(),
                 tool_results: Vec::<ToolResultMessage>::new(),
             },
         )
@@ -502,5 +619,106 @@ async fn agent_settled_is_active_and_isolates_callback_failures() {
     assert!(driver.diagnostics().iter().any(|diagnostic| {
         diagnostic.hook == "agent_settled"
             && diagnostic.message.contains("intentional callback failure")
+    }));
+}
+
+#[tokio::test]
+async fn observer_hooks_share_one_generation_batch_and_one_compact_stream_encoding() {
+    let dispatcher = Arc::new(HookBatchDispatcher::default());
+    let generation = JsPluginGeneration::prepare(
+        JsGenerationManifest {
+            generation_id: "js-observer-batch".to_string(),
+            agent_plugins: vec![
+                JsAgentPluginManifest {
+                    id: "extension-first".to_string(),
+                    tools: Vec::new(),
+                    commands: Vec::new(),
+                    hooks: vec![JsHookManifest {
+                        name: "message_update".to_string(),
+                        callback_id: "message-update:first".to_string(),
+                    }],
+                },
+                JsAgentPluginManifest {
+                    id: "extension-second".to_string(),
+                    tools: Vec::new(),
+                    commands: Vec::new(),
+                    hooks: vec![JsHookManifest {
+                        name: "message_update".to_string(),
+                        callback_id: "message-update:second".to_string(),
+                    }],
+                },
+            ],
+            provider_plugins: Vec::new(),
+            provider_registrations: Vec::new(),
+            session_plugins: Vec::new(),
+            diagnostics: Vec::new(),
+        },
+        dispatcher.clone(),
+    )
+    .unwrap();
+    let (driver, _) = RegistriesBuilder::new()
+        .register_plugins(generation.agent_plugins())
+        .unwrap();
+    assert_eq!(
+        driver.plugin_order(),
+        [
+            PluginId::new("extension-first"),
+            PluginId::new("extension-second")
+        ]
+    );
+
+    let (_, signal) = AbortHandle::new();
+    driver
+        .message_update(
+            &RunId::new("batch-run"),
+            std::path::Path::new("/workspace"),
+            &signal,
+            MessageUpdateEvent {
+                stream: assistant_stream(assistant("cumulative-message-only")),
+                update: Arc::new(StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: "delta".to_string(),
+                }),
+            },
+        )
+        .await;
+
+    let batches = dispatcher.stream_batches.lock().unwrap();
+    assert_eq!(batches.len(), 1);
+    let batch = &batches[0];
+    assert_eq!(
+        batch
+            .callbacks
+            .iter()
+            .map(|callback| callback.callback_id.as_str())
+            .collect::<Vec<_>>(),
+        ["message-update:first", "message-update:second"]
+    );
+    assert_eq!(batch.callbacks[0].context["pluginId"], "extension-first");
+    assert_eq!(batch.callbacks[1].context["pluginId"], "extension-second");
+    assert_eq!(
+        batch.initial_message.as_ref().unwrap().content[0],
+        ContentBlock::Text(TextContent::new("cumulative-message-only"))
+    );
+    assert_eq!(
+        *batch.update,
+        StreamEvent::TextDelta {
+            content_index: 0,
+            delta: "delta".to_string(),
+        }
+    );
+    assert_eq!(
+        serde_json::to_string(batch)
+            .unwrap()
+            .matches("cumulative-message-only")
+            .count(),
+        1
+    );
+    drop(batches);
+
+    assert!(driver.diagnostics().iter().any(|diagnostic| {
+        diagnostic.plugin_id == PluginId::new("extension-first")
+            && diagnostic.hook == "message_update"
+            && diagnostic.message.contains("intentional observer failure")
     }));
 }

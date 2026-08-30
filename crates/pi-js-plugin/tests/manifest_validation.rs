@@ -74,7 +74,7 @@ impl JsCallbackDispatcher for RetiringDispatcher {
     async fn invoke(
         &self,
         _invocation: JsInvocation,
-        _context: pi_js_plugin::ExtensionContextHandle,
+        _context: pi_js_plugin::PluginContextHandle,
     ) -> Result<Value, JsCallbackError> {
         unreachable!("manifest validation does not invoke callbacks")
     }
@@ -116,6 +116,61 @@ fn agent_hook_interests_are_derived_from_the_validated_manifest() {
     let interests = plugin.hook_interests();
     assert!(interests.contains(AgentHook::Input));
     assert!(!interests.contains(AgentHook::Context));
+}
+
+#[test]
+fn observer_batching_keeps_mutating_hooks_on_their_owning_plugin() {
+    let dispatcher = Arc::new(RetiringDispatcher::default());
+    let generation = JsPluginGeneration::prepare(
+        JsGenerationManifest {
+            generation_id: "js-observer-routes".to_string(),
+            agent_plugins: vec![
+                JsAgentPluginManifest {
+                    id: "first".to_string(),
+                    tools: Vec::new(),
+                    commands: Vec::new(),
+                    hooks: Vec::new(),
+                },
+                JsAgentPluginManifest {
+                    id: "second".to_string(),
+                    tools: Vec::new(),
+                    commands: Vec::new(),
+                    hooks: vec![
+                        JsHookManifest {
+                            name: "message_update".to_string(),
+                            callback_id: "message-update".to_string(),
+                        },
+                        JsHookManifest {
+                            name: "tool_call".to_string(),
+                            callback_id: "tool-call".to_string(),
+                        },
+                    ],
+                },
+            ],
+            provider_plugins: Vec::new(),
+            provider_registrations: Vec::new(),
+            session_plugins: Vec::new(),
+            diagnostics: Vec::new(),
+        },
+        dispatcher,
+    )
+    .unwrap();
+
+    let plugins = generation.agent_plugins();
+    assert_eq!(plugins[0].id().as_str(), "first");
+    assert!(
+        plugins[0]
+            .hook_interests()
+            .contains(AgentHook::MessageUpdate)
+    );
+    assert!(!plugins[0].hook_interests().contains(AgentHook::ToolCall));
+    assert_eq!(plugins[1].id().as_str(), "second");
+    assert!(plugins[1].hook_interests().contains(AgentHook::ToolCall));
+    assert!(
+        !plugins[1]
+            .hook_interests()
+            .contains(AgentHook::MessageUpdate)
+    );
 }
 
 #[test]

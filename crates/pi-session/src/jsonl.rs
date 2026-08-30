@@ -153,6 +153,10 @@ impl SessionLog {
         &self.inner.path
     }
 
+    pub fn id(&self) -> &str {
+        &self.inner.header.id
+    }
+
     pub fn header(&self) -> SessionHeader {
         self.inner.header.clone()
     }

@@ -820,7 +820,7 @@ async fn queue_message(
             StreamingBehavior::FollowUp => QueueKind::FollowUp,
         };
         session
-            .enqueue_extension_message(user_message(text, images), kind)
+            .enqueue_message(user_message(text, images), kind)
             .map_err(|error| error.to_string())?;
     }
     Ok(())

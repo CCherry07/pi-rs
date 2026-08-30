@@ -22,13 +22,14 @@ product seam.
 ## Workspace
 
 ```text
-crates/pi-core                  contracts, registries, plugin drivers, ModelRuntime
+crates/pi-core                  contracts, plugin-facing product capabilities, registries, plugin drivers,
+                                ModelRuntime
 crates/pi-agent                 Agent façade, AgentLoop, StreamAssembler, ToolScheduler
 crates/pi-runtime               plugin registration and Agent construction
 crates/pi-provider              vendor-neutral HTTP transport and SSE framing
 crates/pi-prompt                pure Pi-style system prompt assembly
 crates/pi-resources             generic system/append prompts and project context discovery
-crates/pi-session               Pi v4 storage plus MultiSessionManager/PiSession product runtime
+crates/pi-session               Pi v4 storage/runtime plus plugin contracts under plugin/ and types/
 crates/pi-settings              current-format settings documents, snapshots, and safe writes
 crates/pi-telemetry             typed Pi AI/harness span schemas and sink adapters
 crates/pi-rpc                   Pi JSON projector and stdin/stdout RPC adapter
@@ -40,7 +41,7 @@ crates/pi-plugin-macros         static plugin preparation, agent hook-interest d
 crates/pi-plugin-loader         manifest discovery, compatibility checks, and factory adapters
 crates/pi-plugin-manager        package intent/lock, Registry resolution, CAS, and activation
 crates/pi-js-package-manager     Pi-compatible JS discovery and npm/git orchestration
-crates/pi-js-plugin             typed JS manifest protocol and three Rust lifecycle adapters
+crates/pi-js-plugin             JS wire DTOs plus three Rust lifecycle adapters
 bindings/pi-napi                NAPI-RS boundary between Node callbacks and the Rust product
 packages/pi                     Node launcher, jiti extension loader, and callback host
 crates/pi-test-support          deterministic scripted providers and tools for tests
@@ -225,12 +226,44 @@ while unchanged content reuses one process-pinned handle. Libraries remain pinne
 lifetime because plugin code may retain worker threads. Package metadata and artifact lifetime are
 loader concerns rather than a fourth lifecycle or cross-lifecycle bundle.
 
-Native ABI 4 adds `ProviderPlugin` header/response lifecycle hooks to the ABI 3 required
-`AgentPlugin` hook-interest contract and ABI 2 `AgentContext`/`added_tool_names` surface. The native
+Native ABI 7 replaces cumulative `message_update` ownership with one shared read-only
+`AssistantStream` handle plus the current `StreamEvent` delta. A native hook can clone the handle
+in constant time and calls `snapshot()` only when it actually needs the cumulative assistant
+message. It retains the generation-bound `PluginContext` added in ABI 5 for agent, input, tool, command, provider,
+and session callbacks. The public Rust interface exposes three explicit domain capabilities on each
+typed callback context: `context.session`, `context.models`, and `context.ui`. It has neither a
+pass-through `context.pi()` namespace nor a generic `context.runtime` bucket, and it does not use
+implicit `Deref` to hide method ownership. Ordinary callbacks receive read-only model/catalogue and
+session-inspection capabilities plus the non-replacing `abort`, background `compact`, and product
+`shutdown` controls. Command callbacks additionally receive awaited message delivery and stronger
+session/model capabilities for replacement, navigation, reload, and selection. Tool argument
+preparation and execution receive the same
+generation-bound `ToolContext`, so validation shims cannot escape the product capability lifetime.
+The `plugin::capabilities` module in `pi-core` owns only dependency-inward domain interfaces,
+typed capabilities, and `PluginContextEpoch`. `SessionContextAccess`, `ModelsContextAccess`, and
+`UiContextAccess` keep the internal seam aligned with the public capability fields;
+`PluginContext` is only their aggregate marker. `PluginContextHandle` enforces generation and
+command scope but does not duplicate the domain method surface. `pi-session::PiPluginContext`
+implements those interfaces against the actual `AgentSession`, `PiSession`, and generation-local
+`PiRuntime`. It hides weak session links, command scope checks, queue policy, replacement
+transactions, and semantic UI notices. Retained contexts fail with `Retired` after their generation
+is replaced. Successful session replacements resolve a fresh `ReplacedSessionContext` from the
+newly active runtime generation rather than rebinding the old capability. ABI 4 added
+`ProviderPlugin` header/response lifecycle hooks, ABI 3 added the required `AgentPlugin`
+hook-interest contract, and ABI 2 added the `AgentContext`/`added_tool_names` surface. The native
 agent export macro derives its contract from the callback methods in the annotated impl, so authors
 do not maintain a second hook list. The loader reads the stable C descriptor first and rejects older
-ABIs before resolving any v4 Rust constructor symbol, preventing a stale in-process plugin from
+ABIs before resolving any v7 Rust constructor symbol, preventing a stale in-process plugin from
 crossing the changed trait boundary.
+
+Callback metadata is read-only and exposed through accessors such as `plugin_id()`, `run_id()`,
+`cwd()`, and `signal()`; only the typed `session`, `models`, and `ui` capability fields remain public.
+Host-created callback contexts have no public `new()` constructor. Explicit `standalone()` tool and
+command contexts advertise that product capabilities are unavailable. For coherent history reads,
+`SessionContext::snapshot()` captures session identity, current branch, entries, leaf, labels, and
+the raw extensible wire values at one revision. `SessionEntryView` types stable metadata while
+preserving unknown fields through `raw()`, so native plugin ergonomics do not weaken v4 replay
+compatibility.
 
 Native package distribution is a separate deep module at `pi-plugin-manager`. Editable
 `plugins.json` contains ordered intent; target-specific `plugins.lock` is the exact resolution and
@@ -355,13 +388,15 @@ extension registrations/results, and native binding exports.
 TypeScript protocol types are inferred from those schemas so runtime checks and static interfaces
 cannot drift independently.
 
-The callback boundary uses four generation-scoped operations encoded as JSON: `prepareGeneration`,
-`invoke`, `cancel`, and `retireGeneration`. Every `invoke` also receives a NAPI class instance named
-`NativeExtensionContext`; it is a direct native capability rather than another serialized host
-operation or a process-global callback broker. Its deliberately small Interface has three methods:
-`query` for synchronous reads, `notify` for non-blocking commands, and `request` for awaited
-commands. The operation payloads and results are JSON, but the capability object itself is passed
-as the second threadsafe-function argument. Before `prepareGeneration`, `ProductSessionFactory`
+The callback boundary uses seven generation-scoped operations encoded as JSON: `prepareGeneration`,
+`invoke`, `invokeHookBatch`, `invokeStreamHookBatch`, `releaseStream`, `cancel`, and
+`retireGeneration`. Every invocation also receives a NAPI class instance named
+`NativeExtensionContext`; it is a direct native capability rather than another process-global
+callback broker. Its deliberately small JavaScript Interface has three methods: `query` for
+synchronous reads, `notify` for non-blocking commands, and `request` for awaited commands. Those
+operation tags live only in `pi-js-plugin` and the NAPI Adapter translates them into typed Rust
+context calls. Native Rust plugins never pass through this JSON protocol. The capability object
+itself is passed as the second threadsafe-function argument. Before `prepareGeneration`, `ProductSessionFactory`
 calls the deep Rust Module `pi-js-package-manager` through its
 `resolve(request) -> resolution` Interface. Its side-effect-free
 `requires_javascript_host() -> bool` query is also used by the native-only startup Adapter after
@@ -378,16 +413,53 @@ ordered `extensionPaths` load list and loads TS/JS with Jiti `moduleCache: false
 source, installation, filtering, or precedence policy. JavaScript functions stay in a Node-owned
 callback table; Rust stores only opaque generation and callback IDs. `invoke` crosses a weak NAPI
 threadsafe function and awaits the JavaScript Promise without blocking either the Node event loop or Tokio.
+Agent observer hooks cross the same Seam through `invokeHookBatch`: the JavaScript
+generation Adapter routes all observer callbacks through its first agent adapter while the remaining
+adapters retain their plugin identities and continue to own tools, commands, and chained/mutating
+hooks. One batch carries the shared event once plus a small callback/context list. Node validates and
+projects the event once, then awaits callbacks in registration order against the same event object;
+a rejected callback becomes a callback-scoped diagnostic and does not suppress later observers.
+High-frequency `message_update` uses the separate typed `invokeStreamHookBatch` wire. Rust sends an
+initial message once and thereafter serializes only `streamId` plus the current `StreamEvent`; no
+`serde_json::Value` message tree is built per delta. Node retains text, thinking, and tool-argument
+chunks, applies metadata patches in place, and exposes lazy `message` plus
+`assistantMessageEvent.partial`/`message`/`error` getters. Empty hooks never join the cumulative text;
+the first snapshot read materializes once for the whole callback batch, and that detached snapshot
+keeps plugin mutation out of canonical stream state. `releaseStream`, terminal `done`, and generation
+retirement bound the accumulator lifetime.
 Rust aborts send `cancel`, which aborts the callback's `AbortController`; retirement aborts all
 remaining work and drops every callback for that generation. The native context is guarded by the
 same generation epoch, so a context retained by extension code fails with a retired-context error
-after its generation is gone. `ExtensionSessionBinding` connects each prepared generation to its
-concrete `AgentSession` before `session_start`, then to the stable outer `PiSession` after initial
+after its generation is gone. `JsPluginGeneration` does not construct or own another context epoch:
+every JS invocation receives the handle already attached to its Rust callback.
+`PluginContextBinding` connects each prepared generation to its concrete `AgentSession` before
+`session_start`, then to the stable outer `PiSession` after initial
 startup. Reads therefore remain generation-correct during activation and follow successful
 new/resume/fork/reload replacements afterward. Both links are non-owning (`Weak<AgentSession>` and
 `WeakPiSession`), because the concrete session owns the plugin generation; a strong context-to-
 session edge would form a cycle and prevent generation retirement. The weak TSFN lets Node exit
 once the exported `runPi` Promise settles.
+
+Session-replacing requests are an explicit capability transition rather than an exception to
+retirement. `newSession`, `fork`, and `switchSession` capture the `PiPluginContext`, await the
+replacement, and return a `PluginContextHandle` from the newly published runtime. The NAPI callback
+object advances to that handle before JavaScript runs `setup` or `withSession`; unrelated retained
+contexts from the retired generation still fail with `Retired`.
+
+The callback contract and generation epoch live in `pi-core`; the real product implementation lives
+in `pi-session`. `PiPluginContext` is constructed by the app composition root for native-only
+and JavaScript-enabled runs alike, and invokes `AgentSession`, `PiSession`, and `PiRuntime` directly.
+Rust callbacks call its typed interface.
+Only the NAPI Adapter projects JavaScript's `query`/`notify`/`request` wire operations onto that
+same interface. Both paths therefore observe the same session selection, trust decision, model
+state, queues, compaction, replacement ordering, and retirement rule without a parallel context
+state machine.
+
+That core contract reuses the owning semantic types instead of maintaining adapter copies:
+`CustomMessageContent`/`CustomMessageInput` come from the message Module, `ToolExecutionMode` from
+the tool Module, and `PresentationMode` plus `ForkPosition` are the canonical cross-layer contract
+types consumed by JavaScript hosting and session storage. Adapter-only JavaScript operation DTOs
+remain in `pi-js-plugin`; they are not exported by `pi-core` or used by native plugins.
 
 Node builds Pi's lazy `ExtensionContext` and `ExtensionCommandContext` facades over that native
 capability. Ordinary hooks and tools receive only base context operations. Registered commands also
@@ -484,11 +556,12 @@ Executable JavaScript is never serialized into Pi v4 sessions.
 
 This is compatibility by explicit capability, not an unsafe claim that every Pi TUI API is already
 portable. The current bridge supports registered tools and commands, the Rust agent lifecycle
-hooks, `before_provider_request`, the ten session hooks, read-only session/model context, and the
-command-safe session operations described above. UI is an intentional product divergence: every
+hooks, `before_provider_request`, the ten session hooks, session/model inspection, the explicit
+non-replacing controls, and the command-safe session operations described above. UI is an intentional
+product divergence: every
 JavaScript context reports `hasUI = false` and exposes one explicit inert UI object with
 Pi-compatible default return values. Its `notify` method crosses the native context as a transient
-`AgentSessionEvent::ExtensionNotice`; each Rust frontend owns presentation, and nothing is persisted
+`AgentSessionEvent::PluginNotice`; each Rust frontend owns presentation, and nothing is persisted
 to the v4 session log. UI registrations, renderers, and resource discovery,
 and other recognized-but-inactive facilities do not fail generation construction; they produce an
 `inactive` generation diagnostic and contribute no runtime callback. A hook name known to current
@@ -578,6 +651,9 @@ retry, shell configuration, session storage, image blocking/resizing, skills/pro
 provider timeout/retry, HTTP proxy, and Codex transport. The proxy is bootstrap/global policy and
 is intentionally not project-overridable. UI-only theme and selector settings are retained but do
 not create a second renderer settings implementation.
+Built-in provider credential loading, selected-provider overrides, and factory registration sit
+behind `BuiltinProviderSet`; the session-construction Adapter supplies one transport and does not
+contain provider-name construction branches.
 
 ## Project trust
 
@@ -658,6 +734,13 @@ per-run transcript with copy-on-write. The normal sequential callback path there
 same snapshot without cloning the transcript; retaining a snapshot beyond its callback is safe but
 may make a later mutation clone the retained data.
 
+Each assistant stream owns one mutable assembler state behind a read-only `AssistantStream` view.
+`message_update` carries that constant-size shared handle and exactly one `StreamEvent`; the Agent
+reducer, ordered native hooks, and listeners therefore do not clone cumulative content. Consumers
+that require a full message call `snapshot()` explicitly, while `message_end` and `turn_end` share
+the completed immutable assistant message. These hook fields are part of native ABI 7; older native
+artifacts are rejected before constructor resolution.
+
 Cancellation and exceptional termination close the same observable lifecycle as Pi. A cancellation
 that races with turn entry first commits the prompt and already-drained steering, then emits an
 aborted assistant `message_start`/`message_end`, `turn_end`, and `agent_end`. Errors escaping the
@@ -675,7 +758,7 @@ unstructured maps.
 `StreamAssembler` is the sole owner of provider-stream assembly:
 
 ```text
-StreamEvent -> partial snapshots -> final AssistantMessage
+StreamEvent -> shared live stream state -> final AssistantMessage
 ```
 
 It validates Start/Delta/End/Done transitions, preserves content-index order, and parses tool argument JSON only after the tool-call block ends. Separate response/content metadata events preserve resolved response model and ID, diagnostics, deferred handles, raw stop reason, `end_turn`, redacted-thinking markers, and tool namespaces as providers discover them. Stream errors and aborts finalize the accumulated partial blocks and observed metadata instead of replacing them with an empty assistant message.
@@ -826,6 +909,11 @@ plugin-registration surface. `AgentSessionOptions` independently combines it wit
 generation is prepared before the old generation receives `session_shutdown(reload)`; a load
 failure therefore leaves the old generation running. A successful reload commits the new
 generation and emits `session_start(reload)`.
+
+Plugin-context scalar and point queries use narrow reads owned by `Agent`, `AgentSession`, and
+`SessionLog`: current model/thinking/running state does not clone the transcript, activity checks do
+not clone the frontend snapshot, and session id/name/label/entry/header reads do not reconstruct a
+`SessionDocument`. Coherent multi-entry inspection remains the explicit `SessionSnapshot` path.
 
 `MultiSessionManager` is the multi-session product Module above `AgentSession`. It owns the injected
 `AgentSessionRuntimeFactory`, serializes manager-level acquisition and shutdown, and keeps its

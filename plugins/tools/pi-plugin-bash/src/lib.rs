@@ -149,10 +149,10 @@ async fn execute_bash(
     let callback_state = Arc::clone(&update_state);
     let result = pi_shell::execute(ShellRequest {
         command: prefixed_command(options.command_prefix.as_deref(), command),
-        cwd: context.cwd,
+        cwd: context.cwd().to_path_buf(),
         timeout,
         shell_path: options.shell_path.clone(),
-        abort_signal: context.abort_signal,
+        abort_signal: context.signal().clone(),
         on_chunk: Some(Arc::new(move |chunk: ShellChunk| {
             if let Ok(mut state) = callback_state.lock()
                 && let Some(snapshot) = state.push(&chunk.text)
@@ -335,10 +335,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         let result = BashTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
                 json!({"command":"i=0; while [ $i -lt 10000 ]; do echo line-$i; i=$((i+1)); done"}),
                 updates,
@@ -370,10 +367,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         let error = BashTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
                 json!({"command":"printf hello; printf error >&2; exit 7"}),
                 updates,
@@ -393,10 +387,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         let result = BashTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
                 json!({"command":""}),
                 updates,
@@ -423,10 +414,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         let error = BashTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
                 json!({"command":"sleep 1","timeout":0.05}),
                 updates,
@@ -445,10 +433,7 @@ mod tests {
             options: BashToolOptions::new(None, Some("configured_value=from-settings".to_string())),
         }
         .execute(
-            ToolContext {
-                cwd: dir.path().to_path_buf(),
-                abort_signal: signal,
-            },
+            ToolContext::standalone(dir.path().to_path_buf(), signal),
             ToolCallId::new("1"),
             json!({"command":"printf '%s' \"$configured_value\""}),
             updates,
@@ -472,10 +457,7 @@ mod tests {
             options: BashToolOptions::new(Some("/bin/sh".into()), None),
         }
         .execute(
-            ToolContext {
-                cwd: dir.path().to_path_buf(),
-                abort_signal: signal,
-            },
+            ToolContext::standalone(dir.path().to_path_buf(), signal),
             ToolCallId::new("1"),
             json!({"command":"printf '%s' \"$0\""}),
             updates,

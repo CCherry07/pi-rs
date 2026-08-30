@@ -69,14 +69,11 @@ impl AgentEventDispatcher {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match event {
-            AgentEvent::MessageStart { message } => {
-                state.snapshot.streaming_message = match message {
-                    Message::Assistant(message) => Some((**message).clone()),
-                    _ => None,
-                };
+            AgentEvent::MessageStart { .. } => {
+                state.snapshot.streaming_message = None;
             }
-            AgentEvent::MessageUpdate { message, .. } => {
-                state.snapshot.streaming_message = Some(message.clone())
+            AgentEvent::MessageUpdate { stream, .. } => {
+                state.snapshot.streaming_message = Some(stream.clone())
             }
             AgentEvent::MessageEnd { message } => {
                 state.snapshot.streaming_message = None;
@@ -152,7 +149,7 @@ impl AgentEventDispatcher {
                         signal,
                         TurnEndEvent {
                             turn_index,
-                            message: message.clone(),
+                            message: Arc::clone(message),
                             tool_results: tool_results.clone(),
                         },
                     )
@@ -173,15 +170,15 @@ impl AgentEventDispatcher {
                     .await;
                 None
             }
-            AgentEvent::MessageUpdate { message, event } => {
+            AgentEvent::MessageUpdate { stream, update } => {
                 self.plugins
                     .message_update(
                         &self.run_id,
                         &self.cwd,
                         signal,
                         MessageUpdateEvent {
-                            message: message.clone(),
-                            event: event.clone(),
+                            stream: stream.clone(),
+                            update: update.clone(),
                         },
                     )
                     .await;

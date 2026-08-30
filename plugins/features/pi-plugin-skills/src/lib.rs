@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_core::{
-    AgentPlugin, BeforeAgentStartEvent, BeforeAgentStartPatch, Command, CommandContext,
-    CommandError, CommandOutcome, CommandSpec, PluginContext, PluginError, PluginId,
+    AgentPlugin, AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, Command,
+    CommandContext, CommandError, CommandOutcome, CommandSpec, PluginError, PluginId,
     RegisterContext,
 };
 use serde::{Deserialize, Serialize};
@@ -206,7 +206,7 @@ impl Command for SkillCommand {
         context: CommandContext,
         arguments: String,
     ) -> Result<CommandOutcome, CommandError> {
-        if context.abort_signal.is_aborted() {
+        if context.signal().is_aborted() {
             return Err(CommandError::Aborted);
         }
         Ok(CommandOutcome::TransformInput(render_skill_invocation(
@@ -255,7 +255,7 @@ impl AgentPlugin for SkillsPlugin {
 
     async fn before_agent_start(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         event: BeforeAgentStartEvent,
     ) -> Result<BeforeAgentStartPatch, PluginError> {
         if !event.active_tools.iter().any(|tool| tool == "read") {
@@ -650,7 +650,7 @@ mod tests {
         let (_, signal) = AbortHandle::new();
         let patch = plugin
             .before_agent_start(
-                PluginContext::new(
+                AgentPluginContext::unavailable_for_testing(
                     PluginId::new("skills"),
                     RunId::new("run"),
                     "/tmp".into(),

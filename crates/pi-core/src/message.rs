@@ -85,6 +85,31 @@ impl CustomMessageContent {
     }
 }
 
+/// Extension-supplied custom message fields before the host assigns time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomMessageInput {
+    pub custom_type: String,
+    #[serde(default)]
+    pub content: CustomMessageContent,
+    #[serde(default)]
+    pub display: bool,
+    #[serde(default)]
+    pub details: Option<Value>,
+}
+
+impl CustomMessageInput {
+    pub fn into_message(self, timestamp_ms: i64) -> CustomMessage {
+        CustomMessage {
+            custom_type: self.custom_type,
+            content: self.content,
+            display: self.display,
+            details: self.details,
+            timestamp_ms,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomMessage {

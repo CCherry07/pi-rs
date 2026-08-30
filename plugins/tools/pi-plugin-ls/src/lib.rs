@@ -45,12 +45,9 @@ impl Tool for LsTool {
         input: Value,
         _updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
-        context
-            .abort_signal
-            .check()
-            .map_err(|_| ToolError::Aborted)?;
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
         let path = resolve_to_cwd(
-            &context.cwd,
+            context.cwd(),
             input.get("path").and_then(Value::as_str).unwrap_or("."),
         )?;
         let limit = optional_positive_usize(&input, "limit", DEFAULT_LIMIT)?;
@@ -74,10 +71,7 @@ impl Tool for LsTool {
             .await
             .map_err(|error| execution(format!("Cannot read directory: {error}")))?
         {
-            context
-                .abort_signal
-                .check()
-                .map_err(|_| ToolError::Aborted)?;
+            context.signal().check().map_err(|_| ToolError::Aborted)?;
             entries.push((entry.file_name(), entry.path()));
         }
         entries.sort_by(|(left, _), (right, _)| {
@@ -93,10 +87,7 @@ impl Tool for LsTool {
                 entry_limit_reached = true;
                 break;
             }
-            context
-                .abort_signal
-                .check()
-                .map_err(|_| ToolError::Aborted)?;
+            context.signal().check().map_err(|_| ToolError::Aborted)?;
             let Ok(metadata) = tokio::fs::metadata(entry_path).await else {
                 continue;
             };
@@ -184,10 +175,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         LsTool
             .execute(
-                ToolContext {
-                    cwd: cwd.to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(cwd.to_path_buf(), signal),
                 ToolCallId::new("test"),
                 input,
                 updates,
@@ -211,10 +199,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         let result = LsTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
                 json!({}),
                 updates,

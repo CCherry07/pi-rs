@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
+globset = "0.4.20"
 pi-agent.workspace = true
 pi-core.workspace = true
 pi-plugin-macros.workspace = true

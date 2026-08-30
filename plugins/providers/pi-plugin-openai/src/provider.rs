@@ -343,9 +343,9 @@ mod tests {
             context: ProviderPluginContext,
             event: BeforeProviderRequestEvent,
         ) -> std::result::Result<Option<Value>, PluginError> {
-            assert_eq!(context.generation, 3);
-            assert_eq!(context.provider_id, ProviderId::new("custom"));
-            assert_eq!(context.model_id, ModelId::new("model"));
+            assert_eq!(context.generation(), 3);
+            assert_eq!(context.provider_id(), &ProviderId::new("custom"));
+            assert_eq!(context.model_id(), &ModelId::new("model"));
             let mut payload = event.payload;
             payload["hooked"] = json!(true);
             Ok(Some(payload))

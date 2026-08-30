@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use pi_agent::AgentOptions;
 use pi_core::{
-    AgentEndEvent, AgentPlugin, AgentStartEvent, ContentBlock, ContextEvent, ContextPatch, Message,
-    ModelId, PluginContext, PluginError, PluginId, ProviderId, ToolCall, ToolCallEvent,
+    AgentEndEvent, AgentPlugin, AgentPluginContext, AgentStartEvent, ContentBlock, ContextEvent,
+    ContextPatch, Message, ModelId, PluginError, PluginId, ProviderId, ToolCall, ToolCallEvent,
     ToolCallPatch, ToolExecutionEndEvent, ToolResultEvent, ToolResultPatch, UserMessage,
 };
 use pi_plugin_read::ReadPlugin;
@@ -28,7 +28,7 @@ impl AgentPlugin for AuditPlugin {
 
     async fn agent_start(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: AgentStartEvent,
     ) -> Result<(), PluginError> {
         self.events.lock().unwrap().push("agent_start");
@@ -37,7 +37,7 @@ impl AgentPlugin for AuditPlugin {
 
     async fn agent_end(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: AgentEndEvent,
     ) -> Result<(), PluginError> {
         self.events.lock().unwrap().push("agent_end");
@@ -46,7 +46,7 @@ impl AgentPlugin for AuditPlugin {
 
     async fn context(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         mut event: ContextEvent,
     ) -> Result<ContextPatch, PluginError> {
         event
@@ -59,7 +59,7 @@ impl AgentPlugin for AuditPlugin {
 
     async fn tool_call(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         event: ToolCallEvent,
     ) -> Result<ToolCallPatch, PluginError> {
         let arguments = (event.tool_call.name == "write").then(|| {
@@ -75,7 +75,7 @@ impl AgentPlugin for AuditPlugin {
 
     async fn tool_result(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         event: ToolResultEvent,
     ) -> Result<ToolResultPatch, PluginError> {
         if event.tool_call.name == "read" {
@@ -90,7 +90,7 @@ impl AgentPlugin for AuditPlugin {
 
     async fn tool_execution_end(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: ToolExecutionEndEvent,
     ) -> Result<(), PluginError> {
         self.events.lock().unwrap().push("tool_execution_end");

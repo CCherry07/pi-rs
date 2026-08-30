@@ -34,6 +34,312 @@ test("rejects malformed host operations before dispatch", async () => {
   );
 });
 
+test('batches stream hooks over chunked state and shares one lazy message snapshot', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-hook-batch-'))
+  const first = join(root, 'first.ts')
+  const second = join(root, 'second.ts')
+  await writeFile(first, `
+    export default function (pi: any) {
+      pi.on("message_update", (event: any) => {
+        event.order = ["first"];
+        event.canonicalBeforeMutation = event.message.content[0].text;
+        event.message.content[0].text = "mutated-by-first";
+        throw new Error("first observer failed");
+      });
+    }
+  `)
+  await writeFile(second, `
+    export default function (pi: any) {
+      let observed: unknown = null;
+      pi.on("message_update", (event: any, ctx: any) => {
+        event.order.push("second");
+        observed = {
+          order: event.order,
+          canonicalBeforeMutation: event.canonicalBeforeMutation,
+          text: event.message.content[0].text,
+          sameNestedContent: event.message.content === event.assistantMessageEvent.partial.content,
+          distinctTopLevelMessage: event.message !== event.assistantMessageEvent.partial,
+          cwd: ctx.cwd,
+        };
+      });
+      pi.registerCommand("read-observed", {
+        handler: () => ({ action: "transform", text: JSON.stringify(observed) })
+      });
+    }
+  `)
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: {
+      projectTrusted: true,
+      extensionPaths: [first, second],
+      mode: 'print',
+      cwd: root,
+      flagValues: {},
+    },
+  })))
+  const firstHook = manifest.agentPlugins[0]?.hooks[0]
+  const secondHook = manifest.agentPlugins[1]?.hooks[0]
+  assert.ok(firstHook)
+  assert.ok(secondHook)
+
+  await host.dispatch(JSON.stringify({
+    type: 'invokeStreamHookBatch',
+    invocation: {
+      invocationId: 'message-update-batch',
+      generationId: manifest.generationId,
+      callbacks: [
+        { callbackId: firstHook.callbackId, context: { cwd: join(root, 'first-context') } },
+        { callbackId: secondHook.callbackId, context: { cwd: join(root, 'second-context') } },
+      ],
+      streamId: 'stream-1',
+      initialMessage: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'cumulative' }],
+      },
+      update: { type: 'textDelta', contentIndex: 0, delta: 'delta' },
+    },
+  }))
+  const batchResult = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invokeStreamHookBatch',
+    invocation: {
+      invocationId: 'message-update-batch-2',
+      generationId: manifest.generationId,
+      callbacks: [
+        { callbackId: firstHook.callbackId, context: { cwd: join(root, 'first-context') } },
+        { callbackId: secondHook.callbackId, context: { cwd: join(root, 'second-context') } },
+      ],
+      streamId: 'stream-1',
+      update: { type: 'textDelta', contentIndex: 0, delta: '-next' },
+    },
+  })))
+  assert.deepEqual(batchResult, {
+    errors: [{ callbackId: firstHook.callbackId, message: 'first observer failed' }],
+  })
+
+  const command = manifest.agentPlugins[1]?.commands[0]
+  assert.ok(command)
+  const commandResult = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'read-observed',
+      generationId: manifest.generationId,
+      callbackId: command.callbackId,
+      kind: 'command',
+      payload: { context: { cwd: root }, arguments: '' },
+    },
+  }))) as { text: string }
+  assert.deepEqual(JSON.parse(commandResult.text), {
+    order: ['first', 'second'],
+    canonicalBeforeMutation: 'cumulative-next',
+    text: 'mutated-by-first',
+    sameNestedContent: true,
+    distinctTopLevelMessage: true,
+    cwd: join(root, 'second-context'),
+  })
+})
+
+test('stream hooks apply metadata and tool chunks before lazy terminal projection', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-stream-state-'))
+  const extension = join(root, 'stream.ts')
+  await writeFile(extension, `
+    export default function (pi: any) {
+      const observed: unknown[] = [];
+      pi.on("message_update", (event: any) => {
+        const type = event.assistantMessageEvent.type;
+        if (type === "toolcall_end") {
+          observed.push({ type, arguments: event.assistantMessageEvent.toolCall.arguments });
+        } else if (type === "done") {
+          observed.push({
+            type,
+            responseId: event.message.responseId,
+            stopReason: event.message.stopReason,
+          });
+        } else {
+          observed.push({ type });
+        }
+      });
+      pi.registerCommand("read-stream", {
+        handler: () => ({ action: "transform", text: JSON.stringify(observed) })
+      });
+    }
+  `)
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: {
+      projectTrusted: true,
+      extensionPaths: [extension],
+      mode: 'print',
+      cwd: root,
+      flagValues: {},
+    },
+  })))
+  const hook = manifest.agentPlugins[0]?.hooks[0]
+  assert.ok(hook)
+  const callbacks = [{ callbackId: hook.callbackId, context: { cwd: root } }]
+  const generationId = manifest.generationId
+  const streamId = 'tool-stream'
+
+  await host.dispatch(JSON.stringify({
+    type: 'invokeStreamHookBatch',
+    invocation: {
+      invocationId: 'metadata', generationId, callbacks, streamId,
+      initialMessage: {
+        content: [], api: 'test', provider: 'test', model: 'test', responseId: 'response-1',
+        usage: {}, stopReason: 'pending', timestamp: 0,
+      },
+      update: {
+        type: 'metadata',
+        patch: {
+          responseModel: null, responseId: 'response-1', diagnostics: null,
+          deferred: null, rawStopReason: null, endTurn: null,
+        },
+      },
+    },
+  }))
+  await host.dispatch(JSON.stringify({
+    type: 'invokeStreamHookBatch',
+    invocation: {
+      invocationId: 'tool-start', generationId, callbacks, streamId,
+      update: { type: 'toolCallStart', contentIndex: 0, id: 'call-1', name: 'read' },
+    },
+  }))
+  for (const [index, argumentsDelta] of ['{"path":', '"README.md"}'].entries()) {
+    await host.dispatch(JSON.stringify({
+      type: 'invokeStreamHookBatch',
+      invocation: {
+        invocationId: `tool-delta-${index}`, generationId, callbacks, streamId,
+        update: { type: 'toolCallDelta', contentIndex: 0, argumentsDelta },
+      },
+    }))
+  }
+  await host.dispatch(JSON.stringify({
+    type: 'invokeStreamHookBatch',
+    invocation: {
+      invocationId: 'tool-end', generationId, callbacks, streamId,
+      update: { type: 'toolCallEnd', contentIndex: 0, thoughtSignature: null },
+    },
+  }))
+  await host.dispatch(JSON.stringify({
+    type: 'invokeStreamHookBatch',
+    invocation: {
+      invocationId: 'done', generationId, callbacks, streamId,
+      update: { type: 'done', reason: 'toolUse', usage: { totalTokens: 3 } },
+    },
+  }))
+
+  const command = manifest.agentPlugins[0]?.commands[0]
+  assert.ok(command)
+  const commandResult = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'read-stream', generationId, callbackId: command.callbackId,
+      kind: 'command', payload: { context: { cwd: root }, arguments: '' },
+    },
+  }))) as { text: string }
+  assert.deepEqual(JSON.parse(commandResult.text), [
+    { type: 'toolcall_start' },
+    { type: 'toolcall_delta' },
+    { type: 'toolcall_delta' },
+    { type: 'toolcall_end', arguments: { path: 'README.md' } },
+    { type: 'done', responseId: 'response-1', stopReason: 'toolUse' },
+  ])
+  await assert.rejects(host.dispatch(JSON.stringify({
+    type: 'invokeStreamHookBatch',
+    invocation: {
+      invocationId: 'after-done', generationId, callbacks, streamId,
+      update: { type: 'textStart', contentIndex: 0 },
+    },
+  })), /has no initial message/)
+})
+
+test('cancelling an observer batch aborts the active hook and skips later callbacks', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-hook-batch-cancel-'))
+  const first = join(root, 'first.ts')
+  const second = join(root, 'second.ts')
+  await writeFile(first, `
+    export default function (pi: any) {
+      pi.on("message_update", async (_event: any, ctx: any) => {
+        ctx.sessionManager.appendSessionInfo("batch-started");
+        await new Promise<void>(resolve => {
+          if (ctx.signal.aborted) resolve();
+          else ctx.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      });
+    }
+  `)
+  await writeFile(second, `
+    export default function (pi: any) {
+      let calls = 0;
+      pi.on("message_update", () => { calls += 1; });
+      pi.registerCommand("read-calls", {
+        handler: () => ({ action: "transform", text: String(calls) })
+      });
+    }
+  `)
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: {
+      projectTrusted: true,
+      extensionPaths: [first, second],
+      mode: 'print',
+      cwd: root,
+      flagValues: {},
+    },
+  })))
+  const firstHook = manifest.agentPlugins[0]?.hooks[0]
+  const secondHook = manifest.agentPlugins[1]?.hooks[0]
+  assert.ok(firstHook)
+  assert.ok(secondHook)
+
+  let markStarted: (() => void) | undefined
+  const started = new Promise<void>(resolve => { markStarted = resolve })
+  const invocationId = 'cancelled-message-update-batch'
+  const pending = host.dispatch(JSON.stringify({
+    type: 'invokeStreamHookBatch',
+    invocation: {
+      invocationId,
+      generationId: manifest.generationId,
+      callbacks: [
+        { callbackId: firstHook.callbackId, context: { cwd: root } },
+        { callbackId: secondHook.callbackId, context: { cwd: root } },
+      ],
+      streamId: 'stream-cancel',
+      initialMessage: { role: 'assistant', content: [{ type: 'text', text: '' }] },
+      update: { type: 'textStart', contentIndex: 0 },
+    },
+  }), {
+    query: () => 'null',
+    notify: rawOperation => {
+      const operation = parseJson(rawOperation) as { type?: string; name?: string }
+      if (operation.type === 'setSessionName' && operation.name === 'batch-started') markStarted?.()
+    },
+    request: async () => 'null',
+  })
+  await started
+  await host.dispatch(JSON.stringify({ type: 'cancel', invocationId }))
+  assert.deepEqual(parseJson(await pending), { errors: [] })
+
+  const command = manifest.agentPlugins[1]?.commands[0]
+  assert.ok(command)
+  const commandResult = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'read-calls',
+      generationId: manifest.generationId,
+      callbackId: command.callbackId,
+      kind: 'command',
+      payload: { context: { cwd: root }, arguments: '' },
+    },
+  }))) as { text: string }
+  assert.equal(commandResult.text, '0')
+})
+
 test('pi.exec reports timeout and pre-aborted process termination', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pi-rs-js-exec-')))
   const timedOut = await execCommand(

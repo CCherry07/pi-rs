@@ -1,35 +1,13 @@
 use std::sync::{Arc, RwLock};
 
 use pi_agent::AgentStateSnapshot;
-use pi_core::{AgentEvent, Message, ThinkingLevel};
+use pi_core::{AgentEvent, Message, NoticeLevel, ThinkingLevel};
 use pi_shell::{ShellResult, ShellStream};
 use tokio::sync::broadcast;
 
 use crate::{CompactionReason, SessionRecord};
 
 const DEFAULT_EVENT_CAPACITY: usize = 512;
-
-/// Presentation-neutral severity attached to a JavaScript extension notice.
-///
-/// Frontends decide how to render the notice; extensions never receive a
-/// terminal handle through this event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ExtensionNoticeLevel {
-    Info,
-    Warning,
-    Error,
-}
-
-impl ExtensionNoticeLevel {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Info => "info",
-            Self::Warning => "warning",
-            Self::Error => "error",
-        }
-    }
-}
 
 /// Product events emitted by an [`crate::AgentSession`].
 ///
@@ -81,9 +59,9 @@ pub enum AgentSessionEvent {
     SessionInfoChanged {
         name: Option<String>,
     },
-    ExtensionNotice {
+    PluginNotice {
         message: String,
-        level: ExtensionNoticeLevel,
+        level: NoticeLevel,
     },
     ThinkingLevelChanged {
         level: ThinkingLevel,
@@ -191,6 +169,22 @@ impl AgentSessionEventHub {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    pub(crate) fn has_active_operation(&self) -> bool {
+        let snapshot = self
+            .snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        snapshot.compaction.is_some() || snapshot.auto_retry.is_some() || snapshot.bash.is_some()
+    }
+
+    pub(crate) fn has_pending_messages(&self) -> bool {
+        let snapshot = self
+            .snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !snapshot.queue.steering.is_empty() || !snapshot.queue.follow_up.is_empty()
     }
 
     pub(crate) fn subscribe(&self) -> AgentSessionSubscription {
@@ -323,11 +317,8 @@ impl AgentSessionEventHub {
         );
     }
 
-    pub(crate) fn publish_extension_notice(&self, message: String, level: ExtensionNoticeLevel) {
-        self.publish(
-            AgentSessionEvent::ExtensionNotice { message, level },
-            |_| {},
-        );
+    pub(crate) fn publish_extension_notice(&self, message: String, level: NoticeLevel) {
+        self.publish(AgentSessionEvent::PluginNotice { message, level }, |_| {});
     }
 
     pub(crate) fn publish_thinking(&self, level: ThinkingLevel, agent: AgentStateSnapshot) {
@@ -484,5 +475,23 @@ mod tests {
         let snapshot = hub.snapshot();
         assert_eq!(snapshot.revision, 1);
         assert_eq!(snapshot.agent.thinking_level, ThinkingLevel::High);
+    }
+
+    #[test]
+    fn narrow_activity_queries_follow_the_authoritative_snapshot() {
+        let hub = AgentSessionEventHub::new(agent_state(), None, QueueSnapshot::default());
+        assert!(!hub.has_active_operation());
+        assert!(!hub.has_pending_messages());
+
+        hub.publish_queue(QueueSnapshot {
+            steering: vec!["queued".to_string()],
+            follow_up: Vec::new(),
+        });
+        assert!(hub.has_pending_messages());
+
+        hub.publish_compaction_start(CompactionReason::Manual);
+        assert!(hub.has_active_operation());
+        hub.publish_compaction_end(CompactionReason::Manual, None, false, false, None);
+        assert!(!hub.has_active_operation());
     }
 }

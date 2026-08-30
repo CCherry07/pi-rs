@@ -5,8 +5,11 @@
 //! cumulative assistant snapshots and Rust-only revision envelopes out of
 //! externally consumed streams.
 
+use std::sync::Arc;
+
 use pi_core::{
-    AgentEvent, AssistantMessage, AssistantMessageEvent, ContentBlock, StopReason, ToolResult,
+    AgentEvent, AssistantMessage, AssistantStream, ContentBlock, StopReason, StreamEvent,
+    ToolResult, Usage,
 };
 use pi_session::{
     AgentMessage, AgentSession, AgentSessionEvent, CompactionEntry, SessionDocument, SessionEntry,
@@ -45,7 +48,12 @@ pub fn session_event_json(
     session: &AgentSession,
 ) -> Result<Option<Value>, String> {
     let value = match event {
-        AgentSessionEvent::Agent(event) => agent_event_json(*event)?,
+        AgentSessionEvent::Agent(event) => {
+            let Some(value) = agent_event_json(*event)? else {
+                return Ok(None);
+            };
+            value
+        }
         AgentSessionEvent::AgentEnd {
             messages,
             will_retry,
@@ -120,7 +128,7 @@ pub fn session_event_json(
         AgentSessionEvent::BashExecutionUpdate { id, delta, .. } => {
             json!({"type":"bash_execution_update","id":id,"delta":delta})
         }
-        AgentSessionEvent::ExtensionNotice { .. }
+        AgentSessionEvent::PluginNotice { .. }
         | AgentSessionEvent::BashExecutionStart { .. }
         | AgentSessionEvent::BashExecutionEnd { .. } => return Ok(None),
         _ => return Ok(None),
@@ -278,8 +286,8 @@ fn timestamp_string(timestamp_ms: i64) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-fn agent_event_json(event: AgentEvent) -> Result<Value, String> {
-    Ok(match event {
+fn agent_event_json(event: AgentEvent) -> Result<Option<Value>, String> {
+    Ok(Some(match event {
         AgentEvent::AgentStart => json!({"type":"agent_start"}),
         AgentEvent::AgentEnd { messages } => {
             // Production session streams use AgentSessionEvent::AgentEnd,
@@ -293,7 +301,12 @@ fn agent_event_json(event: AgentEvent) -> Result<Value, String> {
             tool_results,
         } => json!({"type":"turn_end","message":message,"toolResults":tool_results}),
         AgentEvent::MessageStart { message } => json!({"type":"message_start","message":message}),
-        AgentEvent::MessageUpdate { message, event } => message_update_json(&message, event)?,
+        AgentEvent::MessageUpdate { stream, update } => {
+            let Some(value) = message_update_json(&stream, update)? else {
+                return Ok(None);
+            };
+            value
+        }
         AgentEvent::MessageEnd { message } => json!({"type":"message_end","message":message}),
         AgentEvent::ToolExecutionStart {
             tool_call_id,
@@ -329,76 +342,111 @@ fn agent_event_json(event: AgentEvent) -> Result<Value, String> {
             "result":tool_result_json(&result),
             "isError":is_error,
         }),
-    })
+    }))
 }
 
 fn message_update_json(
-    message: &AssistantMessage,
-    event: AssistantMessageEvent,
-) -> Result<Value, String> {
-    let assistant_message_event = match event {
-        AssistantMessageEvent::Start => json!({"type":"start"}),
-        AssistantMessageEvent::TextStart { content_index } => {
+    stream: &AssistantStream,
+    update: Arc<StreamEvent>,
+) -> Result<Option<Value>, String> {
+    let mut usage = Usage::default();
+    let assistant_message_event = match update.as_ref() {
+        StreamEvent::Start { .. } => json!({"type":"start"}),
+        StreamEvent::Metadata { .. } | StreamEvent::ContentMetadata { .. } => return Ok(None),
+        StreamEvent::TextStart { content_index } => {
             json!({"type":"text_start","contentIndex":content_index})
         }
-        AssistantMessageEvent::TextDelta {
+        StreamEvent::TextDelta {
             content_index,
             delta,
         } => json!({"type":"text_delta","contentIndex":content_index,"delta":delta}),
-        AssistantMessageEvent::TextEnd { content_index } => json!({
-            "type":"text_end",
-            "contentIndex":content_index,
-            "content":text_at(message, content_index)?,
-        }),
-        AssistantMessageEvent::ThinkingStart { content_index } => {
+        StreamEvent::TextEnd { content_index, .. } => {
+            let message = stream_snapshot(stream)?;
+            usage = message.usage.clone();
+            json!({
+                "type":"text_end",
+                "contentIndex":content_index,
+                "content":text_at(&message, *content_index)?,
+            })
+        }
+        StreamEvent::ThinkingStart { content_index } => {
             json!({"type":"thinking_start","contentIndex":content_index})
         }
-        AssistantMessageEvent::ThinkingDelta {
+        StreamEvent::ThinkingDelta {
             content_index,
             delta,
         } => json!({"type":"thinking_delta","contentIndex":content_index,"delta":delta}),
-        AssistantMessageEvent::ThinkingEnd { content_index } => json!({
-            "type":"thinking_end",
-            "contentIndex":content_index,
-            "content":thinking_at(message, content_index)?,
-        }),
-        AssistantMessageEvent::ToolCallStart { content_index } => {
-            let call = tool_call_at(message, content_index)?;
+        StreamEvent::ThinkingEnd { content_index, .. } => {
+            let message = stream_snapshot(stream)?;
+            usage = message.usage.clone();
             json!({
-                "type":"toolcall_start",
+                "type":"thinking_end",
                 "contentIndex":content_index,
-                "id":call.id,
-                "toolName":call.name,
+                "content":thinking_at(&message, *content_index)?,
             })
         }
-        AssistantMessageEvent::ToolCallDelta {
+        StreamEvent::ToolCallStart {
             content_index,
-            delta,
-        } => json!({"type":"toolcall_delta","contentIndex":content_index,"delta":delta}),
-        AssistantMessageEvent::ToolCallEnd { content_index } => json!({
-            "type":"toolcall_end",
+            id,
+            name,
+        } => json!({
+            "type":"toolcall_start",
             "contentIndex":content_index,
-            "toolCall":tool_call_at(message, content_index)?,
+            "id":id,
+            "toolName":name,
         }),
-        AssistantMessageEvent::Done => match message.stop_reason {
-            StopReason::Error | StopReason::Aborted => json!({
-                "type":"error",
-                "reason":message.stop_reason,
-                "error":message,
-            }),
-            StopReason::Stop | StopReason::Length | StopReason::ToolUse | StopReason::Deferred => {
-                json!({"type":"done","reason":message.stop_reason,"message":message})
+        StreamEvent::ToolCallDelta {
+            content_index,
+            arguments_delta,
+        } => json!({
+            "type":"toolcall_delta",
+            "contentIndex":content_index,
+            "delta":arguments_delta,
+        }),
+        StreamEvent::ToolCallEnd { content_index, .. } => {
+            let message = stream_snapshot(stream)?;
+            usage = message.usage.clone();
+            json!({
+                "type":"toolcall_end",
+                "contentIndex":content_index,
+                "toolCall":tool_call_at(&message, *content_index)?,
+            })
+        }
+        StreamEvent::Done {
+            reason,
+            usage: final_usage,
+        } => {
+            usage = final_usage.clone();
+            let message = stream_snapshot(stream)?;
+            match *reason {
+                StopReason::Error | StopReason::Aborted => json!({
+                    "type":"error",
+                    "reason":reason,
+                    "error":message,
+                }),
+                StopReason::Stop
+                | StopReason::Length
+                | StopReason::ToolUse
+                | StopReason::Deferred => {
+                    json!({"type":"done","reason":reason,"message":message})
+                }
+                StopReason::Pending => {
+                    return Err("message_update done event has pending stop reason".to_string());
+                }
             }
-            StopReason::Pending => {
-                return Err("message_update done event has pending stop reason".to_string());
-            }
-        },
+        }
     };
-    Ok(json!({
+    Ok(Some(json!({
         "type":"message_update",
-        "usage":message.usage,
+        "usage":usage,
         "assistantMessageEvent":assistant_message_event,
-    }))
+    })))
+}
+
+fn stream_snapshot(stream: &AssistantStream) -> Result<AssistantMessage, String> {
+    stream
+        .snapshot()
+        .ok_or_else(|| format!("assistant stream {} is no longer available", stream.id()))
 }
 
 fn text_at(message: &AssistantMessage, index: usize) -> Result<&str, String> {
@@ -469,8 +517,12 @@ fn compaction_reason(reason: pi_session::CompactionReason) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
 
-    use pi_core::{AssistantMessage, Message, TextContent, ToolCall, Usage, UserMessage};
+    use pi_core::{
+        AssistantMessage, AssistantStreamId, AssistantStreamView, Message, TextContent, ToolCall,
+        Usage, UserMessage,
+    };
     use pi_session::{HeaderKind, SESSION_SCHEMA_VERSION, SessionLog};
 
     use super::*;
@@ -497,6 +549,21 @@ mod tests {
             end_turn: None,
             timestamp_ms: 1,
         }
+    }
+
+    struct FixedStream(AssistantMessage);
+
+    impl AssistantStreamView for FixedStream {
+        fn snapshot(&self) -> Option<AssistantMessage> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn stream(message: AssistantMessage) -> AssistantStream {
+        AssistantStream::new(
+            AssistantStreamId::new("test-stream"),
+            Arc::new(FixedStream(message)),
+        )
     }
 
     #[test]
@@ -528,18 +595,18 @@ mod tests {
         );
         assert_eq!(
             agent_event_json(AgentEvent::MessageUpdate {
-                message: text,
-                event: AssistantMessageEvent::TextDelta {
+                stream: stream(text),
+                update: Arc::new(StreamEvent::TextDelta {
                     content_index: 0,
                     delta: "lo".to_string(),
-                },
+                }),
             })
             .unwrap(),
-            json!({
+            Some(json!({
                 "type":"message_update",
-                "usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},
+                "usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}},
                 "assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"lo"},
-            })
+            }))
         );
 
         let tool = assistant(
@@ -551,9 +618,14 @@ mod tests {
             StopReason::ToolUse,
         );
         let value = agent_event_json(AgentEvent::MessageUpdate {
-            message: tool,
-            event: AssistantMessageEvent::ToolCallStart { content_index: 0 },
+            stream: stream(tool),
+            update: Arc::new(StreamEvent::ToolCallStart {
+                content_index: 0,
+                id: "call-1".into(),
+                name: "read".to_string(),
+            }),
         })
+        .unwrap()
         .unwrap();
         assert_eq!(value["assistantMessageEvent"]["type"], "toolcall_start");
         assert_eq!(value["assistantMessageEvent"]["id"], "call-1");
@@ -576,6 +648,7 @@ mod tests {
                 terminate: false,
             },
         })
+        .unwrap()
         .unwrap();
 
         assert_eq!(value["args"], json!({"command":"pwd"}));

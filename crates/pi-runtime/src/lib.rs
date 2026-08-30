@@ -9,11 +9,12 @@ use pi_agent::{
 };
 use pi_core::{
     AbortHandle, AbortSignal, AgentPlugin, AgentSettledEvent, AssistantMessage, CommandContext,
-    CommandOutcome, CommandSpec, ContentBlock, ImageContent, InputEvent, InputPatch, InputSource,
-    InputStreamingBehavior, Message, ModelId, ModelSpec, PluginDiagnostic, PluginId,
-    ProviderCallContext, ProviderId, ProviderPlugin, ProviderPluginDriver, ProviderRequest,
-    RegistriesBuilder, RunId, StreamEvent, TextContent, ThinkingBudgets, ThinkingLevel,
-    UserMessage, is_retryable_provider_error_message,
+    CommandOutcome, CommandSpec, ContentBlock, ContextParts, ImageContent, InputEvent, InputPatch,
+    InputSource, InputStreamingBehavior, Message, ModelId, ModelSpec, PluginContext,
+    PluginContextEpoch, PluginContextHandle, PluginContextScope, PluginDiagnostic, PluginId,
+    ProviderCallContext, ProviderId, ProviderPlugin, ProviderRequest, RegistriesBuilder, RunId,
+    StreamEvent, TextContent, ThinkingBudgets, ThinkingLevel, UserMessage,
+    is_retryable_provider_error_message,
 };
 use pi_prompt::{BuildSystemPromptOptions, build_system_prompt};
 use pi_resources::{ResourceDiagnostic, ResourceLoaderOptions, load_resources};
@@ -200,6 +201,7 @@ pub struct PiRuntimeBuilder {
     resources: Option<ResourceLoaderOptions>,
     supplemental_diagnostics: Vec<ResourceDiagnostic>,
     completion_retry_policy: Option<CompletionRetryPolicy>,
+    plugin_context: Arc<dyn PluginContext>,
 }
 
 impl Default for PiRuntimeBuilder {
@@ -218,6 +220,7 @@ impl PiRuntimeBuilder {
             resources: None,
             supplemental_diagnostics: Vec::new(),
             completion_retry_policy: None,
+            plugin_context: Arc::new(pi_core::UnavailablePluginContext),
         }
     }
 
@@ -374,6 +377,13 @@ impl PiRuntimeBuilder {
         self
     }
 
+    /// Installs the product context whose restricted views are attached to
+    /// native and JavaScript callbacks in every runtime generation.
+    pub fn plugin_context(mut self, context: Arc<dyn PluginContext>) -> Self {
+        self.plugin_context = context;
+        self
+    }
+
     pub fn build(mut self) -> Result<PiRuntime, RuntimeError> {
         let cwd = self.agent_options.cwd.clone();
         let blueprint = Arc::new(RuntimeBlueprint {
@@ -384,6 +394,7 @@ impl PiRuntimeBuilder {
             resources: self.resources,
             supplemental_diagnostics: self.supplemental_diagnostics,
             completion_retry_policy: self.completion_retry_policy,
+            plugin_context: self.plugin_context,
             cwd: cwd.clone(),
         });
         let generation = Arc::new(build_generation(
@@ -411,15 +422,22 @@ struct RuntimeBlueprint {
     resources: Option<ResourceLoaderOptions>,
     supplemental_diagnostics: Vec<ResourceDiagnostic>,
     completion_retry_policy: Option<CompletionRetryPolicy>,
+    plugin_context: Arc<dyn PluginContext>,
     cwd: std::path::PathBuf,
 }
 
 struct RuntimeGeneration {
     agent: Arc<AgentRuntime>,
-    provider_plugins: Arc<ProviderPluginDriver>,
     prompt_options: Mutex<Option<BuildSystemPromptOptions>>,
     resource_options: Option<ResourceLoaderOptions>,
     resource_diagnostics: Vec<ResourceDiagnostic>,
+    plugin_context_epoch: PluginContextEpoch,
+}
+
+impl Drop for RuntimeGeneration {
+    fn drop(&mut self) {
+        self.plugin_context_epoch.retire();
+    }
 }
 
 fn build_generation(
@@ -460,8 +478,9 @@ fn build_generation(
             RuntimeError::Build(format!("provider plugin source {index} failed: {message}"))
         })?);
     }
+    let plugin_context_epoch = PluginContextEpoch::new(Arc::clone(&blueprint.plugin_context));
     let (driver, provider_driver, registries) = RegistriesBuilder::new()
-        .register_plugin_sets(plugins, provider_plugins)
+        .register_plugin_sets_with_context(plugins, provider_plugins, plugin_context_epoch.clone())
         .map_err(|error| RuntimeError::Build(error.to_string()))?;
     let driver = Arc::new(driver);
     let provider_driver = Arc::new(provider_driver);
@@ -484,10 +503,10 @@ fn build_generation(
             driver,
             Arc::clone(&provider_driver),
         )),
-        provider_plugins: provider_driver,
         prompt_options: Mutex::new(prompt_options),
         resource_options: applied_resources,
         resource_diagnostics: diagnostics,
+        plugin_context_epoch,
     })
 }
 
@@ -567,40 +586,59 @@ impl PiRuntime {
     }
 
     pub fn plugin_order(&self) -> Vec<PluginId> {
-        self.agent.runtime().plugins().plugin_order()
+        self.current_generation().agent.plugins().plugin_order()
     }
 
     pub fn provider_plugin_order(&self) -> Vec<PluginId> {
-        self.current_generation().provider_plugins.plugin_order()
+        self.current_generation()
+            .agent
+            .provider_plugins()
+            .plugin_order()
+    }
+
+    pub fn context_parts(&self) -> ContextParts {
+        self.current_generation().agent.plugins().context_parts()
+    }
+
+    #[doc(hidden)]
+    pub fn plugin_context_handle(&self, scope: PluginContextScope) -> PluginContextHandle {
+        self.current_generation().plugin_context_epoch.handle(scope)
+    }
+
+    pub fn retire_plugin_context(&self) {
+        self.current_generation().plugin_context_epoch.retire();
     }
 
     pub fn models(&self) -> Vec<ModelSpec> {
-        self.agent.runtime().registries().model_specs()
+        self.current_generation().agent.registries().model_specs()
     }
 
     pub fn available_models(&self) -> Vec<ModelSpec> {
-        self.agent
-            .runtime()
+        self.current_generation()
+            .agent
             .registries()
             .model_runtime()
             .available_models()
     }
 
     pub fn provider_statuses(&self) -> Vec<pi_core::ProviderStatus> {
-        self.agent
-            .runtime()
+        self.current_generation()
+            .agent
             .registries()
             .model_runtime()
             .provider_statuses()
     }
 
     pub fn provider_name(&self, provider: &ProviderId) -> Option<String> {
-        self.agent.runtime().registries().provider_name(provider)
+        self.current_generation()
+            .agent
+            .registries()
+            .provider_name(provider)
     }
 
     pub fn model(&self, provider: &ProviderId, model: &ModelId) -> Option<ModelSpec> {
-        self.agent
-            .runtime()
+        self.current_generation()
+            .agent
             .registries()
             .model(provider, model)
             .cloned()
@@ -611,8 +649,8 @@ impl PiRuntime {
         current_provider: &ProviderId,
         reference: &str,
     ) -> Option<ModelSpec> {
-        self.agent
-            .runtime()
+        self.current_generation()
+            .agent
             .registries()
             .model_runtime()
             .resolve_reference(current_provider, reference)
@@ -623,31 +661,31 @@ impl PiRuntime {
         current_provider: &ProviderId,
         reference: &str,
     ) -> Option<ModelSpec> {
-        self.agent
-            .runtime()
+        self.current_generation()
+            .agent
             .registries()
             .model_runtime()
             .resolve_available_reference(current_provider, reference)
     }
 
     pub fn provider_is_available(&self, provider: &ProviderId) -> bool {
-        self.agent
-            .runtime()
+        self.current_generation()
+            .agent
             .registries()
             .provider(provider)
             .is_some_and(|provider| provider.availability().is_available())
     }
 
     pub fn has_provider(&self, provider: &ProviderId) -> bool {
-        self.agent
-            .runtime()
+        self.current_generation()
+            .agent
             .registries()
             .provider(provider)
             .is_some()
     }
 
     pub fn generation(&self) -> u64 {
-        self.agent.runtime().generation()
+        self.current_generation().agent.generation()
     }
 
     pub fn resource_diagnostics(&self) -> Vec<ResourceDiagnostic> {
@@ -657,7 +695,7 @@ impl PiRuntime {
     pub fn plugin_diagnostics(&self) -> Vec<PluginDiagnostic> {
         let generation = self.current_generation();
         let mut diagnostics = generation.agent.plugins().diagnostics();
-        diagnostics.extend(generation.provider_plugins.diagnostics());
+        diagnostics.extend(generation.agent.provider_plugins().diagnostics());
         diagnostics
     }
 
@@ -674,11 +712,14 @@ impl PiRuntime {
     }
 
     pub fn command_specs(&self) -> Vec<CommandSpec> {
-        self.agent.runtime().registries().command_specs()
+        self.current_generation().agent.registries().command_specs()
     }
 
     pub fn tool_specs(&self) -> Vec<pi_core::ToolSpec> {
-        self.agent.runtime().registries().all_tool_specs()
+        self.current_generation()
+            .agent
+            .registries()
+            .all_tool_specs()
     }
 
     /// Runs input hooks directly. Full text submissions dispatch registered
@@ -723,10 +764,11 @@ impl PiRuntime {
         let (_, signal) = AbortHandle::new();
         command
             .execute(
-                CommandContext {
-                    cwd: self.cwd().to_path_buf(),
-                    abort_signal: signal,
-                },
+                CommandContext::with_plugin_context(
+                    self.cwd().to_path_buf(),
+                    signal,
+                    runtime.plugins().command_context_parts(),
+                ),
                 arguments.to_string(),
             )
             .await
@@ -912,10 +954,11 @@ impl PiRuntime {
             let (_, signal) = AbortHandle::new();
             match command
                 .execute(
-                    CommandContext {
-                        cwd: self.cwd().to_path_buf(),
-                        abort_signal: signal,
-                    },
+                    CommandContext::with_plugin_context(
+                        self.cwd().to_path_buf(),
+                        signal,
+                        runtime.plugins().command_context_parts(),
+                    ),
                     arguments.to_string(),
                 )
                 .await
@@ -997,10 +1040,11 @@ impl PiRuntime {
             let (_, signal) = AbortHandle::new();
             match command
                 .execute(
-                    CommandContext {
-                        cwd: self.cwd().to_path_buf(),
-                        abort_signal: signal,
-                    },
+                    CommandContext::with_plugin_context(
+                        self.cwd().to_path_buf(),
+                        signal,
+                        runtime.plugins().command_context_parts(),
+                    ),
                     arguments.to_string(),
                 )
                 .await
@@ -1201,19 +1245,21 @@ impl PiRuntime {
                 state.provider_id
             )));
         }
+        let published = Arc::clone(&next);
+        let generation_slot = Arc::clone(&self.generation);
         self.agent
-            .replace_runtime(Arc::clone(&next.agent))
+            .replace_runtime_transaction(Arc::clone(&next.agent), move || {
+                *generation_slot
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = published;
+            })
             .await
             .map_err(|error| RuntimeError::Agent(error.to_string()))?;
-        *self
-            .generation
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(&next);
         Ok(ReloadReport {
             previous_generation: previous.generation(),
             generation: next_id,
             plugin_order: next.agent.plugins().plugin_order(),
-            provider_plugin_order: next.provider_plugins.plugin_order(),
+            provider_plugin_order: next.agent.provider_plugins().plugin_order(),
             resource_diagnostics: next.resource_diagnostics.clone(),
         })
     }
@@ -1238,12 +1284,22 @@ impl PiRuntime {
     }
 
     fn current_generation(&self) -> Arc<RuntimeGeneration> {
-        Arc::clone(
-            &self
-                .generation
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        // The two reads form a small seqlock around the sidecar. A reader
+        // racing reload retries instead of returning a mixed generation.
+        loop {
+            let before = self.agent.runtime().generation();
+            let generation = Arc::clone(
+                &self
+                    .generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            let after = self.agent.runtime().generation();
+            if before == after && after == generation.agent.generation() {
+                return generation;
+            }
+            std::hint::spin_loop();
+        }
     }
 
     async fn process_input_locked(
@@ -1322,16 +1378,16 @@ mod tests {
     use super::*;
     use pi_agent::{AgentEventListener, AgentOptions};
     use pi_core::{
-        AgentEndEvent, AgentEvent, AgentPlugin, AgentStartEvent, BeforeAgentStartEvent,
-        BeforeAgentStartPatch, BeforeProviderRequestEvent, Command, CommandError, ContentBlock,
-        ContextEvent, ContextPatch, CustomMessage, CustomMessageContent, InputContext, InputEvent,
-        InputPatch, Message, MessageEndEvent, MessageEndPatch, MessageStartEvent,
-        MessageUpdateEvent, PluginContext, PluginError, PluginId, Provider, ProviderCallContext,
-        ProviderError, ProviderPlugin, ProviderPluginContext, ProviderRegisterContext,
-        ProviderStream, RegisterContext, ResponseMetadata, StopReason, StreamEvent, TextContent,
-        ToolCall, ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolExecutionEndEvent,
-        ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch,
-        TurnEndEvent, TurnStartEvent, Usage, UserMessage,
+        AgentEndEvent, AgentEvent, AgentPlugin, AgentPluginContext, AgentStartEvent,
+        BeforeAgentStartEvent, BeforeAgentStartPatch, BeforeProviderRequestEvent, Command,
+        CommandError, ContentBlock, ContextEvent, ContextPatch, CustomMessage,
+        CustomMessageContent, InputContext, InputEvent, InputPatch, Message, MessageEndEvent,
+        MessageEndPatch, MessageStartEvent, MessageUpdateEvent, PluginError, PluginId, Provider,
+        ProviderCallContext, ProviderError, ProviderPlugin, ProviderPluginContext,
+        ProviderRegisterContext, ProviderStream, RegisterContext, ResponseMetadata, StopReason,
+        StreamEvent, TextContent, ToolCall, ToolCallBlock, ToolCallEvent, ToolCallPatch,
+        ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent,
+        ToolResultPatch, TurnEndEvent, TurnStartEvent, Usage, UserMessage,
     };
     use pi_test_support::TestToolsPlugin;
     use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
@@ -1508,7 +1564,7 @@ mod tests {
             event: BeforeProviderRequestEvent,
         ) -> std::result::Result<Option<serde_json::Value>, PluginError> {
             let mut payload = event.payload;
-            payload["hook_generation"] = json!(context.generation);
+            payload["hook_generation"] = json!(context.generation());
             Ok(Some(payload))
         }
     }
@@ -1898,7 +1954,7 @@ mod tests {
 
         async fn before_agent_start(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             event: BeforeAgentStartEvent,
         ) -> Result<BeforeAgentStartPatch, PluginError> {
             Ok(BeforeAgentStartPatch {
@@ -1969,7 +2025,7 @@ mod tests {
 
         async fn before_agent_start(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             event: BeforeAgentStartEvent,
         ) -> Result<BeforeAgentStartPatch, PluginError> {
             Ok(BeforeAgentStartPatch {
@@ -2000,7 +2056,7 @@ mod tests {
 
         async fn before_agent_start(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             _event: BeforeAgentStartEvent,
         ) -> Result<BeforeAgentStartPatch, PluginError> {
             Err(PluginError::Registration(
@@ -2049,7 +2105,7 @@ mod tests {
 
         async fn message_end(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             event: MessageEndEvent,
         ) -> Result<MessageEndPatch, PluginError> {
             Ok(MessageEndPatch {
@@ -2074,7 +2130,7 @@ mod tests {
 
         async fn message_end(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             event: MessageEndEvent,
         ) -> Result<MessageEndPatch, PluginError> {
             let message = match event.message {
@@ -2196,27 +2252,39 @@ mod tests {
 
         async fn agent_start(
             &self,
-            _: PluginContext,
+            _: AgentPluginContext,
             _: AgentStartEvent,
         ) -> Result<(), PluginError> {
             self.push("agent_start");
             Ok(())
         }
-        async fn agent_end(&self, _: PluginContext, _: AgentEndEvent) -> Result<(), PluginError> {
+        async fn agent_end(
+            &self,
+            _: AgentPluginContext,
+            _: AgentEndEvent,
+        ) -> Result<(), PluginError> {
             self.push("agent_end");
             Ok(())
         }
-        async fn turn_start(&self, _: PluginContext, _: TurnStartEvent) -> Result<(), PluginError> {
+        async fn turn_start(
+            &self,
+            _: AgentPluginContext,
+            _: TurnStartEvent,
+        ) -> Result<(), PluginError> {
             self.push("turn_start");
             Ok(())
         }
-        async fn turn_end(&self, _: PluginContext, _: TurnEndEvent) -> Result<(), PluginError> {
+        async fn turn_end(
+            &self,
+            _: AgentPluginContext,
+            _: TurnEndEvent,
+        ) -> Result<(), PluginError> {
             self.push("turn_end");
             Ok(())
         }
         async fn message_start(
             &self,
-            _: PluginContext,
+            _: AgentPluginContext,
             _: MessageStartEvent,
         ) -> Result<(), PluginError> {
             self.push("message_start");
@@ -2224,7 +2292,7 @@ mod tests {
         }
         async fn message_update(
             &self,
-            _: PluginContext,
+            _: AgentPluginContext,
             _: MessageUpdateEvent,
         ) -> Result<(), PluginError> {
             self.push("message_update");
@@ -2232,7 +2300,7 @@ mod tests {
         }
         async fn message_end(
             &self,
-            _: PluginContext,
+            _: AgentPluginContext,
             _: MessageEndEvent,
         ) -> Result<MessageEndPatch, PluginError> {
             self.push("message_end");
@@ -2240,7 +2308,7 @@ mod tests {
         }
         async fn tool_execution_start(
             &self,
-            _: PluginContext,
+            _: AgentPluginContext,
             _: ToolExecutionStartEvent,
         ) -> Result<(), PluginError> {
             self.push("tool_execution_start");
@@ -2248,7 +2316,7 @@ mod tests {
         }
         async fn tool_execution_update(
             &self,
-            _: PluginContext,
+            _: AgentPluginContext,
             _: ToolExecutionUpdateEvent,
         ) -> Result<(), PluginError> {
             self.push("tool_execution_update");
@@ -2256,7 +2324,7 @@ mod tests {
         }
         async fn tool_execution_end(
             &self,
-            _: PluginContext,
+            _: AgentPluginContext,
             _: ToolExecutionEndEvent,
         ) -> Result<(), PluginError> {
             self.push("tool_execution_end");
@@ -2278,7 +2346,7 @@ mod tests {
 
         async fn turn_start(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             event: TurnStartEvent,
         ) -> Result<(), PluginError> {
             self.starts.lock().unwrap().push(event);
@@ -2287,7 +2355,7 @@ mod tests {
 
         async fn turn_end(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             event: TurnEndEvent,
         ) -> Result<(), PluginError> {
             self.ends.lock().unwrap().push(event);
@@ -2350,7 +2418,7 @@ mod tests {
 
         async fn context(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             mut event: ContextEvent,
         ) -> Result<ContextPatch, PluginError> {
             event
@@ -2363,7 +2431,7 @@ mod tests {
 
         async fn tool_call(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             _event: ToolCallEvent,
         ) -> Result<ToolCallPatch, PluginError> {
             Ok(ToolCallPatch {
@@ -2374,7 +2442,7 @@ mod tests {
 
         async fn tool_result(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             _event: ToolResultEvent,
         ) -> Result<ToolResultPatch, PluginError> {
             Ok(ToolResultPatch {
@@ -2783,7 +2851,7 @@ mod tests {
 
         async fn tool_call(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             event: ToolCallEvent,
         ) -> Result<ToolCallPatch, PluginError> {
             Ok(if event.tool_call.name == "echo" {
@@ -2810,7 +2878,7 @@ mod tests {
 
         async fn tool_result(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             _event: ToolResultEvent,
         ) -> Result<ToolResultPatch, PluginError> {
             Ok(ToolResultPatch {

@@ -26,6 +26,7 @@ enum PreparedToolCall {
         source_index: usize,
         call: ToolCall,
         tool: Arc<dyn Tool>,
+        context: ToolContext,
         args: serde_json::Value,
     },
     Immediate {
@@ -343,7 +344,15 @@ impl ToolScheduler {
             };
         };
 
-        let args = match tool.prepare_arguments(call.arguments.clone()).await {
+        let tool_context = ToolContext::with_plugin_context(
+            self.cwd.clone(),
+            signal.child(),
+            self.plugins.context_parts(),
+        );
+        let args = match tool
+            .prepare_arguments(&tool_context, call.arguments.clone())
+            .await
+        {
             Ok(args) => args,
             Err(error) => {
                 return PreparedToolCall::Immediate {
@@ -394,6 +403,7 @@ impl ToolScheduler {
                         source_index,
                         call,
                         tool,
+                        context: tool_context,
                         args: patched_args,
                     }
                 }
@@ -425,14 +435,11 @@ impl ToolScheduler {
                 source_index,
                 call,
                 tool,
+                context,
                 args,
             } => {
                 let (updates, mut update_receiver) = ToolUpdateSink::channel();
-                let tool_context = ToolContext {
-                    cwd: self.cwd.clone(),
-                    abort_signal: signal.child(),
-                };
-                let execution = tool.execute(tool_context, call.id.clone(), args.clone(), updates);
+                let execution = tool.execute(context, call.id.clone(), args.clone(), updates);
                 tokio::pin!(execution);
 
                 let result = loop {
@@ -540,7 +547,7 @@ mod tests {
 
     use async_trait::async_trait;
     use pi_core::{
-        AbortHandle, AgentPlugin, ModelId, PluginContext, PluginError, PluginId, ProviderId,
+        AbortHandle, AgentPlugin, AgentPluginContext, ModelId, PluginError, PluginId, ProviderId,
         RegisterContext, RegistriesBuilder, StopReason, ToolCallEvent, ToolError, ToolResultEvent,
         ToolResultPatch, ToolSpec, Usage,
     };
@@ -642,7 +649,7 @@ mod tests {
 
         async fn tool_call(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             event: ToolCallEvent,
         ) -> Result<pi_core::ToolCallPatch, PluginError> {
             if let Some(observed) = &self.observed_contexts {
@@ -657,7 +664,7 @@ mod tests {
 
         async fn tool_result(
             &self,
-            _context: PluginContext,
+            _context: AgentPluginContext,
             event: ToolResultEvent,
         ) -> Result<ToolResultPatch, PluginError> {
             if let Some(observed) = &self.observed_contexts {

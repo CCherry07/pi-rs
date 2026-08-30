@@ -70,7 +70,11 @@ impl Tool for EditTool {
         )
     }
 
-    async fn prepare_arguments(&self, mut input: Value) -> Result<Value, ToolError> {
+    async fn prepare_arguments(
+        &self,
+        _context: &ToolContext,
+        mut input: Value,
+    ) -> Result<Value, ToolError> {
         let object = input
             .as_object_mut()
             .ok_or_else(|| invalid("arguments must be an object"))?;
@@ -108,10 +112,7 @@ impl Tool for EditTool {
         input: Value,
         _updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
-        context
-            .abort_signal
-            .check()
-            .map_err(|_| ToolError::Aborted)?;
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
         let requested = require_str(&input, "path")?;
         let edits: Vec<EditInput> = if let Some(edits) = input.get("edits") {
             let edits = if let Some(raw) = edits.as_str() {
@@ -140,14 +141,11 @@ impl Tool for EditTool {
         {
             return Err(invalid("newText is too large"));
         }
-        let path = resolve_to_cwd(&context.cwd, requested)?;
+        let path = resolve_to_cwd(context.cwd(), requested)?;
         let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         let queue = file_queue(&key);
-        let _guard = tokio::select! {biased;()=context.abort_signal.wait()=>return Err(ToolError::Aborted),guard=queue.lock()=>guard};
-        context
-            .abort_signal
-            .check()
-            .map_err(|_| ToolError::Aborted)?;
+        let _guard = tokio::select! {biased;()=context.signal().wait()=>return Err(ToolError::Aborted),guard=queue.lock()=>guard};
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
         let metadata = tokio::fs::symlink_metadata(&path)
             .await
             .map_err(|e| execution(format!("Could not edit file: {requested}. {e}.")))?;
@@ -160,10 +158,7 @@ impl Tool for EditTool {
         let original = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| execution(format!("Could not edit file: {requested}. {e}.")))?;
-        context
-            .abort_signal
-            .check()
-            .map_err(|_| ToolError::Aborted)?;
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
         let (bom, content) = original
             .strip_prefix('\u{feff}')
             .map_or(("", original.as_str()), |text| ("\u{feff}", text));
@@ -177,10 +172,7 @@ impl Tool for EditTool {
         };
         let base = normalize_lf(content);
         let (diff_base, updated) = apply_edits(&base, &edits, requested)?;
-        context
-            .abort_signal
-            .check()
-            .map_err(|_| ToolError::Aborted)?;
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
         let restored = format!(
             "{bom}{}",
             if ending == "\r\n" {
@@ -205,10 +197,7 @@ impl Tool for EditTool {
         .await
         .map_err(|e| execution(e.to_string()))?
         .map_err(|e| execution(e.to_string()))?;
-        context
-            .abort_signal
-            .check()
-            .map_err(|_| ToolError::Aborted)?;
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
         let mut result = ToolResult::text(format!(
             "Successfully replaced {} block(s) in {requested}.",
             edits.len()
@@ -438,10 +427,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         EditTool
             .execute(
-                ToolContext {
-                    cwd: path.parent().unwrap().into(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(path.parent().unwrap().into(), signal),
                 ToolCallId::new("1"),
                 input,
                 updates,

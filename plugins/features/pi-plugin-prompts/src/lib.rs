@@ -246,7 +246,7 @@ impl Command for PromptTemplateCommand {
         context: CommandContext,
         arguments: String,
     ) -> Result<CommandOutcome, CommandError> {
-        if context.abort_signal.is_aborted() {
+        if context.signal().is_aborted() {
             return Err(CommandError::Aborted);
         }
         Ok(CommandOutcome::TransformInput(

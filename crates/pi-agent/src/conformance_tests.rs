@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_core::{
-    AbortSignal, AgentEvent, AgentPlugin, AssistantMessage, ContentBlock, Message, ModelId,
-    PluginContext, PluginError, PluginId, ProviderId, ProviderPlugin, RegisterContext,
+    AbortSignal, AgentEvent, AgentPlugin, AgentPluginContext, AssistantMessage, ContentBlock,
+    Message, ModelId, PluginError, PluginId, ProviderId, ProviderPlugin, RegisterContext,
     RegistriesBuilder, ResponseMetadata, ResponseMetadataPatch, StopReason, StreamEvent,
     TextContent, ThinkingLevel, Tool, ToolCall, ToolCallBlock, ToolCallEvent, ToolCallId,
     ToolCallPatch, ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolResultEvent,
@@ -213,7 +213,11 @@ impl Tool for PreparingTool {
         tool_spec("prepare")
     }
 
-    async fn prepare_arguments(&self, input: Value) -> Result<Value, ToolError> {
+    async fn prepare_arguments(
+        &self,
+        _context: &ToolContext,
+        input: Value,
+    ) -> Result<Value, ToolError> {
         let Some(old_text) = input.get("oldText").and_then(Value::as_str) else {
             return Ok(input);
         };
@@ -287,7 +291,7 @@ impl AgentPlugin for PatchStrictArguments {
 
     async fn tool_call(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: ToolCallEvent,
     ) -> Result<ToolCallPatch, PluginError> {
         Ok(ToolCallPatch {
@@ -307,7 +311,7 @@ impl AgentPlugin for BlockAllTools {
 
     async fn tool_call(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: ToolCallEvent,
     ) -> Result<ToolCallPatch, PluginError> {
         Ok(ToolCallPatch {
@@ -330,7 +334,7 @@ impl AgentPlugin for TerminateToolResults {
 
     async fn tool_result(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         _event: ToolResultEvent,
     ) -> Result<ToolResultPatch, PluginError> {
         Ok(ToolResultPatch {
@@ -352,7 +356,7 @@ impl AgentPlugin for ObserveToolHookContext {
 
     async fn tool_call(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         event: ToolCallEvent,
     ) -> Result<ToolCallPatch, PluginError> {
         self.observed.lock().unwrap().push(event.context);
@@ -361,7 +365,7 @@ impl AgentPlugin for ObserveToolHookContext {
 
     async fn tool_result(
         &self,
-        _context: PluginContext,
+        _context: AgentPluginContext,
         event: ToolResultEvent,
     ) -> Result<ToolResultPatch, PluginError> {
         self.observed.lock().unwrap().push(event.context);

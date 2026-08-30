@@ -2,9 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use pi_core::ProviderId;
-use pi_js_plugin::{
-    ExtensionProviderMutation, ExtensionProviderMutationAccess, JsProviderRegistration,
-};
+use pi_js_plugin::JsProviderRegistration;
+use pi_session::{PluginProviderMutation, PluginProviderMutationAccess};
 use serde_json::{Map, Value};
 
 #[derive(Clone, Default)]
@@ -21,7 +20,7 @@ struct DynamicProviderState {
 
 struct PendingMutation {
     revision: u64,
-    mutation: ExtensionProviderMutation,
+    mutation: PluginProviderMutation,
 }
 
 pub(crate) struct DynamicProviderCandidate {
@@ -65,7 +64,7 @@ impl DynamicProviderOverlay {
         for registration in registrations {
             apply_mutation(
                 &mut providers,
-                &ExtensionProviderMutation::Register {
+                &PluginProviderMutation::Register {
                     name: registration.name.clone(),
                     config: registration.config.clone(),
                 },
@@ -131,8 +130,8 @@ impl DynamicProviderCandidate {
     }
 }
 
-impl ExtensionProviderMutationAccess for DynamicProviderOverlay {
-    fn stage(&self, mutation: ExtensionProviderMutation) -> Result<(), String> {
+impl PluginProviderMutationAccess for DynamicProviderOverlay {
+    fn stage(&self, mutation: PluginProviderMutation) -> Result<(), String> {
         validate_mutation(&mutation)?;
         let mut state = self
             .state
@@ -154,9 +153,9 @@ impl ExtensionProviderMutationAccess for DynamicProviderOverlay {
     }
 }
 
-fn validate_mutation(mutation: &ExtensionProviderMutation) -> Result<(), String> {
+fn validate_mutation(mutation: &PluginProviderMutation) -> Result<(), String> {
     match mutation {
-        ExtensionProviderMutation::Register { name, config } => {
+        PluginProviderMutation::Register { name, config } => {
             if name.trim().is_empty() {
                 return Err("provider name must not be empty".to_string());
             }
@@ -164,21 +163,21 @@ fn validate_mutation(mutation: &ExtensionProviderMutation) -> Result<(), String>
                 return Err(format!("provider {name} config must be an object"));
             }
         }
-        ExtensionProviderMutation::Unregister { name } if name.trim().is_empty() => {
+        PluginProviderMutation::Unregister { name } if name.trim().is_empty() => {
             return Err("provider name must not be empty".to_string());
         }
-        ExtensionProviderMutation::Unregister { .. } => {}
+        PluginProviderMutation::Unregister { .. } => {}
     }
     Ok(())
 }
 
 fn apply_mutation(
     providers: &mut BTreeMap<String, Value>,
-    mutation: &ExtensionProviderMutation,
+    mutation: &PluginProviderMutation,
 ) -> Result<(), String> {
     validate_mutation(mutation)?;
     match mutation {
-        ExtensionProviderMutation::Register { name, config } => {
+        PluginProviderMutation::Register { name, config } => {
             let overlay = config
                 .as_object()
                 .expect("validated provider config must be an object");
@@ -189,7 +188,7 @@ fn apply_mutation(
                 .ok_or_else(|| format!("provider {name} config must be an object"))?;
             target.extend(overlay.clone());
         }
-        ExtensionProviderMutation::Unregister { name } => {
+        PluginProviderMutation::Unregister { name } => {
             providers.remove(name);
         }
     }
@@ -223,7 +222,7 @@ mod tests {
         overlay.commit(overlay.candidate(&initial).unwrap());
 
         overlay
-            .stage(ExtensionProviderMutation::Register {
+            .stage(PluginProviderMutation::Register {
                 name: "proxy".to_string(),
                 config: serde_json::json!({"baseUrl": "https://runtime.example/v1"}),
             })
@@ -242,7 +241,7 @@ mod tests {
         );
 
         overlay
-            .stage(ExtensionProviderMutation::Unregister {
+            .stage(PluginProviderMutation::Unregister {
                 name: "proxy".to_string(),
             })
             .unwrap();
@@ -261,14 +260,14 @@ mod tests {
     fn committing_one_revision_preserves_mutations_staged_during_preparation() {
         let overlay = DynamicProviderOverlay::default();
         overlay
-            .stage(ExtensionProviderMutation::Register {
+            .stage(PluginProviderMutation::Register {
                 name: "one".to_string(),
                 config: serde_json::json!({"baseUrl": "https://one.example"}),
             })
             .unwrap();
         let first = overlay.candidate(&[]).unwrap();
         overlay
-            .stage(ExtensionProviderMutation::Register {
+            .stage(PluginProviderMutation::Register {
                 name: "two".to_string(),
                 config: serde_json::json!({"baseUrl": "https://two.example"}),
             })
@@ -285,14 +284,14 @@ mod tests {
     fn failed_preparation_rejects_only_mutations_visible_when_it_started() {
         let overlay = DynamicProviderOverlay::default();
         overlay
-            .stage(ExtensionProviderMutation::Register {
+            .stage(PluginProviderMutation::Register {
                 name: "one".to_string(),
                 config: serde_json::json!({"baseUrl": "https://one.example"}),
             })
             .unwrap();
         let attempt = overlay.begin_preparation();
         overlay
-            .stage(ExtensionProviderMutation::Register {
+            .stage(PluginProviderMutation::Register {
                 name: "two".to_string(),
                 config: serde_json::json!({"baseUrl": "https://two.example"}),
             })

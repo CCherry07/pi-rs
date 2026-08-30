@@ -249,10 +249,7 @@ impl Tool for EchoTool {
         input: Value,
         _updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
-        context
-            .abort_signal
-            .check()
-            .map_err(|_| ToolError::Aborted)?;
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
         Ok(ToolResult::text(
             input
                 .get("text")
@@ -284,7 +281,7 @@ impl Tool for DelayTool {
         let delay_ms = input.get("delayMs").and_then(Value::as_u64).unwrap_or(0);
         tokio::select! {
             biased;
-            () = context.abort_signal.wait() => return Err(ToolError::Aborted),
+            () = context.signal().wait() => return Err(ToolError::Aborted),
             () = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
         }
         let value = input
@@ -359,7 +356,7 @@ impl Tool for WaitForAbortTool {
         _input: Value,
         _updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
-        context.abort_signal.wait().await;
+        context.signal().wait().await;
         Err(ToolError::Aborted)
     }
 }

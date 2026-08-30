@@ -23,12 +23,13 @@ mod legacy_import;
 mod memory;
 mod model_runtime_services;
 mod multi_session_manager;
+pub mod plugin;
+mod plugin_context;
 mod reducer;
 mod repo;
 mod session;
-mod session_plugin;
 mod state;
-mod types;
+pub mod types;
 mod usage;
 
 pub use agent_session::{
@@ -50,8 +51,7 @@ pub use context::{
 };
 pub use event::{
     AgentSessionEvent, AgentSessionSnapshot, AgentSessionSubscription, AutoRetrySnapshot,
-    BashExecutionSnapshot, CompactionSnapshot, ExtensionNoticeLevel, QueueSnapshot,
-    RevisionedAgentSessionEvent,
+    BashExecutionSnapshot, CompactionSnapshot, QueueSnapshot, RevisionedAgentSessionEvent,
 };
 pub use jsonl::SessionLog;
 pub use legacy_import::{
@@ -60,15 +60,13 @@ pub use legacy_import::{
 pub use memory::{InMemorySession, InMemorySessionRepo};
 pub use model_runtime_services::{
     InitialModelRequest, InitialModelResolveError, InitialModelResolver, InitialModelSelection,
-    InitialModelSource, ModelRuntimeServices,
+    InitialModelSource, ModelRuntimeServices, resolve_model_scope,
 };
 pub use multi_session_manager::{
     MultiSessionManager, MultiSessionManagerError, PiSession, WeakPiSession,
 };
-pub use reducer::*;
-pub use repo::{JsonlSessionRepo, list_jsonl_session_metadata, load_jsonl_session};
-pub use session::{DefaultIdGenerator, IdGenerator, Session, SessionStorage, SessionView};
-pub use session_plugin::{
+pub use pi_core::{ForkPosition, NoticeLevel};
+pub use plugin::{
     SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent,
     SessionBeforeForkResult, SessionBeforeSwitchEvent, SessionBeforeSwitchResult,
     SessionBeforeTreeEvent, SessionBeforeTreeResult, SessionCompactEvent,
@@ -78,6 +76,12 @@ pub use session_plugin::{
     SessionShutdownEvent, SessionShutdownReason, SessionStartEvent, SessionStartReason,
     SessionSwitchReason, SessionTreeEvent, SessionTreeSummary, TreePreparation,
 };
+pub use plugin_context::{
+    PiPluginContext, PluginContextBinding, PluginProviderMutation, PluginProviderMutationAccess,
+};
+pub use reducer::*;
+pub use repo::{JsonlSessionRepo, list_jsonl_session_metadata, load_jsonl_session};
+pub use session::{DefaultIdGenerator, IdGenerator, Session, SessionStorage, SessionView};
 pub use types::*;
 pub use usage::{aggregate_session_usage, session_entry_usage};
 

@@ -1,7 +1,13 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
+
 use pi_core::{
-    AssistantMessage, AssistantMessageEvent, ContentBlock, ContentMetadata, ResponseMetadata,
-    StopReason, StreamEvent, TextContent, ThinkingContent, ToolCall, Usage,
+    AssistantMessage, AssistantStream, AssistantStreamId, AssistantStreamView, ContentBlock,
+    ContentMetadata, ResponseMetadata, StopReason, StreamEvent, TextContent, ThinkingContent,
+    ToolCall, Usage,
 };
+
+static NEXT_ASSISTANT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssemblerError {
@@ -30,7 +36,7 @@ pub enum AssemblerError {
 #[derive(Debug, Clone)]
 pub struct StreamUpdate {
     pub started: bool,
-    pub message_event: Option<AssistantMessageEvent>,
+    pub update: Option<Arc<StreamEvent>>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,12 +62,31 @@ enum PartialBlock {
     },
 }
 
-pub struct StreamAssembler {
+struct StreamAssemblerState {
     metadata: Option<ResponseMetadata>,
     blocks: Vec<Option<PartialBlock>>,
     usage: Usage,
     stop_reason: Option<StopReason>,
     finished: bool,
+}
+
+pub struct StreamAssembler {
+    state: Arc<RwLock<StreamAssemblerState>>,
+    stream: AssistantStream,
+}
+
+struct StreamAssemblerView {
+    state: Arc<RwLock<StreamAssemblerState>>,
+}
+
+impl AssistantStreamView for StreamAssemblerView {
+    fn snapshot(&self) -> Option<AssistantMessage> {
+        self.state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .build_message(false)
+            .ok()
+    }
 }
 
 impl Default for StreamAssembler {
@@ -72,6 +97,58 @@ impl Default for StreamAssembler {
 
 impl StreamAssembler {
     pub fn new() -> Self {
+        let state = Arc::new(RwLock::new(StreamAssemblerState::new()));
+        let stream = AssistantStream::new(
+            AssistantStreamId::new(format!(
+                "assistant-stream-{}",
+                NEXT_ASSISTANT_STREAM_ID.fetch_add(1, Ordering::Relaxed)
+            )),
+            Arc::new(StreamAssemblerView {
+                state: Arc::clone(&state),
+            }),
+        );
+        Self { state, stream }
+    }
+
+    pub fn push(&mut self, event: StreamEvent) -> Result<StreamUpdate, AssemblerError> {
+        self.state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(event)
+    }
+
+    pub fn stream(&self) -> AssistantStream {
+        self.stream.clone()
+    }
+
+    pub fn snapshot(&self) -> Result<AssistantMessage, AssemblerError> {
+        self.state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .build_message(false)
+    }
+
+    pub fn finish(&self) -> Result<AssistantMessage, AssemblerError> {
+        self.state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .build_message(true)
+    }
+
+    pub fn failure_message(
+        &self,
+        reason: StopReason,
+        message: impl Into<String>,
+    ) -> AssistantMessage {
+        self.state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .failure_message(reason, message.into())
+    }
+}
+
+impl StreamAssemblerState {
+    fn new() -> Self {
         Self {
             metadata: None,
             blocks: Vec::new(),
@@ -81,7 +158,7 @@ impl StreamAssembler {
         }
     }
 
-    pub fn push(&mut self, event: StreamEvent) -> Result<StreamUpdate, AssemblerError> {
+    fn push(&mut self, event: StreamEvent) -> Result<StreamUpdate, AssemblerError> {
         if self.finished {
             return Err(AssemblerError::AlreadyFinished);
         }
@@ -94,52 +171,55 @@ impl StreamAssembler {
                 self.metadata = Some(metadata);
                 Ok(StreamUpdate {
                     started: true,
-                    message_event: Some(AssistantMessageEvent::Start),
+                    update: None,
                 })
             }
             StreamEvent::Metadata { patch } => {
                 let metadata = self.metadata.as_mut().ok_or(AssemblerError::MissingStart)?;
-                if let Some(response_model) = patch.response_model {
-                    metadata.response_model = Some(response_model);
+                if let Some(response_model) = &patch.response_model {
+                    metadata.response_model = Some(response_model.clone());
                 }
-                if let Some(response_id) = patch.response_id {
-                    metadata.response_id = Some(response_id);
+                if let Some(response_id) = &patch.response_id {
+                    metadata.response_id = Some(response_id.clone());
                 }
-                if let Some(diagnostics) = patch.diagnostics {
-                    metadata.diagnostics = Some(diagnostics);
+                if let Some(diagnostics) = &patch.diagnostics {
+                    metadata.diagnostics = Some(diagnostics.clone());
                 }
-                if let Some(deferred) = patch.deferred {
-                    metadata.deferred = Some(deferred);
+                if let Some(deferred) = &patch.deferred {
+                    metadata.deferred = Some(deferred.clone());
                 }
-                if let Some(raw_stop_reason) = patch.raw_stop_reason {
-                    metadata.raw_stop_reason = Some(raw_stop_reason);
+                if let Some(raw_stop_reason) = &patch.raw_stop_reason {
+                    metadata.raw_stop_reason = Some(raw_stop_reason.clone());
                 }
                 if let Some(end_turn) = patch.end_turn {
                     metadata.end_turn = Some(end_turn);
                 }
                 Ok(StreamUpdate {
                     started: false,
-                    message_event: None,
+                    update: Some(Arc::new(StreamEvent::Metadata { patch })),
                 })
             }
             StreamEvent::ContentMetadata {
                 content_index,
                 metadata,
             } => {
-                match (self.block_mut(content_index)?, metadata) {
+                match (self.block_mut(content_index)?, &metadata) {
                     (
                         PartialBlock::Thinking { redacted, .. },
                         ContentMetadata::Thinking { redacted: value },
-                    ) => *redacted = value,
+                    ) => *redacted = *value,
                     (
                         PartialBlock::ToolCall { namespace, .. },
                         ContentMetadata::ToolCall { namespace: value },
-                    ) => *namespace = value,
+                    ) => *namespace = value.clone(),
                     _ => return Err(AssemblerError::BlockTypeMismatch(content_index)),
                 }
                 Ok(StreamUpdate {
                     started: false,
-                    message_event: None,
+                    update: Some(Arc::new(StreamEvent::ContentMetadata {
+                        content_index,
+                        metadata,
+                    })),
                 })
             }
             StreamEvent::TextStart { content_index } => {
@@ -152,9 +232,7 @@ impl StreamAssembler {
                         ended: false,
                     },
                 )?;
-                Ok(Self::update(AssistantMessageEvent::TextStart {
-                    content_index,
-                }))
+                Ok(Self::update(StreamEvent::TextStart { content_index }))
             }
             StreamEvent::TextDelta {
                 content_index,
@@ -164,7 +242,7 @@ impl StreamAssembler {
                     PartialBlock::Text { text, ended, .. } if !*ended => text.push_str(&delta),
                     _ => return Err(AssemblerError::BlockTypeMismatch(content_index)),
                 }
-                Ok(Self::update(AssistantMessageEvent::TextDelta {
+                Ok(Self::update(StreamEvent::TextDelta {
                     content_index,
                     delta,
                 }))
@@ -177,13 +255,14 @@ impl StreamAssembler {
                     PartialBlock::Text {
                         signature, ended, ..
                     } if !*ended => {
-                        *signature = text_signature;
+                        *signature = text_signature.clone();
                         *ended = true;
                     }
                     _ => return Err(AssemblerError::BlockTypeMismatch(content_index)),
                 }
-                Ok(Self::update(AssistantMessageEvent::TextEnd {
+                Ok(Self::update(StreamEvent::TextEnd {
                     content_index,
+                    text_signature,
                 }))
             }
             StreamEvent::ThinkingStart { content_index } => {
@@ -197,9 +276,7 @@ impl StreamAssembler {
                         ended: false,
                     },
                 )?;
-                Ok(Self::update(AssistantMessageEvent::ThinkingStart {
-                    content_index,
-                }))
+                Ok(Self::update(StreamEvent::ThinkingStart { content_index }))
             }
             StreamEvent::ThinkingDelta {
                 content_index,
@@ -209,7 +286,7 @@ impl StreamAssembler {
                     PartialBlock::Thinking { text, ended, .. } if !*ended => text.push_str(&delta),
                     _ => return Err(AssemblerError::BlockTypeMismatch(content_index)),
                 }
-                Ok(Self::update(AssistantMessageEvent::ThinkingDelta {
+                Ok(Self::update(StreamEvent::ThinkingDelta {
                     content_index,
                     delta,
                 }))
@@ -222,13 +299,14 @@ impl StreamAssembler {
                     PartialBlock::Thinking {
                         signature, ended, ..
                     } if !*ended => {
-                        *signature = thinking_signature;
+                        *signature = thinking_signature.clone();
                         *ended = true;
                     }
                     _ => return Err(AssemblerError::BlockTypeMismatch(content_index)),
                 }
-                Ok(Self::update(AssistantMessageEvent::ThinkingEnd {
+                Ok(Self::update(StreamEvent::ThinkingEnd {
                     content_index,
+                    thinking_signature,
                 }))
             }
             StreamEvent::ToolCallStart {
@@ -240,16 +318,18 @@ impl StreamAssembler {
                 self.insert_block(
                     content_index,
                     PartialBlock::ToolCall {
-                        id,
-                        name,
+                        id: id.clone(),
+                        name: name.clone(),
                         raw_arguments: String::new(),
                         signature: None,
                         namespace: None,
                         ended: false,
                     },
                 )?;
-                Ok(Self::update(AssistantMessageEvent::ToolCallStart {
+                Ok(Self::update(StreamEvent::ToolCallStart {
                     content_index,
+                    id,
+                    name,
                 }))
             }
             StreamEvent::ToolCallDelta {
@@ -264,9 +344,9 @@ impl StreamAssembler {
                     } if !*ended => raw_arguments.push_str(&arguments_delta),
                     _ => return Err(AssemblerError::BlockTypeMismatch(content_index)),
                 }
-                Ok(Self::update(AssistantMessageEvent::ToolCallDelta {
+                Ok(Self::update(StreamEvent::ToolCallDelta {
                     content_index,
-                    delta: arguments_delta,
+                    arguments_delta,
                 }))
             }
             StreamEvent::ToolCallEnd {
@@ -277,13 +357,14 @@ impl StreamAssembler {
                     PartialBlock::ToolCall {
                         signature, ended, ..
                     } if !*ended => {
-                        *signature = thought_signature;
+                        *signature = thought_signature.clone();
                         *ended = true;
                     }
                     _ => return Err(AssemblerError::BlockTypeMismatch(content_index)),
                 }
-                Ok(Self::update(AssistantMessageEvent::ToolCallEnd {
+                Ok(Self::update(StreamEvent::ToolCallEnd {
                     content_index,
+                    thought_signature,
                 }))
             }
             StreamEvent::Done { reason, usage } => {
@@ -301,32 +382,19 @@ impl StreamAssembler {
                         return Err(AssemblerError::OpenBlock(index));
                     }
                 }
-                self.usage = usage;
+                self.usage = usage.clone();
                 self.stop_reason = Some(reason);
                 self.finished = true;
                 Ok(StreamUpdate {
                     started: false,
-                    message_event: None,
+                    update: Some(Arc::new(StreamEvent::Done { reason, usage })),
                 })
             }
         }
     }
 
-    pub fn snapshot(&self) -> Result<AssistantMessage, AssemblerError> {
-        self.build_message(false)
-    }
-
-    pub fn finish(&self) -> Result<AssistantMessage, AssemblerError> {
-        self.build_message(true)
-    }
-
-    pub fn failure_message(
-        &self,
-        reason: StopReason,
-        message: impl Into<String>,
-    ) -> AssistantMessage {
-        let error_message = message.into();
-        if let Ok(mut partial) = self.snapshot() {
+    fn failure_message(&self, reason: StopReason, error_message: String) -> AssistantMessage {
+        if let Ok(mut partial) = self.build_message(false) {
             partial.stop_reason = reason;
             partial.error_message = Some(error_message);
             return partial;
@@ -352,10 +420,10 @@ impl StreamAssembler {
         }
     }
 
-    fn update(event: AssistantMessageEvent) -> StreamUpdate {
+    fn update(update: StreamEvent) -> StreamUpdate {
         StreamUpdate {
             started: false,
-            message_event: Some(event),
+            update: Some(Arc::new(update)),
         }
     }
 
@@ -857,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn done_does_not_emit_a_message_update() {
+    fn done_is_forwarded_as_a_stream_update() {
         let mut assembler = StreamAssembler::new();
         assembler
             .push(StreamEvent::Start {
@@ -870,7 +938,10 @@ mod tests {
                 usage: Usage::default(),
             })
             .unwrap();
-        assert!(update.message_event.is_none());
+        assert!(matches!(
+            update.update.as_deref(),
+            Some(StreamEvent::Done { .. })
+        ));
     }
 
     #[test]

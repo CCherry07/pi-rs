@@ -7,9 +7,10 @@ pub struct FixtureAgentPlugin;
 impl AgentPlugin for FixtureAgentPlugin {
     async fn input(
         &self,
-        _context: InputContext,
+        context: InputContext,
         event: InputEvent,
     ) -> std::result::Result<InputPatch, PluginError> {
+        let _mode = context.ui.mode()?;
         Ok(InputPatch::Transform {
             text: format!("{}-native", event.text),
             images: event.images,

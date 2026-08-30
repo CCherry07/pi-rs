@@ -40,6 +40,78 @@ impl AgentPlugin for HelloPlugin {
 }
 ```
 
+## Runtime context / 运行时上下文
+
+Native callbacks receive Pi plugin capabilities directly on their context. There is no `pi()`
+accessor and plugins never retain or lock the concrete `AgentSession`. The host PluginContext is
+implemented by `pi-session` against `AgentSession` / `PiSession` / `PiRuntime`; the native path does
+not use the JavaScript `query` / `notify` / `request` wire protocol:
+
+```rust
+#[pi_plugin_sdk::agent]
+impl AgentPlugin for HelloPlugin {
+    async fn before_agent_start(
+        &self,
+        context: AgentPluginContext,
+        event: BeforeAgentStartEvent,
+    ) -> std::result::Result<BeforeAgentStartPatch, PluginError> {
+        let model = context.models.current()?;
+        let session = context.session.snapshot()?;
+        let trusted = context.session.is_project_trusted()?;
+
+        context.ui.notify(
+            NoticeLevel::Info,
+            format!("model={model:?}, session={:?}, trusted={trusted}", session.name()),
+        )?;
+
+        Ok(BeforeAgentStartPatch {
+            system_prompt: Some(event.system_prompt),
+            ..BeforeAgentStartPatch::default()
+        })
+    }
+}
+```
+
+`AgentPluginContext`, `InputContext`, `ToolContext`, `ProviderPluginContext`, and
+`SessionPluginContext` expose three explicit capability fields: `session`, `models`, and `ui`.
+There is no implicit `Deref` or generic `runtime` bucket. Session identity and live state,
+model-catalogue queries, and semantic product interaction therefore remain visibly separate at call
+sites. Their existing callback metadata such as plugin ID, run ID, provider/model ID, tool-call ID,
+and session identity remains available through read-only accessors such as `plugin_id()`,
+`run_id()`, `cwd()`, and `signal()`. `context.session.snapshot()` captures identity, entries, the
+current branch, leaf, and labels in one coherent read; each entry has typed metadata and retains its
+complete Pi wire value through `raw()`. `context.cwd()` is the callback execution directory;
+`context.session.cwd()?` is the directory recorded by the active session. Standalone tool and
+command tests use `ToolContext::standalone(...)` / `CommandContext::standalone(...)`, making the
+absence of session, model, and presentation capabilities explicit.
+`Tool::prepare_arguments(&ToolContext, ...)` and `Tool::execute(ToolContext, ...)` observe the same
+runtime generation, including retirement; argument compatibility shims can therefore use the same
+typed product capabilities as execution without a separate adapter context.
+
+Registered commands receive the stronger `CommandContext`; session replacement and navigation are
+unavailable on ordinary hooks and tools:
+
+```rust
+match context.session.create(NewSessionOptions::default()).await? {
+    SessionReplacement::Cancelled => {}
+    SessionReplacement::Replaced(session) => {
+        session
+            .send_user_message(
+                CustomMessageContent::Text("Continue here".to_string()),
+                SendUserMessageOptions::default(),
+            )
+            .await?;
+    }
+}
+```
+
+Contexts are generation-bound capabilities. A context retained after its runtime generation is
+replaced returns `PluginContextError::Retired`; it never follows a stale native plugin into a
+new generation. A successful `new_session`, `fork`, or `switch_session` returns a
+`ReplacedSessionContext` bound to the replacement generation; use that value for follow-up work.
+`reload` succeeds but leaves the caller context retired. UI access is semantic (`notify`) and never
+exposes terminal or Ratatui ownership to a plugin.
+
 The agent macro derives the exact hook-interest set from the callback methods present in the impl.
 Authors do not declare a parallel list and there is no catch-all `ALL` mode. A registration-only
 plugin therefore participates in `register()` but receives no runtime hook calls. Statically linked
@@ -127,19 +199,30 @@ directory. Duplicate IDs fail within each plugin kind.
 ## Compatibility and reload / 兼容与重载
 
 The export macro emits a C-layout descriptor containing ABI version, plugin kind, identity,
-version, and a fingerprint derived from the exact SDK version, Rust compiler, and target. The host
-checks that descriptor before resolving a Rust-ABI trait-object constructor. Native libraries are
+version, and a fingerprint derived from the SDK/core/session sources, workspace lockfile,
+Rust compiler, target, panic strategy, target features, and encoded Rust flags. The host checks that
+descriptor before resolving a Rust-ABI trait-object constructor. Session plugin authors consume
+the lifecycle contract and durable wire types from the single `pi-session` crate; its source keeps
+those surfaces grouped under `plugin/` and `types/` beside the runtime implementation. Native libraries are
 trusted in-process code and are intentionally never unloaded during the process lifetime. Before
 loading, the host snapshots each artifact below `<agent-dir>/cache/plugins/artifacts/<sha256>`;
 unchanged content reuses one pinned handle, while a rebuilt artifact gets a new load path on reload.
 The SDK also pins the `serde_json::Value` map representation used by constructor options, so feature
 unification in a host workspace cannot silently change that Rust-ABI type's layout.
 
-The current contract is native ABI **4**. It adds provider header/response lifecycle hooks to the
-ABI 3 macro-derived agent hook-interest contract and ABI 2 shared `AgentContext` /
-`added_tool_names` surface, so older artifacts are rejected before any Rust-ABI constructor is
-resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 4 constructors use the
-`pi_{agent,provider,session}_plugin_create_v4` symbols. Rebuild every native plugin against the
+The current contract is native ABI **7**. Each `message_update` carries a constant-size shared
+`AssistantStream` handle and the current `StreamEvent` delta. Native hooks call `snapshot()` only
+when they need cumulative content; cloning the event no longer clones the accumulated message.
+Completed `turn_end` assistant messages remain shared.
+ABI 6 shared one immutable cumulative partial instead of deep-cloning it per plugin.
+Native hooks normally match on `event.update()`; `event.snapshot()` materializes the cumulative
+assistant message only for hooks that need it.
+ABI 5 added the generation-bound Pi product context shared by agent, tool preparation/execution,
+command, provider, and session callbacks. ABI 4 added provider header/response hooks,
+ABI 3 added macro-derived agent hook interests, and ABI 2 added the shared `AgentContext` /
+`added_tool_names` surface. Older artifacts are rejected before any Rust-ABI constructor is
+resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 7 constructors use the
+`pi_{agent,provider,session}_plugin_create_v7` symbols. Rebuild every native plugin against the
 current SDK after upgrading the host.
 
 Every factory call creates a fresh instance. Runtime and session reload continue to use the existing

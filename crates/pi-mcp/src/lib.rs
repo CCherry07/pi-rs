@@ -365,7 +365,7 @@ impl Tool for McpTool {
         tokio::pin!(request);
         let result = tokio::select! {
             result = &mut request => result.map_err(|error| ToolError::Execution(error.to_string()))?,
-            () = context.abort_signal.wait() => return Err(ToolError::Aborted),
+            () = context.signal().wait() => return Err(ToolError::Aborted),
         };
         let details = serde_json::to_value(&result).ok();
         let is_error = result.is_error.unwrap_or(false);
@@ -478,10 +478,7 @@ mod tests {
         let (updates, _receiver) = ToolUpdateSink::channel();
         let result = tool
             .execute(
-                ToolContext {
-                    cwd: PathBuf::from("/tmp"),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(PathBuf::from("/tmp"), signal),
                 "call-1".into(),
                 serde_json::json!({"text":"hello"}),
                 updates,

@@ -52,7 +52,7 @@ impl Tool for FindTool {
         let pattern = require_str(&input, "pattern")?;
         let matcher = build_glob(pattern)?;
         let root = resolve_to_cwd(
-            &context.cwd,
+            context.cwd(),
             input.get("path").and_then(Value::as_str).unwrap_or("."),
         )?;
         let metadata = std::fs::metadata(&root)
@@ -62,7 +62,7 @@ impl Tool for FindTool {
         }
         let limit = optional_positive_usize(&input, "limit", DEFAULT_LIMIT)?;
         let require_git = is_inside_git_repository(&root);
-        let signal = context.abort_signal.clone();
+        let signal = context.signal().clone();
         let entries = tokio::task::spawn_blocking(move || {
             let mut entries = Vec::new();
             let mut builder = WalkBuilder::new(&root);
@@ -211,10 +211,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         FindTool
             .execute(
-                ToolContext {
-                    cwd: cwd.to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(cwd.to_path_buf(), signal),
                 ToolCallId::new("test"),
                 input,
                 updates,
@@ -240,10 +237,7 @@ mod tests {
         let (updates, _) = ToolUpdateSink::channel();
         let result = FindTool
             .execute(
-                ToolContext {
-                    cwd: dir.path().to_path_buf(),
-                    abort_signal: signal,
-                },
+                ToolContext::standalone(dir.path().to_path_buf(), signal),
                 ToolCallId::new("1"),
                 json!({"pattern":"*.txt"}),
                 updates,

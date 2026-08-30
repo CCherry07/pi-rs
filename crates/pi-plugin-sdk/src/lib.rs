@@ -17,14 +17,17 @@ pub use pi_core::ProviderPlugin;
 #[cfg(feature = "agent")]
 pub use pi_core::{AgentHook, AgentHookInterests, AgentPlugin};
 #[cfg(feature = "session")]
-pub use pi_session::SessionPlugin;
+pub use pi_session::plugin::SessionPlugin;
 
 /// Version of the trusted Rust-ABI plugin contract.
 ///
-/// ABI 4 adds provider header/response lifecycle hooks to `ProviderPlugin`.
+/// ABI 7 replaces cumulative message-update snapshots with a shared live stream
+/// handle plus one compact [`pi_core::StreamEvent`] delta. ABI 6 shared immutable
+/// cumulative partials; ABI 5 added the generation-bound Pi product context and
+/// tool argument preparation.
 /// Hosts must reject older artifacts before resolving their Rust-ABI
 /// constructors.
-pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 4;
+pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 7;
 pub const BUILD_FINGERPRINT: &str = env!("PI_PLUGIN_BUILD_FINGERPRINT");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -96,15 +99,15 @@ pub type PluginDescriptorFnV1 = unsafe extern "C" fn() -> *const NativePluginDes
 pub type PluginOptionsSchemaFnV1 = unsafe fn() -> String;
 
 #[cfg(feature = "agent")]
-pub type AgentPluginCreateV4 =
+pub type AgentPluginCreateV7 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn AgentPlugin>, PluginLoadError>;
 
 #[cfg(feature = "provider")]
-pub type ProviderPluginCreateV4 =
+pub type ProviderPluginCreateV7 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn ProviderPlugin>, PluginLoadError>;
 
 #[cfg(feature = "session")]
-pub type SessionPluginCreateV4 =
+pub type SessionPluginCreateV7 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn SessionPlugin>, PluginLoadError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,14 +235,21 @@ pub mod agent {
         pub use async_trait::async_trait;
         pub use pi_core::{
             AgentContext, AgentEndEvent, AgentHook, AgentHookInterests, AgentPlugin,
-            AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch, Command, CommandContext,
-            CommandError, CommandOutcome, CommandSpec, ContentBlock, ContextEvent, ContextPatch,
-            InputContext, InputEvent, InputPatch, MessageEndEvent, MessageStartEvent,
-            MessageUpdateEvent, PluginContext, PluginError, RegisterContext, Result, Tool,
-            ToolCallEvent, ToolCallId, ToolCallPatch, ToolContext, ToolError,
+            AgentPluginContext, AgentStartEvent, AssistantMessage, AssistantStream,
+            AssistantStreamId, BeforeAgentStartEvent, BeforeAgentStartPatch, Command,
+            CommandContext, CommandError, CommandModelsContext, CommandOutcome,
+            CommandSessionContext, CommandSpec, ContentBlock, ContentMetadata, ContextEvent,
+            ContextPatch, ContextUsage, CustomMessageContent, CustomMessageInput, ForkOptions,
+            ForkPosition, InputContext, InputEvent, InputPatch, MessageDelivery, MessageEndEvent,
+            MessageStartEvent, MessageUpdateEvent, ModelsContext, NavigateTreeOptions,
+            NewSessionOptions, NoticeLevel, PluginContextError, PluginContextResult, PluginError,
+            PresentationMode, RegisterContext, ReplacedSessionContext, ResponseMetadataPatch,
+            Result, ScopedModel, SendMessageOptions, SendUserMessageOptions, SessionContext,
+            SessionEntryKind, SessionEntryView, SessionReplacement, SessionSnapshot, StreamEvent,
+            Tool, ToolCallEvent, ToolCallId, ToolCallPatch, ToolContext, ToolError,
             ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResult,
             ToolResultEvent, ToolResultPatch, ToolSpec, ToolUpdateSink, TurnEndEvent,
-            TurnStartEvent,
+            TurnStartEvent, UiContext,
         };
         pub use serde_json::{Value, json};
     }
@@ -254,9 +264,11 @@ pub mod provider {
         pub use async_trait::async_trait;
         pub use pi_core::{
             AfterProviderResponseEvent, BeforeProviderHeadersEvent, BeforeProviderRequestEvent,
-            ModelId, ModelSpec, PluginError, PluginId, Provider, ProviderCallContext,
-            ProviderError, ProviderId, ProviderPlugin, ProviderPluginContext,
-            ProviderRegisterContext, ProviderRequest, ProviderStream, Result, StreamEvent,
+            ModelId, ModelSpec, ModelsContext, PluginContextError, PluginContextResult,
+            PluginError, PluginId, PresentationMode, Provider, ProviderCallContext, ProviderError,
+            ProviderId, ProviderPlugin, ProviderPluginContext, ProviderRegisterContext,
+            ProviderRequest, ProviderStream, Result, SessionContext, SessionEntryKind,
+            SessionEntryView, SessionSnapshot, StreamEvent, UiContext,
         };
         pub use serde_json::{Value, json};
     }
@@ -269,7 +281,12 @@ pub mod session {
             NativePluginFactory, PluginLoadContext, PluginLoadError, PluginLoadResult, session,
         };
         pub use async_trait::async_trait;
-        pub use pi_session::{
+        pub use pi_core::{
+            CompactOptions, ContextUsage, ModelsContext, NoticeLevel, PluginContextError,
+            PluginContextResult, PresentationMode, ScopedModel, SessionContext, SessionEntryKind,
+            SessionEntryView, SessionSnapshot, UiContext,
+        };
+        pub use pi_session::plugin::{
             SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent,
             SessionBeforeForkResult, SessionBeforeSwitchEvent, SessionBeforeSwitchResult,
             SessionBeforeTreeEvent, SessionBeforeTreeResult, SessionCompactEvent,

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use pi_core::{
-    AbortHandle, AssistantMessage, BeforeAgentStartEvent, FrozenRegistries, Message, ModelId,
+    AbortHandle, AssistantStream, BeforeAgentStartEvent, FrozenRegistries, Message, ModelId,
     PluginDriver, ProviderId, ProviderPluginDriver, RunId, ThinkingBudgets, ThinkingLevel,
     ToolCallId, ToolExecutionMode, UserMessage,
 };
@@ -65,7 +65,7 @@ pub struct AgentStateSnapshot {
     pub active_tools: Vec<String>,
     pub messages: Vec<Message>,
     pub is_running: bool,
-    pub streaming_message: Option<AssistantMessage>,
+    pub streaming_message: Option<AssistantStream>,
     pub pending_tool_calls: HashSet<ToolCallId>,
     pub error_message: Option<String>,
 }
@@ -425,6 +425,39 @@ impl Agent {
         snapshot
     }
 
+    /// Returns whether a run is active without cloning transcript state.
+    pub fn is_running(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot
+            .is_running
+    }
+
+    /// Returns the selected provider and model without cloning transcript state.
+    pub fn model_selection(&self) -> (ProviderId, ModelId) {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            state.snapshot.provider_id.clone(),
+            state.snapshot.model_id.clone(),
+        )
+    }
+
+    /// Returns the active thinking level without cloning transcript state.
+    pub fn thinking_level(&self) -> ThinkingLevel {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot
+            .thinking_level
+    }
+
     pub fn runtime(&self) -> Arc<AgentRuntime> {
         Arc::clone(
             &self
@@ -443,6 +476,20 @@ impl Agent {
     /// The previous generation remains untouched if it is incompatible with
     /// the agent's current provider or active tool selection.
     pub async fn replace_runtime(&self, runtime: Arc<AgentRuntime>) -> Result<(), AgentError> {
+        self.replace_runtime_transaction(runtime, || {}).await
+    }
+
+    /// Installs a runtime and commits its owning product generation while the
+    /// runtime publication lock is held. Readers therefore observe the old or
+    /// new generation as a whole, never a mixture of the two.
+    pub async fn replace_runtime_transaction<F>(
+        &self,
+        runtime: Arc<AgentRuntime>,
+        commit: F,
+    ) -> Result<(), AgentError>
+    where
+        F: FnOnce(),
+    {
         let _run_guard = self.inner.run_gate.lock().await;
         let mut state = self
             .inner
@@ -450,12 +497,14 @@ impl Agent {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         validate_runtime_selection(&state.snapshot, &runtime)?;
-        state.snapshot.system_prompt = runtime.system_prompt().to_string();
-        *self
+        let mut published = self
             .inner
             .runtime
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = runtime;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.snapshot.system_prompt = runtime.system_prompt().to_string();
+        *published = runtime;
+        commit();
         Ok(())
     }
 
@@ -567,7 +616,7 @@ impl Agent {
     }
 
     pub fn reset(&self) -> Result<(), AgentError> {
-        if self.state().is_running {
+        if self.is_running() {
             return Err(AgentError::ResetWhileRunning);
         }
         let mut state = self
@@ -588,7 +637,7 @@ impl Agent {
     /// product-owned retry. Persistence remains the session layer's concern,
     /// and pending steering/follow-up queues are deliberately preserved.
     pub fn remove_last_failed_assistant(&self) -> Result<bool, AgentError> {
-        if self.state().is_running {
+        if self.is_running() {
             return Err(AgentError::ConfigureWhileRunning);
         }
         let mut state = self

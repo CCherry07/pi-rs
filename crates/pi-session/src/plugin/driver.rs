@@ -1,296 +1,8 @@
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
-use pi_core::{AbortSignal, PluginId};
+use pi_core::{ContextParts, PluginId};
 
-use crate::{
-    BranchSummaryEntry, CompactionEntry, CompactionPreparation, CompactionReason, SessionRecord,
-};
-
-#[derive(Debug, thiserror::Error)]
-pub enum SessionPluginError {
-    #[error("duplicate session plugin id: {0}")]
-    DuplicatePlugin(String),
-    #[error("session plugin source {index} failed: {message}")]
-    Load { index: usize, message: String },
-    #[error("session plugin failed: {0}")]
-    Failure(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionIdentity {
-    pub id: String,
-    pub path: PathBuf,
-    pub cwd: PathBuf,
-    pub parent_session_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionPluginContext {
-    pub plugin_id: PluginId,
-    pub generation: u64,
-    pub session: SessionIdentity,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionStartReason {
-    Startup,
-    Reload,
-    New,
-    Resume,
-    Fork,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionStartEvent {
-    pub reason: SessionStartReason,
-    pub previous_session_file: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionInfoChangedEvent {
-    pub name: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionSwitchReason {
-    New,
-    Resume,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionBeforeSwitchEvent {
-    pub reason: SessionSwitchReason,
-    pub target_session_file: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionForkPosition {
-    Before,
-    At,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionBeforeForkEvent {
-    pub entry_id: String,
-    pub position: SessionForkPosition,
-}
-
-#[derive(Debug, Clone)]
-pub struct SessionBeforeCompactEvent {
-    /// Generation-ready inputs. A plugin can cancel or replace the generated
-    /// compaction without reimplementing cut-point selection.
-    pub preparation: CompactionPreparation,
-    pub branch_entries: Vec<SessionRecord>,
-    pub custom_instructions: Option<String>,
-    pub reason: CompactionReason,
-    pub will_retry: bool,
-    pub signal: AbortSignal,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SessionCompactEvent {
-    pub compaction_entry: CompactionEntry,
-    pub from_extension: bool,
-    pub reason: CompactionReason,
-    pub will_retry: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionCompactFailedEvent {
-    pub reason: CompactionReason,
-    pub error_message: Option<String>,
-    pub aborted: bool,
-    pub will_retry: bool,
-    pub from_extension: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionShutdownReason {
-    Quit,
-    Reload,
-    New,
-    Resume,
-    Fork,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionShutdownEvent {
-    pub reason: SessionShutdownReason,
-    pub target_session_file: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TreePreparation {
-    pub target_id: Option<String>,
-    pub old_leaf_id: Option<String>,
-    pub common_ancestor_id: Option<String>,
-    pub entries_to_summarize: Vec<SessionRecord>,
-    pub user_wants_summary: bool,
-    pub custom_instructions: Option<String>,
-    pub replace_instructions: bool,
-    pub label: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SessionBeforeTreeEvent {
-    pub preparation: TreePreparation,
-    pub signal: AbortSignal,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SessionTreeEvent {
-    pub new_leaf_id: Option<String>,
-    pub old_leaf_id: Option<String>,
-    pub summary_entry: Option<BranchSummaryEntry>,
-    pub from_extension: Option<bool>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SessionBeforeSwitchResult {
-    pub cancel: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SessionBeforeForkResult {
-    pub cancel: bool,
-    pub skip_conversation_restore: bool,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct SessionBeforeCompactResult {
-    pub cancel: bool,
-    pub compaction: Option<CompactionEntry>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct SessionBeforeTreeResult {
-    pub cancel: bool,
-    pub summary: Option<SessionTreeSummary>,
-    pub custom_instructions: Option<String>,
-    pub replace_instructions: Option<bool>,
-    pub label: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SessionTreeSummary {
-    pub summary: String,
-    pub details: Option<serde_json::Value>,
-    pub usage: Option<pi_core::Usage>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionHook {
-    Start,
-    InfoChanged,
-    BeforeSwitch,
-    BeforeFork,
-    BeforeCompact,
-    Compact,
-    CompactFailed,
-    Shutdown,
-    BeforeTree,
-    Tree,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionPluginDiagnostic {
-    pub plugin_id: PluginId,
-    pub generation: u64,
-    pub hook: SessionHook,
-    pub message: String,
-}
-
-/// Pi-style session lifecycle extension. Observer failures are isolated and
-/// exposed as diagnostics; before-hook results follow Pi's ordered
-/// last-non-empty-wins behavior, with the first cancellation short-circuiting.
-/// Statically linked implementations use `#[pi_session::session_plugin]`,
-/// which supplies the async-trait expansion.
-#[async_trait]
-pub trait SessionPlugin: Send + Sync {
-    fn id(&self) -> PluginId;
-
-    async fn session_start(
-        &self,
-        _context: &SessionPluginContext,
-        _event: &SessionStartEvent,
-    ) -> Result<(), SessionPluginError> {
-        Ok(())
-    }
-
-    async fn session_info_changed(
-        &self,
-        _context: &SessionPluginContext,
-        _event: &SessionInfoChangedEvent,
-    ) -> Result<(), SessionPluginError> {
-        Ok(())
-    }
-
-    async fn session_before_switch(
-        &self,
-        _context: &SessionPluginContext,
-        _event: &SessionBeforeSwitchEvent,
-    ) -> Result<Option<SessionBeforeSwitchResult>, SessionPluginError> {
-        Ok(None)
-    }
-
-    async fn session_before_fork(
-        &self,
-        _context: &SessionPluginContext,
-        _event: &SessionBeforeForkEvent,
-    ) -> Result<Option<SessionBeforeForkResult>, SessionPluginError> {
-        Ok(None)
-    }
-
-    async fn session_before_compact(
-        &self,
-        _context: &SessionPluginContext,
-        _event: &SessionBeforeCompactEvent,
-    ) -> Result<Option<SessionBeforeCompactResult>, SessionPluginError> {
-        Ok(None)
-    }
-
-    async fn session_compact(
-        &self,
-        _context: &SessionPluginContext,
-        _event: &SessionCompactEvent,
-    ) -> Result<(), SessionPluginError> {
-        Ok(())
-    }
-
-    async fn session_compact_failed(
-        &self,
-        _context: &SessionPluginContext,
-        _event: &SessionCompactFailedEvent,
-    ) -> Result<(), SessionPluginError> {
-        Ok(())
-    }
-
-    async fn session_shutdown(
-        &self,
-        _context: &SessionPluginContext,
-        _event: &SessionShutdownEvent,
-    ) -> Result<(), SessionPluginError> {
-        Ok(())
-    }
-
-    async fn session_before_tree(
-        &self,
-        _context: &SessionPluginContext,
-        _event: &SessionBeforeTreeEvent,
-    ) -> Result<Option<SessionBeforeTreeResult>, SessionPluginError> {
-        Ok(None)
-    }
-
-    async fn session_tree(
-        &self,
-        _context: &SessionPluginContext,
-        _event: &SessionTreeEvent,
-    ) -> Result<(), SessionPluginError> {
-        Ok(())
-    }
-}
+use super::contract::*;
 
 type SessionPluginFactory = Arc<dyn Fn() -> Result<Arc<dyn SessionPlugin>, String> + Send + Sync>;
 
@@ -373,11 +85,20 @@ impl SessionPlugins {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn build(
         &self,
         identity: SessionIdentity,
     ) -> Result<SessionPluginDriver, SessionPluginError> {
-        SessionPluginDriver::build(self, identity)
+        SessionPluginDriver::build(self, identity, ContextParts::unavailable())
+    }
+
+    pub(crate) fn build_with_context(
+        &self,
+        identity: SessionIdentity,
+        context: ContextParts,
+    ) -> Result<SessionPluginDriver, SessionPluginError> {
+        SessionPluginDriver::build(self, identity, context)
     }
 }
 
@@ -392,18 +113,21 @@ pub struct SessionPluginDriver {
     generation: u64,
     plugins: Vec<SessionPluginSlot>,
     diagnostics: Arc<Mutex<Vec<SessionPluginDiagnostic>>>,
+    context: ContextParts,
 }
 
 impl SessionPluginDriver {
     fn build(
         sources: &SessionPlugins,
         identity: SessionIdentity,
+        context: ContextParts,
     ) -> Result<Self, SessionPluginError> {
         Ok(Self {
             identity,
             generation: 1,
             plugins: load_plugins(sources)?,
             diagnostics: Arc::new(Mutex::new(Vec::new())),
+            context,
         })
     }
 
@@ -445,6 +169,7 @@ impl SessionPluginDriver {
             generation: next_id,
             plugins: load_plugins(sources)?,
             diagnostics: Arc::clone(&self.diagnostics),
+            context: self.context.clone(),
         })
     }
 
@@ -621,11 +346,12 @@ impl SessionPluginDriver {
     }
 
     fn context(&self, slot: &SessionPluginSlot) -> SessionPluginContext {
-        SessionPluginContext {
-            plugin_id: slot.id.clone(),
-            generation: self.generation,
-            session: self.identity.clone(),
-        }
+        SessionPluginContext::with_plugin_context(
+            slot.id.clone(),
+            self.generation,
+            self.identity.clone(),
+            self.context.clone(),
+        )
     }
 
     fn record_error(&self, slot: &SessionPluginSlot, hook: SessionHook, error: SessionPluginError) {

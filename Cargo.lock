@@ -3300,6 +3300,7 @@ name = "pi-session"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "globset",
  "pi-agent",
  "pi-core",
  "pi-plugin-macros",
