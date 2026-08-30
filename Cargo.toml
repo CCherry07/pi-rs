@@ -26,6 +26,7 @@ members = [
     "e2e",
     "plugins/features/pi-plugin-prompts",
     "plugins/features/pi-plugin-skills",
+    "plugins/features/pi-plugin-session-transfer",
     "plugins/providers/pi-plugin-models",
     "plugins/providers/pi-plugin-anthropic",
     "plugins/providers/pi-plugin-openai",
@@ -92,6 +93,7 @@ pi-acp = { path = "crates/pi-acp" }
 pi-mcp = { path = "crates/pi-mcp" }
 pi-plugin-prompts = { path = "plugins/features/pi-plugin-prompts" }
 pi-plugin-skills = { path = "plugins/features/pi-plugin-skills" }
+pi-plugin-session-transfer = { path = "plugins/features/pi-plugin-session-transfer" }
 pi-plugin-models = { path = "plugins/providers/pi-plugin-models" }
 pi-plugin-anthropic = { path = "plugins/providers/pi-plugin-anthropic" }
 pi-plugin-openai = { path = "plugins/providers/pi-plugin-openai" }

@@ -392,6 +392,39 @@ impl SessionState {
             }
         };
 
+        Ok(self.create_snapshot_mutations(entries, lanes))
+    }
+
+    /// Projects the complete active main-lane branch as standalone mutations.
+    ///
+    /// Unlike an interactive fork target, the active leaf may be any session
+    /// entry (for example a prompt snapshot, model change, or compaction).
+    pub(crate) fn create_main_branch_snapshot_mutations(
+        &self,
+    ) -> Result<Vec<SessionMutation>, SessionError> {
+        let target = self.require_lane(MAIN_LANE)?;
+        let entries = match &target {
+            Some(id) => {
+                let mut path = self.walk_to_root(id)?;
+                path.reverse();
+                path
+            }
+            None => Vec::new(),
+        };
+        Ok(self.create_snapshot_mutations(
+            entries,
+            vec![LanePointer {
+                lane: MAIN_LANE.to_string(),
+                leaf_id: target,
+            }],
+        ))
+    }
+
+    fn create_snapshot_mutations(
+        &self,
+        entries: Vec<SessionRecord>,
+        lanes: Vec<LanePointer>,
+    ) -> Vec<SessionMutation> {
         let mut mutations = Vec::new();
         let mut seq = 1u64;
         for mut entry in entries.clone() {
@@ -431,7 +464,7 @@ impl SessionState {
                 seq = seq.saturating_add(1);
             }
         }
-        Ok(mutations)
+        mutations
     }
 
     fn lane_mut(&mut self, lane: &str) -> Result<&mut LanePointer, SessionError> {

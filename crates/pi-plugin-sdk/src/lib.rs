@@ -21,13 +21,14 @@ pub use pi_session::plugin::SessionPlugin;
 
 /// Version of the trusted Rust-ABI plugin contract.
 ///
-/// ABI 7 replaces cumulative message-update snapshots with a shared live stream
+/// ABI 8 adds asynchronous semantic confirmation to the generation-bound UI
+/// context. ABI 7 replaced cumulative message-update snapshots with a shared live stream
 /// handle plus one compact [`pi_core::StreamEvent`] delta. ABI 6 shared immutable
 /// cumulative partials; ABI 5 added the generation-bound Pi product context and
 /// tool argument preparation.
 /// Hosts must reject older artifacts before resolving their Rust-ABI
 /// constructors.
-pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 7;
+pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 8;
 pub const BUILD_FINGERPRINT: &str = env!("PI_PLUGIN_BUILD_FINGERPRINT");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -99,15 +100,15 @@ pub type PluginDescriptorFnV1 = unsafe extern "C" fn() -> *const NativePluginDes
 pub type PluginOptionsSchemaFnV1 = unsafe fn() -> String;
 
 #[cfg(feature = "agent")]
-pub type AgentPluginCreateV7 =
+pub type AgentPluginCreateV8 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn AgentPlugin>, PluginLoadError>;
 
 #[cfg(feature = "provider")]
-pub type ProviderPluginCreateV7 =
+pub type ProviderPluginCreateV8 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn ProviderPlugin>, PluginLoadError>;
 
 #[cfg(feature = "session")]
-pub type SessionPluginCreateV7 =
+pub type SessionPluginCreateV8 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn SessionPlugin>, PluginLoadError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -11,8 +11,10 @@ use super::*;
 
 struct StaticAccess {
     notices: Mutex<Vec<(NoticeLevel, String)>>,
+    confirmations: Mutex<Vec<(String, String)>>,
 }
 
+#[async_trait]
 impl UiContextAccess for StaticAccess {
     fn mode(&self) -> PluginContextResult<PresentationMode> {
         Ok(PresentationMode::Tui)
@@ -21,6 +23,11 @@ impl UiContextAccess for StaticAccess {
     fn ui_notify(&self, level: NoticeLevel, message: String) -> PluginContextResult<()> {
         self.notices.lock().unwrap().push((level, message));
         Ok(())
+    }
+
+    async fn ui_confirm(&self, title: String, message: String) -> PluginContextResult<bool> {
+        self.confirmations.lock().unwrap().push((title, message));
+        Ok(true)
     }
 }
 
@@ -77,6 +84,7 @@ impl SessionContextAccess for StaticAccess {
     ) -> PluginContextResult<PluginContextReplacement> {
         let access: Arc<dyn PluginContext> = Arc::new(StaticAccess {
             notices: Mutex::new(Vec::new()),
+            confirmations: Mutex::new(Vec::new()),
         });
         Ok(PluginContextReplacement {
             cancelled: false,
@@ -88,6 +96,7 @@ impl SessionContextAccess for StaticAccess {
 fn access() -> Arc<StaticAccess> {
     Arc::new(StaticAccess {
         notices: Mutex::new(Vec::new()),
+        confirmations: Mutex::new(Vec::new()),
     })
 }
 
@@ -96,6 +105,7 @@ struct ReplacingAccess {
     next: PluginContextEpoch,
 }
 
+#[async_trait]
 impl UiContextAccess for ReplacingAccess {}
 impl ModelsContextAccess for ReplacingAccess {}
 
@@ -105,6 +115,17 @@ impl SessionContextAccess for ReplacingAccess {
         &self,
         scope: PluginContextScope,
         _options: NewSessionOptions,
+    ) -> PluginContextResult<PluginContextReplacement> {
+        self.old.lock().unwrap().take().unwrap().retire();
+        Ok(PluginContextReplacement {
+            cancelled: false,
+            context: Some(self.next.handle(scope)),
+        })
+    }
+
+    async fn reload(
+        &self,
+        scope: PluginContextScope,
     ) -> PluginContextResult<PluginContextReplacement> {
         self.old.lock().unwrap().take().unwrap().retire();
         Ok(PluginContextReplacement {
@@ -138,6 +159,20 @@ async fn typed_context_calls_the_plugin_contract_without_json_round_trips() {
     assert_eq!(
         access.notices.lock().unwrap().as_slice(),
         &[(NoticeLevel::Info, "ready".to_string())]
+    );
+    assert!(
+        context
+            .ui
+            .confirm("Replace session?", "The active session will change.")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        access.confirmations.lock().unwrap().as_slice(),
+        &[(
+            "Replace session?".to_string(),
+            "The active session will change.".to_string()
+        )]
     );
 
     let SessionReplacement::Replaced(replacement) = epoch
@@ -174,6 +209,25 @@ async fn replacement_handoff_survives_old_epoch_retirement() {
     else {
         panic!("expected a replacement context");
     };
+
+    assert!(matches!(stale.ui.mode(), Err(PluginContextError::Retired)));
+    assert_eq!(replacement.ui.mode().unwrap(), PresentationMode::Tui);
+}
+
+#[tokio::test]
+async fn reload_handoff_survives_old_epoch_retirement() {
+    let next_access: Arc<dyn PluginContext> = access();
+    let next = PluginContextEpoch::new(next_access);
+    let access = Arc::new(ReplacingAccess {
+        old: Mutex::new(None),
+        next,
+    });
+    let old_access: Arc<dyn PluginContext> = access.clone();
+    let old = PluginContextEpoch::new(old_access);
+    *access.old.lock().unwrap() = Some(old.clone());
+    let stale = old.context();
+
+    let replacement = old.command_context().session.reload().await.unwrap();
 
     assert!(matches!(stale.ui.mode(), Err(PluginContextError::Retired)));
     assert_eq!(replacement.ui.mode().unwrap(), PresentationMode::Tui);

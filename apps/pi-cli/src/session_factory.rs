@@ -23,6 +23,7 @@ use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
 use pi_plugin_openai::{CodexTransport, CodexTransportOptions};
 use pi_plugin_prompts::{PromptTemplateLoaderOptions, PromptTemplatesPlugin};
 use pi_plugin_read::ConfiguredReadPlugin;
+use pi_plugin_session_transfer::SessionTransferPlugin;
 use pi_plugin_skills::{SkillLoaderOptions, SkillsPlugin};
 use pi_plugin_write::WritePlugin;
 use pi_provider::{HttpTransport, ReqwestTransport, ReqwestTransportConfig};
@@ -32,8 +33,8 @@ use pi_session::{
     AgentSession, AgentSessionOptions, AgentSessionRuntimeFactory, AgentSessionRuntimeRequest,
     AgentSessionRuntimeTarget, AutoRetrySettings, CompactionSettings as SessionCompactionSettings,
     InitialModelRequest, ModelRuntimeServices, PiPluginContext, PluginContextBinding,
-    PluginProviderMutationAccess, PreparedAgentSession, SessionError, SessionGenerationOverlay,
-    SessionPlugins, SessionRuntimeInventory,
+    PluginProviderMutationAccess, PluginUiBridge, PreparedAgentSession, SessionError,
+    SessionGenerationOverlay, SessionPlugins, SessionRuntimeInventory,
 };
 use pi_settings::{
     QueueModeSetting, SettingsContext, SettingsManager, ThinkingLevelSetting, TransportSetting,
@@ -62,6 +63,7 @@ pub(crate) struct ProductSessionFactory {
     settings: SettingsManager,
     js_plugin_host: Option<Arc<dyn JsPluginHost>>,
     plugin_context_binding: PluginContextBinding,
+    plugin_ui_bridge: Option<Arc<dyn PluginUiBridge>>,
     presentation_mode: PresentationMode,
     dynamic_providers: DynamicProviderOverlay,
 }
@@ -78,6 +80,7 @@ impl ProductSessionFactory {
             settings,
             js_plugin_host: None,
             plugin_context_binding: PluginContextBinding::new(),
+            plugin_ui_bridge: None,
             presentation_mode: PresentationMode::Print,
             dynamic_providers: DynamicProviderOverlay::default(),
         }
@@ -95,6 +98,11 @@ impl ProductSessionFactory {
     ) -> Self {
         self.presentation_mode = mode;
         self.plugin_context_binding = session_binding;
+        self
+    }
+
+    pub(crate) fn with_plugin_ui_bridge(mut self, bridge: Arc<dyn PluginUiBridge>) -> Self {
+        self.plugin_ui_bridge = Some(bridge);
         self
     }
 }
@@ -191,21 +199,24 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             .extend(js_resolution.prompt_paths.iter().cloned());
         let mutation_access: Arc<dyn PluginProviderMutationAccess> =
             Arc::new(self.dynamic_providers.clone());
-        let plugin_context = Arc::new(
-            PiPluginContext::new(
-                self.presentation_mode,
-                project_trusted,
-                self.plugin_context_binding.clone(),
-            )
-            .with_model_scope(
-                config
-                    .runtime_settings
-                    .enabled_models
-                    .clone()
-                    .unwrap_or_default(),
-            )
-            .with_provider_mutations(mutation_access),
-        );
+        let plugin_context = PiPluginContext::new(
+            self.presentation_mode,
+            project_trusted,
+            self.plugin_context_binding.clone(),
+        )
+        .with_model_scope(
+            config
+                .runtime_settings
+                .enabled_models
+                .clone()
+                .unwrap_or_default(),
+        )
+        .with_provider_mutations(mutation_access);
+        let plugin_context = match &self.plugin_ui_bridge {
+            Some(bridge) => plugin_context.with_ui_bridge(Arc::clone(bridge)),
+            None => plugin_context,
+        };
+        let plugin_context = Arc::new(plugin_context);
         let context_access: Arc<dyn PluginContext> = plugin_context.clone();
         let mut js_extensions = Vec::new();
         let mut dynamic_provider_candidate = None;
@@ -607,6 +618,7 @@ fn build_runtime_inner(
             let skill_options = skill_options.clone();
             move || SkillsPlugin::load(skill_options.clone())
         })
+        .agent_plugin_factory(SessionTransferPlugin::default)
         .agent_plugin_factory({
             let auto_resize_images = config.runtime_settings.images.auto_resize;
             move || ConfiguredReadPlugin::new(auto_resize_images)

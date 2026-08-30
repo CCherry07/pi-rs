@@ -284,8 +284,8 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, app: &App, palette: UiPalette
     if root.is_empty() {
         return;
     }
-    if let Some(prompt) = &app.import_prompt {
-        draw_import_prompt(frame, &prompt.source);
+    if let Some(prompt) = &app.confirmation_prompt {
+        draw_confirmation_prompt(frame, &prompt.title, &prompt.message);
     } else if let Some(prompt) = &app.trust_prompt {
         draw_project_trust_prompt(frame, &prompt.cwd, &prompt.options, prompt.selected);
     } else {
@@ -316,24 +316,17 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, app: &App, palette: UiPalette
     }
 }
 
-pub(super) fn draw_import_prompt(frame: &mut ratatui::Frame<'_>, source: &Path) {
+pub(super) fn draw_confirmation_prompt(frame: &mut ratatui::Frame<'_>, title: &str, message: &str) {
     let root = frame.area();
     frame.render_widget(Clear, root);
     let area = inset(root, horizontal_gutter(root.width).saturating_add(1));
     let lines = vec![
         Line::from(Span::styled(
-            "Import session?",
+            title.to_string(),
             Style::default().add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            source.display().to_string(),
-            Style::default().fg(Color::DarkGray),
-        )),
         Line::default(),
-        Line::from("The current session in this view will be replaced by the imported v4 session."),
-        Line::from(
-            "The source file is kept. An inactive session with the same filename may be replaced.",
-        ),
+        Line::from(message.to_string()),
         Line::default(),
         Line::from(Span::styled(
             "enter confirm · esc cancel",

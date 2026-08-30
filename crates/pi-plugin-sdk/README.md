@@ -84,6 +84,10 @@ complete Pi wire value through `raw()`. `context.cwd()` is the callback executio
 `context.session.cwd()?` is the directory recorded by the active session. Standalone tool and
 command tests use `ToolContext::standalone(...)` / `CommandContext::standalone(...)`, making the
 absence of session, model, and presentation capabilities explicit.
+Session contexts also expose typed `active_tools()`, `tools()`, and `commands()` reads. Async
+`context.ui.confirm(title, message)` requests a semantic yes/no decision from an interactive
+frontend and resolves to `false` in non-interactive product modes; the frontend retains all
+terminal ownership.
 `Tool::prepare_arguments(&ToolContext, ...)` and `Tool::execute(ToolContext, ...)` observe the same
 runtime generation, including retirement; argument compatibility shims can therefore use the same
 typed product capabilities as execution without a separate adapter context.
@@ -107,10 +111,10 @@ match context.session.create(NewSessionOptions::default()).await? {
 
 Contexts are generation-bound capabilities. A context retained after its runtime generation is
 replaced returns `PluginContextError::Retired`; it never follows a stale native plugin into a
-new generation. A successful `new_session`, `fork`, or `switch_session` returns a
-`ReplacedSessionContext` bound to the replacement generation; use that value for follow-up work.
-`reload` succeeds but leaves the caller context retired. UI access is semantic (`notify`) and never
-exposes terminal or Ratatui ownership to a plugin.
+new generation. A successful `new_session`, `fork`, or `switch_session` carries a
+`ReplacedSessionContext` bound to the replacement generation, while `reload` returns that fresh
+context directly. Use the returned value for every follow-up operation. UI access is semantic
+(`notify`) and never exposes terminal or Ratatui ownership to a plugin.
 
 The agent macro derives the exact hook-interest set from the callback methods present in the impl.
 Authors do not declare a parallel list and there is no catch-all `ALL` mode. A registration-only
@@ -210,19 +214,22 @@ unchanged content reuses one pinned handle, while a rebuilt artifact gets a new 
 The SDK also pins the `serde_json::Value` map representation used by constructor options, so feature
 unification in a host workspace cannot silently change that Rust-ABI type's layout.
 
-The current contract is native ABI **7**. Each `message_update` carries a constant-size shared
+The current contract is native ABI **8**. ABI 8 adds async semantic confirmation to `UiContext`.
+Each `message_update` carries a constant-size shared
 `AssistantStream` handle and the current `StreamEvent` delta. Native hooks call `snapshot()` only
 when they need cumulative content; cloning the event no longer clones the accumulated message.
 Completed `turn_end` assistant messages remain shared.
 ABI 6 shared one immutable cumulative partial instead of deep-cloning it per plugin.
 Native hooks normally match on `event.update()`; `event.snapshot()` materializes the cumulative
 assistant message only for hooks that need it.
+ABI 7 also made command-session reload return the fresh `ReplacedSessionContext` instead of
+silently retiring the caller with no continuation handle.
 ABI 5 added the generation-bound Pi product context shared by agent, tool preparation/execution,
 command, provider, and session callbacks. ABI 4 added provider header/response hooks,
 ABI 3 added macro-derived agent hook interests, and ABI 2 added the shared `AgentContext` /
 `added_tool_names` surface. Older artifacts are rejected before any Rust-ABI constructor is
-resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 7 constructors use the
-`pi_{agent,provider,session}_plugin_create_v7` symbols. Rebuild every native plugin against the
+resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 8 constructors use the
+`pi_{agent,provider,session}_plugin_create_v8` symbols. Rebuild every native plugin against the
 current SDK after upgrading the host.
 
 Every factory call creates a fresh instance. Runtime and session reload continue to use the existing

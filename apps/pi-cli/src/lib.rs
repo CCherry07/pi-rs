@@ -8,10 +8,9 @@ mod dynamic_providers;
 mod output;
 mod package_commands;
 mod plugin_commands;
+mod plugin_ui;
 mod project_trust;
-mod session_export;
 mod session_factory;
-mod session_share;
 mod text_selection;
 mod tui;
 
@@ -32,6 +31,11 @@ pub(crate) struct ResolvedProjectTrust {
     service: ProjectTrustService,
     requests: mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
     trusted: bool,
+}
+
+pub(crate) struct InteractiveRequestReceivers {
+    project_trust: mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
+    plugin_confirmation: mpsc::UnboundedReceiver<plugin_ui::PluginConfirmationRequest>,
 }
 
 impl ResolvedProjectTrust {
@@ -187,9 +191,11 @@ async fn run(
     let agent_dir = config.agent_dir.clone();
     let session_path = config.session_path.clone();
     let plugin_context_binding = PluginContextBinding::new();
+    let (plugin_ui, plugin_confirmation_requests) = plugin_ui::PluginUiService::channel();
     let mut factory =
         session_factory::ProductSessionFactory::new(config, trust.service.clone(), settings)
-            .with_plugin_context(cli_mode.presentation_mode(), plugin_context_binding.clone());
+            .with_plugin_context(cli_mode.presentation_mode(), plugin_context_binding.clone())
+            .with_plugin_ui_bridge(Arc::new(plugin_ui));
     if let Some(js_host) = js_host {
         factory = factory.with_js_plugin_host(js_host);
     }
@@ -201,6 +207,7 @@ async fn run(
         // Keep the receiver alive so per-session trust resolution retains its
         // normal non-interactive request channel semantics.
         let _trust_requests = trust.requests;
+        let _plugin_confirmation_requests = plugin_confirmation_requests;
         let result = tokio::select! {
             result = pi_acp::serve_stdio(
                 sessions.clone(),
@@ -222,7 +229,10 @@ async fn run(
         session,
         cli.fullscreen_enabled(),
         trust.service,
-        trust.requests,
+        InteractiveRequestReceivers {
+            project_trust: trust.requests,
+            plugin_confirmation: plugin_confirmation_requests,
+        },
         agent_dir,
         Some(plugin_context_binding),
     )
@@ -389,7 +399,7 @@ async fn run_cli_with_shutdown(
     session: PiSession,
     fullscreen: bool,
     project_trust: ProjectTrustService,
-    trust_requests: mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
+    interactive_requests: InteractiveRequestReceivers,
     agent_dir: std::path::PathBuf,
     shutdown: Option<PluginContextBinding>,
 ) -> Result<(), String> {
@@ -401,7 +411,7 @@ async fn run_cli_with_shutdown(
                 session,
                 fullscreen,
                 project_trust,
-                trust_requests,
+                interactive_requests,
                 agent_dir,
             ) => result,
             () = shutdown.wait_for_shutdown() => {
@@ -415,7 +425,7 @@ async fn run_cli_with_shutdown(
             session,
             fullscreen,
             project_trust,
-            trust_requests,
+            interactive_requests,
             agent_dir,
         )
         .await
@@ -427,12 +437,14 @@ async fn run_cli(
     session: PiSession,
     fullscreen: bool,
     project_trust: ProjectTrustService,
-    trust_requests: mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
+    interactive_requests: InteractiveRequestReceivers,
     agent_dir: std::path::PathBuf,
 ) -> Result<(), String> {
     match mode {
         CLIMode::Json { input } => output::run_json(session, input).await,
-        CLIMode::Rpc => pi_rpc::rpc::run(session, session_export::export_html).await,
+        CLIMode::Rpc => {
+            pi_rpc::rpc::run(session, pi_plugin_session_transfer::export::export_html).await
+        }
         CLIMode::Acp => Err("ACP mode must start before creating a CLI session".to_string()),
         CLIMode::Print { input } => output::run_print(session, input).await,
         CLIMode::Tui { initial_prompt } => {
@@ -441,7 +453,7 @@ async fn run_cli(
                 fullscreen,
                 initial_prompt,
                 project_trust,
-                trust_requests,
+                interactive_requests,
                 agent_dir,
             )
             .await

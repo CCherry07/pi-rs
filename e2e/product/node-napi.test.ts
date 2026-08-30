@@ -59,7 +59,7 @@ test("runs a TypeScript extension through Node, NAPI, Rust, and a tool loop", as
 });
 
 function hasProductEvent(events: JsonObject[], type: string): boolean {
-  return events.some((entry) => stringField(recordField(entry, "event"), "type") === type);
+  return events.some((entry) => stringField(entry, "type") === type);
 }
 
 function arrayField(value: unknown, field: string): unknown[] {

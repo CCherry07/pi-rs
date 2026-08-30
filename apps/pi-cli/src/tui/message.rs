@@ -11,6 +11,7 @@ pub(super) enum AppMessage {
     },
     EffectCompleted(EffectDone),
     TrustRequested(ProjectTrustPromptRequest),
+    ConfirmationRequested(PluginConfirmationRequest),
     AnimationTick,
     Quit,
 }

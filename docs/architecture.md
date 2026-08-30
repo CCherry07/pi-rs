@@ -52,6 +52,8 @@ plugins/providers/pi-plugin-google        Google Generative AI provider and Gemi
 plugins/providers/pi-plugin-models        models.json catalog, routing, and request-time config
 plugins/features/pi-plugin-{prompts,skills}
                                 generation-local prompt-template and skill discovery/commands
+plugins/features/pi-plugin-session-transfer
+                                first-party export/import/share commands
 crates/pi-tool-support           shared path validation, argument, and truncation helpers
 plugins/tools/pi-plugin-{read,write,edit,hashline-edit,bash,grep,find,ls}
                                 one production tool per plugin crate
@@ -226,12 +228,16 @@ while unchanged content reuses one process-pinned handle. Libraries remain pinne
 lifetime because plugin code may retain worker threads. Package metadata and artifact lifetime are
 loader concerns rather than a fourth lifecycle or cross-lifecycle bundle.
 
-Native ABI 7 replaces cumulative `message_update` ownership with one shared read-only
+Native ABI 8 adds asynchronous semantic confirmation to the generation-bound `UiContext`, allowing
+trusted Rust plugins to request a yes/no decision without owning terminal input or rendering.
+Native ABI 7 replaced cumulative `message_update` ownership with one shared read-only
 `AssistantStream` handle plus the current `StreamEvent` delta. A native hook can clone the handle
 in constant time and calls `snapshot()` only when it actually needs the cumulative assistant
-message. It retains the generation-bound `PluginContext` added in ABI 5 for agent, input, tool, command, provider,
-and session callbacks. The public Rust interface exposes three explicit domain capabilities on each
-typed callback context: `context.session`, `context.models`, and `context.ui`. It has neither a
+message. It also makes command-session reload return the fresh `ReplacedSessionContext` instead of
+silently retiring the caller with no continuation handle. ABI 7 retains the generation-bound
+`PluginContext` added in ABI 5 for agent, input, tool, command, provider, and session callbacks. The
+public Rust interface exposes three explicit domain capabilities on each typed callback context:
+`context.session`, `context.models`, and `context.ui`. It has neither a
 pass-through `context.pi()` namespace nor a generic `context.runtime` bucket, and it does not use
 implicit `Deref` to hide method ownership. Ordinary callbacks receive read-only model/catalogue and
 session-inspection capabilities plus the non-replacing `abort`, background `compact`, and product
@@ -246,14 +252,17 @@ typed capabilities, and `PluginContextEpoch`. `SessionContextAccess`, `ModelsCon
 command scope but does not duplicate the domain method surface. `pi-session::PiPluginContext`
 implements those interfaces against the actual `AgentSession`, `PiSession`, and generation-local
 `PiRuntime`. It hides weak session links, command scope checks, queue policy, replacement
-transactions, and semantic UI notices. Retained contexts fail with `Retired` after their generation
-is replaced. Successful session replacements resolve a fresh `ReplacedSessionContext` from the
-newly active runtime generation rather than rebinding the old capability. ABI 4 added
+transactions, semantic UI notices, and the injected frontend confirmation bridge. Retained
+contexts fail with `Retired` after their generation is replaced. `SessionContext` exposes typed
+active-tool, tool-catalogue, and command-catalogue reads in addition to coherent snapshots.
+Successful create, fork, switch, and reload operations resolve a fresh
+`ReplacedSessionContext` from the newly active runtime generation rather than rebinding the old
+capability. ABI 4 added
 `ProviderPlugin` header/response lifecycle hooks, ABI 3 added the required `AgentPlugin`
 hook-interest contract, and ABI 2 added the `AgentContext`/`added_tool_names` surface. The native
 agent export macro derives its contract from the callback methods in the annotated impl, so authors
 do not maintain a second hook list. The loader reads the stable C descriptor first and rejects older
-ABIs before resolving any v7 Rust constructor symbol, preventing a stale in-process plugin from
+ABIs before resolving any v8 Rust constructor symbol, preventing a stale in-process plugin from
 crossing the changed trait boundary.
 
 Callback metadata is read-only and exposed through accessors such as `plugin_id()`, `run_id()`,
@@ -441,10 +450,11 @@ session edge would form a cycle and prevent generation retirement. The weak TSFN
 once the exported `runPi` Promise settles.
 
 Session-replacing requests are an explicit capability transition rather than an exception to
-retirement. `newSession`, `fork`, and `switchSession` capture the `PiPluginContext`, await the
-replacement, and return a `PluginContextHandle` from the newly published runtime. The NAPI callback
-object advances to that handle before JavaScript runs `setup` or `withSession`; unrelated retained
-contexts from the retired generation still fail with `Retired`.
+retirement. `newSession`, `fork`, `switchSession`, and `reload` capture the `PiPluginContext`, await
+the replacement, and return a `PluginContextHandle` from the newly published runtime. The NAPI
+callback object advances to that handle before JavaScript runs `setup` or `withSession`, and before
+the `reload` Promise resolves; unrelated retained contexts from the retired generation still fail
+with `Retired`.
 
 The callback contract and generation epoch live in `pi-core`; the real product implementation lives
 in `pi-session`. `PiPluginContext` is constructed by the app composition root for native-only
@@ -738,8 +748,9 @@ Each assistant stream owns one mutable assembler state behind a read-only `Assis
 `message_update` carries that constant-size shared handle and exactly one `StreamEvent`; the Agent
 reducer, ordered native hooks, and listeners therefore do not clone cumulative content. Consumers
 that require a full message call `snapshot()` explicitly, while `message_end` and `turn_end` share
-the completed immutable assistant message. These hook fields are part of native ABI 7; older native
-artifacts are rejected before constructor resolution.
+the completed immutable assistant message. These hook fields were introduced in native ABI 7;
+ABI 8 adds UI confirmation to the same generation-bound context. Older native artifacts are
+rejected before constructor resolution.
 
 Cancellation and exceptional termination close the same observable lifecycle as Pi. A cancellation
 that races with turn entry first commits the prompt and already-drained steering, then emits an
@@ -937,11 +948,14 @@ retained tails are materialized explicitly. Every line is validated before publi
 conversion or candidate generation removes the staged destination. Import deliberately uses Pi's
 resume lifecycle reasons rather than adding an import-only session hook.
 
-Portable JSONL export is a storage operation on `SessionLog`: it atomically writes the selected
-main-lane branch, applicable name/label facts, and a parent-free v4 header without mutating the live
-log. HTML export and GitHub-Gist sharing remain app-owned presentation/integration policy in
-`apps/pi-cli`; neither terminal rendering nor external upload commands are dependencies of
-`pi-session`.
+`pi-session` exposes the narrow storage and migration primitives used for portability:
+`SessionLog::export_branch`, session-file inspection, and legacy import. The first-party
+`SessionTransferPlugin` owns the complete `/export`, `/import`, and `/share` policy in every product
+generation, including safe self-contained HTML serialization, destination selection, path
+expansion, and GitHub CLI/viewer-URL behavior. Import validates and stages a unique v4 destination,
+requests confirmation through the semantic `UiContext`, then reuses command-session `switch`;
+cancellation or replacement failure removes the staged file. The CLI only renders the generic
+confirmation request and never switches on those command names.
 
 ## Event ordering
 

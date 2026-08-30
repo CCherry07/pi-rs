@@ -46,9 +46,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::clipboard::{ClipboardWriter, SystemClipboard};
 use crate::config::AuthCommand;
 use crate::output::{assistant_text, shell_command};
+use crate::plugin_ui::PluginConfirmationRequest;
 use crate::project_trust::{ProjectTrustOption, ProjectTrustPromptRequest, ProjectTrustService};
 use crate::text_selection::{ScreenSelection, ScreenTextSurface};
-use crate::{auth, auth::AuthProviderInfo};
+use crate::{InteractiveRequestReceivers, auth, auth::AuthProviderInfo};
 
 mod components;
 mod controller;
@@ -670,7 +671,7 @@ struct App {
     scroll_input: ScrollInputNormalizer,
     screen_selection: Option<ScreenSelection>,
     trust_prompt: Option<TrustPromptState>,
-    import_prompt: Option<ImportPromptState>,
+    confirmation_prompt: Option<ConfirmationPromptState>,
     pending_auth: Option<AuthRequest>,
     epoch: u64,
     quit: bool,
@@ -792,7 +793,7 @@ impl App {
             scroll_input: ScrollInputNormalizer::for_terminal(),
             screen_selection: None,
             trust_prompt: None,
-            import_prompt: None,
+            confirmation_prompt: None,
             pending_auth: None,
             epoch: 1,
             quit: false,
@@ -827,6 +828,11 @@ impl App {
                 self.screen_selection = None;
                 self.trust_prompt = Some(request.into());
                 self.status = "Choose project trust".to_string();
+            }
+            AppMessage::ConfirmationRequested(request) => {
+                self.screen_selection = None;
+                self.confirmation_prompt = Some(request.into());
+                self.status = "Confirmation required".to_string();
             }
             AppMessage::AnimationTick => self.advance_animation(),
             AppMessage::Quit => self.quit = true,
@@ -1235,9 +1241,20 @@ struct TrustPromptState {
     response: Option<tokio::sync::oneshot::Sender<Option<usize>>>,
 }
 
-struct ImportPromptState {
-    command: String,
-    source: PathBuf,
+struct ConfirmationPromptState {
+    title: String,
+    message: String,
+    response: Option<tokio::sync::oneshot::Sender<bool>>,
+}
+
+impl From<PluginConfirmationRequest> for ConfirmationPromptState {
+    fn from(request: PluginConfirmationRequest) -> Self {
+        Self {
+            title: request.title,
+            message: request.message,
+            response: Some(request.response),
+        }
+    }
 }
 
 impl From<ProjectTrustPromptRequest> for TrustPromptState {
@@ -1283,7 +1300,7 @@ pub(crate) async fn run(
     fullscreen: bool,
     initial_prompt: Option<String>,
     project_trust: ProjectTrustService,
-    trust_requests: tokio::sync::mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
+    interactive_requests: InteractiveRequestReceivers,
     agent_dir: PathBuf,
 ) -> Result<(), String> {
     let palette = UiPalette::detect();
@@ -1294,7 +1311,7 @@ pub(crate) async fn run(
         initial_prompt,
         palette,
         project_trust,
-        trust_requests,
+        interactive_requests,
         agent_dir,
     )
     .await;
@@ -1335,9 +1352,13 @@ async fn run_loop(
     initial_prompt: Option<String>,
     palette: UiPalette,
     project_trust: ProjectTrustService,
-    mut trust_requests: tokio::sync::mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
+    interactive_requests: InteractiveRequestReceivers,
     agent_dir: PathBuf,
 ) -> Result<(), String> {
+    let InteractiveRequestReceivers {
+        project_trust: mut trust_requests,
+        plugin_confirmation: mut confirmation_requests,
+    } = interactive_requests;
     let mut session_changes = session_handle.subscribe();
     let mut session = session_handle.current();
     let mut subscription = session.subscribe();
@@ -1404,7 +1425,8 @@ async fn run_loop(
                         handle_mouse_event(mouse, &mut app, &surface, &mut clipboard);
                     }
                     Some(Ok(Event::Paste(text)))
-                        if app.trust_prompt.is_none() && app.import_prompt.is_none() =>
+                        if app.trust_prompt.is_none()
+                            && app.confirmation_prompt.is_none() =>
                     {
                         app.screen_selection = None;
                         app.input.insert_str(text);
@@ -1436,7 +1458,7 @@ async fn run_loop(
                     let tools_expanded = app.tools_expanded;
                     let scroll_from_bottom = app.scroll_from_bottom;
                     let trust_prompt = app.trust_prompt.take();
-                    let import_prompt = app.import_prompt.take();
+                    let confirmation_prompt = app.confirmation_prompt.take();
                     let mut recovered = app_for_session(&session, &snapshot, &agent_dir);
                     recovered.input = input;
                     recovered.input_history = input_history;
@@ -1445,7 +1467,7 @@ async fn run_loop(
                     recovered.tools_expanded = tools_expanded;
                     recovered.scroll_from_bottom = scroll_from_bottom;
                     recovered.trust_prompt = trust_prompt;
-                    recovered.import_prompt = import_prompt;
+                    recovered.confirmation_prompt = confirmation_prompt;
                     recovered.status = "Caught up after UI lag".to_string();
                     app = recovered;
                 }
@@ -1470,6 +1492,9 @@ async fn run_loop(
             }
             Some(request) = trust_requests.recv() => {
                 app.update(AppMessage::TrustRequested(request));
+            }
+            Some(request) = confirmation_requests.recv() => {
+                app.update(AppMessage::ConfirmationRequested(request));
             }
             _ = animation_tick.tick(), if app.has_active_animation() => {
                 app.update(AppMessage::AnimationTick);
@@ -1574,13 +1599,6 @@ fn command_suggestions(input: &str, command_specs: &[CommandSpec]) -> Vec<Comman
     let builtins = [
         ("/new", "new session", Some("[path]")),
         ("/resume", "list or open sessions", Some("[query|path]")),
-        ("/export", "export session as HTML or JSONL", Some("[file]")),
-        (
-            "/import",
-            "import and resume a v4 session",
-            Some("<file.jsonl>"),
-        ),
-        ("/share", "share session as a secret GitHub gist", None),
         ("/reload", "reload all plugins/resources", None),
         ("/trust", "change trust for this project", None),
         (
@@ -1965,7 +1983,7 @@ mod tests {
             scroll_input: ScrollInputNormalizer::with_events_per_tick(1),
             screen_selection: None,
             trust_prompt: None,
-            import_prompt: None,
+            confirmation_prompt: None,
             pending_auth: None,
             epoch: 1,
             quit: false,
@@ -2113,7 +2131,24 @@ mod tests {
 
     #[test]
     fn common_session_commands_are_suggested_with_pi_compatible_arguments() {
-        let suggestions = command_suggestions("/", &[]);
+        let plugin_commands = [
+            CommandSpec {
+                name: "export".to_string(),
+                description: "Export session".to_string(),
+                argument_hint: Some("[file]".to_string()),
+            },
+            CommandSpec {
+                name: "import".to_string(),
+                description: "Import session".to_string(),
+                argument_hint: Some("<file.jsonl>".to_string()),
+            },
+            CommandSpec {
+                name: "share".to_string(),
+                description: "Share session".to_string(),
+                argument_hint: None,
+            },
+        ];
+        let suggestions = command_suggestions("/", &plugin_commands);
 
         let compact = suggestions
             .iter()
@@ -2133,7 +2168,7 @@ mod tests {
 
     #[test]
     fn help_text_is_a_readable_multiline_command_list() {
-        let help = builtin_help_text();
+        let help = builtin_help_text(&[]);
 
         assert!(help.starts_with("Commands\n\n"));
         assert!(help.lines().any(|line| line.starts_with("- `/new [path]`")));
@@ -2143,153 +2178,27 @@ mod tests {
     }
 
     #[test]
-    fn import_and_export_paths_support_spaces_and_quotes() {
-        assert_eq!(
-            path_command_argument("/export path with spaces/session.html", "/export").unwrap(),
-            Some("path with spaces/session.html".to_string())
-        );
-        assert_eq!(
-            path_command_argument("/import \"path with spaces/session.jsonl\"", "/import").unwrap(),
-            Some("path with spaces/session.jsonl".to_string())
-        );
-        assert_eq!(path_command_argument("/export", "/export").unwrap(), None);
-        assert!(
-            path_command_argument("/import \"unterminated", "/import")
-                .unwrap_err()
-                .contains("unterminated")
-        );
-        assert!(!path_command_matches("/exporter out.html", "/export"));
-    }
+    fn generic_plugin_confirmation_renders_and_returns_the_decision() {
+        let mut app = demo_app();
+        let (response, decision) = tokio::sync::oneshot::channel();
+        app.update(AppMessage::ConfirmationRequested(
+            PluginConfirmationRequest {
+                title: "Import session?".to_string(),
+                message: "/tmp/session.jsonl\n\nThe current session will be replaced.".to_string(),
+                response,
+            },
+        ));
 
-    #[tokio::test]
-    async fn export_and_import_commands_round_trip_the_active_branch() {
-        let directory = tempfile::tempdir().unwrap();
-        let workspace = directory.path().join("workspace");
-        let session_directory = directory.path().join("sessions");
-        let export_directory = directory.path().join("portable files");
-        std::fs::create_dir_all(&workspace).unwrap();
-        std::fs::create_dir_all(&session_directory).unwrap();
-        let sessions = MultiSessionManager::new(|request: AgentSessionRuntimeRequest| async move {
-            let (cwd, path, create) = match request.target {
-                AgentSessionRuntimeTarget::Create { cwd, path, .. } => (cwd, path, true),
-                AgentSessionRuntimeTarget::Open { path } => {
-                    let (_, document) = SessionLog::open(&path)?;
-                    (document.header.cwd, path, false)
-                }
-                AgentSessionRuntimeTarget::Reuse { .. } => unreachable!("test does not reuse logs"),
-            };
-            let pi_runtime = pi_runtime::PiRuntime::builder()
-                .provider_plugin(
-                    pi_plugin_openai::OpenAiCompatiblePlugin::new(
-                        pi_plugin_openai::OpenAiCompatibleConfig::without_api_key(
-                            "https://example.invalid/v1",
-                        ),
-                    )
-                    .unwrap(),
-                )
-                .agent_options(pi_agent::AgentOptions {
-                    provider_id: ProviderId::new("openai-compatible"),
-                    cwd,
-                    ..pi_agent::AgentOptions::default()
-                })
-                .system_prompt(pi_runtime::SystemPrompt::Final("test".to_string()))
-                .build()?;
-            if create {
-                AgentSession::prepare_create(pi_runtime, path).await
-            } else {
-                AgentSession::prepare_open(pi_runtime, path).await
-            }
-        });
-        let handle = sessions
-            .create_session(&workspace, session_directory.join("current.jsonl"))
-            .await
-            .unwrap();
-        let current = handle.current();
-        current
-            .log()
-            .append_message(Message::User(pi_core::UserMessage::text(
-                "portable conversation",
-                1,
-            )))
-            .unwrap();
-        current.log().materialize().unwrap();
-        let jsonl = export_directory.join("portable session.jsonl");
-        let html = export_directory.join("portable session.html");
-
-        let json_status = run_effect(
-            &handle,
-            &current,
-            format!("/export \"{}\"", jsonl.display()),
-            EffectMode::Submit,
-        )
-        .await
-        .unwrap();
-        let html_status = run_effect(
-            &handle,
-            &current,
-            format!("/export \"{}\"", html.display()),
-            EffectMode::Submit,
-        )
-        .await
-        .unwrap();
-
-        assert!(json_status.contains(jsonl.to_string_lossy().as_ref()));
-        assert!(html_status.contains(html.to_string_lossy().as_ref()));
-        assert!(
-            std::fs::read_to_string(&html)
-                .unwrap()
-                .contains("portable conversation")
-        );
-        let (trust, _) = ProjectTrustService::new(
-            &directory.path().join("agent"),
-            None,
-            true,
-            pi_settings::DefaultProjectTrust::Ask,
-        )
-        .unwrap();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut clipboard = RecordingClipboard::default();
-        let mut app = App::new(&current, &current.snapshot());
-        app.input
-            .set_text(format!("/import \"{}\"", jsonl.display()));
-        submit_editor(
-            &mut app,
-            &current,
-            &handle,
-            &trust,
-            &sender,
-            &mut clipboard,
-            EffectMode::Submit,
-        );
-        assert!(app.import_prompt.is_some());
         let confirmation = render_app(&app, 100, 20);
         assert!(confirmation.contains("Import session?"));
+        assert!(confirmation.contains("/tmp/session.jsonl"));
         assert!(confirmation.contains("enter confirm · esc cancel"));
-        assert!(handle_import_prompt_key(
+        assert!(handle_confirmation_prompt_key(
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             &mut app,
-            &current,
-            &handle,
-            &sender,
         ));
-        assert!(app.import_prompt.is_none());
-        assert!(receiver.try_recv().is_err());
-        let import_status = run_effect(
-            &handle,
-            &current,
-            format!("/import \"{}\"", jsonl.display()),
-            EffectMode::Submit,
-        )
-        .await
-        .unwrap();
-
-        assert!(import_status.contains(jsonl.to_string_lossy().as_ref()));
-        assert_eq!(
-            handle.path(),
-            session_directory.join("portable session.jsonl")
-        );
-        assert_eq!(handle.current().log().load().unwrap().messages().len(), 1);
-        sessions.shutdown().await.unwrap();
+        assert!(app.confirmation_prompt.is_none());
+        assert!(!decision.blocking_recv().unwrap());
     }
 
     #[tokio::test]
@@ -4213,7 +4122,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["/login", "/logout"]
         );
-        let help = builtin_help_text();
+        let help = builtin_help_text(&[]);
         assert!(help.contains("`/login [provider]`"));
         assert!(help.contains("`/logout`"));
     }

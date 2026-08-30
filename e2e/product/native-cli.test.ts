@@ -24,9 +24,7 @@ test("runs the standalone CLI through the product NDJSON seam", async () => {
 });
 
 function hasProductEvent(events: JsonObject[], type: string): boolean {
-  return events.some(
-    (entry) => stringField(recordField(entry, "event"), "type") === type,
-  );
+  return events.some((entry) => stringField(entry, "type") === type);
 }
 
 function arrayField(value: unknown, field: string): unknown[] {
@@ -39,12 +37,6 @@ function stringField(value: unknown, field: string): string | undefined {
   if (!isRecord(value)) return undefined;
   const candidate = value[field];
   return typeof candidate === "string" ? candidate : undefined;
-}
-
-function recordField(value: unknown, field: string): JsonObject | undefined {
-  if (!isRecord(value)) return undefined;
-  const candidate = value[field];
-  return isRecord(candidate) ? candidate : undefined;
 }
 
 function record(value: unknown): JsonObject {

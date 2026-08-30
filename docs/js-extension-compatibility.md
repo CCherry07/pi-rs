@@ -76,7 +76,9 @@ summarizing and non-summarizing `navigateTree`, `switchSession`, and `reload`. `
 preserved on the new Pi session header; `setup`, `withSession`, and the replacement-only
 `sendMessage` / `sendUserMessage` surface run against the newly published `PiSession`. Unlike Pi,
 the JavaScript `setup` callback runs after the replacement session's `session_start` hook because
-the Rust generation is prepared and activated atomically before the old command resumes.
+the Rust generation is prepared and activated atomically before the old command resumes. `reload`
+also advances the callback's native capability before resolving, so the same JavaScript command
+context can immediately query and operate on the reloaded generation.
 
 ## UI and registrations
 

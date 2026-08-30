@@ -14,7 +14,7 @@ pub(super) fn handle_key<C: ClipboardWriter>(
     sender: &tokio::sync::mpsc::UnboundedSender<EffectDone>,
     ui: &mut KeyUi<'_, C>,
 ) {
-    if handle_import_prompt_key(key, app, session, session_handle, sender) {
+    if handle_confirmation_prompt_key(key, app) {
         return;
     }
     if handle_trust_prompt_key(key, app, project_trust) {
@@ -132,41 +132,27 @@ pub(super) fn handle_key<C: ClipboardWriter>(
     }
 }
 
-pub(super) fn handle_import_prompt_key(
-    key: KeyEvent,
-    app: &mut App,
-    session: &Arc<AgentSession>,
-    session_handle: &PiSession,
-    sender: &tokio::sync::mpsc::UnboundedSender<EffectDone>,
-) -> bool {
-    if app.import_prompt.is_none() {
+pub(super) fn handle_confirmation_prompt_key(key: KeyEvent, app: &mut App) -> bool {
+    if app.confirmation_prompt.is_none() {
         return false;
     }
-    match key.code {
-        KeyCode::Enter => {
-            let Some(prompt) = app.import_prompt.take() else {
-                return true;
-            };
-            app.awaiting_assistant = true;
-            app.working_started_at = Some(Instant::now());
-            app.status = "Importing session…".to_string();
-            spawn_effect(
-                Arc::clone(session),
-                session_handle.clone(),
-                app.epoch,
-                prompt.command,
-                EffectMode::Submit,
-                sender.clone(),
-            );
-        }
-        KeyCode::Esc | KeyCode::Char('c')
-            if matches!(key.code, KeyCode::Esc)
-                || key.modifiers.contains(KeyModifiers::CONTROL) =>
+    let decision = match key.code {
+        KeyCode::Enter => Some(true),
+        KeyCode::Esc => Some(false),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(false),
+        _ => None,
+    };
+    if let Some(decision) = decision {
+        if let Some(mut prompt) = app.confirmation_prompt.take()
+            && let Some(response) = prompt.response.take()
         {
-            app.import_prompt = None;
-            app.status = "Import cancelled".to_string();
+            let _ = response.send(decision);
         }
-        _ => {}
+        app.status = if decision {
+            "Confirmed".to_string()
+        } else {
+            "Cancelled".to_string()
+        };
     }
     true
 }
@@ -457,14 +443,14 @@ pub(super) fn handle_mouse(
     match mouse.kind {
         MouseEventKind::ScrollUp => {
             app.screen_selection = None;
-            if app.trust_prompt.is_none() && app.import_prompt.is_none() {
+            if app.trust_prompt.is_none() && app.confirmation_prompt.is_none() {
                 let lines = app.scroll_input.lines(ScrollDirection::Up);
                 app.scroll_from_bottom = app.scroll_from_bottom.saturating_add(lines);
             }
         }
         MouseEventKind::ScrollDown => {
             app.screen_selection = None;
-            if app.trust_prompt.is_none() && app.import_prompt.is_none() {
+            if app.trust_prompt.is_none() && app.confirmation_prompt.is_none() {
                 let lines = app.scroll_input.lines(ScrollDirection::Down);
                 app.scroll_from_bottom = app.scroll_from_bottom.saturating_sub(lines);
             }
@@ -582,38 +568,6 @@ pub(super) fn submit_editor(
         }
         app.input.clear();
         app.command_palette.get_mut().reset();
-        return;
-    }
-    if path_command_matches(&input, "/import") {
-        let requested = match path_command_argument(&input, "/import") {
-            Ok(Some(path)) if !path.is_empty() => path,
-            Ok(_) => {
-                app.input.clear();
-                app.command_palette.get_mut().reset();
-                app.status = "usage: /import <path.jsonl>".to_string();
-                return;
-            }
-            Err(error) => {
-                app.input.clear();
-                app.command_palette.get_mut().reset();
-                app.status = error;
-                return;
-            }
-        };
-        let source = crate::session_export::resolve_user_path(session.runtime().cwd(), &requested);
-        if let Err(error) = crate::session_export::validate_v4_import(&source) {
-            app.input.clear();
-            app.command_palette.get_mut().reset();
-            app.status = error;
-            return;
-        }
-        app.import_prompt = Some(ImportPromptState {
-            command: input,
-            source,
-        });
-        app.input.clear();
-        app.command_palette.get_mut().reset();
-        app.status = "Confirm session import".to_string();
         return;
     }
     app.input.clear();
@@ -937,13 +891,10 @@ pub(super) fn resume_suggestions(query: &str, choices: &[SessionChoice]) -> Vec<
         .collect()
 }
 
-pub(super) fn builtin_help_text() -> String {
-    [
+pub(super) fn builtin_help_text(command_specs: &[CommandSpec]) -> String {
+    let builtins = [
         ("/new [path]", "start a new session"),
         ("/resume [query|path]", "list or open sessions"),
-        ("/export [file]", "export session as HTML or JSONL"),
-        ("/import <file.jsonl>", "import and resume a v4 session"),
-        ("/share", "share session as a secret GitHub gist"),
         ("/reload", "reload all plugins and resources"),
         ("/trust", "change trust for this project"),
         ("/login [provider]", "configure provider authentication"),
@@ -962,14 +913,32 @@ pub(super) fn builtin_help_text() -> String {
         ("/quit", "exit"),
         ("!cmd", "run a shell command and include its output"),
         ("!!cmd", "run a shell command without including its output"),
-    ]
-    .into_iter()
-    .map(|(command, description)| format!("- `{command}` — {description}"))
-    .fold("Commands\n\n".to_string(), |mut help, line| {
-        help.push_str(&line);
-        help.push('\n');
-        help
-    })
+    ];
+    let mut lines = builtins
+        .into_iter()
+        .map(|(command, description)| format!("- `{command}` — {description}"))
+        .collect::<Vec<_>>();
+    for spec in command_specs {
+        let prefix = format!("/{}", spec.name);
+        if builtins
+            .iter()
+            .any(|(command, _)| command.split_whitespace().next() == Some(prefix.as_str()))
+        {
+            continue;
+        }
+        let command = spec
+            .argument_hint
+            .as_deref()
+            .map_or(prefix.clone(), |hint| format!("{prefix} {hint}"));
+        lines.push(format!("- `{command}` — {}", spec.description));
+    }
+    lines
+        .into_iter()
+        .fold("Commands\n\n".to_string(), |mut help, line| {
+            help.push_str(&line);
+            help.push('\n');
+            help
+        })
 }
 
 pub(super) fn model_suggestions(
@@ -1137,43 +1106,8 @@ pub(super) async fn run_effect(
             usage.cost.total,
         ));
     }
-    if path_command_matches(&input, "/export") {
-        let requested = path_command_argument(&input, "/export")?;
-        let exported = if requested
-            .as_deref()
-            .is_some_and(|path| path.ends_with(".jsonl"))
-        {
-            crate::session_export::export_jsonl(session, requested.as_deref())?
-        } else {
-            crate::session_export::export_html(session, requested.as_deref())?
-        };
-        return Ok(format!("Session exported to: {}", exported.display()));
-    }
-    if path_command_matches(&input, "/import") {
-        let requested = path_command_argument(&input, "/import")?
-            .filter(|path| !path.is_empty())
-            .ok_or_else(|| "usage: /import <path.jsonl>".to_string())?;
-        let source = crate::session_export::resolve_user_path(session.runtime().cwd(), &requested);
-        crate::session_export::validate_v4_import(&source)?;
-        let replacement = session_handle
-            .import_session(&source)
-            .await
-            .map_err(|error| error.to_string())?;
-        return Ok(match replacement {
-            pi_session::AgentSessionReplacement::Replaced => {
-                format!("Session imported from: {}", source.display())
-            }
-            pi_session::AgentSessionReplacement::Cancelled => "Import cancelled".to_string(),
-        });
-    }
-    if input == "/share" {
-        return crate::session_share::share_session(session).await;
-    }
-    if input.starts_with("/share ") {
-        return Err("usage: /share".to_string());
-    }
     if input == "/help" {
-        return Ok(builtin_help_text());
+        return Ok(builtin_help_text(&session.runtime().command_specs()));
     }
     if let Some(arguments) = input.strip_prefix("/new")
         && (arguments.is_empty() || arguments.starts_with(char::is_whitespace))
@@ -1307,43 +1241,4 @@ pub(super) async fn run_effect(
         SubmitOutcome::Queued { kind, .. } => format!("Queued {kind:?}"),
         _ => "Ready".to_string(),
     })
-}
-
-pub(super) fn path_command_matches(input: &str, command: &str) -> bool {
-    input == command
-        || input
-            .strip_prefix(command)
-            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
-}
-
-pub(super) fn path_command_argument(input: &str, command: &str) -> Result<Option<String>, String> {
-    if input == command {
-        return Ok(None);
-    }
-    let Some(rest) = input.strip_prefix(command) else {
-        return Ok(None);
-    };
-    if !rest.starts_with(char::is_whitespace) {
-        return Ok(None);
-    }
-    let argument = rest.trim();
-    if argument.is_empty() {
-        return Ok(None);
-    }
-    let Some(quote) = argument
-        .chars()
-        .next()
-        .filter(|character| matches!(character, '\'' | '"'))
-    else {
-        return Ok(Some(argument.to_string()));
-    };
-    let quoted = &argument[quote.len_utf8()..];
-    let closing = quoted
-        .find(quote)
-        .ok_or_else(|| format!("unterminated quoted path for {command}"))?;
-    let trailing = quoted[closing + quote.len_utf8()..].trim();
-    if !trailing.is_empty() {
-        return Err(format!("unexpected arguments after {command} path"));
-    }
-    Ok(Some(quoted[..closing].to_string()))
 }

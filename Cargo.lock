@@ -2726,6 +2726,7 @@ dependencies = [
  "pi-plugin-openrouter",
  "pi-plugin-prompts",
  "pi-plugin-read",
+ "pi-plugin-session-transfer",
  "pi-plugin-skills",
  "pi-plugin-write",
  "pi-plugin-xai",
@@ -2735,7 +2736,6 @@ dependencies = [
  "pi-runtime",
  "pi-session",
  "pi-settings",
- "pulldown-cmark",
  "ratatui",
  "ratatui-textarea",
  "rpassword",
@@ -3186,6 +3186,23 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "pi-plugin-session-transfer"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "pi-agent",
+ "pi-core",
+ "pi-runtime",
+ "pi-session",
+ "pi-test-support",
+ "pulldown-cmark",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -78,6 +78,7 @@ pub use plugin::{
 };
 pub use plugin_context::{
     PiPluginContext, PluginContextBinding, PluginProviderMutation, PluginProviderMutationAccess,
+    PluginUiBridge,
 };
 pub use reducer::*;
 pub use repo::{JsonlSessionRepo, list_jsonl_session_metadata, load_jsonl_session};

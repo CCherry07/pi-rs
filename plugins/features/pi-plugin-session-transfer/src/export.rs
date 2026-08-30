@@ -35,7 +35,7 @@ img { max-width:100%; height:auto; border-radius:8px; }
 @media print { body { background:#fff; } main { width:100%; margin:0; } .message,.notice { break-inside:avoid; } }
 "#;
 
-pub(crate) fn resolve_user_path(cwd: &Path, input: &str) -> PathBuf {
+pub fn resolve_user_path(cwd: &Path, input: &str) -> PathBuf {
     let path = if input == "~" {
         home_directory().unwrap_or_else(|| PathBuf::from(input))
     } else if let Some(rest) = input.strip_prefix("~/") {
@@ -52,13 +52,13 @@ pub(crate) fn resolve_user_path(cwd: &Path, input: &str) -> PathBuf {
     }
 }
 
-pub(crate) fn validate_v4_import(path: &Path) -> Result<(), String> {
+pub fn validate_session_import(path: &Path) -> Result<(), String> {
     inspect_session_file(path)
         .map(|_| ())
         .map_err(|error| format!("unsupported session format in {}: {error}", path.display()))
 }
 
-pub(crate) fn export_jsonl(
+pub fn export_jsonl(
     session: &AgentSession,
     requested_path: Option<&str>,
 ) -> Result<PathBuf, String> {
@@ -77,7 +77,14 @@ pub(crate) fn export_jsonl(
         .map_err(|error| error.to_string())
 }
 
-pub(crate) fn export_html(
+/// Exports the active branch from an existing materialized session file.
+pub fn export_jsonl_file(source: &Path, destination: &Path) -> Result<PathBuf, String> {
+    let (log, _) = pi_session::SessionLog::open(source).map_err(|error| error.to_string())?;
+    log.export_branch(destination)
+        .map_err(|error| error.to_string())
+}
+
+pub fn export_html(
     session: &AgentSession,
     requested_path: Option<&str>,
 ) -> Result<PathBuf, String> {
@@ -93,14 +100,19 @@ pub(crate) fn export_html(
     export_html_to(session, &destination)
 }
 
-pub(crate) fn export_html_to(
-    session: &AgentSession,
-    destination: &Path,
-) -> Result<PathBuf, String> {
+pub fn export_html_to(session: &AgentSession, destination: &Path) -> Result<PathBuf, String> {
     if !session.log().is_materialized() {
         return Err("nothing to export yet; start a conversation first".to_string());
     }
     let document = session.log().load().map_err(|error| error.to_string())?;
+    let rendered = render_document_html(&document).map_err(|error| error.to_string())?;
+    atomic_write(destination, rendered.as_bytes()).map_err(|error| error.to_string())?;
+    Ok(destination.to_path_buf())
+}
+
+/// Renders an existing materialized session file as standalone HTML.
+pub fn export_html_file(source: &Path, destination: &Path) -> Result<PathBuf, String> {
+    let (_, document) = pi_session::SessionLog::open(source).map_err(|error| error.to_string())?;
     let rendered = render_document_html(&document).map_err(|error| error.to_string())?;
     atomic_write(destination, rendered.as_bytes()).map_err(|error| error.to_string())?;
     Ok(destination.to_path_buf())
@@ -537,7 +549,7 @@ mod tests {
         let current = directory.path().join("current.jsonl");
         SessionLog::create(&current, SessionHeader::new("current", directory.path())).unwrap();
 
-        assert!(validate_v4_import(&legacy).is_ok());
-        assert!(validate_v4_import(&current).is_ok());
+        assert!(validate_session_import(&legacy).is_ok());
+        assert!(validate_session_import(&current).is_ok());
     }
 }

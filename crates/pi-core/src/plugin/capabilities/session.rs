@@ -399,7 +399,10 @@ pub trait SessionContextAccess: Send + Sync {
         unbound()
     }
 
-    async fn reload(&self, _scope: PluginContextScope) -> PluginContextResult<()> {
+    async fn reload(
+        &self,
+        _scope: PluginContextScope,
+    ) -> PluginContextResult<PluginContextReplacement> {
         unbound()
     }
 }
@@ -490,6 +493,18 @@ macro_rules! impl_session_context {
 
             pub fn name(&self) -> PluginContextResult<Option<String>> {
                 self.handle.access()?.session_name()
+            }
+
+            pub fn active_tools(&self) -> PluginContextResult<Vec<String>> {
+                self.handle.access()?.active_tools()
+            }
+
+            pub fn tools(&self) -> PluginContextResult<Vec<ToolSpec>> {
+                self.handle.access()?.all_tools()
+            }
+
+            pub fn commands(&self) -> PluginContextResult<Vec<CommandSpec>> {
+                self.handle.access()?.commands()
             }
 
             pub fn is_project_trusted(&self) -> PluginContextResult<bool> {
@@ -585,9 +600,24 @@ impl CommandSessionContext {
         Self::replace(replacement)
     }
 
-    pub async fn reload(&self) -> PluginContextResult<()> {
+    /// Rebuilds the product generation and returns capabilities bound to it.
+    ///
+    /// The current command context retires as part of the replacement. Use
+    /// the returned context for every operation after this call.
+    pub async fn reload(&self) -> PluginContextResult<ReplacedSessionContext> {
         let access = self.handle.access()?;
-        access.reload(self.handle.scope()).await
+        let replacement = access.reload(self.handle.scope()).await?;
+        if replacement.cancelled {
+            return Err(PluginContextError::Failed(
+                "session reload unexpectedly reported cancellation".to_string(),
+            ));
+        }
+        let handle = replacement.context.ok_or_else(|| {
+            PluginContextError::Failed(
+                "session reload did not return a product context".to_string(),
+            )
+        })?;
+        Ok(ReplacedSessionContext::new(handle))
     }
 
     fn replace(replacement: PluginContextReplacement) -> PluginContextResult<SessionReplacement> {

@@ -337,10 +337,7 @@ pub async fn execute_context_request(
         ExtensionContextRequest::SwitchSession { session_path } => {
             replacement_output(access.switch_session(context.scope(), session_path).await?)
         }
-        ExtensionContextRequest::Reload => {
-            access.reload(context.scope()).await?;
-            Ok(request_output(Value::Null))
-        }
+        ExtensionContextRequest::Reload => reload_output(access.reload(context.scope()).await?),
         ExtensionContextRequest::SetModel { provider, model_id } => Ok(request_output(value(
             access
                 .set_model(
@@ -366,6 +363,23 @@ fn replacement_output(
     Ok(ExtensionContextRequestOutput {
         value: json!({ "cancelled": replacement.cancelled }),
         replacement: replacement.context,
+    })
+}
+
+fn reload_output(
+    replacement: PluginContextReplacement,
+) -> Result<ExtensionContextRequestOutput, PluginContextError> {
+    if replacement.cancelled {
+        return Err(PluginContextError::Failed(
+            "session reload unexpectedly reported cancellation".to_string(),
+        ));
+    }
+    let context = replacement.context.ok_or_else(|| {
+        PluginContextError::Failed("session reload did not return a product context".to_string())
+    })?;
+    Ok(ExtensionContextRequestOutput {
+        value: Value::Null,
+        replacement: Some(context),
     })
 }
 
@@ -400,6 +414,18 @@ mod tests {
             &self,
             scope: PluginContextScope,
             _options: NewSessionOptions,
+        ) -> Result<PluginContextReplacement, PluginContextError> {
+            self.old.lock().unwrap().take().unwrap().retire();
+            let target: Arc<dyn PluginContext> = Arc::new(ReplacementTarget);
+            Ok(PluginContextReplacement {
+                cancelled: false,
+                context: Some(PluginContextEpoch::new(target).handle(scope)),
+            })
+        }
+
+        async fn reload(
+            &self,
+            scope: PluginContextScope,
         ) -> Result<PluginContextReplacement, PluginContextError> {
             self.old.lock().unwrap().take().unwrap().retire();
             let target: Arc<dyn PluginContext> = Arc::new(ReplacementTarget);
@@ -478,6 +504,37 @@ mod tests {
         assert_eq!(
             execute_context_query(&output.replacement.unwrap(), ExtensionContextQuery::Mode,)
                 .unwrap(),
+            json!("json")
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_requests_return_the_new_runtime_context_handle() {
+        let access = Arc::new(ReplacementContext {
+            old: Mutex::new(None),
+        });
+        let plugin_access: Arc<dyn PluginContext> = access.clone();
+        let old = PluginContextEpoch::new(plugin_access);
+        *access.old.lock().unwrap() = Some(old.clone());
+        let handle = old.handle(PluginContextScope::Command);
+
+        let output = execute_context_request(&handle, ExtensionContextRequest::Reload)
+            .await
+            .unwrap();
+
+        assert_eq!(output.value, Value::Null);
+        assert!(matches!(
+            execute_context_query(&handle, ExtensionContextQuery::Mode),
+            Err(PluginContextError::Retired)
+        ));
+        assert_eq!(
+            execute_context_query(
+                &output
+                    .replacement
+                    .expect("reload must hand off the replacement context"),
+                ExtensionContextQuery::Mode,
+            )
+            .unwrap(),
             json!("json")
         );
     }

@@ -103,8 +103,10 @@ boundaries:
    trait-surface change was introduced in native ABI 2; ABI 3 added the required hook-interest
    contract, ABI 4 adds provider header/response lifecycle hooks, ABI 5 adds the shared
    generation-bound Pi product context (including tool argument preparation), ABI 6 shares
-   cumulative assistant messages, and ABI 7 replaces per-update cumulative messages with a shared
-   live stream handle plus typed delta. Older artifacts are rejected before loading.
+   cumulative assistant messages, ABI 7 replaces per-update cumulative messages with a shared
+   live stream handle plus typed delta and requires reload to hand off fresh generation
+   capabilities, and ABI 8 adds semantic UI confirmation. Older artifacts are rejected before
+   loading.
 
 ## Updating this matrix
 

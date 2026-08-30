@@ -46,6 +46,7 @@ pi-plugin-copilot.workspace = true
 pi-plugin-bedrock.workspace = true
 pi-plugin-prompts.workspace = true
 pi-plugin-skills.workspace = true
+pi-plugin-session-transfer.workspace = true
 pi-plugin-read.workspace = true
 pi-plugin-write.workspace = true
 pi-plugin-edit.workspace = true
@@ -54,7 +55,6 @@ pi-plugin-bash.workspace = true
 pi-plugin-grep.workspace = true
 pi-plugin-find.workspace = true
 pi-plugin-ls.workspace = true
-pulldown-cmark = "0.13"
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 ratatui-textarea = { version = "0.9.2", default-features = false }
 serde = { workspace = true, features = ["derive"] }

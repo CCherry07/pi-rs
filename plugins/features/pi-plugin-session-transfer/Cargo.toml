@@ -1,0 +1,22 @@
+[package]
+name = "pi-plugin-session-transfer"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+pi-core.workspace = true
+pi-session.workspace = true
+pulldown-cmark = "0.13"
+serde_json.workspace = true
+tempfile = "3.21.0"
+tokio.workspace = true
+uuid = { version = "1.18.1", features = ["v7"] }
+
+[dev-dependencies]
+pi-agent.workspace = true
+pi-runtime.workspace = true
+pi-test-support.workspace = true

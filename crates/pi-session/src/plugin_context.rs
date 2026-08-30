@@ -34,6 +34,15 @@ pub trait PluginProviderMutationAccess: Send + Sync {
     fn has_pending(&self) -> bool;
 }
 
+/// Presentation bridge supplied by the product frontend.
+///
+/// `pi-session` owns the plugin-context adapter, while concrete terminal or
+/// graphical interaction remains outside this crate.
+#[async_trait]
+pub trait PluginUiBridge: Send + Sync {
+    async fn confirm(&self, title: String, message: String) -> Result<bool, String>;
+}
+
 #[derive(Default)]
 struct PluginContextBindingState {
     sessions: Vec<WeakPiSession>,
@@ -143,6 +152,7 @@ pub struct PiPluginContext {
     binding: PluginContextBinding,
     runtime: tokio::runtime::Handle,
     provider_mutations: Option<Arc<dyn PluginProviderMutationAccess>>,
+    ui_bridge: Option<Arc<dyn PluginUiBridge>>,
     provider_reload_gate: Arc<tokio::sync::Mutex<()>>,
     model_scope_patterns: Vec<String>,
 }
@@ -160,6 +170,7 @@ impl PiPluginContext {
             binding,
             runtime: tokio::runtime::Handle::current(),
             provider_mutations: None,
+            ui_bridge: None,
             provider_reload_gate: Arc::new(tokio::sync::Mutex::new(())),
             model_scope_patterns: Vec::new(),
         }
@@ -170,6 +181,11 @@ impl PiPluginContext {
         access: Arc<dyn PluginProviderMutationAccess>,
     ) -> Self {
         self.provider_mutations = Some(access);
+        self
+    }
+
+    pub fn with_ui_bridge(mut self, bridge: Arc<dyn PluginUiBridge>) -> Self {
+        self.ui_bridge = Some(bridge);
         self
     }
 
@@ -234,6 +250,7 @@ impl PiPluginContext {
     }
 }
 
+#[async_trait]
 impl UiContextAccess for PiPluginContext {
     fn mode(&self) -> Result<PresentationMode, PluginContextError> {
         Ok(self.mode)
@@ -246,6 +263,16 @@ impl UiContextAccess for PiPluginContext {
     fn ui_notify(&self, level: NoticeLevel, message: String) -> Result<(), PluginContextError> {
         self.session()?.notify_plugin(message, level);
         Ok(())
+    }
+
+    async fn ui_confirm(&self, title: String, message: String) -> Result<bool, PluginContextError> {
+        if !matches!(self.mode, PresentationMode::Tui) {
+            return Ok(false);
+        }
+        let bridge = self.ui_bridge.as_ref().ok_or_else(|| {
+            PluginContextError::Unavailable("interactive confirmation is not configured".into())
+        })?;
+        bridge.confirm(title, message).await.map_err(context_failed)
     }
 }
 
@@ -786,9 +813,17 @@ impl SessionContextAccess for PiPluginContext {
         Self::replacement(pi_session, scope, replacement)
     }
 
-    async fn reload(&self, scope: PluginContextScope) -> Result<(), PluginContextError> {
+    async fn reload(
+        &self,
+        scope: PluginContextScope,
+    ) -> Result<PluginContextReplacement, PluginContextError> {
         require_command(scope, "reload")?;
-        self.pi_session()?.reload().await.map_err(context_failed)
+        let pi_session = self.pi_session()?;
+        pi_session.reload().await.map_err(context_failed)?;
+        Ok(PluginContextReplacement {
+            cancelled: false,
+            context: Some(pi_session.current().runtime().plugin_context_handle(scope)),
+        })
     }
 }
 

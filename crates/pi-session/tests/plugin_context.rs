@@ -6,7 +6,8 @@ use pi_core::{
 };
 use pi_runtime::PiRuntime;
 use pi_session::{
-    AgentSession, PiPluginContext, PluginContextBinding, SessionStartEvent, SessionStartReason,
+    AgentSession, PiPluginContext, PluginContextBinding, PluginUiBridge, SessionStartEvent,
+    SessionStartReason,
 };
 use pi_test_support::ScriptedProviderPlugin;
 
@@ -21,6 +22,19 @@ struct Observation {
 struct NativeContextProbe {
     observed: Arc<Mutex<Option<Observation>>>,
     retained: Arc<Mutex<Option<InputContext>>>,
+}
+
+#[derive(Default)]
+struct RecordingUiBridge {
+    confirmations: Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl PluginUiBridge for RecordingUiBridge {
+    async fn confirm(&self, title: String, message: String) -> Result<bool, String> {
+        self.confirmations.lock().unwrap().push((title, message));
+        Ok(true)
+    }
 }
 
 #[pi_core::agent_plugin]
@@ -49,7 +63,11 @@ impl AgentPlugin for NativeContextProbe {
 async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
     let directory = tempfile::tempdir().unwrap();
     let binding = PluginContextBinding::new();
-    let access = Arc::new(PiPluginContext::new(PresentationMode::Tui, true, binding));
+    let ui_bridge = Arc::new(RecordingUiBridge::default());
+    let access = Arc::new(
+        PiPluginContext::new(PresentationMode::Tui, true, binding)
+            .with_ui_bridge(ui_bridge.clone()),
+    );
     let context_access: Arc<dyn PluginContext> = access.clone();
     let observed = Arc::new(Mutex::new(None));
     let retained = Arc::new(Mutex::new(None));
@@ -153,6 +171,32 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
     assert_eq!(
         replacement_context.session.header().unwrap()["id"],
         session.log().id()
+    );
+    assert_eq!(
+        replacement_context.session.active_tools().unwrap(),
+        session.runtime().active_tools()
+    );
+    assert_eq!(
+        replacement_context.session.tools().unwrap(),
+        session.runtime().tool_specs()
+    );
+    assert_eq!(
+        replacement_context.session.commands().unwrap(),
+        session.runtime().command_specs()
+    );
+    assert!(
+        replacement_context
+            .ui
+            .confirm("Import session?", "The current session will be replaced.")
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        ui_bridge.confirmations.lock().unwrap().as_slice(),
+        &[(
+            "Import session?".to_string(),
+            "The current session will be replaced.".to_string()
+        )]
     );
 
     let snapshot = replacement_context.session.snapshot().unwrap();

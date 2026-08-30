@@ -249,10 +249,7 @@ impl SessionLog {
             std::fs::create_dir_all(parent)?;
         }
 
-        let mutations = self.state().create_fork_mutations(&ForkOptions::Branch {
-            entry_id: None,
-            position: Some(crate::ForkPosition::At),
-        })?;
+        let mutations = self.state().create_main_branch_snapshot_mutations()?;
         let mut header = self.inner.header.clone();
         header.created_at = now_ms();
         header.parent_session_id = None;
@@ -1177,6 +1174,28 @@ mod tests {
         );
         assert_eq!(document.branch().unwrap().len(), 2);
         assert!(source_path.exists());
+    }
+
+    #[test]
+    fn exports_the_active_branch_when_its_leaf_is_not_a_message() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("source.jsonl");
+        let export_path = directory.path().join("portable.jsonl");
+        let log = SessionLog::create(&source_path, header()).unwrap();
+        log.append_message(Message::User(UserMessage::text("root", 1)))
+            .unwrap();
+        let custom = log
+            .append_custom_entry(
+                "pi.prompt_snapshot",
+                Some(serde_json::json!({"kept": true})),
+            )
+            .unwrap();
+
+        assert_eq!(log.export_branch(&export_path).unwrap(), export_path);
+
+        let (_, document) = SessionLog::open(&export_path).unwrap();
+        assert!(document.entries.iter().any(|entry| entry.id == custom));
+        assert_eq!(document.branch().unwrap().len(), 2);
     }
 
     #[test]

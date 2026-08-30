@@ -305,6 +305,12 @@ The product supports:
 - interrupted-state reduction and provider-context repair;
 - preservation of matching tool calls and tool results across persistence and replay.
 
+`/export`, `/import`, and `/share` are registered by the built-in Rust
+`SessionTransferPlugin`, not dispatched by CLI command-name branches. Storage and HTML
+serialization policy lives in that plugin; `pi-session` only exposes the session-log and migration
+primitives it composes. The TUI only renders the generic semantic confirmation used by the import
+command.
+
 `/export` writes HTML by default; a destination ending in `.jsonl` writes a portable v4 session.
 `/import` accepts Pi coding-agent v1/v2/v3 and native pi-rs v4 JSONL. Legacy files are converted into
 a new v4 destination without modifying the source; tree identity, parent links, custom messages,

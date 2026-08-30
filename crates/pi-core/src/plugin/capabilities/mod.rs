@@ -100,6 +100,7 @@ impl SessionContextAccess for UnavailablePluginContext {}
 #[async_trait]
 impl ModelsContextAccess for UnavailablePluginContext {}
 
+#[async_trait]
 impl UiContextAccess for UnavailablePluginContext {}
 
 #[cfg(test)]
