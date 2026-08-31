@@ -55,8 +55,7 @@ impl Tool for EditTool {
                 json!({
                     "type":"object","properties":{
                     "path":{"type":"string","description":"Path to the file to edit (relative or absolute)"},
-                        "edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"],"additionalProperties":false}},
-                        "oldText":{"type":"string"},"newText":{"type":"string"}
+                        "edits":{"type":"array","items":{"type":"object","properties":{"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["oldText","newText"],"additionalProperties":false}}
                     },"required":["path"],"additionalProperties":false
                 }),
             ),
@@ -94,7 +93,9 @@ impl Tool for EditTool {
             let edit = object.remove("edits").unwrap();
             object.insert("edits".to_string(), Value::Array(vec![edit]));
         }
-        if let (Some(old), Some(new)) = (object.remove("oldText"), object.remove("newText")) {
+        let has_explicit_edits = object.contains_key("edits");
+        let legacy = (object.remove("oldText"), object.remove("newText"));
+        if !has_explicit_edits && let (Some(old), Some(new)) = legacy {
             object
                 .entry("edits".to_string())
                 .or_insert_with(|| Value::Array(Vec::new()))
@@ -434,6 +435,60 @@ mod tests {
             )
             .await
     }
+
+    #[tokio::test]
+    async fn explicit_edits_take_precedence_over_legacy_fields() {
+        let (_, signal) = AbortHandle::new();
+        let prepared = EditTool
+            .prepare_arguments(
+                &ToolContext::standalone(std::path::PathBuf::from("."), signal),
+                json!({
+                    "path": "a",
+                    "edits": [{"oldText": "one", "newText": "ONE"}],
+                    "oldText": "",
+                    "newText": ""
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            prepared,
+            json!({
+                "path": "a",
+                "edits": [{"oldText": "one", "newText": "ONE"}]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_fields_are_converted_when_edits_are_absent() {
+        let (_, signal) = AbortHandle::new();
+        let prepared = EditTool
+            .prepare_arguments(
+                &ToolContext::standalone(std::path::PathBuf::from("."), signal),
+                json!({"path": "a", "oldText": "one", "newText": "ONE"}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            prepared,
+            json!({
+                "path": "a",
+                "edits": [{"oldText": "one", "newText": "ONE"}]
+            })
+        );
+    }
+
+    #[test]
+    fn schema_exposes_only_the_current_edits_shape() {
+        let parameters = EditTool.spec().parameters;
+        assert!(parameters.pointer("/properties/edits").is_some());
+        assert!(parameters.pointer("/properties/oldText").is_none());
+        assert!(parameters.pointer("/properties/newText").is_none());
+    }
+
     #[tokio::test]
     async fn supports_multiple_and_legacy_input() {
         let d = tempfile::tempdir().unwrap();
