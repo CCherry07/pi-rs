@@ -14,7 +14,8 @@ catalog, skills, and plugins all use the same production runtime.
   code, CJK/IME input, command completion, history, scrolling, whole-screen mouse selection, and
   clipboard copy.
 - **Repository-aware agent** — built-in `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`,
-  `find`, and `ls` tools for understanding and changing real projects.
+  `find`, `ls`, `memory`, and `session_search` tools for understanding projects and carrying durable
+  user-approved context between sessions.
 - **Multiple providers and models** — built-in OpenAI-compatible, OpenAI Codex, Anthropic, Google
   Gemini and Vertex, xAI, Mistral, Azure OpenAI, Amazon Bedrock, OpenRouter, and GitHub Copilot
   integrations, plus custom providers and models declared in `models.json`.
@@ -193,6 +194,7 @@ Common commands:
 | `/tree`                       | Navigate the current session tree                                     |
 | `/name [name]`                | Show or set the session name                                          |
 | `/session`                    | Show session path, ID, messages, tokens, and cost                     |
+| `/memory-local-*`             | Inspect, search, or rebuild the bundled local-memory index             |
 | `/reload`                     | Atomically rebuild plugins, models, resources, and session extensions |
 | `/trust`                      | Review or change trust for the current project                        |
 | `/copy`                       | Copy the last completed assistant response                            |
@@ -322,6 +324,231 @@ creates a non-public Gist, and prints both the viewer and Gist URLs. Set `PI_SHA
 override the default `https://pi.dev/session/` viewer. Review the transcript before sharing because
 tool output can contain source code, local paths, or credentials.
 
+## Delegated child sessions
+
+The built-in `subagent` tool delegates one task to a fresh isolated Pi session and returns the
+child's final response to the parent. It provides `scout`, `worker`, `reviewer`, `oracle`, and
+`delegate` role prompts. Independent calls emitted in the same assistant turn run through the
+normal parallel tool scheduler. Authorized children receive the same tool and may delegate
+recursively, with feature-owned limits of default depth 1, 64 cumulative children per root session,
+and 20 active children.
+The current implementation is foreground-only: the parent tool call remains open until the child
+finishes or is aborted. The frontend continues to render its original primary session.
+
+Set the global nesting limit in `<agent-dir>/extensions/subagent/config.json`; the default agent
+directory therefore uses `~/.pi/agent/extensions/subagent/config.json`:
+
+```json
+{ "maxSubagentDepth": 6 }
+```
+
+`PI_SUBAGENT_MAX_DEPTH` overrides that value for the current process when it contains a
+non-negative integer. Invalid environment values are ignored. A value of `0` disables subagent
+launches at the primary session. When neither source is set, the default is `1`. The effective limit
+is captured in each child lineage, so a running child keeps its inherited ceiling across reloads.
+
+The generation-local subagent catalog overlays the built-ins with recursively discovered Markdown
+agent definitions from `<agent-dir>/agents/` and, when project trust permits it, the nearest
+`.pi/agents/` directory. Project definitions have higher precedence and reload atomically with the
+runtime generation. Each file has a YAML frontmatter block followed by its role system prompt:
+
+```markdown
+---
+name: project-scout
+description: Inspect this project and return exact code evidence
+aliases: project-explorer
+tools: read, grep, find, ls, bash
+excludeTools: bash
+model: inherit
+thinking: off
+systemPromptMode: append
+inheritSkills: false
+skills: review-checklist
+skillPath: ./private-skills
+timeoutMs: 900000
+allowNestedSubagents: false
+maxSubagentDepth: 2
+---
+
+Inspect the assigned paths and return a concise, evidence-backed result.
+```
+
+Supported fields are `name`, `description`, `aliases`, `systemPromptMode` (`append` or `replace`),
+`allowNestedSubagents`, `maxSubagentDepth`, `tools`, `excludeTools`, `model`, `thinking`,
+`inheritSkills`, `skills`, `skillPath`, and `timeoutMs`. Custom definitions default to `replace`,
+do not inherit the normal skill catalog, and cannot delegate recursively unless they opt in. An agent-level
+`maxSubagentDepth` is an absolute, non-negative child-lineage ceiling and can only tighten the
+inherited global or parent limit. Omitted runtime fields inherit the immediate parent. `tools` is a
+strict allowlist, while an explicitly empty value selects no tools; it can never exceed the
+parent's active-tool ceiling. `excludeTools` removes exact names after inherited or explicit tool
+selection; unknown names have no effect. Aliases are accepted anywhere an agent name is selected,
+while prompts, events, and results retain the canonical name. Exact canonical names beat aliases,
+and ambiguous alias-to-alias collisions fail candidate generation.
+
+`inheritSkills: true` projects the normal generation-local skill catalog into the child. `skills`
+adds explicitly named skills regardless of inheritance. `skillPath` supplies invocation-private
+skill files or directories, resolved relative to the agent Markdown file; local matches beat the
+normal catalog and never enter the parent catalog. Missing selected skills produce non-fatal
+warnings in the subagent result. A skill-enabled explicit tool selection receives `read`
+automatically only when `read` remains inside the parent's capability ceiling and is not excluded.
+
+`timeoutMs` must be a positive integer. It bounds the foreground child execution wait after launch;
+expiration aborts the isolated session and returns a terminal `timed_out` tool result. `model` accepts `inherit`, an exact
+`provider/model`, or a bare available id that prefers the current provider. `thinking` accepts
+`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `false` for off. Invalid, ambiguous,
+unavailable, or model-incompatible selections fail before the child session is created.
+
+For copy-paste real-model verification of direct delegation, recursive children, parallel calls,
+and primary-session ownership, follow the [subagent smoke test](../../docs/subagents-smoke-test.md).
+
+## Memory
+
+The default provider follows the memory/self-improvement flow of
+[Hermes Agent](https://github.com/NousResearch/hermes-agent/tree/e629c900a87622ddcc31f67a4b4a756b239fbaf0).
+It freezes `MEMORY.md` and `USER.md` from `<agent-dir>/pi-hermes-memory/` into the session prompt.
+The `memory` tool supports add/replace/remove or atomic batches, targeting `memory` (2,200
+characters by default) or `user` (1,375). Successful writes affect subsequent session snapshots.
+If memory is full, the current Agent receives existing entries and can consolidate them and retry.
+Consolidation failures share a counter across memory/user targets within one invocation. The first
+three failures allow correction and retry; the fourth returns `done: true` and instructs the Agent
+to continue its user-facing answer without retrying memory. It does not terminate the Agent loop.
+A successful write resets the counter, and each new foreground or background invocation starts fresh.
+
+Memory review is due every 10 user requests; skill review is due every 10 model iterations, with
+skill-tool use resetting that counter. After a successful final answer, due work is combined into
+one background Agent. It inherits the effective prompt, structured history, model, and current
+provider authentication. It can read/search files, maintain memory, and create/update reusable
+skills. Shell/general file writes are denied unless explicitly opted in and active in the parent.
+The review is private: no extra resume entry, no review transcript in the dialogue, no recursive
+review. New user requests cancel it and take priority. There is no direct/isolated transport switch
+or CLI subprocess fallback.
+
+After its first provider response, a long review can summarize older context in place while
+retaining the current request and complete recent tool-call/result groups. The summary uses the
+same provider/authentication, has no tools, and shares the review's input-token/time budget. It
+cannot modify the main conversation, write a compaction record, or rotate a session. Missing model
+window metadata disables this optimization, not the review. Ordinary managed subagents skip
+automatic memory/skill reviews (including opt-in lifecycle flushes), while keeping memory injection
+and normal memory/skill tools. Reload and nested delegation preserve that distinction.
+
+Skills created through the tool are marked agent-owned. Background modifications require
+agent ownership, no external edits, no pin, and a read of the exact file in this review. Deletion
+requires verified consolidation into another skill and archives the original. Skills are stored
+under `<agent-dir>/pi-hermes-memory/skills/<slug>/SKILL.md`, or
+`<agent-dir>/projects-memory/<project>/skills/<slug>/SKILL.md` for explicit project scope.
+Reload before using a newly created `/skill:<name>` command. Project skill discovery remains
+subject to Pi project trust.
+
+Useful retained Pi commands include `/memory-insights`, `/memory-preview-context`,
+`/memory-consolidate`, `/memory-skills`, `/memory-index-sessions`, and
+`/memory-sync-markdown`. `memory_search` and `session_search` retain searchable existing data.
+These commands, project/failure notes, and optional standing instructions are Rust product
+extensions, not Hermes Agent's exact CLI. Correction regexes no longer trigger automatic writes.
+Extra pre-compaction/shutdown flushes are opt-in, off by default.
+
+Use `"provider": "local"` to select the independent semantic-memory provider described below.
+See [architecture](../../docs/architecture.md#memory-systems) for the pinned baseline, verified
+mechanisms, and remaining Rust-specific adaptations; this is not a byte-for-byte Hermes port.
+
+## Local semantic memory
+
+The built-in `memory` tool records explicit facts, preferences, decisions, instructions, and
+summaries in the current Pi v4 session before updating a local SQLite index. It supports
+`remember`, `correct`, `forget`, `list`, and `search`; `session_search` searches user/assistant text
+from active branches of sessions in the current project. Recall is injected only into the current
+provider request and is never copied into session history. Automatic capture is off, and the tool
+must not be used for passwords, API keys, tokens, private keys, or other secrets.
+
+The derived database is `<agent-dir>/memory/memory.sqlite3`. Current-session JSONL entries of type
+`pi.memory.v1` are reconciled when a session starts and settles, so an index failure does not replace
+the journal as the commit point. The user-facing management command supports:
+
+```text
+/memory-local-status                 # health and row counts
+/memory-local-list [query]           # active records in the current scopes, with provenance
+/memory-local-search <query>         # explicit search
+/memory-local-rebuild                # atomically rebuild from configured v4 session directories
+/memory-local-model-status           # local embedding assets and active ranking mode
+/memory-local-model-install          # download, verify, backfill, and activate dense recall
+/memory-local-model-backfill         # repair active records with missing vectors
+```
+
+Rebuild reads JSONL without repairing an actively written torn tail, skips legacy v1-v3 files until
+they are imported, and leaves the old index intact if any v4 source is invalid. If SQLite detects a
+corrupt database while loading the generation, pi-rs preserves it as `memory.sqlite3.corrupt-*`,
+creates a clean derived database, and reports the recovery through `/memory-local-status`; run
+`/memory-local-rebuild` to repopulate every saved session.
+
+Dense recall never triggers an implicit first-query download. Enable it either with the explicit
+model-install command or with the local provider's automatic initialization policy.
+The pinned `intfloat/multilingual-e5-small` ONNX model and tokenizer assets occupy about 465 MiB
+under `<agent-dir>/models/embeddings`. Installation verifies every SHA-256 digest before publishing
+the ready marker. Once installed, startup uses BM25 and cosine dense candidates with reciprocal-rank
+fusion; missing or invalid assets keep the existing lightweight lexical Hybrid mode. Normal startup,
+recall, and writes never access the model host, and a cached installation works offline.
+
+Run the opt-in real-model smoke test against an installed cache with:
+
+```bash
+PI_MEMORY_EMBEDDING_CACHE=<agent-dir>/models/embeddings \
+  cargo test -p pi-plugin-memory-local --test dense_model_smoke -- --ignored --nocapture
+```
+
+`<agent-dir>/memory.json` selects the provider; `settings.json` does not own durable-memory policy:
+
+```json
+{
+  "version": 1,
+  "enabled": true,
+  "provider": "hermes",
+  "providers": {},
+  "recall": {
+    "maxRecords": 8,
+    "tokenBudget": 1200,
+    "timeoutMs": 50
+  }
+}
+```
+
+Hermes settings live in `<agent-dir>/hermes-memory-config.json`; if absent, the
+`providers.hermes` object in `memory.json` is used. Relevant defaults:
+
+```json
+{
+  "memoryCharLimit": 2200,
+  "userCharLimit": 1375,
+  "nudgeInterval": 10,
+  "skillNudgeInterval": 10,
+  "reviewEnabled": true,
+  "reviewExtraTools": [],
+  "reviewMaxInputTokens": 600000,
+  "flushOnCompact": false,
+  "flushOnShutdown": false
+}
+```
+
+Set either nudge interval to 0 to disable that review trigger; `reviewEnabled: false` disables
+automatic review entirely. A nonpositive `reviewMaxInputTokens` removes the aggregate input budget,
+but review still has a 16-iteration and 120-second bound. `llmModelOverride` may name a registered
+`provider/model`; `llmThinkingOverride` overrides review reasoning. Different-model review uses a
+bounded history digest because it cannot reuse the parent's model cache.
+
+`reviewTransport`, `childExtensionPaths`, `memoryMode`, `memoryPolicyStyle`,
+`nudgeToolCalls`, `reviewRecentMessages`, and correction-pattern settings have been removed;
+there is no compatibility execution path. Do not enable shell tools through `reviewExtraTools`
+unless autonomous shell access is intended. Existing user files remain untouched.
+
+For a deterministic regression run:
+
+```sh
+cargo test -p pi-plugin-memory-hermes -p pi-runtime
+```
+
+For local experimentation, use a disposable agent directory and set `nudgeInterval` or
+`skillNudgeInterval` to 1. Finish a conversation, then inspect `/memory-insights` or
+`/memory-skills`; asking a new question should cancel an in-flight review. Do not test mutation
+against valuable production memory.
+
 ## Skills, resources, and project trust
 
 Global resources load from the agent directory. Project resources are discovered from the current
@@ -330,6 +557,7 @@ project and its ancestors using Pi-compatible precedence.
 ```text
 ~/.pi/agent/
 ├── auth.json
+├── memory.json
 ├── models.json
 ├── settings.json
 ├── trust.json

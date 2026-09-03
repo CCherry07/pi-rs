@@ -5,12 +5,16 @@ use serde_json::Value;
 
 use super::types::unbound;
 use super::{PluginContextHandle, PluginContextResult, PluginContextScope, ScopedModel};
-use crate::{ModelId, ModelSpec, ProviderId, ThinkingLevel};
+use crate::{ModelId, ModelSelection, ModelSpec, ProviderId, ThinkingLevel};
 
 /// Model-catalogue and selection access implemented by the owning product layer.
 #[doc(hidden)]
 #[async_trait]
 pub trait ModelsContextAccess: Send + Sync {
+    fn model_selection(&self) -> PluginContextResult<Option<ModelSelection>> {
+        unbound()
+    }
+
     fn model(&self) -> PluginContextResult<Option<ModelSpec>> {
         unbound()
     }
@@ -78,6 +82,10 @@ macro_rules! impl_models_context {
 
             pub fn current(&self) -> PluginContextResult<Option<ModelSpec>> {
                 self.handle.access()?.model()
+            }
+
+            pub fn selection(&self) -> PluginContextResult<Option<ModelSelection>> {
+                self.handle.access()?.model_selection()
             }
 
             pub fn scoped(&self) -> PluginContextResult<Vec<ScopedModel>> {

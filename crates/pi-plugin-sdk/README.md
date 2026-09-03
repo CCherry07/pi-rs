@@ -88,6 +88,21 @@ Session contexts also expose typed `active_tools()`, `tools()`, and `commands()`
 `context.ui.confirm(title, message)` requests a semantic yes/no decision from an interactive
 frontend and resolves to `false` in non-interactive product modes; the frontend retains all
 terminal ownership.
+
+`context.session.execution_origin()?` distinguishes `SessionExecutionOrigin::User` from a managed
+`Subagent`. The origin survives live generation replacement and nested delegation but is not a
+session wire field. Feature plugins use it for their own background-work policy; ordinary tools
+remain available. `ToolContext::run_id()` exposes the same `RunId` seen by the Agent's hooks,
+including argument preparation and execution; standalone tool contexts return `None`. Invocation
+state and observations belong to plugins, not a core type-erased state bag. Foreground plugins can
+own state between `agent_start` and `agent_end`; ephemeral callers attach fresh tool-hook-only
+plugin instances to own their private state through completion or cancellation.
+
+`context.session.complete(DirectCompletionRequest { ... }, signal).await` runs one isolated,
+tool-free provider completion using the active session model and request-time credentials. It does
+not append messages, emit agent lifecycle events, or share the main agent's tool loop. Plugins must
+keep this work bounded and supply their own cancellation signal. For side work requiring tools,
+use the ephemeral Agent entry instead.
 `Tool::prepare_arguments(&ToolContext, ...)` and `Tool::execute(ToolContext, ...)` observe the same
 runtime generation, including retirement; argument compatibility shims can therefore use the same
 typed product capabilities as execution without a separate adapter context.
@@ -214,7 +229,46 @@ unchanged content reuses one pinned handle, while a rebuilt artifact gets a new 
 The SDK also pins the `serde_json::Value` map representation used by constructor options, so feature
 unification in a host workspace cannot silently change that Rust-ABI type's layout.
 
-The current contract is native ABI **8**. ABI 8 adds async semantic confirmation to `UiContext`.
+The current contract is native ABI **15**. ABI 15 replaces core tool-run state with `ToolContext::run_id()`
+and adds explicit `EphemeralSessionRequest.plugins` attachments. ABI 14 added `EphemeralCompactionOptions`, execution-origin
+inspection, and typed invocation-private tool state (removed in ABI 15). ABI 13 extended the ephemeral Agent entry
+introduced in ABI 12 with inherited effective prompt/history, optional history-tail digest,
+invocation-local tool observations and aggregate input-token budgets. Advertised schemas remain those of the
+parent's active tools; `tools` is an execution allowlist enforced before preparation and execution.
+Model/thinking default to the parent. Provider instances, routing and request-time auth are reused.
+
+No parent agent/session hooks, UI, model-control or child-launch capabilities are given to tools;
+history is copied, never appended to the parent. There is no managed-session entry or JSONL file.
+`plugins` accepts invocation-private `AgentPlugin` instances using the ordinary Agent hook driver.
+Duplicate IDs fail before provider execution. Their `register` methods are not invoked:
+registrations come from the immutable parent generation. The driver awaits interested plugins
+in registration order, including prompt/context, Agent/turn/message, and tool hooks. Prompt and
+context patches affect only the private Agent. This structured-prompt entry does not run the
+product `input` pipeline or emit `agent_settled` or `SessionPlugin` lifecycle events.
+Normal tool blocking, argument revalidation, and result patches remain intact.
+Use an empty vector when no private hooks are needed. Stateful plugins must be constructed fresh
+for each invocation, not reused by cloning a request. The runtime releases its private plugin
+instances on all exit paths; use plugin-owned RAII for cleanup, since cancellation or dropping
+the future can bypass `agent_end`. Cleanup must not spawn detached work.
+Set a positive `timeout` and `max_tool_iterations`; awaiting returns an `EphemeralSessionOutcome`
+with completion, abort, timeout, or failure status. Cancellation and dropping the future abort the
+temporary Agent; completed tool side effects are not rolled back. The entry works inside awaited
+shutdown hooks without the session-manager lock. Use launch/wait/abort for ordinary managed
+subagents. Rebuild native plugins for the new exact-build context layout.
+
+Set `EphemeralSessionRequest.compaction` to `Some(EphemeralCompactionOptions { ... })` to compact
+only the private fork between completed tool iterations. Supply a positive pressure threshold,
+tail token budget, and summary output budget, plus protected head/tail message counts. The first
+provider replay remains untouched. Tool-free summaries reuse the pinned generation/provider/auth,
+preserve tool-call/result groups and the current request, and count input/cache usage against the
+same review budget. Summary requests use model-aware input estimates and output caps. Cancellation, timeout,
+empty/invalid/truncated summaries, and dropping the future cannot mutate the parent or create
+session records. `None` disables detached compaction; compaction policy is caller-owned.
+
+ABI 11 added tool-free direct completion to
+`SessionContext`. ABI 10 adds inherited model, thinking, and active-tool selection to fresh
+isolated sessions. ABI 9 added fresh isolated-session launch, wait, and abort to
+`SessionContext`. ABI 8 added async semantic confirmation to `UiContext`.
 Each `message_update` carries a constant-size shared
 `AssistantStream` handle and the current `StreamEvent` delta. Native hooks call `snapshot()` only
 when they need cumulative content; cloning the event no longer clones the accumulated message.
@@ -228,8 +282,8 @@ ABI 5 added the generation-bound Pi product context shared by agent, tool prepar
 command, provider, and session callbacks. ABI 4 added provider header/response hooks,
 ABI 3 added macro-derived agent hook interests, and ABI 2 added the shared `AgentContext` /
 `added_tool_names` surface. Older artifacts are rejected before any Rust-ABI constructor is
-resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 8 constructors use the
-`pi_{agent,provider,session}_plugin_create_v8` symbols. Rebuild every native plugin against the
+resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 15 constructors use the
+`pi_{agent,provider,session}_plugin_create_v15` symbols. Rebuild every native plugin against the
 current SDK after upgrading the host.
 
 Every factory call creates a fresh instance. Runtime and session reload continue to use the existing

@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 2,
+  "corpusVersion": "1.4.0-holdout-v3",
+  "corpusSeed": 24052026,
+  "suite": "small-dev",
+  "haystack": "small",
+  "backend": "sqlite-fts5-bm25",
+  "sessions": 100,
+  "records": 306,
+  "retrieval": {
+    "recallAt1": 0.9,
+    "recallAt5": 0.9,
+    "recallAt8": 0.9,
+    "allHopsRate": 0.8666666666666667,
+    "meanReciprocalRank": 0.9333333333333333,
+    "evidenceDensity": 0.175,
+    "returnedHits": 113,
+    "wrongScopeHits": 0,
+    "staleHits": 0,
+    "distractorHits": 2
+  },
+  "byLanguageRelation": {
+    "same-language": {
+      "cases": 8,
+      "recallAt5": 1.0,
+      "allHopsRate": 1.0
+    },
+    "cross-language": {
+      "cases": 4,
+      "recallAt5": 1.0,
+      "allHopsRate": 1.0
+    },
+    "mixed-language": {
+      "cases": 3,
+      "recallAt5": 0.5,
+      "allHopsRate": 0.3333333333333333
+    }
+  },
+  "byHopClass": {
+    "single-hop": {
+      "cases": 14,
+      "recallAt5": 0.9285714285714286,
+      "allHopsRate": 0.9285714285714286
+    },
+    "multi-hop": {
+      "cases": 1,
+      "recallAt5": 0.5,
+      "allHopsRate": 0.0
+    }
+  }
+}

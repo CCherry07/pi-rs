@@ -14,6 +14,7 @@ members = [
     "crates/pi-plugin-macros",
     "crates/pi-plugin-sdk",
     "crates/pi-plugin-loader",
+    "crates/pi-memory-loader",
     "crates/pi-plugin-manager",
     "crates/pi-js-package-manager",
     "crates/pi-js-plugin",
@@ -24,9 +25,13 @@ members = [
     "crates/pi-mcp",
     "bindings/pi-napi",
     "e2e",
+    "evals/pi-memory",
     "plugins/features/pi-plugin-prompts",
     "plugins/features/pi-plugin-skills",
     "plugins/features/pi-plugin-session-transfer",
+    "plugins/features/pi-plugin-memory-hermes",
+    "plugins/features/pi-plugin-memory-local",
+    "plugins/features/pi-plugin-subagents",
     "plugins/providers/pi-plugin-models",
     "plugins/providers/pi-plugin-anthropic",
     "plugins/providers/pi-plugin-openai",
@@ -83,6 +88,7 @@ pi-md = { path = "apps/pi-md" }
 pi-plugin-macros = { path = "crates/pi-plugin-macros" }
 pi-plugin-sdk = { path = "crates/pi-plugin-sdk" }
 pi-plugin-loader = { path = "crates/pi-plugin-loader" }
+pi-memory-loader = { path = "crates/pi-memory-loader" }
 pi-plugin-manager = { path = "crates/pi-plugin-manager" }
 pi-js-package-manager = { path = "crates/pi-js-package-manager" }
 pi-js-plugin = { path = "crates/pi-js-plugin" }
@@ -94,6 +100,9 @@ pi-mcp = { path = "crates/pi-mcp" }
 pi-plugin-prompts = { path = "plugins/features/pi-plugin-prompts" }
 pi-plugin-skills = { path = "plugins/features/pi-plugin-skills" }
 pi-plugin-session-transfer = { path = "plugins/features/pi-plugin-session-transfer" }
+pi-plugin-memory-hermes = { path = "plugins/features/pi-plugin-memory-hermes" }
+pi-plugin-memory-local = { path = "plugins/features/pi-plugin-memory-local" }
+pi-plugin-subagents = { path = "plugins/features/pi-plugin-subagents" }
 pi-plugin-models = { path = "plugins/providers/pi-plugin-models" }
 pi-plugin-anthropic = { path = "plugins/providers/pi-plugin-anthropic" }
 pi-plugin-openai = { path = "plugins/providers/pi-plugin-openai" }

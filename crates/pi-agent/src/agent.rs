@@ -234,6 +234,7 @@ struct AgentInner {
     next_subscription: AtomicU64,
     runtime: RwLock<Arc<AgentRuntime>>,
     session_id: RwLock<Option<String>>,
+    effective_prompt: RwLock<Option<String>>,
     config: AgentOptions,
 }
 
@@ -325,6 +326,7 @@ impl Agent {
                 next_subscription: AtomicU64::new(1),
                 runtime: RwLock::new(runtime),
                 session_id: RwLock::new(None),
+                effective_prompt: RwLock::new(None),
                 config: options,
             }),
         }
@@ -425,6 +427,17 @@ impl Agent {
         snapshot
     }
 
+    /// Last effective run prompt, including plugin contributions, without re-running hooks.
+    pub fn effective_system_prompt(&self) -> String {
+        let prompt = self
+            .inner
+            .effective_prompt
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        prompt.unwrap_or_else(|| self.runtime().system_prompt().to_string())
+    }
+
     /// Returns whether a run is active without cloning transcript state.
     pub fn is_running(&self) -> bool {
         self.inner
@@ -504,6 +517,11 @@ impl Agent {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.snapshot.system_prompt = runtime.system_prompt().to_string();
         *published = runtime;
+        *self
+            .inner
+            .effective_prompt
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         commit();
         Ok(())
     }
@@ -522,6 +540,11 @@ impl Agent {
             validate_active_tools(tools, &runtime)?;
         }
         if let Some(system_prompt) = patch.system_prompt {
+            *self
+                .inner
+                .effective_prompt
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             state.snapshot.system_prompt = system_prompt.clone();
             *self
                 .inner
@@ -589,6 +612,11 @@ impl Agent {
                 Arc::new(runtime.with_system_prompt(system_prompt));
         }
         state.snapshot = candidate;
+        *self
+            .inner
+            .effective_prompt
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.inner.steering.clear();
         self.inner.follow_up.clear();
         Ok(())
@@ -762,6 +790,12 @@ impl Agent {
             cwd: self.inner.config.cwd.clone(),
             session_id: self.session_id(),
         };
+        *self
+            .inner
+            .effective_prompt
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(context.system_prompt.clone());
         let queue_adapter: Arc<dyn AgentMessageQueues> = Arc::new(QueueAdapter {
             steering: Arc::clone(&self.inner.steering),
             follow_up: Arc::clone(&self.inner.follow_up),
@@ -809,6 +843,14 @@ impl Agent {
 
         if let Err(error) = &result {
             emit_run_failure_lifecycle(&events, &failure_signal, &failure_config, error).await;
+        }
+        if let Ok(outcome) = &result {
+            *self
+                .inner
+                .effective_prompt
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(outcome.final_context.system_prompt.clone());
         }
 
         self.finish_active_run(&completion_sender);

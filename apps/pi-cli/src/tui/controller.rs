@@ -14,6 +14,12 @@ pub(super) fn handle_key<C: ClipboardWriter>(
     sender: &tokio::sync::mpsc::UnboundedSender<EffectDone>,
     ui: &mut KeyUi<'_, C>,
 ) {
+    if handle_multi_selection_prompt_key(key, app) {
+        return;
+    }
+    if handle_selection_prompt_key(key, app) {
+        return;
+    }
     if handle_confirmation_prompt_key(key, app) {
         return;
     }
@@ -130,6 +136,274 @@ pub(super) fn handle_key<C: ClipboardWriter>(
             app.command_palette.get_mut().reset();
         }
     }
+}
+
+pub(super) fn handle_multi_selection_prompt_key(key: KeyEvent, app: &mut App) -> bool {
+    if app.multi_selection_prompt.is_none() {
+        return false;
+    }
+
+    let mut action_id = None;
+    let mut cancel = false;
+    {
+        let prompt = app
+            .multi_selection_prompt
+            .as_mut()
+            .expect("multi-selection prompt checked above");
+
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            cancel = true;
+        } else if let Some(pending_action) = prompt.pending_action.clone() {
+            match key.code {
+                KeyCode::Char('y' | 'Y') => action_id = Some(pending_action),
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    prompt.pending_action = None;
+                    prompt.summary_lines = vec!["Delete cancelled.".to_string()];
+                }
+                _ => {}
+            }
+        } else if key.code == KeyCode::Esc && prompt.focus != MultiSelectionFocus::Filters {
+            cancel = true;
+        } else if prompt.focus == MultiSelectionFocus::Filters {
+            let category_count = prompt.categories.len();
+            let draft = prompt
+                .pending_categories
+                .get_or_insert_with(|| prompt.active_categories.clone());
+            match key.code {
+                KeyCode::Esc => {
+                    prompt.pending_categories = None;
+                    prompt.focus = MultiSelectionFocus::List;
+                    prompt.summary_lines = vec!["Filter changes cancelled.".to_string()];
+                }
+                KeyCode::Up => {
+                    prompt.filter_cursor = prompt.filter_cursor.saturating_sub(1);
+                }
+                KeyCode::Down => {
+                    prompt.filter_cursor =
+                        (prompt.filter_cursor + 1).min(category_count.saturating_sub(1));
+                }
+                KeyCode::Char(' ') => {
+                    if let Some((id, _)) = prompt.categories.get(prompt.filter_cursor)
+                        && !draft.remove(id)
+                    {
+                        draft.insert(id.clone());
+                    }
+                }
+                KeyCode::Enter => {
+                    let mut applied = prompt.pending_categories.take().unwrap_or_default();
+                    let restored = applied.is_empty();
+                    if restored {
+                        applied.extend(prompt.categories.iter().map(|(id, _)| id.clone()));
+                    }
+                    prompt.active_categories = applied;
+                    prompt.focus = MultiSelectionFocus::List;
+                    prompt.summary_lines = if restored {
+                        vec![
+                            "All categories were disabled; restored all category filters."
+                                .to_string(),
+                        ]
+                    } else {
+                        vec!["Category filters applied.".to_string()]
+                    };
+                    prompt.clamp_cursor();
+                }
+                _ => {}
+            }
+        } else if prompt.focus == MultiSelectionFocus::Search {
+            match key.code {
+                KeyCode::Tab | KeyCode::Down | KeyCode::Enter => {
+                    prompt.focus = MultiSelectionFocus::List;
+                }
+                KeyCode::Backspace => {
+                    prompt.query.pop();
+                    prompt.clamp_cursor();
+                }
+                KeyCode::Char(character)
+                    if !key.modifiers.intersects(
+                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                    ) =>
+                {
+                    prompt.query.push(character);
+                    prompt.clamp_cursor();
+                }
+                _ => {}
+            }
+        } else {
+            let visible = prompt.visible_indices();
+            match key.code {
+                KeyCode::Up => prompt.cursor = prompt.cursor.saturating_sub(1),
+                KeyCode::Down => {
+                    prompt.cursor = (prompt.cursor + 1).min(visible.len().saturating_sub(1));
+                }
+                KeyCode::PageUp => prompt.cursor = prompt.cursor.saturating_sub(10),
+                KeyCode::PageDown => {
+                    prompt.cursor = (prompt.cursor + 10).min(visible.len().saturating_sub(1));
+                }
+                KeyCode::Home => prompt.cursor = 0,
+                KeyCode::End => prompt.cursor = visible.len().saturating_sub(1),
+                KeyCode::Char(' ') => {
+                    if let Some(index) = visible.get(prompt.cursor)
+                        && !prompt.selected.remove(index)
+                    {
+                        prompt.selected.insert(*index);
+                    }
+                }
+                KeyCode::Char('a') => {
+                    prompt.selected.extend(visible);
+                    prompt.summary_lines = vec![format!(
+                        "Selected {} visible skill{}.",
+                        prompt.visible_indices().len(),
+                        if prompt.visible_indices().len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    )];
+                }
+                KeyCode::Char('n') => {
+                    prompt.selected.clear();
+                    prompt.summary_lines = vec!["Cleared all selections.".to_string()];
+                }
+                KeyCode::Char('s') if !prompt.sort_modes.is_empty() => {
+                    prompt.sort_mode = (prompt.sort_mode + 1) % prompt.sort_modes.len();
+                    prompt.clamp_cursor();
+                    prompt.summary_lines = vec![format!(
+                        "Sort mode: {}.",
+                        prompt.sort_modes[prompt.sort_mode].0
+                    )];
+                }
+                KeyCode::Char('f') if !prompt.categories.is_empty() => {
+                    prompt.pending_categories = Some(prompt.active_categories.clone());
+                    prompt.filter_cursor = 0;
+                    prompt.focus = MultiSelectionFocus::Filters;
+                    prompt.summary_lines =
+                        vec!["Filter panel open: space toggle · enter apply · esc cancel.".into()];
+                }
+                KeyCode::Tab | KeyCode::Char('/') => {
+                    prompt.focus = MultiSelectionFocus::Search;
+                }
+                KeyCode::Char(character) => {
+                    if let Some(action) =
+                        prompt.actions.iter().find(|action| action.key == character)
+                    {
+                        if !action.enabled {
+                            prompt.summary_lines =
+                                vec![format!("{} is unavailable.", action.label)];
+                        } else if prompt.selected.is_empty() {
+                            prompt.summary_lines =
+                                vec!["Select one or more skills first.".to_string()];
+                        } else if let Some(template) = &action.confirmation {
+                            let read_only_count = prompt
+                                .selected
+                                .iter()
+                                .filter(|index| {
+                                    prompt.options.get(**index).is_some_and(|row| row.read_only)
+                                })
+                                .count();
+                            let count = prompt.selected.len().saturating_sub(read_only_count);
+                            if count == 0 {
+                                action_id = Some(action.id.clone());
+                            } else {
+                                let read_only_note = if read_only_count == 0 {
+                                    String::new()
+                                } else {
+                                    format!(
+                                        " ({read_only_count} external read-only item{} will be skipped)",
+                                        if read_only_count == 1 { "" } else { "s" }
+                                    )
+                                };
+                                prompt.pending_action = Some(action.id.clone());
+                                prompt.summary_lines = vec![
+                                    template
+                                        .replace("{count}", &count.to_string())
+                                        .replace("{plural}", if count == 1 { "" } else { "s" })
+                                        .replace("{read_only_note}", &read_only_note),
+                                ];
+                            }
+                        } else {
+                            action_id = Some(action.id.clone());
+                        }
+                    } else if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+                    {
+                        prompt.focus = MultiSelectionFocus::Search;
+                        prompt.query.push(character);
+                        prompt.clamp_cursor();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if cancel {
+        if let Some(mut prompt) = app.multi_selection_prompt.take()
+            && let Some(response) = prompt.response.take()
+        {
+            let _ = response.send(None);
+        }
+        app.status = "Cancelled".to_string();
+    } else if let Some(action_id) = action_id {
+        if let Some(mut prompt) = app.multi_selection_prompt.take()
+            && let Some(response) = prompt.response.take()
+        {
+            let mut selected = prompt.selected.into_iter().collect::<Vec<_>>();
+            selected.sort_unstable();
+            let mut active_categories = prompt.active_categories.into_iter().collect::<Vec<_>>();
+            active_categories.sort();
+            let _ = response.send(Some(UiMultiSelectResponse {
+                selected,
+                action_id,
+                query: prompt.query,
+                active_categories,
+                sort_mode: prompt.sort_mode,
+            }));
+        }
+        app.status = "Selection submitted".to_string();
+    }
+    true
+}
+
+pub(super) fn handle_selection_prompt_key(key: KeyEvent, app: &mut App) -> bool {
+    let Some(prompt) = app.selection_prompt.as_mut() else {
+        return false;
+    };
+    match key.code {
+        KeyCode::Up => {
+            prompt.selected = prompt.selected.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            prompt.selected = (prompt.selected + 1).min(prompt.options.len().saturating_sub(1));
+        }
+        KeyCode::Enter => {
+            let selected = prompt.selected;
+            if let Some(mut prompt) = app.selection_prompt.take()
+                && let Some(response) = prompt.response.take()
+            {
+                let _ = response.send(Some(selected));
+            }
+            app.status = "Selected".to_string();
+        }
+        KeyCode::Esc => {
+            if let Some(mut prompt) = app.selection_prompt.take()
+                && let Some(response) = prompt.response.take()
+            {
+                let _ = response.send(None);
+            }
+            app.status = "Cancelled".to_string();
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(mut prompt) = app.selection_prompt.take()
+                && let Some(response) = prompt.response.take()
+            {
+                let _ = response.send(None);
+            }
+            app.status = "Cancelled".to_string();
+        }
+        _ => {}
+    }
+    true
 }
 
 pub(super) fn handle_confirmation_prompt_key(key: KeyEvent, app: &mut App) -> bool {
@@ -443,14 +717,22 @@ pub(super) fn handle_mouse(
     match mouse.kind {
         MouseEventKind::ScrollUp => {
             app.screen_selection = None;
-            if app.trust_prompt.is_none() && app.confirmation_prompt.is_none() {
+            if app.trust_prompt.is_none()
+                && app.confirmation_prompt.is_none()
+                && app.selection_prompt.is_none()
+                && app.multi_selection_prompt.is_none()
+            {
                 let lines = app.scroll_input.lines(ScrollDirection::Up);
                 app.scroll_from_bottom = app.scroll_from_bottom.saturating_add(lines);
             }
         }
         MouseEventKind::ScrollDown => {
             app.screen_selection = None;
-            if app.trust_prompt.is_none() && app.confirmation_prompt.is_none() {
+            if app.trust_prompt.is_none()
+                && app.confirmation_prompt.is_none()
+                && app.selection_prompt.is_none()
+                && app.multi_selection_prompt.is_none()
+            {
                 let lines = app.scroll_input.lines(ScrollDirection::Down);
                 app.scroll_from_bottom = app.scroll_from_bottom.saturating_sub(lines);
             }

@@ -1582,10 +1582,16 @@ impl AgentSession {
         custom_type: impl Into<String>,
         data: Option<serde_json::Value>,
     ) -> Result<String, SessionError> {
-        let _operation = self
-            .operation_gate
-            .try_lock()
-            .map_err(|_| SessionError::Busy)?;
+        // Agent/tool callbacks run inside the prompt operation and need to
+        // journal extension state before returning their tool result. The
+        // SessionLog owns atomic mutation sequencing, so this one entry type
+        // may append while a real agent run holds the outer operation gate.
+        // Other busy operations (compaction, replacement, tree navigation)
+        // remain excluded because they have no active run.
+        let operation = self.operation_gate.try_lock().ok();
+        if operation.is_none() && !self.runtime.agent().is_running() {
+            return Err(SessionError::Busy);
+        }
         self.ensure_open()?;
         let entry = SessionEntry::Custom(CustomEntry {
             custom_type: custom_type.into(),
@@ -2237,6 +2243,7 @@ impl AgentSession {
                             ),
                             now_ms(),
                         ))],
+                        model: None,
                         thinking_level: self.runtime.agent().state().thinking_level,
                         thinking_budgets: self.runtime.agent().thinking_budgets(),
                         max_output_tokens: Some(2_048),

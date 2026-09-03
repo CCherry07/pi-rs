@@ -5,6 +5,26 @@ use serde_json::Value;
 
 use crate::{DeferredHandle, ModelId, ProviderId, Usage, UsageCost};
 
+/// Exact provider/model pair selected for one runtime.
+///
+/// This value carries selection identity only. Catalogue metadata and routing
+/// credentials remain generation-local responsibilities of the owning host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSelection {
+    pub provider: ProviderId,
+    pub model_id: ModelId,
+}
+
+impl ModelSelection {
+    pub fn new(provider: impl Into<ProviderId>, model_id: impl Into<ModelId>) -> Self {
+        Self {
+            provider: provider.into(),
+            model_id: model_id.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelInput {
@@ -122,6 +142,21 @@ impl ModelSpec {
             compat: None,
         }
     }
+
+    /// Whether this model accepts the product's semantic thinking level.
+    ///
+    /// Missing map entries use Pi's common reasoning defaults. The extended
+    /// `xhigh` and `max` levels require an explicit catalogue mapping.
+    pub fn supports_thinking_level(&self, level: ThinkingLevel) -> bool {
+        if !self.reasoning {
+            return level == ThinkingLevel::Off;
+        }
+        match self.thinking_level_map.get(level.as_str()) {
+            Some(None) => false,
+            Some(Some(_)) => true,
+            None => !matches!(level, ThinkingLevel::XHigh | ThinkingLevel::Max),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -193,6 +228,23 @@ mod cost_tests {
         assert_eq!(calculated.cache_read, 0.000_04);
         assert_eq!(calculated.cache_write, 0.000_612_5);
         assert_eq!(calculated.total, 0.001_272_5);
+    }
+
+    #[test]
+    fn thinking_support_uses_reasoning_and_explicit_extended_levels() {
+        let mut model = ModelSpec::new("test", "reasoning", "Reasoning", "test");
+        assert!(model.supports_thinking_level(ThinkingLevel::Off));
+        assert!(!model.supports_thinking_level(ThinkingLevel::Low));
+
+        model.reasoning = true;
+        assert!(model.supports_thinking_level(ThinkingLevel::Low));
+        assert!(!model.supports_thinking_level(ThinkingLevel::Max));
+        model
+            .thinking_level_map
+            .insert("max".to_string(), Some("max".to_string()));
+        assert!(model.supports_thinking_level(ThinkingLevel::Max));
+        model.thinking_level_map.insert("off".to_string(), None);
+        assert!(!model.supports_thinking_level(ThinkingLevel::Off));
     }
 }
 

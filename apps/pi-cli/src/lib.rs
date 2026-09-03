@@ -36,6 +36,8 @@ pub(crate) struct ResolvedProjectTrust {
 pub(crate) struct InteractiveRequestReceivers {
     project_trust: mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
     plugin_confirmation: mpsc::UnboundedReceiver<plugin_ui::PluginConfirmationRequest>,
+    plugin_selection: mpsc::UnboundedReceiver<plugin_ui::PluginSelectionRequest>,
+    plugin_multi_selection: mpsc::UnboundedReceiver<plugin_ui::PluginMultiSelectionRequest>,
 }
 
 impl ResolvedProjectTrust {
@@ -191,7 +193,12 @@ async fn run(
     let agent_dir = config.agent_dir.clone();
     let session_path = config.session_path.clone();
     let plugin_context_binding = PluginContextBinding::new();
-    let (plugin_ui, plugin_confirmation_requests) = plugin_ui::PluginUiService::channel();
+    let (
+        plugin_ui,
+        plugin_confirmation_requests,
+        plugin_selection_requests,
+        plugin_multi_selection_requests,
+    ) = plugin_ui::PluginUiService::channel();
     let mut factory =
         session_factory::ProductSessionFactory::new(config, trust.service.clone(), settings)
             .with_plugin_context(cli_mode.presentation_mode(), plugin_context_binding.clone())
@@ -208,6 +215,8 @@ async fn run(
         // normal non-interactive request channel semantics.
         let _trust_requests = trust.requests;
         let _plugin_confirmation_requests = plugin_confirmation_requests;
+        let _plugin_selection_requests = plugin_selection_requests;
+        let _plugin_multi_selection_requests = plugin_multi_selection_requests;
         let result = tokio::select! {
             result = pi_acp::serve_stdio(
                 sessions.clone(),
@@ -232,6 +241,8 @@ async fn run(
         InteractiveRequestReceivers {
             project_trust: trust.requests,
             plugin_confirmation: plugin_confirmation_requests,
+            plugin_selection: plugin_selection_requests,
+            plugin_multi_selection: plugin_multi_selection_requests,
         },
         agent_dir,
         Some(plugin_context_binding),
@@ -265,6 +276,7 @@ fn split_extension_flags(
         "cwd",
         "session",
         "model",
+        "thinking",
         "base-url",
         "api-key",
         "provider",
@@ -280,6 +292,7 @@ fn split_extension_flags(
         "cwd",
         "session",
         "model",
+        "thinking",
         "base-url",
         "api-key",
         "provider",

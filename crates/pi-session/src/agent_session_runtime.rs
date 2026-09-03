@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use pi_core::AgentPlugin;
-use pi_runtime::PiRuntimeBuilder;
+use pi_core::{AgentPlugin, ModelSelection, ThinkingLevel};
+use pi_runtime::{PiRuntime, PiRuntimeBuilder};
 use tokio::sync::{Mutex, watch};
 
 use crate::{
@@ -76,6 +76,7 @@ type OverlayAgentPlugin = Arc<dyn Fn() -> Arc<dyn AgentPlugin> + Send + Sync>;
 #[derive(Clone, Default)]
 pub struct SessionGenerationOverlay {
     agent_plugins: Vec<OverlayAgentPlugin>,
+    execution_origin: pi_core::SessionExecutionOrigin,
 }
 
 impl std::fmt::Debug for SessionGenerationOverlay {
@@ -83,6 +84,7 @@ impl std::fmt::Debug for SessionGenerationOverlay {
         formatter
             .debug_struct("SessionGenerationOverlay")
             .field("agent_plugins", &self.agent_plugins.len())
+            .field("execution_origin", &self.execution_origin)
             .finish()
     }
 }
@@ -90,6 +92,13 @@ impl std::fmt::Debug for SessionGenerationOverlay {
 impl SessionGenerationOverlay {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Provenance follows the live handle across replacement and reload, not
+    /// the persisted parent-session pointer (a user fork is still user work).
+    pub fn with_execution_origin(mut self, origin: pi_core::SessionExecutionOrigin) -> Self {
+        self.execution_origin = origin;
+        self
     }
 
     /// Adds one session-local agent plugin that is rebuilt for every runtime generation.
@@ -103,6 +112,7 @@ impl SessionGenerationOverlay {
 
     /// Applies the opaque session-local additions to a product runtime builder.
     pub fn apply_to(&self, mut builder: PiRuntimeBuilder) -> PiRuntimeBuilder {
+        builder = builder.execution_origin(self.execution_origin);
         for plugin in &self.agent_plugins {
             let plugin = Arc::clone(plugin);
             builder = builder.try_agent_plugin_arc_factory(move || {
@@ -118,6 +128,58 @@ pub struct AgentSessionRuntimeRequest {
     pub target: AgentSessionRuntimeTarget,
     pub start_event: SessionStartEvent,
     pub generation_overlay: SessionGenerationOverlay,
+    /// Complete initial state for a fresh runtime. Product factories must
+    /// apply it before preparing the new session so its first persisted
+    /// configuration and provider request agree.
+    pub initial_state: Option<AgentSessionInitialState>,
+}
+
+/// Fully resolved initial runtime state for a fresh agent session.
+///
+/// This type is product-policy agnostic: isolated-session inheritance and
+/// capability ceilings are resolved by the owning multi-session host before
+/// the runtime factory receives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSessionInitialState {
+    pub model: ModelSelection,
+    /// Allows product policy to distinguish an explicit child selection from
+    /// faithful inheritance of a model already accepted by the parent.
+    pub model_source: AgentSessionInitialModelSource,
+    pub thinking_level: ThinkingLevel,
+    pub active_tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentSessionInitialModelSource {
+    Inherited,
+    Requested,
+}
+
+impl AgentSessionInitialState {
+    /// Applies the complete state to a built runtime before session creation.
+    pub fn apply_to(&self, runtime: &PiRuntime) -> Result<(), SessionError> {
+        if let Some(model) = runtime.model(&self.model.provider, &self.model.model_id)
+            && !model.supports_thinking_level(self.thinking_level)
+        {
+            return Err(SessionError::Runtime(format!(
+                "thinking level {} is unsupported by {}/{}",
+                self.thinking_level.as_str(),
+                self.model.provider,
+                self.model.model_id
+            )));
+        }
+        let current = runtime.agent().state();
+        if current.provider_id != self.model.provider || current.model_id != self.model.model_id {
+            runtime.set_model(self.model.provider.clone(), self.model.model_id.clone())?;
+        }
+        if current.thinking_level != self.thinking_level {
+            runtime.set_thinking_level(self.thinking_level)?;
+        }
+        if current.active_tools != self.active_tools {
+            runtime.set_active_tools(self.active_tools.clone())?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -278,6 +340,24 @@ impl AgentSessionRuntime {
     where
         F: AgentSessionRuntimeFactory + 'static,
     {
+        Self::create_with_overlay_and_initial_state(
+            factory,
+            initial_target,
+            generation_overlay,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn create_with_overlay_and_initial_state<F>(
+        factory: F,
+        initial_target: AgentSessionRuntimeTarget,
+        generation_overlay: SessionGenerationOverlay,
+        initial_state: Option<AgentSessionInitialState>,
+    ) -> Result<Self, AgentSessionRuntimeError>
+    where
+        F: AgentSessionRuntimeFactory + 'static,
+    {
         let factory: Arc<dyn AgentSessionRuntimeFactory> = Arc::new(factory);
         let start_event = SessionStartEvent {
             reason: SessionStartReason::Startup,
@@ -288,6 +368,7 @@ impl AgentSessionRuntime {
                 target: initial_target,
                 start_event: start_event.clone(),
                 generation_overlay: generation_overlay.clone(),
+                initial_state,
             })
             .await?;
         let session = prepared.activate(start_event).await;
@@ -372,6 +453,7 @@ impl AgentSessionRuntime {
                     previous_session_file: Some(previous_session_file),
                 },
                 generation_overlay: self.generation_overlay.clone(),
+                initial_state: None,
             },
             SessionShutdownEvent {
                 reason: SessionShutdownReason::New,
@@ -411,6 +493,7 @@ impl AgentSessionRuntime {
                     previous_session_file: Some(previous_session_file),
                 },
                 generation_overlay: self.generation_overlay.clone(),
+                initial_state: None,
             },
             SessionShutdownEvent {
                 reason: SessionShutdownReason::Resume,
@@ -455,6 +538,7 @@ impl AgentSessionRuntime {
                     previous_session_file: Some(previous_session_file),
                 },
                 generation_overlay: self.generation_overlay.clone(),
+                initial_state: None,
             },
             SessionShutdownEvent {
                 reason: SessionShutdownReason::Resume,
@@ -518,6 +602,7 @@ impl AgentSessionRuntime {
                 target: AgentSessionRuntimeTarget::reuse_log(fork),
                 start_event: start_event.clone(),
                 generation_overlay: self.generation_overlay.clone(),
+                initial_state: None,
             })
             .await
         {
@@ -560,6 +645,7 @@ impl AgentSessionRuntime {
                     previous_session_file: None,
                 },
                 generation_overlay: self.generation_overlay.clone(),
+                initial_state: None,
             },
             SessionShutdownEvent {
                 reason: SessionShutdownReason::Reload,

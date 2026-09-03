@@ -18,6 +18,7 @@ mod agent_session_runtime;
 mod compaction;
 mod context;
 mod event;
+mod isolated_session;
 mod jsonl;
 mod legacy_import;
 mod memory;
@@ -38,9 +39,9 @@ pub use agent_session::{
     SessionRuntimeInventory, ShellExecutionOptions, SubmitOutcome, read_prompt_snapshot,
 };
 pub use agent_session_runtime::{
-    AgentSessionReplacement, AgentSessionRuntime, AgentSessionRuntimeError,
-    AgentSessionRuntimeFactory, AgentSessionRuntimeRequest, AgentSessionRuntimeTarget,
-    SessionGenerationOverlay,
+    AgentSessionInitialModelSource, AgentSessionInitialState, AgentSessionReplacement,
+    AgentSessionRuntime, AgentSessionRuntimeError, AgentSessionRuntimeFactory,
+    AgentSessionRuntimeRequest, AgentSessionRuntimeTarget, SessionGenerationOverlay,
 };
 pub use compaction::*;
 pub use context::{

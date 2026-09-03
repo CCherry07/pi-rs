@@ -201,6 +201,7 @@ impl CompactionCompleter for PiRuntime {
                         request.prompt,
                         crate::now_ms(),
                     ))],
+                    model: None,
                     thinking_level: request.thinking_level,
                     thinking_budgets: self.agent().thinking_budgets(),
                     max_output_tokens: Some(request.max_output_tokens),

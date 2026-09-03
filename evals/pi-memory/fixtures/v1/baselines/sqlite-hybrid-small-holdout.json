@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 2,
+  "corpusVersion": "1.4.0-holdout-v3",
+  "corpusSeed": 24052026,
+  "suite": "small-holdout",
+  "haystack": "small",
+  "backend": "sqlite-hybrid-lexical",
+  "sessions": 100,
+  "records": 306,
+  "retrieval": {
+    "recallAt1": 0.7333333333333333,
+    "recallAt5": 0.7666666666666667,
+    "recallAt8": 0.7666666666666667,
+    "allHopsRate": 0.7333333333333333,
+    "meanReciprocalRank": 0.7666666666666667,
+    "evidenceDensity": 0.6333333333333333,
+    "returnedHits": 20,
+    "wrongScopeHits": 0,
+    "staleHits": 0,
+    "distractorHits": 0
+  },
+  "byLanguageRelation": {
+    "same-language": {
+      "cases": 5,
+      "recallAt5": 1.0,
+      "allHopsRate": 1.0
+    },
+    "cross-language": {
+      "cases": 8,
+      "recallAt5": 0.75,
+      "allHopsRate": 0.75
+    },
+    "mixed-language": {
+      "cases": 2,
+      "recallAt5": 0.25,
+      "allHopsRate": 0.0
+    }
+  },
+  "byHopClass": {
+    "single-hop": {
+      "cases": 14,
+      "recallAt5": 0.7857142857142857,
+      "allHopsRate": 0.7857142857142857
+    },
+    "multi-hop": {
+      "cases": 1,
+      "recallAt5": 0.5,
+      "allHopsRate": 0.0
+    }
+  }
+}

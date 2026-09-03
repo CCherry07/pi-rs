@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::types::unbound;
@@ -13,7 +14,256 @@ use super::{
     PluginContextError, PluginContextHandle, PluginContextReplacement, PluginContextResult,
     PluginContextScope, SendMessageOptions, SendUserMessageOptions,
 };
-use crate::{CommandSpec, CustomMessageContent, CustomMessageInput, ToolSpec};
+use crate::{
+    AbortSignal, AssistantMessage, CommandSpec, CustomMessageContent, CustomMessageInput, Message,
+    ModelSelection, ThinkingLevel, ToolSpec,
+};
+
+/// Stable identity for one independently running session launched from a
+/// plugin context.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct IsolatedSessionId(String);
+
+impl IsolatedSessionId {
+    #[doc(hidden)]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Input for a fresh session that runs independently of the caller's current
+/// [`crate::SessionContext`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsolatedSessionRequest {
+    pub input: CustomMessageContent,
+    #[serde(default)]
+    pub options: IsolatedSessionOptions,
+}
+
+/// A single tool-free provider completion requested by a plugin.
+///
+/// It deliberately does not alter the parent transcript or emit Agent
+/// lifecycle events. An omitted model uses the active session model; provider
+/// credentials are still resolved at request time. An omitted thinking level
+/// inherits the session's current selection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DirectCompletionRequest {
+    pub system_prompt: String,
+    pub messages: Vec<Message>,
+    pub model: Option<ModelSelection>,
+    pub thinking_level: Option<ThinkingLevel>,
+    pub max_output_tokens: Option<u64>,
+}
+
+/// Transient execution provenance, set by the host rather than inferred from
+/// prompts, paths, or the persisted session's parent pointer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionExecutionOrigin {
+    #[default]
+    User,
+    Subagent,
+}
+
+/// Token and retention policy for private, in-place context compaction.
+/// Policy is supplied by the caller; the runtime owns safe cut points and the
+/// detached, tool-free summarization request. The first Agent request is never
+/// compacted, preserving the inherited prompt-cache prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EphemeralCompactionOptions {
+    pub threshold_tokens: u64,
+    pub retained_head_messages: usize,
+    pub retained_tail_messages: usize,
+    pub retained_tail_tokens: u64,
+    pub max_summary_tokens: u64,
+}
+
+/// One bounded, in-memory tool loop using the calling generation's providers.
+/// Executable tools must be a subset of the parent's active tools; advertised
+/// schemas stay intact. History may be copied but never mutates the parent.
+/// Parent hooks, UI and nested-session capabilities are not inherited.
+#[derive(Clone)]
+pub struct EphemeralSessionRequest {
+    /// None inherits the parent's effective (already assembled) prompt.
+    pub system_prompt: Option<String>,
+    /// Diagnostic label for denied tool calls; not an authorization signal.
+    pub origin: String,
+    pub inherit_history: bool,
+    /// Optional bounded replay: summarize older text, retaining a balanced
+    /// tail of at least this many structured messages. None replays verbatim.
+    pub history_tail: Option<usize>,
+    pub messages: Vec<Message>,
+    /// Execution allowlist, not a replacement for advertised tool definitions.
+    pub tools: Vec<String>,
+    /// Invocation-private [`crate::AgentPlugin`] instances. The ordinary Agent
+    /// driver awaits interested plugins in this vector's order; there is no
+    /// separate allowlist of hook kinds.
+    ///
+    /// # Hooks emitted by the private Agent
+    ///
+    /// | Hook(s) | Behavior |
+    /// | --- | --- |
+    /// | `before_agent_start` | Patch the system prompt or append input messages. |
+    /// | `agent_start`, `agent_end` | Observe the start/end of one Agent run. |
+    /// | `turn_start`, `turn_end` | Observe each model-response/tool-processing turn. |
+    /// | `context` | Patch the messages the Agent is about to send to the model. |
+    /// | `message_start`, `message_update`, `message_end` | Observe messages/assistant streaming; `message_end` may replace a message with one of the same role. |
+    /// | `tool_call` | Patch validated arguments or block a tool call before execution. Patched arguments are revalidated. |
+    /// | `tool_result` | Inspect or patch a tool's result after execution. |
+    /// | `tool_execution_start`, `tool_execution_update`, `tool_execution_end` | Observe tool dispatch/progress/completion without patching the result. |
+    ///
+    /// Hooks follow actual events, not a mandatory checklist. `message_update`
+    /// requires assistant stream events; `tool_execution_update` requires tool
+    /// progress. `tool_call` runs after argument preparation and validation.
+    /// `tool_result` is skipped when a call is rejected before execution, e.g.
+    /// by the execution allowlist, invalid arguments, or a blocking hook.
+    ///
+    /// # Entry-point boundaries
+    ///
+    /// - `input` and `agent_settled` may be declared but are not emitted: this
+    ///   entry bypasses product input and session-settled orchestration.
+    /// - `SessionPlugin` lifecycle hooks (`session_*`) are not attached here;
+    ///   the private Agent has no managed session or session log.
+    /// - `register()` is not called. Tools/commands come from the immutable
+    ///   pinned generation; duplicate private plugin IDs fail before a provider
+    ///   request. Parent Agent hooks are not inherited. Provider hooks are
+    ///   reused from that generation, not supplied through this field.
+    /// - Callback contexts expose event data, `run_id`, `cwd`, and cancellation,
+    ///   but their `session`, `models`, and `ui` capabilities are unavailable.
+    ///   Prompt/context patches affect only the private Agent.
+    ///
+    /// Cancellation, timeout, or dropping the run future may bypass terminal
+    /// hooks such as `agent_end`. Use plugin-owned `Drop`/RAII for cleanup, not
+    /// an end callback alone. Construct fresh stateful instances per execution:
+    /// cloning this request clones the plugin Arcs, not their underlying state.
+    pub plugins: Vec<Arc<dyn crate::AgentPlugin>>,
+    pub model: Option<ModelSelection>,
+    pub thinking_level: Option<ThinkingLevel>,
+    pub max_tool_iterations: usize,
+    pub max_input_tokens: Option<u64>,
+    /// None disables automatic compaction. No summary, compaction record or
+    /// compressor state is ever written to the parent session.
+    pub compaction: Option<EphemeralCompactionOptions>,
+    pub timeout: std::time::Duration,
+}
+
+impl std::fmt::Debug for EphemeralSessionRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EphemeralSessionRequest")
+            .field("system_prompt", &self.system_prompt)
+            .field("origin", &self.origin)
+            .field("inherit_history", &self.inherit_history)
+            .field("history_tail", &self.history_tail)
+            .field("messages", &self.messages)
+            .field("tools", &self.tools)
+            .field(
+                "plugins",
+                &self
+                    .plugins
+                    .iter()
+                    .map(|plugin| plugin.id())
+                    .collect::<Vec<_>>(),
+            )
+            .field("model", &self.model)
+            .field("thinking_level", &self.thinking_level)
+            .field("max_tool_iterations", &self.max_tool_iterations)
+            .field("max_input_tokens", &self.max_input_tokens)
+            .field("compaction", &self.compaction)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EphemeralSessionStatus {
+    Completed,
+    Aborted,
+    TimedOut,
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct EphemeralSessionOutcome {
+    pub messages: Vec<Message>,
+    pub status: EphemeralSessionStatus,
+}
+
+/// Initial runtime selections for a fresh isolated session.
+///
+/// An omitted field inherits the corresponding selection from the calling
+/// session. `Some(Vec::new())` explicitly starts with no active tools.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsolatedSessionOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<ThinkingLevel>,
+}
+
+impl IsolatedSessionRequest {
+    pub fn new(input: CustomMessageContent) -> Self {
+        Self {
+            input,
+            options: IsolatedSessionOptions::default(),
+        }
+    }
+
+    pub fn options(mut self, options: IsolatedSessionOptions) -> Self {
+        self.options = options;
+        self
+    }
+}
+
+/// Terminal result of an independently running session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsolatedSessionOutcome {
+    pub session_id: String,
+    pub messages: Vec<Message>,
+    pub aborted: bool,
+}
+
+/// Generation-bound control handle for one independently running session.
+///
+/// The launched session is owned by the product session manager. This handle
+/// deliberately exposes no concrete `AgentSession` or `PiSession` value.
+#[derive(Clone)]
+pub struct IsolatedSessionHandle {
+    id: IsolatedSessionId,
+    context: PluginContextHandle,
+}
+
+impl IsolatedSessionHandle {
+    fn new(id: IsolatedSessionId, context: PluginContextHandle) -> Self {
+        Self { id, context }
+    }
+
+    pub fn id(&self) -> &IsolatedSessionId {
+        &self.id
+    }
+
+    pub async fn wait(&self) -> PluginContextResult<IsolatedSessionOutcome> {
+        let access = self.context.access()?;
+        access
+            .wait_for_isolated_session(self.context.scope(), self.id.clone())
+            .await
+    }
+
+    pub fn abort(&self) -> PluginContextResult<()> {
+        self.context
+            .access()?
+            .abort_isolated_session(self.context.scope(), self.id.clone())
+    }
+}
 
 /// Stable semantic category for one entry exposed through a [`SessionSnapshot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +493,10 @@ pub trait SessionContextAccess: Send + Sync {
         unbound()
     }
 
+    fn execution_origin(&self) -> PluginContextResult<SessionExecutionOrigin> {
+        unbound()
+    }
+
     fn session_file(&self) -> PluginContextResult<Option<PathBuf>> {
         unbound()
     }
@@ -365,6 +619,49 @@ pub trait SessionContextAccess: Send + Sync {
         unbound()
     }
 
+    /// Runs a tool-free completion without changing the parent session.
+    async fn complete(
+        &self,
+        _scope: PluginContextScope,
+        _request: DirectCompletionRequest,
+        _signal: AbortSignal,
+    ) -> PluginContextResult<AssistantMessage> {
+        unbound()
+    }
+
+    async fn run_ephemeral(
+        &self,
+        _scope: PluginContextScope,
+        _request: EphemeralSessionRequest,
+        _signal: AbortSignal,
+    ) -> PluginContextResult<EphemeralSessionOutcome> {
+        unbound()
+    }
+
+    async fn launch_isolated_session(
+        &self,
+        _scope: PluginContextScope,
+        _request: IsolatedSessionRequest,
+    ) -> PluginContextResult<IsolatedSessionId> {
+        unbound()
+    }
+
+    async fn wait_for_isolated_session(
+        &self,
+        _scope: PluginContextScope,
+        _id: IsolatedSessionId,
+    ) -> PluginContextResult<IsolatedSessionOutcome> {
+        unbound()
+    }
+
+    fn abort_isolated_session(
+        &self,
+        _scope: PluginContextScope,
+        _id: IsolatedSessionId,
+    ) -> PluginContextResult<()> {
+        unbound()
+    }
+
     async fn new_session(
         &self,
         _scope: PluginContextScope,
@@ -451,6 +748,10 @@ macro_rules! impl_session_context {
                 self.handle.access()?.session_id()
             }
 
+            pub fn execution_origin(&self) -> PluginContextResult<SessionExecutionOrigin> {
+                self.handle.access()?.execution_origin()
+            }
+
             pub fn file(&self) -> PluginContextResult<Option<PathBuf>> {
                 self.handle.access()?.session_file()
             }
@@ -535,8 +836,54 @@ macro_rules! impl_session_context {
                 self.handle.access()?.compact(options)
             }
 
+            /// Appends an extension-defined entry to the canonical session
+            /// journal without projecting it into provider context.
+            pub fn append_entry(
+                &self,
+                custom_type: impl Into<String>,
+                data: Option<Value>,
+            ) -> PluginContextResult<()> {
+                self.handle.access()?.append_entry(custom_type.into(), data)
+            }
+
             pub fn system_prompt(&self) -> PluginContextResult<String> {
                 self.handle.access()?.system_prompt()
+            }
+
+            /// Runs a tool-free provider completion without changing this
+            /// session's transcript or emitting Agent lifecycle events.
+            pub async fn complete(
+                &self,
+                request: DirectCompletionRequest,
+                signal: AbortSignal,
+            ) -> PluginContextResult<AssistantMessage> {
+                let access = self.handle.access()?;
+                access.complete(self.handle.scope(), request, signal).await
+            }
+
+            /// Runs a bounded ephemeral session without acquiring a managed
+            /// session slot. Safe to await from compaction/shutdown hooks.
+            pub async fn run_ephemeral(
+                &self,
+                request: EphemeralSessionRequest,
+                signal: AbortSignal,
+            ) -> PluginContextResult<EphemeralSessionOutcome> {
+                self.handle
+                    .access()?
+                    .run_ephemeral(self.handle.scope(), request, signal)
+                    .await
+            }
+
+            /// Launches a fresh session without replacing the current one.
+            pub async fn launch_isolated_session(
+                &self,
+                request: IsolatedSessionRequest,
+            ) -> PluginContextResult<IsolatedSessionHandle> {
+                let access = self.handle.access()?;
+                let id = access
+                    .launch_isolated_session(self.handle.scope(), request)
+                    .await?;
+                Ok(IsolatedSessionHandle::new(id, self.handle.clone()))
             }
         }
     };

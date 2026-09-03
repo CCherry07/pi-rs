@@ -12,6 +12,7 @@ pub struct ProviderStatus {
 }
 
 /// Read-only provider and model snapshot for one runtime generation.
+#[derive(Clone)]
 pub struct ModelRuntime {
     providers: HashMap<ProviderId, (PluginId, Arc<dyn Provider>)>,
     models: HashMap<ModelKey, (PluginId, ModelSpec)>,

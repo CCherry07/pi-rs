@@ -284,7 +284,11 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, app: &App, palette: UiPalette
     if root.is_empty() {
         return;
     }
-    if let Some(prompt) = &app.confirmation_prompt {
+    if let Some(prompt) = &app.multi_selection_prompt {
+        draw_multi_selection_prompt(frame, prompt);
+    } else if let Some(prompt) = &app.selection_prompt {
+        draw_selection_prompt(frame, &prompt.title, &prompt.options, prompt.selected);
+    } else if let Some(prompt) = &app.confirmation_prompt {
         draw_confirmation_prompt(frame, &prompt.title, &prompt.message);
     } else if let Some(prompt) = &app.trust_prompt {
         draw_project_trust_prompt(frame, &prompt.cwd, &prompt.options, prompt.selected);
@@ -314,6 +318,229 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, app: &App, palette: UiPalette
             selection_background(palette.terminal_appearance),
         );
     }
+}
+
+pub(super) fn draw_multi_selection_prompt(
+    frame: &mut ratatui::Frame<'_>,
+    prompt: &MultiSelectionPromptState,
+) {
+    let root = frame.area();
+    frame.render_widget(Clear, root);
+    let area = inset(root, horizontal_gutter(root.width).saturating_add(1));
+    let visible = prompt.visible_indices();
+    let sort_label = prompt
+        .sort_modes
+        .get(prompt.sort_mode)
+        .map_or("default", |(label, _)| label.as_str());
+    let focus_label = match prompt.focus {
+        MultiSelectionFocus::Search => "search",
+        MultiSelectionFocus::List => "list",
+        MultiSelectionFocus::Filters => "filters",
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            prompt.title.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+        Line::from(format!(
+            "{focus_label}: {}{}",
+            prompt.query,
+            if prompt.focus == MultiSelectionFocus::Search {
+                "▏"
+            } else {
+                ""
+            }
+        )),
+        Line::from(Span::styled(
+            format!(
+                "{} visible · {} total · {} selected · sort: {sort_label}",
+                visible.len(),
+                prompt.options.len(),
+                prompt.selected.len()
+            ),
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    if !prompt.categories.is_empty() {
+        let categories = prompt
+            .categories
+            .iter()
+            .filter(|(id, _)| prompt.active_categories.contains(id))
+            .map(|(id, _)| format!("[{id}]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(Line::from(Span::styled(
+            format!("filters: {categories}"),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.push(Line::default());
+
+    let reserved_rows = 10usize
+        .saturating_add(prompt.summary_lines.len())
+        .saturating_add(if prompt.focus == MultiSelectionFocus::Filters {
+            prompt.categories.len().saturating_add(2)
+        } else {
+            0
+        });
+    let max_visible = usize::from(area.height)
+        .saturating_sub(reserved_rows)
+        .clamp(1, 14);
+    let start = prompt
+        .cursor
+        .saturating_sub(max_visible / 2)
+        .min(visible.len().saturating_sub(max_visible));
+    let end = (start + max_visible).min(visible.len());
+    if visible.is_empty() {
+        lines.push(Line::from("No skills match the current filters/search."));
+    } else {
+        for (position, option_index) in visible[start..end].iter().enumerate() {
+            let absolute_position = start + position;
+            let cursor = if absolute_position == prompt.cursor {
+                "›"
+            } else {
+                " "
+            };
+            let check = if prompt.selected.contains(option_index) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let style = if absolute_position == prompt.cursor {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{cursor} {check} {}", prompt.options[*option_index].label),
+                style,
+            )));
+        }
+        if start > 0 || end < visible.len() {
+            lines.push(Line::from(Span::styled(
+                format!("Showing {}-{end} of {}", start + 1, visible.len()),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        if let Some(option_index) = visible.get(prompt.cursor) {
+            lines.push(Line::default());
+            lines.extend(
+                prompt.options[*option_index]
+                    .detail_lines
+                    .iter()
+                    .map(|line| Line::from(line.clone())),
+            );
+        }
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "Last action",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.extend(
+        prompt
+            .summary_lines
+            .iter()
+            .map(|line| Line::from(line.clone())),
+    );
+
+    if prompt.pending_action.is_some() {
+        lines.extend([
+            Line::default(),
+            Line::from(Span::styled(
+                "Confirm delete: y yes · n no · esc cancel",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]);
+    } else if prompt.focus == MultiSelectionFocus::Filters {
+        lines.push(Line::default());
+        let draft = prompt
+            .pending_categories
+            .as_ref()
+            .unwrap_or(&prompt.active_categories);
+        lines.extend(
+            prompt
+                .categories
+                .iter()
+                .enumerate()
+                .map(|(index, (id, label))| {
+                    let cursor = if index == prompt.filter_cursor {
+                        "›"
+                    } else {
+                        " "
+                    };
+                    let check = if draft.contains(id) { "[x]" } else { "[ ]" };
+                    Line::from(format!("{cursor} {check} {label}"))
+                }),
+        );
+        lines.push(Line::from(Span::styled(
+            "space toggle · enter apply · esc cancel",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        let actions = prompt
+            .actions
+            .iter()
+            .map(|action| {
+                format!(
+                    "{} {}{}",
+                    action.key,
+                    action.label,
+                    if action.enabled { "" } else { " (disabled)" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        lines.extend([
+            Line::default(),
+            Line::from(Span::styled(
+                "↑↓ move · space select · / search · s sort · f filters · a all · n none · esc close",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                actions,
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]);
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+pub(super) fn draw_selection_prompt(
+    frame: &mut ratatui::Frame<'_>,
+    title: &str,
+    options: &[String],
+    selected: usize,
+) {
+    let root = frame.area();
+    frame.render_widget(Clear, root);
+    let area = inset(root, horizontal_gutter(root.width).saturating_add(1));
+    let mut lines = vec![
+        Line::from(Span::styled(
+            title.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::default(),
+    ];
+    lines.extend(options.iter().enumerate().map(|(index, option)| {
+        let marker = if index == selected { "›" } else { " " };
+        let style = if index == selected {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Line::from(Span::styled(format!("{marker} {option}"), style))
+    }));
+    lines.extend([
+        Line::default(),
+        Line::from(Span::styled(
+            "↑/↓ choose · enter select · esc cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ]);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 pub(super) fn draw_confirmation_prompt(frame: &mut ratatui::Frame<'_>, title: &str, message: &str) {

@@ -8,6 +8,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::*;
+use crate::{
+    AbortHandle, AssistantMessage, ContentBlock, CustomMessageContent, Message, ModelId,
+    ProviderId, StopReason, TextContent, Usage, UserMessage,
+};
 
 struct StaticAccess {
     notices: Mutex<Vec<(NoticeLevel, String)>>,
@@ -75,6 +79,63 @@ impl SessionContextAccess for StaticAccess {
 
     fn session_entries(&self) -> PluginContextResult<Vec<Value>> {
         Ok(vec![serde_json::json!({ "id": "entry-1" })])
+    }
+
+    async fn complete(
+        &self,
+        _scope: PluginContextScope,
+        request: DirectCompletionRequest,
+        signal: crate::AbortSignal,
+    ) -> PluginContextResult<AssistantMessage> {
+        assert_eq!(request.system_prompt, "review");
+        assert_eq!(request.messages.len(), 1);
+        assert!(!signal.is_aborted());
+        Ok(AssistantMessage {
+            content: vec![ContentBlock::Text(TextContent::new("{\"operations\":[]}"))],
+            api: "test".to_string(),
+            provider: ProviderId::new("test"),
+            model: ModelId::new("test"),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            deferred: None,
+            raw_stop_reason: None,
+            end_turn: None,
+            timestamp_ms: 0,
+        })
+    }
+
+    async fn launch_isolated_session(
+        &self,
+        _scope: PluginContextScope,
+        _request: IsolatedSessionRequest,
+    ) -> PluginContextResult<IsolatedSessionId> {
+        Ok(IsolatedSessionId::new("isolated-1"))
+    }
+
+    async fn wait_for_isolated_session(
+        &self,
+        _scope: PluginContextScope,
+        id: IsolatedSessionId,
+    ) -> PluginContextResult<IsolatedSessionOutcome> {
+        assert_eq!(id.as_str(), "isolated-1");
+        Ok(IsolatedSessionOutcome {
+            session_id: "child-session".to_string(),
+            messages: Vec::new(),
+            aborted: false,
+        })
+    }
+
+    fn abort_isolated_session(
+        &self,
+        _scope: PluginContextScope,
+        id: IsolatedSessionId,
+    ) -> PluginContextResult<()> {
+        assert_eq!(id.as_str(), "isolated-1");
+        Ok(())
     }
 
     async fn new_session(
@@ -154,6 +215,37 @@ async fn typed_context_calls_the_plugin_contract_without_json_round_trips() {
     assert_eq!(snapshot.label("entry-1"), Some("checkpoint"));
     assert_eq!(snapshot.raw_header()["future"], true);
     assert_eq!(snapshot.leaf().unwrap().raw()["future"], true);
+
+    let (_, signal) = AbortHandle::new();
+    let direct = context
+        .session
+        .complete(
+            DirectCompletionRequest {
+                system_prompt: "review".to_string(),
+                messages: vec![Message::User(UserMessage::text("history", 1))],
+                model: None,
+                thinking_level: None,
+                max_output_tokens: Some(256),
+            },
+            signal,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        direct.content.first(),
+        Some(ContentBlock::Text(text)) if text.text == "{\"operations\":[]}"
+    ));
+
+    let isolated = context
+        .session
+        .launch_isolated_session(IsolatedSessionRequest::new(CustomMessageContent::Text(
+            "inspect".to_string(),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(isolated.id().as_str(), "isolated-1");
+    isolated.abort().unwrap();
+    assert_eq!(isolated.wait().await.unwrap().session_id, "child-session");
 
     context.ui.notify(NoticeLevel::Info, "ready").unwrap();
     assert_eq!(

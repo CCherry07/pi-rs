@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 2,
+  "name": "small-ranking-dev",
+  "haystack": "small",
+  "questionIds": [
+    "ranking-dev-static-canonical-workspace-test",
+    "ranking-dev-premise-tool-inventory",
+    "ranking-dev-premise-command-existence",
+    "ranking-dev-gotcha-os-assigned-port",
+    "ranking-dev-gotcha-kernel-selected-port",
+    "ranking-dev-procedure-promotion-and-verification"
+  ]
+}

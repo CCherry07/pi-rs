@@ -120,6 +120,17 @@ impl SessionLog {
         ))
     }
 
+    /// Reads a coherent v4 document without modifying the source file.
+    ///
+    /// A syntactically torn final append is ignored in the returned snapshot,
+    /// but unlike [`SessionLog::open`] this method never appends a newline or
+    /// truncates the source. This makes it safe for derived-index scans that
+    /// may observe a session while another process is appending to it.
+    pub fn read(path: impl AsRef<Path>) -> Result<SessionDocument, SessionError> {
+        let (header, state, _repair) = load_file(path.as_ref())?;
+        Ok(state.document(header))
+    }
+
     fn from_parts(
         path: PathBuf,
         header: SessionHeader,
@@ -1230,6 +1241,27 @@ mod tests {
             .append_message(Message::User(UserMessage::text("after", 2)))
             .unwrap();
         assert_eq!(reopened.load().unwrap().messages().len(), 2);
+    }
+
+    #[test]
+    fn read_ignores_a_torn_tail_without_repairing_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let log = SessionLog::create(&path, header()).unwrap();
+        log.append_message(Message::User(UserMessage::text("before", 1)))
+            .unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"kind\":\"entry\"")
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let document = SessionLog::read(&path).unwrap();
+
+        assert_eq!(document.messages().len(), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

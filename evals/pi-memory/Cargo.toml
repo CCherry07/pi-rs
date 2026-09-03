@@ -1,0 +1,16 @@
+[package]
+name = "pi-memory-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+pi-plugin-memory-local.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3.21.0"
+thiserror.workspace = true
+tokio.workspace = true

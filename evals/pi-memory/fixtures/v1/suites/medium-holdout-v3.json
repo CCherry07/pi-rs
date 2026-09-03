@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 2,
+  "name": "medium-holdout-v3",
+  "haystack": "medium",
+  "questionIds": [
+    "holdout-v3-static-user-example-language",
+    "holdout-v3-static-atlas-full-test-command",
+    "holdout-v3-static-session-debug-setting",
+    "holdout-v3-dynamic-atlas-region",
+    "holdout-v3-dynamic-atlas-cache",
+    "holdout-v3-dynamic-user-answer-style",
+    "holdout-v3-procedure-atlas-release",
+    "holdout-v3-procedure-atlas-rollback",
+    "holdout-v3-procedure-memory-correction",
+    "holdout-v3-gotcha-macos-sed",
+    "holdout-v3-gotcha-sqlite-fts5",
+    "holdout-v3-gotcha-parallel-port",
+    "holdout-v3-premise-atlas-postgres",
+    "holdout-v3-premise-atlas-old-region",
+    "holdout-v3-premise-atlas-deploy-tool"
+  ]
+}

@@ -13,4 +13,7 @@ dist/
 **/.pi/plugins/installed/
 **/.pi/plugins/.installed-*/
 **/.pi/plugins.lock.guard
-.pi
+.pi/*
+!.pi/agents/
+!.pi/agents/*.md
+!.pi/agents/**/*.md

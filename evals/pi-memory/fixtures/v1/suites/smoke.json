@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 2,
+  "name": "smoke",
+  "haystack": "smoke",
+  "questionIds": [
+    "static-user-example-language",
+    "static-atlas-full-test-command",
+    "static-session-debug-setting",
+    "dynamic-atlas-region",
+    "dynamic-atlas-cache",
+    "dynamic-user-answer-style",
+    "procedure-atlas-release",
+    "procedure-atlas-rollback",
+    "procedure-memory-correction",
+    "gotcha-macos-sed",
+    "gotcha-sqlite-fts5",
+    "gotcha-parallel-port",
+    "premise-atlas-postgres",
+    "premise-atlas-old-region",
+    "premise-atlas-deploy-tool"
+  ]
+}

@@ -46,7 +46,8 @@ behavior, and being explicit whenever the Rust product diverges.
   request parameters, headers, credentials, and model metadata.
 - **Authentication**: `/login`, `/logout`, and `pi auth` manage Pi-compatible API-key and OAuth
   credentials without exposing secrets in the TUI.
-- **Production tools**: `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`, `find`, and `ls`.
+- **Production tools**: `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`, `find`, `ls`, and
+  bounded `subagent` delegation through isolated child sessions with Markdown-defined roles.
 - **Skills and prompt templates**: global and project discovery, `/skill:<name>` commands, Markdown
   prompt-template slash commands, and generation-time system prompt contributions.
 - **Pi v4 sessions**: lazy first-response persistence, `/resume`, durable queues, branch/tree

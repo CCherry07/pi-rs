@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod ephemeral;
+
 use std::sync::{Arc, Mutex, RwLock};
 
 use futures::StreamExt;
@@ -10,10 +12,10 @@ use pi_agent::{
 use pi_core::{
     AbortHandle, AbortSignal, AgentPlugin, AgentSettledEvent, AssistantMessage, CommandContext,
     CommandOutcome, CommandSpec, ContentBlock, ContextParts, ImageContent, InputEvent, InputPatch,
-    InputSource, InputStreamingBehavior, Message, ModelId, ModelSpec, PluginContext,
-    PluginContextEpoch, PluginContextHandle, PluginContextScope, PluginDiagnostic, PluginId,
-    ProviderCallContext, ProviderId, ProviderPlugin, ProviderRequest, RegistriesBuilder, RunId,
-    StreamEvent, TextContent, ThinkingBudgets, ThinkingLevel, UserMessage,
+    InputSource, InputStreamingBehavior, Message, ModelId, ModelSelection, ModelSpec,
+    PluginContext, PluginContextEpoch, PluginContextHandle, PluginContextScope, PluginDiagnostic,
+    PluginId, ProviderCallContext, ProviderId, ProviderPlugin, ProviderRequest, RegistriesBuilder,
+    RunId, StreamEvent, TextContent, ThinkingBudgets, ThinkingLevel, UserMessage,
     is_retryable_provider_error_message,
 };
 use pi_prompt::{BuildSystemPromptOptions, build_system_prompt};
@@ -64,6 +66,7 @@ pub struct RuntimePromptOutcome {
 pub struct RuntimeCompletionRequest {
     pub system_prompt: String,
     pub messages: Vec<Message>,
+    pub model: Option<ModelSelection>,
     pub thinking_level: ThinkingLevel,
     pub thinking_budgets: Option<ThinkingBudgets>,
     pub max_output_tokens: Option<u64>,
@@ -202,6 +205,7 @@ pub struct PiRuntimeBuilder {
     supplemental_diagnostics: Vec<ResourceDiagnostic>,
     completion_retry_policy: Option<CompletionRetryPolicy>,
     plugin_context: Arc<dyn PluginContext>,
+    execution_origin: pi_core::SessionExecutionOrigin,
 }
 
 impl Default for PiRuntimeBuilder {
@@ -221,7 +225,14 @@ impl PiRuntimeBuilder {
             supplemental_diagnostics: Vec::new(),
             completion_retry_policy: None,
             plugin_context: Arc::new(pi_core::UnavailablePluginContext),
+            execution_origin: pi_core::SessionExecutionOrigin::User,
         }
+    }
+
+    /// Transient host provenance. Plugins decide which policies apply to it.
+    pub fn execution_origin(mut self, origin: pi_core::SessionExecutionOrigin) -> Self {
+        self.execution_origin = origin;
+        self
     }
 
     pub fn agent_plugin(mut self, plugin: impl AgentPlugin + 'static) -> Self {
@@ -395,6 +406,7 @@ impl PiRuntimeBuilder {
             supplemental_diagnostics: self.supplemental_diagnostics,
             completion_retry_policy: self.completion_retry_policy,
             plugin_context: self.plugin_context,
+            execution_origin: self.execution_origin,
             cwd: cwd.clone(),
         });
         let generation = Arc::new(build_generation(
@@ -423,6 +435,7 @@ struct RuntimeBlueprint {
     supplemental_diagnostics: Vec<ResourceDiagnostic>,
     completion_retry_policy: Option<CompletionRetryPolicy>,
     plugin_context: Arc<dyn PluginContext>,
+    execution_origin: pi_core::SessionExecutionOrigin,
     cwd: std::path::PathBuf,
 }
 
@@ -583,6 +596,10 @@ impl PiRuntime {
 
     pub fn cwd(&self) -> &std::path::Path {
         &self.cwd
+    }
+
+    pub fn execution_origin(&self) -> pi_core::SessionExecutionOrigin {
+        self.blueprint.execution_origin
     }
 
     pub fn plugin_order(&self) -> Vec<PluginId> {
@@ -1127,10 +1144,28 @@ impl PiRuntime {
         request: RuntimeCompletionRequest,
         signal: AbortSignal,
     ) -> Result<AssistantMessage, RuntimeError> {
-        let _reload_guard = self.reload_lock.lock().await;
+        // Hooks may await this while the parent prompt owns reload_lock.
+        // Pin the immutable generation instead of re-entering that lock, and
+        // keep provider/model selection stable across completion retries.
+        let generation = self.current_generation();
+        let selection = request.model.clone().unwrap_or_else(|| {
+            let state = self.agent.state();
+            ModelSelection {
+                provider: state.provider_id,
+                model_id: state.model_id,
+            }
+        });
         let mut retry_attempt = 0_u32;
         loop {
-            let result = self.complete_once_locked(&request, signal.clone()).await;
+            let result = Self::complete_once(
+                &generation.agent,
+                self.cwd(),
+                self.agent.session_id(),
+                &selection,
+                &request,
+                signal.clone(),
+            )
+            .await;
             let Some(policy) = self.blueprint.completion_retry_policy else {
                 return result;
             };
@@ -1152,36 +1187,37 @@ impl PiRuntime {
         }
     }
 
-    async fn complete_once_locked(
-        &self,
+    async fn complete_once(
+        runtime: &AgentRuntime,
+        cwd: &std::path::Path,
+        session_id: Option<String>,
+        selection: &ModelSelection,
         request: &RuntimeCompletionRequest,
         signal: AbortSignal,
     ) -> Result<AssistantMessage, RuntimeError> {
-        let runtime = self.agent.runtime();
-        let state = self.agent.state();
         let provider = runtime
             .registries()
-            .provider(&state.provider_id)
+            .provider(&selection.provider)
             .ok_or_else(|| {
-                RuntimeError::Provider(format!("provider not found: {}", state.provider_id))
+                RuntimeError::Provider(format!("provider not found: {}", selection.provider))
             })?;
         let call_context = ProviderCallContext::new(
             runtime.generation(),
-            self.cwd().to_path_buf(),
-            state.provider_id.clone(),
-            state.model_id.clone(),
+            cwd.to_path_buf(),
+            selection.provider.clone(),
+            selection.model_id.clone(),
             Arc::clone(runtime.provider_plugins()),
         );
         let model_spec = runtime
             .registries()
-            .model(&state.provider_id, &state.model_id)
+            .model(&selection.provider, &selection.model_id)
             .cloned();
         let model_cost = model_spec.as_ref().map(|model| model.cost.clone());
         let mut stream = provider
             .stream(
                 ProviderRequest {
                     model_spec: model_spec.clone(),
-                    model: state.model_id.clone(),
+                    model: selection.model_id.clone(),
                     system_prompt: request.system_prompt.clone(),
                     messages: request.messages.clone(),
                     tools: Vec::new(),
@@ -1190,7 +1226,7 @@ impl PiRuntime {
                     max_output_tokens: request.max_output_tokens,
                     headers: Default::default(),
                     sampling_params: Default::default(),
-                    session_id: self.agent.session_id(),
+                    session_id,
                 },
                 call_context,
                 signal.child(),
@@ -3196,6 +3232,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn standalone_completion_pins_its_generation_without_blocking_reload() {
+        let scripted = ScriptedProviderPlugin::scripted([ScriptedTurn::WaitForAbort]);
+        let provider = scripted.provider();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(scripted)
+            .build()
+            .unwrap();
+        let old_context = runtime.plugin_context_handle(PluginContextScope::Base);
+        let (abort, signal) = AbortHandle::new();
+        let mut completion = Box::pin(runtime.complete(
+            RuntimeCompletionRequest {
+                system_prompt: "review".to_string(),
+                messages: vec![Message::User(UserMessage::text("history", 1))],
+                model: None,
+                thinking_level: ThinkingLevel::Off,
+                thinking_budgets: None,
+                max_output_tokens: None,
+            },
+            signal,
+        ));
+        tokio::select! {
+            result = &mut completion => panic!("completion ended before cancellation: {result:?}"),
+            () = async {
+                while provider.requests().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            } => {},
+        }
+        tokio::time::timeout(Duration::from_secs(1), runtime.reload())
+            .await
+            .expect("standalone completion must not hold the parent reload mutex")
+            .unwrap();
+        assert!(old_context.access_for_adapter().is_ok());
+        abort.abort();
+        assert!(matches!(completion.await, Err(RuntimeError::Aborted)));
+        assert!(matches!(
+            old_context.access_for_adapter(),
+            Err(pi_core::PluginContextError::Retired)
+        ));
+    }
+
+    #[tokio::test]
     async fn standalone_completion_retries_transient_failures_with_runtime_policy() {
         let scripted = ScriptedProviderPlugin::scripted([
             ScriptedTurn::Error("stream ended before a terminal response event".to_string()),
@@ -3218,6 +3296,7 @@ mod tests {
                 RuntimeCompletionRequest {
                     system_prompt: "summarize".to_string(),
                     messages: vec![Message::User(UserMessage::text("history", 1))],
+                    model: None,
                     thinking_level: ThinkingLevel::Off,
                     thinking_budgets: None,
                     max_output_tokens: Some(2_048),

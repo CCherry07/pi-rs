@@ -348,7 +348,8 @@ impl ToolScheduler {
             self.cwd.clone(),
             signal.child(),
             self.plugins.context_parts(),
-        );
+        )
+        .with_run_id(run_id.clone());
         let args = match tool
             .prepare_arguments(&tool_context, call.arguments.clone())
             .await

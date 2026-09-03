@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::io::{self, BufRead, BufReader, Stdout, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,7 +19,8 @@ use futures::StreamExt;
 use pi_agent::AgentLoopStop;
 use pi_core::{
     AgentEvent, CommandSpec, ContentBlock, Message, ModelId, ModelSpec, ProviderId, StopReason,
-    StreamEvent, ThinkingLevel, ToolCallId,
+    StreamEvent, ThinkingLevel, ToolCallId, UiMultiSelectAction, UiMultiSelectOption,
+    UiMultiSelectResponse,
 };
 use pi_session::{
     AgentSession, AgentSessionEvent, AgentSessionSnapshot, EntryOrder, EntryQuery, ForkPosition,
@@ -46,7 +48,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::clipboard::{ClipboardWriter, SystemClipboard};
 use crate::config::AuthCommand;
 use crate::output::{assistant_text, shell_command};
-use crate::plugin_ui::PluginConfirmationRequest;
+use crate::plugin_ui::{
+    PluginConfirmationRequest, PluginMultiSelectionRequest, PluginSelectionRequest,
+};
 use crate::project_trust::{ProjectTrustOption, ProjectTrustPromptRequest, ProjectTrustService};
 use crate::text_selection::{ScreenSelection, ScreenTextSurface};
 use crate::{InteractiveRequestReceivers, auth, auth::AuthProviderInfo};
@@ -672,6 +676,8 @@ struct App {
     screen_selection: Option<ScreenSelection>,
     trust_prompt: Option<TrustPromptState>,
     confirmation_prompt: Option<ConfirmationPromptState>,
+    selection_prompt: Option<SelectionPromptState>,
+    multi_selection_prompt: Option<MultiSelectionPromptState>,
     pending_auth: Option<AuthRequest>,
     epoch: u64,
     quit: bool,
@@ -794,6 +800,8 @@ impl App {
             screen_selection: None,
             trust_prompt: None,
             confirmation_prompt: None,
+            selection_prompt: None,
+            multi_selection_prompt: None,
             pending_auth: None,
             epoch: 1,
             quit: false,
@@ -833,6 +841,16 @@ impl App {
                 self.screen_selection = None;
                 self.confirmation_prompt = Some(request.into());
                 self.status = "Confirmation required".to_string();
+            }
+            AppMessage::SelectionRequested(request) => {
+                self.screen_selection = None;
+                self.selection_prompt = Some(request.into());
+                self.status = "Selection required".to_string();
+            }
+            AppMessage::MultiSelectionRequested(request) => {
+                self.screen_selection = None;
+                self.multi_selection_prompt = Some(request.into());
+                self.status = "Multi-selection required".to_string();
             }
             AppMessage::AnimationTick => self.advance_animation(),
             AppMessage::Quit => self.quit = true,
@@ -1247,11 +1265,172 @@ struct ConfirmationPromptState {
     response: Option<tokio::sync::oneshot::Sender<bool>>,
 }
 
+struct SelectionPromptState {
+    title: String,
+    options: Vec<String>,
+    selected: usize,
+    response: Option<tokio::sync::oneshot::Sender<Option<usize>>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MultiSelectionFocus {
+    List,
+    Search,
+    Filters,
+}
+
+struct MultiSelectionPromptState {
+    title: String,
+    options: Vec<UiMultiSelectOption>,
+    actions: Vec<UiMultiSelectAction>,
+    categories: Vec<(String, String)>,
+    active_categories: HashSet<String>,
+    pending_categories: Option<HashSet<String>>,
+    sort_modes: Vec<(String, bool)>,
+    sort_mode: usize,
+    selected: HashSet<usize>,
+    cursor: usize,
+    filter_cursor: usize,
+    query: String,
+    focus: MultiSelectionFocus,
+    summary_lines: Vec<String>,
+    pending_action: Option<String>,
+    response: Option<tokio::sync::oneshot::Sender<Option<UiMultiSelectResponse>>>,
+}
+
+impl MultiSelectionPromptState {
+    fn visible_indices(&self) -> Vec<usize> {
+        let query = self.query.trim().to_lowercase();
+        let mut indices = self
+            .options
+            .iter()
+            .enumerate()
+            .filter(|(_, option)| {
+                option
+                    .category
+                    .as_ref()
+                    .is_none_or(|category| self.active_categories.contains(category))
+                    && (query.is_empty() || fuzzy_matches(&option.search_text, &query))
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if let Some((_, descending)) = self.sort_modes.get(self.sort_mode) {
+            indices.sort_by(|left, right| {
+                let left_option = &self.options[*left];
+                let right_option = &self.options[*right];
+                let left_values = left_option
+                    .sort_values
+                    .get(self.sort_mode)
+                    .map_or(&[][..], Vec::as_slice);
+                let right_values = right_option
+                    .sort_values
+                    .get(self.sort_mode)
+                    .map_or(&[][..], Vec::as_slice);
+                let primary = (0..left_values.len().max(right_values.len()))
+                    .find_map(|key_index| {
+                        let left_value = left_values.get(key_index).map_or("", String::as_str);
+                        let right_value = right_values.get(key_index).map_or("", String::as_str);
+                        let ordering = match (left_value.is_empty(), right_value.is_empty()) {
+                            (true, false) => std::cmp::Ordering::Greater,
+                            (false, true) => std::cmp::Ordering::Less,
+                            _ if *descending => right_value.cmp(left_value),
+                            _ => left_value.cmp(right_value),
+                        };
+                        (ordering != std::cmp::Ordering::Equal).then_some(ordering)
+                    })
+                    .unwrap_or(std::cmp::Ordering::Equal);
+                primary
+                    .then_with(|| {
+                        category_position(&self.categories, left_option.category.as_deref()).cmp(
+                            &category_position(&self.categories, right_option.category.as_deref()),
+                        )
+                    })
+                    .then_with(|| {
+                        left_option
+                            .label
+                            .to_lowercase()
+                            .cmp(&right_option.label.to_lowercase())
+                    })
+            });
+        }
+        indices
+    }
+
+    fn clamp_cursor(&mut self) {
+        self.cursor = self
+            .cursor
+            .min(self.visible_indices().len().saturating_sub(1));
+    }
+}
+
+fn category_position(categories: &[(String, String)], category: Option<&str>) -> usize {
+    category
+        .and_then(|category| categories.iter().position(|(id, _)| id == category))
+        .unwrap_or(categories.len())
+}
+
+fn fuzzy_matches(haystack: &str, query: &str) -> bool {
+    let haystack = haystack.to_lowercase();
+    if haystack.contains(query) {
+        return true;
+    }
+    let mut characters = haystack.chars();
+    query
+        .chars()
+        .all(|needle| characters.by_ref().any(|candidate| candidate == needle))
+}
+
 impl From<PluginConfirmationRequest> for ConfirmationPromptState {
     fn from(request: PluginConfirmationRequest) -> Self {
         Self {
             title: request.title,
             message: request.message,
+            response: Some(request.response),
+        }
+    }
+}
+
+impl From<PluginSelectionRequest> for SelectionPromptState {
+    fn from(request: PluginSelectionRequest) -> Self {
+        Self {
+            title: request.title,
+            options: request.options,
+            selected: 0,
+            response: Some(request.response),
+        }
+    }
+}
+
+impl From<PluginMultiSelectionRequest> for MultiSelectionPromptState {
+    fn from(request: PluginMultiSelectionRequest) -> Self {
+        let mut active_categories = request
+            .request
+            .initial_active_categories
+            .into_iter()
+            .collect::<HashSet<_>>();
+        if active_categories.is_empty() {
+            active_categories.extend(request.request.categories.iter().map(|(id, _)| id.clone()));
+        }
+        let sort_mode = request
+            .request
+            .initial_sort_mode
+            .min(request.request.sort_modes.len().saturating_sub(1));
+        Self {
+            title: request.request.title,
+            options: request.request.options,
+            actions: request.request.actions,
+            categories: request.request.categories,
+            active_categories,
+            pending_categories: None,
+            sort_modes: request.request.sort_modes,
+            sort_mode,
+            selected: request.request.initially_selected.into_iter().collect(),
+            cursor: 0,
+            filter_cursor: 0,
+            query: request.request.initial_query,
+            focus: MultiSelectionFocus::List,
+            summary_lines: request.request.summary_lines,
+            pending_action: None,
             response: Some(request.response),
         }
     }
@@ -1358,6 +1537,8 @@ async fn run_loop(
     let InteractiveRequestReceivers {
         project_trust: mut trust_requests,
         plugin_confirmation: mut confirmation_requests,
+        plugin_selection: mut selection_requests,
+        plugin_multi_selection: mut multi_selection_requests,
     } = interactive_requests;
     let mut session_changes = session_handle.subscribe();
     let mut session = session_handle.current();
@@ -1426,7 +1607,9 @@ async fn run_loop(
                     }
                     Some(Ok(Event::Paste(text)))
                         if app.trust_prompt.is_none()
-                            && app.confirmation_prompt.is_none() =>
+                            && app.confirmation_prompt.is_none()
+                            && app.selection_prompt.is_none()
+                            && app.multi_selection_prompt.is_none() =>
                     {
                         app.screen_selection = None;
                         app.input.insert_str(text);
@@ -1459,6 +1642,8 @@ async fn run_loop(
                     let scroll_from_bottom = app.scroll_from_bottom;
                     let trust_prompt = app.trust_prompt.take();
                     let confirmation_prompt = app.confirmation_prompt.take();
+                    let selection_prompt = app.selection_prompt.take();
+                    let multi_selection_prompt = app.multi_selection_prompt.take();
                     let mut recovered = app_for_session(&session, &snapshot, &agent_dir);
                     recovered.input = input;
                     recovered.input_history = input_history;
@@ -1468,6 +1653,8 @@ async fn run_loop(
                     recovered.scroll_from_bottom = scroll_from_bottom;
                     recovered.trust_prompt = trust_prompt;
                     recovered.confirmation_prompt = confirmation_prompt;
+                    recovered.selection_prompt = selection_prompt;
+                    recovered.multi_selection_prompt = multi_selection_prompt;
                     recovered.status = "Caught up after UI lag".to_string();
                     app = recovered;
                 }
@@ -1495,6 +1682,12 @@ async fn run_loop(
             }
             Some(request) = confirmation_requests.recv() => {
                 app.update(AppMessage::ConfirmationRequested(request));
+            }
+            Some(request) = selection_requests.recv() => {
+                app.update(AppMessage::SelectionRequested(request));
+            }
+            Some(request) = multi_selection_requests.recv() => {
+                app.update(AppMessage::MultiSelectionRequested(request));
             }
             _ = animation_tick.tick(), if app.has_active_animation() => {
                 app.update(AppMessage::AnimationTick);
@@ -1984,6 +2177,8 @@ mod tests {
             screen_selection: None,
             trust_prompt: None,
             confirmation_prompt: None,
+            selection_prompt: None,
+            multi_selection_prompt: None,
             pending_auth: None,
             epoch: 1,
             quit: false,
@@ -2199,6 +2394,155 @@ mod tests {
         ));
         assert!(app.confirmation_prompt.is_none());
         assert!(!decision.blocking_recv().unwrap());
+    }
+
+    #[test]
+    fn generic_plugin_multi_selection_searches_filters_sorts_and_returns_an_action() {
+        let mut app = demo_app();
+        let (response, decision) = tokio::sync::oneshot::channel();
+        app.update(AppMessage::MultiSelectionRequested(
+            PluginMultiSelectionRequest {
+                request: pi_core::UiMultiSelectRequest {
+                    title: "Pi Hermes Memory — Procedural Skills".to_string(),
+                    options: vec![
+                        UiMultiSelectOption {
+                            label: "[G] Alpha (~/.pi/skills/alpha/SKILL.md)".to_string(),
+                            search_text: "Alpha global".to_string(),
+                            category: Some("G".to_string()),
+                            detail_lines: vec![
+                                "Global alpha procedure".to_string(),
+                                "global:alpha".to_string(),
+                            ],
+                            read_only: false,
+                            sort_values: vec![
+                                vec!["2026-01-01".to_string()],
+                                vec!["2025-01-01".to_string()],
+                                vec!["alpha".to_string()],
+                            ],
+                        },
+                        UiMultiSelectOption {
+                            label: "[P] Beta (.pi/skills/beta/SKILL.md)".to_string(),
+                            search_text: "Beta project".to_string(),
+                            category: Some("P".to_string()),
+                            detail_lines: vec![
+                                "Project beta procedure".to_string(),
+                                "project:demo:beta".to_string(),
+                            ],
+                            read_only: false,
+                            sort_values: vec![
+                                vec!["2026-02-01".to_string()],
+                                vec!["2025-02-01".to_string()],
+                                vec!["beta".to_string()],
+                            ],
+                        },
+                    ],
+                    actions: vec![
+                        UiMultiSelectAction {
+                            id: "move-global".to_string(),
+                            key: 'g',
+                            label: "global".to_string(),
+                            enabled: true,
+                            confirmation: None,
+                        },
+                        UiMultiSelectAction {
+                            id: "delete".to_string(),
+                            key: 'd',
+                            label: "delete".to_string(),
+                            enabled: true,
+                            confirmation: Some(
+                                "Delete {count} selected skill{plural}? This cannot be undone. Press y to confirm or n to cancel.{read_only_note}"
+                                    .to_string(),
+                            ),
+                        },
+                    ],
+                    categories: vec![
+                        ("G".to_string(), "Global [G]".to_string()),
+                        ("P".to_string(), "Project [P]".to_string()),
+                    ],
+                    sort_modes: vec![
+                        ("Updated".to_string(), true),
+                        ("Created".to_string(), true),
+                        ("Name".to_string(), false),
+                    ],
+                    initially_selected: Vec::new(),
+                    initial_query: String::new(),
+                    initial_active_categories: Vec::new(),
+                    initial_sort_mode: 0,
+                    summary_lines: vec!["Select skills with space.".to_string()],
+                },
+                response,
+            },
+        ));
+
+        let initial = render_app(&app, 110, 24);
+        assert!(initial.contains("2 visible · 2 total · 0 selected · sort: Updated"));
+        assert!(initial.contains("[P] Beta"));
+        assert!(initial.contains("Project beta procedure"));
+        assert!(handle_multi_selection_prompt_key(
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
+            &mut app,
+        ));
+        assert!(handle_multi_selection_prompt_key(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &mut app,
+        ));
+        assert!(handle_multi_selection_prompt_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+        ));
+        let filtered = render_app(&app, 110, 24);
+        assert!(filtered.contains("1 visible · 2 total · 0 selected"));
+        assert!(filtered.contains("filters: [P]"));
+        assert!(handle_multi_selection_prompt_key(
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            &mut app,
+        ));
+        assert!(handle_multi_selection_prompt_key(
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            &mut app,
+        ));
+        assert!(handle_multi_selection_prompt_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut app,
+        ));
+        assert!(handle_multi_selection_prompt_key(
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+            &mut app,
+        ));
+        assert!(handle_multi_selection_prompt_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            &mut app,
+        ));
+        assert!(handle_multi_selection_prompt_key(
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+            &mut app,
+        ));
+        let searched = render_app(&app, 110, 24);
+        assert!(searched.contains("1 visible · 2 total · 1 selected"));
+        assert!(handle_multi_selection_prompt_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut app,
+        ));
+        assert!(handle_multi_selection_prompt_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &mut app,
+        ));
+        assert!(render_app(&app, 110, 24).contains("Confirm delete: y yes"));
+        assert!(handle_multi_selection_prompt_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut app,
+        ));
+        assert!(app.multi_selection_prompt.is_none());
+        assert_eq!(
+            decision.blocking_recv().unwrap(),
+            Some(UiMultiSelectResponse {
+                selected: vec![1],
+                action_id: "delete".to_string(),
+                query: "bet".to_string(),
+                active_categories: vec!["P".to_string()],
+                sort_mode: 1,
+            })
+        );
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::path::{Path, PathBuf};
+#[cfg(any(feature = "agent", feature = "provider", feature = "session"))]
 use std::sync::Arc;
 
 pub use async_trait::async_trait;
@@ -21,14 +22,23 @@ pub use pi_session::plugin::SessionPlugin;
 
 /// Version of the trusted Rust-ABI plugin contract.
 ///
-/// ABI 8 adds asynchronous semantic confirmation to the generation-bound UI
-/// context. ABI 7 replaced cumulative message-update snapshots with a shared live stream
+/// ABI 15 replaces core tool-run state with a run identity and explicit
+/// invocation-private Agent plugins for ephemeral Agents.
+/// ABI 14 adds detached context compaction, transient execution provenance,
+/// and typed invocation-local tool state. ABI 13 adds inherited fork prompts/history, invocation-local observations,
+/// guarded dispatch, and input budgets. ABI 12 adds bounded ephemeral sessions to the generation-bound session
+/// capability. ABI 11 adds tool-free direct completion to the generation-bound session
+/// capability. ABI 10 adds inherited model, thinking, and active-tool selection for fresh
+/// isolated sessions. ABI 9 added independently running sessions to the
+/// generation-bound session context. ABI 8 added asynchronous semantic
+/// confirmation to the UI context.
+/// ABI 7 replaced cumulative message-update snapshots with a shared live stream
 /// handle plus one compact [`pi_core::StreamEvent`] delta. ABI 6 shared immutable
 /// cumulative partials; ABI 5 added the generation-bound Pi product context and
 /// tool argument preparation.
 /// Hosts must reject older artifacts before resolving their Rust-ABI
 /// constructors.
-pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 8;
+pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 15;
 pub const BUILD_FINGERPRINT: &str = env!("PI_PLUGIN_BUILD_FINGERPRINT");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -100,15 +110,15 @@ pub type PluginDescriptorFnV1 = unsafe extern "C" fn() -> *const NativePluginDes
 pub type PluginOptionsSchemaFnV1 = unsafe fn() -> String;
 
 #[cfg(feature = "agent")]
-pub type AgentPluginCreateV8 =
+pub type AgentPluginCreateV15 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn AgentPlugin>, PluginLoadError>;
 
 #[cfg(feature = "provider")]
-pub type ProviderPluginCreateV8 =
+pub type ProviderPluginCreateV15 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn ProviderPlugin>, PluginLoadError>;
 
 #[cfg(feature = "session")]
-pub type SessionPluginCreateV8 =
+pub type SessionPluginCreateV15 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn SessionPlugin>, PluginLoadError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,22 +245,25 @@ pub mod agent {
         };
         pub use async_trait::async_trait;
         pub use pi_core::{
-            AgentContext, AgentEndEvent, AgentHook, AgentHookInterests, AgentPlugin,
-            AgentPluginContext, AgentStartEvent, AssistantMessage, AssistantStream,
+            AbortHandle, AbortSignal, AgentContext, AgentEndEvent, AgentHook, AgentHookInterests,
+            AgentPlugin, AgentPluginContext, AgentStartEvent, AssistantMessage, AssistantStream,
             AssistantStreamId, BeforeAgentStartEvent, BeforeAgentStartPatch, Command,
             CommandContext, CommandError, CommandModelsContext, CommandOutcome,
             CommandSessionContext, CommandSpec, ContentBlock, ContentMetadata, ContextEvent,
-            ContextPatch, ContextUsage, CustomMessageContent, CustomMessageInput, ForkOptions,
-            ForkPosition, InputContext, InputEvent, InputPatch, MessageDelivery, MessageEndEvent,
-            MessageStartEvent, MessageUpdateEvent, ModelsContext, NavigateTreeOptions,
-            NewSessionOptions, NoticeLevel, PluginContextError, PluginContextResult, PluginError,
-            PresentationMode, RegisterContext, ReplacedSessionContext, ResponseMetadataPatch,
-            Result, ScopedModel, SendMessageOptions, SendUserMessageOptions, SessionContext,
-            SessionEntryKind, SessionEntryView, SessionReplacement, SessionSnapshot, StreamEvent,
-            Tool, ToolCallEvent, ToolCallId, ToolCallPatch, ToolContext, ToolError,
-            ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResult,
-            ToolResultEvent, ToolResultPatch, ToolSpec, ToolUpdateSink, TurnEndEvent,
-            TurnStartEvent, UiContext,
+            ContextPatch, ContextUsage, CustomMessageContent, CustomMessageInput,
+            DirectCompletionRequest, EphemeralCompactionOptions, EphemeralSessionOutcome,
+            EphemeralSessionRequest, EphemeralSessionStatus, ForkOptions, ForkPosition,
+            InputContext, InputEvent, InputPatch, IsolatedSessionOptions, IsolatedSessionRequest,
+            MessageDelivery, MessageEndEvent, MessageStartEvent, MessageUpdateEvent,
+            ModelSelection, ModelsContext, NavigateTreeOptions, NewSessionOptions, NoticeLevel,
+            PluginContextError, PluginContextResult, PluginError, PresentationMode,
+            RegisterContext, ReplacedSessionContext, ResponseMetadataPatch, Result, RunId,
+            ScopedModel, SendMessageOptions, SendUserMessageOptions, SessionContext,
+            SessionEntryKind, SessionEntryView, SessionExecutionOrigin, SessionReplacement,
+            SessionSnapshot, StreamEvent, ThinkingLevel, Tool, ToolCallEvent, ToolCallId,
+            ToolCallPatch, ToolContext, ToolError, ToolExecutionEndEvent, ToolExecutionStartEvent,
+            ToolExecutionUpdateEvent, ToolResult, ToolResultEvent, ToolResultPatch, ToolSpec,
+            ToolUpdateSink, TurnEndEvent, TurnStartEvent, UiContext,
         };
         pub use serde_json::{Value, json};
     }
@@ -264,12 +277,15 @@ pub mod provider {
         };
         pub use async_trait::async_trait;
         pub use pi_core::{
-            AfterProviderResponseEvent, BeforeProviderHeadersEvent, BeforeProviderRequestEvent,
-            ModelId, ModelSpec, ModelsContext, PluginContextError, PluginContextResult,
-            PluginError, PluginId, PresentationMode, Provider, ProviderCallContext, ProviderError,
-            ProviderId, ProviderPlugin, ProviderPluginContext, ProviderRegisterContext,
-            ProviderRequest, ProviderStream, Result, SessionContext, SessionEntryKind,
-            SessionEntryView, SessionSnapshot, StreamEvent, UiContext,
+            AbortHandle, AbortSignal, AfterProviderResponseEvent, BeforeProviderHeadersEvent,
+            BeforeProviderRequestEvent, DirectCompletionRequest, EphemeralCompactionOptions,
+            EphemeralSessionOutcome, EphemeralSessionRequest, EphemeralSessionStatus,
+            IsolatedSessionOptions, IsolatedSessionRequest, ModelId, ModelSelection, ModelSpec,
+            ModelsContext, PluginContextError, PluginContextResult, PluginError, PluginId,
+            PresentationMode, Provider, ProviderCallContext, ProviderError, ProviderId,
+            ProviderPlugin, ProviderPluginContext, ProviderRegisterContext, ProviderRequest,
+            ProviderStream, Result, SessionContext, SessionEntryKind, SessionEntryView,
+            SessionExecutionOrigin, SessionSnapshot, StreamEvent, ThinkingLevel, UiContext,
         };
         pub use serde_json::{Value, json};
     }
@@ -283,9 +299,12 @@ pub mod session {
         };
         pub use async_trait::async_trait;
         pub use pi_core::{
-            CompactOptions, ContextUsage, ModelsContext, NoticeLevel, PluginContextError,
-            PluginContextResult, PresentationMode, ScopedModel, SessionContext, SessionEntryKind,
-            SessionEntryView, SessionSnapshot, UiContext,
+            AbortHandle, AbortSignal, CompactOptions, ContextUsage, DirectCompletionRequest,
+            EphemeralCompactionOptions, EphemeralSessionOutcome, EphemeralSessionRequest,
+            EphemeralSessionStatus, IsolatedSessionOptions, IsolatedSessionRequest, ModelSelection,
+            ModelsContext, NoticeLevel, PluginContextError, PluginContextResult, PresentationMode,
+            ScopedModel, SessionContext, SessionEntryKind, SessionEntryView,
+            SessionExecutionOrigin, SessionSnapshot, ThinkingLevel, UiContext,
         };
         pub use pi_session::plugin::{
             SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent,

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -6,8 +7,8 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::{
-    AbortSignal, ContentBlock, ContextParts, ModelsContext, PluginContextHandle, SessionContext,
-    ToolCallId, UiContext, Usage,
+    AbortSignal, ContentBlock, ContextParts, ModelsContext, PluginContextHandle, RunId,
+    SessionContext, ToolCallId, UiContext, Usage,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +90,7 @@ pub struct ToolContext {
     pub session: SessionContext,
     pub models: ModelsContext,
     pub ui: UiContext,
+    run_id: Option<RunId>,
 }
 
 impl ToolContext {
@@ -112,6 +114,7 @@ impl ToolContext {
             session: context.session,
             models: context.models,
             ui: context.ui,
+            run_id: None,
         }
     }
 
@@ -123,9 +126,72 @@ impl ToolContext {
         &self.abort_signal
     }
 
+    /// The same execution identity observed by agent plugin hooks. Standalone
+    /// tool calls have no Agent run; plugin-owned state is never stored here.
+    pub fn run_id(&self) -> Option<&RunId> {
+        self.run_id.as_ref()
+    }
+
+    #[doc(hidden)]
+    pub fn with_run_id(mut self, run_id: RunId) -> Self {
+        self.run_id = Some(run_id);
+        self
+    }
+
     #[doc(hidden)]
     pub fn plugin_context_handle(&self) -> PluginContextHandle {
         self.session.handle_for_adapter()
+    }
+}
+
+/// Keeps the advertised schema intact while guarding preparation AND execution.
+pub(crate) struct ScopedTool {
+    pub inner: Arc<dyn Tool>,
+    pub allowed: bool,
+    pub origin: Arc<str>,
+}
+
+impl ScopedTool {
+    fn ensure_allowed(&self) -> Result<(), ToolError> {
+        if !self.allowed {
+            return Err(ToolError::Execution(format!(
+                "{} denied tool {}. Do not retry this tool in this run.",
+                self.origin,
+                self.inner.spec().name
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Tool for ScopedTool {
+    fn spec(&self) -> ToolSpec {
+        self.inner.spec()
+    }
+
+    async fn prepare_arguments(
+        &self,
+        context: &ToolContext,
+        input: Value,
+    ) -> Result<Value, ToolError> {
+        self.ensure_allowed()?;
+        self.inner.prepare_arguments(context, input).await
+    }
+
+    fn validate_arguments(&self, input: &Value) -> Result<(), ToolError> {
+        self.inner.validate_arguments(input)
+    }
+
+    async fn execute(
+        &self,
+        context: ToolContext,
+        id: ToolCallId,
+        input: Value,
+        updates: ToolUpdateSink,
+    ) -> Result<ToolResult, ToolError> {
+        self.ensure_allowed()?;
+        self.inner.execute(context, id, input, updates).await
     }
 }
 

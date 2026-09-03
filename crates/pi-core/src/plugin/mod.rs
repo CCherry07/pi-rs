@@ -15,13 +15,17 @@ pub use agent::{
 };
 pub use capabilities::{
     CommandContextParts, CommandModelsContext, CommandSessionContext, CompactOptions, ContextParts,
-    ContextUsage, ForkOptions, ForkPosition, MessageDelivery, ModelsContext, ModelsContextAccess,
+    ContextUsage, DirectCompletionRequest, EphemeralCompactionOptions, EphemeralSessionOutcome,
+    EphemeralSessionRequest, EphemeralSessionStatus, ForkOptions, ForkPosition,
+    IsolatedSessionHandle, IsolatedSessionId, IsolatedSessionOptions, IsolatedSessionOutcome,
+    IsolatedSessionRequest, MessageDelivery, ModelsContext, ModelsContextAccess,
     NavigateTreeOptions, NewSessionOptions, NoticeLevel, PluginContext, PluginContextEpoch,
     PluginContextError, PluginContextHandle, PluginContextReplacement, PluginContextResult,
     PluginContextScope, PresentationMode, ReplacedSessionContext, ScopedModel, SendMessageOptions,
     SendUserMessageOptions, SessionContext, SessionContextAccess, SessionEntryKind,
-    SessionEntryView, SessionReplacement, SessionSnapshot, UiContext, UiContextAccess,
-    UnavailablePluginContext,
+    SessionEntryView, SessionExecutionOrigin, SessionReplacement, SessionSnapshot, UiContext,
+    UiContextAccess, UiMultiSelectAction, UiMultiSelectOption, UiMultiSelectRequest,
+    UiMultiSelectResponse, UnavailablePluginContext,
 };
 pub use provider::{
     AfterProviderResponseEvent, BeforeProviderHeadersEvent, BeforeProviderRequestEvent,

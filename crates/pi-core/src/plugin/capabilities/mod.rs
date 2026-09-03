@@ -16,15 +16,22 @@ use async_trait::async_trait;
 pub use epoch::{PluginContextEpoch, PluginContextHandle, PluginContextReplacement};
 pub use models::{CommandModelsContext, ModelsContext, ModelsContextAccess};
 pub use session::{
-    CommandSessionContext, ReplacedSessionContext, SessionContext, SessionContextAccess,
-    SessionEntryKind, SessionEntryView, SessionReplacement, SessionSnapshot,
+    CommandSessionContext, DirectCompletionRequest, EphemeralCompactionOptions,
+    EphemeralSessionOutcome, EphemeralSessionRequest, EphemeralSessionStatus,
+    IsolatedSessionHandle, IsolatedSessionId, IsolatedSessionOptions, IsolatedSessionOutcome,
+    IsolatedSessionRequest, ReplacedSessionContext, SessionContext, SessionContextAccess,
+    SessionEntryKind, SessionEntryView, SessionExecutionOrigin, SessionReplacement,
+    SessionSnapshot,
 };
 pub use types::{
     CompactOptions, ContextUsage, ForkOptions, ForkPosition, MessageDelivery, NavigateTreeOptions,
     NewSessionOptions, NoticeLevel, PluginContextError, PluginContextResult, PluginContextScope,
     PresentationMode, ScopedModel, SendMessageOptions, SendUserMessageOptions,
 };
-pub use ui::{UiContext, UiContextAccess};
+pub use ui::{
+    UiContext, UiContextAccess, UiMultiSelectAction, UiMultiSelectOption, UiMultiSelectRequest,
+    UiMultiSelectResponse,
+};
 
 /// Dependency-inward aggregate implemented by the Pi-owned context Adapter.
 ///

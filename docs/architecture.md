@@ -31,6 +31,7 @@ crates/pi-prompt                pure Pi-style system prompt assembly
 crates/pi-resources             generic system/append prompts and project context discovery
 crates/pi-session               Pi v4 storage/runtime plus plugin contracts under plugin/ and types/
 crates/pi-settings              current-format settings documents, snapshots, and safe writes
+evals/pi-memory                 deterministic provider-only semantic-memory retrieval evaluation
 crates/pi-telemetry             typed Pi AI/harness span schemas and sink adapters
 crates/pi-rpc                   Pi JSON projector and stdin/stdout RPC adapter
 crates/pi-mcp                   protocol-neutral MCP client, tool projection, and process ownership
@@ -39,6 +40,7 @@ apps/pi-md                     TUI-owned Markdown parsing, streaming repair, hig
 crates/pi-plugin-sdk            native plugin author interface and descriptor types
 crates/pi-plugin-macros         static plugin preparation, agent hook-interest derivation, and native exports
 crates/pi-plugin-loader         manifest discovery, compatibility checks, and factory adapters
+crates/pi-memory-loader         memory.json loading and provider construction Interface
 crates/pi-plugin-manager        package intent/lock, Registry resolution, CAS, and activation
 crates/pi-js-package-manager     Pi-compatible JS discovery and npm/git orchestration
 crates/pi-js-plugin             JS wire DTOs plus three Rust lifecycle adapters
@@ -54,6 +56,13 @@ plugins/features/pi-plugin-{prompts,skills}
                                 generation-local prompt-template and skill discovery/commands
 plugins/features/pi-plugin-session-transfer
                                 first-party export/import/share commands
+plugins/features/pi-plugin-subagents
+                                profiled delegation and bounded recursive child-session policy
+plugins/features/pi-plugin-memory-hermes
+                                default curated USER.md/MEMORY.md provider with frozen prompt snapshots
+plugins/features/pi-plugin-memory-local
+                                declared local Agent/Session plugin, SQLite/FTS/sqlite-vec storage, ranking,
+                                FastEmbed lifecycle, tools, recall injection, maintenance, and rebuild policy
 crates/pi-tool-support           shared path validation, argument, and truncation helpers
 plugins/tools/pi-plugin-{read,write,edit,hashline-edit,bash,grep,find,ls}
                                 one production tool per plugin crate
@@ -70,6 +79,8 @@ pi-prompt            -> standard library only
 pi-resources         -> pi-prompt
 pi-session           -> pi-core + pi-prompt + pi-resources + pi-runtime
 pi-settings          -> serde JSON + filesystem persistence only
+pi-memory-eval       -> pi-plugin-memory-local
+                        (development-only corpus, adapters, runner, metrics, and reports)
 pi-rpc               -> pi-agent + pi-core + pi-session
 pi-mcp               -> pi-core + rmcp
 pi-acp               -> pi-agent + pi-core + pi-mcp + pi-session + official ACP SDK
@@ -81,6 +92,16 @@ pi-tool-support      -> pi-core
 production tools     -> pi-core + pi-tool-support
 plugins/features/pi-plugin-skills
                      -> pi-core (skill discovery, prompt contribution, explicit invocation)
+pi-memory-loader     -> pi-core + pi-session
+                        (provider selection, opaque configuration, and construction)
+plugins/features/pi-plugin-memory-hermes
+                     -> pi-memory-loader + filesystem locking
+                        (default bounded, file-backed curated memory provider)
+plugins/features/pi-plugin-memory-local
+                     -> pi-memory-loader + SQLite + version-pinned sqlite-vec
+                        + FastEmbed + Hugging Face Hub
+                        (bundled local provider implementation, provider-owned initialization,
+                        factory, and maintenance policy)
 plugins/providers/pi-plugin-models
                      -> pi-core + pi-plugin-openai (credential-blind catalog and routing)
 other plugins/*      -> pi-core
@@ -168,10 +189,11 @@ cancel notifications, transcript replay, and model/thinking configuration stay i
 RPC commands and wire types. `pi-mcp` is deeper and protocol-neutral: it owns stdio MCP process
 lifetime, discovery, qualified tool names, invocation, result projection, and cancellation. ACP
 converts per-session `mcpServers` into `pi-mcp` configuration and injects the resulting plugin by a
-`SessionGenerationOverlay`. The overlay is carried across live new/resume/fork/reload generation
-replacement but is never serialized; reopening a session requires the external adapter to provide
-its transient MCP configuration again. This preserves Pi v4 storage and keeps ACP and MCP policy out
-of `pi-core` and `pi-session`.
+`SessionGenerationOverlay`. The overlay also carries typed `SessionExecutionOrigin` provenance
+(`User` or `Subagent`). Both are carried across live new/resume/fork/reload generation replacement
+but are never serialized; reopening a session requires the caller to provide its transient
+configuration again. This preserves Pi v4 storage and keeps ACP, MCP, and review policy out of
+`pi-core` and `pi-session`.
 
 Pi's experimental framed-CBOR server/client protocol is intentionally outside the pi-rs product
 surface. Process integrations use the supported Pi stdin/stdout RPC or ACP adapters rather than a
@@ -228,7 +250,48 @@ while unchanged content reuses one process-pinned handle. Libraries remain pinne
 lifetime because plugin code may retain worker threads. Package metadata and artifact lifetime are
 loader concerns rather than a fourth lifecycle or cross-lifecycle bundle.
 
-Native ABI 8 adds asynchronous semantic confirmation to the generation-bound `UiContext`, allowing
+Native ABI 15 replaces the core tool-run state container with `ToolContext::run_id()` and explicit
+invocation-private Agent-plugin attachments. ABI 14 added optional detached compaction to
+`SessionContext::run_ephemeral`, typed execution origin inspection, and typed tool state (now
+removed from core). ABI 13 added inherited effective
+prompt/history, optional bounded history replay, per-invocation tool observations, and aggregate
+input budgets to the ABI 12 ephemeral entry. `pi-core` owns the request/outcome contract, `pi-runtime` executes the
+normal Agent loop, and `PiPluginContext` forwards without the multi-session manager or parent
+operation/reload gate. The call pins a generation and reuses providers and request-time auth.
+Model/thinking default to the parent. All parent-active schemas remain advertised; only the
+requested subset may prepare arguments or execute. Tools receive the same run identity as plugin
+hooks, but no parent-session/model-control/UI capabilities. Core stores no plugin state or tool
+observations. `EphemeralSessionRequest.plugins` explicitly attaches private `AgentPlugin`
+instances without a separate hook allowlist. The ordinary Agent driver awaits interested plugins
+in registration order, including prompt/context, Agent/turn/message, and tool hooks. Prompt and
+context patches affect only the private Agent. Tool blocking, argument revalidation, and result
+patching remain intact. Duplicate IDs fail before the provider runs. Private plugin registration
+is not invoked, so published generation registries remain immutable. This is reuse of the existing
+AgentPlugin driver, not a fourth plugin lifecycle. Parent agent/session hooks do not run. The bare
+Agent entry does not run the product `input` pipeline or emit `agent_settled` or `SessionPlugin`
+lifecycle events. This is a capability boundary, not a sandbox for trusted native code.
+
+The fork has no SessionLog, managed handle, frontend forwarding, or external worker. Completion,
+timeout, cancellation, and dropping the future release its private plugin instances and abort its
+provider/tool signal. Stateful attachments are fresh per invocation, not shared through request clones.
+Cleanup uses plugin-owned RAII, since cancellation or dropping the future can bypass `agent_end`.
+Completed tool side effects are not rolled back. It remains usable inside awaited compaction and
+shutdown hooks before generation retirement. Ordinary managed subagents still use launch/wait/abort.
+Optional compaction runs only between completed tool iterations, after the first full replay. It
+reuses the pinned provider path for tool-free summaries, applies caller-supplied retention/token
+limits, and replaces only the fork's private context. Summary input/cache usage counts toward the
+same aggregate budget; timeout, cancellation, and invalid summaries cannot commit to the parent.
+
+Native ABI 11 added `SessionContext::complete`: a tool-free, transcript-free provider completion
+for bounded, tool-free plugin side work. Direct completions pin the immutable
+runtime generation and resolved model for their entire retry loop, rather than acquiring the
+parent prompt's reload mutex. This lets lifecycle hooks await them without self-deadlock. An
+in-flight standalone completion may finish against its pinned old generation after a runtime
+reload; that generation's plugin context remains alive until its last owner is released.
+Native ABI 10 adds inherited model,
+thinking, and active-tool selection to fresh isolated sessions.
+Native ABI 9 added fresh isolated-session launch, wait, and abort to the generation-bound
+`SessionContext`. Native ABI 8 added asynchronous semantic confirmation to the `UiContext`, allowing
 trusted Rust plugins to request a yes/no decision without owning terminal input or rendering.
 Native ABI 7 replaced cumulative `message_update` ownership with one shared read-only
 `AssistantStream` handle plus the current `StreamEvent` delta. A native hook can clone the handle
@@ -240,8 +303,10 @@ public Rust interface exposes three explicit domain capabilities on each typed c
 `context.session`, `context.models`, and `context.ui`. It has neither a
 pass-through `context.pi()` namespace nor a generic `context.runtime` bucket, and it does not use
 implicit `Deref` to hide method ownership. Ordinary callbacks receive read-only model/catalogue and
-session-inspection capabilities plus the non-replacing `abort`, background `compact`, and product
-`shutdown` controls. Command callbacks additionally receive awaited message delivery and stronger
+session-inspection capabilities plus the non-replacing `abort`, background `compact`, product
+`shutdown`, direct-completion, and ephemeral tool-loop controls. A direct completion carries an explicit system
+prompt and message list, uses the active model and request-time credentials, has no tools, and does
+not mutate the parent transcript or emit agent lifecycle events. Command callbacks additionally receive awaited message delivery and stronger
 session/model capabilities for replacement, navigation, reload, and selection. Tool argument
 preparation and execution receive the same
 generation-bound `ToolContext`, so validation shims cannot escape the product capability lifetime.
@@ -262,7 +327,7 @@ capability. ABI 4 added
 hook-interest contract, and ABI 2 added the `AgentContext`/`added_tool_names` surface. The native
 agent export macro derives its contract from the callback methods in the annotated impl, so authors
 do not maintain a second hook list. The loader reads the stable C descriptor first and rejects older
-ABIs before resolving any v8 Rust constructor symbol, preventing a stale in-process plugin from
+ABIs before resolving any v15 Rust constructor symbol, preventing a stale in-process plugin from
 crossing the changed trait boundary.
 
 Callback metadata is read-only and exposed through accessors such as `plugin_id()`, `run_id()`,
@@ -661,6 +726,10 @@ retry, shell configuration, session storage, image blocking/resizing, skills/pro
 provider timeout/retry, HTTP proxy, and Codex transport. The proxy is bootstrap/global policy and
 is intentionally not project-overridable. UI-only theme and selector settings are retained but do
 not create a second renderer settings implementation.
+Memory follows the same generation publication boundary but not the `settings.json` schema.
+The global `<agent-dir>/memory.json` document selects one registered memory provider and owns the
+host recall limits; project settings never merge into it or redirect durable memory. The bundled
+factory id is `local`, and automatic capture remains off.
 Built-in provider credential loading, selected-provider overrides, and factory registration sit
 behind `BuiltinProviderSet`; the session-construction Adapter supplies one transport and does not
 contain provider-name construction branches.
@@ -749,8 +818,11 @@ Each assistant stream owns one mutable assembler state behind a read-only `Assis
 reducer, ordered native hooks, and listeners therefore do not clone cumulative content. Consumers
 that require a full message call `snapshot()` explicitly, while `message_end` and `turn_end` share
 the completed immutable assistant message. These hook fields were introduced in native ABI 7;
-ABI 8 adds UI confirmation to the same generation-bound context. Older native artifacts are
-rejected before constructor resolution.
+ABI 8 adds UI confirmation, ABI 9 adds isolated-session control, ABI 10 adds isolated-session
+initial runtime selection, ABI 11 adds direct tool-free completion, ABI 12 adds ephemeral tool loops,
+ABI 13 adds inherited prompt/history, guarded dispatch and invocation observations, and ABI 14 adds
+detached compaction, execution origin and typed run-local state. Older native artifacts are rejected
+before constructor resolution.
 
 Cancellation and exceptional termination close the same observable lifecycle as Pi. A cancellation
 that races with turn entry first commits the prompt and already-drained steering, then emits an
@@ -931,6 +1003,382 @@ not clone the frontend snapshot, and session id/name/label/entry/header reads do
 active-session map private. Opening an already-active path reuses its `PiSession`; creating or
 switching to a path owned by another handle fails before any session lifecycle transition starts.
 Manager shutdown drains and closes every managed handle.
+
+## Memory systems
+
+pi-rs has two deliberately separate persistent-memory mechanisms. The default provider,
+`pi-plugin-memory-hermes`, now targets **NousResearch/hermes-agent**, pinned to
+[`e629c900`](https://github.com/NousResearch/hermes-agent/tree/e629c900a87622ddcc31f67a4b4a756b239fbaf0).
+It no longer uses the Pi-Hermes extension's policy-only prompt, correction regex, or
+direct-completion/CLI review protocol.
+
+Global `MEMORY.md` and `USER.md` remain canonical under
+`<agent-dir>/pi-hermes-memory/`. Their contents are frozen at session start and appended to the
+effective prompt; writes update files but not that session's frozen prompt. The unified `memory`
+tool supports add/replace/remove and atomic operation batches, targeting memory (default) or user.
+Defaults are 2,200/1,375 Unicode characters. Capacity errors return the current entries so the
+calling Agent can consolidate and retry without launching another Agent. Following Hermes's
+[memory tool](https://github.com/NousResearch/hermes-agent/blob/e629c900a87622ddcc31f67a4b4a756b239fbaf0/tools/memory_tool.py),
+capacity, missing-match, and atomic-batch consolidation failures share one invocation-local budget
+across targets. The first three failures may return entries/retry guidance; the fourth and later
+return only `success: false`, `done: true`, and a stop-retrying message. This is a terminal memory
+response, not an Agent-loop termination. A successful write (including duplicate/no-op success)
+resets the counter; a new foreground or detached invocation starts at zero. Ordinary standalone
+validation, ambiguous standalone matches, and content-safety failures do not consume this budget.
+Per-file locks, conflict checks, atomic replacement, content scanning, and the derived SQLite FTS
+index remain in the store.
+
+Review scheduling is plugin-owned and session-local. User messages increment the memory counter
+(default 10; resumed user count is hydrated from the active branch). Model iterations separately
+increment the skill counter (default 10), reset by skill_manage use. A successful final response
+at `agent_settled` combines due flags into one detached review. There is at most one review per
+parent. A new foreground request, compaction, reload, or shutdown cancels it; foreground waits at
+most two seconds for acknowledgment.
+Managed children have `SessionExecutionOrigin::Subagent`, preserved across reload and nested
+delegation. Hermes skips their review counters, autonomous reviews, and opt-in lifecycle flushes,
+equivalent to the upstream `skip_background_review` behavior. They still receive the memory
+snapshot and can explicitly use the normal memory/skill tools. This gate belongs to the memory
+plugin; generic session orchestration only supplies provenance.
+
+Hermes remains one package with two internal responsibilities. `HermesMemoryPlugin` owns tools,
+commands, prompt injection, foreground invocation budgets, review scheduling and cancellation.
+For each automatic review, explicit consolidation, or lifecycle flush, it constructs a fresh
+`HermesReviewPlugin` and attaches it to the private Agent's tool hooks. That plugin has no prompt,
+session, or review-scheduling hooks. Each instance owns its consolidation budget and successful
+skill-read witnesses. The generation's tools locate this typed state by `RunId` through a
+Hermes-private weak directory; RAII leases remove entries on completion, error, timeout,
+cancellation, dropped futures, and eventual generation release. Foreground state is bounded by
+`agent_start`/`agent_end` with session-specific shutdown cleanup. Shared storage and rule code do
+not imply shared execution state. `origin` is only a diagnostic label, never the authority to enable
+autonomous skill rules. Missing or mismatched invocation ownership rejects Hermes mutation-tool
+execution rather than silently falling back to unrestricted writes. Standalone tool calls have no
+Agent invocation and retain their explicit standalone behavior. This is a deliberate Rust plugin
+execution design, not an additional installable plugin or a change to Hermes review thresholds.
+
+The sole review transport is a bounded, in-process Agent fork. It pins the current generation,
+inherits effective system prompt/model/thinking/provider authentication, and replays structured
+parent history. A different configured review model uses an older-text digest plus at least 24
+recent messages, keeping tool-call/result groups together. It shares advertised tool definitions
+for cache parity but checks an execution allowlist before argument preparation and execution.
+The default allowlist is memory, skill_manage, skill_view, skills_list and the available Pi file
+read/search tools. `reviewExtraTools` can opt in other tools only within the parent's active-tool
+ceiling. Shell and general file writes are not executable by default. Tools receive no mutable
+parent-session, model-control, UI, or child-launch capabilities. This is an invocation boundary,
+not a sandbox for trusted native code.
+
+Review uses 16 model/tool iterations, a default aggregate 600,000 input-token budget, and a
+120-second timeout. It creates no managed session or JSONL file, emits no parent agent/session
+hooks, and cannot recursively schedule a review. Only successful mutation receipts are reported,
+not assistant claims. The reusable direct-completion API remains available to other plugins; it is
+not an alternative review transport, and there is no subprocess fallback.
+
+Long review contexts use detached, in-place LLM compaction after the first provider response and
+its complete tool-result group, preserving the initial cache replay. The plugin supplies Hermes's
+default model-window profile: 75% of effective input capacity below a 512,000-token window, 50%
+otherwise, with the 64,000-token floor capped at 85% of effective capacity when binding. The
+runtime retains the protected prefix, a token-bounded recent tail with complete tool groups, and
+the newest user request verbatim. Summary calls contain no executable tools, image data, or
+reasoning traces. Transcript estimates and output caps use model limits; actual input/cache usage is
+charged to the review's existing budget. Invalid, empty, or truncated summaries stop only that
+review without replacing its context. Two ineffective summaries disable further compaction.
+No session database, journal, rotation, or lifecycle hook participates. If model-window metadata
+is unavailable, compaction stays off and the review retains its iteration/input/time bounds.
+
+Skills are active procedural memory: review may create class-level skills and improve existing
+ones using verified procedures, corrections, and pitfalls. Skill-tool creations receive curator
+metadata. Background edits require agent provenance, an unchanged content hash, an unpinned skill,
+and a successful read of the exact existing file during that review. User-owned and externally
+changed skills fail closed. Supporting files use relative, non-symlink paths. Autonomous deletion
+requires an existing `absorbed_into` skill and archives the source outside all skill roots.
+Pi-native skill roots and immutable catalog ownership stay with `SkillsPlugin`; reload is required
+before newly created skills appear as `/skill:` commands.
+
+Existing project/failure notes, FTS/session search, manual memory-management commands, and
+optional standing instructions are retained as Rust product extensions, not claims of Hermes
+Agent command/storage parity. No existing user memory or skill files are deleted by the change.
+`/memory-preview-context` shows the actual frozen prompt. Explicit
+`flushOnCompact`/`flushOnShutdown` enable extra best-effort review at lifecycle boundaries
+(minimum six user requests; 30/10-second bounds); both default off. The old correction regex and
+automatic capacity-consolidation Agent are removed.
+
+Detached review compaction, managed-child review suppression, and per-invocation consolidation
+failure limits have deterministic regressions, including the complete review/read/summary/
+memory-write handoff and unchanged parent JSONL. Private plugin tests cover shared hook/tool run
+identity, no parent hooks or registration, fail-closed validation, concurrent review isolation,
+fresh read witnesses, and state release across completion/error/cancel/timeout/drop/reload.
+Prompts, JSON configuration, Pi-native skill
+metadata/catalogs, and filesystem conflict protection remain Rust adaptations. The compressor
+implements the default window/retention profile and detached lifecycle, not every upstream
+compressor tuning option or recovery heuristic. This is not byte-for-byte or complete Hermes parity.
+
+The older local semantic provider is retained as an explicitly selected `"local"` provider for
+vector/FTS recall use cases. It is not the default and does not claim Hermes compatibility.
+`memory.json` selects exactly one provider; the loader never combines their tool contracts or
+storage semantics.
+
+Memory providers do not add a fourth plugin Driver. `pi-memory-loader` is a host-side construction crate that
+owns `MemoryLoader`. The Loader reads `<agent-dir>/memory.json`, selects exactly one registered
+`MemoryProviderFactory`, and awaits provider initialization before the candidate generation is
+published. The resulting `Arc<dyn MemoryProviderPlugin>` is projected directly into the existing
+`AgentPlugin` and `SessionPlugin` Drivers, so one provider instance and its state are shared by both
+systems without a forwarding Adapter, separate lease object, or memory-specific Driver.
+
+`MemoryProviderPlugin` is a marker Interface extending the ordinary `AgentPlugin` and
+`SessionPlugin` Interfaces. It adds only the provider identity used by `memory.json`; it does not
+copy their hooks into a parallel lifecycle contract. A provider declares its tools, commands,
+agent hooks, and session hooks directly through those existing plugin traits. There is no parallel
+`capabilities` declaration or generic `MemoryLifecycleTask` event envelope to keep in sync.
+
+There is no provider-neutral record, storage, retrieval, or session-index Interface. Provider
+authors receive configuration plus the ordinary plugin lifecycles and own their complete memory
+model behind that seam. This avoids freezing the bundled SQLite provider's record and query shapes
+into every future provider before a second implementation demonstrates shared semantics.
+
+`pi-plugin-memory-local` is the deep bundled Provider Module. Its external construction Interface is
+`LocalMemoryProviderFactory`, while its public `LocalMemoryPlugin` directly implements both
+`AgentPlugin` and `SessionPlugin`. The local implementation owns the `memory` and `session_search`
+tools, tool schemas and write policy, local `MemoryRecord`/mutation/query types, transient context
+recall, per-run recall caching, start/compact/tree/shutdown reconciliation, maintenance commands,
+and on-device storage. Its `LocalMemoryProvider` implementation hides SQLite/FTS persistence,
+sqlite-vec dense retrieval, hybrid ranking, session indexing, embedding validation, and the pinned
+FastEmbed asset lifecycle. It stores a local database at
+`<agent-dir>/memory/memory.sqlite3`, uses WAL plus FTS5, sets the directory to `0700` and the
+database, WAL, and SHM files to `0600` on Unix, and opens a fresh connection in a blocking
+worker for each operation. SQLite, ranking, or embedding internals can change without changing the
+factory or lifecycle Interface. A different Provider remains free to register different tools and
+implement different lifecycle policy.
+
+The crate layout follows those responsibilities: `factory.rs` is the sole construction Adapter,
+`plugin.rs` owns agent/session hooks, `commands/` and `tools/` hide their concrete registrations,
+`embedding/` owns model acquisition and initialization, and `storage/` owns SQLite plus sqlite-vec.
+The pure ranking Module remains separate from storage mechanics. Provider initialization types are
+crate-private; the root exports only the product factory/plugin and concrete types required by the
+evaluation Adapter.
+
+Non-empty SQLite recall keeps four concrete ranking modes inside the local Provider Module. The
+product-default lightweight Hybrid mode asks FTS5/BM25 for 32–100 active,
+scope-filtered candidates; an internal ranking Module combines candidate-local term rarity, term
+coverage, phrase order, contiguous spans, code atoms, and reciprocal sparse rank. It does not infer
+query intent from language-specific keyword vocabularies or use `MemoryKind` as a lexical ranking
+prior. Greedy diversity promotes complementary evidence over near-duplicate records, and a relative
+confidence cutoff may return fewer than the requested maximum. `SqliteRecallRanking::Bm25` remains
+the deterministic sparse control. `SparseDenseRawRrf` is a historical evaluation control that
+deliberately omits confidence, cutoff, and diversity; it is selectable only through a concrete
+SQLite Adapter constructor and is never product construction policy.
+
+The optional `SparseDenseRrf` mode accepts one injected `MemoryEmbedder` at an internal seam and
+stores compact float32 vectors in a sqlite-vec `vec0` table. Its immutable
+model/revision/dimension descriptor owns the embedding space; a descriptor change atomically
+recreates the derived vector table. Cosine KNN applies `scope_key` metadata filters before its
+bounded candidate limit, while materialization repeats the active/scope predicate as defense in
+depth. The ranking Module first runs the ordinary lexical diversity/cutoff path to form a protected
+core. It then scores the BM25/dense union with lexical structure, normalized cosine similarity,
+and a bounded reciprocal-rank contribution; raw BM25 and distance values are never directly
+mixed. A dense rescue must add substantive query evidence not covered by the core, or strongly
+repeat at least three substantive query terms, before it enters the same seeded diversity and
+relative-cutoff policy. Within the rescue pool, a candidate that adds previously uncovered
+substantive evidence and expresses it as an adjacent query phrase or exact query code atom is
+selected before score-only repeated evidence; that coherent complement survives the relative
+cutoff that still applies to ordinary rescues. This prevents redundant subsystem summaries from
+consuming every multi-hop slot without globally lowering the cutoff. The substantive-token rule is
+shape based (CJK, digit-bearing, or at least four characters), not an intent vocabulary or a
+`MemoryKind` prior. Tombstones and supersession remove vectors regardless of replay order.
+Query/model failures return the ordinary lexical result, write-time model failures leave an active
+record pending rather than weakening the canonical write, and bounded backfill performs model work
+outside SQLite transactions. Empty-query recency and LIKE fallback behavior are unchanged.
+
+The local-provider Module privately owns sqlite-vec's required C entry-point conversion.
+Registration is process-wide, checked, and memoized. Unsafe code is denied crate-wide and allowed
+only in that single audited registration function; the module is not exported. Embeddings, model
+state, ranks, and backfill state remain derived provider data rather than canonical `MemoryRecord`
+fields.
+
+The same local Provider Module owns the concrete FastEmbed Adapter, its asset lifecycle, and its
+`LocalMemoryProviderInitializer`. `LocalMemoryProviderFactory` parses only `providers.local`,
+derives the database and model paths, awaits storage/model initialization, and returns the declared
+`LocalMemoryPlugin`; that plugin attaches the provider-specific `/memory-local-*` maintenance
+commands and owns its lifecycle implementation. An initialization error rejects the candidate generation and
+leaves the previous generation intact. The initial embedding space is
+`intfloat/multilingual-e5-small` at one immutable Hugging Face commit, 384
+dimensions, mean pooling, normalized FastEmbed output, and versioned E5 `query:` / `passage:`
+prefix policy. Model identity includes both the upstream commit and Pi Adapter-policy revision, so a
+change that would invalidate stored document vectors recreates the derived vector index. FastEmbed
+is opened from provider-verified local bytes rather than its automatic Hub constructor; `HF_HOME`
+cannot redirect ordinary inference, recall, or writes.
+
+The Memory Loader owns only the outer shape of `<agent-dir>/memory.json`; generic `settings.json`
+parsing neither decodes nor merges Memory policy, and project settings cannot redirect durable
+memory. The versioned document selects the provider, recall budgets, and provider-specific
+configuration under `providers.<id>`. Each value in `providers` remains opaque JSON to the host.
+Only the selected subtree is passed to its factory; inactive provider configurations are neither
+decoded nor exposed to another provider. The provider developer owns that subtree's complete
+schema, defaults, paths, credentials, model acquisition, and validation policy.
+Missing configuration safely defaults to the Hermes curated provider. Selecting the local Provider
+with no `providers.local` configuration uses its `offline` initialization; an
+invalid existing document fails generation preparation so the previous generation remains
+published. For the local Provider, `providers.local.initialization` selects `offline` or
+`automatic`. Offline initialization creates and validates local storage and activates dense recall
+only when a complete verified model is already present; it never accesses the network. Automatic
+initialization lets the Provider download missing pinned assets, load the model, create the vector
+index, and backfill existing active records before the generation is published. Both paths verify
+exact sizes and SHA-256 digests and atomically publish a versioned completion marker under a
+cross-process file lock. `HF_ENDPOINT` may select a Hub mirror, but not a different model revision.
+The explicit `/memory-local-model-install` operation remains available: it prepares and backfills a dense
+Adapter, then performs the normal whole-generation reload. Installed model sessions are shared
+between overlapping generations in-process, avoiding a second 470 MB ONNX load during the atomic
+swap. `/memory-local-model-backfill` repairs pending rows, and `/memory-local-rebuild` backfills after replacing
+the canonical derived index.
+
+The Pi v4 JSONL session remains the source of truth. A curated write validates a compact
+`MemoryRecord`, appends a `pi.memory.v1` custom entry, and only then applies that mutation to the
+derived database. If indexing fails after the append, the tool reports the durable write as
+pending rather than inventing a second commit point; lifecycle reconciliation replays JSONL by
+mutation id. `remember` records and `forget` tombstones are immutable. A correction is a new record
+whose `supersedes` points at the old id, so replay from multiple sessions is commutative and does
+not depend on a global sequence number. Active queries exclude tombstoned and superseded ids.
+Reusing one mutation id with a different payload is rejected as journal corruption rather than
+silently accepting whichever session happened to reconcile first.
+
+SQLite maintenance remains a concrete local capability behind `LocalMemoryPlugin` rather than a
+requirement imposed on every provider. `/memory-local-status`
+reports schema, SQLite quick-check state, row counts, and index size; `/memory-local-list` and
+`/memory-local-search` expose active records with provenance; `/memory-local-rebuild` replaces all derived rows
+from the configured v4 session directories. A rebuild acquires an immediate SQLite write
+transaction before reading its sources, uses the non-repairing `SessionLog::read` path so an
+actively appended torn tail is ignored rather than truncated, and commits the complete replacement
+atomically. Concurrent curated writes append JSONL first and then wait behind the transaction, so
+they cannot be cleared by the replacement. Legacy v1-v3 files are skipped until explicitly imported
+through the existing session-import seam; invalid v4 files and duplicate session ids fail the whole
+rebuild and preserve the old index. If SQLite identifies the database as corrupt or not a database
+during generation construction, the file and any sidecars are preserved under a `.corrupt-*` name
+before a clean derived database is initialized; status directs the user to rebuild it from JSONL.
+
+The local Provider's `MemoryRecord` V1 contains id, exactly one user/project/session scope, kind,
+text, origin, required
+evidence, record time, and optional supersession. UUIDv7 identities make retries and reconciliation
+explicit. Embeddings, access counters, ranks, and future confidence/valid-time fields are derived
+provider data rather than canonical fields. Automatic capture is intentionally absent: the model
+can write only through the visible `memory` tool, whose contract forbids credentials and transient
+task details.
+
+Recall runs from the generation `context` hook with a bounded record count, approximate token
+budget, and timeout. Results are cached per agent run, rendered as one hidden custom message before
+the latest real user message, and never appended to JSONL. The wrapper says that current user
+instructions win and quoted memory cannot become a system/tool command. `session_search` indexes
+only user and assistant text from each current active branch; tool results are excluded because
+they commonly contain source files, credentials, or very large payloads. Replacing a session index
+therefore removes abandoned branch text. Project search is rooted at the nearest Git ancestor (or
+the canonical cwd when no Git root exists), while the database stays outside the project.
+
+`pi-memory-eval` is a development-only Module with its own narrow seam. Its `EvalBackend`
+Interface has one operation and receives only query text, scopes, and a result limit; question ids,
+ability labels, gold evidence, forbidden records, and expected answers remain runner-owned. The
+local production Adapter delegates to `LocalMemoryProvider::recall`, while no-recall and
+deliberately gold-privileged Oracle Adapters provide lower and upper bounds. The traced SQLite
+evaluation Adapter uses
+the concrete `recall_with_candidates` capability to return rank-ordered sparse/dense identities
+alongside the unchanged final result. For the product sparse/dense policy it additionally records
+protected-core, gate-eligible, and pre-cutoff identities; ordinary product recall does not collect
+any of those ids. The bundled corpus replays ordinary `MemoryMutation` values and scores
+evidence-hop Recall@1/5/8, all-hop success, MRR, scope/stale/distractor risk, evidence density,
+timeout rate, and latency percentiles. Report schema v5 also groups retrieval metrics by language
+relation and hop shape, compares gold coverage in the sparse, dense, and deduplicated candidate
+union, and aggregates coverage at each final-ranking boundary. Gold comparison happens only after
+`EvalBackend::gather` returns. Language relation, split membership, and every other gold field
+remain runner-owned and never cross the `EvalBackend` seam.
+
+Corpus schema v2 separates haystacks from evaluation suites: a suite references one haystack and an
+explicit ordered question-id set. The fixed-seed `small` haystack expands seven curated sessions to
+100 sessions and 306 records. Corpus version `1.3.0-holdout-v2` contains 45 unique questions:
+`small-dev`, the first frozen holdout, and a second pre-run frozen holdout select 15 questions each
+over those exact records. The fixed-seed `medium` haystack retains the curated needles and expands
+to 500 sessions, 1,506 records, and 1,507 replay mutations; its dev and two holdout suites reuse the
+corresponding small-tier question ids. Paired small/medium reports therefore isolate scale pressure,
+while only a never-before-run question split can measure unseen-query generalization. Fixture tests
+enforce shared mutations, ordered v2 question identity, ability/language/hop composition, Oracle
+upper bounds, and query-input uniqueness. This prevents split names from changing generated filler
+and makes lexical tuning failures visible on separately worded cross-language queries. Checked BM25
+and lightweight-hybrid baselines omit machine-specific latency while runtime reports retain it.
+This is a `pi-rs` provider benchmark inspired by LongMemEval-V2, not an official
+trajectory-benchmark score and not a reason to widen the production memory Interface.
+
+The explicit `sqlite-dense` evaluation Adapter loads the same pinned FastEmbed model and exercises
+the production protected-lexical/dense-rescue path through `LocalMemoryProvider::recall`; it never
+installs or downloads model assets. Its cache path is mandatory, haystack embedding occurs before timed
+queries, and the real-model regression is ignored by ordinary workspace tests. This keeps
+deterministic lexical controls and offline CI independent from a 470 MB asset while making the
+model-backed path reproducible on machines where that exact revision was installed.
+`sqlite-dense-raw-rrf` uses the same concrete Adapter and model but selects the historical
+equal-weight RRF control. The choice stays outside `LocalMemoryPlugin`, keeping evaluation
+ablations from becoming product plugin policy.
+
+The plugin-facing custom-entry capability permits an atomic extension-state append while the Agent
+itself owns the prompt operation. `SessionLog` still assigns the shared mutation sequence; busy
+compaction, switch, fork, and tree operations remain rejected. This lets a tool establish the JSONL
+commit before updating a derived provider without weakening other session mutation gates.
+
+`SessionContext::launch_isolated_session` is a deliberate Rust product extension seam rather than
+Pi core workflow policy. It creates a fresh `PiSession` through the same
+`AgentSessionRuntimeFactory`, starts one user-message run, and returns a generation-bound opaque
+handle with `wait` and `abort`. Optional initial active tools, model, and thinking level inherit
+from the caller when omitted. `MultiSessionManager` resolves those values into one complete
+`AgentSessionInitialState`, rejects any tool selection outside the caller's active-tool ceiling,
+and passes it to the product factory. The factory applies that state before session preparation, so
+the first provider request and the initial Pi v4 model/thinking/tool records agree. The generation
+overlay also marks the child as `SessionExecutionOrigin::Subagent` before any hook runs. That
+transient origin survives live generation replacement and nested children, without changing Pi v4
+wire records or disabling ordinary plugin tools. The caller's
+`PiSession` is never replaced. The manager registers
+the isolated handle like every other active session so path ownership, plugin-context binding, and
+shutdown remain centralized; frontends retain their explicitly returned primary `PiSession` rather
+than deriving presentation ownership from the manager inventory. Isolated files live below the
+owning session's sibling directory and therefore do not enter the top-level resume listing. Closing
+an owner closes its registered isolated descendants. Fork seeding, detached-run reattachment, and
+background status remain later layers rather than widening this interface.
+
+`pi-plugin-subagents` is the first policy module over that seam. It registers one parallel-safe
+`subagent` tool with focused `scout`, `worker`, `reviewer`, `oracle`, and `delegate` built-ins. Its
+generation-local agent catalog overlays those built-ins with recursive Markdown discovery from the
+global agent directory's `agents/` subtree and the nearest trusted project `.pi/agents/` subtree;
+project definitions win name collisions. Definition frontmatter owns `name`, `description`,
+`aliases`, `systemPromptMode`, `allowNestedSubagents`, `maxSubagentDepth`, `tools`, `excludeTools`,
+`model`, `thinking`, `inheritSkills`, `skills`, `skillPath`, and `timeoutMs`,
+while the Markdown body owns the role system prompt. Omitted selections inherit from the immediate
+parent; an empty `tools` field selects no tools; an explicit list is a strict allowlist under the
+inherited ceiling, and exclusions can only narrow the resolved set. Canonical names beat aliases;
+alias-to-alias ambiguity fails candidate generation. Bare model ids prefer the current provider and otherwise require a unique
+available catalogue match; thinking levels are checked against the resolved model before launch.
+Reload rescans the catalog transactionally, and untrusted project definitions never enter the
+candidate generation.
+
+`SkillsPlugin` exposes a small prompt-projection Interface over its immutable generation catalog.
+Normal sessions use the complete model-visible catalog; the subagent Adapter selects inherited and
+explicit skills from the feature-owned launch record. Invocation-private `skillPath` roots are
+resolved relative to the defining Markdown file, remain outside the parent catalog, and take
+precedence only for explicitly selected names. The subagent hook runs before the skills hook so
+`systemPromptMode: replace` replaces the base prompt without discarding the projected child skill
+catalog. Skill-enabled profiles receive `read` only within the caller's existing capability ceiling;
+missing names remain non-fatal result warnings.
+
+A shared feature-owned runtime tracks logical lineage across independently rebuilt child
+generations and enforces maximum nesting depth, cumulative spawns per root session, active-run
+capacity, and each parent profile's nested-delegation permission. The global depth comes from
+`PI_SUBAGENT_MAX_DEPTH`, then `<agent-dir>/extensions/subagent/config.json`, then the built-in
+default. A profile's absolute `maxSubagentDepth` can only tighten the inherited lineage ceiling;
+already-launched children retain that ceiling when a root generation reloads. This is the
+in-process equivalent of pi-subagents' child environment propagation rather than a child-process
+environment contract. Invalid feature configuration fails candidate generation transactionally.
+The launch record retains the resolved owned profile, so a file change between parent launch and
+child binding cannot mix two definition generations. Profile specialization is applied by the plugin's generation hook;
+`pi-core` and `pi-session` never interpret profile names or subagent policy. An authorized child
+receives the same feature plugin and can launch its own isolated child within inherited limits. The
+current tool waits in the foreground and projects the child's final textual response into the parent
+tool result; multiple tool calls emitted in one assistant turn use the existing parallel tool
+scheduler. A positive profile `timeoutMs` bounds that wait, aborts the isolated handle on expiry,
+and returns a terminal timed-out result without widening the generic isolated-session Interface.
+A separate session-plugin adapter clears lineage on quit or logical-session replacement
+while retaining cumulative state across a generation reload. Frontends continue to render their
+explicitly held primary session.
 
 Each `PiSession` has one replaceable current `AgentSession`. Its internal `AgentSessionRuntime`
 serializes replacement, dispatches `session_before_switch` or `session_before_fork`, settles the

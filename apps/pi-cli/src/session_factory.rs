@@ -9,6 +9,7 @@ use pi_core::{
 };
 use pi_js_package_manager::{PackageManager as JsPackageManager, ResolvedExtensionIdentity};
 use pi_js_plugin::{JsGenerationRequest, JsPluginGeneration, JsPluginHost};
+use pi_memory_loader::{MemoryLoader, MemoryLoaderOptions, PreparedMemoryProvider};
 use pi_plugin_bash::{BashToolOptions, ConfiguredBashPlugin};
 use pi_plugin_edit::EditPlugin;
 use pi_plugin_find::FindPlugin;
@@ -19,12 +20,18 @@ use pi_plugin_ls::LsPlugin;
 use pi_plugin_manager::{
     InstallScope, PluginManager, PluginManagerOptions, PreparedPluginReconcile,
 };
+use pi_plugin_memory_hermes::{HermesMemoryProviderFactory, managed_skill_roots};
+use pi_plugin_memory_local::LocalMemoryProviderFactory;
 use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
 use pi_plugin_openai::{CodexTransport, CodexTransportOptions};
 use pi_plugin_prompts::{PromptTemplateLoaderOptions, PromptTemplatesPlugin};
 use pi_plugin_read::ConfiguredReadPlugin;
 use pi_plugin_session_transfer::SessionTransferPlugin;
 use pi_plugin_skills::{SkillLoaderOptions, SkillsPlugin};
+use pi_plugin_subagents::{
+    SubagentLoaderOptions, SubagentRuntime, SubagentSkillPromptProjector, SubagentsPlugin,
+    SubagentsSessionPlugin,
+};
 use pi_plugin_write::WritePlugin;
 use pi_provider::{HttpTransport, ReqwestTransport, ReqwestTransportConfig};
 use pi_resources::ResourceLoaderOptions;
@@ -41,11 +48,11 @@ use pi_settings::{
 };
 
 use crate::builtin_providers::BuiltinProviderSet;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, ThinkingLevelArg};
 use crate::dynamic_providers::{DynamicProviderCandidate, DynamicProviderOverlay};
 use crate::project_trust::ProjectTrustService;
 
-const BUILTIN_TOOL_NAMES: [&str; 8] = [
+const BUILTIN_TOOL_NAMES: [&str; 11] = [
     "read",
     "grep",
     "find",
@@ -54,6 +61,9 @@ const BUILTIN_TOOL_NAMES: [&str; 8] = [
     "edit",
     "hashline_edit",
     "bash",
+    "subagent",
+    "memory",
+    "session_search",
 ];
 
 #[derive(Clone)]
@@ -66,6 +76,7 @@ pub(crate) struct ProductSessionFactory {
     plugin_ui_bridge: Option<Arc<dyn PluginUiBridge>>,
     presentation_mode: PresentationMode,
     dynamic_providers: DynamicProviderOverlay,
+    subagents: SubagentRuntime,
 }
 
 impl ProductSessionFactory {
@@ -83,6 +94,7 @@ impl ProductSessionFactory {
             plugin_ui_bridge: None,
             presentation_mode: PresentationMode::Print,
             dynamic_providers: DynamicProviderOverlay::default(),
+            subagents: SubagentRuntime::default(),
         }
     }
 
@@ -118,6 +130,7 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
         request: AgentSessionRuntimeRequest,
     ) -> Result<PreparedAgentSession, SessionError> {
         let generation_overlay = request.generation_overlay;
+        let initial_state = request.initial_state;
         let (path, create, cwd, reused_log, parent_session) = match request.target {
             AgentSessionRuntimeTarget::Create {
                 cwd,
@@ -175,6 +188,9 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             &settings.project().prompts,
             &config.cwd.join(".pi"),
         );
+        let memory = build_memory_provider(&config, Some(&path))
+            .await
+            .map_err(SessionError::Runtime)?;
         let package_reconciliations = prepare_native_packages(&config, project_trusted).await?;
         let mut native_options = NativePluginLoaderOptions::new(&config.cwd, &config.agent_dir);
         native_options.project_trusted = project_trusted;
@@ -254,24 +270,52 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
         } else {
             None
         };
-        let runtime = match build_runtime_with_generation_overlay(
+        let runtime = match build_runtime_inner(
             &config,
             project_trusted,
             &native_plugins,
             js_generation.as_ref(),
             dynamic_provider_candidate.as_ref(),
-            &generation_overlay,
-            Arc::clone(&context_access),
-        ) {
+            RuntimeBuildExtras {
+                generation_overlay: &generation_overlay,
+                codex_credentials: None,
+                plugin_context: Some(Arc::clone(&context_access)),
+                subagents: self.subagents.clone(),
+                memory: memory.clone(),
+            },
+        )
+        .map_err(SessionError::from)
+        .and_then(|runtime| {
+            if let Some(initial_state) = &initial_state {
+                if !create {
+                    return Err(SessionError::Runtime(
+                        "initial runtime state is valid only for a fresh session".to_string(),
+                    ));
+                }
+                validate_initial_model_scope(&runtime, &config, initial_state)?;
+                initial_state.apply_to(&runtime)?;
+            }
+            Ok(runtime)
+        }) {
             Ok(runtime) => runtime,
             Err(error) => {
                 if let Some(candidate) = &dynamic_provider_candidate {
                     self.dynamic_providers.reject(candidate);
                 }
-                return Err(error.into());
+                return Err(error);
             }
         };
-        let mut session_plugins = native_plugins.apply_session(SessionPlugins::new());
+        let mut session_plugins = SessionPlugins::new();
+        if let Some(memory) = memory {
+            let plugin = memory.session_plugin();
+            session_plugins = session_plugins
+                .try_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)));
+        }
+        let session_plugins = session_plugins.plugin_factory({
+            let subagents = self.subagents.clone();
+            move || SubagentsSessionPlugin::new(subagents.clone())
+        });
+        let mut session_plugins = native_plugins.apply_session(session_plugins);
         if let Some(js_generation) = &js_generation {
             for plugin in js_generation.session_plugins() {
                 session_plugins = session_plugins.try_plugin_arc_factory({
@@ -488,29 +532,6 @@ fn build_runtime(
     )
 }
 
-fn build_runtime_with_generation_overlay(
-    config: &AppConfig,
-    project_trusted: bool,
-    native_plugins: &NativePlugins,
-    js_generation: Option<&JsPluginGeneration>,
-    dynamic_providers: Option<&DynamicProviderCandidate>,
-    generation_overlay: &SessionGenerationOverlay,
-    plugin_context: Arc<dyn PluginContext>,
-) -> Result<PiRuntime, RuntimeError> {
-    build_runtime_inner(
-        config,
-        project_trusted,
-        native_plugins,
-        js_generation,
-        dynamic_providers,
-        RuntimeBuildExtras {
-            generation_overlay,
-            codex_credentials: None,
-            plugin_context: Some(plugin_context),
-        },
-    )
-}
-
 #[cfg(test)]
 fn build_runtime_with_codex_credentials(
     config: &AppConfig,
@@ -530,6 +551,32 @@ fn build_runtime_with_codex_credentials(
             generation_overlay: &SessionGenerationOverlay::default(),
             codex_credentials,
             plugin_context: None,
+            subagents: SubagentRuntime::default(),
+            memory: None,
+        },
+    )
+}
+
+#[cfg(test)]
+async fn build_runtime_with_first_party_memory(
+    config: &AppConfig,
+) -> Result<PiRuntime, RuntimeError> {
+    let memory = build_memory_provider(config, None)
+        .await
+        .map_err(RuntimeError::Build)?;
+    let generation_overlay = SessionGenerationOverlay::default();
+    build_runtime_inner(
+        config,
+        false,
+        &NativePlugins::default(),
+        None,
+        None,
+        RuntimeBuildExtras {
+            generation_overlay: &generation_overlay,
+            codex_credentials: Some(pi_plugin_openai::CodexCredentials::default()),
+            plugin_context: None,
+            subagents: SubagentRuntime::default(),
+            memory,
         },
     )
 }
@@ -538,6 +585,8 @@ struct RuntimeBuildExtras<'a> {
     generation_overlay: &'a SessionGenerationOverlay,
     codex_credentials: Option<pi_plugin_openai::CodexCredentials>,
     plugin_context: Option<Arc<dyn PluginContext>>,
+    subagents: SubagentRuntime,
+    memory: Option<PreparedMemoryProvider>,
 }
 
 fn build_runtime_inner(
@@ -548,6 +597,12 @@ fn build_runtime_inner(
     dynamic_providers: Option<&DynamicProviderCandidate>,
     extras: RuntimeBuildExtras<'_>,
 ) -> Result<PiRuntime, RuntimeError> {
+    let memory_supports_memory_tool = extras.memory.is_some();
+    let memory_supports_session_search = extras.memory.is_some();
+    let memory_is_hermes = extras
+        .memory
+        .as_ref()
+        .is_some_and(|memory| memory.provider_id() == "hermes");
     let transport = provider_transport(config)?;
     let codex_transport_options = codex_transport_options(config);
     let builtin_providers = BuiltinProviderSet::load(config, extras.codex_credentials.clone())?;
@@ -558,12 +613,23 @@ fn build_runtime_inner(
     skill_options
         .additional_paths
         .extend(config.settings_skill_paths.iter().cloned());
+    if memory_is_hermes {
+        let mut roots = managed_skill_roots(&config.agent_dir, &config.cwd).into_iter();
+        if let Some(global_root) = roots.next() {
+            skill_options.additional_paths.push(global_root);
+        }
+        if project_trusted {
+            skill_options.additional_paths.extend(roots);
+        }
+    }
     let mut prompt_template_options =
         PromptTemplateLoaderOptions::new(&config.cwd, &config.agent_dir);
     prompt_template_options.project_trusted = project_trusted;
     prompt_template_options
         .additional_paths
         .extend(config.settings_prompt_paths.iter().cloned());
+    let mut subagent_options = SubagentLoaderOptions::new(&config.cwd, &config.agent_dir);
+    subagent_options.project_trusted = project_trusted;
     if let Some(home) = std::env::var_os("HOME") {
         skill_options
             .additional_paths
@@ -604,6 +670,8 @@ fn build_runtime_inner(
         Arc::clone(&transport),
         codex_transport_options,
     );
+    let skill_prompt_projector =
+        Arc::new(SubagentSkillPromptProjector::new(extras.subagents.clone()));
     let builder = builder
         .try_provider_plugin_factory({
             let model_options = model_options.clone();
@@ -613,10 +681,29 @@ fn build_runtime_inner(
         .agent_plugin_factory({
             let prompt_template_options = prompt_template_options.clone();
             move || PromptTemplatesPlugin::load(prompt_template_options.clone())
+        });
+    let builder = match extras.memory {
+        Some(memory) => {
+            let plugin = memory.agent_plugin();
+            builder.try_agent_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)))
+        }
+        None => builder,
+    };
+    let builder = builder
+        .try_agent_plugin_factory({
+            let subagents = extras.subagents.clone();
+            let subagent_options = subagent_options.clone();
+            move || SubagentsPlugin::load(subagents.clone(), subagent_options.clone())
         })
         .agent_plugin_factory({
             let skill_options = skill_options.clone();
-            move || SkillsPlugin::load(skill_options.clone())
+            let skill_prompt_projector = Arc::clone(&skill_prompt_projector);
+            move || {
+                SkillsPlugin::load_with_prompt_projector(
+                    skill_options.clone(),
+                    skill_prompt_projector.clone(),
+                )
+            }
         })
         .agent_plugin_factory(SessionTransferPlugin::default)
         .agent_plugin_factory({
@@ -657,7 +744,15 @@ fn build_runtime_inner(
             thinking_level: settings_thinking_level(config),
             thinking_budgets: settings_thinking_budgets(config),
             block_images: config.runtime_settings.images.block_images,
-            active_tools: BUILTIN_TOOL_NAMES.map(str::to_string).to_vec(),
+            active_tools: BUILTIN_TOOL_NAMES
+                .into_iter()
+                .filter(|tool| match *tool {
+                    "memory" => memory_supports_memory_tool,
+                    "session_search" => memory_supports_session_search,
+                    _ => true,
+                })
+                .map(str::to_string)
+                .collect(),
             cwd: config.cwd.clone(),
             max_tool_iterations: 100,
             steering_mode: settings_queue_mode(config.runtime_settings.steering_mode),
@@ -692,6 +787,25 @@ fn build_runtime_inner(
         .map_err(|error| RuntimeError::Build(error.to_string()))?;
 
     Ok(runtime)
+}
+
+async fn build_memory_provider(
+    config: &AppConfig,
+    active_session_path: Option<&std::path::Path>,
+) -> Result<Option<PreparedMemoryProvider>, String> {
+    let mut options = MemoryLoaderOptions::new(&config.cwd, &config.agent_dir);
+    if let Some(session_root) = config.session_path.parent() {
+        options.session_roots.push(session_root.to_path_buf());
+    }
+    if let Some(session_root) = active_session_path.and_then(std::path::Path::parent) {
+        options.session_roots.push(session_root.to_path_buf());
+    }
+    MemoryLoader::new(options)
+        .provider_factory(HermesMemoryProviderFactory)
+        .provider_factory(LocalMemoryProviderFactory)
+        .load()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 fn provider_transport(config: &AppConfig) -> Result<Arc<dyn HttpTransport>, RuntimeError> {
@@ -759,6 +873,31 @@ fn initial_model_request(config: &AppConfig) -> InitialModelRequest {
     }
 }
 
+fn validate_initial_model_scope(
+    runtime: &PiRuntime,
+    config: &AppConfig,
+    initial_state: &pi_session::AgentSessionInitialState,
+) -> Result<(), SessionError> {
+    if initial_state.model_source == pi_session::AgentSessionInitialModelSource::Inherited {
+        return Ok(());
+    }
+    let Some(patterns) = &config.runtime_settings.enabled_models else {
+        return Ok(());
+    };
+    let allowed = ModelRuntimeServices::new(runtime).resolve_model_scope(patterns);
+    if allowed.iter().any(|candidate| {
+        candidate.model.provider == initial_state.model.provider
+            && candidate.model.id == initial_state.model.model_id
+    }) {
+        Ok(())
+    } else {
+        Err(SessionError::Runtime(format!(
+            "isolated session model {}/{} is outside the configured model scope",
+            initial_state.model.provider, initial_state.model.model_id
+        )))
+    }
+}
+
 fn settings_queue_mode(mode: QueueModeSetting) -> QueueMode {
     match mode {
         QueueModeSetting::All => QueueMode::All,
@@ -767,6 +906,17 @@ fn settings_queue_mode(mode: QueueModeSetting) -> QueueMode {
 }
 
 fn settings_thinking_level(config: &AppConfig) -> ThinkingLevel {
+    if let Some(level) = config.thinking {
+        return match level {
+            ThinkingLevelArg::Off => ThinkingLevel::Off,
+            ThinkingLevelArg::Minimal => ThinkingLevel::Minimal,
+            ThinkingLevelArg::Low => ThinkingLevel::Low,
+            ThinkingLevelArg::Medium => ThinkingLevel::Medium,
+            ThinkingLevelArg::High => ThinkingLevel::High,
+            ThinkingLevelArg::Xhigh => ThinkingLevel::XHigh,
+            ThinkingLevelArg::Max => ThinkingLevel::Max,
+        };
+    }
     match config.runtime_settings.default_thinking_level {
         Some(ThinkingLevelSetting::Off) | None => ThinkingLevel::Off,
         Some(ThinkingLevelSetting::Minimal) => ThinkingLevel::Minimal,
@@ -1017,6 +1167,7 @@ command = "fixture-command"
             agent_dir: agent_dir.to_path_buf(),
             session_path: agent_dir.join("session.jsonl"),
             model: model.map(str::to_string),
+            thinking: None,
             fallback_model: "gpt-4o-mini".to_string(),
             base_url: "https://fallback.example/v1".to_string(),
             api_key: None,
@@ -1138,6 +1289,174 @@ command = "fixture-command"
         assert_eq!(
             codex_transport_options(&config).websocket_connect_timeout,
             None
+        );
+    }
+
+    #[test]
+    fn product_runtime_registers_the_first_party_subagent_tool() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = app_config(directory.path(), None);
+        let runtime = build_runtime_with_codex_credentials(
+            &config,
+            false,
+            &NativePlugins::default(),
+            None,
+            None,
+            Some(pi_plugin_openai::CodexCredentials::default()),
+        )
+        .unwrap();
+
+        assert!(runtime.active_tools().iter().any(|tool| tool == "subagent"));
+        let spec = runtime
+            .tool_specs()
+            .into_iter()
+            .find(|spec| spec.name == "subagent")
+            .expect("subagent tool should be registered");
+        assert_eq!(
+            spec.parameters["properties"]["agent"]["enum"],
+            serde_json::json!(["scout", "worker", "reviewer", "oracle", "delegate"])
+        );
+    }
+
+    #[tokio::test]
+    async fn product_runtime_registers_hermes_memory_tools_commands_and_skills() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("pi-hermes-memory/skills/deploy-demo"))
+            .unwrap();
+        std::fs::write(
+            directory
+                .path()
+                .join("pi-hermes-memory/skills/deploy-demo/SKILL.md"),
+            "---\nname: deploy-demo\ndescription: Deploy the demo safely\n---\n\n## Procedure\n1. Run tests\n",
+        )
+        .unwrap();
+        let config = app_config(directory.path(), None);
+        let runtime = build_runtime_with_first_party_memory(&config)
+            .await
+            .unwrap();
+        assert!(runtime.active_tools().iter().any(|tool| tool == "memory"));
+        assert!(
+            runtime
+                .active_tools()
+                .iter()
+                .any(|tool| tool == "session_search")
+        );
+        assert!(
+            runtime
+                .active_tools()
+                .iter()
+                .any(|tool| tool == "skill_manage")
+        );
+        assert!(
+            runtime
+                .command_specs()
+                .iter()
+                .any(|command| command.name == "skill:deploy-demo")
+        );
+        for command in [
+            "memory-consolidate",
+            "memory-index-sessions",
+            "memory-insights",
+            "memory-interview",
+            "learn-memory-tool",
+            "memory-preview-context",
+            "memory-skills",
+            "memory-switch-project",
+            "memory-sync-markdown",
+        ] {
+            assert!(
+                runtime
+                    .command_specs()
+                    .iter()
+                    .any(|registered| registered.name == command),
+                "expected Hermes command {command}"
+            );
+        }
+        assert!(
+            !runtime
+                .command_specs()
+                .iter()
+                .any(|command| command.name.starts_with("memory-local-"))
+        );
+
+        std::fs::write(
+            directory.path().join("memory.json"),
+            r#"{"version": 1, "enabled": false}"#,
+        )
+        .unwrap();
+        let disabled = build_runtime_with_first_party_memory(&config)
+            .await
+            .unwrap();
+        assert!(
+            !disabled
+                .tool_specs()
+                .iter()
+                .any(|tool| tool.name == "memory")
+        );
+        assert!(
+            !disabled
+                .command_specs()
+                .iter()
+                .any(|command| command.name.starts_with("memory-local-"))
+        );
+        assert!(
+            !disabled
+                .command_specs()
+                .iter()
+                .any(|command| command.name.starts_with("memory-"))
+        );
+    }
+
+    #[test]
+    fn trusted_project_markdown_agents_extend_the_subagent_catalog() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent_dir = directory.path().join("agent");
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(project.join(".pi/agents")).unwrap();
+        std::fs::write(
+            project.join(".pi/agents/project-scout.md"),
+            "---\nname: project-scout\ndescription: Project-only scout\nsystemPromptMode: append\n---\nInspect this project.",
+        )
+        .unwrap();
+        let mut config = app_config(&agent_dir, None);
+        config.cwd = project;
+
+        let build = |project_trusted| {
+            build_runtime_with_codex_credentials(
+                &config,
+                project_trusted,
+                &NativePlugins::default(),
+                None,
+                None,
+                Some(pi_plugin_openai::CodexCredentials::default()),
+            )
+            .unwrap()
+        };
+        let trusted = build(true);
+        let trusted_spec = trusted
+            .tool_specs()
+            .into_iter()
+            .find(|spec| spec.name == "subagent")
+            .unwrap();
+        assert!(
+            trusted_spec.parameters["properties"]["agent"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("project-scout"))
+        );
+
+        let untrusted = build(false);
+        let untrusted_spec = untrusted
+            .tool_specs()
+            .into_iter()
+            .find(|spec| spec.name == "subagent")
+            .unwrap();
+        assert!(
+            !untrusted_spec.parameters["properties"]["agent"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("project-scout"))
         );
     }
 

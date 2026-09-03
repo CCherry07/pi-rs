@@ -15,6 +15,7 @@ const TRUST_REQUIRING_PI_RESOURCES: &[&str] = &[
     "plugins",
     "plugins.json",
     "plugins.lock",
+    "agents",
     "skills",
     "prompts",
     "themes",
@@ -334,6 +335,18 @@ fn has_trust_requiring_project_resources(cwd: &Path) -> Result<bool, ProjectTrus
         return Ok(true);
     }
 
+    let git_root = cwd
+        .ancestors()
+        .find(|ancestor| ancestor.join(".git").exists());
+    for ancestor in cwd.ancestors() {
+        if ancestor.join(".pi/agents").exists() {
+            return Ok(true);
+        }
+        if git_root == Some(ancestor) {
+            break;
+        }
+    }
+
     let user_skills = std::env::var_os("HOME")
         .map(PathBuf::from)
         .and_then(|home| normalize_path(&home.join(".agents/skills")).ok());
@@ -514,6 +527,16 @@ mod tests {
         let child = root.path().join("a/b");
         fs::create_dir_all(&child).unwrap();
         fs::create_dir_all(root.path().join(".agents/skills/example")).unwrap();
+        assert!(has_trust_requiring_project_resources(&child).unwrap());
+    }
+
+    #[test]
+    fn ancestor_pi_agents_require_trust() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("a/b");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir_all(root.path().join(".pi/agents")).unwrap();
+
         assert!(has_trust_requiring_project_resources(&child).unwrap());
     }
 

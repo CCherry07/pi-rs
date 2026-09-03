@@ -4,12 +4,13 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use async_trait::async_trait;
 use pi_core::{
-    CompactOptions, ContentBlock, CustomMessage, CustomMessageContent, CustomMessageInput,
-    ForkOptions, Message, MessageDelivery, ModelId, ModelsContextAccess, NavigateTreeOptions,
-    NewSessionOptions, NoticeLevel, PluginContextError, PluginContextReplacement,
-    PluginContextScope, PresentationMode, ProviderId, SendMessageOptions, SendUserMessageOptions,
-    SessionContextAccess, SessionEntryKind, SessionEntryView, SessionSnapshot, ThinkingLevel,
-    UiContextAccess, UserMessage,
+    AbortSignal, AssistantMessage, CompactOptions, ContentBlock, CustomMessage,
+    CustomMessageContent, CustomMessageInput, DirectCompletionRequest, ForkOptions,
+    IsolatedSessionId, IsolatedSessionOutcome, IsolatedSessionRequest, Message, MessageDelivery,
+    ModelId, ModelsContextAccess, NavigateTreeOptions, NewSessionOptions, NoticeLevel,
+    PluginContextError, PluginContextReplacement, PluginContextScope, PresentationMode, ProviderId,
+    SendMessageOptions, SendUserMessageOptions, SessionContextAccess, SessionEntryKind,
+    SessionEntryView, SessionSnapshot, ThinkingLevel, UiContextAccess, UserMessage,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -41,6 +42,17 @@ pub trait PluginProviderMutationAccess: Send + Sync {
 #[async_trait]
 pub trait PluginUiBridge: Send + Sync {
     async fn confirm(&self, title: String, message: String) -> Result<bool, String>;
+
+    async fn select(&self, _title: String, _options: Vec<String>) -> Result<Option<usize>, String> {
+        Err("interactive selection is unavailable".to_string())
+    }
+
+    async fn multi_select(
+        &self,
+        _request: pi_core::UiMultiSelectRequest,
+    ) -> Result<Option<pi_core::UiMultiSelectResponse>, String> {
+        Err("interactive multi-selection is unavailable".to_string())
+    }
 }
 
 #[derive(Default)]
@@ -274,10 +286,42 @@ impl UiContextAccess for PiPluginContext {
         })?;
         bridge.confirm(title, message).await.map_err(context_failed)
     }
+
+    async fn ui_select(
+        &self,
+        title: String,
+        options: Vec<String>,
+    ) -> Result<Option<usize>, PluginContextError> {
+        if !matches!(self.mode, PresentationMode::Tui) || options.is_empty() {
+            return Ok(None);
+        }
+        let bridge = self.ui_bridge.as_ref().ok_or_else(|| {
+            PluginContextError::Unavailable("interactive selection is not configured".into())
+        })?;
+        bridge.select(title, options).await.map_err(context_failed)
+    }
+
+    async fn ui_multi_select(
+        &self,
+        request: pi_core::UiMultiSelectRequest,
+    ) -> Result<Option<pi_core::UiMultiSelectResponse>, PluginContextError> {
+        if !matches!(self.mode, PresentationMode::Tui) {
+            return Ok(None);
+        }
+        let bridge = self.ui_bridge.as_ref().ok_or_else(|| {
+            PluginContextError::Unavailable("interactive multi-selection is not configured".into())
+        })?;
+        bridge.multi_select(request).await.map_err(context_failed)
+    }
 }
 
 #[async_trait]
 impl ModelsContextAccess for PiPluginContext {
+    fn model_selection(&self) -> Result<Option<pi_core::ModelSelection>, PluginContextError> {
+        let (provider, model_id) = self.session()?.runtime().agent().model_selection();
+        Ok(Some(pi_core::ModelSelection { provider, model_id }))
+    }
+
     fn model(&self) -> Result<Option<pi_core::ModelSpec>, PluginContextError> {
         let session = self.session()?;
         let (provider_id, model_id) = session.runtime().agent().model_selection();
@@ -355,6 +399,23 @@ impl ModelsContextAccess for PiPluginContext {
 
 #[async_trait]
 impl SessionContextAccess for PiPluginContext {
+    fn execution_origin(&self) -> Result<pi_core::SessionExecutionOrigin, PluginContextError> {
+        Ok(self.session()?.runtime().execution_origin())
+    }
+
+    async fn run_ephemeral(
+        &self,
+        _scope: PluginContextScope,
+        request: pi_core::EphemeralSessionRequest,
+        signal: AbortSignal,
+    ) -> Result<pi_core::EphemeralSessionOutcome, PluginContextError> {
+        self.session()?
+            .runtime()
+            .run_ephemeral(request, signal)
+            .await
+            .map_err(context_failed)
+    }
+
     fn session_snapshot(&self) -> Result<SessionSnapshot, PluginContextError> {
         let session = self.session()?;
         let document = session
@@ -724,6 +785,58 @@ impl SessionContextAccess for PiPluginContext {
         let plan =
             plan_user_message(content, options, running).map_err(PluginContextError::Invalid)?;
         execute_message_plan(session, plan).await
+    }
+
+    async fn complete(
+        &self,
+        _scope: PluginContextScope,
+        request: DirectCompletionRequest,
+        signal: AbortSignal,
+    ) -> Result<AssistantMessage, PluginContextError> {
+        let session = self.session()?;
+        let runtime = session.runtime();
+        let state = runtime.agent().state();
+        runtime
+            .complete(
+                pi_runtime::RuntimeCompletionRequest {
+                    system_prompt: request.system_prompt,
+                    messages: request.messages,
+                    model: request.model,
+                    thinking_level: request.thinking_level.unwrap_or(state.thinking_level),
+                    thinking_budgets: runtime.agent().thinking_budgets(),
+                    max_output_tokens: request.max_output_tokens,
+                },
+                signal,
+            )
+            .await
+            .map_err(context_failed)
+    }
+
+    async fn launch_isolated_session(
+        &self,
+        _scope: PluginContextScope,
+        request: IsolatedSessionRequest,
+    ) -> Result<IsolatedSessionId, PluginContextError> {
+        self.pi_session()?
+            .launch_isolated_session(request)
+            .await
+            .map_err(context_failed)
+    }
+
+    async fn wait_for_isolated_session(
+        &self,
+        _scope: PluginContextScope,
+        id: IsolatedSessionId,
+    ) -> Result<IsolatedSessionOutcome, PluginContextError> {
+        self.pi_session()?.wait_for_isolated_session(&id).await
+    }
+
+    fn abort_isolated_session(
+        &self,
+        _scope: PluginContextScope,
+        id: IsolatedSessionId,
+    ) -> Result<(), PluginContextError> {
+        self.pi_session()?.abort_isolated_session(&id)
     }
 
     async fn new_session(

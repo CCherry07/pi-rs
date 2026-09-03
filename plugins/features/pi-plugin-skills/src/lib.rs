@@ -94,23 +94,59 @@ pub struct SourcedSkillCatalog<T> {
     pub diagnostics: Vec<SourcedSkillDiagnostic<T>>,
 }
 
-/// A generation-local, immutable catalog of skills.
+/// Immutable generation-local skill discovery result.
 ///
-/// Construct this plugin through `PiRuntimeBuilder::agent_plugin_factory` so every
-/// runtime reload rescans the configured roots and publishes a new catalog as
-/// part of the next runtime generation.
-pub struct SkillsPlugin {
-    skills: Vec<SkillInfo>,
-    diagnostics: Vec<SkillDiagnostic>,
-    enable_commands: bool,
+/// The catalog owns discovery and selection so callers never need to repeat
+/// collision, private-path, or model-visibility policy.
+#[derive(Debug, Clone)]
+pub struct SkillCatalog {
+    skills: Arc<Vec<SkillInfo>>,
+    diagnostics: Arc<Vec<SkillDiagnostic>>,
 }
 
-impl SkillsPlugin {
-    pub fn new(options: SkillLoaderOptions) -> Self {
-        Self::load(options)
+/// Per-run projection requested from a [`SkillCatalog`].
+///
+/// Additional paths are invocation-private candidates. They do not enter the
+/// reusable catalog, and their skills are available only when explicitly named.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillPromptSelection {
+    pub inherit: bool,
+    pub names: Vec<String>,
+    pub additional_paths: Vec<PathBuf>,
+}
+
+/// Skills and non-fatal diagnostics selected for one model prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillPromptProjection {
+    skills: Vec<SkillInfo>,
+    warnings: Vec<String>,
+}
+
+impl SkillPromptProjection {
+    pub fn skills(&self) -> &[SkillInfo] {
+        &self.skills
     }
 
-    pub fn load(options: SkillLoaderOptions) -> Self {
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+}
+
+/// Adapter seam for selecting a prompt-local view of the immutable skill catalog.
+///
+/// Normal Pi sessions use the complete catalog. Features that launch a
+/// specialized run can provide a projector without changing skill discovery or
+/// teaching the generic session runtime about skills.
+pub trait SkillPromptProjector: Send + Sync {
+    fn project(
+        &self,
+        event: &BeforeAgentStartEvent,
+        catalog: &SkillCatalog,
+    ) -> SkillPromptProjection;
+}
+
+impl SkillCatalog {
+    pub fn load(options: &SkillLoaderOptions) -> Self {
         let cwd = absolute(&options.cwd);
         let agent_dir = absolute(&options.agent_dir);
         let (skills, diagnostics) = load_skills(
@@ -121,17 +157,15 @@ impl SkillsPlugin {
             options.project_trusted,
         );
         Self {
-            skills,
-            diagnostics,
-            enable_commands: options.enable_commands,
+            skills: Arc::new(skills),
+            diagnostics: Arc::new(diagnostics),
         }
     }
 
     pub fn from_skills(skills: impl IntoIterator<Item = SkillInfo>) -> Self {
         Self {
-            skills: skills.into_iter().collect(),
-            diagnostics: Vec::new(),
-            enable_commands: true,
+            skills: Arc::new(skills.into_iter().collect()),
+            diagnostics: Arc::new(Vec::new()),
         }
     }
 
@@ -141,6 +175,125 @@ impl SkillsPlugin {
 
     pub fn diagnostics(&self) -> &[SkillDiagnostic] {
         &self.diagnostics
+    }
+
+    pub fn all_for_prompt(&self) -> SkillPromptProjection {
+        SkillPromptProjection {
+            skills: self.skills.as_ref().clone(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Resolves one prompt-local projection. Explicit agent-local candidates
+    /// take precedence over inherited skills with the same name.
+    pub fn project(&self, selection: &SkillPromptSelection) -> SkillPromptProjection {
+        let (local_skills, local_diagnostics) =
+            load_skill_roots(selection.additional_paths.iter().cloned());
+        let local_by_name = local_skills
+            .iter()
+            .map(|skill| (skill.name.as_str(), skill))
+            .collect::<HashMap<_, _>>();
+        let inherited_by_name = self
+            .skills
+            .iter()
+            .map(|skill| (skill.name.as_str(), skill))
+            .collect::<HashMap<_, _>>();
+
+        let mut warnings = local_diagnostics
+            .into_iter()
+            .map(|diagnostic| {
+                format!(
+                    "agent-local skill diagnostic at {}: {}",
+                    diagnostic.path.display(),
+                    diagnostic.message
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut selected = Vec::new();
+        let mut seen = HashSet::new();
+        for name in &selection.names {
+            if !seen.insert(name.as_str()) {
+                continue;
+            }
+            match local_by_name
+                .get(name.as_str())
+                .copied()
+                .or_else(|| inherited_by_name.get(name.as_str()).copied())
+            {
+                Some(skill) => selected.push(skill.clone()),
+                None => warnings.push(format!(
+                    "configured skill {name:?} was not found in agent-local skillPath entries or the inherited skill catalog"
+                )),
+            }
+        }
+
+        let mut skills = if selection.inherit {
+            self.skills.as_ref().clone()
+        } else {
+            Vec::new()
+        };
+        for skill in selected {
+            if let Some(index) = skills
+                .iter()
+                .position(|candidate| candidate.name == skill.name)
+            {
+                skills[index] = skill;
+            } else {
+                skills.push(skill);
+            }
+        }
+        SkillPromptProjection { skills, warnings }
+    }
+}
+
+/// A generation-local, immutable catalog of skills.
+///
+/// Construct this plugin through `PiRuntimeBuilder::agent_plugin_factory` so every
+/// runtime reload rescans the configured roots and publishes a new catalog as
+/// part of the next runtime generation.
+pub struct SkillsPlugin {
+    catalog: SkillCatalog,
+    enable_commands: bool,
+    prompt_projector: Option<Arc<dyn SkillPromptProjector>>,
+}
+
+impl SkillsPlugin {
+    pub fn new(options: SkillLoaderOptions) -> Self {
+        Self::load(options)
+    }
+
+    pub fn load(options: SkillLoaderOptions) -> Self {
+        let enable_commands = options.enable_commands;
+        Self {
+            catalog: SkillCatalog::load(&options),
+            enable_commands,
+            prompt_projector: None,
+        }
+    }
+
+    pub fn load_with_prompt_projector(
+        options: SkillLoaderOptions,
+        prompt_projector: Arc<dyn SkillPromptProjector>,
+    ) -> Self {
+        let mut plugin = Self::load(options);
+        plugin.prompt_projector = Some(prompt_projector);
+        plugin
+    }
+
+    pub fn from_skills(skills: impl IntoIterator<Item = SkillInfo>) -> Self {
+        Self {
+            catalog: SkillCatalog::from_skills(skills),
+            enable_commands: true,
+            prompt_projector: None,
+        }
+    }
+
+    pub fn skills(&self) -> &[SkillInfo] {
+        self.catalog.skills()
+    }
+
+    pub fn diagnostics(&self) -> &[SkillDiagnostic] {
+        self.catalog.diagnostics()
     }
 }
 
@@ -245,7 +398,7 @@ impl AgentPlugin for SkillsPlugin {
         if !self.enable_commands {
             return Ok(());
         }
-        for skill in &self.skills {
+        for skill in self.catalog.skills() {
             context.register_command(Arc::new(SkillCommand {
                 skill: skill.clone(),
             }))?;
@@ -261,7 +414,11 @@ impl AgentPlugin for SkillsPlugin {
         if !event.active_tools.iter().any(|tool| tool == "read") {
             return Ok(BeforeAgentStartPatch::default());
         }
-        let catalog = format_skills_for_prompt(&self.skills);
+        let projection = self.prompt_projector.as_ref().map_or_else(
+            || self.catalog.all_for_prompt(),
+            |projector| projector.project(&event, &self.catalog),
+        );
+        let catalog = format_skills_for_prompt(projection.skills());
         if catalog.is_empty() {
             return Ok(BeforeAgentStartPatch::default());
         }
@@ -295,6 +452,12 @@ fn load_skills(
         }
     }));
 
+    load_skill_roots(roots)
+}
+
+fn load_skill_roots(
+    roots: impl IntoIterator<Item = PathBuf>,
+) -> (Vec<SkillInfo>, Vec<SkillDiagnostic>) {
     let mut skills = Vec::new();
     let mut diagnostics = Vec::new();
     let mut names = HashMap::<String, PathBuf>::new();
@@ -580,9 +743,9 @@ mod tests {
         };
         let runtime = PiRuntime::builder()
             .agent_plugin(SkillsPlugin {
-                skills: vec![skill],
-                diagnostics: Vec::new(),
+                catalog: SkillCatalog::from_skills([skill]),
                 enable_commands: false,
+                prompt_projector: None,
             })
             .build()
             .unwrap();
@@ -711,6 +874,74 @@ mod tests {
         assert!(
             prompt.find("<name>a&amp;b</name>").unwrap()
                 < prompt.find("<name>second</name>").unwrap()
+        );
+    }
+
+    #[test]
+    fn prompt_projection_selects_private_skills_first_and_reports_missing_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let local = directory.path().join("local");
+        std::fs::create_dir_all(local.join("shared")).unwrap();
+        std::fs::create_dir_all(local.join("private")).unwrap();
+        std::fs::write(
+            local.join("shared/SKILL.md"),
+            "---\nname: shared\ndescription: local shared\n---\nlocal",
+        )
+        .unwrap();
+        std::fs::write(
+            local.join("private/SKILL.md"),
+            "---\nname: private\ndescription: private\n---\nprivate",
+        )
+        .unwrap();
+        let catalog = SkillCatalog::from_skills([
+            SkillInfo {
+                name: "shared".into(),
+                description: "inherited shared".into(),
+                file_path: "/inherited/shared/SKILL.md".into(),
+                content: "inherited".into(),
+                disable_model_invocation: false,
+            },
+            SkillInfo {
+                name: "global".into(),
+                description: "global".into(),
+                file_path: "/inherited/global/SKILL.md".into(),
+                content: "global".into(),
+                disable_model_invocation: false,
+            },
+        ]);
+
+        let selected = catalog.project(&SkillPromptSelection {
+            inherit: false,
+            names: vec!["shared".into(), "private".into(), "missing".into()],
+            additional_paths: vec![local.clone()],
+        });
+        assert_eq!(
+            selected
+                .skills()
+                .iter()
+                .map(|skill| (skill.name.as_str(), skill.description.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("shared", "local shared"), ("private", "private")]
+        );
+        assert_eq!(selected.warnings().len(), 1);
+        assert!(selected.warnings()[0].contains("missing"));
+
+        let inherited = catalog.project(&SkillPromptSelection {
+            inherit: true,
+            names: vec!["shared".into(), "private".into()],
+            additional_paths: vec![local],
+        });
+        assert_eq!(
+            inherited
+                .skills()
+                .iter()
+                .map(|skill| (skill.name.as_str(), skill.description.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("shared", "local shared"),
+                ("global", "global"),
+                ("private", "private"),
+            ]
         );
     }
 

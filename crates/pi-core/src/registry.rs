@@ -210,8 +210,47 @@ pub struct FrozenRegistries {
 }
 
 impl FrozenRegistries {
+    /// Derives a new immutable view with only the selected tools and no
+    /// commands. Provider instances and their model/routing snapshot are kept.
+    pub fn restrict_tools(&self, names: &[String]) -> Result<Self> {
+        let mut tools = HashMap::new();
+        for name in names {
+            let entry = self
+                .tools
+                .get(name)
+                .ok_or_else(|| CoreError::ToolNotFound(name.clone()))?;
+            tools.insert(name.clone(), entry.clone());
+        }
+        Ok(Self {
+            tools,
+            commands: HashMap::new(),
+            models: self.models.clone(),
+        })
+    }
+
     pub fn tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).map(|(_, tool)| Arc::clone(tool))
+    }
+
+    /// A new immutable registry with identical schemas and run-local dispatch guards.
+    pub fn scope_tool_execution(&self, allowed: &[String], origin: &str) -> Self {
+        let origin: Arc<str> = Arc::from(origin);
+        Self {
+            tools: self
+                .tools
+                .iter()
+                .map(|(name, (owner, tool))| {
+                    let scoped: Arc<dyn Tool> = Arc::new(crate::tool::ScopedTool {
+                        inner: Arc::clone(tool),
+                        allowed: allowed.contains(name),
+                        origin: Arc::clone(&origin),
+                    });
+                    (name.clone(), (owner.clone(), scoped))
+                })
+                .collect(),
+            commands: HashMap::new(),
+            models: self.models.clone(),
+        }
     }
 
     pub fn command(&self, name: &str) -> Option<Arc<dyn Command>> {

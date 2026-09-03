@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 2,
+  "name": "smoke",
+  "sessionIds": [
+    "session-user-profile",
+    "session-atlas-foundation",
+    "session-atlas-history",
+    "session-atlas-current",
+    "session-atlas-runbook",
+    "session-atlas-debug",
+    "session-orbit-project"
+  ]
+}

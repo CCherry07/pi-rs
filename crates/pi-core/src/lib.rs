@@ -35,8 +35,8 @@ pub use message::{
     ToolResultMessage, UserMessage,
 };
 pub use model::{
-    ModelCost, ModelCostTier, ModelInput, ModelSpec, ResponseMetadata, StopReason, ThinkingBudgets,
-    ThinkingLevel,
+    ModelCost, ModelCostTier, ModelInput, ModelSelection, ModelSpec, ResponseMetadata, StopReason,
+    ThinkingBudgets, ThinkingLevel,
 };
 pub use model_runtime::{ModelRuntime, ProviderStatus};
 pub use pi_plugin_macros::{agent_plugin, provider_plugin};
@@ -45,19 +45,22 @@ pub use plugin::{
     AgentPluginContext, AgentSettledEvent, AgentStartEvent, BeforeAgentStartEvent,
     BeforeAgentStartPatch, BeforeProviderHeadersEvent, BeforeProviderRequestEvent,
     CommandContextParts, CommandModelsContext, CommandSessionContext, CompactOptions, ContextEvent,
-    ContextParts, ContextPatch, ContextUsage, ForkOptions, ForkPosition, InputContext, InputEvent,
-    InputPatch, InputSource, InputStreamingBehavior, MessageDelivery, MessageEndEvent,
-    MessageEndPatch, MessageStartEvent, MessageUpdateEvent, ModelsContext, ModelsContextAccess,
-    NavigateTreeOptions, NewSessionOptions, NoticeLevel, PluginContext, PluginContextEpoch,
-    PluginContextError, PluginContextHandle, PluginContextReplacement, PluginContextResult,
-    PluginContextScope, PluginDiagnostic, PluginDriver, PluginError, PresentationMode,
-    ProviderPlugin, ProviderPluginContext, ProviderPluginDriver, ProviderRegisterContext,
-    RegisterContext, ReplacedSessionContext, ScopedModel, SendMessageOptions,
-    SendUserMessageOptions, SessionContext, SessionContextAccess, SessionEntryKind,
-    SessionEntryView, SessionReplacement, SessionSnapshot, ToolCallBlock, ToolCallEvent,
-    ToolCallPatch, ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent,
-    ToolResultEvent, ToolResultPatch, TurnEndEvent, TurnStartEvent, UiContext, UiContextAccess,
-    UnavailablePluginContext,
+    ContextParts, ContextPatch, ContextUsage, DirectCompletionRequest, EphemeralCompactionOptions,
+    EphemeralSessionOutcome, EphemeralSessionRequest, EphemeralSessionStatus, ForkOptions,
+    ForkPosition, InputContext, InputEvent, InputPatch, InputSource, InputStreamingBehavior,
+    IsolatedSessionHandle, IsolatedSessionId, IsolatedSessionOptions, IsolatedSessionOutcome,
+    IsolatedSessionRequest, MessageDelivery, MessageEndEvent, MessageEndPatch, MessageStartEvent,
+    MessageUpdateEvent, ModelsContext, ModelsContextAccess, NavigateTreeOptions, NewSessionOptions,
+    NoticeLevel, PluginContext, PluginContextEpoch, PluginContextError, PluginContextHandle,
+    PluginContextReplacement, PluginContextResult, PluginContextScope, PluginDiagnostic,
+    PluginDriver, PluginError, PresentationMode, ProviderPlugin, ProviderPluginContext,
+    ProviderPluginDriver, ProviderRegisterContext, RegisterContext, ReplacedSessionContext,
+    ScopedModel, SendMessageOptions, SendUserMessageOptions, SessionContext, SessionContextAccess,
+    SessionEntryKind, SessionEntryView, SessionExecutionOrigin, SessionReplacement,
+    SessionSnapshot, ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolExecutionEndEvent,
+    ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch,
+    TurnEndEvent, TurnStartEvent, UiContext, UiContextAccess, UiMultiSelectAction,
+    UiMultiSelectOption, UiMultiSelectRequest, UiMultiSelectResponse, UnavailablePluginContext,
 };
 pub use provider::{
     Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderRequest,

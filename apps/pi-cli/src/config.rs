@@ -53,6 +53,10 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) model: Option<String>,
 
+    /// Initial reasoning level override.
+    #[arg(long, value_enum)]
+    pub(crate) thinking: Option<ThinkingLevelArg>,
+
     #[arg(
         long,
         env = "OPENAI_BASE_URL",
@@ -99,6 +103,17 @@ pub(crate) enum OutputMode {
     Text,
     Json,
     Rpc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ThinkingLevelArg {
+    Off,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -231,6 +246,7 @@ pub(crate) struct AppConfig {
     pub(crate) agent_dir: PathBuf,
     pub(crate) session_path: PathBuf,
     pub(crate) model: Option<String>,
+    pub(crate) thinking: Option<ThinkingLevelArg>,
     pub(crate) fallback_model: String,
     pub(crate) base_url: String,
     pub(crate) api_key: Option<String>,
@@ -288,6 +304,7 @@ impl AppConfig {
             agent_dir,
             session_path,
             model: cli.model.clone().filter(|model| !model.trim().is_empty()),
+            thinking: cli.thinking,
             fallback_model,
             base_url: cli.base_url.clone(),
             api_key,
@@ -443,6 +460,7 @@ mod tests {
             cwd: directory.path().to_path_buf(),
             session: Some(session_path.clone()),
             model: None,
+            thinking: None,
             base_url: "https://example.test/v1".to_string(),
             api_key: None,
             provider: None,

@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use libloading::{Library, Symbol};
 use pi_core::{AgentPlugin, ProviderPlugin};
 use pi_plugin_sdk::{
-    AgentPluginCreateV8, BUILD_FINGERPRINT, NATIVE_PLUGIN_ABI_VERSION, NativePluginKind,
+    AgentPluginCreateV15, BUILD_FINGERPRINT, NATIVE_PLUGIN_ABI_VERSION, NativePluginKind,
     PluginDescriptorFnV1, PluginLoadContext, PluginOptionsValue, PluginScope,
-    ProviderPluginCreateV8, SessionPluginCreateV8,
+    ProviderPluginCreateV15, SessionPluginCreateV15,
 };
 use pi_runtime::PiRuntimeBuilder;
 use pi_session::{SessionPlugin, SessionPlugins};
@@ -19,9 +19,9 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 const DESCRIPTOR_SYMBOL: &[u8] = b"pi_plugin_descriptor_v1\0";
-const AGENT_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_agent_plugin_create_v8\0";
-const PROVIDER_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_provider_plugin_create_v8\0";
-const SESSION_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_session_plugin_create_v8\0";
+const AGENT_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_agent_plugin_create_v15\0";
+const PROVIDER_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_provider_plugin_create_v15\0";
+const SESSION_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_session_plugin_create_v15\0";
 const MANIFEST_FILE_NAME: &str = "pi-plugin.toml";
 
 #[derive(Debug, thiserror::Error)]
@@ -282,7 +282,7 @@ impl FactoryCommon {
 #[derive(Clone)]
 pub struct NativeAgentPluginFactory {
     common: Arc<FactoryCommon>,
-    create: AgentPluginCreateV8,
+    create: AgentPluginCreateV15,
 }
 
 impl NativeAgentPluginFactory {
@@ -303,7 +303,7 @@ impl NativeAgentPluginFactory {
 #[derive(Clone)]
 pub struct NativeProviderPluginFactory {
     common: Arc<FactoryCommon>,
-    create: ProviderPluginCreateV8,
+    create: ProviderPluginCreateV15,
 }
 
 impl NativeProviderPluginFactory {
@@ -324,7 +324,7 @@ impl NativeProviderPluginFactory {
 #[derive(Clone)]
 pub struct NativeSessionPluginFactory {
     common: Arc<FactoryCommon>,
-    create: SessionPluginCreateV8,
+    create: SessionPluginCreateV15,
 }
 
 impl NativeSessionPluginFactory {
@@ -534,11 +534,11 @@ fn load_library(
             // SAFETY: The exact build fingerprint was verified before resolving
             // this Rust-ABI constructor, and the library remains pinned.
             let create = unsafe {
-                load_symbol::<AgentPluginCreateV8>(
+                load_symbol::<AgentPluginCreateV15>(
                     &pinned._library,
                     &package.artifact,
                     AGENT_CONSTRUCTOR_SYMBOL,
-                    "pi_agent_plugin_create_v8",
+                    "pi_agent_plugin_create_v15",
                 )?
             };
             Ok(LoadedFactory::Agent(NativeAgentPluginFactory {
@@ -549,11 +549,11 @@ fn load_library(
         NativePluginKind::Provider => {
             // SAFETY: See the agent constructor branch above.
             let create = unsafe {
-                load_symbol::<ProviderPluginCreateV8>(
+                load_symbol::<ProviderPluginCreateV15>(
                     &pinned._library,
                     &package.artifact,
                     PROVIDER_CONSTRUCTOR_SYMBOL,
-                    "pi_provider_plugin_create_v8",
+                    "pi_provider_plugin_create_v15",
                 )?
             };
             Ok(LoadedFactory::Provider(NativeProviderPluginFactory {
@@ -564,11 +564,11 @@ fn load_library(
         NativePluginKind::Session => {
             // SAFETY: See the agent constructor branch above.
             let create = unsafe {
-                load_symbol::<SessionPluginCreateV8>(
+                load_symbol::<SessionPluginCreateV15>(
                     &pinned._library,
                     &package.artifact,
                     SESSION_CONSTRUCTOR_SYMBOL,
-                    "pi_session_plugin_create_v8",
+                    "pi_session_plugin_create_v15",
                 )?
             };
             Ok(LoadedFactory::Session(NativeSessionPluginFactory {
