@@ -180,7 +180,7 @@ pub fn build_session_context(
 }
 
 impl SessionContext {
-    /// Applies Pi's default `convertToLlm` projection. Extension roles unknown
+    /// Applies Pi's session-level `convertToLlm` projection. Extension roles unknown
     /// to the default converter remain in `messages` but are omitted here.
     /// Histories produced by older pi-rs versions may end a run immediately
     /// after an assistant tool call; synthesize failed results for those calls
@@ -299,6 +299,17 @@ pub fn agent_message_to_provider_message(message: &AgentMessage) -> Option<Messa
         ))),
         _ => None,
     }
+}
+
+/// Session runtime messages already contain projected summaries and bash output.
+/// Keep typed custom messages in agent state until the provider request boundary.
+pub(crate) fn runtime_message_converter() -> pi_agent::ConvertToLlm {
+    pi_agent::ConvertToLlm::new(|messages| async move {
+        messages
+            .into_iter()
+            .map(Message::into_provider_message)
+            .collect()
+    })
 }
 
 pub fn agent_message_to_runtime_message(message: &AgentMessage) -> Option<Message> {

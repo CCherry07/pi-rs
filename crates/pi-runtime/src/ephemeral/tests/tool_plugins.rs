@@ -366,7 +366,7 @@ async fn private_plugins_receive_normal_agent_hooks_in_order_without_parent_or_s
 }
 
 #[tokio::test]
-async fn explicit_tool_hooks_share_execution_identity_and_preserve_guards_and_validation() {
+async fn explicit_tool_hooks_share_execution_identity_and_preserve_guards_and_initial_validation() {
     let trace = Arc::new(Trace::default());
     let scripted = ScriptedProviderPlugin::scripted([
         ScriptedTurn::ToolCalls(vec![
@@ -419,6 +419,8 @@ async fn explicit_tool_hooks_share_execution_identity_and_preserve_guards_and_va
             "call:\"block\"",
             "prepare:allowed:\"invalid-patch\"",
             "call:\"invalid-patch\"",
+            "execute:allowed:42",
+            "result:42",
             "prepare:allowed:42",
             "prepare:allowed:\"error\"",
             "call:\"error\"",
@@ -438,7 +440,17 @@ async fn explicit_tool_hooks_share_execution_identity_and_preserve_guards_and_va
         receipts[0].content,
         ToolResult::text("private receipt").content
     );
-    assert!(receipts[1..].iter().all(|receipt| receipt.is_error));
+    assert_eq!(
+        receipts
+            .iter()
+            .map(|receipt| receipt.is_error)
+            .collect::<Vec<_>>(),
+        [false, true, false, true, true, true]
+    );
+    assert_eq!(
+        receipts[2].content,
+        ToolResult::text("private receipt").content
+    );
     assert_eq!(provider.requests()[0].tools, parent_tools);
     assert_eq!(
         runtime

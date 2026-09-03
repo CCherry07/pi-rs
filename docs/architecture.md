@@ -218,7 +218,7 @@ configuration files or plugin ID conventions.
 2. Agent plugin hooks, provider plugin registration, and provider request hooks each execute in builder order. There is no numeric priority. Statically linked Rust plugin impls use one lifecycle attribute—`#[pi_core::agent_plugin]`, `#[pi_core::provider_plugin]`, or `#[pi_session::session_plugin]`—which expands async callbacks without a companion `#[async_trait]`. The agent attribute also derives hook interests. Native plugins get the corresponding behavior from `#[pi_plugin_sdk::{agent,provider,session}]`, while JavaScript agent adapters derive interests from the validated `pi.on(...)` manifest. `PluginDriver` snapshots an immutable per-hook route when a generation is built. Registration still visits every agent plugin; runtime hooks visit only their exact route, with no catch-all interest or `ALL` fallback.
 3. Duplicate IDs are rejected within each plugin system; duplicate tool, command, provider, or model IDs fail runtime construction.
 4. Registries are mutable only during registration and frozen before Agent construction.
-5. `tool_call` runs in order, chains argument patches, revalidates patched arguments, and lets the first block decision win. It is the intentional fail-closed exception: a hook error fails that tool call. Every typed `AgentPlugin` callback receives the same `Arc<AgentContext>` snapshot for the batch, including the current system prompt, transcript with the requesting assistant message, and active-tool names. The JavaScript extension Adapter projects Pi's narrower extension event and does not serialize this native context into Node.
+5. `tool_call` runs in order after prepared provider arguments are validated, chains argument patches without revalidation (matching Pi), and lets the first block decision win. It is the intentional fail-closed exception: a hook error fails that tool call. Every typed `AgentPlugin` callback receives the same `Arc<AgentContext>` snapshot for the batch, including the current system prompt, transcript with the requesting assistant message, and active-tool names. The JavaScript extension Adapter projects Pi's narrower extension event and does not serialize this native context into Node.
 6. `input` receives text, images, source, and optional streaming behavior. Text/image replacements chain in registration order, `Handled` stops the submission, and a hook error is recorded as a generation-local plugin diagnostic before later hooks continue.
 7. `before_agent_start` runs once per prompt/continue invocation in registration order; prompt replacements chain and injected messages are accumulated for that run only. Hook errors are diagnosed and skipped without discarding earlier replacements.
 8. `context` runs before every provider request and chains message replacements without mutating the persisted transcript. Hook errors are diagnosed and later hooks still run.
@@ -264,7 +264,7 @@ hooks, but no parent-session/model-control/UI capabilities. Core stores no plugi
 observations. `EphemeralSessionRequest.plugins` explicitly attaches private `AgentPlugin`
 instances without a separate hook allowlist. The ordinary Agent driver awaits interested plugins
 in registration order, including prompt/context, Agent/turn/message, and tool hooks. Prompt and
-context patches affect only the private Agent. Tool blocking, argument revalidation, and result
+context patches affect only the private Agent. Tool blocking, initial argument validation, and result
 patching remain intact. Duplicate IDs fail before the provider runs. Private plugin registration
 is not invoked, so published generation registries remain immutable. This is reuse of the existing
 AgentPlugin driver, not a fourth plugin lifecycle. Parent agent/session hooks do not run. The bare
@@ -281,6 +281,9 @@ Optional compaction runs only between completed tool iterations, after the first
 reuses the pinned provider path for tool-free summaries, applies caller-supplied retention/token
 limits, and replaces only the fork's private context. Summary input/cache usage counts toward the
 same aggregate budget; timeout, cancellation, and invalid summaries cannot commit to the parent.
+The ephemeral turn controller settles compaction before its stop decision so a failed summary or
+exhausted summary budget prevents another request; it applies a successful context replacement
+only when `prepare_next_turn` is called for a continuation.
 
 Native ABI 11 added `SessionContext::complete`: a tool-free, transcript-free provider completion
 for bounded, tool-free plugin side work. Direct completions pin the immutable
@@ -804,14 +807,44 @@ registers the plugin factory in each generation.
 events, invokes a provider, delegates stream assembly and tool execution, polls steering after each
 turn, polls follow-up before settlement, and returns the final context plus messages added by that
 invocation. `AgentTurnControl` owns Pi's between-turn callbacks. After `turn_end`,
-`prepare_next_turn` may replace only the run-local context/provider/model/thinking values, then
-`should_stop_after_turn` runs, and only then does queue polling occur. These replacements never
+`should_stop_after_turn` runs before queue polling. Only when another turn will run does
+`prepare_next_turn` receive that completed turn and optionally replace the run-local
+context/provider/model/thinking values, before the next `turn_start`. If no steering was already
+drained, the loop polls again after preparation to include messages queued during it. Settled runs
+and runs stopped by `should_stop_after_turn` do not invoke preparation. These replacements never
 mutate the reusable Agent configuration. `FnTurnControl` is the closure Adapter for this single
 Interface; it hides async future boxing rather than introducing a second callback lifecycle. Turn
 callbacks receive `Arc`-backed immutable snapshots, while the live loop mutates its context and
 per-run transcript with copy-on-write. The normal sequential callback path therefore shares the
 same snapshot without cloning the transcript; retaining a snapshot beyond its callback is safe but
 may make a later mutation clone the retained data.
+
+`AgentOptions` and `AgentLoopConfig` expose `TransformContext`, `ConvertToLlm`, and `StreamFn`
+closure adapters. Every provider request applies the generation's ordered `context` plugin hooks,
+then the optional run-local context transform, then message conversion, then image filtering.
+Transform and conversion operate on owned message snapshots without rewriting the transcript;
+conversion is awaited exactly once per request, including tool continuations. As in Pi's base
+Agent, the default converter retains only user, assistant and tool-result messages. Custom messages
+remain in agent state and events but are omitted from provider input unless a caller supplies a
+converter. Conversion can be configured between runs through `AgentConfigurationPatch` and is
+captured once for each run.
+
+`pi-session` owns the coding-agent projection. Session creation, open and reuse install its
+runtime-message converter when the caller has not supplied one. It maps typed custom messages to
+user content at the provider boundary, while session context construction handles summaries, bash
+output and unknown wire roles. Explicit caller converters take precedence. Ephemeral agents inherit
+the parent's converter so inherited session context has the same provider meaning. Configuration
+and runtime-generation changes preserve the converter without changing stored messages.
+
+An explicit `stream_fn` overrides `AgentLoopServices::default_stream_fn`. The loop resolves this
+fallback once per run. `AgentRuntime` supplies a registry-backed default and can be built with a
+different default stream callback. The default moves with its immutable runtime generation and
+survives system-prompt configuration. This is the scoped Rust equivalent of Pi's configured
+fallback; there is no mutable process-global stream registry. The callback receives the same
+request and generation-bound `ProviderCallContext` as a registered provider, and can return either
+a provider event stream or `AssistantResponse::Complete` for a terminal response without deltas.
+Complete responses preserve assistant metadata, usage, tool calls, and message-end hook processing,
+and emit only `message_start` and `message_end` for the assistant message.
 
 Each assistant stream owns one mutable assembler state behind a read-only `AssistantStream` view.
 `message_update` carries that constant-size shared handle and exactly one `StreamEvent`; the Agent
@@ -845,6 +878,9 @@ StreamEvent -> shared live stream state -> final AssistantMessage
 ```
 
 It validates Start/Delta/End/Done transitions, preserves content-index order, and parses tool argument JSON only after the tool-call block ends. Separate response/content metadata events preserve resolved response model and ID, diagnostics, deferred handles, raw stop reason, `end_turn`, redacted-thinking markers, and tool namespaces as providers discover them. Stream errors and aborts finalize the accumulated partial blocks and observed metadata instead of replacing them with an empty assistant message.
+
+As in Pi, `Done` finalizes usage and stop reason without emitting a `message_update`; consumers
+observe terminal metadata through `message_end`. Content events continue to emit stream updates.
 
 `ToolScheduler` selects sequential execution when requested globally or when any resolved call is
 declared sequential. Its two observable schedules are:

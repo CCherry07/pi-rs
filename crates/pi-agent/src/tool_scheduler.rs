@@ -383,14 +383,9 @@ impl ToolScheduler {
             .await
         {
             Ok(patch) => {
+                // Pi validates prepared provider arguments once, before the
+                // hook. Hook-owned replacements go directly to execution.
                 let patched_args = patch.arguments.unwrap_or(args);
-                if let Err(error) = tool.validate_arguments(&patched_args) {
-                    return PreparedToolCall::Immediate {
-                        source_index,
-                        call,
-                        result: ToolResult::error(error.to_string()),
-                    };
-                }
                 if let Some(block) = patch.block {
                     let mut result = ToolResult::error(block.reason);
                     result.terminate = block.terminate;

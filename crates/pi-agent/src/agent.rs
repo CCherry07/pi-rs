@@ -14,8 +14,8 @@ use crate::agent_loop::emit_run_failure_lifecycle;
 use crate::event_dispatcher::{AgentEventDispatcher, AgentEventListener};
 use crate::{
     AgentContext, AgentEventSink, AgentLoopConfig, AgentLoopOutcome, AgentLoopServices,
-    AgentMessageQueues, AgentTurnControl, NoopAgentTurnControl, PendingMessageQueue, QueueMode,
-    run_agent_loop, run_agent_loop_continue,
+    AgentMessageQueues, AgentTurnControl, ConvertToLlm, NoopAgentTurnControl, PendingMessageQueue,
+    QueueMode, StreamFn, TransformContext, run_agent_loop, run_agent_loop_continue,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -84,6 +84,9 @@ pub struct SubscriptionId(u64);
 
 #[derive(Clone)]
 pub struct AgentOptions {
+    pub stream_fn: Option<StreamFn>,
+    pub convert_to_llm: ConvertToLlm,
+    pub transform_context: Option<TransformContext>,
     pub system_prompt: String,
     pub provider_id: ProviderId,
     pub model_id: ModelId,
@@ -105,6 +108,9 @@ pub struct AgentOptions {
 impl Default for AgentOptions {
     fn default() -> Self {
         Self {
+            stream_fn: None,
+            convert_to_llm: ConvertToLlm::default(),
+            transform_context: None,
             system_prompt: String::new(),
             provider_id: ProviderId::new("scripted"),
             model_id: ModelId::new("test"),
@@ -127,6 +133,7 @@ impl Default for AgentOptions {
 
 #[derive(Debug, Clone, Default)]
 pub struct AgentConfigurationPatch {
+    pub convert_to_llm: Option<ConvertToLlm>,
     pub system_prompt: Option<String>,
     pub active_tools: Option<Vec<String>>,
     pub provider_id: Option<ProviderId>,
@@ -167,6 +174,7 @@ impl WeakAgent {
 /// A new value can be installed between runs so registries and plugin hooks
 /// always move together as one generation.
 pub struct AgentRuntime {
+    default_stream_fn: StreamFn,
     generation: u64,
     system_prompt: String,
     registries: Arc<FrozenRegistries>,
@@ -184,6 +192,7 @@ impl AgentRuntime {
     ) -> Self {
         Self {
             generation,
+            default_stream_fn: StreamFn::from_registries(Arc::clone(&registries)),
             system_prompt: system_prompt.into(),
             registries,
             plugins,
@@ -193,6 +202,17 @@ impl AgentRuntime {
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Replaces the fallback captured by runs using this runtime generation.
+    #[must_use]
+    pub fn with_default_stream_fn(mut self, stream_fn: StreamFn) -> Self {
+        self.default_stream_fn = stream_fn;
+        self
+    }
+
+    pub fn default_stream_fn(&self) -> &StreamFn {
+        &self.default_stream_fn
     }
 
     pub fn system_prompt(&self) -> &str {
@@ -213,6 +233,7 @@ impl AgentRuntime {
 
     fn with_system_prompt(&self, system_prompt: String) -> Self {
         Self {
+            default_stream_fn: self.default_stream_fn.clone(),
             generation: self.generation,
             system_prompt,
             registries: Arc::clone(&self.registries),
@@ -235,6 +256,7 @@ struct AgentInner {
     runtime: RwLock<Arc<AgentRuntime>>,
     session_id: RwLock<Option<String>>,
     effective_prompt: RwLock<Option<String>>,
+    convert_to_llm: RwLock<ConvertToLlm>,
     config: AgentOptions,
 }
 
@@ -276,6 +298,14 @@ impl Agent {
 
     pub fn thinking_budgets(&self) -> Option<ThinkingBudgets> {
         self.inner.config.thinking_budgets
+    }
+
+    pub fn convert_to_llm(&self) -> ConvertToLlm {
+        self.inner
+            .convert_to_llm
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn downgrade(&self) -> WeakAgent {
@@ -327,6 +357,7 @@ impl Agent {
                 runtime: RwLock::new(runtime),
                 session_id: RwLock::new(None),
                 effective_prompt: RwLock::new(None),
+                convert_to_llm: RwLock::new(options.convert_to_llm.clone()),
                 config: options,
             }),
         }
@@ -570,6 +601,13 @@ impl Agent {
         if let Some(thinking_level) = patch.thinking_level {
             state.snapshot.thinking_level = thinking_level;
         }
+        if let Some(convert_to_llm) = patch.convert_to_llm {
+            *self
+                .inner
+                .convert_to_llm
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = convert_to_llm;
+        }
         Ok(())
     }
 
@@ -779,6 +817,9 @@ impl Agent {
             active_tools: snapshot.active_tools,
         };
         let config = AgentLoopConfig {
+            stream_fn: self.inner.config.stream_fn.clone(),
+            convert_to_llm: self.convert_to_llm(),
+            transform_context: self.inner.config.transform_context.clone(),
             provider_id: snapshot.provider_id,
             model_id: snapshot.model_id,
             thinking_level: snapshot.thinking_level,
@@ -809,6 +850,7 @@ impl Agent {
         });
         let events = self.event_sink(run_id.clone(), Arc::clone(runtime.plugins()));
         let services = AgentLoopServices {
+            default_stream_fn: Some(runtime.default_stream_fn().clone()),
             generation: runtime.generation(),
             registries: Arc::clone(runtime.registries()),
             plugins: Arc::clone(runtime.plugins()),

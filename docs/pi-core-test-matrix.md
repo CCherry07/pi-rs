@@ -40,7 +40,7 @@ the required CI gate.
 
 | Legacy suite (static declarations) | Rust ownership and executable evidence | Status |
 | --- | --- | --- |
-| `agent-loop.test.ts` (23) | `pi-agent` stream/loop/scheduler tests and `pi-runtime::tests::{full_plugin_first_tool_loop_preserves_result_order,sequential_tool_forces_source_order_execution,...}` | **Redistributed.** Covers full response/content stream metadata, partial failures and incomplete EOF, strict sequential per-call lifecycle, parallel source/completion ordering, `addedToolNames`, shared tool-hook context, queues, truncated calls, argument preparation, termination, errors, continuation, and the exact `turn_end -> prepare_next_turn -> should_stop_after_turn -> queue poll` ordering. Turn and tool callbacks share immutable `Arc` snapshots instead of cloning transcripts; preparation and execution share one generation-bound `ToolContext`. The legacy default-stream fallback is not part of the plugin-first Provider contract. Patched tool arguments are deliberately revalidated in Rust. |
+| `agent-loop.test.ts` (23) | [`crates/pi-agent/src/agent_loop/tests.rs`](../crates/pi-agent/src/agent_loop/tests.rs), with additional callback/stream/scheduler/runtime regressions | **Covered with 23 corresponding unit tests.** Uses the oracle's done-only response inputs and directly asserts configured default-stream fallback, independent conversion/transform callbacks, messages, tool usage patches, truncated calls, argument preparation, hook mutations without revalidation, parallel completion/source ordering, sequential overrides, queues, turn preparation, stopping, termination, continuation, exact lifecycle sequences, and empty-context error text. `should_stop_after_turn` precedes queue polling; `prepare_next_turn` runs only before a continuation. The default stream is scoped to a Rust runtime generation; typed tool patches express Pi's argument mutations. |
 | `agent.test.ts` (23) | [`crates/pi-agent/src/conformance_tests.rs`](../crates/pi-agent/src/conformance_tests.rs), `pending_queue.rs`, and runtime lifecycle tests | **Covered for the Rust Agent Interface.** Includes state/restore, subscribe/unsubscribe, async settlement, active abort signals, late updates (including a parallel batch), running guards, queueing, assistant-tail steering/follow-up continuation, pre-turn abort closure, exceptional failure lifecycle, mutable session ID, and run-local turn-control replacements that do not mutate Agent configuration. `FnTurnControl` covers ordinary async-closure use without exposing future boxing. |
 | `e2e.test.ts` (10) | `pi-agent` thinking/continue regressions, `pi-runtime` scripted-provider tests, and [`e2e/tests/runtime_agent.rs`](../e2e/tests/runtime_agent.rs) | **Covered.** Basic text, tools, pending state, abort, lifecycle, multi-turn context, thinking blocks, and valid/invalid continuation tails are deterministic and offline. |
 | `harness/agent-harness-scaffold.test.ts` (4) | `pi-session` reducer, durable queue recovery, deferred JSONL, and `agent_session::tests::open_reconciles_interrupted_run_from_reducer_without_replaying_side_effects` | **Divergence, stronger restore.** The current TypeScript scaffold explicitly rejects every recorded-session restore. Rust reducer-reconciles accepted deferred writes, missing initial input, run queues, and interrupted-operation closure idempotently. Open deliberately performs no provider I/O or blind tool side-effect replay. |
@@ -82,13 +82,19 @@ The seven previously listed items are now resolved as follows:
    UTF-8/path/process behavior, settled update queue, immutable registries, and generation-affine
    `ProviderCallContext`.
 
-This does not mean every upstream declaration was transliterated. pi-rs deliberately omits the
-legacy default-stream fallback from its plugin-first Provider contract and revalidates arguments
-changed by a `tool_call` hook. Session open also refuses to execute external work implicitly. These
-fail-closed boundaries are documented in `docs/architecture.md` and locked by focused regressions.
+Most upstream suites remain distributed across owning Rust modules. The AgentLoop suite now maps
+each declaration to a named unit test, with a configured stream callback used when the explicit
+callback is absent. Additional regressions cover explicit overrides, missing defaults, AgentOptions
+callback composition on every turn, default filtering of custom messages without changing history,
+runtime-generation defaults, streamed metadata, and cancellation. Session-level custom-message
+projection remains explicit, preserves caller overrides, and survives resume and ephemeral history
+inheritance.
+Prepared tool arguments are validated before `tool_call`; hook
+replacements execute without revalidation, matching Pi. Session open still refuses to execute
+external work implicitly. These boundaries are documented in `docs/architecture.md` and covered
+by focused regressions.
 
-The later AgentLoop parity audit also closed five observable gaps without changing those safety
-boundaries:
+The earlier AgentLoop parity audit also closed five observable gaps:
 
 1. Stream assembly and the Anthropic, Google, OpenAI Completions, OpenAI Responses, and scripted
    adapters preserve every response/content extension they can observe; failures retain partial

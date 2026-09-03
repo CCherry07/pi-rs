@@ -16,14 +16,22 @@ use pi_telemetry::{
     TelemetryContext,
 };
 
-use crate::{AgentEventSink, StreamAssembler, ToolScheduler};
+use crate::llm_callbacks::StreamFnError;
+use crate::{
+    AgentEventSink, AssistantResponse, ConvertToLlm, StreamAssembler, StreamFn, ToolScheduler,
+    TransformContext,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentLoopError {
-    #[error("agent context is empty")]
+    #[error("Cannot continue: no messages in context")]
     EmptyContext,
-    #[error("cannot continue from an assistant message")]
+    #[error("Cannot continue from message role: assistant")]
     CannotContinueFromAssistant,
+    #[error(
+        "No default stream function configured. Pass stream_fn explicitly or configure default_stream_fn."
+    )]
+    NoDefaultStreamFunction,
     #[error("provider not found: {0}")]
     ProviderNotFound(String),
     #[error("stream assembly failed: {0}")]
@@ -40,6 +48,10 @@ pub enum AgentLoopError {
 
 #[derive(Debug, Clone)]
 pub struct AgentLoopConfig {
+    /// Overrides the runtime's configured default for this run.
+    pub stream_fn: Option<StreamFn>,
+    pub convert_to_llm: ConvertToLlm,
+    pub transform_context: Option<TransformContext>,
     pub provider_id: ProviderId,
     pub model_id: ModelId,
     pub thinking_level: ThinkingLevel,
@@ -95,9 +107,11 @@ pub struct AgentLoopTurnUpdate {
 #[error("turn control failed: {0}")]
 pub struct AgentTurnControlError(pub String);
 
-/// Run-local control seam invoked between a completed turn and queue polling.
+/// Run-local control seam for stopping after a turn and preparing a continuation.
 #[async_trait]
 pub trait AgentTurnControl: Send + Sync {
+    /// Prepare an actual continuation from the previous completed turn, after
+    /// the stop decision and queue polling, but before the next `turn_start`.
     async fn prepare_next_turn(
         &self,
         _context: AgentTurnContext,
@@ -106,6 +120,8 @@ pub trait AgentTurnControl: Send + Sync {
         Ok(None)
     }
 
+    /// Decide whether to stop after `turn_end`, before polling either queue.
+    /// This also runs for a final response that has no continuation.
     async fn should_stop_after_turn(
         &self,
         _context: AgentTurnContext,
@@ -208,6 +224,7 @@ pub struct NoopMessageQueues;
 
 #[derive(Clone)]
 pub struct AgentLoopServices {
+    pub default_stream_fn: Option<StreamFn>,
     pub generation: u64,
     pub registries: Arc<FrozenRegistries>,
     pub plugins: Arc<PluginDriver>,
@@ -219,6 +236,7 @@ pub struct AgentLoopServices {
 }
 
 struct AssistantResponseServices {
+    stream_fn: StreamFn,
     generation: u64,
     registries: Arc<FrozenRegistries>,
     plugins: Arc<PluginDriver>,
@@ -245,16 +263,7 @@ pub async fn run_agent_loop(
     services: AgentLoopServices,
     signal: AbortSignal,
 ) -> Result<AgentLoopOutcome, AgentLoopError> {
-    let AgentLoopServices {
-        generation,
-        registries,
-        plugins,
-        provider_plugins,
-        queues,
-        turn_control,
-        telemetry,
-        events,
-    } = services;
+    let events = Arc::clone(&services.events);
     let mut new_messages = Vec::with_capacity(prompts.len());
     emit(&events, AgentEvent::AgentStart, &signal).await?;
     emit(&events, AgentEvent::TurnStart, &signal).await?;
@@ -271,23 +280,7 @@ pub async fn run_agent_loop(
         context.messages.push(prompt.clone());
         new_messages.push(prompt);
     }
-    run_loop(
-        run_id,
-        context,
-        new_messages,
-        config,
-        generation,
-        registries,
-        plugins,
-        provider_plugins,
-        queues,
-        turn_control,
-        telemetry,
-        signal,
-        events,
-        true,
-    )
-    .await
+    run_loop(run_id, context, new_messages, config, services, signal).await
 }
 
 pub async fn run_agent_loop_continue(
@@ -297,7 +290,28 @@ pub async fn run_agent_loop_continue(
     services: AgentLoopServices,
     signal: AbortSignal,
 ) -> Result<AgentLoopOutcome, AgentLoopError> {
+    let events = Arc::clone(&services.events);
+    if context.messages.is_empty() {
+        return Err(AgentLoopError::EmptyContext);
+    }
+    if context.messages.last().is_some_and(Message::is_assistant) {
+        return Err(AgentLoopError::CannotContinueFromAssistant);
+    }
+    emit(&events, AgentEvent::AgentStart, &signal).await?;
+    emit(&events, AgentEvent::TurnStart, &signal).await?;
+    run_loop(run_id, context, Vec::new(), config, services, signal).await
+}
+
+async fn run_loop(
+    run_id: RunId,
+    context: AgentContext,
+    new_messages: Vec<Message>,
+    mut config: AgentLoopConfig,
+    services: AgentLoopServices,
+    signal: AbortSignal,
+) -> Result<AgentLoopOutcome, AgentLoopError> {
     let AgentLoopServices {
+        default_stream_fn,
         generation,
         registries,
         plugins,
@@ -307,50 +321,11 @@ pub async fn run_agent_loop_continue(
         telemetry,
         events,
     } = services;
-    if context.messages.is_empty() {
-        return Err(AgentLoopError::EmptyContext);
-    }
-    if context.messages.last().is_some_and(Message::is_assistant) {
-        return Err(AgentLoopError::CannotContinueFromAssistant);
-    }
-    emit(&events, AgentEvent::AgentStart, &signal).await?;
-    emit(&events, AgentEvent::TurnStart, &signal).await?;
-    run_loop(
-        run_id,
-        context,
-        Vec::new(),
-        config,
-        generation,
-        registries,
-        plugins,
-        provider_plugins,
-        queues,
-        turn_control,
-        telemetry,
-        signal,
-        events,
-        true,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_loop(
-    run_id: RunId,
-    context: AgentContext,
-    new_messages: Vec<Message>,
-    mut config: AgentLoopConfig,
-    generation: u64,
-    registries: Arc<FrozenRegistries>,
-    plugins: Arc<PluginDriver>,
-    provider_plugins: Arc<ProviderPluginDriver>,
-    queues: Arc<dyn AgentMessageQueues>,
-    turn_control: Arc<dyn AgentTurnControl>,
-    telemetry: TelemetryContext,
-    signal: AbortSignal,
-    events: Arc<dyn AgentEventSink>,
-    mut first_turn: bool,
-) -> Result<AgentLoopOutcome, AgentLoopError> {
+    let stream_fn = config
+        .stream_fn
+        .clone()
+        .or(default_stream_fn)
+        .ok_or(AgentLoopError::NoDefaultStreamFunction)?;
     let mut context = Arc::new(context);
     let mut new_messages = Arc::new(new_messages);
     let scheduler = ToolScheduler::new(
@@ -360,6 +335,7 @@ async fn run_loop(
         config.max_parallel_tools,
     );
     let response_services = AssistantResponseServices {
+        stream_fn,
         generation,
         registries: Arc::clone(&registries),
         plugins: Arc::clone(&plugins),
@@ -371,14 +347,36 @@ async fn run_loop(
     let mut tool_iterations = 0usize;
     let mut stop = AgentLoopStop::Completed;
     let mut last_batch_terminated = false;
+    let mut last_completed_turn: Option<AgentTurnContext> = None;
 
     'run: loop {
         let mut should_continue = true;
         while should_continue || !pending.is_empty() {
-            if !first_turn {
+            if let Some(previous_turn) = last_completed_turn.take() {
+                if let Some(update) = turn_control
+                    .prepare_next_turn(previous_turn, signal.clone())
+                    .await?
+                {
+                    if let Some(next_context) = update.context {
+                        context = Arc::new(next_context);
+                    }
+                    if let Some(provider_id) = update.provider_id {
+                        config.provider_id = provider_id;
+                    }
+                    if let Some(model_id) = update.model_id {
+                        config.model_id = model_id;
+                    }
+                    if let Some(thinking_level) = update.thinking_level {
+                        config.thinking_level = thinking_level;
+                    }
+                }
+                // Preparation can queue new steering. Preserve an already
+                // drained batch so one-at-a-time delivery stays one-at-a-time.
+                if pending.is_empty() {
+                    pending = queues.drain_steering();
+                }
                 emit(&events, AgentEvent::TurnStart, &signal).await?;
             }
-            first_turn = false;
 
             for message in std::mem::take(&mut pending) {
                 emit(
@@ -529,49 +527,19 @@ async fn run_loop(
             )
             .await?;
 
-            let message = Arc::new(assistant);
-            let tool_results = Arc::new(tool_results);
-
-            if let Some(update) = turn_control
-                .prepare_next_turn(
-                    AgentTurnContext {
-                        message: Arc::clone(&message),
-                        tool_results: Arc::clone(&tool_results),
-                        context: Arc::clone(&context),
-                        new_messages: Arc::clone(&new_messages),
-                    },
-                    signal.clone(),
-                )
-                .await?
-            {
-                if let Some(next_context) = update.context {
-                    context = Arc::new(next_context);
-                }
-                if let Some(provider_id) = update.provider_id {
-                    config.provider_id = provider_id;
-                }
-                if let Some(model_id) = update.model_id {
-                    config.model_id = model_id;
-                }
-                if let Some(thinking_level) = update.thinking_level {
-                    config.thinking_level = thinking_level;
-                }
-            }
-
+            let completed_turn = AgentTurnContext {
+                message: Arc::new(assistant),
+                tool_results: Arc::new(tool_results),
+                context: Arc::clone(&context),
+                new_messages: Arc::clone(&new_messages),
+            };
             if turn_control
-                .should_stop_after_turn(
-                    AgentTurnContext {
-                        message,
-                        tool_results,
-                        context: Arc::clone(&context),
-                        new_messages: Arc::clone(&new_messages),
-                    },
-                    signal.clone(),
-                )
+                .should_stop_after_turn(completed_turn.clone(), signal.clone())
                 .await?
             {
                 break 'run;
             }
+            last_completed_turn = Some(completed_turn);
 
             // Steering is polled after every completed turn, including a final
             // text-only turn and a terminating tool batch. This matches Pi's
@@ -622,20 +590,21 @@ async fn stream_assistant_response(
     let provider_plugins = Arc::clone(&services.provider_plugins);
     let events = Arc::clone(&services.events);
 
-    let Some(provider) = registries.provider(&config.provider_id) else {
-        return Err(AgentLoopError::ProviderNotFound(
-            config.provider_id.to_string(),
-        ));
-    };
     let tools = registries
         .tool_specs(&context.active_tools)
         .map_err(|error| AgentLoopError::ProviderNotFound(error.to_string()))?;
-    let request_messages = plugins
+    let mut request_messages = plugins
         .context(run_id, &config.cwd, &signal, context.messages.clone())
         .await
-        .map_err(|error| AgentLoopError::Event(error.to_string()))?
+        .map_err(|error| AgentLoopError::Event(error.to_string()))?;
+    if let Some(transform) = &config.transform_context {
+        request_messages = transform.call(request_messages, signal.clone()).await;
+    }
+    let request_messages = config
+        .convert_to_llm
+        .call(request_messages)
+        .await
         .into_iter()
-        .map(Message::into_provider_message)
         .map(|message| filter_blocked_images(message, config.block_images))
         .collect();
     let model_spec = registries
@@ -679,12 +648,34 @@ async fn stream_assistant_response(
     let request_started = std::time::Instant::now();
     let mut chunk_count = 0_u64;
     let mut time_to_first_chunk_ms = None;
-    let stream_result = provider.stream(request, call_context, signal.child()).await;
-    let mut assembler = StreamAssembler::new();
-    let mut started = false;
+    let stream_result = tokio::select! {
+        biased;
+        () = signal.wait() => {
+            let message = provider_failure_message(config, "operation aborted".to_string(), StopReason::Aborted);
+            let message = emit_message_pair(&events, &signal, &message).await?;
+            context.messages.push(Message::assistant(message.clone()));
+            finish_ai_request(&telemetry_span, &message, 0, None);
+            return Ok(message);
+        }
+        result = services.stream_fn.call(request, call_context, signal.child()) => result,
+    };
     let mut stream = match stream_result {
-        Ok(stream) => stream,
-        Err(error) => {
+        Ok(AssistantResponse::Stream(stream)) => stream,
+        Ok(AssistantResponse::Complete(mut message)) => {
+            if let Some(cost) = &model_cost {
+                message.usage.cost = cost.calculate(&message.usage);
+            }
+            let message = emit_message_pair(&events, &signal, &message).await?;
+            context.messages.push(Message::assistant(message.clone()));
+            let elapsed_ms =
+                u64::try_from(request_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            finish_ai_request(&telemetry_span, &message, 1, Some(elapsed_ms));
+            return Ok(message);
+        }
+        Err(StreamFnError::ProviderNotFound(provider_id)) => {
+            return Err(AgentLoopError::ProviderNotFound(provider_id.to_string()));
+        }
+        Err(StreamFnError::Provider(error)) => {
             let message = provider_failure_message(config, error.to_string(), StopReason::Error);
             let message = emit_message_pair(&events, &signal, &message).await?;
             context.messages.push(Message::assistant(message.clone()));
@@ -697,6 +688,8 @@ async fn stream_assistant_response(
             return Ok(message);
         }
     };
+    let mut assembler = StreamAssembler::new();
+    let mut started = false;
 
     loop {
         let item = tokio::select! {
@@ -1202,6 +1195,10 @@ fn now_ms() -> i64 {
             i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
         })
 }
+
+#[cfg(test)]
+#[path = "agent_loop/tests.rs"]
+mod conformance_tests;
 
 #[cfg(test)]
 mod tests {

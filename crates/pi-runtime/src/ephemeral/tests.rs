@@ -677,6 +677,55 @@ async fn aggregate_input_budget_counts_cached_tokens_and_stops_after_balanced_to
 }
 
 #[tokio::test]
+async fn inherited_history_uses_the_parents_message_converter() {
+    let custom = Message::custom(pi_core::CustomMessage {
+        custom_type: "context".to_string(),
+        content: pi_core::CustomMessageContent::Text("retained context".to_string()),
+        display: false,
+        details: None,
+        timestamp_ms: 1,
+    });
+    let plugin = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".to_string())]);
+    let provider = plugin.provider();
+    let runtime = PiRuntime::builder()
+        .provider_plugin(plugin)
+        .agent_options(AgentOptions {
+            messages: vec![custom.clone()],
+            ..AgentOptions::default()
+        })
+        .build()
+        .unwrap();
+    runtime
+        .agent()
+        .configure(pi_agent::AgentConfigurationPatch {
+            convert_to_llm: Some(pi_agent::ConvertToLlm::new(|messages| async move {
+                messages
+                    .into_iter()
+                    .map(Message::into_provider_message)
+                    .collect()
+            })),
+            ..pi_agent::AgentConfigurationPatch::default()
+        })
+        .unwrap();
+    let mut input = request(&[]);
+    input.inherit_history = true;
+    let outcome = runtime
+        .run_ephemeral(input, AbortHandle::new().1)
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, EphemeralSessionStatus::Completed);
+    assert_eq!(
+        provider.requests()[0].messages,
+        [
+            Message::User(UserMessage::text("retained context", 1)),
+            Message::User(UserMessage::text("maintain", 0)),
+        ]
+    );
+    assert_eq!(runtime.agent().state().messages, [custom]);
+}
+
+#[tokio::test]
 async fn cold_history_digest_preserves_the_tool_group_at_the_cut() {
     let scripted = ScriptedProviderPlugin::scripted([
         ScriptedTurn::ToolCalls(vec![ToolCall::new("call", "missing", json!({}))]),

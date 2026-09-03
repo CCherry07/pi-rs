@@ -382,12 +382,12 @@ impl StreamAssemblerState {
                         return Err(AssemblerError::OpenBlock(index));
                     }
                 }
-                self.usage = usage.clone();
+                self.usage = usage;
                 self.stop_reason = Some(reason);
                 self.finished = true;
                 Ok(StreamUpdate {
                     started: false,
-                    update: Some(Arc::new(StreamEvent::Done { reason, usage })),
+                    update: None,
                 })
             }
         }
@@ -925,23 +925,30 @@ mod tests {
     }
 
     #[test]
-    fn done_is_forwarded_as_a_stream_update() {
+    fn done_finalizes_usage_without_emitting_a_stream_update() {
         let mut assembler = StreamAssembler::new();
         assembler
             .push(StreamEvent::Start {
                 metadata: metadata(),
             })
             .unwrap();
+        let usage = Usage {
+            input: 10,
+            output: 5,
+            total_tokens: 15,
+            ..Usage::default()
+        };
         let update = assembler
             .push(StreamEvent::Done {
-                reason: StopReason::Stop,
-                usage: Usage::default(),
+                reason: StopReason::Length,
+                usage: usage.clone(),
             })
             .unwrap();
-        assert!(matches!(
-            update.update.as_deref(),
-            Some(StreamEvent::Done { .. })
-        ));
+        assert!(!update.started);
+        assert!(update.update.is_none());
+        let message = assembler.finish().unwrap();
+        assert_eq!(message.usage, usage);
+        assert_eq!(message.stop_reason, StopReason::Length);
     }
 
     #[test]

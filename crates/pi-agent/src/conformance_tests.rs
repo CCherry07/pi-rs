@@ -1100,7 +1100,7 @@ async fn agent_loop_passes_the_current_batch_context_to_both_tool_hooks() {
 }
 
 #[tokio::test]
-async fn hook_patched_arguments_are_revalidated_before_execution() {
+async fn hook_patched_arguments_execute_without_revalidation_like_pi() {
     let executions = Arc::new(AtomicUsize::new(0));
     let (agent, _) = build_agent(
         [
@@ -1127,12 +1127,11 @@ async fn hook_patched_arguments_are_revalidated_before_execution() {
     );
 
     let outcome = agent.prompt("strict").await.unwrap();
-    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
     assert!(outcome.new_messages.iter().any(|message| matches!(
         message,
         Message::ToolResult(result)
-            if result.is_error
-                && tool_result_text(result).is_some_and(|text| text.contains("must be a string"))
+            if !result.is_error && tool_result_text(result) == Some("strict")
     )));
 }
 
@@ -1483,7 +1482,7 @@ async fn prepare_next_turn_replaces_run_local_context_model_and_thinking() {
     assert!(saw_active_signal.load(Ordering::SeqCst));
     assert_eq!(
         *observed_prompts.lock().unwrap(),
-        vec!["prepared prompt", "prepared prompt"]
+        vec!["", "prepared prompt"]
     );
     assert_eq!(agent.state().model_id.as_str(), "test");
     assert_eq!(agent.state().thinking_level, ThinkingLevel::Off);
@@ -1506,9 +1505,15 @@ async fn turn_control_closures_share_snapshots_and_isolate_copy_on_write_changes
                     tokio::task::yield_now().await;
                     assert!(!signal.is_aborted());
                     observations.lock().unwrap().push("prepare");
-                    *shared_snapshots.lock().unwrap() = Some((
-                        Arc::downgrade(&context.context),
-                        Arc::downgrade(&context.new_messages),
+                    let (stopped_context, stopped_messages) =
+                        shared_snapshots.lock().unwrap().take().unwrap();
+                    assert!(Arc::ptr_eq(
+                        &stopped_context.upgrade().unwrap(),
+                        &context.context
+                    ));
+                    assert!(Arc::ptr_eq(
+                        &stopped_messages.upgrade().unwrap(),
+                        &context.new_messages
                     ));
                     Arc::make_mut(&mut context.context).system_prompt = "detached".to_string();
                     Arc::make_mut(&mut context.new_messages).clear();
@@ -1521,20 +1526,24 @@ async fn turn_control_closures_share_snapshots_and_isolate_copy_on_write_changes
                 async move {
                     assert!(!signal.is_aborted());
                     assert_eq!(context.context.system_prompt, "base prompt");
-                    assert_eq!(context.new_messages.len(), 2);
                     observations.lock().unwrap().push("stop");
-                    let (prepared_context, prepared_messages) =
-                        shared_snapshots.lock().unwrap().take().unwrap();
-                    let prepared_context = prepared_context.upgrade().unwrap();
-                    let prepared_messages = prepared_messages.upgrade().unwrap();
-                    assert!(Arc::ptr_eq(&prepared_context, &context.context));
-                    assert!(Arc::ptr_eq(&prepared_messages, &context.new_messages));
+                    if context.new_messages.len() == 2 {
+                        *shared_snapshots.lock().unwrap() = Some((
+                            Arc::downgrade(&context.context),
+                            Arc::downgrade(&context.new_messages),
+                        ));
+                    } else {
+                        assert_eq!(context.new_messages.len(), 4);
+                    }
                     Ok(false)
                 }
             }),
     );
     let (agent, _) = build_agent(
-        [ScriptedTurn::Text("done".to_string())],
+        [
+            ScriptedTurn::Text("first response".to_string()),
+            ScriptedTurn::Text("done".to_string()),
+        ],
         Vec::new(),
         AgentOptions {
             system_prompt: "base prompt".to_string(),
@@ -1543,12 +1552,13 @@ async fn turn_control_closures_share_snapshots_and_isolate_copy_on_write_changes
         },
     );
 
+    agent.follow_up(Message::User(UserMessage::text("continue", 2)));
     let outcome = agent.prompt("start").await.unwrap();
 
     assert_eq!(outcome.final_context.system_prompt, "base prompt");
-    assert_eq!(outcome.new_messages.len(), 2);
+    assert_eq!(outcome.new_messages.len(), 4);
     let observations = observations.lock().unwrap();
-    assert_eq!(*observations, vec!["prepare", "stop"]);
+    assert_eq!(*observations, vec!["stop", "prepare", "stop"]);
 }
 
 #[tokio::test]
@@ -1619,6 +1629,7 @@ async fn turn_control_failure_returns_an_error_after_emitting_pi_terminal_lifecy
         }
     }));
 
+    agent.follow_up(Message::User(UserMessage::text("continue", 2)));
     let error = agent.prompt("start").await.unwrap_err();
 
     assert!(error.to_string().contains("prepare callback exploded"));

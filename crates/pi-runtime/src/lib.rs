@@ -2260,8 +2260,11 @@ mod tests {
         assert_eq!(requests[1].system_prompt, "base|a|b");
         assert!(matches!(&requests[0].messages[0], Message::User(message)
             if matches!(&message.content[0], ContentBlock::Text(text) if text.text == "first")));
-        assert!(matches!(&requests[0].messages[1], Message::User(message)
-            if matches!(&message.content[0], ContentBlock::Text(text) if text.text == "injected")));
+        assert_eq!(requests[0].messages.len(), 1);
+        assert!(matches!(
+            &requests[1].messages[..],
+            [Message::User(_), Message::Assistant(_), Message::User(_)]
+        ));
         assert!(matches!(
             &runtime.agent().state().messages[1],
             Message::Custom(message) if message.custom_type == "fixture-context"

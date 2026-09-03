@@ -421,6 +421,7 @@ impl AgentSession {
         path: impl Into<PathBuf>,
         options: AgentSessionOptions,
     ) -> Result<PreparedAgentSession, SessionError> {
+        default_configure_session_message_conversion(&runtime)?;
         let path = path.into();
         let state = runtime.agent().state();
         let initial_model = crate::InitialModelRequest::default()
@@ -566,6 +567,7 @@ impl AgentSession {
         mut document: SessionDocument,
         options: AgentSessionOptions,
     ) -> Result<PreparedAgentSession, SessionError> {
+        default_configure_session_message_conversion(&runtime)?;
         let agent_state = runtime.agent().state();
         let recovery_defaults = crate::EffectiveLaneConfiguration {
             model: SessionModel {
@@ -2856,6 +2858,19 @@ fn session_identity(header: &SessionHeader, path: PathBuf) -> SessionIdentity {
     }
 }
 
+fn default_configure_session_message_conversion(runtime: &PiRuntime) -> Result<(), SessionError> {
+    if runtime.agent().convert_to_llm().is_default() {
+        runtime
+            .agent()
+            .configure(pi_agent::AgentConfigurationPatch {
+                convert_to_llm: Some(crate::context::runtime_message_converter()),
+                ..pi_agent::AgentConfigurationPatch::default()
+            })
+            .map_err(|error| SessionError::Runtime(error.to_string()))?;
+    }
+    Ok(())
+}
+
 fn restore_runtime_context(
     runtime: &PiRuntime,
     context: &SessionContext,
@@ -3173,18 +3188,71 @@ mod tests {
             .unwrap();
         drop(session);
 
-        let reopened = AgentSession::open(scripted_runtime([]), &path)
-            .await
+        let resumed_plugin =
+            ScriptedProviderPlugin::scripted([ScriptedTurn::Text("resumed".to_string())]);
+        let resumed_provider = resumed_plugin.provider();
+        let resumed_runtime = PiRuntime::builder()
+            .provider_plugin(resumed_plugin)
+            .build()
             .unwrap();
+        let reopened = AgentSession::open(resumed_runtime, &path).await.unwrap();
         assert_eq!(reopened.snapshot().queue.follow_up, vec!["next run"]);
-        let activity = reopened
-            .activity
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(matches!(
-            activity.recovered_queue.first().map(|item| &item.message),
-            Some(Message::Custom(custom)) if custom.timestamp_ms == queued_at
-        ));
+        {
+            let activity = reopened
+                .activity
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(matches!(
+                activity.recovered_queue.first().map(|item| &item.message),
+                Some(Message::Custom(custom)) if custom.timestamp_ms == queued_at
+            ));
+        }
+        reopened.prompt("continue again").await.unwrap();
+        let requests = resumed_provider.requests();
+        assert!(requests[0].messages.iter().any(|message| {
+            matches!(message, Message::User(user)
+                    if user.content.iter().any(|block| matches!(block,
+                        ContentBlock::Text(text) if text.text == "remember this")))
+        }));
+    }
+
+    #[tokio::test]
+    async fn session_preserves_an_explicit_agent_message_converter() {
+        let directory = tempfile::tempdir().unwrap();
+        let plugin = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".to_string())]);
+        let provider = plugin.provider();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(plugin)
+            .agent_options(AgentOptions {
+                convert_to_llm: pi_agent::ConvertToLlm::new(|messages| async move {
+                    messages
+                        .into_iter()
+                        .filter(|message| !matches!(message, Message::Custom(_)))
+                        .collect()
+                }),
+                ..AgentOptions::default()
+            })
+            .build()
+            .unwrap();
+        let session =
+            AgentSession::create(runtime, directory.path().join("explicit-converter.jsonl"))
+                .await
+                .unwrap();
+        let custom = CustomMessage {
+            custom_type: "notification".to_string(),
+            content: CustomMessageContent::Text("internal notification".to_string()),
+            display: false,
+            details: None,
+            timestamp_ms: 1,
+        };
+        session.append_custom_message(custom.clone()).unwrap();
+        let stored = session.runtime().agent().state().messages[0].clone();
+        session.prompt("hello").await.unwrap();
+
+        let requests = provider.requests();
+        assert!(matches!(&requests[0].messages[..], [Message::User(user)]
+            if matches!(&user.content[..], [ContentBlock::Text(text)] if text.text == "hello")));
+        assert_eq!(session.runtime().agent().state().messages[0], stored);
     }
 
     #[tokio::test]

@@ -113,7 +113,7 @@ pub struct EphemeralSessionRequest {
     /// | `turn_start`, `turn_end` | Observe each model-response/tool-processing turn. |
     /// | `context` | Patch the messages the Agent is about to send to the model. |
     /// | `message_start`, `message_update`, `message_end` | Observe messages/assistant streaming; `message_end` may replace a message with one of the same role. |
-    /// | `tool_call` | Patch validated arguments or block a tool call before execution. Patched arguments are revalidated. |
+    /// | `tool_call` | Patch validated arguments or block a tool call before execution. Hook replacements are not revalidated, matching Pi. |
     /// | `tool_result` | Inspect or patch a tool's result after execution. |
     /// | `tool_execution_start`, `tool_execution_update`, `tool_execution_end` | Observe tool dispatch/progress/completion without patching the result. |
     ///

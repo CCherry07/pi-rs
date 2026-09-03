@@ -245,7 +245,8 @@ registrations come from the immutable parent generation. The driver awaits inter
 in registration order, including prompt/context, Agent/turn/message, and tool hooks. Prompt and
 context patches affect only the private Agent. This structured-prompt entry does not run the
 product `input` pipeline or emit `agent_settled` or `SessionPlugin` lifecycle events.
-Normal tool blocking, argument revalidation, and result patches remain intact.
+Normal tool blocking, initial argument validation, and result patches remain intact;
+hook-replaced arguments execute without revalidation, matching Pi.
 Use an empty vector when no private hooks are needed. Stateful plugins must be constructed fresh
 for each invocation, not reused by cloning a request. The runtime releases its private plugin
 instances on all exit paths; use plugin-owned RAII for cleanup, since cancellation or dropping

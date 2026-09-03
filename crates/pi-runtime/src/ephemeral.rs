@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use pi_agent::{
-    Agent, AgentLoopStop, AgentLoopTurnUpdate, AgentOptions, AgentRuntime, FnTurnControl,
+    Agent, AgentLoopStop, AgentLoopTurnUpdate, AgentOptions, AgentRuntime, AgentTurnContext,
+    FnTurnControl,
 };
 use pi_core::{
     AbortSignal, EphemeralSessionOutcome, EphemeralSessionRequest, EphemeralSessionStatus, Message,
@@ -113,7 +114,7 @@ impl PiRuntime {
         let iteration_limit = request.max_tool_iterations;
         let summary_spent = Arc::clone(&summary_input);
         let compact_failure = Arc::clone(&compaction_error);
-        let control = FnTurnControl::new().with_prepare_next_turn(move |turn, signal| {
+        let prepare_compaction = move |turn: AgentTurnContext, signal| {
             let compactor = compactor.clone();
             let summary_spent = Arc::clone(&summary_spent);
             let compact_failure = Arc::clone(&compact_failure);
@@ -127,11 +128,9 @@ impl PiRuntime {
                     || model_iterations(&turn.new_messages) >= iteration_limit
                     || input_limit.is_some_and(|limit| spent >= limit)
                 {
-                    return Ok(None);
+                    return None;
                 }
-                let Some(compactor) = compactor else {
-                    return Ok(None);
-                };
+                let compactor = compactor?;
                 match compactor
                     .compact(
                         &turn,
@@ -143,28 +142,48 @@ impl PiRuntime {
                     Ok(compacted) => {
                         summary_spent
                             .fetch_add(compacted.input_tokens, std::sync::atomic::Ordering::AcqRel);
-                        Ok(compacted.context.map(|context| AgentLoopTurnUpdate {
+                        compacted.context.map(|context| AgentLoopTurnUpdate {
                             context: Some(context),
                             ..AgentLoopTurnUpdate::default()
-                        }))
+                        })
                     }
                     Err(error) => {
                         *compact_failure
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
-                        Ok(None)
+                        None
                     }
                 }
+            }
+        };
+        // Compaction can fail or consume the remaining input budget. Finish it
+        // before deciding whether to stop, then publish its context only when
+        // AgentLoop prepares an actual continuation.
+        let pending_update = Arc::new(std::sync::Mutex::new(None));
+        let prepared_update = Arc::clone(&pending_update);
+        let control = FnTurnControl::new().with_prepare_next_turn(move |_, _| {
+            let prepared_update = Arc::clone(&prepared_update);
+            async move {
+                Ok(prepared_update
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take())
             }
         });
         let summary_spent = Arc::clone(&summary_input);
         let compact_failure = Arc::clone(&compaction_error);
-        let control = control.with_should_stop_after_turn(move |turn, _| {
+        let control = control.with_should_stop_after_turn(move |turn, signal| {
             let budget_exhausted = Arc::clone(&budget_exhausted);
             let iteration_flag = Arc::clone(&iteration_flag);
             let summary_spent = Arc::clone(&summary_spent);
             let compact_failure = Arc::clone(&compact_failure);
+            let prepare_compaction = prepare_compaction.clone();
+            let pending_update = Arc::clone(&pending_update);
             async move {
+                let update = prepare_compaction(turn.clone(), signal).await;
+                *pending_update
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = update;
                 let spent = spent_input(&turn.new_messages)
                     .saturating_add(summary_spent.load(std::sync::atomic::Ordering::Acquire));
                 let stop = input_limit.is_some_and(|limit| spent >= limit)
@@ -184,6 +203,7 @@ impl PiRuntime {
         });
         let child = Agent::with_runtime(
             AgentOptions {
+                convert_to_llm: self.agent.convert_to_llm(),
                 provider_id: model.provider,
                 model_id: model.model_id,
                 thinking_level: request.thinking_level.unwrap_or(parent.thinking_level),
