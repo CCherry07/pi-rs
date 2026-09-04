@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.8.0](https://github.com/CCherry07/pi-rs/compare/v0.7.0...v0.8.0) (2026-09-04)
+
+
+### Features
+
+* align Hermes memory behavior ([5ebcb84](https://github.com/CCherry07/pi-rs/commit/5ebcb84849941f3e71e10f637da272be8a842fd7))
+* **cli:** add RPC, ACP, and session migration ([065c012](https://github.com/CCherry07/pi-rs/commit/065c0125862dbaa63b3e42297b423957cd70317a))
+* **cli:** add session import export and share ([c7c9123](https://github.com/CCherry07/pi-rs/commit/c7c9123e3b1c16d31411f5cc9d8133bfdf8116d2))
+* **extensions:** expand Pi runtime compatibility ([dece4ca](https://github.com/CCherry07/pi-rs/commit/dece4ca6ae1c2c61ffcd513fbc9a230de3da43f2))
+* **extensions:** support dynamic provider registration ([8dcfca4](https://github.com/CCherry07/pi-rs/commit/8dcfca49cb3537b5bc3adef8944c1a039b70c783))
+* **plugins:** add Hermes memory and subagent workflows ([0ebee3e](https://github.com/CCherry07/pi-rs/commit/0ebee3ec2298f5148740f72eba0dfcb64339d2f9))
+* **plugins:** add rust-first session transfer ([e839807](https://github.com/CCherry07/pi-rs/commit/e839807a752f1dff5ee3ddc949e145c9744d2a18))
+* **providers:** expand Pi provider coverage ([38ef6f7](https://github.com/CCherry07/pi-rs/commit/38ef6f77675f0202f08891fcb946f5534deaacad))
+* **settings:** implement current non-UI runtime settings ([6a4cbcb](https://github.com/CCherry07/pi-rs/commit/6a4cbcb7a768d639ab61b59bf9eb3a5ccceae8d4))
+
+
+### Bug Fixes
+
+* **memory:** fall back from empty mutation batches ([7eb5715](https://github.com/CCherry07/pi-rs/commit/7eb5715722094ff989b3d2b4e4bca9f05aa3a8e4))
+* **session:** align token accounting with Pi ([79582c1](https://github.com/CCherry07/pi-rs/commit/79582c105d95df1429ccc2e65430ee063fa8b9c6))
+* **tools:** prefer explicit edit replacements ([a911fb0](https://github.com/CCherry07/pi-rs/commit/a911fb012d86922a8fb61f2f74aefdae3f0c9342))
+
 ## [0.7.0](https://github.com/CCherry07/pi-rs/compare/v0.6.0...v0.7.0) (2026-08-26)
 
 
