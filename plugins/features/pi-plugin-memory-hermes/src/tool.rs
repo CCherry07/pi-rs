@@ -192,7 +192,11 @@ impl HermesMemoryTool {
         if !matches!(target, MemoryTarget::Memory | MemoryTarget::User) {
             return Ok(ToolResult::error("memory target must be memory or user"));
         }
-        let result = if let Some(operations) = input.get("operations").and_then(Value::as_array) {
+        let result = if let Some(operations) = input
+            .get("operations")
+            .and_then(Value::as_array)
+            .filter(|operations| !operations.is_empty())
+        {
             let mut plan = Vec::new();
             for op in operations {
                 let action = match op.get("action").and_then(Value::as_str) {

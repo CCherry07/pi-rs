@@ -351,6 +351,7 @@ fn verbose_memory_actions(
     if let Some(operations) = arguments
         .get("operations")
         .and_then(serde_json::Value::as_array)
+        .filter(|operations| !operations.is_empty())
     {
         return operations
             .iter()
@@ -500,6 +501,19 @@ mod tests {
         );
         assert_eq!(
             action_summary_with_mode(&messages, MemoryNotificationMode::Verbose),
+            "Memory ➕ User prefers terse replies"
+        );
+
+        let mut empty_batch = messages.clone();
+        let Message::Assistant(message) = &mut empty_batch[0] else {
+            unreachable!()
+        };
+        let pi_core::ContentBlock::ToolCall(call) = &mut Arc::make_mut(message).content[0] else {
+            unreachable!()
+        };
+        call.arguments["operations"] = serde_json::json!([]);
+        assert_eq!(
+            action_summary_with_mode(&empty_batch, MemoryNotificationMode::Verbose),
             "Memory ➕ User prefers terse replies"
         );
 

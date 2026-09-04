@@ -446,6 +446,25 @@ async fn memory_tool_aliases_and_poisoned_batches_match_hermes() {
     assert!(!added.is_error);
     assert_eq!(added.details.as_ref().unwrap()["done"], true);
 
+    let added_with_empty_batch = execute_memory_tool(
+        root.path(),
+        &tool,
+        json!({
+            "action":"add",
+            "content":"empty batch falls back to the single operation",
+            "operations":[]
+        }),
+    )
+    .await;
+    assert!(!added_with_empty_batch.is_error);
+    assert!(
+        plugin
+            .store
+            .entries(MemoryTarget::Memory)
+            .unwrap()
+            .contains(&"empty batch falls back to the single operation".to_string())
+    );
+
     let replaced = execute_memory_tool(
         root.path(),
         &tool,
