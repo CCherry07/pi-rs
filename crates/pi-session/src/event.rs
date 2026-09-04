@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock};
 
 use pi_agent::AgentStateSnapshot;
-use pi_core::{AgentEvent, Message, NoticeLevel, ThinkingLevel};
+use pi_core::{AgentEvent, Message, NoticeLevel, ThinkingLevel, Usage};
 use pi_shell::{ShellResult, ShellStream};
 use tokio::sync::broadcast;
 
@@ -55,6 +55,11 @@ pub enum AgentSessionEvent {
     },
     EntryAppended {
         entry: SessionRecord,
+    },
+    /// Detached provider usage was added to the session ledger without a
+    /// corresponding conversation entry.
+    UsageRecorded {
+        usage: Usage,
     },
     SessionInfoChanged {
         name: Option<String>,
@@ -231,6 +236,10 @@ impl AgentSessionEventHub {
             },
             |_| {},
         );
+    }
+
+    pub(crate) fn publish_usage(&self, usage: Usage) {
+        self.publish(AgentSessionEvent::UsageRecorded { usage }, |_| {});
     }
 
     pub(crate) fn publish_queue(&self, queue: QueueSnapshot) {

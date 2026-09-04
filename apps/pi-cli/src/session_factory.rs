@@ -188,7 +188,7 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             &settings.project().prompts,
             &config.cwd.join(".pi"),
         );
-        let memory = build_memory_provider(&config, Some(&path))
+        let memory = build_memory_provider(&config, Some(&path), project_trusted)
             .await
             .map_err(SessionError::Runtime)?;
         let package_reconciliations = prepare_native_packages(&config, project_trusted).await?;
@@ -561,7 +561,7 @@ fn build_runtime_with_codex_credentials(
 async fn build_runtime_with_first_party_memory(
     config: &AppConfig,
 ) -> Result<PiRuntime, RuntimeError> {
-    let memory = build_memory_provider(config, None)
+    let memory = build_memory_provider(config, None, false)
         .await
         .map_err(RuntimeError::Build)?;
     let generation_overlay = SessionGenerationOverlay::default();
@@ -614,7 +614,8 @@ fn build_runtime_inner(
         .additional_paths
         .extend(config.settings_skill_paths.iter().cloned());
     if memory_is_hermes {
-        let mut roots = managed_skill_roots(&config.agent_dir, &config.cwd).into_iter();
+        let mut roots =
+            managed_skill_roots(&config.agent_dir, &config.cwd, project_trusted).into_iter();
         if let Some(global_root) = roots.next() {
             skill_options.additional_paths.push(global_root);
         }
@@ -792,8 +793,10 @@ fn build_runtime_inner(
 async fn build_memory_provider(
     config: &AppConfig,
     active_session_path: Option<&std::path::Path>,
+    project_trusted: bool,
 ) -> Result<Option<PreparedMemoryProvider>, String> {
     let mut options = MemoryLoaderOptions::new(&config.cwd, &config.agent_dir);
+    options.project_trusted = project_trusted;
     if let Some(session_root) = config.session_path.parent() {
         options.session_roots.push(session_root.to_path_buf());
     }
@@ -1361,7 +1364,6 @@ command = "fixture-command"
             "learn-memory-tool",
             "memory-preview-context",
             "memory-skills",
-            "memory-switch-project",
             "memory-sync-markdown",
         ] {
             assert!(

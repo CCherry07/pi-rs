@@ -7,10 +7,11 @@ use async_trait::async_trait;
 use pi_core::{
     AbortHandle, AbortSignal, AgentPlugin, AgentPluginContext, BeforeAgentStartEvent,
     BeforeAgentStartPatch, BeforeProviderHeadersEvent, ContentBlock, EphemeralSessionRequest,
-    EphemeralSessionStatus, Message, ModelId, PluginError, PluginId, Provider, ProviderCallContext,
-    ProviderError, ProviderId, ProviderPlugin, ProviderPluginContext, ProviderRegisterContext,
-    ProviderRequest, ProviderStream, RegisterContext, Tool, ToolCall, ToolCallId, ToolContext,
-    ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdateSink, UserMessage,
+    EphemeralSessionStatus, Message, ModelId, ModelSelection, PluginError, PluginId, Provider,
+    ProviderCallContext, ProviderError, ProviderId, ProviderPlugin, ProviderPluginContext,
+    ProviderRegisterContext, ProviderRequest, ProviderStream, RegisterContext, ThinkingBudgets,
+    ThinkingLevel, Tool, ToolCall, ToolCallId, ToolContext, ToolError, ToolExecutionMode,
+    ToolResult, ToolSpec, ToolUpdateSink, UserMessage,
 };
 use pi_test_support::{ScriptedProvider, ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::{Value, json};
@@ -263,6 +264,103 @@ async fn timeout_cancel_and_dropped_future_abort_the_provider_without_detached_w
             "{mode} must cancel the child's provider signal"
         );
     }
+}
+
+#[tokio::test]
+async fn cancellation_and_timeout_return_completed_balanced_tool_receipts() {
+    for mode in ["cancel", "timeout"] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let scripted = ScriptedProviderPlugin::scripted([
+            ScriptedTurn::ToolCalls(vec![ToolCall::new("saved", "allowed", json!({}))]),
+            ScriptedTurn::WaitForAbort,
+        ]);
+        let provider = scripted.provider();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(scripted)
+            .agent_plugin(ProbePlugin {
+                allowed: calls.clone(),
+                forbidden: Arc::new(AtomicUsize::new(0)),
+                hooks: Arc::new(AtomicUsize::new(0)),
+            })
+            .agent_options(AgentOptions {
+                active_tools: vec!["allowed".into()],
+                ..AgentOptions::default()
+            })
+            .build()
+            .unwrap();
+        let (abort, signal) = AbortHandle::new();
+        let mut input = request(&["allowed"]);
+        if mode == "timeout" {
+            input.timeout = Duration::from_secs(1);
+        }
+        let mut run = Box::pin(runtime.run_ephemeral(input, signal));
+        tokio::select! {
+            result = &mut run => panic!("run ended before its second provider call: {result:?}"),
+            () = async { while provider.requests().len() < 2 { tokio::task::yield_now().await; } } => {},
+        }
+        if mode == "cancel" {
+            abort.abort();
+        }
+        let outcome = run.await.unwrap();
+        assert_eq!(
+            outcome.status,
+            if mode == "cancel" {
+                EphemeralSessionStatus::Aborted
+            } else {
+                EphemeralSessionStatus::TimedOut
+            }
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(outcome.messages.iter().any(
+            |message| matches!(message, Message::ToolResult(result) if result.tool_name == "allowed" && !result.is_error)
+        ));
+        assert_balanced(&outcome.messages);
+        assert!(runtime.agent().state().messages.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn only_a_different_explicit_model_gets_independent_thinking_settings() {
+    let scripted = ScriptedProviderPlugin::scripted([
+        ScriptedTurn::Text("alternate".into()),
+        ScriptedTurn::Text("same".into()),
+    ]);
+    let provider = scripted.provider();
+    let budgets = ThinkingBudgets {
+        minimal: Some(100),
+        low: Some(200),
+        medium: Some(300),
+        high: Some(400),
+    };
+    let runtime = PiRuntime::builder()
+        .provider_plugin(scripted)
+        .agent_options(AgentOptions {
+            thinking_level: ThinkingLevel::High,
+            thinking_budgets: Some(budgets),
+            ..AgentOptions::default()
+        })
+        .build()
+        .unwrap();
+
+    let mut alternate = request(&[]);
+    alternate.model = Some(ModelSelection::new("scripted", "review"));
+    runtime
+        .run_ephemeral(alternate, AbortHandle::new().1)
+        .await
+        .unwrap();
+    let mut same = request(&[]);
+    same.model = Some(ModelSelection::new("scripted", "test"));
+    runtime
+        .run_ephemeral(same, AbortHandle::new().1)
+        .await
+        .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests[0].model.as_str(), "review");
+    assert_eq!(requests[0].thinking_level, ThinkingLevel::Off);
+    assert_eq!(requests[0].thinking_budgets, None);
+    assert_eq!(requests[1].thinking_level, ThinkingLevel::High);
+    assert_eq!(requests[1].thinking_budgets, Some(budgets));
 }
 
 #[tokio::test]
@@ -551,6 +649,14 @@ async fn compaction_summary_usage_shares_the_aggregate_input_budget() {
     );
     assert_eq!(provider.requests().len(), 2);
     assert_balanced(&outcome.messages);
+    assert_eq!(
+        outcome.usage.cache_read, 25_000,
+        "detached summary usage must be returned even though its message is private"
+    );
+    assert_eq!(
+        outcome.api_calls, 2,
+        "the review response and detached summary are both provider calls"
+    );
 }
 
 #[tokio::test]
@@ -666,6 +772,10 @@ async fn aggregate_input_budget_counts_cached_tokens_and_stops_after_balanced_to
         matches!(outcome.status, EphemeralSessionStatus::Failed(reason) if reason.contains("input-token"))
     );
     assert_eq!(provider.requests().len(), 2);
+    assert_eq!(outcome.usage.input, 20);
+    assert_eq!(outcome.usage.cache_read, 60);
+    assert_eq!(outcome.usage.cache_write, 40);
+    assert_eq!(outcome.api_calls, 2);
     assert_eq!(
         outcome
             .messages

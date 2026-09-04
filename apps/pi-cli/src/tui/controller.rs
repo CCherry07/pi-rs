@@ -1371,7 +1371,7 @@ pub(super) async fn run_effect(
             .map_err(|error| error.to_string())?;
         let stats = session.log().stats();
         let document = session.log().load().map_err(|error| error.to_string())?;
-        let usage = aggregate_session_usage(document.entries.iter().map(|record| &record.entry));
+        let usage = aggregate_document_usage(&document);
         let name = session
             .log()
             .name()

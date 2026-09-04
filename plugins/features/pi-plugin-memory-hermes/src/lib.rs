@@ -69,6 +69,7 @@ impl MemoryProviderFactory for HermesMemoryProviderFactory {
             context.cwd(),
             config.clone(),
             context.session_roots().to_vec(),
+            context.project_trusted(),
         )?;
         Ok(Arc::new(HermesMemoryPlugin {
             store: Arc::new(store),
@@ -121,10 +122,31 @@ impl Drop for ReviewCompletion {
     }
 }
 
+fn begin_review(
+    activity: &Arc<Mutex<HashMap<String, SessionActivity>>>,
+    session_id: String,
+) -> Option<(pi_core::AbortSignal, ReviewCompletion)> {
+    let mut activities = activity
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let state = activities.entry(session_id).or_default();
+    if state
+        .running
+        .as_ref()
+        .is_some_and(|run| !run.finished.is_aborted())
+    {
+        return None;
+    }
+    let (abort, signal) = AbortHandle::new();
+    let (finish, finished) = AbortHandle::new();
+    state.running = Some(Arc::new(ReviewRun { abort, finished }));
+    Some((signal, ReviewCompletion(finish)))
+}
+
 /// Pi-native roots managed by Hermes. The ordinary Skills plugin remains the
 /// parser/catalog owner and consumes these paths while building a generation.
-pub fn managed_skill_roots(agent_dir: &Path, cwd: &Path) -> Vec<PathBuf> {
-    HermesMemoryStore::managed_skill_roots(agent_dir, cwd)
+pub fn managed_skill_roots(agent_dir: &Path, cwd: &Path, project_trusted: bool) -> Vec<PathBuf> {
+    HermesMemoryStore::managed_skill_roots(agent_dir, cwd, project_trusted)
 }
 
 impl MemoryProviderPlugin for HermesMemoryPlugin {
@@ -140,7 +162,13 @@ impl AgentPlugin for HermesMemoryPlugin {
     }
 
     fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
-        commands::register(context, Arc::clone(&self.store), Arc::clone(&self.runs))?;
+        commands::register(
+            context,
+            Arc::clone(&self.store),
+            Arc::clone(&self.runs),
+            self.config.clone(),
+            Arc::clone(&self.activity),
+        )?;
         tool::register(context, Arc::clone(&self.store), Arc::clone(&self.runs))
     }
 
@@ -286,7 +314,7 @@ impl AgentPlugin for HermesMemoryPlugin {
             .activity
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let state = activities.entry(session_id).or_default();
+        let state = activities.entry(session_id.clone()).or_default();
         let memory = std::mem::take(&mut state.memory_due);
         let skills = self.config.skill_nudge_interval > 0
             && state.iterations_since_skill >= self.config.skill_nudge_interval
@@ -294,52 +322,34 @@ impl AgentPlugin for HermesMemoryPlugin {
         if skills {
             state.iterations_since_skill = 0;
         }
-        if !self.config.review_enabled
-            || !state.final_response
-            || !(memory || skills)
-            || state
-                .running
-                .as_ref()
-                .is_some_and(|run| !run.finished.is_aborted())
-        {
+        if !self.config.review_enabled || !state.final_response || !(memory || skills) {
             return Ok(());
         }
         state.final_response = false;
-        let (abort, signal) = AbortHandle::new();
-        let (finish, finished) = AbortHandle::new();
-        state.running = Some(Arc::new(ReviewRun { abort, finished }));
+        drop(activities);
+        let Some((signal, completion)) = begin_review(&self.activity, session_id) else {
+            return Ok(());
+        };
         let config = self.config.clone();
         let runs = Arc::clone(&self.runs);
         tokio::spawn(async move {
-            let _completion = ReviewCompletion(finish);
+            let _completion = completion;
             let result = transport::run_review(
                 &context.session,
                 &context.models,
                 &config,
                 runs,
-                transport::review_prompt(memory, skills),
+                &transport::review_prompt(memory, skills),
                 signal,
                 Duration::from_secs(120),
             )
             .await;
             match result {
                 Ok(outcome) => {
-                    let summary = transport::action_summary(&outcome.messages);
-                    if !summary.is_empty() {
-                        let _ = context.ui.notify(
-                            NoticeLevel::Info,
-                            format!("💾 Self-improvement review: {summary}"),
-                        );
-                    }
-                    match outcome.status {
-                        pi_core::EphemeralSessionStatus::Failed(error) => {
-                            context.report_hook_error("background_review", error)
-                        }
-                        pi_core::EphemeralSessionStatus::TimedOut => context.report_hook_error(
-                            "background_review",
-                            "Review timed out; completed writes are retained.",
-                        ),
-                        _ => {}
+                    for error in
+                        transport::finish_review(&context.session, &context.ui, &config, &outcome)
+                    {
+                        context.report_hook_error("background_review", error);
                     }
                 }
                 Err(error) => {

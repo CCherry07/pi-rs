@@ -1,15 +1,19 @@
 //! User-facing Hermes slash commands.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_core::{
-    Command, CommandContext, CommandError, CommandOutcome, CommandSpec, NoticeLevel,
+    Command, CommandContext, CommandError, CommandOutcome, CommandSpec, ContextParts, NoticeLevel,
     RegisterContext, UiMultiSelectAction, UiMultiSelectOption, UiMultiSelectRequest,
 };
 
-use crate::config::{STANDING_MAX_CHARS, STANDING_MAX_ENTRIES, char_len, char_prefix};
+use crate::SessionActivity;
+use crate::config::{
+    HermesMemoryConfig, STANDING_MAX_CHARS, STANDING_MAX_ENTRIES, char_len, char_prefix,
+};
 use crate::execution::HermesRuns;
 use crate::store::{HermesMemoryStore, MemoryTarget};
 
@@ -17,6 +21,8 @@ pub(crate) fn register(
     context: &mut RegisterContext<'_>,
     store: Arc<HermesMemoryStore>,
     runs: Arc<HermesRuns>,
+    config: HermesMemoryConfig,
+    activity: Arc<Mutex<HashMap<String, SessionActivity>>>,
 ) -> pi_core::Result<()> {
     let mut kinds = vec![
         Kind::Consolidate,
@@ -25,8 +31,8 @@ pub(crate) fn register(
         Kind::Interview,
         Kind::Learn,
         Kind::Preview,
+        Kind::Refine,
         Kind::Skills,
-        Kind::SwitchProject,
         Kind::SyncMarkdown,
     ];
     if store.standing().is_some() {
@@ -36,6 +42,8 @@ pub(crate) fn register(
         context.register_command(Arc::new(HermesCommand {
             store: Arc::clone(&store),
             runs: Arc::clone(&runs),
+            config: config.clone(),
+            activity: Arc::clone(&activity),
             kind,
         }))?;
     }
@@ -45,6 +53,8 @@ pub(crate) fn register(
 struct HermesCommand {
     store: Arc<HermesMemoryStore>,
     runs: Arc<HermesRuns>,
+    config: HermesMemoryConfig,
+    activity: Arc<Mutex<HashMap<String, SessionActivity>>>,
     kind: Kind,
 }
 
@@ -56,9 +66,9 @@ enum Kind {
     Interview,
     Learn,
     Preview,
+    Refine,
     Skills,
     Pin,
-    SwitchProject,
     SyncMarkdown,
 }
 
@@ -95,6 +105,11 @@ impl Kind {
                 "Preview the memory policy or legacy memory context blocks",
                 None,
             ),
+            Self::Refine => (
+                "refine",
+                "Run the memory and skill self-improvement review now",
+                Some("[focus]"),
+            ),
             Self::Skills => (
                 "memory-skills",
                 "Manage global, active-project, and loaded external procedural skills",
@@ -104,11 +119,6 @@ impl Kind {
                 "memory-pin",
                 "Pin a standing instruction that is injected into every session",
                 Some("[list | remove <n> | clear | <instruction>]"),
-            ),
-            Self::SwitchProject => (
-                "memory-switch-project",
-                "Switch the active project for project-scoped memory",
-                None,
             ),
             Self::SyncMarkdown => (
                 "memory-sync-markdown",
@@ -291,33 +301,80 @@ impl Command for HermesCommand {
             Kind::Preview => {
                 notify(&context, render_preview(&self.store).map_err(execution)?)?;
             }
+            Kind::Refine => {
+                let snapshot = context.session.snapshot()?;
+                if !snapshot
+                    .branch()
+                    .iter()
+                    .any(|entry| entry.kind() == &pi_core::SessionEntryKind::Message)
+                {
+                    notify(
+                        &context,
+                        "Nothing to refine yet — the conversation is empty.",
+                    )?;
+                    return Ok(CommandOutcome::Handled);
+                }
+                let session_id = context.session.id()?;
+                let Some((signal, completion)) = crate::begin_review(&self.activity, session_id)
+                else {
+                    notify(&context, "A self-improvement review is already running.")?;
+                    return Ok(CommandOutcome::Handled);
+                };
+                let review_skills = context
+                    .session
+                    .active_tools()?
+                    .iter()
+                    .any(|tool| tool == "skill_manage");
+                let focus = (!arguments.is_empty()).then_some(arguments);
+                let prompt = crate::transport::review_prompt_with_focus(true, review_skills, focus);
+                let suffix = focus.map_or_else(String::new, |focus| format!(" (focus: {focus})"));
+                notify(
+                    &context,
+                    format!(
+                        "⚗ Reviewing this conversation in the background{suffix} — any memory/skill updates will be reported when done."
+                    ),
+                )?;
+                let parts = ContextParts::new(context.plugin_context_handle());
+                let config = self.config.clone();
+                let runs = Arc::clone(&self.runs);
+                tokio::spawn(async move {
+                    let _completion = completion;
+                    match crate::transport::run_review(
+                        &parts.session,
+                        &parts.models,
+                        &config,
+                        runs,
+                        &prompt,
+                        signal,
+                        Duration::from_secs(120),
+                    )
+                    .await
+                    {
+                        Ok(outcome) => {
+                            for error in crate::transport::finish_review(
+                                &parts.session,
+                                &parts.ui,
+                                &config,
+                                &outcome,
+                            ) {
+                                let _ = parts
+                                    .ui
+                                    .notify(NoticeLevel::Error, format!("/refine: {error}"));
+                            }
+                        }
+                        Err(error) => {
+                            let _ = parts
+                                .ui
+                                .notify(NoticeLevel::Error, format!("/refine failed: {error}"));
+                        }
+                    }
+                });
+            }
             Kind::Skills => {
                 manage_skills(&context, &self.store).await?;
             }
             Kind::Pin => {
                 pin(&context, &self.store, arguments)?;
-            }
-            Kind::SwitchProject => {
-                let projects = self.store.project_summaries().map_err(execution)?;
-                let text = if projects.is_empty() {
-                    "\n  📁 No existing project memories found.\n\n  The memory tool writes global memory/user notes; use project-scoped skills for reusable repository procedures.\n".to_string()
-                } else {
-                    let rows = projects
-                        .iter()
-                        .map(|(name, count)| {
-                            format!(
-                                "  📁 {name} ({count} {})",
-                                if *count == 1 { "entry" } else { "entries" }
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    format!(
-                        "\n  ╔══════════════════════════════════════════════╗\n  ║        📁 Project Memory — Switch           ║\n  ╚══════════════════════════════════════════════╝\n\n  Available project memories:\n\n{rows}\n\n  Use memory(action='add') with target 'project' to manage\n  project-scoped memory. Project is auto-detected from\n  your current directory: {}",
-                        context.cwd().display()
-                    )
-                };
-                notify(&context, text)?;
             }
             Kind::SyncMarkdown => {
                 notify(
@@ -370,7 +427,7 @@ impl Command for HermesCommand {
 }
 
 fn render_insights(store: &HermesMemoryStore) -> Result<String, crate::store::StoreError> {
-    let mut sections = vec![
+    let sections = vec![
         String::new(),
         "  ╔══════════════════════════════════════════════╗".to_string(),
         "  ║            🧠 Memory Insights                ║".to_string(),
@@ -384,13 +441,6 @@ fn render_insights(store: &HermesMemoryStore) -> Result<String, crate::store::St
         render_entries("👤 USER PROFILE", &store.entries(MemoryTarget::User)?),
         String::new(),
     ];
-    if let Some(name) = store.current_project_name() {
-        sections.push(render_entries(
-            &format!("📁 PROJECT MEMORY: {name}"),
-            &store.entries(MemoryTarget::Project)?,
-        ));
-        sections.push(String::new());
-    }
     Ok(sections.join("\n"))
 }
 
@@ -976,11 +1026,11 @@ Keep it light. This should feel like a friendly chat, not a form."#;
 
 const LEARN_GUIDE: &str = r#"Pi Hermes Memory
 
-Stores durable facts in MEMORY.md, USER.md, failures.md, and per-project MEMORY.md files. The SQLite database mirrors those files and indexes prior sessions for memory_search and session_search.
+Stores profile-scoped facts in MEMORY.md, USER.md, and failures.md. Repository instructions belong in HERMES.md or AGENTS.md; repository procedures belong in trusted .hermes/skills or .agents/skills directories. The SQLite database mirrors durable memory and indexes prior sessions for memory_search and session_search.
 
 Tools: memory(action='add'), memory(action='replace'), memory(action='remove'), memory_search, session_search, skill_manage.
 
-Commands: /memory-insights, /memory-skills, /memory-consolidate, /memory-interview, /memory-switch-project, /memory-index-sessions, /memory-sync-markdown, /memory-preview-context, /memory-pin.
+Commands: /memory-insights, /memory-skills, /memory-consolidate, /memory-interview, /memory-index-sessions, /memory-sync-markdown, /memory-preview-context, /memory-pin.
 
 Save stable preferences, environment facts, corrections, conventions, failures, and reusable procedures. Do not save task progress, session outcomes, secrets, or temporary state."#;
 
@@ -1050,7 +1100,6 @@ const LEARN_SECTIONS: [&str; 7] = [
   /memory-skills        List all saved skills
   /memory-consolidate   Manually trigger memory cleanup
   /memory-interview     Answer questions to pre-fill profile
-  /memory-switch-project List all project memories
   /memory-index-sessions Import past sessions for search
   /memory-sync-markdown Backfill Markdown memories into SQLite
   /memory-preview-context Show this session's frozen MEMORY/USER prompt"#,

@@ -1,23 +1,45 @@
 //! Hermes Agent e629c90: detached, cache-preserving memory/skill review.
-use crate::{config::HermesMemoryConfig, execution::HermesRuns, review_plugin::HermesReviewPlugin};
+use crate::{
+    config::{HermesMemoryConfig, MemoryNotificationMode, char_len, char_prefix},
+    execution::HermesRuns,
+    review_plugin::HermesReviewPlugin,
+};
 use pi_core::{
     AbortSignal, EphemeralSessionOutcome, EphemeralSessionRequest, Message, ModelsContext,
-    SessionContext, UserMessage,
+    SessionContext, UiContext, UserMessage,
 };
 use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::HashMap, collections::HashSet};
 
-pub(crate) fn review_prompt(memory: bool, skills: bool) -> &'static str {
+/// Learning policy from Hermes e629c900's agent/background_review.py. Both skill
+/// modes share the full policy; tool names, ownership and catalog behavior are Pi's.
+pub(crate) fn review_prompt(memory: bool, skills: bool) -> String {
+    const MEMORY: &str = include_str!("prompts/memory_review.md");
+    const SKILLS: &str = include_str!("prompts/skill_review.md");
     match (memory, skills) {
-        (true, true) => {
-            "Review this conversation. Save durable facts about the user, their preferences and expectations with memory. Also actively improve the skill library: prefer updating a relevant existing class-level skill, then creating a reusable class-level procedure when needed. Read skills before changing them. Capture verified techniques, corrections, and pitfalls; put session-specific details in supporting files. Never modify user-owned, installed, or pinned skills autonomously. If there is genuinely nothing reusable, say 'Nothing to save.'"
-        }
-        (true, false) => {
-            "Review this conversation for durable facts about the user: persona, preferences, work style, and expectations about your behavior. Save worthwhile facts using memory. Otherwise say 'Nothing to save.'"
-        }
-        _ => {
-            "Review this conversation and actively improve the skill library. Capture reusable verified procedures, corrections, and non-obvious techniques. Prefer improving a relevant class-level skill to making narrow one-session skills. Read the current skill before modifying it. Only autonomously maintain agent-created, unpinned skills. Create a new skill when no suitable existing skill covers the procedure. If nothing reusable was learned, say 'Nothing to save.'"
-        }
+        (true, true) => format!(
+            "Review the conversation above and update memory and skills.\n\n{MEMORY}\n{SKILLS}\nAct on whichever of the two dimensions has real signal. Both should carry user-preference lessons when relevant. Protected skills do not prevent saving worthwhile user facts to memory. If nothing stands out on either dimension, say 'Nothing to save.' and stop; do not reach for that conclusion as a default."
+        ),
+        (true, false) => format!(
+            "Review the conversation above and consider saving to memory if appropriate.\n\n{MEMORY}\nIf nothing is worth saving, just say 'Nothing to save.' and stop."
+        ),
+        (false, true) => format!(
+            "Review the conversation above and update the skill library.\n\n{SKILLS}\nIf there is no reusable learning, or the only skills needing an update are protected, say 'Nothing to save.' and stop. Otherwise, act."
+        ),
+        (false, false) => "Nothing to save.".into(),
+    }
+}
+
+pub(crate) fn review_prompt_with_focus(memory: bool, skills: bool, focus: Option<&str>) -> String {
+    let prompt = review_prompt(memory, skills);
+    let focus = focus.unwrap_or_default().trim();
+    if focus.is_empty() {
+        prompt
+    } else {
+        format!(
+            "{prompt}\n\nThe user explicitly requested this review with the following focus — prioritize it over the general instructions above:\n{focus}"
+        )
     }
 }
 
@@ -30,25 +52,23 @@ pub(crate) fn request(
     current_model: Option<pi_core::ModelSpec>,
     timeout: Duration,
 ) -> Result<EphemeralSessionRequest, String> {
-    let model = match config.llm_model_override.as_deref() {
-        None => None,
-        Some(reference) => Some(
-            models
-                .iter()
-                .find(|m| format!("{}/{}", m.provider, m.id) == reference)
-                .or_else(|| {
-                    let mut found = models.iter().filter(|m| m.id.as_str() == reference);
-                    let candidate = found.next();
-                    if found.next().is_none() {
-                        candidate
-                    } else {
-                        None
-                    }
-                })
-                .map(|m| pi_core::ModelSelection::new(m.provider.clone(), m.id.clone()))
-                .ok_or_else(|| format!("review model not found: {reference}"))?,
-        ),
-    };
+    // A review-model override is best effort, matching Hermes: stale or
+    // ambiguous configuration falls back to the live session model.
+    let model = config.llm_model_override.as_deref().and_then(|reference| {
+        models
+            .iter()
+            .find(|m| format!("{}/{}", m.provider, m.id) == reference)
+            .or_else(|| {
+                let mut found = models.iter().filter(|m| m.id.as_str() == reference);
+                let candidate = found.next();
+                if found.next().is_none() {
+                    candidate
+                } else {
+                    None
+                }
+            })
+            .map(|m| pi_core::ModelSelection::new(m.provider.clone(), m.id.clone()))
+    });
     let review_model = model
         .as_ref()
         .and_then(|selection| {
@@ -124,6 +144,66 @@ pub(crate) async fn run_review(
         .map_err(|e| e.to_string())
 }
 
+/// Attribute detached provider work and surface only receipt-backed changes.
+/// Each step is best effort so an accounting or presentation failure cannot
+/// undo memory/skill writes that already completed.
+pub(crate) fn finish_review(
+    session: &SessionContext,
+    ui: &UiContext,
+    config: &HermesMemoryConfig,
+    outcome: &EphemeralSessionOutcome,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if outcome.api_calls > 0 || has_usage(&outcome.usage) {
+        let mut details = serde_json::json!({
+            "task": "background_review",
+            "apiCalls": outcome.api_calls,
+        });
+        if let Some(message) = outcome.messages.iter().find_map(|message| match message {
+            Message::Assistant(message) => Some(message),
+            _ => None,
+        }) {
+            details["provider"] = serde_json::json!(message.provider.as_str());
+            details["model"] = serde_json::json!(message.model.as_str());
+        }
+        if let Err(error) = session.record_usage(outcome.usage.clone(), Some(details)) {
+            errors.push(format!("review usage recording failed: {error}"));
+        }
+    }
+
+    let summary = action_summary_with_mode(&outcome.messages, config.memory_notifications);
+    if !summary.is_empty()
+        && let Err(error) = ui.notify(
+            pi_core::NoticeLevel::Info,
+            format!("💾 Self-improvement review: {summary}"),
+        )
+    {
+        errors.push(format!("review notification failed: {error}"));
+    }
+    match &outcome.status {
+        pi_core::EphemeralSessionStatus::Failed(error) => errors.push(error.clone()),
+        pi_core::EphemeralSessionStatus::TimedOut => {
+            errors.push("Review timed out; completed writes are retained.".into());
+        }
+        pi_core::EphemeralSessionStatus::Completed | pi_core::EphemeralSessionStatus::Aborted => {}
+    }
+    errors
+}
+
+fn has_usage(usage: &pi_core::Usage) -> bool {
+    usage.input > 0
+        || usage.output > 0
+        || usage.cache_read > 0
+        || usage.cache_write > 0
+        || usage.cache_write_1h.unwrap_or(0) > 0
+        || usage.reasoning.unwrap_or(0) > 0
+        || usage.cost.input != 0.0
+        || usage.cost.output != 0.0
+        || usage.cost.cache_read != 0.0
+        || usage.cost.cache_write != 0.0
+        || usage.cost.total != 0.0
+}
+
 /// Hermes ContextCompressor's default model-window profile. This is feature
 /// policy, not a memory/skill special case in the generic runtime.
 fn compaction_options(model: &pi_core::ModelSpec) -> Option<pi_core::EphemeralCompactionOptions> {
@@ -164,33 +244,275 @@ fn compaction_options(model: &pi_core::ModelSpec) -> Option<pi_core::EphemeralCo
     })
 }
 
-/// Report successful tool receipts, never an assistant's unsupported claim.
-pub(crate) fn action_summary(messages: &[Message]) -> String {
-    let mut actions = Vec::new();
+pub(crate) fn action_summary_with_mode(
+    messages: &[Message],
+    mode: MemoryNotificationMode,
+) -> String {
+    if mode == MemoryNotificationMode::Off {
+        return String::new();
+    }
+    let mut calls = HashMap::new();
     for message in messages {
-        if let Message::ToolResult(result) = message {
-            if result.is_error || !matches!(result.tool_name.as_str(), "memory" | "skill_manage") {
-                continue;
-            }
-            let Some(details) = &result.details else {
-                continue;
-            };
-            if details.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
-                continue;
-            }
-            if let Some(change) = details.get("_change").and_then(serde_json::Value::as_str) {
-                actions.push(change.to_string());
+        if let Message::Assistant(message) = message {
+            for call in message.tool_calls() {
+                if matches!(call.name.as_str(), "memory" | "skill_manage") {
+                    calls.insert(call.id, (call.name, call.arguments));
+                }
             }
         }
     }
-    actions.sort();
-    actions.dedup();
+    let mut actions = Vec::new();
+    let mut seen = HashSet::new();
+    for message in messages {
+        let Message::ToolResult(result) = message else {
+            continue;
+        };
+        if result.is_error || !matches!(result.tool_name.as_str(), "memory" | "skill_manage") {
+            continue;
+        }
+        let Some(details) = &result.details else {
+            continue;
+        };
+        if details.get("success").and_then(serde_json::Value::as_bool) != Some(true)
+            || details
+                .get("_change")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+        {
+            continue;
+        }
+        let Some((tool, arguments)) = calls.get(&result.tool_call_id) else {
+            continue;
+        };
+        if tool != &result.tool_name {
+            continue;
+        }
+        for action in notification_actions(tool, arguments, details, mode) {
+            if seen.insert(action.clone()) {
+                actions.push(action);
+            }
+        }
+    }
     actions.join(" · ")
+}
+
+fn notification_actions(
+    tool: &str,
+    arguments: &serde_json::Value,
+    details: &serde_json::Value,
+    mode: MemoryNotificationMode,
+) -> Vec<String> {
+    let message = details
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if mode == MemoryNotificationMode::On {
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("created")
+            || lower.contains("updated")
+            || (tool == "skill_manage" && lower.contains("patched"))
+        {
+            return vec![message.to_string()];
+        }
+        return vec![if tool == "skill_manage" {
+            "Skill updated".to_string()
+        } else if memory_target(arguments, details) == "user" {
+            "User profile updated".to_string()
+        } else {
+            "Memory updated".to_string()
+        }];
+    }
+
+    if tool == "skill_manage" {
+        return vec![verbose_skill_action(arguments, message)];
+    }
+    verbose_memory_actions(arguments, details)
+}
+
+fn memory_target(arguments: &serde_json::Value, details: &serde_json::Value) -> String {
+    arguments
+        .get("target")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| details.get("target").and_then(serde_json::Value::as_str))
+        .unwrap_or("memory")
+        .to_ascii_lowercase()
+}
+
+fn verbose_memory_actions(
+    arguments: &serde_json::Value,
+    details: &serde_json::Value,
+) -> Vec<String> {
+    let target = memory_target(arguments, details);
+    let label = match target.as_str() {
+        "user" => "User profile",
+        "memory" => "Memory",
+        other => other,
+    };
+    if let Some(operations) = arguments
+        .get("operations")
+        .and_then(serde_json::Value::as_array)
+    {
+        return operations
+            .iter()
+            .filter_map(|operation| memory_operation(label, operation))
+            .collect();
+    }
+    memory_operation(label, arguments).into_iter().collect()
+}
+
+fn memory_operation(label: &str, value: &serde_json::Value) -> Option<String> {
+    let action = value.get("action")?.as_str()?;
+    match action {
+        "add" => value
+            .get("content")
+            .or_else(|| value.get("new_text"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|content| !content.is_empty())
+            .map(|content| format!("{label} ➕ {}", preview_text(content, 120, false))),
+        "replace" => value
+            .get("content")
+            .or_else(|| value.get("new_text"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|content| !content.is_empty())
+            .map(|content| format!("{label} ✏️ {}", preview_text(content, 120, false))),
+        "remove" => value
+            .get("old_text")
+            .and_then(serde_json::Value::as_str)
+            .filter(|content| !content.is_empty())
+            .map(|content| format!("{label} ➖ {}", preview_text(content, 60, false))),
+        _ => None,
+    }
+}
+
+fn verbose_skill_action(arguments: &serde_json::Value, message: &str) -> String {
+    let action = arguments
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let name = arguments
+        .get("name")
+        .or_else(|| arguments.get("skill_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let description = arguments
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let old = arguments
+        .get("old_string")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let new = arguments
+        .get("new_string")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if action == "patch" && (!old.is_empty() || !new.is_empty()) {
+        return format!(
+            "📝 Skill '{name}' patched: \"{}\" → \"{}\"",
+            preview_text(old, 80, true),
+            preview_text(new, 80, true)
+        );
+    }
+    if action == "create" && !description.is_empty() {
+        return format!("📝 Skill '{name}' created: {description}");
+    }
+    if matches!(action, "edit" | "update") && !description.is_empty() {
+        return format!("📝 Skill '{name}' rewritten: {description}");
+    }
+    if !message.is_empty() {
+        format!("📝 {message}")
+    } else {
+        format!("Skill {action}")
+    }
+}
+
+fn preview_text(value: &str, maximum: usize, flatten: bool) -> String {
+    let value = if flatten {
+        value.replace('\n', " ")
+    } else {
+        value.to_string()
+    };
+    if char_len(&value) > maximum {
+        format!("{}…", char_prefix(&value, maximum))
+    } else {
+        value
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn memory_add_messages(content: &str) -> Vec<Message> {
+        vec![
+            Message::assistant(pi_core::AssistantMessage {
+                content: vec![pi_core::ContentBlock::ToolCall(pi_core::ToolCall::new(
+                    "call-memory",
+                    "memory",
+                    serde_json::json!({
+                        "action": "add",
+                        "target": "memory",
+                        "content": content,
+                    }),
+                ))],
+                api: "test".into(),
+                provider: pi_core::ProviderId::new("test"),
+                model: pi_core::ModelId::new("test"),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pi_core::Usage::default(),
+                stop_reason: pi_core::StopReason::ToolUse,
+                error_message: None,
+                deferred: None,
+                raw_stop_reason: None,
+                end_turn: None,
+                timestamp_ms: 1,
+            }),
+            Message::tool_result(pi_core::ToolResultMessage {
+                tool_call_id: pi_core::ToolCallId::new("call-memory"),
+                tool_name: "memory".into(),
+                content: vec![],
+                details: Some(serde_json::json!({
+                    "success": true,
+                    "message": "Entry added.",
+                    "target": "memory",
+                    "_change": "Memory updated: memory",
+                })),
+                usage: None,
+                added_tool_names: None,
+                is_error: false,
+                timestamp_ms: 2,
+            }),
+        ]
+    }
+
+    #[test]
+    fn review_notifications_match_hermes_off_on_and_verbose_modes() {
+        let messages = memory_add_messages("User prefers terse replies");
+        assert_eq!(
+            action_summary_with_mode(&messages, MemoryNotificationMode::Off),
+            ""
+        );
+        assert_eq!(
+            action_summary_with_mode(&messages, MemoryNotificationMode::On),
+            "Memory updated"
+        );
+        assert_eq!(
+            action_summary_with_mode(&messages, MemoryNotificationMode::Verbose),
+            "Memory ➕ User prefers terse replies"
+        );
+
+        let mut failed = messages;
+        let Message::ToolResult(result) = &mut failed[1] else {
+            unreachable!()
+        };
+        Arc::make_mut(result).is_error = true;
+        assert!(
+            action_summary_with_mode(&failed, MemoryNotificationMode::Verbose).is_empty(),
+            "assistant tool arguments alone are not proof of a mutation"
+        );
+    }
 
     fn model(window: u64, output: u64) -> pi_core::ModelSpec {
         let mut model = pi_core::ModelSpec::new("test", "test", "test", "test");

@@ -250,8 +250,10 @@ while unchanged content reuses one process-pinned handle. Libraries remain pinne
 lifetime because plugin code may retain worker threads. Package metadata and artifact lifetime are
 loader concerns rather than a fourth lifecycle or cross-lifecycle bundle.
 
-Native ABI 15 replaces the core tool-run state container with `ToolContext::run_id()` and explicit
-invocation-private Agent-plugin attachments. ABI 14 added optional detached compaction to
+Native ABI 16 adds aggregate usage/provider-call results to ephemeral Agents and
+`SessionContext::record_usage` for detached parent-session accounting. Native ABI 15 replaces the
+core tool-run state container with `ToolContext::run_id()` and explicit invocation-private
+Agent-plugin attachments. ABI 14 added optional detached compaction to
 `SessionContext::run_ephemeral`, typed execution origin inspection, and typed tool state (now
 removed from core). ABI 13 added inherited effective
 prompt/history, optional bounded history replay, per-invocation tool observations, and aggregate
@@ -307,7 +309,11 @@ public Rust interface exposes three explicit domain capabilities on each typed c
 pass-through `context.pi()` namespace nor a generic `context.runtime` bucket, and it does not use
 implicit `Deref` to hide method ownership. Ordinary callbacks receive read-only model/catalogue and
 session-inspection capabilities plus the non-replacing `abort`, background `compact`, product
-`shutdown`, direct-completion, and ephemeral tool-loop controls. A direct completion carries an explicit system
+`shutdown`, direct-completion, ephemeral tool-loop controls, and detached usage attribution. A
+plugin calls `SessionContext::record_usage` to append a signed adjustment record with typed usage
+and optional task details; it does not create a message or alter provider context. The capability
+remains valid through an awaited shutdown hook and closes when that generation retires. A direct
+completion carries an explicit system
 prompt and message list, uses the active model and request-time credentials, has no tools, and does
 not mutate the parent transcript or emit agent lifecycle events. Command callbacks additionally receive awaited message delivery and stronger
 session/model capabilities for replacement, navigation, reload, and selection. Tool argument
@@ -330,7 +336,7 @@ capability. ABI 4 added
 hook-interest contract, and ABI 2 added the `AgentContext`/`added_tool_names` surface. The native
 agent export macro derives its contract from the callback methods in the annotated impl, so authors
 do not maintain a second hook list. The loader reads the stable C descriptor first and rejects older
-ABIs before resolving any v15 Rust constructor symbol, preventing a stale in-process plugin from
+ABIs before resolving any v16 Rust constructor symbol, preventing a stale in-process plugin from
 crossing the changed trait boundary.
 
 Callback metadata is read-only and exposed through accessors such as `plugin_id()`, `run_id()`,
@@ -749,12 +755,14 @@ interactive selector. Non-interactive `ask` resolves to untrusted.
 Trust-requiring resources are the current cwd's `.pi/settings.json`, `extensions`, `plugins`,
 `plugins.json`, `plugins.lock`, `skills`, `prompts`, `themes`, `SYSTEM.md`, and
 `APPEND_SYSTEM.md`, plus `.agents/skills` found from cwd toward
+the repository root and `.hermes/skills` at
 the repository root. The user-level `~/.agents/skills` root is always trusted. The current runtime
 uses the decision to gate project `.pi` prompt files, project skill roots, project JavaScript
 settings/packages/extensions, and native plugin manifests. The Rust JavaScript PackageManager is
 called only after this decision and does not introduce a second trust store or prompt. As in Pi,
-`AGENTS.override.md`, `AGENTS.md`, and `CLAUDE.md` context discovery is not gated by project trust,
-and trust is not a tool sandbox.
+`HERMES.md`, `AGENTS.override.md`, `AGENTS.md`, and `CLAUDE.md` context discovery is not gated by
+project trust, and trust is not a tool sandbox. Within one directory `HERMES.md` wins the context
+candidate selection, matching the Hermes project-context boundary.
 
 Filesystem tool paths follow Pi's `resolveToCwd` behavior. Relative paths resolve from the active
 cwd, while absolute paths, `~` paths, `file://` URLs, and parent-relative paths may address files
@@ -851,7 +859,8 @@ Each assistant stream owns one mutable assembler state behind a read-only `Assis
 reducer, ordered native hooks, and listeners therefore do not clone cumulative content. Consumers
 that require a full message call `snapshot()` explicitly, while `message_end` and `turn_end` share
 the completed immutable assistant message. These hook fields were introduced in native ABI 7;
-ABI 8 adds UI confirmation, ABI 9 adds isolated-session control, ABI 10 adds isolated-session
+ABI 16 adds detached usage attribution and ephemeral usage/call outcomes. ABI 8 adds UI
+confirmation, ABI 9 adds isolated-session control, ABI 10 adds isolated-session
 initial runtime selection, ABI 11 adds direct tool-free completion, ABI 12 adds ephemeral tool loops,
 ABI 13 adds inherited prompt/history, guarded dispatch and invocation observations, and ABI 14 adds
 detached compaction, execution origin and typed run-local state. Older native artifacts are rejected
@@ -1052,6 +1061,8 @@ Global `MEMORY.md` and `USER.md` remain canonical under
 `<agent-dir>/pi-hermes-memory/`. Their contents are frozen at session start and appended to the
 effective prompt; writes update files but not that session's frozen prompt. The unified `memory`
 tool supports add/replace/remove and atomic operation batches, targeting memory (default) or user.
+It never selects a project target from cwd: repository-owned instructions belong in `HERMES.md` or
+`AGENTS.md`, while repository procedures belong in trusted repo-local skills.
 Defaults are 2,200/1,375 Unicode characters. Capacity errors return the current entries so the
 calling Agent can consolidate and retry without launching another Agent. Following Hermes's
 [memory tool](https://github.com/NousResearch/hermes-agent/blob/e629c900a87622ddcc31f67a4b4a756b239fbaf0/tools/memory_tool.py),
@@ -1064,12 +1075,34 @@ validation, ambiguous standalone matches, and content-safety failures do not con
 Per-file locks, conflict checks, atomic replacement, content scanning, and the derived SQLite FTS
 index remain in the store.
 
+Memory writes and session-start snapshots use Hermes's strict threat-pattern set from the pinned
+revision. Scanning is bounded to 65,536 Unicode characters, checks invisible/bidirectional
+carriers before NFKC normalization, and then checks normalized text for injection, promptware,
+exfiltration, persistence, and hard-coded-secret shapes. The existing provider-specific credential
+detectors remain an additive Pi safety check. At session start, a risky on-disk entry is replaced
+only in the frozen prompt snapshot with a `[BLOCKED: ...]` marker naming the matched patterns. Its
+original text remains in the canonical file and live store so it can be inspected or removed;
+already-blocked markers are not wrapped again.
+
+Read-modify-write mutations derive parsing and drift checks from one checked UTF-8 snapshot under
+the per-file lock. A leading UTF-8 BOM is ignored and removed by the next successful write. Invalid
+UTF-8 or another read failure returns a normal failed memory result and leaves the original bytes
+unchanged. `replace`, `remove`, and atomic batches refuse files that cannot round-trip through the
+entry format or contain an impossible over-limit entry, save the exact bytes to a
+`MEMORY.md.bak.*`/`USER.md.bak.*` recovery file, and return remediation details. `add` reloads the
+same checked snapshot while allowing mild external formatting drift, preserving that content when
+it appends the new entry. Fingerprint checks around publication still catch writers that race after
+the checked read.
+
 Review scheduling is plugin-owned and session-local. User messages increment the memory counter
 (default 10; resumed user count is hydrated from the active branch). Model iterations separately
 increment the skill counter (default 10), reset by skill_manage use. A successful final response
 at `agent_settled` combines due flags into one detached review. There is at most one review per
 parent. A new foreground request, compaction, reload, or shutdown cancels it; foreground waits at
-most two seconds for acknowledgment.
+most two seconds for acknowledgment. `/refine [focus]` starts the same review explicitly and
+bypasses `reviewEnabled`, interval counters, and deferred scheduling. A focus string is appended to
+the private request as the user's priority; an empty conversation or already-running review does
+not start another fork.
 Managed children have `SessionExecutionOrigin::Subagent`, preserved across reload and nested
 delegation. Hermes skips their review counters, autonomous reviews, and opt-in lifecycle flushes,
 equivalent to the upstream `skip_background_review` behavior. They still receive the memory
@@ -1092,9 +1125,13 @@ Agent invocation and retain their explicit standalone behavior. This is a delibe
 execution design, not an additional installable plugin or a change to Hermes review thresholds.
 
 The sole review transport is a bounded, in-process Agent fork. It pins the current generation,
-inherits effective system prompt/model/thinking/provider authentication, and replays structured
-parent history. A different configured review model uses an older-text digest plus at least 24
-recent messages, keeping tool-call/result groups together. It shares advertised tool definitions
+inherits the effective system prompt, provider authentication, and, by default, the current model
+and thinking settings, then replays structured parent history. A configured model that resolves to
+a different model starts with thinking off and without the parent's token-budget overrides unless
+the review configuration explicitly selects a thinking level. A missing or ambiguous optional
+review model falls back to the current model instead of suppressing review. A successfully selected
+different model uses an older-text digest plus at least 24 recent messages, keeping tool-call/result
+groups together. It shares advertised tool definitions
 for cache parity but checks an execution allowlist before argument preparation and execution.
 The default allowlist is memory, skill_manage, skill_view, skills_list and the available Pi file
 read/search tools. `reviewExtraTools` can opt in other tools only within the parent's active-tool
@@ -1103,9 +1140,18 @@ parent-session, model-control, UI, or child-launch capabilities. This is an invo
 not a sandbox for trusted native code.
 
 Review uses 16 model/tool iterations, a default aggregate 600,000 input-token budget, and a
-120-second timeout. It creates no managed session or JSONL file, emits no parent agent/session
-hooks, and cannot recursively schedule a review. Only successful mutation receipts are reported,
-not assistant claims. The reusable direct-completion API remains available to other plugins; it is
+120-second timeout. It creates no managed child session or review JSONL file, emits no parent
+agent/session hooks, and cannot recursively schedule a review. Its completed assistant, metered
+tool, and private compaction calls are aggregated and appended to the parent ledger as one
+`background_review` usage adjustment, without adding any parent message or context entry. Session
+totals exposed by the TUI, `/session`, and RPC include that adjustment. Cancellation and timeout return the completed,
+tool-balanced review-message prefix, so successful writes from earlier complete tool groups remain
+available for receipt-based reporting; an interrupted partial group is omitted. Only successful
+mutation receipts are reported, not assistant claims. `memoryNotifications` accepts `off`, `on`
+(default), or `verbose` (and legacy booleans): `off` suppresses successful action notices, `on`
+uses compact generic/tool messages, and `verbose` includes bounded argument previews. Review
+failures remain visible independently of this action-notification setting. The reusable
+direct-completion API remains available to other plugins; it is
 not an alternative review transport, and there is no subprocess fallback.
 
 Long review contexts use detached, in-place LLM compaction after the first provider response and
@@ -1117,33 +1163,63 @@ the newest user request verbatim. Summary calls contain no executable tools, ima
 reasoning traces. Transcript estimates and output caps use model limits; actual input/cache usage is
 charged to the review's existing budget. Invalid, empty, or truncated summaries stop only that
 review without replacing its context. Two ineffective summaries disable further compaction.
-No session database, journal, rotation, or lifecycle hook participates. If model-window metadata
-is unavailable, compaction stays off and the review retains its iteration/input/time bounds.
+No private session database, compaction entry, rotation, or lifecycle hook participates. The
+summary call contributes only to the parent review's aggregate usage adjustment. If model-window
+metadata is unavailable, compaction stays off and the review retains its iteration/input/time bounds.
+
+Automatic review selects memory-only, skill-only, or combined learning instructions. The
+plugin-owned prompt assets preserve Hermes e629c900's learning rules; skill-only and combined
+reviews use the same complete skill policy. User corrections to style, format, or workflow belong
+in the relevant skill body as well as memory when appropriate. Review prefers a relevant skill
+loaded in this conversation, then an existing class-level umbrella, then a supporting file, and
+creates a new umbrella only when none fits. References, templates, and runnable scripts have
+distinct roles and need a pointer from SKILL.md. Fresh reads precede changes to existing files;
+a read-guard refusal permits one fresh read and one retry. Verified fixes and successful retry
+patterns are reusable; unresolved attempts, transient setup failures, blanket negative tool
+claims, and one-off task narratives must not become durable procedures. With no learning signal,
+review may save nothing. In combined mode, protected skills do not prevent independent memory
+updates. These instructions are appended only to the private review request, preserving the
+parent system prompt and tool definitions.
 
 Skills are active procedural memory: review may create class-level skills and improve existing
-ones using verified procedures, corrections, and pitfalls. Skill-tool creations receive curator
-metadata. Background edits require agent provenance, an unchanged content hash, an unpinned skill,
+ones using verified procedures, corrections, and pitfalls. Global creations live below
+`<agent-dir>/pi-hermes-memory/skills`; explicit project creations live below the active Git
+checkout's `.hermes/skills` and require the same project-trust decision used for discovery.
+Trusted `.agents/skills` remains the cross-tool repository root. Skill-tool creations receive curator
+metadata, including foreground tool creations; this differs from Hermes's foreground ownership
+rule. Background edits require agent provenance, an unchanged content hash, an unpinned skill,
 and a successful read of the exact existing file during that review. User-owned and externally
 changed skills fail closed. Supporting files use relative, non-symlink paths. Autonomous deletion
 requires an existing `absorbed_into` skill and archives the source outside all skill roots.
 Pi-native skill roots and immutable catalog ownership stay with `SkillsPlugin`; reload is required
 before newly created skills appear as `/skill:` commands.
+The learning prompts use Pi's `/skill:<name>` syntax and skill tools' `content` field. They leave
+protected-skill corrections to foreground user action and report overlap without promising a
+separate background curator or a Hermes adoption command. Memory instructions retain the Pi
+policy against storing temporary task progress or secrets.
 
-Existing project/failure notes, FTS/session search, manual memory-management commands, and
-optional standing instructions are retained as Rust product extensions, not claims of Hermes
-Agent command/storage parity. No existing user memory or skill files are deleted by the change.
-`/memory-preview-context` shows the actual frozen prompt. Explicit
+Legacy project-memory Markdown remains indexed read-only so existing data is not deleted, but the
+project-memory mutation/switch surface is retired. Failure notes, FTS/session search, manual
+memory-management commands, and optional standing instructions are retained as Rust product
+extensions, not claims of Hermes Agent command/storage parity. No existing user memory or skill
+files are deleted by the change.
+`/memory-preview-context` shows the actual frozen prompt. `/refine [focus]` is the Hermes-compatible
+manual entry to the shared background review path. Explicit
 `flushOnCompact`/`flushOnShutdown` enable extra best-effort review at lifecycle boundaries
-(minimum six user requests; 30/10-second bounds); both default off. The old correction regex and
+(minimum six user requests; 30/10-second bounds); both default off. These lifecycle flushes add an
+urgency preface to the same complete combined memory-and-skill policy used by automatic review.
+The old correction regex and
 automatic capacity-consolidation Agent are removed.
 
 Detached review compaction, managed-child review suppression, and per-invocation consolidation
 failure limits have deterministic regressions, including the complete review/read/summary/
-memory-write handoff and unchanged parent JSONL. Private plugin tests cover shared hook/tool run
+memory-write handoff, an unchanged parent message tree, and one parent usage adjustment. Private plugin tests cover shared hook/tool run
 identity, no parent hooks or registration, fail-closed validation, concurrent review isolation,
 fresh read witnesses, and state release across completion/error/cancel/timeout/drop/reload.
-Prompts, JSON configuration, Pi-native skill
-metadata/catalogs, and filesystem conflict protection remain Rust adaptations. The compressor
+Provider-request regressions check the learning rules and action priority in all three automatic
+review modes. They verify policy delivery, not a scripted provider's ability to learn. Prompt
+wording, JSON configuration, Pi-native skill metadata/catalogs, and filesystem conflict protection
+remain Rust adaptations. The compressor
 implements the default window/retention profile and detached lifecycle, not every upstream
 compressor tuning option or recovery heuristic. This is not byte-for-byte or complete Hermes parity.
 

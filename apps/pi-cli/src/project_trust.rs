@@ -338,6 +338,9 @@ fn has_trust_requiring_project_resources(cwd: &Path) -> Result<bool, ProjectTrus
     let git_root = cwd
         .ancestors()
         .find(|ancestor| ancestor.join(".git").exists());
+    if git_root.is_some_and(|root| root.join(".hermes/skills").exists()) {
+        return Ok(true);
+    }
     for ancestor in cwd.ancestors() {
         if ancestor.join(".pi/agents").exists() {
             return Ok(true);
@@ -527,6 +530,18 @@ mod tests {
         let child = root.path().join("a/b");
         fs::create_dir_all(&child).unwrap();
         fs::create_dir_all(root.path().join(".agents/skills/example")).unwrap();
+        assert!(has_trust_requiring_project_resources(&child).unwrap());
+    }
+
+    #[test]
+    fn repository_hermes_skills_require_trust() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let child = repo.join("a/b");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(repo.join(".hermes/skills/example")).unwrap();
+        fs::create_dir_all(&child).unwrap();
+
         assert!(has_trust_requiring_project_resources(&child).unwrap());
     }
 

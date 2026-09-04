@@ -17,6 +17,7 @@ pub struct MemoryProviderInitializeContext {
     agent_dir: PathBuf,
     session_roots: Arc<[PathBuf]>,
     recall_options: MemoryRecallOptions,
+    project_trusted: bool,
 }
 
 impl MemoryProviderInitializeContext {
@@ -25,12 +26,14 @@ impl MemoryProviderInitializeContext {
         agent_dir: PathBuf,
         session_roots: Vec<PathBuf>,
         recall_options: MemoryRecallOptions,
+        project_trusted: bool,
     ) -> Self {
         Self {
             cwd,
             agent_dir,
             session_roots: Arc::from(session_roots),
             recall_options,
+            project_trusted,
         }
     }
 
@@ -48,6 +51,11 @@ impl MemoryProviderInitializeContext {
 
     pub fn recall_options(&self) -> MemoryRecallOptions {
         self.recall_options
+    }
+
+    /// Whether project-owned executable resources may be loaded or mutated.
+    pub fn project_trusted(&self) -> bool {
+        self.project_trusted
     }
 }
 

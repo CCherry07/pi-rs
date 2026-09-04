@@ -39,7 +39,7 @@ pub(crate) fn char_suffix(value: &str, maximum: usize) -> String {
 
 pub(crate) const MEMORY_TOOL_DESCRIPTION: &str = "Save durable user preferences and environment facts across sessions. Use action add, replace, remove, or an atomic operations array. Target is memory (default) or user. replace/remove identify an entry by a short unique old_text substring. If capacity is exceeded, consolidate overlapping entries and retry in the same turn. Do not store task progress or secrets. Successful writes are durable but do not change this session's frozen memory prompt.";
 
-pub(crate) const SKILL_TOOL_DESCRIPTION: &str = "Maintain reusable class-level procedures as Pi-native SKILL.md files. Use skills_list to discover and skill_view to read. Prefer improving existing skills to creating narrow task-specific ones. create accepts name, description, content (Markdown or a complete SKILL.md), and optional scope (global default; project for repo-specific procedures). edit/update rewrites the body; patch accepts old_string/new_string or section plus content. write_file/remove_file maintain relative supporting file_path paths. Background review may modify only agent-created, unpinned skills and must read the exact existing file in the current review before changing it. Autonomous delete requires absorbed_into naming an existing skill and archives the source. Never store task progress or secrets.";
+pub(crate) const SKILL_TOOL_DESCRIPTION: &str = "Maintain reusable class-level procedures as Pi-native SKILL.md files. Use skills_list to discover and skill_view to read. Prefer improving existing skills to creating narrow task-specific ones. create accepts name, description, content (Markdown or a complete SKILL.md), and optional scope (global default; project writes to the trusted Git checkout's .hermes/skills directory for repo-specific procedures). edit/update rewrites the body; patch accepts old_string/new_string or section plus content. write_file/remove_file maintain relative supporting file_path paths. Background review may modify only agent-created, unpinned skills and must read the exact existing file in the current review before changing it. Autonomous delete requires absorbed_into naming an existing skill and archives the source. Never store task progress or secrets.";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum MemoryOverflowStrategy {
@@ -55,6 +55,14 @@ pub(crate) enum SessionSearchVariant {
     Anchors,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum MemoryNotificationMode {
+    Off,
+    #[default]
+    On,
+    Verbose,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct HermesMemoryConfig {
     pub(crate) memory_char_limit: usize,
@@ -65,6 +73,7 @@ pub(crate) struct HermesMemoryConfig {
     pub(crate) skill_nudge_interval: u64,
     pub(crate) review_extra_tools: Vec<String>,
     pub(crate) review_max_input_tokens: Option<u64>,
+    pub(crate) memory_notifications: MemoryNotificationMode,
     pub(crate) flush_on_compact: bool,
     pub(crate) flush_on_shutdown: bool,
     pub(crate) flush_min_turns: u64,
@@ -92,6 +101,7 @@ impl Default for HermesMemoryConfig {
             skill_nudge_interval: 10,
             review_extra_tools: Vec::new(),
             review_max_input_tokens: Some(600_000),
+            memory_notifications: MemoryNotificationMode::On,
             flush_on_compact: false,
             flush_on_shutdown: false,
             flush_min_turns: DEFAULT_FLUSH_MIN_TURNS,
@@ -139,6 +149,9 @@ impl HermesMemoryConfig {
         config.review_extra_tools = string_array(object, "reviewExtraTools").unwrap_or_default();
         if let Some(value) = object.get("reviewMaxInputTokens").and_then(Value::as_i64) {
             config.review_max_input_tokens = (value > 0).then_some(value as u64);
+        }
+        if let Some(value) = object.get("memoryNotifications") {
+            config.memory_notifications = memory_notification_mode(value);
         }
         set_bool(object, "flushOnCompact", &mut config.flush_on_compact);
         set_bool(object, "flushOnShutdown", &mut config.flush_on_shutdown);
@@ -318,6 +331,20 @@ fn parse_thinking(value: &str) -> Option<ThinkingLevel> {
     }
 }
 
+fn memory_notification_mode(value: &Value) -> MemoryNotificationMode {
+    match value {
+        Value::Bool(false) => MemoryNotificationMode::Off,
+        Value::Bool(true) => MemoryNotificationMode::On,
+        Value::String(value) if value.trim().eq_ignore_ascii_case("off") => {
+            MemoryNotificationMode::Off
+        }
+        Value::String(value) if value.trim().eq_ignore_ascii_case("verbose") => {
+            MemoryNotificationMode::Verbose
+        }
+        _ => MemoryNotificationMode::On,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +358,30 @@ mod tests {
         assert_eq!(config.nudge_interval, 10);
         assert_eq!(config.skill_nudge_interval, 10);
         assert_eq!(config.consolidation_timeout_ms, 180_000);
+        assert_eq!(config.memory_notifications, MemoryNotificationMode::On);
+    }
+
+    #[test]
+    fn memory_notification_mode_accepts_hermes_modes_and_boolean_compatibility() {
+        for (value, expected) in [
+            (serde_json::json!("off"), MemoryNotificationMode::Off),
+            (serde_json::json!("on"), MemoryNotificationMode::On),
+            (
+                serde_json::json!("verbose"),
+                MemoryNotificationMode::Verbose,
+            ),
+            (serde_json::json!(false), MemoryNotificationMode::Off),
+            (serde_json::json!(true), MemoryNotificationMode::On),
+            (serde_json::json!("unknown"), MemoryNotificationMode::On),
+        ] {
+            let config = HermesMemoryConfig::from_object(
+                serde_json::json!({"memoryNotifications": value})
+                    .as_object()
+                    .unwrap(),
+                Path::new("/tmp/agent"),
+            );
+            assert_eq!(config.memory_notifications, expected);
+        }
     }
 
     #[test]

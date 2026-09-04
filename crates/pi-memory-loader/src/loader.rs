@@ -82,6 +82,7 @@ impl MemoryLoader {
             self.options.agent_dir,
             self.options.session_roots,
             recall_options,
+            self.options.project_trusted,
         );
         let config =
             MemoryProviderConfig::new(selected.clone(), source_path, document.selected_config());
@@ -143,7 +144,15 @@ mod tests {
         id: &'static str,
         calls: Arc<AtomicUsize>,
         seen: Arc<Mutex<Option<Value>>>,
+        seen_project_trust: Arc<Mutex<Option<bool>>>,
     }
+
+    type FactoryFixture = (
+        FakeFactory,
+        Arc<AtomicUsize>,
+        Arc<Mutex<Option<Value>>>,
+        Arc<Mutex<Option<bool>>>,
+    );
 
     #[async_trait]
     impl MemoryProviderFactory for FakeFactory {
@@ -153,28 +162,32 @@ mod tests {
 
         async fn initialize(
             &self,
-            _context: &MemoryProviderInitializeContext,
+            context: &MemoryProviderInitializeContext,
             config: &MemoryProviderConfig,
         ) -> Result<Arc<dyn MemoryProviderPlugin>, MemoryProviderInitializeError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             *self.seen.lock().unwrap() = config.raw().cloned();
+            *self.seen_project_trust.lock().unwrap() = Some(context.project_trusted());
             Ok(Arc::new(FakeProvider {
                 id: self.id.to_string(),
             }))
         }
     }
 
-    fn factory(id: &'static str) -> (FakeFactory, Arc<AtomicUsize>, Arc<Mutex<Option<Value>>>) {
+    fn factory(id: &'static str) -> FactoryFixture {
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = Arc::new(Mutex::new(None));
+        let seen_project_trust = Arc::new(Mutex::new(None));
         (
             FakeFactory {
                 id,
                 calls: Arc::clone(&calls),
                 seen: Arc::clone(&seen),
+                seen_project_trust: Arc::clone(&seen_project_trust),
             },
             calls,
             seen,
+            seen_project_trust,
         )
     }
 
@@ -193,17 +206,18 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let (local, local_calls, _) = factory("local");
-        let (remote, remote_calls, remote_seen) = factory("remote");
+        let (local, local_calls, _, _) = factory("local");
+        let (remote, remote_calls, remote_seen, remote_trust) = factory("remote");
 
-        let prepared =
-            MemoryLoader::new(MemoryLoaderOptions::new(directory.path(), directory.path()))
-                .provider_factory(local)
-                .provider_factory(remote)
-                .load()
-                .await
-                .unwrap()
-                .unwrap();
+        let mut options = MemoryLoaderOptions::new(directory.path(), directory.path());
+        options.project_trusted = true;
+        let prepared = MemoryLoader::new(options)
+            .provider_factory(local)
+            .provider_factory(remote)
+            .load()
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(prepared.provider_id(), "remote");
         assert_eq!(local_calls.load(Ordering::SeqCst), 0);
@@ -212,12 +226,13 @@ mod tests {
             *remote_seen.lock().unwrap(),
             Some(json!({"endpoint": "https://memory.example"}))
         );
+        assert_eq!(*remote_trust.lock().unwrap(), Some(true));
     }
 
     #[tokio::test]
     async fn missing_config_uses_the_default_provider_and_disabled_config_initializes_nothing() {
         let directory = tempfile::tempdir().unwrap();
-        let (hermes, calls, seen) = factory("hermes");
+        let (hermes, calls, seen, _) = factory("hermes");
         let options = MemoryLoaderOptions::new(directory.path(), directory.path());
 
         let prepared = MemoryLoader::new(options.clone())
@@ -243,8 +258,8 @@ mod tests {
     async fn duplicate_and_unknown_provider_ids_fail_before_initialization() {
         let directory = tempfile::tempdir().unwrap();
         let options = MemoryLoaderOptions::new(directory.path(), directory.path());
-        let (first, calls, _) = factory("local");
-        let (second, _, _) = factory("local");
+        let (first, calls, _, _) = factory("local");
+        let (second, _, _, _) = factory("local");
         let error = MemoryLoader::new(options.clone())
             .provider_factory(first)
             .provider_factory(second)

@@ -9,10 +9,15 @@ use crate::config::{ENTRY_DELIMITER, MEMORY_FILE};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectInfo {
     pub(crate) name: Option<String>,
-    pub(crate) memory_dir: Option<PathBuf>,
+    pub(crate) root: Option<PathBuf>,
 }
 
-pub(crate) fn detect_project(agent_dir: &Path, projects_dir: &str, cwd: &Path) -> ProjectInfo {
+/// Resolve the active checkout that may own trusted repository-local skills.
+///
+/// Like Hermes, only an enclosing Git checkout creates project scope. The
+/// checkout itself remains the root for worktrees; project state is never
+/// redirected into the user's profile directory.
+pub(crate) fn detect_project(cwd: &Path) -> ProjectInfo {
     let resolved = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -20,82 +25,35 @@ pub(crate) fn detect_project(agent_dir: &Path, projects_dir: &str, cwd: &Path) -
     if resolved.parent().is_none() || home.as_ref().is_some_and(|home| *home == resolved) {
         return ProjectInfo {
             name: None,
-            memory_dir: None,
+            root: None,
         };
     }
-    let Some(cwd_name) = resolved
+    let Some(root) = find_git_repo_root(&resolved) else {
+        return ProjectInfo {
+            name: None,
+            root: None,
+        };
+    };
+    let Some(name) = root
         .file_name()
         .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty() && *value != "." && *value != "..")
+        .filter(|value| !value.is_empty())
     else {
         return ProjectInfo {
             name: None,
-            memory_dir: None,
+            root: None,
         };
-    };
-    let projects_root = agent_dir.join(projects_dir);
-    let repository = find_git_repo_root(&resolved);
-    let candidate = repository
-        .as_deref()
-        .filter(|root| *root != resolved && home.as_deref() != Some(*root))
-        .and_then(Path::file_name)
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or(cwd_name);
-    let name = if candidate != cwd_name
-        && !projects_root.join(candidate).exists()
-        && projects_root.join(cwd_name).exists()
-    {
-        cwd_name
-    } else {
-        candidate
     };
     ProjectInfo {
         name: Some(name.to_string()),
-        memory_dir: Some(projects_root.join(name)),
+        root: Some(root),
     }
 }
 
 pub(crate) fn find_git_repo_root(start: &Path) -> Option<PathBuf> {
     for current in start.ancestors() {
         let dot_git = current.join(".git");
-        if dot_git.is_dir() {
-            return Some(current.to_path_buf());
-        }
-        if dot_git.is_file() {
-            let pointer = fs::read_to_string(&dot_git).ok()?;
-            let git_dir = pointer
-                .lines()
-                .find_map(|line| line.trim().strip_prefix("gitdir:"))
-                .map(str::trim)
-                .map(PathBuf::from)?;
-            let git_dir = if git_dir.is_absolute() {
-                git_dir
-            } else {
-                current.join(git_dir)
-            };
-            if let Ok(common) = fs::read_to_string(git_dir.join("commondir")) {
-                let common = common.trim();
-                if !common.is_empty() {
-                    let common = git_dir.join(common);
-                    let common = fs::canonicalize(&common).unwrap_or(common);
-                    return Some(
-                        if common.file_name().and_then(|v| v.to_str()) == Some(".git") {
-                            common.parent()?.to_path_buf()
-                        } else {
-                            common
-                        },
-                    );
-                }
-            }
-            if git_dir
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|value| value.to_str())
-                == Some("worktrees")
-            {
-                return git_dir.parent()?.parent()?.parent().map(Path::to_path_buf);
-            }
+        if dot_git.is_dir() || dot_git.is_file() {
             return Some(current.to_path_buf());
         }
     }
@@ -191,7 +149,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn linked_worktree_uses_main_repository_identity() {
+    fn linked_worktree_uses_the_checkout_as_its_repo_local_root() {
         let directory = tempfile::tempdir().unwrap();
         let main = directory.path().join("main-repo");
         let linked = directory.path().join("feature-worktree");
@@ -204,9 +162,6 @@ mod tests {
         )
         .unwrap();
         fs::write(git_dir.join("commondir"), "../..\n").unwrap();
-        assert_eq!(
-            find_git_repo_root(&linked).and_then(|path| fs::canonicalize(path).ok()),
-            fs::canonicalize(main).ok()
-        );
+        assert_eq!(find_git_repo_root(&linked), Some(linked));
     }
 }

@@ -8,7 +8,7 @@ use pi_agent::{
 };
 use pi_core::{
     AbortSignal, EphemeralSessionOutcome, EphemeralSessionRequest, EphemeralSessionStatus, Message,
-    ModelSelection, PluginDriver,
+    ModelSelection, PluginDriver, Usage, UsageCost,
 };
 
 use crate::{PiRuntime, RuntimeError};
@@ -56,6 +56,8 @@ impl PiRuntime {
             return Ok(EphemeralSessionOutcome {
                 messages: Vec::new(),
                 status: EphemeralSessionStatus::Aborted,
+                usage: Usage::default(),
+                api_calls: 0,
             });
         }
         // Explicit private attachments use the ordinary Agent hook driver.
@@ -74,6 +76,9 @@ impl PiRuntime {
                 )));
             }
         }
+        let different_model = request.model.as_ref().is_some_and(|selection| {
+            selection.provider != parent.provider_id || selection.model_id != parent.model_id
+        });
         let model = request.model.unwrap_or(ModelSelection {
             provider: parent.provider_id,
             model_id: parent.model_id,
@@ -97,6 +102,8 @@ impl PiRuntime {
         // launch children, notify the UI, or mutate the parent session.
         let input_limit = request.max_input_tokens;
         let summary_input = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let summary_usage = Arc::new(std::sync::Mutex::new(Usage::default()));
+        let summary_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let compaction_error = Arc::new(std::sync::Mutex::new(None::<String>));
         let compactor = request.compaction.map(|options| {
             Arc::new(compaction::DetachedCompactor::new(
@@ -114,10 +121,14 @@ impl PiRuntime {
         let iteration_limit = request.max_tool_iterations;
         let summary_spent = Arc::clone(&summary_input);
         let compact_failure = Arc::clone(&compaction_error);
+        let compact_usage = Arc::clone(&summary_usage);
+        let compact_calls = Arc::clone(&summary_calls);
         let prepare_compaction = move |turn: AgentTurnContext, signal| {
             let compactor = compactor.clone();
             let summary_spent = Arc::clone(&summary_spent);
             let compact_failure = Arc::clone(&compact_failure);
+            let compact_usage = Arc::clone(&compact_usage);
+            let compact_calls = Arc::clone(&compact_calls);
             async move {
                 let spent = spent_input(&turn.new_messages)
                     .saturating_add(summary_spent.load(std::sync::atomic::Ordering::Acquire));
@@ -140,17 +151,40 @@ impl PiRuntime {
                     .await
                 {
                     Ok(compacted) => {
-                        summary_spent
-                            .fetch_add(compacted.input_tokens, std::sync::atomic::Ordering::AcqRel);
+                        summary_spent.fetch_add(
+                            compaction::input_tokens(&compacted.usage),
+                            std::sync::atomic::Ordering::AcqRel,
+                        );
+                        add_usage(
+                            &mut compact_usage
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                            &compacted.usage,
+                        );
+                        compact_calls
+                            .fetch_add(compacted.api_calls, std::sync::atomic::Ordering::AcqRel);
                         compacted.context.map(|context| AgentLoopTurnUpdate {
                             context: Some(context),
                             ..AgentLoopTurnUpdate::default()
                         })
                     }
                     Err(error) => {
+                        summary_spent.fetch_add(
+                            compaction::input_tokens(&error.usage),
+                            std::sync::atomic::Ordering::AcqRel,
+                        );
+                        add_usage(
+                            &mut compact_usage
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                            &error.usage,
+                        );
+                        compact_calls
+                            .fetch_add(error.api_calls, std::sync::atomic::Ordering::AcqRel);
                         *compact_failure
                             .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(error.message);
                         None
                     }
                 }
@@ -206,8 +240,16 @@ impl PiRuntime {
                 convert_to_llm: self.agent.convert_to_llm(),
                 provider_id: model.provider,
                 model_id: model.model_id,
-                thinking_level: request.thinking_level.unwrap_or(parent.thinking_level),
-                thinking_budgets: self.agent.thinking_budgets(),
+                thinking_level: request.thinking_level.unwrap_or(if different_model {
+                    pi_core::ThinkingLevel::Off
+                } else {
+                    parent.thinking_level
+                }),
+                thinking_budgets: if different_model {
+                    None
+                } else {
+                    self.agent.thinking_budgets()
+                },
                 active_tools: parent.active_tools,
                 messages: if request.inherit_history {
                     match request.history_tail {
@@ -233,17 +275,18 @@ impl PiRuntime {
             )),
         );
         child.set_session_id(self.agent.session_id());
+        let review_start = child.state().messages.len();
         let _abort = AbortOnDrop(child.clone());
         // Cancellation/timeout drops child.prompt instead of awaiting its
         // terminal hooks. AbortOnDrop and plugin-owned RAII handle cleanup.
         let outcome = tokio::select! {
             biased;
-            () = signal.wait() => return Ok(EphemeralSessionOutcome {
-                messages: Vec::new(), status: EphemeralSessionStatus::Aborted,
-            }),
-            () = tokio::time::sleep(request.timeout) => return Ok(EphemeralSessionOutcome {
-                messages: Vec::new(), status: EphemeralSessionStatus::TimedOut,
-            }),
+            () = signal.wait() => return Ok(interrupted_outcome(
+                &child, review_start, EphemeralSessionStatus::Aborted, &summary_usage, &summary_calls,
+            )),
+            () = tokio::time::sleep(request.timeout) => return Ok(interrupted_outcome(
+                &child, review_start, EphemeralSessionStatus::TimedOut, &summary_usage, &summary_calls,
+            )),
             result = child.prompt(request.messages) => result.map_err(|error| RuntimeError::Agent(error.to_string()))?,
         };
         let status = if exhausted.load(std::sync::atomic::Ordering::Acquire) {
@@ -279,11 +322,124 @@ impl PiRuntime {
                 }
             }
         };
+        let messages = outcome.new_messages;
+        let usage = outcome_usage(&messages, &summary_usage);
+        let api_calls = outcome_api_calls(&messages, &summary_calls);
         Ok(EphemeralSessionOutcome {
-            messages: outcome.new_messages,
+            messages,
             status,
+            usage,
+            api_calls,
         })
     }
+}
+
+fn interrupted_outcome(
+    child: &Agent,
+    review_start: usize,
+    status: EphemeralSessionStatus,
+    summary_usage: &std::sync::Mutex<Usage>,
+    summary_calls: &std::sync::atomic::AtomicU64,
+) -> EphemeralSessionOutcome {
+    child.abort();
+    let state = child.state();
+    let messages = state.messages.get(review_start..).unwrap_or_default();
+    let messages = complete_message_prefix(messages);
+    let usage = outcome_usage(&messages, summary_usage);
+    let api_calls = outcome_api_calls(&messages, summary_calls);
+    EphemeralSessionOutcome {
+        messages,
+        status,
+        usage,
+        api_calls,
+    }
+}
+
+fn outcome_api_calls(messages: &[Message], summary_calls: &std::sync::atomic::AtomicU64) -> u64 {
+    let message_calls = messages
+        .iter()
+        .filter(|message| matches!(message, Message::Assistant(_)))
+        .count() as u64;
+    message_calls.saturating_add(summary_calls.load(std::sync::atomic::Ordering::Acquire))
+}
+
+fn outcome_usage(messages: &[Message], summary_usage: &std::sync::Mutex<Usage>) -> Usage {
+    let mut total = summary_usage
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    for message in messages {
+        match message {
+            Message::Assistant(message) => add_usage(&mut total, &message.usage),
+            Message::ToolResult(message) => {
+                if let Some(usage) = &message.usage {
+                    add_usage(&mut total, usage);
+                }
+            }
+            Message::User(_) | Message::Custom(_) => {}
+        }
+    }
+    total.total_tokens = total
+        .input
+        .saturating_add(total.output)
+        .saturating_add(total.cache_read)
+        .saturating_add(total.cache_write);
+    total
+}
+
+fn add_usage(total: &mut Usage, usage: &Usage) {
+    total.input = total.input.saturating_add(usage.input);
+    total.output = total.output.saturating_add(usage.output);
+    total.cache_read = total.cache_read.saturating_add(usage.cache_read);
+    total.cache_write = total.cache_write.saturating_add(usage.cache_write);
+    if let Some(value) = usage.cache_write_1h {
+        total.cache_write_1h = Some(total.cache_write_1h.unwrap_or(0).saturating_add(value));
+    }
+    if let Some(value) = usage.reasoning {
+        total.reasoning = Some(total.reasoning.unwrap_or(0).saturating_add(value));
+    }
+    total.cost = UsageCost {
+        input: total.cost.input + usage.cost.input,
+        output: total.cost.output + usage.cost.output,
+        cache_read: total.cost.cache_read + usage.cost.cache_read,
+        cache_write: total.cost.cache_write + usage.cost.cache_write,
+        total: total.cost.total + usage.cost.total,
+    };
+}
+
+/// Keep only the prefix that can be replayed without a dangling tool call or
+/// orphaned result. An interrupted in-flight batch is excluded as one group.
+fn complete_message_prefix(messages: &[Message]) -> Vec<Message> {
+    let mut pending = std::collections::HashSet::new();
+    let mut last_complete = 0;
+    for (index, message) in messages.iter().enumerate() {
+        match message {
+            Message::Assistant(message) => {
+                if !pending.is_empty() {
+                    break;
+                }
+                pending.extend(message.tool_calls().into_iter().map(|call| call.id));
+                if pending.is_empty() {
+                    last_complete = index + 1;
+                }
+            }
+            Message::ToolResult(message) => {
+                if !pending.remove(&message.tool_call_id) {
+                    break;
+                }
+                if pending.is_empty() {
+                    last_complete = index + 1;
+                }
+            }
+            _ => {
+                if !pending.is_empty() {
+                    break;
+                }
+                last_complete = index + 1;
+            }
+        }
+    }
+    messages[..last_complete].to_vec()
 }
 
 fn spent_input(messages: &[Message]) -> u64 {

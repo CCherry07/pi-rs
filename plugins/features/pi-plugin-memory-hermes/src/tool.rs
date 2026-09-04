@@ -123,7 +123,7 @@ impl Tool for HermesMemoryTool {
                 vec![
                     "Use skill_manage after completing complex tasks that required trial and error or multiple tool calls.".to_string(),
                     "Use 'create' to save a new reusable procedure, 'patch' to update a section of an existing skill by skill_id, and 'update' for a full rewrite.".to_string(),
-                    "Scope is required on create: choose scope='global' for transferable procedures and scope='project' when the workflow depends on this repo's paths, scripts, conventions, or deploy steps.".to_string(),
+                    "Scope is required on create: choose scope='global' for transferable procedures and scope='project' to write into the trusted Git checkout's .hermes/skills directory when the workflow depends on this repo's paths, scripts, conventions, or deploy steps.".to_string(),
                     "Prefer structured fields for create/update/patch: when_to_use, procedure_steps, pitfalls, and verification_steps. The tool renders valid SKILL.md sections for you.".to_string(),
                     "For patch, pass section plus the matching structured field (e.g. section='Procedure' with procedure_steps). Avoid free-form content that is a JSON array/object string.".to_string(),
                     "Prefer 'update' for multi-section rewrites when patch content would be large or format-unstable.".to_string(),
@@ -249,8 +249,21 @@ impl HermesMemoryTool {
         let mut details = result.details.unwrap_or_else(|| json!({}));
         if result.is_error {
             if retryable {
-                details["current_entries"] =
-                    json!(self.store.entries(target).map_err(store_error)?);
+                let current_entries = self.store.entries(target).map_err(store_error)?;
+                let current = char_len(&current_entries.join("\n§\n"));
+                if details.get("current_entries").is_none() {
+                    details["current_entries"] = json!(&current_entries);
+                }
+                if details.get("usage").is_none() {
+                    let limit = match target {
+                        MemoryTarget::Memory => self.store.config().memory_char_limit,
+                        MemoryTarget::User => self.store.config().user_char_limit,
+                        MemoryTarget::Project | MemoryTarget::Failure => unreachable!(
+                            "the public memory tool accepts only memory and user targets"
+                        ),
+                    };
+                    details["usage"] = json!(format!("{current}/{limit} chars"));
+                }
                 details["guidance"] = json!(
                     "Use replace/remove or an atomic operations batch to consolidate, then retry within this turn. Do not start another Agent."
                 );
@@ -885,13 +898,13 @@ const MEMORY_SEARCH_DESCRIPTION: &str = r#"Search extended memory store for rele
 
 Use cases:
 - Find memories about a specific topic: "What do I know about auth setup?"
-- Search project-specific memories: "What conventions does project X follow?"
+- Search legacy project-attributed memories: "What conventions were saved for project X?"
 - Find user preferences: "What are the user's testing preferences?"
 - Search for past failures: "memory_search('auth', category='failure')"
 
-target="project" returns only project-attributed memory entries (the ones labeled [target=project]); combine with project to search a named project.
+target="project" returns only legacy project-attributed entries; combine with project to search a named project. These entries remain searchable for migration compatibility but are read-only.
 
-Returns matching memory entries with their mutation target, scope, and dates. The displayed target is the value required by memory(action='replace') and memory(action='remove')."#;
+Returns matching memory entries with their scope and dates. Global memory/user targets can be passed to memory(action='replace') and memory(action='remove'); legacy project entries cannot be mutated through the memory tool."#;
 
 const SESSION_SEARCH_LEGACY_DESCRIPTION: &str = r#"Search across past Pi coding sessions for relevant conversation context. Use this when the user asks about previous discussions, past work, or when you need context from earlier sessions.
 

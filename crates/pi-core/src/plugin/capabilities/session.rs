@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     AbortSignal, AssistantMessage, CommandSpec, CustomMessageContent, CustomMessageInput, Message,
-    ModelSelection, ThinkingLevel, ToolSpec,
+    ModelSelection, ThinkingLevel, ToolSpec, Usage,
 };
 
 /// Stable identity for one independently running session launched from a
@@ -138,10 +138,15 @@ pub struct EphemeralSessionRequest {
     ///   Prompt/context patches affect only the private Agent.
     ///
     /// Cancellation, timeout, or dropping the run future may bypass terminal
-    /// hooks such as `agent_end`. Use plugin-owned `Drop`/RAII for cleanup, not
-    /// an end callback alone. Construct fresh stateful instances per execution:
-    /// cloning this request clones the plugin Arcs, not their underlying state.
+    /// hooks such as `agent_end`. Cancellation and timeout return the completed,
+    /// tool-balanced message prefix; an in-flight partial tool group is omitted.
+    /// Use plugin-owned `Drop`/RAII for cleanup, not an end callback alone.
+    /// Construct fresh stateful instances per execution: cloning this request
+    /// clones the plugin Arcs, not their underlying state.
     pub plugins: Vec<Arc<dyn crate::AgentPlugin>>,
+    /// None inherits the parent model. Selecting a different model starts with
+    /// thinking off and without the parent's token-budget overrides unless
+    /// `thinking_level` explicitly selects a level for this run.
     pub model: Option<ModelSelection>,
     pub thinking_level: Option<ThinkingLevel>,
     pub max_tool_iterations: usize,
@@ -192,6 +197,12 @@ pub enum EphemeralSessionStatus {
 pub struct EphemeralSessionOutcome {
     pub messages: Vec<Message>,
     pub status: EphemeralSessionStatus,
+    /// All completed provider usage billed by this private run, including
+    /// detached compaction calls whose messages are not returned.
+    pub usage: Usage,
+    /// Completed private provider calls represented by this outcome. Detached
+    /// compaction calls are included even though their messages are omitted.
+    pub api_calls: u64,
 }
 
 /// Initial runtime selections for a fresh isolated session.
@@ -585,6 +596,13 @@ pub trait SessionContextAccess: Send + Sync {
         unbound()
     }
 
+    /// Records provider-billed work that happened outside the parent message
+    /// tree. Details identify the auxiliary task without projecting it into
+    /// model context.
+    fn record_usage(&self, _usage: Usage, _details: Option<Value>) -> PluginContextResult<()> {
+        unbound()
+    }
+
     fn set_session_name(&self, _name: String) -> PluginContextResult<()> {
         unbound()
     }
@@ -844,6 +862,16 @@ macro_rules! impl_session_context {
                 data: Option<Value>,
             ) -> PluginContextResult<()> {
                 self.handle.access()?.append_entry(custom_type.into(), data)
+            }
+
+            /// Adds out-of-band billed work to the session usage ledger
+            /// without adding a message to the conversation tree.
+            pub fn record_usage(
+                &self,
+                usage: Usage,
+                details: Option<Value>,
+            ) -> PluginContextResult<()> {
+                self.handle.access()?.record_usage(usage, details)
             }
 
             pub fn system_prompt(&self) -> PluginContextResult<String> {

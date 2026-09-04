@@ -25,7 +25,7 @@ use pi_core::{
 use pi_session::{
     AgentSession, AgentSessionEvent, AgentSessionSnapshot, EntryOrder, EntryQuery, ForkPosition,
     PiSession, QueueSnapshot, SessionEntry, SessionRuntimeInventory, ShellExecutionOptions,
-    SubmitOutcome, aggregate_session_usage, current_session_context_tokens,
+    SubmitOutcome, aggregate_document_usage, current_session_context_tokens,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -694,9 +694,7 @@ impl App {
             for record in &branch {
                 push_history_entry(&mut transcript, &record.entry);
             }
-            session_tokens =
-                aggregate_session_usage(document.entries.iter().map(|record| &record.entry))
-                    .total_tokens;
+            session_tokens = aggregate_document_usage(&document).total_tokens;
             let messages = snapshot
                 .agent
                 .messages
@@ -1000,6 +998,14 @@ impl App {
                 self.session_tokens = self
                     .session_tokens
                     .saturating_add(session_entry_token_usage(&entry.entry));
+            }
+            AgentSessionEvent::UsageRecorded { usage } => {
+                self.session_tokens = self
+                    .session_tokens
+                    .saturating_add(usage.input)
+                    .saturating_add(usage.output)
+                    .saturating_add(usage.cache_read)
+                    .saturating_add(usage.cache_write);
             }
             AgentSessionEvent::ThinkingLevelChanged { level } => {
                 self.status = format!("Thinking: {}", level.as_str());
@@ -4642,7 +4648,7 @@ mod tests {
     }
 
     #[test]
-    fn live_usage_counts_tool_results_and_compaction_entries_once() {
+    fn live_usage_counts_entries_and_detached_adjustments_once() {
         let mut app = demo_app();
         app.session_tokens = 0;
         let mut tool_usage = billed_usage(20, 5, 6, 7);
@@ -4694,8 +4700,11 @@ mod tests {
             will_retry: false,
             error_message: None,
         });
+        app.apply_session_event(AgentSessionEvent::UsageRecorded {
+            usage: billed_usage(2, 3, 4, 5),
+        });
 
-        assert_eq!(app.session_tokens, 95);
+        assert_eq!(app.session_tokens, 109);
         assert_eq!(app.context_tokens, None);
         assert!(usage_footer(&app).contains("context ?"));
     }

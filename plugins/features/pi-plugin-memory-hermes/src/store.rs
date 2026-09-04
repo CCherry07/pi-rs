@@ -166,7 +166,7 @@ pub(crate) struct MemoryResult {
     pub(crate) warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) target: Option<MemoryTarget>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(rename = "current_entries", skip_serializing_if = "Vec::is_empty")]
     pub(crate) entries: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) usage: Option<String>,
@@ -180,6 +180,10 @@ pub(crate) struct MemoryResult {
     pub(crate) matches: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) matching_targets: Vec<MemoryTarget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) drift_backup: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) remediation: Option<String>,
 }
 
 impl MemoryResult {
@@ -242,8 +246,6 @@ struct Entries {
 #[derive(Debug, Clone)]
 struct ProjectState {
     info: ProjectInfo,
-    entries: Vec<String>,
-    frozen_entries: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -263,16 +265,22 @@ pub(crate) struct HermesMemoryStore {
     config: HermesMemoryConfig,
     database: Database,
     standing: Option<StandingInstructions>,
+    project_trusted: bool,
     live: RwLock<LiveState>,
     overflow_since: Mutex<HashMap<MemoryTarget, i64>>,
 }
 
 impl HermesMemoryStore {
-    pub(crate) fn managed_skill_roots(agent_dir: &Path, cwd: &Path) -> Vec<PathBuf> {
+    pub(crate) fn managed_skill_roots(
+        agent_dir: &Path,
+        cwd: &Path,
+        project_trusted: bool,
+    ) -> Vec<PathBuf> {
         let config = HermesMemoryConfig::load(agent_dir, None);
         let mut roots = vec![config.global_dir(agent_dir).join("skills")];
-        if let Some(project) = detect_project(agent_dir, &config.projects_memory_dir, cwd).name {
-            roots.push(config.projects_root(agent_dir).join(project).join("skills"));
+        let project = detect_project(cwd);
+        if project_trusted && let Some(root) = project.root {
+            roots.push(root.join(".hermes/skills"));
         }
         roots
     }
@@ -282,6 +290,7 @@ impl HermesMemoryStore {
         cwd: impl AsRef<Path>,
         config: HermesMemoryConfig,
         session_roots: Vec<PathBuf>,
+        project_trusted: bool,
     ) -> Result<Self, StoreError> {
         let agent_dir = agent_dir.as_ref().to_path_buf();
         let global_dir = absolutize(&agent_dir, config.global_dir(&agent_dir));
@@ -311,6 +320,7 @@ impl HermesMemoryStore {
             user: dedupe(read_entries(&user_path)?),
             failure: dedupe(read_entries(&failure_path)?),
         };
+        let frozen_global = sanitize_snapshot(&global);
         let database = Database::new(
             global_dir.join("sessions.db"),
             agent_dir.clone(),
@@ -329,8 +339,9 @@ impl HermesMemoryStore {
             config,
             database,
             standing,
+            project_trusted,
             live: RwLock::new(LiveState {
-                frozen_global: global.clone(),
+                frozen_global,
                 global,
                 project: None,
                 fingerprints: HashMap::new(),
@@ -352,31 +363,15 @@ impl HermesMemoryStore {
         &self.database
     }
 
-    pub(crate) fn project_summaries(&self) -> Result<Vec<(String, usize)>, StoreError> {
-        let mut projects = Vec::new();
-        let directories = match fs::read_dir(&self.projects_root) {
-            Ok(directories) => directories,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(projects),
-            Err(error) => return Err(error.into()),
-        };
-        for directory in directories {
-            let directory = directory?;
-            if directory.file_type()?.is_dir() {
-                let entries = read_entries(&directory.path().join(MEMORY_FILE))?;
-                if !entries.is_empty() {
-                    projects.push((
-                        directory.file_name().to_string_lossy().to_string(),
-                        entries.len(),
-                    ));
-                }
-            }
-        }
-        projects.sort_by(|left, right| left.0.cmp(&right.0));
-        Ok(projects)
-    }
-
     pub(crate) fn bind_project(&self, cwd: &Path) -> Result<Option<String>, StoreError> {
-        let info = detect_project(&self.agent_dir, &self.config.projects_memory_dir, cwd);
+        let info = if self.project_trusted {
+            detect_project(cwd)
+        } else {
+            ProjectInfo {
+                name: None,
+                root: None,
+            }
+        };
         let next_name = info.name.clone();
         let current_name = self
             .live
@@ -388,14 +383,8 @@ impl HermesMemoryStore {
         if current_name == next_name {
             return Ok(next_name);
         }
-        let project = if let Some(name) = next_name.as_deref() {
-            let path = self.projects_root.join(name).join(MEMORY_FILE);
-            let entries = dedupe(read_entries(&path)?);
-            Some(ProjectState {
-                info,
-                frozen_entries: entries.clone(),
-                entries,
-            })
+        let project = if next_name.is_some() {
+            Some(ProjectState { info })
         } else {
             None
         };
@@ -413,21 +402,13 @@ impl HermesMemoryStore {
             user: dedupe(read_entries(&self.global_dir.join(USER_FILE))?),
             failure: dedupe(read_entries(&self.global_dir.join(FAILURE_FILE))?),
         };
+        let frozen_global = sanitize_snapshot(&global);
         let mut live = self
             .live
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         live.global = global.clone();
-        live.frozen_global = global;
-        if let Some(project) = live.project.as_mut()
-            && let Some(name) = project.info.name.as_deref()
-        {
-            let entries = dedupe(read_entries(
-                &self.projects_root.join(name).join(MEMORY_FILE),
-            )?);
-            project.entries = entries.clone();
-            project.frozen_entries = entries;
-        }
+        live.frozen_global = frozen_global;
         drop(live);
         if let Some(standing) = self.standing.as_ref() {
             standing.reload()?;
@@ -520,7 +501,7 @@ impl HermesMemoryStore {
         let project = (target == MemoryTarget::Failure)
             .then_some(failure.project.as_deref())
             .flatten();
-        self.mutate(target, |entries, limit| {
+        self.mutate(target, true, |entries, limit| {
             if entries.iter().any(|entry| {
                 let decoded = decode_entry(entry);
                 decoded.text == content
@@ -579,9 +560,9 @@ impl HermesMemoryStore {
         if let Err(error) = scan_content(content) {
             return Ok(failure_result(error));
         }
-        self.mutate(target, |entries, limit| {
+        self.mutate(target, false, |entries, limit| {
             let matches = matching_indices(entries, &old_text);
-            if let Some(result) = validate_matches(target, entries, &matches, &old_text) {
+            if let Some(result) = validate_matches(target, entries, &matches, &old_text, limit) {
                 return MutationOutcome::unchanged(result);
             }
             let mut planned = entries.clone();
@@ -596,9 +577,14 @@ impl HermesMemoryStore {
             }
             let total = joined_len(&planned);
             if total > limit {
-                return MutationOutcome::unchanged(MemoryResult::consolidation_error(format!(
-                    "Replacement would put memory at {total}/{limit} chars. Shorten or remove other entries first."
-                )));
+                return MutationOutcome::unchanged(consolidation_failure_for(
+                    target,
+                    entries,
+                    limit,
+                    format!(
+                        "Replacement would put memory at {total}/{limit} chars. Shorten the new content, or remove other stale or less important entries to make room (see current_entries below), then retry — all in this turn."
+                    ),
+                ));
             }
             *entries = planned;
             MutationOutcome::changed(success_for(target, entries, limit, "Entry replaced."))
@@ -614,9 +600,9 @@ impl HermesMemoryStore {
         if old_text.is_empty() {
             return Ok(failure_result("old_text cannot be empty."));
         }
-        self.mutate(target, |entries, limit| {
+        self.mutate(target, false, |entries, limit| {
             let matches = matching_indices(entries, &old_text);
-            if let Some(result) = validate_matches(target, entries, &matches, &old_text) {
+            if let Some(result) = validate_matches(target, entries, &matches, &old_text, limit) {
                 return MutationOutcome::unchanged(result);
             }
             let matches = matches.into_iter().collect::<HashSet<_>>();
@@ -665,7 +651,7 @@ impl HermesMemoryStore {
         operations: &[MemoryMutationOperation],
         require_shrink: bool,
     ) -> Result<MemoryResult, StoreError> {
-        self.mutate(target, |entries, limit| {
+        self.mutate(target, false, |entries, limit| {
             if operations.is_empty() {
                 return MutationOutcome::unchanged(failure_result(
                     "Memory mutation plan requires at least one operation.",
@@ -677,7 +663,7 @@ impl HermesMemoryStore {
                 match operation.action {
                     MutationAction::Add => {
                         let Some(raw) = operation.content.as_deref().map(str::trim).filter(|value| !value.is_empty()) else {
-                            return MutationOutcome::unchanged(MemoryResult::consolidation_error("Memory mutation add requires content."));
+                            return MutationOutcome::unchanged(consolidation_failure_for(target, entries, limit, "Memory mutation add requires content."));
                         };
                         let content = if target == MemoryTarget::Failure && operation.category.is_some() {
                             format_failure(raw, &FailureOptions {
@@ -704,13 +690,18 @@ impl HermesMemoryStore {
                     MutationAction::Remove | MutationAction::Replace => {
                         let old_text = normalize_lookup(operation.old_text.as_deref().unwrap_or_default());
                         if old_text.is_empty() {
-                            return MutationOutcome::unchanged(MemoryResult::consolidation_error(format!(
-                                "Memory mutation {} requires old_text.",
-                                if operation.action == MutationAction::Remove { "remove" } else { "replace" }
-                            )));
+                            return MutationOutcome::unchanged(consolidation_failure_for(
+                                target,
+                                entries,
+                                limit,
+                                format!(
+                                    "Memory mutation {} requires old_text.",
+                                    if operation.action == MutationAction::Remove { "remove" } else { "replace" }
+                                ),
+                            ));
                         }
                         let matches = matching_indices(&planned, &old_text);
-                        if let Some(mut result) = validate_matches(target, &planned, &matches, &old_text) {
+                        if let Some(mut result) = validate_matches(target, &planned, &matches, &old_text, limit) {
                             result.consolidation_failure = true;
                             return MutationOutcome::unchanged(result);
                         }
@@ -719,7 +710,7 @@ impl HermesMemoryStore {
                             planned = planned.into_iter().enumerate().filter(|(index, _)| !matches.contains(index)).map(|(_, entry)| entry).collect();
                         } else {
                             let Some(content) = operation.content.as_deref().map(str::trim).filter(|value| !value.is_empty()) else {
-                                return MutationOutcome::unchanged(MemoryResult::consolidation_error("Memory mutation replace requires content."));
+                                return MutationOutcome::unchanged(consolidation_failure_for(target, entries, limit, "Memory mutation replace requires content."));
                             };
                             if let Err(error) = scan_content(content) {
                                 return MutationOutcome::unchanged(failure_result(error));
@@ -735,9 +726,14 @@ impl HermesMemoryStore {
             let original_total = joined_len(&original);
             let planned_total = joined_len(&planned);
             if planned_total > limit {
-                return MutationOutcome::unchanged(MemoryResult::consolidation_error(format!(
-                    "Memory mutation plan would put memory at {planned_total}/{limit} chars."
-                )));
+                return MutationOutcome::unchanged(consolidation_failure_for(
+                    target,
+                    entries,
+                    limit,
+                    format!(
+                        "Memory mutation plan would put memory at {planned_total}/{limit} chars. Consolidate or remove stale entries, then retry — all in this turn."
+                    ),
+                ));
             }
             if require_shrink && planned_total >= original_total {
                 return MutationOutcome::unchanged(failure_result(format!(
@@ -906,9 +902,14 @@ impl HermesMemoryStore {
     ) -> Result<T, SkillError> {
         let project = self.current_project_name();
         let global = self.global_dir.join("skills");
-        let project_root = project
+        let project_root = self
+            .live
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .project
             .as_ref()
-            .map(|project| self.projects_root.join(project).join("skills"));
+            .and_then(|project| project.info.root.as_ref())
+            .map(|root| root.join(".hermes/skills"));
         operation(SkillRoots {
             global_root: &global,
             project_root: project_root.as_deref(),
@@ -947,6 +948,7 @@ impl HermesMemoryStore {
     fn mutate(
         &self,
         target: MemoryTarget,
+        skip_drift_guard: bool,
         action: impl Fn(&mut Vec<String>, usize) -> MutationOutcome,
     ) -> Result<MemoryResult, StoreError> {
         let path = self.path_for(target)?;
@@ -967,8 +969,19 @@ impl HermesMemoryStore {
         lock.lock_exclusive()?;
         let result = (|| {
             for attempt in 0..=MAX_EXTERNAL_WRITE_RETRIES {
-                let before_fingerprint = fingerprint(&path)?;
-                let mut entries = dedupe(read_entries(&path)?);
+                let snapshot = match read_memory_snapshot(&path) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => return Ok(unreadable_file_result(&path, &error)),
+                };
+                let before_fingerprint = snapshot.fingerprint.clone();
+                let mut entries = dedupe(parse_entries(&snapshot.raw));
+                if !skip_drift_guard
+                    && let Some(result) =
+                        external_drift_result(target, &path, &snapshot, self.limit_for(target))
+                {
+                    self.update_live(target, entries, before_fingerprint);
+                    return Ok(result);
+                }
                 let mut outcome = action(&mut entries, self.limit_for(target));
                 if !outcome.changed {
                     self.update_live(target, entries, before_fingerprint);
@@ -1047,11 +1060,7 @@ impl HermesMemoryStore {
             MemoryTarget::Memory => live.global.memory = entries,
             MemoryTarget::User => live.global.user = entries,
             MemoryTarget::Failure => live.global.failure = entries,
-            MemoryTarget::Project => {
-                if let Some(project) = live.project.as_mut() {
-                    project.entries = entries;
-                }
-            }
+            MemoryTarget::Project => {}
         }
         if let Some(path) = path {
             live.fingerprints.insert(path, fingerprint);
@@ -1336,12 +1345,165 @@ fn read_entries(path: &Path) -> Result<Vec<String>, std::io::Error> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
-    Ok(raw
-        .split(ENTRY_DELIMITER)
+    Ok(parse_entries(&raw))
+}
+
+fn parse_entries(raw: &str) -> Vec<String> {
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    raw.split(ENTRY_DELIMITER)
         .map(str::trim)
         .filter(|entry| !entry.is_empty())
         .map(str::to_string)
-        .collect())
+        .collect()
+}
+
+struct MemoryFileSnapshot {
+    raw: String,
+    bytes: Vec<u8>,
+    fingerprint: String,
+}
+
+fn read_memory_snapshot(path: &Path) -> Result<MemoryFileSnapshot, std::io::Error> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(MemoryFileSnapshot {
+                raw: String::new(),
+                bytes: Vec::new(),
+                fingerprint: "missing".to_string(),
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let fingerprint = hash_bytes(&bytes);
+    let raw = std::str::from_utf8(&bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw).to_string();
+    Ok(MemoryFileSnapshot {
+        raw,
+        bytes,
+        fingerprint,
+    })
+}
+
+fn unreadable_file_result(path: &Path, error: &std::io::Error) -> MemoryResult {
+    failure_result(format!(
+        "Refusing to write {} because the existing memory file could not be read without data loss ({error}). The file was left unchanged.",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("memory file")
+    ))
+}
+
+fn external_drift_result(
+    target: MemoryTarget,
+    path: &Path,
+    snapshot: &MemoryFileSnapshot,
+    limit: usize,
+) -> Option<MemoryResult> {
+    if snapshot.raw.trim().is_empty() {
+        return None;
+    }
+    let entries = parse_entries(&snapshot.raw);
+    let roundtrip = entries.join(ENTRY_DELIMITER);
+    let oversized_entry = entries
+        .iter()
+        .map(|entry| char_len(&decode_entry(entry).text))
+        .max()
+        .unwrap_or(0)
+        > limit;
+    if snapshot.raw.trim() == roundtrip && !oversized_entry {
+        return None;
+    }
+
+    let backup = write_drift_backup(path, &snapshot.bytes);
+    let backup_display = backup.unwrap_or_else(|error| {
+        format!(
+            "{} (BACKUP FAILED — file unchanged on disk: {error})",
+            drift_backup_path(path).display()
+        )
+    });
+    Some(MemoryResult {
+        success: false,
+        target: Some(target),
+        error: Some(format!(
+            "Refusing to write {}: file on disk has content that wouldn't round-trip through the memory tool (likely added by the patch tool, a shell append, a manual edit, or a concurrent session). A snapshot was saved to {backup_display}. Resolve the drift first — either rewrite the file as a clean §-delimited list of entries, or move the extra content out — then retry. This guard exists to prevent silent data loss (issue #26045).",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("memory file")
+        )),
+        drift_backup: Some(backup_display),
+        remediation: Some(
+            "Open the .bak file, integrate the missing entries into the memory tool one at a time with memory(action=add, content=...), then remove or rewrite the original file to a clean state."
+                .to_string(),
+        ),
+        ..MemoryResult::default()
+    })
+}
+
+fn drift_backup_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.bak.{}", path.display(), now_ms()))
+}
+
+fn write_drift_backup(path: &Path, bytes: &[u8]) -> Result<String, std::io::Error> {
+    let base = drift_backup_path(path);
+    for sequence in 0..=100_u8 {
+        let backup = if sequence == 0 {
+            base.clone()
+        } else {
+            PathBuf::from(format!("{}.{}", base.display(), sequence))
+        };
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)
+        {
+            Ok(mut file) => {
+                file.write_all(bytes)?;
+                file.sync_all()?;
+                return Ok(backup.display().to_string());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique drift-backup path",
+    ))
+}
+
+fn sanitize_snapshot(entries: &Entries) -> Entries {
+    Entries {
+        memory: sanitize_snapshot_entries(&entries.memory, MEMORY_FILE),
+        user: sanitize_snapshot_entries(&entries.user, USER_FILE),
+        failure: sanitize_snapshot_entries(&entries.failure, FAILURE_FILE),
+    }
+}
+
+fn sanitize_snapshot_entries(entries: &[String], filename: &str) -> Vec<String> {
+    entries
+        .iter()
+        .map(|entry| {
+            let decoded = decode_entry(entry);
+            if decoded.text.starts_with("[BLOCKED:") {
+                return entry.clone();
+            }
+            let findings = crate::content_scanner::scan_content_findings(&decoded.text);
+            if findings.is_empty() {
+                return entry.clone();
+            }
+            encode_entry(
+                &format!(
+                    "[BLOCKED: {filename} entry contained threat pattern(s): {}. Removed from system prompt.]",
+                    findings.join(", ")
+                ),
+                Some(&decoded.created),
+                Some(&decoded.last_referenced),
+                decoded.project.as_deref(),
+            )
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -1800,6 +1962,25 @@ fn memory_full_result(
     }
 }
 
+fn consolidation_failure_for(
+    target: MemoryTarget,
+    entries: &[String],
+    limit: usize,
+    error: impl Into<String>,
+) -> MemoryResult {
+    let current = joined_len(entries);
+    MemoryResult {
+        success: false,
+        consolidation_failure: true,
+        target: Some(target),
+        error: Some(error.into()),
+        usage: Some(format!("{current}/{limit} chars")),
+        entry_count: Some(entries.len()),
+        entries: visible_entries(entries),
+        ..MemoryResult::default()
+    }
+}
+
 fn fifo_add(
     target: MemoryTarget,
     entries: &mut Vec<String>,
@@ -1852,11 +2033,17 @@ fn validate_matches(
     entries: &[String],
     matches: &[usize],
     old_text: &str,
+    limit: usize,
 ) -> Option<MemoryResult> {
     if matches.is_empty() {
-        return Some(MemoryResult::consolidation_error(format!(
-            "No entry matched '{old_text}'."
-        )));
+        return Some(consolidation_failure_for(
+            target,
+            entries,
+            limit,
+            format!(
+                "No entry matched '{old_text}'. Check current_entries below and retry with the exact text of the entry you want to change."
+            ),
+        ));
     }
     if matches.len() > 1 && !are_distinct_scoped_failures(target, entries, matches) {
         let mut result = failure_result(format!(
@@ -2155,7 +2342,7 @@ mod tests {
             memory_dir: Some(memory_dir),
             ..HermesMemoryConfig::default()
         };
-        HermesMemoryStore::load(&agent_dir, root, config, Vec::new())
+        HermesMemoryStore::load(&agent_dir, root, config, Vec::new(), true)
     }
 
     #[test]

@@ -16,7 +16,30 @@ pub(crate) async fn flush_if_due(
     if user_turns < config.flush_min_turns {
         return;
     }
-    let _ = crate::transport::run_review(&context.session, &context.models, config, runs,
-        "The conversation is about to lose context. Save durable user preferences and useful verified procedures using memory and skill_manage. Read existing skills before changing them. Do not save temporary task progress.",
-        parent_signal.unwrap_or_else(|| AbortHandle::new().1), timeout).await;
+    let prompt = format!(
+        "The conversation is about to lose context. Preserve its durable learning now.\n\n{}",
+        crate::transport::review_prompt(true, true)
+    );
+    let errors = match crate::transport::run_review(
+        &context.session,
+        &context.models,
+        config,
+        runs,
+        &prompt,
+        parent_signal.unwrap_or_else(|| AbortHandle::new().1),
+        timeout,
+    )
+    .await
+    {
+        Ok(outcome) => {
+            crate::transport::finish_review(&context.session, &context.ui, config, &outcome)
+        }
+        Err(error) => vec![error],
+    };
+    for error in errors {
+        let _ = context.ui.notify(
+            pi_core::NoticeLevel::Warning,
+            format!("⚠️ Memory review: {error}"),
+        );
+    }
 }

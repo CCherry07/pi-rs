@@ -420,7 +420,9 @@ one background Agent. It inherits the effective prompt, structured history, mode
 provider authentication. It can read/search files, maintain memory, and create/update reusable
 skills. Shell/general file writes are denied unless explicitly opted in and active in the parent.
 The review is private: no extra resume entry, no review transcript in the dialogue, no recursive
-review. New user requests cancel it and take priority. There is no direct/isolated transport switch
+review. Its assistant, metered-tool, and private-compaction usage is recorded as one
+`background_review` adjustment on the parent session and appears in the TUI, `/session`, and RPC
+totals. New user requests cancel it and take priority. There is no direct/isolated transport switch
 or CLI subprocess fallback.
 
 After its first provider response, a long review can summarize older context in place while
@@ -434,16 +436,21 @@ and normal memory/skill tools. Reload and nested delegation preserve that distin
 Skills created through the tool are marked agent-owned. Background modifications require
 agent ownership, no external edits, no pin, and a read of the exact file in this review. Deletion
 requires verified consolidation into another skill and archives the original. Skills are stored
-under `<agent-dir>/pi-hermes-memory/skills/<slug>/SKILL.md`, or
-`<agent-dir>/projects-memory/<project>/skills/<slug>/SKILL.md` for explicit project scope.
-Reload before using a newly created `/skill:<name>` command. Project skill discovery remains
-subject to Pi project trust.
+under `<agent-dir>/pi-hermes-memory/skills/<slug>/SKILL.md`. Explicit project-scope creations use
+the active Git checkout's `.hermes/skills/<slug>/SKILL.md`; `.agents/skills` is also discovered as
+a cross-tool repository skill root. Repository skill loading and mutation require Pi project
+trust. Reload before using a newly created `/skill:<name>` command.
 
 Useful retained Pi commands include `/memory-insights`, `/memory-preview-context`,
 `/memory-consolidate`, `/memory-skills`, `/memory-index-sessions`, and
-`/memory-sync-markdown`. `memory_search` and `session_search` retain searchable existing data.
-These commands, project/failure notes, and optional standing instructions are Rust product
-extensions, not Hermes Agent's exact CLI. Correction regexes no longer trigger automatic writes.
+`/memory-sync-markdown`. `/refine [focus]` runs the same memory/skill review immediately; an
+optional focus is prioritized in its private request. It bypasses automatic review intervals and
+`reviewEnabled`, still allows only one review at a time, and is cancelled by a new foreground
+request. `memory_search` and `session_search` retain searchable existing data. Legacy project
+memory files remain indexed read-only so an upgrade does not discard them; new memory writes only
+target the profile-scoped `MEMORY.md` and `USER.md`. Failure notes and optional standing
+instructions remain Rust product extensions, not Hermes Agent's exact CLI. Correction regexes no
+longer trigger automatic writes.
 Extra pre-compaction/shutdown flushes are opt-in, off by default.
 
 Use `"provider": "local"` to select the independent semantic-memory provider described below.
@@ -522,13 +529,18 @@ Hermes settings live in `<agent-dir>/hermes-memory-config.json`; if absent, the
   "reviewEnabled": true,
   "reviewExtraTools": [],
   "reviewMaxInputTokens": 600000,
+  "memoryNotifications": "on",
   "flushOnCompact": false,
   "flushOnShutdown": false
 }
 ```
 
 Set either nudge interval to 0 to disable that review trigger; `reviewEnabled: false` disables
-automatic review entirely. A nonpositive `reviewMaxInputTokens` removes the aggregate input budget,
+automatic review entirely but leaves `/refine` available. `memoryNotifications` is `off`, `on`, or
+`verbose`: `on` reports compact successful actions, `verbose` adds bounded previews, and `off`
+suppresses successful action notices. Boolean `true`/`false` remains accepted as `on`/`off`.
+Notifications require a successful memory/skill tool receipt; assistant text alone is never
+reported as a write. A nonpositive `reviewMaxInputTokens` removes the aggregate input budget,
 but review still has a 16-iteration and 120-second bound. `llmModelOverride` may name a registered
 `provider/model`; `llmThinkingOverride` overrides review reasoning. Different-model review uses a
 bounded history digest because it cannot reuse the parent's model cache.
@@ -583,8 +595,9 @@ Interactive runs prompt when needed; `--print` and `--json` default to untrusted
 decision or CLI flag decides otherwise. Use `--approve` / `-a` or `--no-approve` / `-na` for a
 run-local override.
 
-Like current Pi, `AGENTS.md` and `CLAUDE.md` context discovery is independent of project trust.
-Skills under `~/.agents/skills` are also supported.
+Like current Pi, `HERMES.md`, `AGENTS.md`, and `CLAUDE.md` context discovery is independent of
+project trust. Trusted repositories may provide `.hermes/skills` and `.agents/skills`; skills
+under `~/.agents/skills` are also supported.
 
 ## Plugins and extensions
 

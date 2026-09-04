@@ -10,7 +10,7 @@ use pi_core::{
     ModelId, ModelsContextAccess, NavigateTreeOptions, NewSessionOptions, NoticeLevel,
     PluginContextError, PluginContextReplacement, PluginContextScope, PresentationMode, ProviderId,
     SendMessageOptions, SendUserMessageOptions, SessionContextAccess, SessionEntryKind,
-    SessionEntryView, SessionSnapshot, ThinkingLevel, UiContextAccess, UserMessage,
+    SessionEntryView, SessionSnapshot, ThinkingLevel, UiContextAccess, Usage, UserMessage,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -714,6 +714,13 @@ impl SessionContextAccess for PiPluginContext {
     ) -> Result<(), PluginContextError> {
         self.session()?
             .append_custom_entry(custom_type, data)
+            .map_err(context_failed)?;
+        Ok(())
+    }
+
+    fn record_usage(&self, usage: Usage, details: Option<Value>) -> Result<(), PluginContextError> {
+        self.session()?
+            .record_usage(usage, details)
             .map_err(context_failed)?;
         Ok(())
     }

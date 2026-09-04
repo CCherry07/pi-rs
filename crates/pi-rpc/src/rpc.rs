@@ -13,7 +13,7 @@ use pi_core::{
 };
 use pi_session::{
     AgentMessage, AgentSession, AgentSessionReplacement, ForkPosition, PiSession, QueueKind,
-    SessionDocument, SessionEntry, SessionRecord, ShellExecutionOptions, aggregate_session_usage,
+    SessionDocument, SessionEntry, SessionRecord, ShellExecutionOptions, aggregate_document_usage,
     current_session_context_tokens,
 };
 use serde::Deserialize;
@@ -1010,7 +1010,7 @@ fn session_stats_json(session: &AgentSession) -> Result<Value, String> {
             }
         }
     }
-    let usage = aggregate_session_usage(document.entries.iter().map(|record| &record.entry));
+    let usage = aggregate_document_usage(&document);
     let mut value = json!({
         "sessionFile":session.log().is_materialized().then(|| session.log().path()),
         "sessionId":session.log().header().id,

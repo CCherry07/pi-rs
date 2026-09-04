@@ -129,6 +129,7 @@ pub fn session_event_json(
             json!({"type":"bash_execution_update","id":id,"delta":delta})
         }
         AgentSessionEvent::PluginNotice { .. }
+        | AgentSessionEvent::UsageRecorded { .. }
         | AgentSessionEvent::BashExecutionStart { .. }
         | AgentSessionEvent::BashExecutionEnd { .. } => return Ok(None),
         _ => return Ok(None),

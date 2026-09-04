@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub const CONFIG_DIR_NAME: &str = ".pi";
 const CONTEXT_CANDIDATES: &[&str] = &[
+    "HERMES.md",
     "AGENTS.override.md",
     "AGENTS.md",
     "AGENTS.MD",
@@ -234,6 +235,27 @@ mod tests {
             .map(|f| f.content)
             .collect::<Vec<_>>();
         assert_eq!(values, vec!["g", "r", "a"]);
+    }
+
+    #[test]
+    fn hermes_md_is_the_preferred_repository_context_file() {
+        let root = tempdir();
+        let agent = root.join("agent");
+        let project = root.join("project");
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("HERMES.md"), "hermes").unwrap();
+        std::fs::write(project.join("AGENTS.md"), "agents").unwrap();
+
+        let contexts = load_project_context_files(&project, &agent);
+
+        let project_contexts = contexts
+            .iter()
+            .filter(|context| context.path.starts_with(&project))
+            .collect::<Vec<_>>();
+        assert_eq!(project_contexts.len(), 1);
+        assert_eq!(project_contexts[0].content, "hermes");
+        assert_eq!(project_contexts[0].path, project.join("HERMES.md"));
     }
     fn tempdir() -> PathBuf {
         let path = std::env::temp_dir().join(format!(

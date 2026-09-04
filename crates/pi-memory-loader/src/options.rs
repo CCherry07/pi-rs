@@ -25,6 +25,7 @@ pub struct MemoryLoaderOptions {
     pub agent_dir: PathBuf,
     pub session_roots: Vec<PathBuf>,
     pub recall_options: MemoryRecallOptions,
+    pub project_trusted: bool,
 }
 
 impl MemoryLoaderOptions {
@@ -35,6 +36,7 @@ impl MemoryLoaderOptions {
             agent_dir: agent_dir.clone(),
             session_roots: vec![agent_dir.join("sessions")],
             recall_options: MemoryRecallOptions::default(),
+            project_trusted: false,
         }
     }
 }

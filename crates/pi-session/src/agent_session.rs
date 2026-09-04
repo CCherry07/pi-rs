@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use pi_agent::{AgentLoopOutcome, AgentLoopStop, EventError, PromptInput, QueueMode};
 use pi_core::{
     AbortHandle, AgentEvent, CommandOutcome, ContentBlock, CustomMessage, ImageContent,
     InputStreamingBehavior, Message, ModelId, PluginId, ProviderId, StopReason, ThinkingLevel,
-    UserMessage,
+    Usage, UserMessage,
 };
 use pi_prompt::BuildSystemPromptOptions;
 use pi_runtime::{
@@ -31,10 +31,10 @@ use crate::{
     SessionDocument, SessionEntry, SessionError, SessionHeader, SessionIdentity,
     SessionInfoChangedEvent, SessionLog, SessionModel, SessionPluginDriver,
     SessionPluginReloadReport, SessionPlugins, SessionRecord, SessionShutdownEvent,
-    SessionShutdownReason, SessionStartEvent, SessionStartReason, SessionTreeEvent,
-    ThinkingLevelEntry, TreePreparation, compact as generate_compaction, estimate_context_tokens,
-    estimate_session_context_tokens, next_unique_id, now_ms, prepare_compaction, reduce_lane_state,
-    should_compact,
+    SessionShutdownReason, SessionStartEvent, SessionStartReason, SessionTreeEvent, SessionUsage,
+    ThinkingLevelEntry, TreePreparation, UsageAttribution, UsageRecord,
+    compact as generate_compaction, estimate_context_tokens, estimate_session_context_tokens,
+    next_unique_id, now_ms, prepare_compaction, reduce_lane_state, should_compact,
 };
 
 pub const PROMPT_SNAPSHOT_CUSTOM_TYPE: &str = "pi.prompt_snapshot";
@@ -320,6 +320,7 @@ pub struct AgentSession {
     branch_summary_reserve_tokens: u64,
     compaction_abort: Arc<std::sync::Mutex<Option<AbortHandle>>>,
     lifecycle_state: Arc<AtomicU8>,
+    usage_recording_open: Arc<AtomicBool>,
     events: Arc<AgentSessionEventHub>,
     activity: Arc<std::sync::Mutex<SessionActivity>>,
     bash_abort: Arc<std::sync::Mutex<Option<(String, AbortHandle)>>>,
@@ -486,6 +487,7 @@ impl AgentSession {
             branch_summary_reserve_tokens: options.branch_summary_reserve_tokens.unwrap_or(16_384),
             compaction_abort: Arc::new(std::sync::Mutex::new(None)),
             lifecycle_state: Arc::new(AtomicU8::new(SESSION_OPEN)),
+            usage_recording_open: Arc::new(AtomicBool::new(true)),
             events,
             activity,
             bash_abort: Arc::new(std::sync::Mutex::new(None)),
@@ -619,6 +621,7 @@ impl AgentSession {
             branch_summary_reserve_tokens: options.branch_summary_reserve_tokens.unwrap_or(16_384),
             compaction_abort: Arc::new(std::sync::Mutex::new(None)),
             lifecycle_state: Arc::new(AtomicU8::new(SESSION_OPEN)),
+            usage_recording_open: Arc::new(AtomicBool::new(true)),
             events,
             activity,
             bash_abort: Arc::new(std::sync::Mutex::new(None)),
@@ -737,6 +740,7 @@ impl AgentSession {
             return;
         }
         self.session_plugin_driver().session_shutdown(&event).await;
+        self.usage_recording_open.store(false, Ordering::Release);
         self.runtime.retire_plugin_context();
     }
 
@@ -1602,6 +1606,34 @@ impl AgentSession {
         let record = self.log.append_session_record(entry)?;
         let id = record.id.clone();
         self.events.publish_entry(record);
+        Ok(id)
+    }
+
+    /// Adds usage from an auxiliary provider call without inserting anything
+    /// into the session's message tree. The JSONL storage serializes this
+    /// append with concurrent Agent and lifecycle writes.
+    pub fn record_usage(
+        &self,
+        usage: Usage,
+        details: Option<serde_json::Value>,
+    ) -> Result<String, SessionError> {
+        if !self.usage_recording_open.load(Ordering::Acquire) {
+            return Err(SessionError::Closed);
+        }
+        let id = next_unique_id("usage");
+        self.log.append_record(NewLaneRecord {
+            id: id.clone(),
+            lane: MAIN_LANE.to_string(),
+            record: LaneRecordEntry::Usage(UsageRecord {
+                usage: SessionUsage::from(&usage),
+                attribution: UsageAttribution::Adjustment {
+                    run_id: None,
+                    entry_id: None,
+                    details,
+                },
+            }),
+        })?;
+        self.events.publish_usage(usage);
         Ok(id)
     }
 

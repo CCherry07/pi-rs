@@ -23,6 +23,7 @@ same-file = "1.0.6"
 tempfile = "3.21.0"
 thiserror.workspace = true
 tokio.workspace = true
+unicode-normalization = "0.1.25"
 uuid = { version = "1.24.1", features = ["v4"] }
 walkdir = "2.5.0"
 

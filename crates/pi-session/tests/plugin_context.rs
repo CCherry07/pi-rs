@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use pi_core::{
     AgentPlugin, CommandContextParts, InputContext, InputEvent, InputPatch, PluginContext,
-    PluginContextScope, PluginError, PresentationMode, SessionEntryKind,
+    PluginContextScope, PluginError, PresentationMode, SessionEntryKind, Usage, UsageCost,
 };
 use pi_runtime::PiRuntime;
 use pi_session::{
@@ -211,6 +211,42 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
         snapshot.entry(&entry_id).unwrap().raw()["data"]["kept"],
         true
     );
+
+    replacement_context
+        .session
+        .record_usage(
+            Usage {
+                input: 11,
+                output: 3,
+                cache_read: 17,
+                cache_write: 5,
+                total_tokens: 36,
+                cost: UsageCost {
+                    total: 0.25,
+                    ..UsageCost::default()
+                },
+                ..Usage::default()
+            },
+            Some(serde_json::json!({"task": "background_review"})),
+        )
+        .unwrap();
+    let document = session.log().load().unwrap();
+    let usage = document
+        .records
+        .iter()
+        .find_map(|record| match &record.record {
+            pi_session::LaneRecordEntry::Usage(usage) => Some(usage),
+            _ => None,
+        })
+        .expect("plugin usage is recorded outside the message tree");
+    assert_eq!(usage.usage.input, 11);
+    assert!(matches!(
+        &usage.attribution,
+        pi_session::UsageAttribution::Adjustment { details: Some(details), .. }
+            if details["task"] == "background_review"
+    ));
+    assert_eq!(document.stats.total_tokens, 36);
+    assert_eq!(document.stats.cost_total, 0.25);
 
     session.shutdown().await;
     assert!(matches!(

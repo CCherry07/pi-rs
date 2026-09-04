@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 const CONFIG_DIR_NAME: &str = ".pi";
 const AGENTS_DIR_NAME: &str = ".agents";
+const HERMES_DIR_NAME: &str = ".hermes";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -440,6 +441,9 @@ fn load_skills(
     if defaults {
         if project_trusted {
             roots.push(cwd.join(CONFIG_DIR_NAME).join("skills"));
+            if let Some(root) = project_root(cwd) {
+                roots.push(root.join(HERMES_DIR_NAME).join("skills"));
+            }
             roots.extend(ancestor_agent_skill_dirs(cwd));
         }
         roots.push(agent_dir.join("skills"));
@@ -520,9 +524,7 @@ fn collect_skill_root(
 }
 
 fn ancestor_agent_skill_dirs(cwd: &Path) -> Vec<PathBuf> {
-    let git_root = cwd
-        .ancestors()
-        .find(|ancestor| ancestor.join(".git").exists());
+    let git_root = project_root(cwd);
     let user_skills = std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|home| absolute(&home.join(AGENTS_DIR_NAME).join("skills")));
@@ -540,6 +542,11 @@ fn ancestor_agent_skill_dirs(cwd: &Path) -> Vec<PathBuf> {
         }
     }
     roots
+}
+
+fn project_root(cwd: &Path) -> Option<&Path> {
+    cwd.ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())
 }
 
 fn discover_skill_files(root: &Path, include_root_md: bool) -> Vec<PathBuf> {
@@ -1107,6 +1114,46 @@ mod tests {
         let plugin = SkillsPlugin::load(SkillLoaderOptions::new(&cwd, &agent_dir));
 
         assert!(plugin.skills().iter().any(|skill| skill.name == "shared"));
+    }
+
+    #[test]
+    fn trusted_projects_load_hermes_native_repo_skills() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path().join("repo");
+        let cwd = repo.join("packages/app");
+        let agent_dir = directory.path().join("agent");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(repo.join(".hermes/skills/release")).unwrap();
+        std::fs::write(
+            repo.join(".hermes/skills/release/SKILL.md"),
+            "---\nname: release\ndescription: release this repository\n---\nbody",
+        )
+        .unwrap();
+
+        let plugin = SkillsPlugin::load(SkillLoaderOptions::new(&cwd, &agent_dir));
+
+        assert!(plugin.skills().iter().any(|skill| skill.name == "release"));
+    }
+
+    #[test]
+    fn untrusted_projects_do_not_load_hermes_native_repo_skills() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path().join("repo");
+        let agent_dir = directory.path().join("agent");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".hermes/skills/release")).unwrap();
+        std::fs::write(
+            repo.join(".hermes/skills/release/SKILL.md"),
+            "---\nname: release\ndescription: release this repository\n---\nbody",
+        )
+        .unwrap();
+        let mut options = SkillLoaderOptions::new(&repo, &agent_dir);
+        options.project_trusted = false;
+
+        let plugin = SkillsPlugin::load(options);
+
+        assert!(!plugin.skills().iter().any(|skill| skill.name == "release"));
     }
 
     #[tokio::test]

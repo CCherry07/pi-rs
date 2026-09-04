@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use pi_agent::{AgentRuntime, AgentTurnContext};
 use pi_core::{
     AbortSignal, AgentContext, ContentBlock, CustomMessageContent, EphemeralCompactionOptions,
-    Message, ModelSelection, StopReason, ThinkingLevel, UserMessage,
+    Message, ModelSelection, StopReason, ThinkingLevel, Usage, UserMessage,
 };
 
 use crate::{PiRuntime, RuntimeCompletionRequest};
@@ -28,7 +28,24 @@ pub(super) struct DetachedCompactor {
 
 pub(super) struct Compaction {
     pub context: Option<AgentContext>,
-    pub input_tokens: u64,
+    pub usage: Usage,
+    pub api_calls: u64,
+}
+
+pub(super) struct CompactionError {
+    pub message: String,
+    pub usage: Box<Usage>,
+    pub api_calls: u64,
+}
+
+impl CompactionError {
+    fn before_request(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            usage: Box::default(),
+            api_calls: 0,
+        }
+    }
 }
 
 impl DetachedCompactor {
@@ -54,10 +71,11 @@ impl DetachedCompactor {
         turn: &AgentTurnContext,
         remaining_input_tokens: Option<u64>,
         signal: AbortSignal,
-    ) -> Result<Compaction, String> {
+    ) -> Result<Compaction, CompactionError> {
         let unchanged = || Compaction {
             context: None,
-            input_tokens: 0,
+            usage: Usage::default(),
+            api_calls: 0,
         };
         let actual_input = input_tokens(&turn.message.usage);
         let pressure = if actual_input > 0 {
@@ -114,7 +132,9 @@ impl DetachedCompactor {
             .saturating_mul(4)
             .min(160_000) as usize;
         if max_chars < 256 {
-            return Err("detached context compaction has no room for summary input".into());
+            return Err(CompactionError::before_request(
+                "detached context compaction has no room for summary input",
+            ));
         }
         let transcript = removed
             .iter()
@@ -127,9 +147,9 @@ impl DetachedCompactor {
             .saturating_add(estimate_text(&prompt))
             .saturating_add(32);
         if remaining_input_tokens.is_some_and(|remaining| estimated_input >= remaining) {
-            return Err(
-                "aggregate input-token budget cannot cover detached context compaction".into(),
-            );
+            return Err(CompactionError::before_request(
+                "aggregate input-token budget cannot cover detached context compaction",
+            ));
         }
         let summary = PiRuntime::complete_once(
             &self.runtime,
@@ -147,7 +167,12 @@ impl DetachedCompactor {
             signal,
         )
         .await
-        .map_err(|error| format!("detached context compaction failed: {error}"))?;
+        .map_err(|error| CompactionError {
+            message: format!("detached context compaction failed: {error}"),
+            usage: Box::default(),
+            api_calls: 1,
+        })?;
+        let summary_usage = summary.usage.clone();
         let summary_text = text_content(&summary.content);
         if summary.error_message.is_some()
             || matches!(
@@ -157,7 +182,11 @@ impl DetachedCompactor {
             || !summary.tool_calls().is_empty()
             || summary_text.trim().is_empty()
         {
-            return Err("detached context compaction returned an incomplete summary; original context retained".into());
+            return Err(CompactionError {
+                message: "detached context compaction returned an incomplete summary; original context retained".into(),
+                usage: Box::new(summary_usage),
+                api_calls: 1,
+            });
         }
         let mut compacted = messages[..head_end].to_vec();
         compacted.push(Message::User(UserMessage::text(
@@ -193,7 +222,8 @@ impl DetachedCompactor {
             // Never replace useful history with a larger or equally large
             // summary. Two ineffective attempts stop further summary calls.
             context: (after < before).then_some(context),
-            input_tokens: input_tokens(&summary.usage),
+            usage: summary_usage,
+            api_calls: 1,
         })
     }
 

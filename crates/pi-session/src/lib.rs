@@ -85,7 +85,7 @@ pub use reducer::*;
 pub use repo::{JsonlSessionRepo, list_jsonl_session_metadata, load_jsonl_session};
 pub use session::{DefaultIdGenerator, IdGenerator, Session, SessionStorage, SessionView};
 pub use types::*;
-pub use usage::{aggregate_session_usage, session_entry_usage};
+pub use usage::{aggregate_document_usage, aggregate_session_usage, session_entry_usage};
 
 pub(crate) fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};

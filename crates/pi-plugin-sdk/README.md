@@ -98,6 +98,12 @@ state and observations belong to plugins, not a core type-erased state bag. Fore
 own state between `agent_start` and `agent_end`; ephemeral callers attach fresh tool-hook-only
 plugin instances to own their private state through completion or cancellation.
 
+`context.session.record_usage(usage, details)` attributes detached provider work to the parent
+session without adding a message or context entry. The host persists it as an explicit signed
+usage adjustment; `details` should identify the task so accounting consumers can distinguish the
+source. It remains available while an awaited shutdown hook is finishing and retires with the
+generation.
+
 `context.session.complete(DirectCompletionRequest { ... }, signal).await` runs one isolated,
 tool-free provider completion using the active session model and request-time credentials. It does
 not append messages, emit agent lifecycle events, or share the main agent's tool loop. Plugins must
@@ -229,7 +235,8 @@ unchanged content reuses one pinned handle, while a rebuilt artifact gets a new 
 The SDK also pins the `serde_json::Value` map representation used by constructor options, so feature
 unification in a host workspace cannot silently change that Rust-ABI type's layout.
 
-The current contract is native ABI **15**. ABI 15 replaces core tool-run state with `ToolContext::run_id()`
+The current contract is native ABI **16**. ABI 16 adds aggregate `usage` and `api_calls` to
+`EphemeralSessionOutcome` plus `SessionContext::record_usage` for parent-session attribution. ABI 15 replaces core tool-run state with `ToolContext::run_id()`
 and adds explicit `EphemeralSessionRequest.plugins` attachments. ABI 14 added `EphemeralCompactionOptions`, execution-origin
 inspection, and typed invocation-private tool state (removed in ABI 15). ABI 13 extended the ephemeral Agent entry
 introduced in ABI 12 with inherited effective prompt/history, optional history-tail digest,
@@ -252,7 +259,9 @@ for each invocation, not reused by cloning a request. The runtime releases its p
 instances on all exit paths; use plugin-owned RAII for cleanup, since cancellation or dropping
 the future can bypass `agent_end`. Cleanup must not spawn detached work.
 Set a positive `timeout` and `max_tool_iterations`; awaiting returns an `EphemeralSessionOutcome`
-with completion, abort, timeout, or failure status. Cancellation and dropping the future abort the
+with completion, abort, timeout, or failure status, aggregate usage from every completed assistant,
+metered tool, and detached compaction call, and the number of provider calls represented by the
+outcome. Cancellation and dropping the future abort the
 temporary Agent; completed tool side effects are not rolled back. The entry works inside awaited
 shutdown hooks without the session-manager lock. Use launch/wait/abort for ordinary managed
 subagents. Rebuild native plugins for the new exact-build context layout.
@@ -283,8 +292,8 @@ ABI 5 added the generation-bound Pi product context shared by agent, tool prepar
 command, provider, and session callbacks. ABI 4 added provider header/response hooks,
 ABI 3 added macro-derived agent hook interests, and ABI 2 added the shared `AgentContext` /
 `added_tool_names` surface. Older artifacts are rejected before any Rust-ABI constructor is
-resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 15 constructors use the
-`pi_{agent,provider,session}_plugin_create_v15` symbols. Rebuild every native plugin against the
+resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 16 constructors use the
+`pi_{agent,provider,session}_plugin_create_v16` symbols. Rebuild every native plugin against the
 current SDK after upgrading the host.
 
 Every factory call creates a fresh instance. Runtime and session reload continue to use the existing

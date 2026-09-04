@@ -1,12 +1,20 @@
 use super::*;
 use crate::store::{FailureOptions, MemoryTarget};
-use pi_core::{EphemeralSessionStatus, Message, ToolCall, ToolCallId, ToolContext, ToolUpdateSink};
+use pi_core::{
+    EphemeralSessionStatus, Message, ResponseMetadata, StopReason, StreamEvent, ToolCall,
+    ToolCallId, ToolContext, ToolUpdateSink, Usage, UsageCost,
+};
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::json;
 
+#[path = "tests/memory_conformance.rs"]
+mod memory_conformance;
+#[path = "tests/review_policy.rs"]
+mod review_policy;
+
 fn plugin(root: &Path, config: HermesMemoryConfig) -> Arc<HermesMemoryPlugin> {
-    let store =
-        HermesMemoryStore::load(root.join("agent"), root, config.clone(), Vec::new()).unwrap();
+    let store = HermesMemoryStore::load(root.join("agent"), root, config.clone(), Vec::new(), true)
+        .unwrap();
     Arc::new(HermesMemoryPlugin {
         store: Arc::new(store),
         config,
@@ -19,6 +27,46 @@ fn plugin(root: &Path, config: HermesMemoryConfig) -> Arc<HermesMemoryPlugin> {
     })
 }
 
+#[test]
+fn project_skills_are_repo_local_and_require_project_trust() {
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().join("repo");
+    let agent_dir = root.path().join("agent");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let config = HermesMemoryConfig::default();
+    let trusted =
+        HermesMemoryStore::load(&agent_dir, &repo, config.clone(), Vec::new(), true).unwrap();
+    let skill = trusted
+        .create_skill(crate::skills::SkillCreate {
+            scope: crate::skills::SkillScope::Project,
+            name: "release-repository".into(),
+            description: "Release this repository".into(),
+            body: "Run the repository release checks.".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        skill.path,
+        std::fs::canonicalize(&repo)
+            .unwrap()
+            .join(".hermes/skills/release-repository/SKILL.md")
+    );
+
+    let untrusted = HermesMemoryStore::load(&agent_dir, &repo, config, Vec::new(), false).unwrap();
+    let error = untrusted
+        .create_skill(crate::skills::SkillCreate {
+            scope: crate::skills::SkillScope::Project,
+            name: "untrusted".into(),
+            description: "Must not write into an untrusted repository".into(),
+            body: "Do not create this file.".into(),
+        })
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::skills::SkillError::ProjectUnavailable
+    ));
+    assert!(!repo.join(".hermes/skills/untrusted/SKILL.md").exists());
+}
+
 fn call(name: &str, args: serde_json::Value) -> ScriptedTurn {
     ScriptedTurn::ToolCalls(vec![ToolCall::new(format!("private-{name}"), name, args)])
 }
@@ -27,6 +75,52 @@ fn create() -> ScriptedTurn {
         "skill_manage",
         json!({"action":"create","name":"cargo-validation","description":"Validate Rust changes with Cargo","content":"## Procedure\\nRun cargo check."}),
     )
+}
+
+fn call_with_usage(name: &str, args: serde_json::Value, usage: Usage) -> ScriptedTurn {
+    ScriptedTurn::Events(vec![
+        StreamEvent::Start {
+            metadata: ResponseMetadata::new("scripted".into(), "test".into(), "scripted", 0),
+        },
+        StreamEvent::ToolCallStart {
+            content_index: 0,
+            id: ToolCallId::new(format!("private-{name}")),
+            name: name.to_string(),
+        },
+        StreamEvent::ToolCallDelta {
+            content_index: 0,
+            arguments_delta: args.to_string(),
+        },
+        StreamEvent::ToolCallEnd {
+            content_index: 0,
+            thought_signature: None,
+        },
+        StreamEvent::Done {
+            reason: StopReason::ToolUse,
+            usage,
+        },
+    ])
+}
+
+fn text_with_usage(text: &str, usage: Usage) -> ScriptedTurn {
+    ScriptedTurn::Events(vec![
+        StreamEvent::Start {
+            metadata: ResponseMetadata::new("scripted".into(), "test".into(), "scripted", 0),
+        },
+        StreamEvent::TextStart { content_index: 0 },
+        StreamEvent::TextDelta {
+            content_index: 0,
+            delta: text.to_string(),
+        },
+        StreamEvent::TextEnd {
+            content_index: 0,
+            text_signature: None,
+        },
+        StreamEvent::Done {
+            reason: StopReason::Stop,
+            usage,
+        },
+    ])
 }
 
 async fn session(
@@ -142,7 +236,7 @@ async fn settled(plugin: &HermesMemoryPlugin) {
 }
 
 #[tokio::test]
-async fn automatic_review_compacts_long_history_and_keeps_the_parent_journal_unchanged() {
+async fn automatic_review_compacts_long_history_and_only_adds_parent_usage_accounting() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("context.txt"), "Verify with cargo test.").unwrap();
     let plugin = plugin(
@@ -183,7 +277,7 @@ async fn automatic_review_compacts_long_history_and_keeps_the_parent_journal_unc
     session.prompt("Finish the verification.").await.unwrap();
     let parent_messages = session.runtime().agent().state().messages;
     let journal_path = root.path().join("session.jsonl");
-    let parent_journal = std::fs::read(&journal_path).unwrap();
+    let parent_entries = session.log().load().unwrap().entries;
     settled(&plugin).await;
 
     let requests = provider.requests();
@@ -218,7 +312,27 @@ async fn automatic_review_compacts_long_history_and_keeps_the_parent_journal_unc
         vec!["Validate Rust changes with cargo test."]
     );
     assert_eq!(session.runtime().agent().state().messages, parent_messages);
-    assert_eq!(std::fs::read(&journal_path).unwrap(), parent_journal);
+    let document = session.log().load().unwrap();
+    assert_eq!(document.entries, parent_entries);
+    let review_usage = document
+        .records
+        .iter()
+        .filter_map(|record| {
+            let pi_session::LaneRecordEntry::Usage(usage) = &record.record else {
+                return None;
+            };
+            let pi_session::UsageAttribution::Adjustment {
+                details: Some(details),
+                ..
+            } = &usage.attribution
+            else {
+                return None;
+            };
+            (details.get("task") == Some(&json!("background_review"))).then_some((usage, details))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(review_usage.len(), 1);
+    assert_eq!(review_usage[0].1["apiCalls"], 4);
     assert_eq!(
         walkdir::WalkDir::new(root.path())
             .into_iter()
@@ -228,10 +342,10 @@ async fn automatic_review_compacts_long_history_and_keeps_the_parent_journal_unc
         1,
         "background compaction must not materialize or rotate a session"
     );
+    let parent_journal = std::fs::read_to_string(journal_path).unwrap();
     assert!(
-        !String::from_utf8(parent_journal)
-            .unwrap()
-            .contains("Private context summary")
+        !parent_journal.contains("Private context summary"),
+        "private compaction text must not leak into the parent journal"
     );
     session.shutdown().await;
 }
@@ -568,6 +682,287 @@ async fn background_review_preserves_context_reads_and_writes_skills_without_ses
             .iter()
             .any(|m| matches!(m, Message::ToolResult(r) if r.tool_name == "memory"))
     );
+}
+
+#[tokio::test]
+async fn manual_refine_bypasses_automatic_gate_records_usage_and_reports_verbose_actions() {
+    let root = tempfile::tempdir().unwrap();
+    let plugin = plugin(
+        root.path(),
+        HermesMemoryConfig {
+            review_enabled: false,
+            nudge_interval: 1,
+            skill_nudge_interval: 1,
+            memory_notifications: crate::config::MemoryNotificationMode::Verbose,
+            ..HermesMemoryConfig::default()
+        },
+    );
+    let review_call_usage = Usage {
+        input: 11,
+        output: 2,
+        cache_read: 13,
+        cache_write: 5,
+        total_tokens: 31,
+        cost: UsageCost {
+            total: 0.12,
+            ..UsageCost::default()
+        },
+        ..Usage::default()
+    };
+    let review_final_usage = Usage {
+        input: 7,
+        output: 3,
+        cache_read: 17,
+        cache_write: 0,
+        total_tokens: 27,
+        cost: UsageCost {
+            total: 0.08,
+            ..UsageCost::default()
+        },
+        ..Usage::default()
+    };
+    let (session, provider) = session(
+        root.path(),
+        plugin.clone(),
+        vec![
+            ScriptedTurn::Text("Foreground complete.".into()),
+            call_with_usage(
+                "memory",
+                json!({
+                    "action": "add",
+                    "target": "memory",
+                    "content": "User prefers terse replies",
+                }),
+                review_call_usage,
+            ),
+            text_with_usage("Review complete.", review_final_usage),
+        ],
+    )
+    .await;
+    session
+        .prompt("Learn my response preference.")
+        .await
+        .unwrap();
+    settled(&plugin).await;
+    assert_eq!(provider.requests().len(), 1, "automatic review is disabled");
+    let parent_messages = session.runtime().agent().state().messages;
+    let parent_entries = session.log().load().unwrap().entries;
+    let mut subscription = session.subscribe();
+
+    assert!(matches!(
+        session
+            .submit("/refine save my terse-response preference")
+            .await
+            .unwrap(),
+        pi_session::SubmitOutcome::Handled
+    ));
+    settled(&plugin).await;
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    let request_json = serde_json::to_string(&requests[1].messages).unwrap();
+    assert!(request_json.contains("save my terse-response preference"));
+    assert!(request_json.contains("explicitly requested"));
+    assert_eq!(session.runtime().agent().state().messages, parent_messages);
+    let document = session.log().load().unwrap();
+    assert_eq!(document.entries, parent_entries);
+    assert_eq!(
+        plugin.store.entries(MemoryTarget::Memory).unwrap(),
+        ["User prefers terse replies"]
+    );
+    let recorded = document
+        .records
+        .iter()
+        .filter_map(|record| match &record.record {
+            pi_session::LaneRecordEntry::Usage(usage) => Some(usage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].usage.input, 18);
+    assert_eq!(recorded[0].usage.output, 5);
+    assert_eq!(recorded[0].usage.cache_read, 30);
+    assert_eq!(recorded[0].usage.cache_write, 5);
+    assert!((recorded[0].usage.cost.total - 0.20).abs() < f64::EPSILON);
+    assert!(matches!(
+        &recorded[0].attribution,
+        pi_session::UsageAttribution::Adjustment { details: Some(details), .. }
+            if details["task"] == "background_review"
+                && details["apiCalls"] == 2
+                && details["provider"] == "scripted"
+                && details["model"] == "test"
+    ));
+    let notices = std::iter::from_fn(|| subscription.events.try_recv().ok())
+        .filter_map(|event| match event.event {
+            pi_session::AgentSessionEvent::PluginNotice { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains("Reviewing this conversation in the background"))
+    );
+    assert!(notices.iter().any(|notice| {
+        notice.contains("Self-improvement review")
+            && notice.contains("Memory ➕ User prefers terse replies")
+    }));
+    session.shutdown().await;
+}
+
+#[tokio::test]
+async fn bare_manual_refine_runs_with_reviews_disabled_and_honors_notifications_off() {
+    let root = tempfile::tempdir().unwrap();
+    let plugin = plugin(
+        root.path(),
+        HermesMemoryConfig {
+            review_enabled: false,
+            nudge_interval: 0,
+            skill_nudge_interval: 0,
+            memory_notifications: crate::config::MemoryNotificationMode::Off,
+            ..HermesMemoryConfig::default()
+        },
+    );
+    let (session, provider) = session(
+        root.path(),
+        plugin.clone(),
+        vec![
+            ScriptedTurn::Text("Foreground complete.".into()),
+            call(
+                "memory",
+                json!({"action":"add","content":"Run the focused tests first."}),
+            ),
+            ScriptedTurn::Text("Review complete.".into()),
+        ],
+    )
+    .await;
+    session.prompt("Finish the implementation.").await.unwrap();
+    settled(&plugin).await;
+    assert_eq!(provider.requests().len(), 1);
+    let mut subscription = session.subscribe();
+
+    assert!(matches!(
+        session.submit("/refine").await.unwrap(),
+        pi_session::SubmitOutcome::Handled
+    ));
+    settled(&plugin).await;
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        !serde_json::to_string(&requests[1].messages)
+            .unwrap()
+            .contains("explicitly requested")
+    );
+    assert_eq!(
+        plugin.store.entries(MemoryTarget::Memory).unwrap(),
+        ["Run the focused tests first."]
+    );
+    let notices = std::iter::from_fn(|| subscription.events.try_recv().ok())
+        .filter_map(|event| match event.event {
+            pi_session::AgentSessionEvent::PluginNotice { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains("Reviewing this conversation in the background"))
+    );
+    assert!(
+        notices
+            .iter()
+            .all(|notice| !notice.contains("Self-improvement review")),
+        "off suppresses successful action notifications"
+    );
+    session.shutdown().await;
+}
+
+#[tokio::test]
+async fn manual_refine_records_completed_usage_when_a_later_review_call_fails() {
+    let root = tempfile::tempdir().unwrap();
+    let plugin = plugin(
+        root.path(),
+        HermesMemoryConfig {
+            review_enabled: false,
+            memory_notifications: crate::config::MemoryNotificationMode::Off,
+            ..HermesMemoryConfig::default()
+        },
+    );
+    let completed_usage = Usage {
+        input: 9,
+        output: 2,
+        cache_read: 15,
+        cache_write: 4,
+        reasoning: Some(3),
+        total_tokens: 30,
+        cost: UsageCost {
+            total: 0.17,
+            ..UsageCost::default()
+        },
+        ..Usage::default()
+    };
+    let (session, _) = session(
+        root.path(),
+        plugin.clone(),
+        vec![
+            ScriptedTurn::Text("Foreground complete.".into()),
+            call_with_usage(
+                "memory",
+                json!({"action":"add","content":"Keep verified review receipts."}),
+                completed_usage,
+            ),
+            ScriptedTurn::Error("review provider failed".into()),
+        ],
+    )
+    .await;
+    session.prompt("Remember this lesson.").await.unwrap();
+    let mut subscription = session.subscribe();
+
+    assert!(matches!(
+        session.submit("/refine").await.unwrap(),
+        pi_session::SubmitOutcome::Handled
+    ));
+    settled(&plugin).await;
+
+    let document = session.log().load().unwrap();
+    let (usage, details) = document
+        .records
+        .iter()
+        .find_map(|record| match &record.record {
+            pi_session::LaneRecordEntry::Usage(usage) => match &usage.attribution {
+                pi_session::UsageAttribution::Adjustment {
+                    details: Some(details),
+                    ..
+                } if details["task"] == "background_review" => Some((&usage.usage, details)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("completed review work is billed even when a later call fails");
+    assert_eq!(usage.input, 9);
+    assert_eq!(usage.output, 2);
+    assert_eq!(usage.cache_read, 15);
+    assert_eq!(usage.cache_write, 4);
+    assert_eq!(usage.reasoning, Some(3));
+    assert!((usage.cost.total - 0.17).abs() < f64::EPSILON);
+    assert_eq!(details["apiCalls"], 2);
+    assert_eq!(
+        plugin.store.entries(MemoryTarget::Memory).unwrap(),
+        ["Keep verified review receipts."]
+    );
+    let notices = std::iter::from_fn(|| subscription.events.try_recv().ok())
+        .filter_map(|event| match event.event {
+            pi_session::AgentSessionEvent::PluginNotice { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains("review provider failed"))
+    );
+    session.shutdown().await;
 }
 
 #[tokio::test]
@@ -1202,7 +1597,11 @@ async fn foreground_tool_created_skills_are_curatable_but_pinned_skills_are_not(
         |m| matches!(m, Message::ToolResult(r) if r.tool_name == "skill_manage" && r.is_error)
     ));
     assert!(
-        transport::action_summary(&result.messages).is_empty(),
+        transport::action_summary_with_mode(
+            &result.messages,
+            crate::config::MemoryNotificationMode::On,
+        )
+        .is_empty(),
         "Reads and failed writes must not be reported as mutations"
     );
 }
