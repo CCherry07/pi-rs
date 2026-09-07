@@ -713,7 +713,7 @@ impl SessionContextAccess for PiPluginContext {
         data: Option<Value>,
     ) -> Result<(), PluginContextError> {
         self.session()?
-            .append_custom_entry(custom_type, data)
+            .append_custom_entry_from_plugin(custom_type, data)
             .map_err(context_failed)?;
         Ok(())
     }

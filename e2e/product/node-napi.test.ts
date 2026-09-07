@@ -58,6 +58,49 @@ test("runs a TypeScript extension through Node, NAPI, Rust, and a tool loop", as
   assert.match(result.sessionLog, /Frontend NAPI product e2e passed/);
 });
 
+test("accepts BotMux launch arguments and persists its agent_settled marker", async () => {
+  const sessionId = "018f4f7c-7f4a-7000-8000-botmux000001";
+  const result = await runProductScenario({
+    adapter: "node-napi",
+    projectFixture: projectDirectory,
+    extensions: [".pi/extensions/botmux-turn-boundary.ts"],
+    input: "@botmux-prompt.md",
+    providerTurns: [{ text: "BotMux-compatible response." }],
+    sessionId,
+    sessionName: "BotMux compatibility",
+  });
+
+  assert.ok(result.sessionPath?.endsWith(`_${sessionId}.jsonl`));
+  assert.ok(result.sessionLog);
+  const mutations = result.sessionLog
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as JsonObject);
+  assert.equal(mutations[0]?.id, sessionId);
+  assert.ok(
+    mutations.some(
+      (mutation) =>
+        mutation.kind === "fact" &&
+        mutation.fact === "name" &&
+        mutation.name === "BotMux compatibility",
+    ),
+  );
+  const settled = mutations.find(
+    (mutation) =>
+      mutation.kind === "entry" &&
+      mutation.customType === "botmux-turn-settled",
+  );
+  assert.ok(settled, "agent_settled must append BotMux's durable turn marker");
+  assert.equal(typeof settled.timestamp, "string");
+  assert.match(String(settled.timestamp), /^\d{4}-\d{2}-\d{2}T/);
+
+  const firstMessages = arrayField(result.providerRequests[0], "messages");
+  assert.match(
+    stringField(firstMessages.at(-1), "content") ?? "",
+    /<file name=".*botmux-prompt\.md">\n# BotMux task/,
+  );
+});
+
 function hasProductEvent(events: JsonObject[], type: string): boolean {
   return events.some((entry) => stringField(entry, "type") === type);
 }

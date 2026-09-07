@@ -232,6 +232,14 @@ Sessions use the Pi v4 JSONL format. A new session exists in memory immediately,
 created only after the first assistant response completes. Quitting before that response, or using
 only shell shorthand, does not leave an empty resume entry.
 
+External orchestrators can use `--session-id <id>` to reopen an exact current-project session or
+create a deferred `..._<id>.jsonl` session when it is missing. `--name`/`-n` sets its display name,
+and a text `@file` argument expands to Pi's file prompt markup. These flags are accepted by the Node
+launcher as built-ins, so an extension such as BotMux's turn-boundary hook can receive
+`agent_settled` and append its durable custom entry through NAPI. Use the installed npm `pi`
+command—or `./scripts/pi-dev` from a checkout—for that flow; the standalone Rust binary does not
+host JavaScript.
+
 The product supports:
 
 - session discovery and `/resume`;

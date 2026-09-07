@@ -38,7 +38,9 @@ pub(super) fn cached_transcript_layout(
 ) -> Arc<CachedTranscriptLayout> {
     let show_working_placeholder = app.streaming_assistant.is_none()
         && !app.compacting
-        && (app.working_started_at.is_some() || app.awaiting_assistant || app.status == "Working…");
+        && (app.working_started_at.is_some()
+            || app.awaiting_assistant
+            || app.status == "Working...");
     let key = TranscriptLayoutKey {
         width,
         gutter,
@@ -1560,7 +1562,7 @@ pub(super) fn draw_footer(
             Style::default().fg(Color::Magenta),
         ));
     }
-    if !matches!(app.status.as_str(), "Ready" | "Working…") {
+    if !matches!(app.status.as_str(), "Ready" | "Working...") {
         spans.push(footer_separator());
         spans.push(Span::styled(
             app.status.clone(),
@@ -2076,7 +2078,7 @@ pub(super) fn working_status_line(
             .fg(leading_color)
             .add_modifier(Modifier::BOLD),
     )];
-    for (index, character) in "Working".chars().enumerate() {
+    for (index, character) in "Working...".chars().enumerate() {
         spans.push(Span::styled(
             character.to_string(),
             Style::default()

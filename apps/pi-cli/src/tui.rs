@@ -1555,7 +1555,7 @@ async fn run_loop(
         app.input_history.record(&prompt);
         app.awaiting_assistant = true;
         app.working_started_at = Some(Instant::now());
-        app.status = "Working…".to_string();
+        app.status = "Working...".to_string();
         spawn_effect(
             Arc::clone(&session),
             session_handle.clone(),
@@ -3047,24 +3047,27 @@ mod tests {
         let first = working_status_line(TerminalAppearance::Light, 0, 65);
         let next = working_status_line(TerminalAppearance::Light, 1, 65);
 
-        assert_eq!(first.to_string(), "• Working (1m 05s • esc to interrupt)");
+        assert_eq!(
+            first.to_string(),
+            "• Working... (1m 05s • esc to interrupt)"
+        );
         assert_eq!(format_elapsed_compact(0), "0s");
         assert_eq!(format_elapsed_compact(59), "59s");
         assert_eq!(format_elapsed_compact(3601), "1h 00m 01s");
         assert_eq!(first.spans[0].style.fg, first.spans[1].style.fg);
         assert_eq!(next.spans[0].style.fg, next.spans[1].style.fg);
         assert!(first.spans[0].style.add_modifier.contains(Modifier::BOLD));
-        let first_colors = first.spans[1..=7]
+        let first_colors = first.spans[1..=10]
             .iter()
             .map(|span| span.style.fg)
             .collect::<Vec<_>>();
-        let next_colors = next.spans[1..=7]
+        let next_colors = next.spans[1..=10]
             .iter()
             .map(|span| span.style.fg)
             .collect::<Vec<_>>();
         assert_ne!(first_colors, next_colors);
         assert!(
-            first.spans[1..=7]
+            first.spans[1..=10]
                 .iter()
                 .all(|span| { span.style.add_modifier.contains(Modifier::BOLD) })
         );
@@ -3087,7 +3090,7 @@ mod tests {
     fn local_working_status_renders_a_transcript_placeholder_before_session_events() {
         let mut app = demo_app();
         app.transcript.clear();
-        app.status = "Working…".to_string();
+        app.status = "Working...".to_string();
         app.working_started_at = Instant::now().checked_sub(Duration::from_secs(5));
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -3106,7 +3109,7 @@ mod tests {
             .is_some(),
             "the transcript should acknowledge submission before any provider event arrives"
         );
-        assert!(render_app(&app, 80, 12).contains("Working (5s • esc to interrupt)"));
+        assert!(render_app(&app, 80, 12).contains("Working... (5s • esc to interrupt)"));
     }
 
     #[test]
@@ -3145,7 +3148,7 @@ mod tests {
         }];
         app.streaming_assistant = Some(0);
         app.awaiting_assistant = true;
-        app.status = "Working…".to_string();
+        app.status = "Working...".to_string();
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         let palette = UiPalette::from_background(Some(RgbColor::new(0, 0, 0)));

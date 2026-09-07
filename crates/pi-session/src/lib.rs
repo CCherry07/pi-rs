@@ -84,7 +84,9 @@ pub use plugin_context::{
     PluginUiBridge,
 };
 pub use reducer::*;
-pub use repo::{JsonlSessionRepo, list_jsonl_session_metadata, load_jsonl_session};
+pub use repo::{
+    ExactSessionIdResolution, JsonlSessionRepo, list_jsonl_session_metadata, load_jsonl_session,
+};
 pub use session::{DefaultIdGenerator, IdGenerator, Session, SessionStorage, SessionView};
 pub use types::*;
 pub use usage::{aggregate_document_usage, aggregate_session_usage, session_entry_usage};

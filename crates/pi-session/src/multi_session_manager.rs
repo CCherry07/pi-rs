@@ -117,6 +117,20 @@ impl MultiSessionManager {
         .await
     }
 
+    pub async fn create_session_with_id(
+        &self,
+        cwd: impl Into<PathBuf>,
+        path: impl Into<PathBuf>,
+        session_id: impl Into<String>,
+    ) -> Result<PiSession, MultiSessionManagerError> {
+        self.acquire(
+            AgentSessionRuntimeTarget::create_with_id(cwd, path, session_id),
+            ExistingSessionPolicy::Reject,
+            SessionGenerationOverlay::default(),
+        )
+        .await
+    }
+
     /// Creates a session with transient factories layered onto every runtime
     /// generation owned by the returned handle.
     pub async fn create_session_with_overlay(

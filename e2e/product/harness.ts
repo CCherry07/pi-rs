@@ -1,5 +1,13 @@
 import { spawn } from "node:child_process";
-import { access, cp, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  access,
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+} from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -24,12 +32,15 @@ export interface ProductScenario {
   providerTurns: ProviderTurn[];
   projectFixture?: string;
   extensions?: string[];
+  sessionId?: string;
+  sessionName?: string;
 }
 
 export interface ProductRun {
   events: JsonObject[];
   providerRequests: JsonObject[];
   sessionLog: string | null;
+  sessionPath: string | null;
   stderr: string;
   stdout: string;
 }
@@ -96,8 +107,10 @@ export async function runProductScenario(
       projectPath,
       "--agent-dir",
       agentDirectory,
-      "--session",
-      sessionPath,
+      ...(scenario.sessionId
+        ? ["--session-id", scenario.sessionId]
+        : ["--session", sessionPath]),
+      ...(scenario.sessionName ? ["--name", scenario.sessionName] : []),
       "--no-approve",
       "--no-extensions",
       ...(scenario.extensions ?? []).flatMap((extension) => [
@@ -126,11 +139,17 @@ export async function runProductScenario(
     provider.assertHealthy();
 
     const events = parseNdjson(result.stdout);
-    const sessionLog = await readOptionalFile(sessionPath);
+    const resolvedSessionPath = scenario.sessionId
+      ? await findSessionById(agentDirectory, scenario.sessionId)
+      : sessionPath;
+    const sessionLog = resolvedSessionPath
+      ? await readOptionalFile(resolvedSessionPath)
+      : null;
     return {
       events,
       providerRequests: provider.requests,
       sessionLog,
+      sessionPath: resolvedSessionPath,
       stderr: result.stderr,
       stdout: result.stdout,
     };
@@ -138,6 +157,31 @@ export async function runProductScenario(
     await provider.close();
     await rm(root, { recursive: true, force: true });
   }
+}
+
+async function findSessionById(
+  agentDirectory: string,
+  sessionId: string,
+): Promise<string | null> {
+  const root = join(agentDirectory, "sessions");
+  const suffix = `_${sessionId}.jsonl`;
+  const pending = [root];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    if (!directory) break;
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(path);
+      else if (entry.name.endsWith(suffix)) return path;
+    }
+  }
+  return null;
 }
 
 class ScriptedOpenAiServer {

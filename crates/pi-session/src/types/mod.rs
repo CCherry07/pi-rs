@@ -14,6 +14,49 @@ pub use wire::*;
 pub const SESSION_SCHEMA_VERSION: u32 = 4;
 pub const MAIN_LANE: &str = "main";
 
+pub(crate) mod iso_timestamp_ms {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Timestamp {
+        Milliseconds(i64),
+        Iso(String),
+    }
+
+    pub fn serialize<S>(timestamp_ms: &i64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let timestamp = OffsetDateTime::from_unix_timestamp_nanos(
+            i128::from(*timestamp_ms).saturating_mul(1_000_000),
+        )
+        .map_err(serde::ser::Error::custom)?;
+        serializer.serialize_str(
+            &timestamp
+                .format(&Rfc3339)
+                .map_err(serde::ser::Error::custom)?,
+        )
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<i64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match Timestamp::deserialize(deserializer)? {
+            Timestamp::Milliseconds(value) => Ok(value),
+            Timestamp::Iso(value) => {
+                let timestamp =
+                    OffsetDateTime::parse(&value, &Rfc3339).map_err(serde::de::Error::custom)?;
+                i64::try_from(timestamp.unix_timestamp_nanos() / 1_000_000)
+                    .map_err(serde::de::Error::custom)
+            }
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error("session I/O failed: {0}")]
@@ -457,7 +500,7 @@ pub struct LaneRecord {
     pub id: String,
     pub seq: u64,
     pub lane: String,
-    #[serde(rename = "timestamp")]
+    #[serde(rename = "timestamp", with = "iso_timestamp_ms")]
     pub timestamp_ms: i64,
     #[serde(flatten)]
     pub record: LaneRecordEntry,
@@ -720,7 +763,7 @@ mod tests {
                 id: "entry-1".to_string(),
                 seq: 1,
                 parent_id: None,
-                timestamp_ms: 100,
+                timestamp_ms: 1_700_000_000_123,
                 entry: SessionEntry::Custom(CustomEntry {
                     custom_type: "note".to_string(),
                     data: Some(json!({"text": "hello"})),
@@ -736,7 +779,7 @@ mod tests {
                 "id": "entry-1",
                 "seq": 1,
                 "parentId": null,
-                "timestamp": 100,
+                "timestamp": "2023-11-14T22:13:20.123Z",
                 "customType": "note",
                 "data": {"text": "hello"}
             })
@@ -747,7 +790,7 @@ mod tests {
                 id: "run-1".to_string(),
                 seq: 2,
                 lane: "main".to_string(),
-                timestamp_ms: 101,
+                timestamp_ms: 1_700_000_000_124,
                 record: LaneRecordEntry::OperationStarted {
                     source_leaf_id: None,
                     intent: OperationIntent::Run {
@@ -767,11 +810,27 @@ mod tests {
                 "id": "run-1",
                 "seq": 2,
                 "lane": "main",
-                "timestamp": 101,
+                "timestamp": "2023-11-14T22:13:20.124Z",
                 "sourceLeafId": null,
                 "intent": {"kind": "run", "originalPrompt": [], "initialMessages": []}
             })
         );
+
+        let legacy_numeric: SessionMutation = serde_json::from_value(json!({
+            "kind": "entry",
+            "lane": "main",
+            "type": "custom",
+            "id": "legacy-entry",
+            "seq": 4,
+            "parentId": null,
+            "timestamp": 1_700_000_000_125_i64,
+            "customType": "legacy"
+        }))
+        .unwrap();
+        let SessionMutation::Entry { record, .. } = legacy_numeric else {
+            panic!("expected entry mutation");
+        };
+        assert_eq!(record.timestamp_ms, 1_700_000_000_125);
 
         assert_eq!(
             serde_json::to_value(SessionMutation::Fact {

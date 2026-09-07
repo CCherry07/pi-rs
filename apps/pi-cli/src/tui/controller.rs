@@ -856,7 +856,7 @@ pub(super) fn submit_editor(
     app.command_palette.get_mut().reset();
     app.awaiting_assistant = true;
     app.working_started_at = Some(Instant::now());
-    app.status = "Working…".to_string();
+    app.status = "Working...".to_string();
     spawn_effect(
         Arc::clone(session),
         session_handle.clone(),

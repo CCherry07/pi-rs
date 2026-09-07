@@ -26,6 +26,8 @@ pub enum AgentError {
     ResetWhileRunning,
     #[error("cannot configure while agent is running")]
     ConfigureWhileRunning,
+    #[error("agent turn control has already been composed")]
+    TurnControlAlreadyComposed,
     #[error("agent configuration is invalid: {0}")]
     InvalidConfiguration(String),
     #[error("agent loop failed: {0}")]
@@ -257,6 +259,7 @@ struct AgentInner {
     session_id: RwLock<Option<String>>,
     effective_prompt: RwLock<Option<String>>,
     convert_to_llm: RwLock<ConvertToLlm>,
+    composed_turn_control: RwLock<Option<Arc<dyn AgentTurnControl>>>,
     config: AgentOptions,
 }
 
@@ -358,9 +361,49 @@ impl Agent {
                 session_id: RwLock::new(None),
                 effective_prompt: RwLock::new(None),
                 convert_to_llm: RwLock::new(options.convert_to_llm.clone()),
+                composed_turn_control: RwLock::new(None),
                 config: options,
             }),
         }
+    }
+
+    /// Permanently composes one product controller over the configured controller.
+    ///
+    /// This is a construction seam for an owning product such as an agent
+    /// session. Composition is restricted to an idle agent and may happen only
+    /// once for the lifetime of that agent.
+    pub fn compose_turn_control<F>(&self, compose: F) -> Result<(), AgentError>
+    where
+        F: FnOnce(Arc<dyn AgentTurnControl>) -> Arc<dyn AgentTurnControl>,
+    {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.snapshot.is_running {
+            return Err(AgentError::ConfigureWhileRunning);
+        }
+        let mut composed = self
+            .inner
+            .composed_turn_control
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if composed.is_some() {
+            return Err(AgentError::TurnControlAlreadyComposed);
+        }
+        *composed = Some(compose(Arc::clone(&self.inner.config.turn_control)));
+        Ok(())
+    }
+
+    fn active_turn_control(&self) -> Arc<dyn AgentTurnControl> {
+        self.inner
+            .composed_turn_control
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(&self.inner.config.turn_control))
     }
 
     pub async fn prompt(
@@ -856,7 +899,7 @@ impl Agent {
             plugins: Arc::clone(runtime.plugins()),
             provider_plugins: Arc::clone(runtime.provider_plugins()),
             queues: queue_adapter,
-            turn_control: Arc::clone(&self.inner.config.turn_control),
+            turn_control: self.active_turn_control(),
             telemetry: self.inner.config.telemetry.clone(),
             events: Arc::clone(&events),
         };

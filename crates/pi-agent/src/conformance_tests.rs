@@ -1489,6 +1489,81 @@ async fn prepare_next_turn_replaces_run_local_context_model_and_thinking() {
 }
 
 #[tokio::test]
+async fn permanent_turn_control_composes_once_over_the_configured_controller() {
+    let executions = Arc::new(Mutex::new(Vec::new()));
+    let configured_calls = Arc::new(AtomicUsize::new(0));
+    let composed_calls = Arc::new(AtomicUsize::new(0));
+    let configured = Arc::new(FnTurnControl::new().with_prepare_next_turn({
+        let configured_calls = Arc::clone(&configured_calls);
+        move |_context, _signal| {
+            let configured_calls = Arc::clone(&configured_calls);
+            async move {
+                configured_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(None)
+            }
+        }
+    }));
+    let (agent, _) = build_agent(
+        [
+            ScriptedTurn::ToolCalls(vec![ToolCall::new(
+                "composed-turn-1",
+                "record",
+                json!({"value": "first"}),
+            )]),
+            ScriptedTurn::Text("first done".to_string()),
+            ScriptedTurn::ToolCalls(vec![ToolCall::new(
+                "composed-turn-2",
+                "record",
+                json!({"value": "second"}),
+            )]),
+            ScriptedTurn::Text("second done".to_string()),
+        ],
+        vec![Arc::new(ToolPlugin::one(
+            "composed-turn-tool",
+            Arc::new(RecordingTool {
+                name: "record",
+                executions,
+            }),
+        ))],
+        AgentOptions {
+            active_tools: vec!["record".to_string()],
+            turn_control: configured,
+            ..AgentOptions::default()
+        },
+    );
+
+    agent
+        .compose_turn_control({
+            let composed_calls = Arc::clone(&composed_calls);
+            move |previous| {
+                Arc::new(
+                    FnTurnControl::new().with_prepare_next_turn(move |context, signal| {
+                        let previous = Arc::clone(&previous);
+                        let composed_calls = Arc::clone(&composed_calls);
+                        async move {
+                            composed_calls.fetch_add(1, Ordering::SeqCst);
+                            previous.prepare_next_turn(context, signal).await
+                        }
+                    }),
+                )
+            }
+        })
+        .unwrap();
+
+    agent.prompt("first").await.unwrap();
+    assert_eq!(configured_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(composed_calls.load(Ordering::SeqCst), 1);
+
+    assert!(matches!(
+        agent.compose_turn_control(|previous| previous),
+        Err(crate::agent::AgentError::TurnControlAlreadyComposed)
+    ));
+    agent.prompt("second").await.unwrap();
+    assert_eq!(configured_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(composed_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn turn_control_closures_share_snapshots_and_isolate_copy_on_write_changes() {
     let observations = Arc::new(Mutex::new(Vec::new()));
     let shared_snapshots = Arc::new(Mutex::new(None::<(Weak<AgentContext>, Weak<Vec<Message>>)>));

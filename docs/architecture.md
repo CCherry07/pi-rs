@@ -252,7 +252,7 @@ configuration files or plugin ID conventions.
 7. `before_agent_start` runs once per prompt/continue invocation in registration order; prompt replacements chain and injected messages are accumulated for that run only. Hook errors are diagnosed and skipped without discarding earlier replacements.
 8. `context` runs before every provider request and chains message replacements without mutating the persisted transcript. Hook errors are diagnosed and later hooks still run.
 9. `tool_result` receives that same batch context and chains content, details, usage, `added_tool_names`, and error patches. Hook errors are diagnosed and skipped; they do not rewrite a successfully executed tool result into a failure. `added_tool_names` then survives the tool-result message and session/provider projection. Legacy before/after tool hooks remain compatible.
-10. Lifecycle events are delivered through independent plugin methods (`agent_start/end/settled`, `turn_start/end`, `message_start/update/end`, and `tool_execution_start/update/end`) in registration order. `agent_start`/`agent_end` belong to each low-level run, while session orchestration emits `agent_settled` once no automatic retry, compaction, or queued continuation remains and before publishing the product settled event. Turns use a zero-based per-run index and `turn_start` also carries its millisecond timestamp. `message_end` may replace a message while preserving its role; each valid replacement becomes the next hook's input and the final message is used by Agent state, listeners, provider context, tool scheduling, and persistence. Observer errors and invalid cross-role replacements are diagnosed and skipped without failing the run.
+10. Lifecycle events are delivered through independent plugin methods (`agent_start/end/settled`, `turn_start/end`, `message_start/update/end`, and `tool_execution_start/update/end`) in registration order. `agent_start`/`agent_end` belong to each low-level run, while session orchestration emits `agent_settled` once no automatic retry, compaction, or queued continuation remains and before publishing the product settled event. Turns use a zero-based per-run index and `turn_start` also carries its millisecond timestamp. `message_end` may replace a message while preserving its role; each valid replacement becomes the next hook's input and the final message is used by Agent state, listeners, provider context, tool scheduling, and persistence. A validated plugin context may append extension state while the owning prompt operation still holds its outer gate, including during `agent_settled`; direct idle-time callers retain the ordinary busy exclusion. Observer errors and invalid cross-role replacements are diagnosed and skipped without failing the run.
 11. A native plugin is trusted in-process code; the loader and trait interfaces are not a sandbox.
 12. Registered slash commands own both their `CommandSpec` and execution. A `TransformInput` result then passes through `input` hooks in registration order before the agent run; `Handled` stops the submission. Text preprocessing retains both the product-facing submitted text and the effective model text rather than requiring a frontend to reverse an expansion.
 13. `before_provider_request` runs after a concrete provider has serialized its final wire payload and before transport. Replacements chain in provider-plugin order; hook errors are diagnosed and skipped so later provider hooks still receive the last valid payload.
@@ -848,13 +848,16 @@ invocation. `AgentTurnControl` owns Pi's between-turn callbacks. After `turn_end
 `prepare_next_turn` receive that completed turn and optionally replace the run-local
 context/provider/model/thinking values, before the next `turn_start`. If no steering was already
 drained, the loop polls again after preparation to include messages queued during it. Settled runs
-and runs stopped by `should_stop_after_turn` do not invoke preparation. These replacements never
-mutate the reusable Agent configuration. `FnTurnControl` is the closure Adapter for this single
-Interface; it hides async future boxing rather than introducing a second callback lifecycle. Turn
-callbacks receive `Arc`-backed immutable snapshots, while the live loop mutates its context and
-per-run transcript with copy-on-write. The normal sequential callback path therefore shares the
-same snapshot without cloning the transcript; retaining a snapshot beyond its callback is safe but
-may make a later mutation clone the retained data.
+and runs stopped by `should_stop_after_turn` do not invoke preparation. During construction, an
+owning product may permanently compose exactly one controller over the configured controller; the
+Agent keeps that composition alive for its lifetime. Controllers that refer back to their owner use
+a weak reference so session/runtime ownership cannot form a reference cycle. These replacements
+never mutate the reusable Agent configuration. `FnTurnControl` is the closure Adapter for this
+single Interface; it hides async future boxing rather than introducing a second callback lifecycle.
+Turn callbacks receive `Arc`-backed immutable snapshots, while the live
+loop mutates its context and per-run transcript with copy-on-write. The normal sequential callback
+path therefore shares the same snapshot without cloning the transcript; retaining a snapshot
+beyond its callback is safe but may make a later mutation clone the retained data.
 
 `AgentOptions` and `AgentLoopConfig` expose `TransformContext`, `ConvertToLlm`, and `StreamFn`
 closure adapters. Every provider request applies the generation's ordered `context` plugin hooks,
@@ -934,6 +937,9 @@ Unknown, invalid, blocked, and truncated tool calls produce error tool-result me
 `legacy/pi/packages/agent/src/harness/session`. A JSONL file starts with the exact v4 header and is
 followed by four mutation kinds: tree entries, lane records, lane pointers, and global facts. Every
 mutation consumes one shared, consecutive `seq`. Entry and record IDs share one namespace.
+Top-level entry and lane-record timestamps serialize as Pi-compatible ISO 8601 strings. The decoder
+also accepts the millisecond-number representation emitted by earlier pi-rs v4 builds; nested agent
+message timestamps keep their millisecond wire shape.
 
 Entries form an immutable parent-linked tree. Named lanes are durable pointers into that tree and
 remain available after moving away from their prior leaves. Lane records hold operation starts and
@@ -952,6 +958,12 @@ ID provisioning, validation, global queries, branch queries, lane views, records
 repositories implement create/open/list/delete and branch/tree fork semantics. A branch fork copies
 only the selected message path and applicable facts; a tree fork copies all entries, lanes, and
 applicable facts. Neither copies operation records.
+
+`JsonlSessionRepo::resolve_exact_id` owns the CLI's project-scoped session identity lookup and Pi
+directory/filename layout. Resolution is read-only: an existing ID yields its metadata, while a
+missing ID yields a timestamped `..._<id>.jsonl` target without creating a directory. The chosen ID
+then travels through `AgentSessionRuntimeTarget` and `ProductSessionFactory` into the new session
+header, keeping the adapter thin and deferred persistence intact.
 
 `SessionDocument::context()` derives model, thinking level, and active tools from the entire selected
 path. Its default transform starts at the latest compaction; that compaction contributes its summary
@@ -1015,12 +1027,13 @@ same-ID deferred-target correction before appending it. Recovery validation reso
 target, so resume reconstructs the transformed user, assistant, or tool-result message rather than
 the pre-hook value while ordinary display-text metadata remains intact.
 
-`AgentSession::create` and `AgentSession::open` adapt the v4 tree to `PiRuntime`. Configuration
-changes are v4 entries, completed messages are persisted on `message_end`, and pi-rs-only prompt
-snapshots/resource diagnostics use reserved `customType` values rather than extending the v4 entry
+`AgentSession::create` and `AgentSession::open` adapt the v4 tree to `PiRuntime` and return the
+session's stable `Arc<AgentSession>` identity. Configuration changes are v4 entries, completed
+messages are persisted on `message_end`, and pi-rs-only prompt snapshots/resource diagnostics use
+reserved `customType` values rather than extending the v4 entry
 union. Opening restores data state only; executable plugins and resources always come from the
 supplied runtime. Checkout, branch summaries, and compaction rebuild runtime context immediately.
-`prepare_create` and `prepare_open` expose the same construction as a `PreparedAgentSession` whose
+`prepare_create` and `prepare_open` expose the same shared identity as a `PreparedAgentSession` whose
 `session_start` event is deferred, allowing a host to order replacement lifecycle events correctly.
 
 `pi-session::compaction` ports the Harness `retainedTail` algorithm: provider usage plus trailing

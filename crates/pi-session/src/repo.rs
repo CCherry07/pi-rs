@@ -16,6 +16,16 @@ pub struct JsonlSessionRepo {
     mutation_gate: Arc<Mutex<()>>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExactSessionIdResolution {
+    Existing(JsonlSessionMetadata),
+    New {
+        id: String,
+        cwd: PathBuf,
+        path: PathBuf,
+    },
+}
+
 impl JsonlSessionRepo {
     pub fn new(sessions_root: impl Into<PathBuf>) -> Self {
         Self {
@@ -55,6 +65,34 @@ impl JsonlSessionRepo {
         options: &JsonlSessionListOptions,
     ) -> Result<Vec<JsonlSessionMetadata>, SessionError> {
         list_jsonl_session_metadata(&self.sessions_root, options)
+    }
+
+    /// Resolves Pi's project-scoped `--session-id` contract without writing
+    /// a directory or session file for a missing ID.
+    pub fn resolve_exact_id(
+        &self,
+        cwd: impl AsRef<Path>,
+        id: &str,
+    ) -> Result<ExactSessionIdResolution, SessionError> {
+        validate_session_id(id)?;
+        let cwd = absolute_path(cwd.as_ref())?;
+        if let Some(metadata) = self
+            .list(&JsonlSessionListOptions {
+                cwd: Some(cwd.clone()),
+            })?
+            .into_iter()
+            .find(|metadata| metadata.id == id)
+        {
+            return Ok(ExactSessionIdResolution::Existing(metadata));
+        }
+
+        let directory = self.session_directory(&cwd)?;
+        let path = directory.join(format!("{}_{}.jsonl", session_timestamp(now_ms()), id));
+        Ok(ExactSessionIdResolution::New {
+            id: id.to_string(),
+            cwd,
+            path,
+        })
     }
 
     pub fn delete(&self, metadata: &JsonlSessionMetadata) -> Result<(), SessionError> {
@@ -213,7 +251,7 @@ fn read_header_for_listing(path: &Path) -> Option<SessionHeader> {
     validate_header(&header).ok().map(|()| header)
 }
 
-fn validate_session_id(id: &str) -> Result<(), SessionError> {
+pub(crate) fn validate_session_id(id: &str) -> Result<(), SessionError> {
     let valid_edge = |byte: u8| byte.is_ascii_alphanumeric();
     let bytes = id.as_bytes();
     let valid = bytes.first().is_some_and(|byte| valid_edge(*byte))
@@ -327,6 +365,45 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn exact_id_resolution_is_project_scoped_and_does_not_materialize_new_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = JsonlSessionRepo::new(directory.path().join("sessions"));
+        let first_project = directory.path().join("workspace/first");
+        let second_project = directory.path().join("workspace/second");
+
+        let new = repo
+            .resolve_exact_id(&first_project, "botmux-session")
+            .unwrap();
+        let ExactSessionIdResolution::New { id, cwd, path } = new else {
+            panic!("missing id should resolve to a deferred new session");
+        };
+        assert_eq!(id, "botmux-session");
+        assert_eq!(cwd, std::path::absolute(&first_project).unwrap());
+        assert!(path.to_string_lossy().ends_with("_botmux-session.jsonl"));
+        assert!(!path.exists());
+        assert!(!directory.path().join("sessions").exists());
+
+        let existing = repo
+            .create(JsonlSessionCreateOptions {
+                id: Some("botmux-session".to_string()),
+                cwd: first_project.clone(),
+                ..JsonlSessionCreateOptions::default()
+            })
+            .unwrap();
+        let existing_path = existing.metadata().unwrap().path;
+        assert!(matches!(
+            repo.resolve_exact_id(&first_project, "botmux-session")
+                .unwrap(),
+            ExactSessionIdResolution::Existing(metadata) if metadata.path == existing_path
+        ));
+        assert!(matches!(
+            repo.resolve_exact_id(&second_project, "botmux-session")
+                .unwrap(),
+            ExactSessionIdResolution::New { .. }
+        ));
     }
 
     #[test]

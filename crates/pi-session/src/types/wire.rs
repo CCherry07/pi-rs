@@ -337,7 +337,7 @@ pub struct SessionRecord {
     pub id: String,
     pub seq: u64,
     pub parent_id: Option<String>,
-    #[serde(rename = "timestamp")]
+    #[serde(rename = "timestamp", with = "super::iso_timestamp_ms")]
     pub timestamp_ms: i64,
     #[serde(flatten)]
     pub entry: SessionEntry,

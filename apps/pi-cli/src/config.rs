@@ -28,7 +28,7 @@ pub(crate) struct Cli {
     /// Serve Agent Client Protocol stable v1 over stdin/stdout.
     #[arg(
         long,
-        conflicts_with_all = ["print", "json", "mode", "session", "prompt"]
+        conflicts_with_all = ["print", "json", "mode", "session", "session_id", "prompt"]
     )]
     pub(crate) acp: bool,
 
@@ -46,6 +46,14 @@ pub(crate) struct Cli {
     /// Open an exact JSONL session path; creates it when absent.
     #[arg(long)]
     pub(crate) session: Option<PathBuf>,
+
+    /// Use an exact project session ID, creating it when missing.
+    #[arg(long, conflicts_with = "session")]
+    pub(crate) session_id: Option<String>,
+
+    /// Set the session display name.
+    #[arg(short = 'n', long)]
+    pub(crate) name: Option<String>,
 
     /// Initial model override. When omitted, models.json owns catalog selection.
     #[arg(long)]
@@ -372,6 +380,31 @@ mod tests {
     }
 
     #[test]
+    fn botmux_session_identity_and_name_flags_match_pi() {
+        let parsed = Cli::try_parse_from([
+            "pi",
+            "--session-id",
+            "018f4f7c-example",
+            "--name",
+            "BotMux task",
+        ])
+        .unwrap();
+        assert_eq!(parsed.session_id.as_deref(), Some("018f4f7c-example"));
+        assert_eq!(parsed.name.as_deref(), Some("BotMux task"));
+        assert_eq!(
+            Cli::try_parse_from(["pi", "-n", "short"])
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("short")
+        );
+        assert!(
+            Cli::try_parse_from(["pi", "--session", "old.jsonl", "--session-id", "new-id"])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn resolving_a_new_session_does_not_create_its_directory() {
         let directory = tempfile::tempdir().unwrap();
         let session_path = directory.path().join("agent/sessions/new.jsonl");
@@ -386,6 +419,8 @@ mod tests {
             no_fullscreen: false,
             cwd: directory.path().to_path_buf(),
             session: Some(session_path.clone()),
+            session_id: None,
+            name: None,
             model: None,
             thinking: None,
             base_url: "https://example.test/v1".to_string(),

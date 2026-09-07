@@ -13,6 +13,7 @@ mod tui;
 
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use config::{AppConfig, Cli, CliCommand, OutputMode};
@@ -22,7 +23,10 @@ use pi_js_plugin::JsPluginHost;
 use pi_sdk::{
     ProductSessionFactory, ProjectTrustEvaluation, ProjectTrustPromptRequest, ProjectTrustService,
 };
-use pi_session::{MultiSessionManager, PiSession, PluginContextBinding, SessionLog};
+use pi_session::{
+    ExactSessionIdResolution, JsonlSessionRepo, MultiSessionManager, PiSession,
+    PluginContextBinding, SessionLog,
+};
 use pi_settings::{SettingsContext, SettingsManager};
 use tokio::sync::mpsc;
 
@@ -160,6 +164,35 @@ async fn run(
     {
         return package_commands::run(&cli, &config, command, &settings).await;
     }
+    let startup_name = cli
+        .name
+        .as_deref()
+        .map(str::trim)
+        .map(|name| {
+            (!name.is_empty())
+                .then(|| name.to_string())
+                .ok_or_else(|| "--name requires a non-empty value".to_string())
+        })
+        .transpose()?;
+    let mut create_session_id = None;
+    if let Some(session_id) = &cli.session_id {
+        let sessions_root = config
+            .session_path
+            .parent()
+            .map_or_else(|| config.agent_dir.join("sessions"), PathBuf::from);
+        match JsonlSessionRepo::new(sessions_root)
+            .resolve_exact_id(&config.cwd, session_id)
+            .map_err(|error| error.to_string())?
+        {
+            ExactSessionIdResolution::Existing(metadata) => {
+                config.session_path = metadata.path;
+            }
+            ExactSessionIdResolution::New { id, path, .. } => {
+                config.session_path = path;
+                create_session_id = Some(id);
+            }
+        }
+    }
     let session_exists = !cli.acp && config.session_path.exists();
     if session_exists {
         let (_, document) =
@@ -227,10 +260,21 @@ async fn run(
     }
     let session = if session_exists {
         sessions.open_session(&session_path).await
+    } else if let Some(session_id) = create_session_id {
+        sessions
+            .create_session_with_id(&cwd, &session_path, session_id)
+            .await
     } else {
         sessions.create_session(&cwd, &session_path).await
     }
     .map_err(|error| error.to_string())?;
+    if let Some(name) = startup_name {
+        session
+            .current()
+            .set_name(Some(name))
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     let result = run_cli_with_shutdown(
         cli_mode,
         session,
@@ -273,6 +317,8 @@ fn split_extension_flags(
         "no-fullscreen",
         "cwd",
         "session",
+        "session-id",
+        "name",
         "model",
         "thinking",
         "base-url",
@@ -289,6 +335,8 @@ fn split_extension_flags(
         "mode",
         "cwd",
         "session",
+        "session-id",
+        "name",
         "model",
         "thinking",
         "base-url",
@@ -318,7 +366,7 @@ fn split_extension_flags(
             consumes_next = !has_value && BUILT_IN_VALUE_OPTIONS.contains(&name);
             return None;
         }
-        if argument == "-e" {
+        if matches!(argument.as_str(), "-e" | "-n") {
             consumes_next = true;
             return None;
         }
@@ -348,7 +396,7 @@ fn split_extension_flags(
             continue;
         }
         let Some(long) = argument.strip_prefix("--") else {
-            consumes_next = argument == "-e";
+            consumes_next = matches!(argument.as_str(), "-e" | "-n");
             if !argument.starts_with('-') {
                 positional_only = true;
             }
@@ -526,7 +574,32 @@ pub(crate) async fn resolve_project_trust(
 
 fn resolve_input(cli: &Cli, stdin_is_terminal: bool) -> Result<Option<String>, String> {
     if !cli.prompt.is_empty() {
-        return Ok(Some(cli.prompt.join(" ")));
+        let mut file_text = String::new();
+        let mut messages = Vec::new();
+        for argument in &cli.prompt {
+            let Some(file) = argument.strip_prefix('@') else {
+                messages.push(argument.as_str());
+                continue;
+            };
+            if file.is_empty() {
+                return Err("@file requires a path".to_string());
+            }
+            let file = expand_prompt_path(file, &cli.cwd);
+            let metadata = std::fs::metadata(&file)
+                .map_err(|_| format!("File not found: {}", file.display()))?;
+            if metadata.len() == 0 {
+                continue;
+            }
+            let content = std::fs::read_to_string(&file)
+                .map_err(|error| format!("Could not read file {}: {error}", file.display()))?;
+            let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
+            file_text.push_str(&format!(
+                "<file name=\"{}\">\n{content}\n</file>\n",
+                file.display()
+            ));
+        }
+        file_text.push_str(&messages.join(" "));
+        return Ok((!file_text.is_empty()).then_some(file_text));
     }
     if !stdin_is_terminal {
         let mut input = String::new();
@@ -539,6 +612,25 @@ fn resolve_input(cli: &Cli, stdin_is_terminal: bool) -> Result<Option<String>, S
     Ok(None)
 }
 
+fn expand_prompt_path(path: &str, cwd: &std::path::Path) -> PathBuf {
+    let path = if path == "~" {
+        std::env::var_os("HOME").map_or_else(|| PathBuf::from(path), PathBuf::from)
+    } else if let Some(relative) = path.strip_prefix("~/") {
+        std::env::var_os("HOME").map_or_else(
+            || PathBuf::from(path),
+            |home| PathBuf::from(home).join(relative),
+        )
+    } else {
+        PathBuf::from(path)
+    };
+    let path = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    std::path::absolute(&path).unwrap_or(path)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -548,7 +640,7 @@ mod tests {
 
     use super::{
         CLIMode, Cli, PresentationMode, ensure_javascript_host_available, finish_run,
-        split_extension_flags,
+        resolve_input, split_extension_flags,
     };
 
     fn cli(arguments: &[&str]) -> Cli {
@@ -615,6 +707,45 @@ mod tests {
             split_extension_flags(vec!["--".to_string(), "--literal-prompt".to_string()]);
         assert_eq!(escaped, vec!["--", "--literal-prompt"]);
         assert!(values.is_empty());
+
+        let (botmux, values) = split_extension_flags(vec![
+            "--session-id".to_string(),
+            "botmux-id".to_string(),
+            "--name".to_string(),
+            "BotMux task".to_string(),
+            "prompt".to_string(),
+        ]);
+        assert_eq!(
+            botmux,
+            [
+                "--session-id",
+                "botmux-id",
+                "--name",
+                "BotMux task",
+                "prompt"
+            ]
+        );
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn expands_botmux_text_file_prompt_with_pi_markup() {
+        let directory = tempfile::tempdir().unwrap();
+        let prompt_path = directory.path().join("long prompt.md");
+        fs::write(&prompt_path, "\u{feff}# Task\n\nDo the work.").unwrap();
+        let mut parsed = cli(&["@long prompt.md"]);
+        parsed.cwd = directory.path().to_path_buf();
+
+        assert_eq!(
+            resolve_input(&parsed, true).unwrap().as_deref(),
+            Some(
+                format!(
+                    "<file name=\"{}\">\n# Task\n\nDo the work.\n</file>\n",
+                    prompt_path.display()
+                )
+                .as_str()
+            )
+        );
     }
 
     #[test]

@@ -810,7 +810,7 @@ fn validate_mutation_json_shape(value: &Value, line: usize) -> Result<(), Sessio
                 ));
             }
             require_nullable_json_string(object, "parentId", line)?;
-            require_safe_integer(object.get("timestamp"), line, "timestamp", true)?;
+            require_pi_timestamp(object.get("timestamp"), line)?;
             if matches!(entry_type, "custom" | "custom_message") {
                 require_json_string(object, "customType", line)?;
             }
@@ -836,7 +836,7 @@ fn validate_mutation_json_shape(value: &Value, line: usize) -> Result<(), Sessio
                     format!("has unknown record type {record_type}"),
                 ));
             }
-            require_safe_integer(object.get("timestamp"), line, "timestamp", true)?;
+            require_pi_timestamp(object.get("timestamp"), line)?;
             if record_type == "operation_started" {
                 let intent = object
                     .get("intent")
@@ -922,6 +922,13 @@ fn require_safe_integer(
     } else {
         Err(invalid_json_shape(line, format!("has invalid {field}")))
     }
+}
+
+fn require_pi_timestamp(value: Option<&Value>, line: usize) -> Result<(), SessionError> {
+    if matches!(value, Some(Value::String(_))) {
+        return Ok(());
+    }
+    require_safe_integer(value, line, "timestamp", true)
 }
 
 fn invalid_json_shape(line: usize, message: impl Into<String>) -> SessionError {

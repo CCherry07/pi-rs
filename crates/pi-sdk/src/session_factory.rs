@@ -131,15 +131,16 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
     ) -> Result<PreparedAgentSession, SessionError> {
         let generation_overlay = request.generation_overlay;
         let initial_state = request.initial_state;
-        let (path, create, cwd, reused_log, parent_session) = match request.target {
+        let (path, create, cwd, reused_log, parent_session, session_id) = match request.target {
             AgentSessionRuntimeTarget::Create {
                 cwd,
                 path,
                 parent_session,
-            } => (path, true, cwd, None, parent_session),
+                session_id,
+            } => (path, true, cwd, None, parent_session, session_id),
             AgentSessionRuntimeTarget::Open { path } => {
                 let (_, document) = pi_session::SessionLog::open(&path)?;
-                (path, false, document.header.cwd, None, None)
+                (path, false, document.header.cwd, None, None, None)
             }
             AgentSessionRuntimeTarget::Reuse { log } => {
                 let document = log.load()?;
@@ -148,6 +149,7 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
                     false,
                     document.header.cwd,
                     Some(log),
+                    None,
                     None,
                 )
             }
@@ -346,7 +348,8 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
                     .map(expand_tilde_path),
                 config.runtime_settings.shell_command_prefix.clone(),
             )
-            .parent_session_path(parent_session);
+            .parent_session_path(parent_session)
+            .session_id(session_id);
         let prepared = if create {
             AgentSession::prepare_create_with_options(runtime, path, session_options).await
         } else if let Some(log) = reused_log {

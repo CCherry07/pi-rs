@@ -295,6 +295,20 @@ Sessions use the Pi v4 JSONL format. A new session exists in memory immediately,
 created only after the first assistant response completes. Quitting before that response, or using
 only shell shorthand, does not leave an empty resume entry.
 
+Automation can select a stable project-scoped identity and display name at startup:
+
+```bash
+pi --session-id 018f4f7c-example --name "BotMux task" --json @prompt.md
+```
+
+`--session-id` reopens that exact ID in the current project or creates it when missing; a new file
+uses Pi's timestamped `..._<session-id>.jsonl` name and remains deferred until the first assistant
+response. It cannot be combined with `--session`. `--name` also has the `-n` short form. Text
+`@file` arguments are resolved from `--cwd`, stripped of an optional UTF-8 BOM, and wrapped in Pi's
+`<file name="...">` prompt markup. Top-level entry timestamps are written as ISO 8601 strings;
+older pi-rs v4 files containing millisecond numbers remain readable. Message timestamps remain
+milliseconds.
+
 The product supports:
 
 - session discovery and `/resume`;
@@ -684,6 +698,9 @@ Run the CLI directly during development:
 ```bash
 # Complete Node-hosted product with JavaScript extensions
 ./scripts/pi-dev
+
+# BotMux-style launch; required when its agent_settled extension is enabled
+./scripts/pi-dev --session-id 018f4f7c-example -e /path/to/botmux-turn-boundary.ts @prompt.md
 
 # Intentional native-only modes
 cargo run -p pi-cli -- --no-extensions

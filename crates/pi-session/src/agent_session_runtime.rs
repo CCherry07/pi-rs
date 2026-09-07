@@ -21,6 +21,7 @@ pub enum AgentSessionRuntimeTarget {
         cwd: PathBuf,
         path: PathBuf,
         parent_session: Option<PathBuf>,
+        session_id: Option<String>,
     },
     Open {
         path: PathBuf,
@@ -36,6 +37,20 @@ impl AgentSessionRuntimeTarget {
             cwd: cwd.into(),
             path: path.into(),
             parent_session: None,
+            session_id: None,
+        }
+    }
+
+    pub fn create_with_id(
+        cwd: impl Into<PathBuf>,
+        path: impl Into<PathBuf>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        Self::Create {
+            cwd: cwd.into(),
+            path: path.into(),
+            parent_session: None,
+            session_id: Some(session_id.into()),
         }
     }
 
@@ -48,6 +63,7 @@ impl AgentSessionRuntimeTarget {
             cwd: cwd.into(),
             path: path.into(),
             parent_session: Some(parent_session.into()),
+            session_id: None,
         }
     }
 
@@ -375,12 +391,12 @@ impl AgentSessionRuntime {
         Ok(Self::from_parts(session, factory, generation_overlay))
     }
 
-    pub fn from_session<F>(session: AgentSession, factory: F) -> Self
+    pub fn from_session<F>(session: Arc<AgentSession>, factory: F) -> Self
     where
         F: AgentSessionRuntimeFactory + 'static,
     {
         Self::from_parts(
-            Arc::new(session),
+            session,
             Arc::new(factory),
             SessionGenerationOverlay::default(),
         )
