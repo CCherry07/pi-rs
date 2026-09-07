@@ -448,8 +448,12 @@ export function useThreads({
   );
 
   const handleThreadUnarchived = useCallback(
-    (workspaceId: string, threadId: string) => {
-      threadHandlers.onThreadUnarchived?.(workspaceId, threadId);
+    (
+      workspaceId: string,
+      threadId: string,
+      thread: Record<string, unknown> | null,
+    ) => {
+      threadHandlers.onThreadUnarchived?.(workspaceId, threadId, thread);
     },
     [threadHandlers],
   );

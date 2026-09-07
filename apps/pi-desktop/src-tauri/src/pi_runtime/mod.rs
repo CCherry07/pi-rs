@@ -265,13 +265,14 @@ pub(crate) async fn pi_unarchive_thread(
     app: AppHandle,
 ) -> Result<Value, String> {
     pi.store.unarchive(&thread_id).await?;
+    let thread = summary_thread(&pi.store.summary(&thread_id)?);
     emit(
         &app,
         &workspace_id,
         "thread/unarchived",
-        json!({ "threadId": thread_id }),
+        json!({ "threadId": thread_id, "thread": thread.clone() }),
     );
-    Ok(json!({ "ok": true }))
+    Ok(json!({ "ok": true, "thread": thread }))
 }
 
 #[tauri::command]
@@ -1152,11 +1153,18 @@ mod tests {
                 })
                 .build()?;
             match request.target {
-                AgentSessionRuntimeTarget::Create { path, .. } => {
+                AgentSessionRuntimeTarget::Create {
+                    path,
+                    parent_session,
+                    session_id,
+                    ..
+                } => {
                     AgentSession::prepare_create_with_options(
                         runtime,
                         path,
-                        AgentSessionOptions::default(),
+                        AgentSessionOptions::default()
+                            .parent_session_path(parent_session)
+                            .session_id(session_id),
                     )
                     .await
                 }
@@ -1314,6 +1322,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn desktop_session_filename_ends_with_exposed_session_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = scripted_store(directory.path().join("agent"));
+        let session = store.create(directory.path()).await.unwrap();
+        session
+            .submit("materialize the desktop session")
+            .await
+            .unwrap();
+
+        let path = session.log().path();
+        let document = SessionLog::read(path).unwrap();
+        let projected = thread_from_session(&session);
+        let copied_id = projected["id"].as_str().unwrap();
+
+        assert_eq!(copied_id, document.header.id);
+        assert!(
+            path.file_name().is_some_and(|name| name
+                .to_string_lossy()
+                .ends_with(&format!("_{copied_id}.jsonl"))),
+            "desktop copy ID must match the JSONL filename suffix"
+        );
+    }
+
+    #[tokio::test]
     async fn pi_session_projects_into_desktop_thread_shape() {
         let directory = tempfile::tempdir().unwrap();
         let store = scripted_store(directory.path().join("agent"));
@@ -1435,12 +1467,10 @@ mod tests {
         session.submit("archive me").await.unwrap();
         let session_id = session.log().header().id.clone();
         let session_path = session.log().path().to_path_buf();
-        let archived_path = directory
-            .path()
-            .join("agent")
-            .join("sessions")
+        let sessions_path = directory.path().join("agent").join("sessions");
+        let archived_path = sessions_path
             .join("archived")
-            .join(session_path.file_name().unwrap());
+            .join(session_path.strip_prefix(&sessions_path).unwrap());
         let companion = session_path
             .parent()
             .unwrap()
@@ -1474,14 +1504,16 @@ mod tests {
         let session = store.create(directory.path()).await.unwrap();
 
         session.submit("restore me").await.unwrap();
+        session
+            .set_name(Some("Restored session title".to_string()))
+            .await
+            .unwrap();
         let session_id = session.log().header().id.clone();
         let session_path = session.log().path().to_path_buf();
-        let archived_path = directory
-            .path()
-            .join("agent")
-            .join("sessions")
+        let sessions_path = directory.path().join("agent").join("sessions");
+        let archived_path = sessions_path
             .join("archived")
-            .join(session_path.file_name().unwrap());
+            .join(session_path.strip_prefix(&sessions_path).unwrap());
         let companion = session_path
             .parent()
             .unwrap()
@@ -1507,7 +1539,11 @@ mod tests {
         assert!(child_path.exists());
         assert!(!archived_path.exists());
         assert!(!archived_companion.exists());
-        assert_eq!(store.list(directory.path()).unwrap().len(), 1);
+        let restored = store.list(directory.path()).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].title, "Restored session title");
+        assert_eq!(restored[0].message_count, 2);
+        assert_eq!(restored[0].model.as_deref(), Some("test"));
         assert!(store.list_archived(directory.path()).unwrap().is_empty());
     }
 

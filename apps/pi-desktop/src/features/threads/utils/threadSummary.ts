@@ -53,6 +53,11 @@ export function buildThreadSummaryFromThread({
     ? customName
     : clampThreadName(preview) ?? fallbackName;
   const metadata = extractThreadRunMetadata(thread);
+  const messageCountValue = Number(thread.messageCount ?? thread.message_count);
+  const messageCount =
+    Number.isFinite(messageCountValue) && messageCountValue >= 0
+      ? Math.floor(messageCountValue)
+      : null;
   if (shouldHideSubagentThreadFromSidebar(thread.source)) {
     return null;
   }
@@ -68,6 +73,7 @@ export function buildThreadSummaryFromThread({
     createdAt: getThreadCreatedTimestamp(thread),
     ...(metadata.modelId ? { modelId: metadata.modelId } : {}),
     ...(metadata.effort ? { effort: metadata.effort } : {}),
+    ...(messageCount !== null ? { messageCount } : {}),
     ...(isSubagent ? { isSubagent: true } : {}),
     ...(isSubagent && subagentMetadata.nickname
       ? { subagentNickname: subagentMetadata.nickname }

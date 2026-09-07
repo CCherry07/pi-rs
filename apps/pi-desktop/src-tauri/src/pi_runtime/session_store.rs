@@ -8,8 +8,8 @@ use pi_core::{
 };
 use pi_session::{
     current_session_context_tokens, AgentSession, AgentSessionReplacement, AgentSessionSnapshot,
-    AgentSessionSubscription, ForkPosition, IsolatedSessionObservation, MultiSessionManager,
-    PiSession, SessionDocument, SessionEntry, SessionLog,
+    AgentSessionSubscription, ExactSessionIdResolution, ForkPosition, IsolatedSessionObservation,
+    JsonlSessionRepo, MultiSessionManager, PiSession, SessionDocument, SessionEntry, SessionLog,
 };
 use serde_json::Value;
 
@@ -128,13 +128,19 @@ impl SessionStore {
         if !cwd.is_dir() {
             return Err(format!("workspace is not a directory: {}", cwd.display()));
         }
-        let path = self
-            .agent_dir
-            .join("sessions")
-            .join(format!("{}.jsonl", uuid::Uuid::now_v7()));
+        let session_id = uuid::Uuid::now_v7().to_string();
+        let path = match JsonlSessionRepo::new(self.agent_dir.join("sessions"))
+            .resolve_exact_id(&cwd, &session_id)
+            .map_err(|error| error.to_string())?
+        {
+            ExactSessionIdResolution::New { path, .. } => path,
+            ExactSessionIdResolution::Existing(_) => {
+                return Err(format!("generated duplicate Pi session id: {session_id}"));
+            }
+        };
         let session = self
             .manager
-            .create_session(cwd, path)
+            .create_session_with_id(cwd, path, session_id)
             .await
             .map_err(|error| error.to_string())?;
         let current = session.current();
@@ -275,22 +281,39 @@ impl SessionStore {
 
     pub(crate) async fn archive(&self, id: &str) -> Result<(), String> {
         let path = self.close_and_resolve_path(id, false).await?;
-        let archive_dir = self.agent_dir.join("sessions").join("archived");
-        std::fs::create_dir_all(&archive_dir)
-            .map_err(|error| format!("cannot create archive {}: {error}", archive_dir.display()))?;
-        let destination = archive_dir.join(
-            path.file_name()
-                .ok_or_else(|| format!("invalid session path: {}", path.display()))?,
-        );
+        let sessions_dir = self.agent_dir.join("sessions");
+        let relative = path.strip_prefix(&sessions_dir).map_err(|_| {
+            format!(
+                "session path {} is outside {}",
+                path.display(),
+                sessions_dir.display()
+            )
+        })?;
+        let destination = sessions_dir.join("archived").join(relative);
+        let destination_dir = destination
+            .parent()
+            .ok_or_else(|| format!("invalid archive path: {}", destination.display()))?;
+        std::fs::create_dir_all(destination_dir).map_err(|error| {
+            format!(
+                "cannot create archive {}: {error}",
+                destination_dir.display()
+            )
+        })?;
         move_session_with_companion(&path, &destination, "archive")
     }
 
     pub(crate) async fn unarchive(&self, id: &str) -> Result<(), String> {
         let path = self.find_archived_path(id)?;
-        let destination = self.agent_dir.join("sessions").join(
-            path.file_name()
-                .ok_or_else(|| format!("invalid session path: {}", path.display()))?,
-        );
+        let sessions_dir = self.agent_dir.join("sessions");
+        let archive_dir = sessions_dir.join("archived");
+        let relative = path.strip_prefix(&archive_dir).map_err(|_| {
+            format!(
+                "archived session path {} is outside {}",
+                path.display(),
+                archive_dir.display()
+            )
+        })?;
+        let destination = sessions_dir.join(relative);
         if destination.exists() {
             return Err(format!(
                 "cannot restore archived session {} because {} already exists",
@@ -298,6 +321,15 @@ impl SessionStore {
                 destination.display()
             ));
         }
+        let destination_dir = destination
+            .parent()
+            .ok_or_else(|| format!("invalid restored session path: {}", destination.display()))?;
+        std::fs::create_dir_all(destination_dir).map_err(|error| {
+            format!(
+                "cannot create restored session directory {}: {error}",
+                destination_dir.display()
+            )
+        })?;
         move_session_with_companion(&path, &destination, "restore archived")
     }
 
@@ -439,6 +471,11 @@ impl SessionStore {
         self.list_by_archive_state(cwd, true)
     }
 
+    pub(crate) fn summary(&self, id: &str) -> Result<SessionSummary, String> {
+        let path = self.find_path(id)?;
+        session_summary(&path)
+    }
+
     fn list_by_archive_state(
         &self,
         cwd: &Path,
@@ -452,46 +489,11 @@ impl SessionStore {
                 if path_is_archived(&path) != archived {
                     return None;
                 }
-                let document = SessionLog::read(&path).ok()?;
-                if document.header.cwd != cwd {
+                let summary = session_summary(&path).ok()?;
+                if summary.cwd != cwd {
                     return None;
                 }
-                let id = document.header.id.clone();
-                let updated_at_ms = std::fs::metadata(&path)
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
-                    .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-                    .unwrap_or_default();
-                let model = document.entries.iter().rev().find_map(|record| {
-                    let SessionEntry::Message(entry) = &record.entry else {
-                        return None;
-                    };
-                    match entry.message.as_standard()? {
-                        Message::Assistant(message) => Some(message.model.as_str().to_string()),
-                        _ => None,
-                    }
-                });
-                let messages = document
-                    .entries
-                    .iter()
-                    .filter_map(|record| {
-                        let SessionEntry::Message(entry) = &record.entry else {
-                            return None;
-                        };
-                        entry.message.as_standard()
-                    })
-                    .collect::<Vec<_>>();
-                let title = document.name.unwrap_or_else(|| first_user_title(&messages));
-                let message_count = messages.len();
-                Some(SessionSummary {
-                    id,
-                    title,
-                    cwd: document.header.cwd,
-                    updated_at_ms,
-                    model,
-                    message_count,
-                })
+                Some(summary)
             })
             .collect::<Vec<_>>();
         summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at_ms));
@@ -517,6 +519,46 @@ impl SessionStore {
             })
             .ok_or_else(|| format!("unknown Pi session: {id}"))
     }
+}
+
+fn session_summary(path: &Path) -> Result<SessionSummary, String> {
+    let document = SessionLog::read(path).map_err(|error| error.to_string())?;
+    let id = document.header.id.clone();
+    let updated_at_ms = std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or_default();
+    let model = document.entries.iter().rev().find_map(|record| {
+        let SessionEntry::Message(entry) = &record.entry else {
+            return None;
+        };
+        match entry.message.as_standard()? {
+            Message::Assistant(message) => Some(message.model.as_str().to_string()),
+            _ => None,
+        }
+    });
+    let messages = document
+        .entries
+        .iter()
+        .filter_map(|record| {
+            let SessionEntry::Message(entry) = &record.entry else {
+                return None;
+            };
+            entry.message.as_standard()
+        })
+        .collect::<Vec<_>>();
+    let title = document.name.unwrap_or_else(|| first_user_title(&messages));
+    let message_count = messages.len();
+    Ok(SessionSummary {
+        id,
+        title,
+        cwd: document.header.cwd,
+        updated_at_ms,
+        model,
+        message_count,
+    })
 }
 
 fn path_is_archived(path: &Path) -> bool {

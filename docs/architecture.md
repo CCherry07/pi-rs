@@ -190,6 +190,12 @@ discovery, and one projection Module translates Pi lifecycle events into the UI'
 `turn/*`, and `item/*` vocabulary. The Adapter emits that vocabulary through its own `pi-event`
 channel; there is no external app-server protocol or child-process boundary. Registered
 workspaces are immediately usable by path; the Adapter has no per-workspace connection lifecycle.
+Desktop session creation delegates path construction to `JsonlSessionRepo`, so its project-scoped
+`<timestamp>_<session-id>.jsonl` filename, v4 header ID, and projected frontend thread ID share one
+identity just as they do in Pi.
+Archive and unarchive preserve that project-relative path and companion session tree. An unarchive
+event includes a freshly projected summary from the restored JSONL so the desktop rebuilds the
+title, model, message count, and timestamps instead of publishing an empty thread placeholder.
 The model selector reads the generation-local catalogue from `pi-sdk` and sends the exact
 provider/model identity back to `AgentSession`; thinking selection is constrained by that model's
 declared levels and persisted through the session configuration entries. The Adapter exposes no

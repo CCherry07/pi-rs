@@ -42,7 +42,11 @@ type PiEventHandlers = {
   ) => void;
   onThreadClosed?: (workspaceId: string, threadId: string) => void;
   onThreadArchived?: (workspaceId: string, threadId: string) => void;
-  onThreadUnarchived?: (workspaceId: string, threadId: string) => void;
+  onThreadUnarchived?: (
+    workspaceId: string,
+    threadId: string,
+    thread: Record<string, unknown> | null,
+  ) => void;
   onAgentMessageDelta?: (event: AgentDelta) => void;
   onAgentMessageCompleted?: (event: AgentCompleted) => void;
   onPiEvent?: (event: PiEvent) => void;
@@ -268,7 +272,11 @@ export function usePiEvents(handlers: PiEventHandlers) {
       if (method === "thread/unarchived") {
         const threadId = String(params.threadId ?? params.thread_id ?? "").trim();
         if (threadId) {
-          currentHandlers.onThreadUnarchived?.(workspace_id, threadId);
+          const thread =
+            params.thread && typeof params.thread === "object" && !Array.isArray(params.thread)
+              ? (params.thread as Record<string, unknown>)
+              : null;
+          currentHandlers.onThreadUnarchived?.(workspace_id, threadId, thread);
         }
         return;
       }
