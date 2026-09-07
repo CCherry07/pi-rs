@@ -487,6 +487,8 @@ from bypassing matrix validation. The protected workflow uses npm Trusted Publis
 there is no long-lived npm token, and npm attaches provenance to the OIDC publication. Application
 archives and NAPI artifacts receive SHA-256 files, the assembled sets receive `SHA256SUMS`, and npm
 registry `dist.integrity` must equal the SHA-512 of each locally verified tarball.
+Linux glibc artifacts use Ubuntu 24.04 runners for both x64 and arm64; this is the native dependency
+and system-library compatibility baseline for those release targets.
 Developer-ID/Authenticode signing and notarization remain release-hardening work rather than
 runtime concerns.
 

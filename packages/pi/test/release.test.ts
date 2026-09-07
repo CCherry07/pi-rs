@@ -54,8 +54,13 @@ test("release builds discover every crate inheriting the workspace version", () 
       "pi-cli",
       "pi-js-package-manager",
       "pi-mcp",
+      "pi-memory-eval",
+      "pi-memory-loader",
       "pi-napi",
+      "pi-plugin-memory-hermes",
+      "pi-plugin-memory-local",
       "pi-rpc",
+      "pi-sdk",
       "pi-settings",
     ]),
   );
@@ -68,6 +73,21 @@ test("release matrix has one native runner per supported target", () => {
     new Set(supportedNativeTargets.map((target) => target.rustTarget)),
   );
   assert.ok(matrix.include.every((entry) => entry.runner.length > 0));
+});
+
+test("release matrix builds Linux artifacts on the Ubuntu 24.04 baseline", () => {
+  const linuxRunners = new Map(
+    releaseMatrix().include
+      .filter((entry) => entry.target.endsWith("unknown-linux-gnu"))
+      .map((entry) => [entry.target, entry.runner]),
+  );
+  assert.deepEqual(
+    linuxRunners,
+    new Map([
+      ["aarch64-unknown-linux-gnu", "ubuntu-24.04-arm"],
+      ["x86_64-unknown-linux-gnu", "ubuntu-24.04"],
+    ]),
+  );
 });
 
 test("npm publication always puts the root package last", () => {

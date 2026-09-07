@@ -86,8 +86,8 @@ type PackageManifest = z.infer<typeof packageManifestSchema>;
 const runnerByTarget = {
   "aarch64-apple-darwin": "macos-15",
   "x86_64-apple-darwin": "macos-15-intel",
-  "aarch64-unknown-linux-gnu": "ubuntu-22.04-arm",
-  "x86_64-unknown-linux-gnu": "ubuntu-22.04",
+  "aarch64-unknown-linux-gnu": "ubuntu-24.04-arm",
+  "x86_64-unknown-linux-gnu": "ubuntu-24.04",
   "aarch64-pc-windows-msvc": "windows-11-arm",
   "x86_64-pc-windows-msvc": "windows-2025",
 } as const satisfies Record<(typeof supportedNativeTargets)[number]["rustTarget"], string>;

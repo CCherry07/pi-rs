@@ -24,7 +24,7 @@ env:
 
 jobs:
   prepare:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
@@ -106,7 +106,7 @@ jobs:
 
   assemble:
     needs: build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -144,7 +144,7 @@ jobs:
 
   stage-github-release:
     needs: assemble
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       actions: read
       contents: write
@@ -169,7 +169,7 @@ jobs:
 
   publish-npm:
     needs: stage-github-release
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     environment: npm-publish
     permissions:
       actions: read
@@ -203,7 +203,7 @@ jobs:
 
   publish-github-release:
     needs: publish-npm
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
