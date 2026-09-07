@@ -1,0 +1,219 @@
+{
+  "empty": {
+    "existingThread": "Send a prompt to the agent.",
+    "newThread": "Send a prompt to start a new agent.",
+    "loading": "Loading…"
+  },
+  "toolGroup": {
+    "toolCalls_one": "{{count}} tool call",
+    "toolCalls_other": "{{count}} tool calls",
+    "messages_one": "{{count}} message",
+    "messages_other": "{{count}} messages",
+    "summary": "{{toolCalls}}, {{messages}}",
+    "expand": "Expand tool calls",
+    "collapse": "Collapse tool calls"
+  },
+  "status": {
+    "working": "Working…",
+    "doneIn": "Done in {{duration}}",
+    "fetchCountdown_one": "New message will be fetched in {{count}} second",
+    "fetchCountdown_other": "New message will be fetched in {{count}} seconds"
+  },
+  "images": {
+    "imageNumber": "Image {{number}}",
+    "open": "Open image {{number}}",
+    "closePreview": "Close image preview"
+  },
+  "messageActions": {
+    "quote": "Quote message",
+    "copy": "Copy message",
+    "copyCode": "Copy code block",
+    "copied": "Copied",
+    "copyShort": "Copy",
+    "code": "Code"
+  },
+  "details": {
+    "toggleReasoning": "Toggle reasoning details",
+    "toggleAnsweredInput": "Toggle answered input details",
+    "toggleTool": "Toggle tool details"
+  },
+  "input": {
+    "requested": "Input requested",
+    "noAnswer": "No answer provided",
+    "noAnswerSentence": "No answer provided.",
+    "answered": "answered:",
+    "more": "+{{count}} more",
+    "question": "Question {{number}}"
+  },
+  "files": {
+    "edited_one": "file edited",
+    "edited_other": "files edited",
+    "changes": "changes"
+  },
+  "plan": {
+    "exporting": "Exporting...",
+    "exportMarkdown": "Export .md",
+    "exportDialogTitle": "Export plan as Markdown",
+    "exportFailed": "Plan export failed",
+    "exportUnavailable": "Unable to export plan.",
+    "title": "Plan",
+    "waiting": "Waiting on a plan...",
+    "empty": "No active plan."
+  },
+  "explore": {
+    "exploring": "Exploring",
+    "explored": "Explored",
+    "searchIn": "{{query}} in {{path}}"
+  },
+  "tool": {
+    "cwd": "cwd:",
+    "plan": "Plan",
+    "generatingPlan": "Generating plan...",
+    "command": "Command",
+    "commandNamed": "Command: {{command}}",
+    "fileChanges": "File changes",
+    "pendingChanges": "Pending changes",
+    "tool": "Tool: {{name}}",
+    "webSearch": "Web search",
+    "imageView": "Image view",
+    "contextCompaction": "Context compaction",
+    "compacting": "Compacting conversation context to fit token limits.",
+    "reasoning": "Reasoning"
+  },
+  "toolSummary": {
+    "command": "command",
+    "commandValue": "Command",
+    "searching": "searching",
+    "searched": "searched",
+    "web": "the web",
+    "read": "read",
+    "image": "image",
+    "hook": "hook",
+    "tool": "tool",
+    "waitingFor": "waiting for",
+    "waitedFor": "waited for",
+    "resuming": "resuming",
+    "resumed": "resumed",
+    "closing": "closing",
+    "closed": "closed",
+    "spawning": "spawning",
+    "spawned": "spawned",
+    "sendingTo": "sending to",
+    "sentTo": "sent to",
+    "subagent": "sub-agent",
+    "collabCall": "collaboration call",
+    "unknown": "unknown"
+  },
+  "toolStatus": {
+    "processing": "processing",
+    "completed": "completed",
+    "failed": "failed"
+  },
+  "subagents": {
+    "executionTree": "Sub-agent execution tree",
+    "open": "Open {{agent}} progress"
+  },
+  "errors": {
+    "openFile": "Couldn’t open file",
+    "turnStartFailed": "Turn failed to start.",
+    "turnStartFailedWithMessage": "Turn failed to start: {{message}}",
+    "turnSteerFailedWithMessage": "Turn steer failed: {{message}}",
+    "compactionFailed": "Failed to start context compaction.",
+    "requestFailed": "Request failed.",
+    "promptArgsMissingAssignment": "Could not parse {{command}}: expected key=value but found '{{token}}'. Wrap values in double quotes if they contain spaces.",
+    "promptArgsMissingKey": "Could not parse {{command}}: expected a name before '=' in '{{token}}'.",
+    "promptArgsMissingRequired": "Missing required args for {{command}}: {{names}}. Provide as key=value (quote values with spaces).",
+    "turnFailed": "Turn failed.",
+    "turnFailedWithMessage": "Turn failed: {{message}}"
+  },
+  "composer": {
+    "send": "Send",
+    "steer": "Steer",
+    "queue": "Queue",
+    "placeholder": "Ask Pi to do something...",
+    "unavailable": "Chat is temporarily unavailable.",
+    "addImage": "Add image",
+    "collapseInput": "Collapse input",
+    "expandInput": "Expand input",
+    "queueTitle": "Queued",
+    "queueMenu": "Queue item menu",
+    "queuedImage_one": "{{count}} image",
+    "queuedImage_other": "{{count}} images",
+    "image": "Image",
+    "images": "Images",
+    "pastedImage": "Pasted image",
+    "removeAttachment": "Remove {{name}}",
+    "openIn": "Open in {{target}}",
+    "setCommand": "Set command in Settings",
+    "setAppName": "Set app name in Settings",
+    "downloadLinkedFile": "Download Linked File",
+    "copyLink": "Copy Link",
+    "dictation": {
+      "openSettings": "Open dictation settings",
+      "disabledOpenSettings": "Dictation disabled. Open settings",
+      "cancel": "Cancel transcription",
+      "stop": "Stop dictation",
+      "start": "Start dictation"
+    },
+    "plan": "Plan",
+    "model": "Model",
+    "noModels": "No models",
+    "fastMode": "Fast mode enabled",
+    "thinkingMode": "Thinking mode",
+    "default": "Default",
+    "contextFreeUnknown": "Context usage unavailable",
+    "contextUsage": "Used {{used}} · {{remaining}} remaining ({{percent}}%)",
+    "mobile": {
+      "more": "More actions"
+    },
+    "slash": {
+      "compact": "compact the active thread context",
+      "fast": "toggle Fast mode for upcoming turns",
+      "fork": "branch into a new thread",
+      "new": "start a new chat",
+      "resume": "refresh the active thread",
+      "status": "show session status"
+    },
+    "groups": {
+      "Files": "Files",
+      "Skills": "Skills",
+      "Slash": "Commands",
+      "Prompts": "Prompts"
+    }
+  },
+  "commands": {
+    "unknown": "unknown",
+    "status": {
+      "title": "Session status:",
+      "model": "- Model: {{value}}",
+      "fastMode": "- Fast mode: {{value}}",
+      "reasoningEffort": "- Reasoning effort: {{value}}",
+      "default": "default",
+      "on": "on",
+      "off": "off"
+    },
+    "fast": {
+      "usage": "Usage: /fast, /fast on, /fast off, or /fast status.",
+      "status": "Fast mode is {{state}}.",
+      "enabled": "Fast mode enabled.",
+      "disabled": "Fast mode disabled."
+    }
+  },
+  "notices": {
+    "sessionStopped": "Session stopped."
+  },
+  "transcript": {
+    "user": "User",
+    "assistant": "Assistant",
+    "reasoning": "Reasoning:",
+    "question": "Question {{number}}",
+    "noAnswer": "No answer provided",
+    "inputAnswered": "Input answered:",
+    "tool": "Tool: {{title}}",
+    "status": "Status: {{status}}",
+    "changes": "Changes:",
+    "diff": "Diff: {{title}}",
+    "exploring": "Exploring",
+    "explored": "Explored"
+  }
+}

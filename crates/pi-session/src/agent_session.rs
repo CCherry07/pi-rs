@@ -138,6 +138,40 @@ pub enum SubmitOutcome {
     Queued { kind: QueueKind, entry_id: String },
 }
 
+/// Text and optional image attachments submitted through the session input
+/// pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionInput {
+    text: String,
+    images: Option<Vec<ImageContent>>,
+}
+
+impl SessionInput {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            images: None,
+        }
+    }
+
+    pub fn with_images(mut self, images: impl IntoIterator<Item = ImageContent>) -> Self {
+        self.images = Some(images.into_iter().collect());
+        self
+    }
+}
+
+impl From<String> for SessionInput {
+    fn from(text: String) -> Self {
+        Self::new(text)
+    }
+}
+
+impl From<&str> for SessionInput {
+    fn from(text: &str) -> Self {
+        Self::new(text)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PendingSessionMessage {
     kind: Option<QueueKind>,
@@ -774,8 +808,11 @@ impl AgentSession {
         Ok(transition)
     }
 
-    pub async fn submit(&self, text: impl Into<String>) -> Result<SubmitOutcome, SessionError> {
-        let mut text = text.into();
+    pub async fn submit(
+        &self,
+        input: impl Into<SessionInput>,
+    ) -> Result<SubmitOutcome, SessionError> {
+        let mut input = input.into();
         if self
             .activity
             .lock()
@@ -783,13 +820,13 @@ impl AgentSession {
             .active_run
             .is_some()
         {
-            return self.queue_text(text, QueueKind::Steer).await;
+            return self.queue_input(input, QueueKind::Steer).await;
         }
-        let display_text = text.clone();
-        if let Some(outcome) = self.runtime.execute_command(&text).await? {
+        let display_text = input.text.clone();
+        if let Some(outcome) = self.runtime.execute_command(&input.text).await? {
             match outcome {
                 CommandOutcome::Handled => return Ok(SubmitOutcome::Handled),
-                CommandOutcome::TransformInput(transformed) => text = transformed,
+                CommandOutcome::TransformInput(transformed) => input.text = transformed,
             }
         }
         let _operation = self.operation_gate.lock().await;
@@ -797,7 +834,7 @@ impl AgentSession {
         self.maybe_threshold_compact_locked().await;
         let prepared = match self
             .runtime
-            .prepare_text_submission_after_command(display_text, text)
+            .prepare_submission_after_command(display_text, input.text, input.images)
             .await?
         {
             PreparedTextSubmission::Handled => return Ok(SubmitOutcome::Handled),
@@ -858,13 +895,19 @@ impl AgentSession {
     /// Queues a steering message for the active run after command/input-hook
     /// preprocessing. The durable queue record is committed before the Agent
     /// can observe the message.
-    pub async fn steer(&self, text: impl Into<String>) -> Result<SubmitOutcome, SessionError> {
-        self.queue_text(text.into(), QueueKind::Steer).await
+    pub async fn steer(
+        &self,
+        input: impl Into<SessionInput>,
+    ) -> Result<SubmitOutcome, SessionError> {
+        self.queue_input(input.into(), QueueKind::Steer).await
     }
 
     /// Queues a follow-up message for the active run.
-    pub async fn follow_up(&self, text: impl Into<String>) -> Result<SubmitOutcome, SessionError> {
-        self.queue_text(text.into(), QueueKind::FollowUp).await
+    pub async fn follow_up(
+        &self,
+        input: impl Into<SessionInput>,
+    ) -> Result<SubmitOutcome, SessionError> {
+        self.queue_input(input.into(), QueueKind::FollowUp).await
     }
 
     /// Enqueues an extension-created user or custom message without running
@@ -1228,9 +1271,9 @@ impl AgentSession {
         Ok(run_id)
     }
 
-    async fn queue_text(
+    async fn queue_input(
         &self,
-        text: String,
+        input: SessionInput,
         kind: QueueKind,
     ) -> Result<SubmitOutcome, SessionError> {
         self.ensure_open()?;
@@ -1251,16 +1294,19 @@ impl AgentSession {
                 ));
             }
         };
-        let (generation, display_text, text, images) =
-            match self.runtime.process_queued_text(text, behavior).await? {
-                QueuedTextOutcome::Handled => return Ok(SubmitOutcome::Handled),
-                QueuedTextOutcome::Message {
-                    generation,
-                    display_text,
-                    text,
-                    images,
-                } => (generation, display_text, text, images),
-            };
+        let (generation, display_text, text, images) = match self
+            .runtime
+            .process_queued_input(input.text, input.images, behavior)
+            .await?
+        {
+            QueuedTextOutcome::Handled => return Ok(SubmitOutcome::Handled),
+            QueuedTextOutcome::Message {
+                generation,
+                display_text,
+                text,
+                images,
+            } => (generation, display_text, text, images),
+        };
         if generation != expected.1 {
             return Err(SessionError::Busy);
         }
@@ -1430,9 +1476,8 @@ impl AgentSession {
 
     /// Runs a protocol-neutral, already-structured message batch.
     ///
-    /// External adapters use this when their prompt vocabulary contains
-    /// images or other blocks that cannot be represented by [`Self::submit`]'s
-    /// text-only interface.
+    /// External adapters use this when their prompt vocabulary contains roles
+    /// or content blocks beyond [`SessionInput`]'s text-and-image interface.
     pub async fn prompt_messages(
         &self,
         messages: Vec<Message>,
@@ -3525,6 +3570,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_input_images_reach_the_provider_and_persist() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("multimodal.jsonl");
+        let scripted = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".to_string())]);
+        let provider = scripted.provider();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(scripted)
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("test"),
+                ..AgentOptions::default()
+            })
+            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .build()
+            .unwrap();
+        let session = AgentSession::create(runtime, &path).await.unwrap();
+        let image = ImageContent {
+            data: "aW1hZ2U=".to_string(),
+            mime_type: "image/png".to_string(),
+        };
+
+        session
+            .submit(SessionInput::new("inspect").with_images([image.clone()]))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            &provider.requests()[0].messages[0],
+            Message::User(user)
+                if matches!(&user.content[..], [ContentBlock::Text(text), ContentBlock::Image(actual)]
+                    if text.text == "inspect" && actual == &image)
+        ));
+        let document = session.log().load().unwrap();
+        assert!(matches!(
+            document.messages()[0].as_standard(),
+            Some(Message::User(user))
+                if matches!(&user.content[..], [ContentBlock::Text(text), ContentBlock::Image(actual)]
+                    if text.text == "inspect" && actual == &image)
+        ));
+    }
+
+    #[tokio::test]
     async fn message_end_replacements_are_the_messages_persisted_and_restored() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
@@ -4063,7 +4150,14 @@ mod tests {
         .await
         .unwrap();
 
-        let queued = session.steer("keep this draft").await.unwrap();
+        let queued_image = ImageContent {
+            data: "cXVldWVk".to_string(),
+            mime_type: "image/webp".to_string(),
+        };
+        let queued = session
+            .steer(SessionInput::new("keep this draft").with_images([queued_image.clone()]))
+            .await
+            .unwrap();
         assert!(matches!(
             queued,
             SubmitOutcome::Queued {
@@ -4075,6 +4169,22 @@ mod tests {
             session.snapshot().queue.steering,
             vec!["keep this draft".to_string()]
         );
+        let document = session.log().load().unwrap();
+        let queued_message = document.records.iter().find_map(|record| {
+            let LaneRecordEntry::QueueEnqueued { target, .. } = &record.record else {
+                return None;
+            };
+            let SessionEntry::Message(message) = &target.entry else {
+                return None;
+            };
+            message.message.as_standard()
+        });
+        assert!(matches!(
+            queued_message,
+            Some(Message::User(user))
+                if matches!(&user.content[..], [ContentBlock::Text(text), ContentBlock::Image(actual)]
+                    if text.text == "keep this draft" && actual == &queued_image)
+        ));
         session.abort();
         let outcome = running.await.unwrap().unwrap();
         assert!(matches!(outcome, SubmitOutcome::Agent(_)));

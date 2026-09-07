@@ -23,44 +23,25 @@ rpassword = "7.4"
 pi-agent.workspace = true
 pi-acp.workspace = true
 pi-rpc.workspace = true
-pi-md.workspace = true
 pi-core.workspace = true
-pi-plugin-loader.workspace = true
 pi-plugin-manager.workspace = true
 pi-js-package-manager.workspace = true
 pi-js-plugin.workspace = true
-pi-resources.workspace = true
-pi-provider.workspace = true
 pi-runtime.workspace = true
 pi-session.workspace = true
 pi-settings.workspace = true
-pi-memory-loader.workspace = true
-pi-plugin-memory-local.workspace = true
-pi-plugin-memory-hermes.workspace = true
+pi-sdk.workspace = true
 pi-plugin-openai.workspace = true
 pi-plugin-xai.workspace = true
 pi-plugin-models.workspace = true
 pi-plugin-anthropic.workspace = true
-pi-plugin-google.workspace = true
-pi-plugin-mistral.workspace = true
-pi-plugin-azure-openai.workspace = true
 pi-plugin-openrouter.workspace = true
 pi-plugin-copilot.workspace = true
-pi-plugin-bedrock.workspace = true
-pi-plugin-prompts.workspace = true
 pi-plugin-skills.workspace = true
 pi-plugin-session-transfer.workspace = true
-pi-plugin-subagents.workspace = true
-pi-plugin-read.workspace = true
-pi-plugin-write.workspace = true
-pi-plugin-edit.workspace = true
-pi-plugin-hashline-edit.workspace = true
-pi-plugin-bash.workspace = true
-pi-plugin-grep.workspace = true
-pi-plugin-find.workspace = true
-pi-plugin-ls.workspace = true
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 ratatui-textarea = { version = "0.9.2", default-features = false }
+regex = "1"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 termina = "0.3.3"
@@ -69,5 +50,6 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util", "signal"] }
 tui-realm-stdlib = "4.1.0"
 tuirealm = { version = "4.1.0", default-features = false }
+pulldown-cmark = "0.13"
 unicode-width = "0.2"
 uuid = { version = "1.18.1", features = ["v7"] }

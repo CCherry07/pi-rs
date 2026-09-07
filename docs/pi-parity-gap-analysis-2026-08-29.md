@@ -33,8 +33,8 @@ pi-rs 的核心已经不是“库级原型”：agent loop、基础文本交互�
 
 以下能力在当前代码中已经存在，不应继续沿用早期 handoff 的“未完成”判断：
 
-- **基础 filesystem/shell 工具已经产品化。** 当前 generation 注册 read、grep、find、ls、write、edit、hashline edit 和 bash（`apps/pi-cli/src/session_factory.rs:698-714`），不是只有 mock tool。
-- **skills、prompt templates、settings 和 project trust 已进入 generation 构建。** trusted project 的 scoped skill/prompt paths 在 prepare 阶段计算（`apps/pi-cli/src/session_factory.rs:141-190`）；trust service 有持久 store、交互 prompt 和缓存（`apps/pi-cli/src/project_trust.rs:70-99,160-185`）。
+- **基础 filesystem/shell 工具已经产品化。** 当前 generation 注册 read、grep、find、ls、write、edit、hashline edit 和 bash（`crates/pi-sdk/src/session_factory.rs:693-720`），不是只有 mock tool。
+- **skills、prompt templates、settings 和 project trust 已进入 generation 构建。** trusted project 的 scoped skill/prompt paths 在 prepare 阶段计算（`crates/pi-sdk/src/session_factory.rs:155-215`）；trust service 有持久 store、交互 prompt 和缓存（`crates/pi-sdk/src/project_trust.rs:71-99,158-185`）。
 - **resume/fork/tree/compaction/reload 已是真实 session runtime 能力。** `PiSession` 已实现 resume/fork/reload（`crates/pi-session/src/multi_session_manager.rs:260-288`），`AgentSession` 实现 tree checkout 和 compaction（`crates/pi-session/src/agent_session.rs:1623-1640,1773-1788`）；product reload 会整体重建 runtime/provider/resource/session plugin generation（`crates/pi-session/src/agent_session_runtime.rs:343-369`）。
 - **JavaScript 扩展并非整体缺失。** tools、commands、flags、许多 hooks、消息/session actions 和配置型 provider 已有真实 bridge（`packages/pi/src/extension-host.ts:500-609,611-688`）；剩余差距是 P0-4/P1-6 所列的 UI 和高级 API 子集。
 - **TUI 已支持实际 fullscreen、Markdown、滚动、selection/clipboard、IME 输入和 command selectors。** 本报告只把 Pi 额外的 settings/themes/keybindings/session-management 工作流列为差距，不再把“没有 TUI”或“只有 print mode”列为缺失。
@@ -95,7 +95,7 @@ Pi AI 层定义了 10 种已知 completion API，包括 Mistral conversations、
 
 pi-rs 产品 generation 现在会同时注册 OpenAI-compatible、Anthropic、OpenAI Codex、xAI、
 Google Gemini/Vertex、Mistral、Azure OpenAI Responses、OpenRouter、GitHub Copilot、Amazon
-Bedrock 与 `models.json` plugin（`apps/pi-cli/src/session_factory.rs:689-928`）。`models.json`
+Bedrock 与 `models.json` plugin（`crates/pi-sdk/src/builtin_providers.rs:110-467`，`crates/pi-sdk/src/session_factory.rs:668-681`）。`models.json`
 接受 `openai-completions`、`openai-responses`、`azure-openai-responses`、
 `mistral-conversations`、`anthropic-messages`、`google-generative-ai`、`google-vertex` 和
 `bedrock-converse-stream` 八类 API（`plugins/providers/pi-plugin-models/src/config.rs:976-995`）；
@@ -190,7 +190,7 @@ Pi 会实际调用 `ModelRuntime.refresh()` 更新远程 model catalogs（`legac
 1. **fullscreen 默认值不同。** Pi settings 默认 `regular`（`legacy/pi/packages/coding-agent/src/core/settings-manager.ts:1202-1209`，TUI 在 `interactive-mode.ts:567-571` 读取）；pi-rs 默认 alternate-screen，除非 `--no-fullscreen`（`apps/pi-cli/src/config.rs:347-349`），且测试明确锁定此行为（同文件 `:388-400`）。这是产品选择，除非目标改为严格 CLI UX parity。
 2. **v4 session 是主动架构选择。** 参见 P0-3；应补 importer，而不是把 Rust 核心倒退成 v3。
 3. **native Rust plugins / generation reload 是 pi-rs 增量能力。** `--plugin` 和 native plugin 管理直接出现在 Rust CLI（`apps/pi-cli/src/config.rs:65-67,92-96,170-207`）；这不是 Pi 缺口。
-4. **Rust 默认工具多了 `hashline_edit`。** generation 同时注册 edit 和 hashline edit（`apps/pi-cli/src/session_factory.rs:708-714`），属于扩展而非 parity 问题。
+4. **Rust 默认工具多了 `hashline_edit`。** generation 同时注册 edit 和 hashline edit（`crates/pi-sdk/src/session_factory.rs:717-720`），属于扩展而非 parity 问题。
 
 ## 不确定，需实机验证
 

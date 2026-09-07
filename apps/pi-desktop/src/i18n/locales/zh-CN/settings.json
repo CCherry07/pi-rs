@@ -1,0 +1,454 @@
+{
+  "shell": {
+    "title": "设置",
+    "close": "关闭设置",
+    "back": "返回设置分类",
+    "sections": "设置分类"
+  },
+  "sections": {
+    "projects": "项目",
+    "archived": "归档任务",
+    "environments": "环境",
+    "display": "显示与声音",
+    "composer": "输入框",
+    "dictation": "语音输入",
+    "shortcuts": "快捷键",
+    "openApps": "打开方式",
+    "git": "Git",
+    "about": "关于"
+  },
+  "archived": {
+    "title": "归档任务",
+    "subtitle": "查看已归档的任务，恢复到任务列表，或永久删除本地会话文件。",
+    "listTitle": "已归档",
+    "listSubtitle": "归档只会从主任务列表隐藏任务；删除会移除底层 session 文件。",
+    "loading": "正在加载归档任务…",
+    "empty": "没有归档任务。",
+    "restore": "恢复",
+    "restoring": "恢复中…",
+    "deleting": "删除中…",
+    "deleteAll": "全部删除",
+    "deletingAll": "全部删除中…",
+    "untitled": "未命名任务",
+    "unknownUpdatedAt": "更新时间未知",
+    "messageCount": "{{count}} 条消息",
+    "deleteTitle": "删除归档任务",
+    "deleteQuestion": "确定要永久删除“{{name}}”吗？这个操作会删除本地 session 文件，无法撤销。",
+    "deleteAllTitle": "删除全部归档任务",
+    "deleteAllQuestion": "确定要永久删除全部 {{count}} 个归档任务吗？这个操作会删除本地 session 文件，无法撤销。",
+    "deleteAllError": "部分归档任务删除失败：{{message}}",
+    "error": "加载归档任务失败：{{message}}"
+  },
+  "display": {
+    "title": "显示与声音",
+    "subtitle": "调整界面视觉效果和声音提醒。",
+    "sectionTitle": "显示",
+    "sectionSubtitle": "调整窗口背景和视觉效果。",
+    "language": "界面语言",
+    "languageOptions": {
+      "system": "跟随系统",
+      "en": "English",
+      "zhCN": "简体中文"
+    },
+    "theme": "主题",
+    "themeOptions": {
+      "system": "跟随系统",
+      "light": "浅色",
+      "dark": "深色",
+      "dim": "柔和深色"
+    },
+    "messageFilePath": {
+      "title": "在消息中显示文件路径",
+      "subtitle": "在文件链接旁显示其父目录路径。"
+    },
+    "splitPanes": {
+      "title": "并排显示对话和差异",
+      "subtitle": "同时显示对话与差异视图，而不是在两者之间切换。"
+    },
+    "threadTitles": {
+      "title": "自动生成新任务标题",
+      "subtitle": "根据第一条消息生成简短标题（会消耗额外 token）。"
+    },
+    "transparency": {
+      "title": "降低透明度",
+      "subtitle": "使用纯色表面代替玻璃效果。"
+    },
+    "interfaceScale": "界面缩放",
+    "scaleShortcuts": {
+      "title": "使用 {{key}}+ 和 {{key}}- 缩放，按 {{key}}+0 重置。",
+      "text": "快捷键：{{key}}+ 和 {{key}}- 缩放，{{key}}+0 重置。"
+    },
+    "uiFont": {
+      "label": "界面字体",
+      "help": "应用于所有界面文字。留空则使用系统默认字体。"
+    },
+    "codeFont": {
+      "label": "代码字体",
+      "help": "应用于 Git 差异和其他等宽文本区域。"
+    },
+    "codeFontSize": {
+      "label": "代码字号",
+      "help": "调整代码和差异文本的字号。"
+    }
+  },
+  "chat": {
+    "sectionTitle": "对话",
+    "sectionSubtitle": "控制每个任务在内存中保留的对话历史数量。",
+    "unlimited": {
+      "title": "保留完整对话历史",
+      "subtitle": "在内存中保留全部任务历史（可能影响性能）。"
+    },
+    "scrollbackPreset": "历史数量预设",
+    "custom": "自定义",
+    "defaultValue": "{{value}}（默认）",
+    "scrollbackHelp": "数值越高，保留的历史越多，但可能增加内存占用。可在任务中使用“从服务器同步”重新获取更早的消息。",
+    "maxItems": "每个任务最多保留条目数",
+    "rangeHelp": "范围：{{min}}–{{max}}。包括消息、工具调用和其他对话条目。"
+  },
+  "sounds": {
+    "sectionTitle": "声音",
+    "sectionSubtitle": "控制通知声音提醒。",
+    "notificationSounds": {
+      "title": "通知声音",
+      "subtitle": "窗口未聚焦时，长时间运行的任务完成后播放声音。"
+    },
+    "systemNotifications": {
+      "title": "系统通知",
+      "subtitle": "窗口未聚焦时，长时间运行的任务完成后显示系统通知。"
+    },
+    "subagentNotifications": {
+      "title": "子Agent通知",
+      "subtitle": "系统通知中包含已创建的子Agent任务。"
+    },
+    "testSound": "测试声音",
+    "testNotification": "测试通知"
+  },
+  "projects": {
+    "title": "项目",
+    "subtitle": "将相关工作区分组，并调整各组内项目的顺序。",
+    "groups": {
+      "title": "分组",
+      "subtitle": "为相关仓库创建分组标签。",
+      "newName": "新分组名称",
+      "add": "添加分组",
+      "copiesFolder": "副本文件夹",
+      "moveUp": "上移分组",
+      "moveDown": "下移分组",
+      "delete": "删除分组",
+      "empty": "暂无分组。",
+      "deleteTitle": "删除分组",
+      "deleteQuestion": "删除“{{name}}”？",
+      "deleteMove": "该分组中的项目将移到“{{group}}”。"
+    },
+    "projectList": {
+      "title": "项目",
+      "subtitle": "将项目分配到分组并调整顺序。",
+      "moveUp": "上移项目",
+      "moveDown": "下移项目",
+      "delete": "删除项目",
+      "empty": "暂无项目。"
+    }
+  },
+  "openApps": {
+    "title": "打开方式",
+    "subtitle": "自定义标题栏和文件预览中显示的“打开方式”菜单。",
+    "fields": {
+      "label": "标签",
+      "type": "类型",
+      "appName": "应用名称",
+      "command": "命令",
+      "args": "参数",
+      "labelNumber": "第 {{number}} 个打开方式标签",
+      "typeNumber": "第 {{number}} 个打开方式类型",
+      "appNameNumber": "第 {{number}} 个应用名称",
+      "commandNumber": "第 {{number}} 个打开命令",
+      "argsNumber": "第 {{number}} 个打开参数"
+    },
+    "types": {
+      "app": "应用",
+      "command": "命令"
+    },
+    "validation": {
+      "label": "必须填写标签",
+      "appName": "必须填写应用名称",
+      "command": "必须填写命令",
+      "requiredFields": "请填写所有必填字段"
+    },
+    "incomplete": "未完成",
+    "remove": "移除应用",
+    "add": "添加应用",
+    "commandPathHelp": "命令会将所选路径作为最后一个参数。",
+    "macHelp": "应用通过带可选参数的 `open -a` 打开。",
+    "otherHelp": "应用会作为可执行文件运行，并可附带参数。",
+    "newApp": "新应用"
+  },
+  "environments": {
+    "title": "环境",
+    "subtitle": "配置各项目的初始化脚本和工作树位置。",
+    "globalRoot": {
+      "label": "全局工作树根目录",
+      "help": "当项目没有单独设置时，新工作树默认创建在这里。每个项目会在该目录下使用独立子文件夹。",
+      "pickerTitle": "选择全局工作树根目录"
+    },
+    "project": "项目",
+    "setupScript": {
+      "label": "初始化脚本",
+      "help": "每次创建新工作树后，在独立终端中运行一次。"
+    },
+    "projectRoot": {
+      "label": "工作树文件夹",
+      "help": "该项目工作树的自定义位置。留空将使用全局根目录或内置默认位置。",
+      "pickerTitle": "选择工作树文件夹"
+    },
+    "folderPickerFailed": "无法打开文件夹选择器",
+    "copyFailed": {
+      "title": "复制失败",
+      "unavailable": "当前环境无法访问剪贴板，请手动复制脚本。",
+      "write": "无法写入剪贴板，请手动复制脚本。"
+    }
+  },
+  "composer": {
+    "title": "输入框",
+    "subtitle": "控制消息编辑器中的辅助功能和格式行为。",
+    "followUp": {
+      "title": "后续消息行为",
+      "queue": "排队",
+      "steer": "引导",
+      "steerUnavailable": "当前模型不支持引导模式。",
+      "help": "选择任务运行时的默认行为。按 {{shortcut}} 可让单条消息使用相反行为。",
+      "unavailableHelp": "当前模型不支持引导模式，后续消息将进入队列。"
+    },
+    "presets": {
+      "title": "预设",
+      "subtitle": "选择一个起点，再微调下方开关。",
+      "label": "预设",
+      "help": "预设会更新下方开关，选择后仍可单独自定义。",
+      "options": {
+        "default": "默认（无辅助）",
+        "helpful": "辅助",
+        "smart": "智能"
+      }
+    },
+    "fences": {
+      "title": "代码围栏",
+      "space": {
+        "title": "按空格展开围栏",
+        "subtitle": "输入 ``` 后按空格可插入围栏代码块。"
+      },
+      "enter": {
+        "title": "按回车展开围栏",
+        "subtitle": "启用后可按回车展开 ``` 所在行。"
+      },
+      "languageTags": {
+        "title": "支持语言标签",
+        "subtitle": "允许输入 ```lang 后按空格附加语言。"
+      },
+      "wrapSelection": {
+        "title": "用围栏包裹所选内容",
+        "subtitle": "创建围栏时包裹已选择的文本。"
+      },
+      "copyWithout": {
+        "title": "复制代码块时不含围栏",
+        "subtitle": "启用后，复制内容为纯文本；按住 {{key}} 可包含 ``` 围栏。"
+      }
+    },
+    "pasting": {
+      "title": "粘贴",
+      "multiline": {
+        "title": "自动包裹多行粘贴内容",
+        "subtitle": "将多行粘贴内容放入围栏代码块。"
+      },
+      "codeLike": {
+        "title": "自动包裹类似代码的单行内容",
+        "subtitle": "粘贴较长的单行代码片段时自动包裹。"
+      }
+    },
+    "lists": {
+      "title": "列表",
+      "continue": {
+        "title": "按 Shift+Enter 续写列表",
+        "subtitle": "当前行有内容时，继续编号列表或项目列表。"
+      }
+    }
+  },
+  "dictation": {
+    "title": "听写",
+    "subtitle": "使用设备端转录启用麦克风听写。",
+    "enable": {
+      "title": "启用听写",
+      "subtitle": "首次使用时下载所选 Whisper 模型。"
+    },
+    "model": {
+      "label": "听写模型",
+      "help": "{{note}} 下载大小：{{size}}。"
+    },
+    "language": {
+      "label": "偏好的听写语言",
+      "auto": "仅自动检测",
+      "help": "自动检测始终开启；该选项会引导解码器优先考虑你的偏好。",
+      "options": {
+        "en": "英语",
+        "es": "西班牙语",
+        "fr": "法语",
+        "de": "德语",
+        "it": "意大利语",
+        "pt": "葡萄牙语",
+        "nl": "荷兰语",
+        "sv": "瑞典语",
+        "no": "挪威语",
+        "da": "丹麦语",
+        "fi": "芬兰语",
+        "pl": "波兰语",
+        "tr": "土耳其语",
+        "ru": "俄语",
+        "uk": "乌克兰语",
+        "ja": "日语",
+        "ko": "韩语",
+        "zh": "中文"
+      }
+    },
+    "holdKey": {
+      "label": "按住听写键",
+      "off": "关闭",
+      "help": "按住按键开始听写，松开后停止并处理。"
+    },
+    "status": {
+      "label": "模型状态（{{model}}）",
+      "ready": "听写已就绪。",
+      "missing": "尚未下载模型。",
+      "downloading": "正在下载模型...",
+      "error": "下载出错。"
+    },
+    "actions": {
+      "download": "下载模型",
+      "cancel": "取消下载",
+      "remove": "移除模型"
+    },
+    "models": {
+      "tiny": {
+        "label": "微型",
+        "note": "速度最快，准确率最低。"
+      },
+      "base": {
+        "label": "基础",
+        "note": "均衡的默认选择。"
+      },
+      "small": {
+        "label": "小型",
+        "note": "准确率更高。"
+      },
+      "medium": {
+        "label": "中型",
+        "note": "准确率高。"
+      },
+      "largeV3": {
+        "label": "大型 V3",
+        "note": "准确率最高，下载量较大。"
+      }
+    }
+  },
+  "shortcuts": {
+    "title": "快捷键",
+    "subtitle": "自定义文件操作、输入框、面板和导航快捷键。",
+    "typeShortcut": "按下快捷键",
+    "default": "默认：{{shortcut}}",
+    "pressNewDefault": "聚焦后按下新的快捷键。默认：{{shortcut}}",
+    "groups": {
+      "file": {
+        "title": "文件",
+        "subtitle": "通过键盘创建Agent和工作树。"
+      },
+      "composer": {
+        "title": "输入框",
+        "subtitle": "循环切换模型和推理模式。"
+      },
+      "panels": {
+        "title": "面板",
+        "subtitle": "显示或隐藏侧边栏和面板。"
+      },
+      "navigation": {
+        "title": "导航",
+        "subtitle": "在Agent和工作区之间循环切换。"
+      }
+    },
+    "items": {
+      "newAgent": "新建Agent",
+      "newWorktreeAgent": "新建工作树Agent",
+      "newCloneAgent": "新建克隆Agent",
+      "archiveThread": "归档当前任务",
+      "cycleModel": "切换模型",
+      "cycleReasoning": "切换推理模式",
+      "stopRun": "停止当前运行",
+      "toggleProjects": "显示或隐藏项目侧边栏",
+      "toggleGit": "显示或隐藏 Git 侧边栏",
+      "branchSwitcher": "分支切换器",
+      "toggleDebug": "显示或隐藏调试面板",
+      "toggleTerminal": "显示或隐藏终端面板",
+      "nextAgent": "下一个Agent",
+      "previousAgent": "上一个Agent",
+      "nextWorkspace": "下一个工作区",
+      "previousWorkspace": "上一个工作区"
+    },
+    "search": {
+      "label": "搜索快捷键",
+      "placeholder": "搜索快捷键",
+      "help": "按分区名称、操作或默认快捷键筛选。",
+      "noMatch": "没有与搜索条件匹配的快捷键。",
+      "noMatchQuery": "没有与“{{query}}”匹配的快捷键。"
+    }
+  },
+  "git": {
+    "title": "Git",
+    "subtitle": "管理 Git 侧边栏加载差异的方式。",
+    "preload": {
+      "title": "预加载 Git 差异",
+      "subtitle": "让查看 Git 差异更快。"
+    },
+    "ignoreWhitespace": {
+      "title": "忽略空白字符变化",
+      "subtitle": "在本地和提交差异中隐藏仅含空白字符的更改。"
+    },
+    "commitPrompt": {
+      "label": "提交信息提示词",
+      "helpBefore": "生成提交信息时使用。加入",
+      "helpAfter": "可插入 Git 差异。"
+    },
+    "commitModel": {
+      "label": "提交信息模型",
+      "help": "生成提交信息时使用的模型。保留默认可使用工作区模型。"
+    }
+  },
+  "about": {
+    "title": "关于",
+    "subtitle": "应用版本、构建信息和更新控制。",
+    "version": "版本",
+    "buildType": "构建类型",
+    "branch": "分支",
+    "commit": "提交",
+    "buildDate": "构建日期",
+    "unknown": "未知",
+    "buildTypes": {
+      "debug": "调试版",
+      "release": "发布版"
+    },
+    "updates": {
+      "title": "应用更新",
+      "automatic": {
+        "title": "自动检查应用更新",
+        "subtitle": "启用后，Pi 会在启动时检查新版本。"
+      },
+      "currentVersion": "当前运行版本",
+      "unavailable": "当前运行环境不支持更新。",
+      "failed": "更新失败：{{error}}",
+      "downloading": "正在下载更新...",
+      "installing": "正在安装更新...",
+      "restarting": "正在重启...",
+      "availableBefore": "版本",
+      "availableAfter": "可用。",
+      "latest": "当前已是最新版本。",
+      "downloadInstall": "下载并安装",
+      "checking": "正在检查...",
+      "check": "检查更新"
+    }
+  }
+}

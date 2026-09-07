@@ -1,0 +1,52 @@
+{
+  "actions": {
+    "reset": "重置",
+    "dismiss": "关闭",
+    "edit": "编辑",
+    "delete": "删除",
+    "stop": "停止",
+    "choose": "选择…",
+    "clear": "清除",
+    "moveUp": "上移",
+    "moveDown": "下移",
+    "cancel": "取消",
+    "save": "保存",
+    "copy": "复制",
+    "close": "关闭",
+    "back": "返回",
+    "add": "添加",
+    "create": "创建",
+    "retry": "重试",
+    "refresh": "刷新",
+    "browse": "浏览"
+  },
+  "default": "默认",
+  "notSet": "未设置",
+  "notFound": "未找到",
+  "truncated": "内容已截断",
+  "saving": "保存中...",
+  "loading": "加载中...",
+  "relativeShort": {
+    "now": "刚刚",
+    "minute": "{{count}}分",
+    "hour": "{{count}}时",
+    "day": "{{count}}天",
+    "week": "{{count}}周",
+    "month": "{{count}}月",
+    "year": "{{count}}年"
+  },
+  "fileManager": {
+    "generic": "文件管理器",
+    "revealIn": "在 {{name}} 中显示",
+    "showIn": "在 {{name}} 中显示",
+    "openIn": "在 {{name}} 中打开"
+  },
+  "reasoning": {
+    "none": "无",
+    "minimal": "最少",
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+    "xhigh": "超高"
+  }
+}

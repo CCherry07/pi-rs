@@ -33,7 +33,7 @@ const SUBSYSTEMS: &[&str] = &[
 
 const CRATES: &[&str] = &[
     "pi-telemetry",
-    "pi-md",
+    "pi-cli",
     "pi-provider",
     "pi-rpc",
     "pi-resources",

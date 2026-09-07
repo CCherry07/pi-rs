@@ -5,15 +5,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use pi_agent::QueueMode;
-use pi_core::{
-    ContentBlock, ImageContent, Message, ModelSpec, StopReason, ThinkingLevel, UserMessage,
-};
+use pi_core::{ContentBlock, ImageContent, Message, ModelSpec, StopReason, ThinkingLevel};
 use pi_session::{
-    AgentMessage, AgentSession, AgentSessionReplacement, ForkPosition, PiSession, QueueKind,
-    SessionDocument, SessionEntry, SessionRecord, ShellExecutionOptions, aggregate_document_usage,
+    AgentMessage, AgentSession, AgentSessionReplacement, ForkPosition, PiSession, SessionDocument,
+    SessionEntry, SessionInput, SessionRecord, ShellExecutionOptions, aggregate_document_usage,
     current_session_context_tokens,
 };
 use serde::Deserialize;
@@ -794,11 +791,7 @@ async fn handle_command(
 
 fn spawn_prompt(session: Arc<AgentSession>, message: String, images: Vec<ImageContent>) {
     tokio::spawn(async move {
-        if images.is_empty() {
-            let _ = session.submit(message).await;
-        } else {
-            let _ = session.prompt(vec![user_message(message, images)]).await;
-        }
+        let _ = session.submit(session_input(message, images)).await;
     });
 }
 
@@ -808,31 +801,22 @@ async fn queue_message(
     images: Vec<ImageContent>,
     behavior: StreamingBehavior,
 ) -> Result<(), String> {
-    if images.is_empty() {
-        match behavior {
-            StreamingBehavior::Steer => session.steer(text).await,
-            StreamingBehavior::FollowUp => session.follow_up(text).await,
-        }
-        .map_err(|error| error.to_string())?;
-    } else {
-        let kind = match behavior {
-            StreamingBehavior::Steer => QueueKind::Steer,
-            StreamingBehavior::FollowUp => QueueKind::FollowUp,
-        };
-        session
-            .enqueue_message(user_message(text, images), kind)
-            .map_err(|error| error.to_string())?;
+    let input = session_input(text, images);
+    match behavior {
+        StreamingBehavior::Steer => session.steer(input).await,
+        StreamingBehavior::FollowUp => session.follow_up(input).await,
     }
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
-fn user_message(text: String, images: Vec<ImageContent>) -> Message {
-    let mut content = vec![ContentBlock::Text(pi_core::TextContent::new(text))];
-    content.extend(images.into_iter().map(ContentBlock::Image));
-    Message::User(UserMessage {
-        content,
-        timestamp_ms: now_ms(),
-    })
+fn session_input(text: String, images: Vec<ImageContent>) -> SessionInput {
+    let input = SessionInput::new(text);
+    if images.is_empty() {
+        input
+    } else {
+        input.with_images(images)
+    }
 }
 
 fn state_json(session: &AgentSession) -> Result<Value, String> {
@@ -1117,14 +1101,6 @@ fn last_assistant_text(session: &AgentSession) -> Option<String> {
                 )
             }
             _ => None,
-        })
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
         })
 }
 

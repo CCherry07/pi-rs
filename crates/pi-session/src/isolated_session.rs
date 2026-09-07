@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use pi_agent::AgentLoopStop;
@@ -7,9 +8,48 @@ use pi_core::{
 };
 use tokio::sync::watch;
 
-use crate::{PiSession, now_ms};
+use crate::{AgentSessionSnapshot, AgentSessionSubscription, PiSession, now_ms};
 
 type IsolatedResult = Result<IsolatedSessionOutcome, String>;
+
+/// A read-only view of one live isolated session.
+///
+/// Product frontends can use this to project a child agent's semantic event
+/// stream without promoting the child to a frontend-owned [`PiSession`].
+#[derive(Clone)]
+pub struct IsolatedSessionObservation {
+    id: IsolatedSessionId,
+    session: PiSession,
+}
+
+impl IsolatedSessionObservation {
+    pub fn isolated_id(&self) -> &IsolatedSessionId {
+        &self.id
+    }
+
+    pub fn session_id(&self) -> String {
+        self.session.id()
+    }
+
+    pub fn cwd(&self) -> PathBuf {
+        self.session.cwd()
+    }
+
+    pub fn snapshot(&self) -> AgentSessionSnapshot {
+        self.session.current().snapshot()
+    }
+
+    pub fn subscribe(&self) -> AgentSessionSubscription {
+        self.session.current().subscribe()
+    }
+
+    /// Observes an isolated child owned by this observed session.
+    pub fn observe_isolated_session(&self, id: &IsolatedSessionId) -> Result<Self, String> {
+        self.session
+            .observe_isolated_session(id)
+            .map_err(|error| error.to_string())
+    }
+}
 
 pub(crate) struct IsolatedSessionRegistry {
     runs: Mutex<HashMap<IsolatedSessionId, Arc<IsolatedSessionRun>>>,
@@ -105,6 +145,18 @@ impl IsolatedSessionRegistry {
     ) -> Result<(), String> {
         self.owned_run(owner_registration_id, id)?.session.abort();
         Ok(())
+    }
+
+    pub(crate) fn observe(
+        &self,
+        owner_registration_id: &str,
+        id: &IsolatedSessionId,
+    ) -> Result<IsolatedSessionObservation, String> {
+        let run = self.owned_run(owner_registration_id, id)?;
+        Ok(IsolatedSessionObservation {
+            id: id.clone(),
+            session: run.session.clone(),
+        })
     }
 
     pub(crate) fn remove_owned(&self, owner_registration_id: &str) -> Vec<PiSession> {

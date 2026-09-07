@@ -1,0 +1,281 @@
+@import './themes.css';
+
+.app.reduced-transparency {
+  --surface-sidebar: rgba(18, 18, 18, 0.92);
+  --surface-sidebar-opaque: rgb(18, 18, 18);
+  --surface-topbar: rgba(10, 14, 20, 0.94);
+  --surface-right-panel: rgba(9, 12, 20, 0.92);
+  --surface-composer: rgba(10, 14, 20, 0.94);
+  --surface-messages: rgba(8, 10, 16, 0.94);
+  --surface-card: rgba(30, 32, 40, 0.94);
+  --surface-card-strong: rgba(38, 40, 48, 0.96);
+  --surface-card-muted: rgba(24, 26, 34, 0.9);
+  --surface-item: rgba(28, 30, 38, 0.88);
+  --surface-control: rgba(40, 44, 55, 0.7);
+  --surface-control-hover: rgba(54, 60, 72, 0.8);
+  --surface-control-disabled: rgba(40, 44, 55, 0.5);
+  --surface-hover: rgba(46, 50, 62, 0.7);
+  --surface-active: rgba(100, 200, 255, 0.18);
+  --surface-debug: rgba(12, 16, 26, 0.92);
+  --surface-command: rgba(12, 14, 20, 0.95);
+  --surface-diff-card: rgba(14, 18, 28, 0.9);
+  --surface-bubble: rgba(42, 46, 58, 0.9);
+  --surface-bubble-user: rgba(77, 153, 255, 0.55);
+  --surface-context-core: rgba(16, 20, 30, 0.96);
+  --surface-popover: rgba(16, 20, 30, 0.995);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+}
+
+#root {
+  height: var(--app-height, 100dvh);
+  min-height: var(--app-height, 100dvh);
+  overflow: hidden;
+}
+
+.app {
+  height: var(--app-height, 100dvh);
+  min-height: var(--app-height, 100dvh);
+  width: 100vw;
+  display: grid;
+  grid-template-columns: var(--sidebar-width, 280px) 1fr;
+  background: transparent;
+  border-radius: 0;
+  overflow: hidden;
+  position: relative;
+  --main-topbar-height: 44px;
+  /* Shared Pi chrome language */
+  --cm-surface-row: color-mix(in srgb, var(--surface-card) 44%, transparent);
+  --cm-surface-panel-soft: color-mix(in srgb, var(--surface-card) 56%, transparent);
+  --cm-surface-panel: color-mix(in srgb, var(--surface-card) 64%, transparent);
+  --cm-surface-panel-strong: color-mix(in srgb, var(--surface-card) 72%, transparent);
+  --cm-surface-panel-elevated: color-mix(in srgb, var(--surface-card) 78%, transparent);
+  --cm-surface-panel-quiet: color-mix(in srgb, var(--surface-card) 80%, transparent);
+  --cm-surface-panel-loud: color-mix(in srgb, var(--surface-card) 84%, transparent);
+  --cm-surface-panel-hover: color-mix(in srgb, var(--surface-card) 90%, transparent);
+  --cm-surface-panel-solid: color-mix(in srgb, var(--surface-card) 92%, transparent);
+  --cm-surface-panel-active: color-mix(in srgb, var(--surface-active) 96%, transparent);
+  --cm-surface-command-panel: color-mix(in srgb, var(--surface-command) 94%, transparent);
+  --cm-surface-topbar: color-mix(in srgb, var(--surface-topbar) 86%, var(--surface-card) 14%);
+  --cm-surface-composer: color-mix(in srgb, var(--surface-composer) 98%, var(--surface-card) 2%);
+  --cm-border-soft: color-mix(in srgb, var(--border-subtle) 72%, transparent);
+  --cm-border-default: color-mix(in srgb, var(--border-subtle) 78%, transparent);
+  --cm-border-strong: color-mix(in srgb, var(--border-subtle) 82%, transparent);
+  --cm-border-emphasis: color-mix(in srgb, var(--border-subtle) 84%, transparent);
+  --cm-border-elevated: color-mix(in srgb, var(--border-subtle) 86%, transparent);
+  --cm-border-heavy: color-mix(in srgb, var(--border-subtle) 88%, transparent);
+  --cm-border-hover: color-mix(in srgb, var(--border-subtle) 92%, transparent);
+  --cm-border-contrast: color-mix(in srgb, var(--border-subtle) 100%, transparent);
+  --cm-border-accent: color-mix(in srgb, var(--border-accent) 36%, transparent);
+  --cm-border-accent-strong: color-mix(in srgb, var(--border-accent) 46%, transparent);
+  transition: grid-template-columns 220ms ease;
+  font-family: var(--ui-font-family);
+}
+
+.app.is-resizing,
+.app.is-resizing .main {
+  transition: none;
+}
+
+.drag-strip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--window-drag-hit-height, var(--titlebar-height, 24px));
+  z-index: var(--titlebar-drag-strip-z-index, 2);
+  pointer-events: var(--window-drag-strip-pointer-events, auto);
+}
+
+.app.is-windows [data-tauri-drag-region],
+.app.is-windows .titlebar,
+.app.is-windows .main-topbar {
+  -webkit-app-region: no-drag !important;
+}
+
+.titlebar-controls {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--main-topbar-height, 44px);
+  z-index: 4;
+  pointer-events: none;
+}
+
+.titlebar-toggle {
+  position: absolute;
+  top: 50%;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+  transform: translateY(calc(-50% + var(--titlebar-toggle-offset, 0px)));
+  transition:
+    left 180ms ease,
+    right 180ms ease,
+    opacity 160ms ease;
+  will-change: left, right;
+}
+
+.titlebar-toggle-left {
+  left: calc(10px + var(--titlebar-inset-left, 0px));
+}
+
+.app.sidebar-collapsed .titlebar-toggle-left {
+  left: calc(10px + var(--titlebar-inset-left, 0px) + var(--titlebar-collapsed-left-extra, 0px));
+}
+
+.titlebar-toggle-right {
+  right: calc(14px + var(--window-caption-width, 0px) + var(--window-caption-gap, 0px));
+}
+
+.window-caption-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 6;
+  display: inline-flex;
+  align-items: stretch;
+  height: var(--main-topbar-height, 44px);
+  -webkit-app-region: no-drag;
+}
+
+.window-caption-control {
+  width: 46px;
+  height: var(--main-topbar-height, 44px);
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: none;
+  transform: none;
+}
+
+button.window-caption-control,
+.titlebar-toggle .main-header-action {
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    opacity 120ms ease;
+}
+
+.titlebar-toggle .main-header-action {
+  width: var(--titlebar-toggle-size, 28px);
+  height: var(--titlebar-toggle-size, 28px);
+  padding: 0;
+}
+
+button.window-caption-control:hover:not(:disabled),
+button.window-caption-control:focus-visible,
+.titlebar-toggle .main-header-action:hover:not(:disabled),
+.titlebar-toggle .main-header-action:focus-visible {
+  transform: none;
+  box-shadow: none;
+}
+
+.window-caption-control svg {
+  width: 14px;
+  height: 14px;
+}
+
+.window-caption-control:hover,
+.window-caption-control:focus-visible {
+  background: var(--surface-hover);
+  color: var(--text-strong);
+  box-shadow: none;
+  transform: none;
+}
+
+.window-caption-control-close:hover,
+.window-caption-control-close:focus-visible {
+  background: #e81123;
+  color: #fff;
+}
+
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--sidebar-width, 280px) - 4px);
+  width: 8px;
+  cursor: col-resize;
+  z-index: 3;
+  transition: opacity 160ms ease;
+}
+
+.sidebar-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: var(--border-strong);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.sidebar-resizer:hover::after {
+  opacity: 1;
+}
+
+@media (max-width: 960px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    flex-direction: row;
+    align-items: center;
+    overflow-x: auto;
+  }
+
+  .content {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar-resizer {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* Restore functional spinners — these communicate loading state */
+  .working-spinner,
+  .git-panel-spinner,
+  .commit-message-loader,
+  .commit-button-spinner,
+  .sidebar-refresh-icon.spinning,
+  .worktree-deleting-spinner,
+  .sidebar-account-spinner,
+  .settings-agents-generate-loader,
+  .composer-action-spinner,
+  .compact-chat-refresh-icon.spinning,
+  .home-usage-refresh-icon.spinning {
+    animation-duration: var(--ds-spinner-dur) !important;
+    animation-iteration-count: infinite !important;
+  }
+}

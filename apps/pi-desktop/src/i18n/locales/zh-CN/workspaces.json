@@ -1,0 +1,101 @@
+{
+  "clone": {
+    "title": "新建克隆智能体",
+    "subtitle": "为“{{workspace}}”创建新的工作副本。",
+    "name": "副本名称",
+    "folder": "副本文件夹",
+    "suggested": "建议位置",
+    "suggestedFolder": "建议的副本文件夹",
+    "useSuggested": "使用建议位置",
+    "nameRequired": "必须填写副本名称。",
+    "folderRequired": "必须选择副本文件夹。"
+  },
+  "fromUrl": {
+    "title": "从 URL 添加工作区",
+    "url": "远程 Git URL",
+    "folderName": "目标文件夹名称（可选）",
+    "folderNamePlaceholder": "默认使用仓库名称",
+    "destination": "目标父文件夹",
+    "cloning": "正在克隆…",
+    "confirm": "克隆并添加",
+    "urlRequired": "必须填写远程 Git URL。",
+    "destinationRequired": "必须选择目标文件夹。"
+  },
+  "worktree": {
+    "title": "新建工作树智能体",
+    "subtitle": "在“{{workspace}}”下创建工作树。",
+    "name": "名称",
+    "optional": "（可选）",
+    "branch": "分支名称",
+    "noMatchingBranches": "没有匹配的分支",
+    "noBranches": "未找到分支",
+    "copyAgents": "将 AGENTS.md 复制到工作树",
+    "setupScript": "环境初始化脚本",
+    "setupHelp": "此脚本保存在项目中（设置 → 环境），每次创建新工作树后会在独立终端中运行一次。",
+    "branchRequired": "必须填写分支名称。",
+    "createFailed": "创建工作树失败。",
+    "threadFailed": "启动工作树任务失败。"
+  },
+  "home": {
+    "send": "发送",
+    "loading": "正在加载…",
+    "saving": "正在保存…",
+    "notFound": "未找到",
+    "truncated": "已截断",
+    "largeFile": "文件较大，仅显示开头部分。",
+    "agentPlaceholder": "为智能体添加工作区说明…",
+    "recentRuns": "最近运行",
+    "recentRunsEmpty": "启动一次运行后，其实例会显示在这里。",
+    "modeLocal": "本地",
+    "modeWorktree": "工作树",
+    "instanceCount_one": "{{count}} 个实例",
+    "instanceCount_other": "{{count}} 个实例",
+    "failed": "失败",
+    "partial": "部分成功",
+    "more": "另有 {{count}} 项",
+    "noInstances": "没有启动任何实例。",
+    "preparing": "正在准备实例...",
+    "recentThreads": "最近任务",
+    "recentThreadsEmpty": "侧边栏中的任务会显示在这里。",
+    "agentActivity": "智能体动态",
+    "threadCount_one": "{{count}} 个任务",
+    "threadCount_other": "{{count}} 个任务",
+    "selectRunMode": "选择运行模式",
+    "toggleRunMode": "切换运行模式菜单",
+    "selectModels": "选择模型",
+    "toggleModels": "切换模型菜单",
+    "connectModels": "连接此工作区以加载可用模型。",
+    "thinkingMode": "思考模式",
+    "gitSetup": "Git 设置",
+    "gitNotInitialized": "此项目尚未初始化 Git。",
+    "selectModelRequired": "请至少选择一个用于工作树运行的模型。",
+    "newRun": "新运行",
+    "localThreadFailed": "启动本地任务失败。",
+    "defaultModel": "默认模型",
+    "modelSummary_one": "{{count}} 个模型 · {{runs}} 次运行",
+    "modelSummary_other": "{{count}} 个模型 · {{runs}} 次运行",
+    "partialFailure": "已启动 {{started}}/{{total}} 次运行，其中 {{failed}} 次失败。",
+    "allFailed": "所有实例都启动失败。",
+    "status": {
+      "running": "运行中",
+      "idle": "空闲"
+    }
+  },
+  "agentMd": {
+    "loadFailed": "无法加载 AGENTS.md",
+    "saveFailed": "无法保存 AGENTS.md"
+  },
+  "rename": {
+    "branchExists": "分支已存在，已重命名为“{{name}}”。",
+    "renamed": "工作树已重命名。",
+    "upstreamUpdated": "上游分支已更新。"
+  },
+  "groups": {
+    "nameRequired": "必须填写分组名称。",
+    "alreadyExists": "分组名称已存在。",
+    "reserved": "“{{name}}”是保留名称。"
+  },
+  "errors": {
+    "workspaceNotFound": "未找到工作区。"
+  }
+}

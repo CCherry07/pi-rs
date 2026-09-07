@@ -1,0 +1,969 @@
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent } from "react";
+import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
+import Brain from "lucide-react/dist/esm/icons/brain";
+import Check from "lucide-react/dist/esm/icons/check";
+import Copy from "lucide-react/dist/esm/icons/copy";
+import Diff from "lucide-react/dist/esm/icons/diff";
+import FileDiffIcon from "lucide-react/dist/esm/icons/file-diff";
+import FileText from "lucide-react/dist/esm/icons/file-text";
+import Image from "lucide-react/dist/esm/icons/image";
+import Quote from "lucide-react/dist/esm/icons/quote";
+import Search from "lucide-react/dist/esm/icons/search";
+import Terminal from "lucide-react/dist/esm/icons/terminal";
+import Users from "lucide-react/dist/esm/icons/users";
+import Wrench from "lucide-react/dist/esm/icons/wrench";
+import X from "lucide-react/dist/esm/icons/x";
+import { exportMarkdownFile } from "@services/tauri";
+import { pushErrorToast } from "@services/toasts";
+import type { ConversationItem } from "../../../types";
+import type { ParsedFileLocation } from "../../../utils/fileLinks";
+import { PierreDiffBlock } from "../../git/components/PierreDiffBlock";
+import {
+  MAX_COMMAND_OUTPUT_LINES,
+  basename,
+  buildToolSummary,
+  exploreKindLabel,
+  formatDurationMs,
+  formatToolStatusLabel,
+  normalizeMessageImageSrc,
+  statusToneFromText,
+  toolNameFromTitle,
+  toolStatusTone,
+  type MessageImage,
+  type ParsedReasoning,
+  type StatusTone,
+} from "../utils/messageRenderUtils";
+import { Markdown } from "./Markdown";
+import { isStandaloneMarkdownTable } from "./Markdown";
+
+type MarkdownFileLinkProps = {
+  showMessageFilePath?: boolean;
+  workspacePath?: string | null;
+  onOpenFileLink?: (path: ParsedFileLocation) => void;
+  onOpenFileLinkMenu?: (event: MouseEvent, path: ParsedFileLocation) => void;
+  onOpenThreadLink?: (threadId: string) => void;
+};
+
+type WorkingIndicatorProps = {
+  isThinking: boolean;
+  processingStartedAt?: number | null;
+  lastDurationMs?: number | null;
+  hasItems: boolean;
+  reasoningLabel?: string | null;
+  showPollingFetchStatus?: boolean;
+  pollingIntervalMs?: number;
+};
+
+type MessageRowProps = MarkdownFileLinkProps & {
+  item: Extract<ConversationItem, { kind: "message" }>;
+  isCopied: boolean;
+  onCopy: (item: Extract<ConversationItem, { kind: "message" }>) => void;
+  onQuote?: (item: Extract<ConversationItem, { kind: "message" }>, selectedText?: string) => void;
+  codeBlockCopyUseModifier?: boolean;
+};
+
+type ReasoningRowProps = MarkdownFileLinkProps & {
+  item: Extract<ConversationItem, { kind: "reasoning" }>;
+  parsed: ParsedReasoning;
+  isExpanded: boolean;
+  onToggle: (id: string) => void;
+};
+
+type DiffRowProps = {
+  item: Extract<ConversationItem, { kind: "diff" }>;
+};
+
+type UserInputRowProps = {
+  item: Extract<ConversationItem, { kind: "userInput" }>;
+  isExpanded: boolean;
+  onToggle: (id: string) => void;
+};
+
+type ToolRowProps = MarkdownFileLinkProps & {
+  item: Extract<ConversationItem, { kind: "tool" }>;
+  isExpanded: boolean;
+  onToggle: (id: string) => void;
+  onRequestAutoScroll?: () => void;
+};
+
+type ExploreRowProps = {
+  item: Extract<ConversationItem, { kind: "explore" }>;
+};
+
+type CommandOutputProps = {
+  output: string;
+};
+
+const MessageImageGrid = memo(function MessageImageGrid({
+  images,
+  onOpen,
+  hasText,
+}: {
+  images: MessageImage[];
+  onOpen: (index: number) => void;
+  hasText: boolean;
+}) {
+  const { t } = useTranslation("messages");
+  return (
+    <div
+      className={`message-image-grid${hasText ? " message-image-grid--with-text" : ""}`}
+      role="list"
+    >
+      {images.map((image, index) => (
+        <button
+          key={`${image.src}-${index}`}
+          type="button"
+          className="message-image-thumb"
+          onClick={() => onOpen(index)}
+          aria-label={t("images.open", { number: index + 1 })}
+        >
+          <img src={image.src} alt={image.label} loading="lazy" />
+        </button>
+      ))}
+    </div>
+  );
+});
+
+const ImageLightbox = memo(function ImageLightbox({
+  images,
+  activeIndex,
+  onClose,
+}: {
+  images: MessageImage[];
+  activeIndex: number;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation("messages");
+  const activeImage = images[activeIndex];
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onClose]);
+
+  useEffect(() => {
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, []);
+
+  if (!activeImage) {
+    return null;
+  }
+
+  return createPortal(
+    <div
+      className="message-image-lightbox"
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+    >
+      <div
+        className="message-image-lightbox-content"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <button
+          type="button"
+          className="message-image-lightbox-close"
+          onClick={onClose}
+          aria-label={t("images.closePreview")}
+        >
+          <X size={16} aria-hidden />
+        </button>
+        <img src={activeImage.src} alt={activeImage.label} />
+      </div>
+    </div>,
+    document.body,
+  );
+});
+
+const CommandOutput = memo(function CommandOutput({ output }: CommandOutputProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [isPinned, setIsPinned] = useState(true);
+  const lines = useMemo(() => {
+    if (!output) {
+      return [];
+    }
+    return output.split(/\r?\n/);
+  }, [output]);
+  const lineWindow = useMemo(() => {
+    if (lines.length <= MAX_COMMAND_OUTPUT_LINES) {
+      return { offset: 0, lines };
+    }
+    const startIndex = lines.length - MAX_COMMAND_OUTPUT_LINES;
+    return { offset: startIndex, lines: lines.slice(startIndex) };
+  }, [lines]);
+
+  const handleScroll = useCallback(() => {
+    const node = containerRef.current;
+    if (!node) {
+      return;
+    }
+    const threshold = 6;
+    const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
+    setIsPinned(distanceFromBottom <= threshold);
+  }, []);
+
+  useEffect(() => {
+    const node = containerRef.current;
+    if (!node || !isPinned) {
+      return;
+    }
+    node.scrollTop = node.scrollHeight;
+  }, [lineWindow, isPinned]);
+
+  if (lineWindow.lines.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="tool-inline-terminal" role="log" aria-live="polite">
+      <div
+        className="tool-inline-terminal-lines"
+        ref={containerRef}
+        onScroll={handleScroll}
+      >
+        {lineWindow.lines.map((line, index) => (
+          <div
+            key={`${lineWindow.offset + index}-${line}`}
+            className="tool-inline-terminal-line"
+          >
+            {line || " "}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+});
+
+function toolIconForSummary(item: Extract<ConversationItem, { kind: "tool" }>) {
+  if (item.toolType === "commandExecution") {
+    return Terminal;
+  }
+  if (item.toolType === "fileChange") {
+    return FileDiffIcon;
+  }
+  if (item.toolType === "webSearch") {
+    return Search;
+  }
+  if (item.toolType === "imageView") {
+    return Image;
+  }
+  if (item.toolType === "collabToolCall") {
+    return Users;
+  }
+
+  const toolName = toolNameFromTitle(item.title).toLowerCase();
+  if (toolName.includes("read")) {
+    return FileText;
+  }
+  if (toolName.includes("search")) {
+    return Search;
+  }
+  const title = item.title.toLowerCase();
+  if (toolName.includes("diff") || title.includes("diff")) {
+    return Diff;
+  }
+
+  return Wrench;
+}
+
+function buildPlanExportFileName(itemId: string) {
+  const normalized = itemId
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  if (!normalized) {
+    return "plan.md";
+  }
+  return normalized.startsWith("plan-") ? `${normalized}.md` : `plan-${normalized}.md`;
+}
+
+export const WorkingIndicator = memo(function WorkingIndicator({
+  isThinking,
+  processingStartedAt = null,
+  lastDurationMs = null,
+  hasItems,
+  reasoningLabel = null,
+  showPollingFetchStatus = false,
+  pollingIntervalMs = 12000,
+}: WorkingIndicatorProps) {
+  const { t } = useTranslation("messages");
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [pollCountdownSeconds, setPollCountdownSeconds] = useState(() =>
+    Math.max(1, Math.ceil(pollingIntervalMs / 1000)),
+  );
+
+  useEffect(() => {
+    if (!isThinking || !processingStartedAt) {
+      setElapsedMs(0);
+      return undefined;
+    }
+    setElapsedMs(Date.now() - processingStartedAt);
+    const interval = window.setInterval(() => {
+      setElapsedMs(Date.now() - processingStartedAt);
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [isThinking, processingStartedAt]);
+
+  useEffect(() => {
+    if (!showPollingFetchStatus || isThinking) {
+      return undefined;
+    }
+    const intervalSeconds = Math.max(1, Math.ceil(pollingIntervalMs / 1000));
+    setPollCountdownSeconds(intervalSeconds);
+    const timer = window.setInterval(() => {
+      setPollCountdownSeconds((previous) =>
+        previous <= 1 ? intervalSeconds : previous - 1,
+      );
+    }, 1000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [isThinking, pollingIntervalMs, showPollingFetchStatus]);
+
+  return (
+    <>
+      {isThinking && (
+        <div className="working">
+          <span className="working-spinner" aria-hidden />
+          <div className="working-timer">
+            <span className="working-timer-clock">{formatDurationMs(elapsedMs)}</span>
+          </div>
+          <span className="working-text">{reasoningLabel || t("status.working")}</span>
+        </div>
+      )}
+      {!isThinking && lastDurationMs !== null && hasItems && (
+        <div className="turn-complete" aria-live="polite">
+          <span className="turn-complete-line" aria-hidden />
+          <span className="turn-complete-label">
+            {showPollingFetchStatus
+              ? t("status.fetchCountdown", { count: pollCountdownSeconds })
+              : t("status.doneIn", { duration: formatDurationMs(lastDurationMs) })}
+          </span>
+          <span className="turn-complete-line" aria-hidden />
+        </div>
+      )}
+    </>
+  );
+});
+
+export const MessageRow = memo(function MessageRow({
+  item,
+  isCopied,
+  onCopy,
+  onQuote,
+  codeBlockCopyUseModifier,
+  showMessageFilePath,
+  workspacePath,
+  onOpenFileLink,
+  onOpenFileLinkMenu,
+  onOpenThreadLink,
+}: MessageRowProps) {
+  const { t } = useTranslation("messages");
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const bubbleRef = useRef<HTMLDivElement | null>(null);
+  const selectionSnapshotRef = useRef<string | null>(null);
+  const hasText = item.text.trim().length > 0;
+  const imageItems = useMemo(() => {
+    if (!item.images || item.images.length === 0) {
+      return [];
+    }
+    return item.images
+      .map((image, index) => {
+        const src = normalizeMessageImageSrc(image);
+        if (!src) {
+          return null;
+        }
+        return { src, label: t("images.imageNumber", { number: index + 1 }) };
+      })
+      .filter(Boolean) as MessageImage[];
+  }, [item.images, t]);
+  const isTableOnlyAssistantMessage =
+    item.role === "assistant" &&
+    hasText &&
+    imageItems.length === 0 &&
+    isStandaloneMarkdownTable(item.text);
+
+  const getSelectedMessageText = useCallback(() => {
+    const bubble = bubbleRef.current;
+    const selection = window.getSelection();
+    if (!bubble || !selection || selection.rangeCount === 0 || selection.isCollapsed) {
+      return null;
+    }
+    const selectedText = selection.toString().trim();
+    if (!selectedText) {
+      return null;
+    }
+    const range = selection.getRangeAt(0);
+    if (!bubble.contains(range.commonAncestorContainer)) {
+      return null;
+    }
+
+    const isWithinMessageControls = (node: Node | null) => {
+      if (!node) {
+        return false;
+      }
+      const element = node instanceof Element ? node : node.parentElement;
+      return Boolean(element?.closest(".message-quote-button, .message-copy-button"));
+    };
+
+    if (isWithinMessageControls(selection.anchorNode) || isWithinMessageControls(selection.focusNode)) {
+      return null;
+    }
+    return selectedText;
+  }, []);
+
+  const handleQuote = useCallback(() => {
+    if (!onQuote) {
+      return;
+    }
+    const selectedText = getSelectedMessageText() ?? selectionSnapshotRef.current ?? undefined;
+    selectionSnapshotRef.current = null;
+    onQuote(item, selectedText);
+  }, [getSelectedMessageText, item, onQuote]);
+
+  return (
+    <div className={`message ${item.role}`}>
+      <div
+        ref={bubbleRef}
+        className={`bubble message-bubble${isTableOnlyAssistantMessage ? " message-bubble-table-only" : ""}`}
+      >
+        {imageItems.length > 0 && (
+          <MessageImageGrid
+            images={imageItems}
+            onOpen={setLightboxIndex}
+            hasText={hasText}
+          />
+        )}
+        {hasText && (
+          <Markdown
+            value={item.text}
+            className="markdown"
+            codeBlockStyle="message"
+            codeBlockCopyUseModifier={codeBlockCopyUseModifier}
+            showFilePath={showMessageFilePath}
+            workspacePath={workspacePath}
+            onOpenFileLink={onOpenFileLink}
+            onOpenFileLinkMenu={onOpenFileLinkMenu}
+            onOpenThreadLink={onOpenThreadLink}
+          />
+        )}
+        {lightboxIndex !== null && imageItems.length > 0 && (
+          <ImageLightbox
+            images={imageItems}
+            activeIndex={lightboxIndex}
+            onClose={() => setLightboxIndex(null)}
+          />
+        )}
+        {onQuote && hasText && (
+          <button
+            type="button"
+            className="ghost message-quote-button"
+            onMouseDown={() => {
+              selectionSnapshotRef.current = getSelectedMessageText();
+            }}
+            onTouchStart={() => {
+              selectionSnapshotRef.current = getSelectedMessageText();
+            }}
+            onClick={handleQuote}
+            aria-label={t("messageActions.quote")}
+            title={t("messageActions.quote")}
+          >
+            <Quote size={14} aria-hidden />
+          </button>
+        )}
+        <button
+          type="button"
+          className={`ghost message-copy-button${isCopied ? " is-copied" : ""}`}
+          onClick={() => onCopy(item)}
+          aria-label={t("messageActions.copy")}
+          title={t("messageActions.copy")}
+        >
+          <span className="message-copy-icon" aria-hidden>
+            <Copy className="message-copy-icon-copy" size={14} />
+            <Check className="message-copy-icon-check" size={14} />
+          </span>
+        </button>
+      </div>
+    </div>
+  );
+});
+
+export const ReasoningRow = memo(function ReasoningRow({
+  item,
+  parsed,
+  isExpanded,
+  onToggle,
+  showMessageFilePath,
+  workspacePath,
+  onOpenFileLink,
+  onOpenFileLinkMenu,
+  onOpenThreadLink,
+}: ReasoningRowProps) {
+  const { t } = useTranslation("messages");
+  const { summaryTitle, bodyText, hasBody } = parsed;
+  const reasoningTone: StatusTone = hasBody ? "completed" : "processing";
+  return (
+    <div className="tool-inline reasoning-inline">
+      <button
+        type="button"
+        className="tool-inline-bar-toggle"
+        onClick={() => onToggle(item.id)}
+        aria-expanded={isExpanded}
+        aria-label={t("details.toggleReasoning")}
+      />
+      <div className="tool-inline-content">
+        <button
+          type="button"
+          className="tool-inline-summary tool-inline-toggle"
+          onClick={() => onToggle(item.id)}
+          aria-expanded={isExpanded}
+        >
+          <Brain
+            className={`tool-inline-icon ${reasoningTone}`}
+            size={14}
+            aria-hidden
+          />
+          <span className="tool-inline-value">{summaryTitle}</span>
+        </button>
+        {hasBody && (
+          <Markdown
+            value={bodyText}
+            className={`reasoning-inline-detail markdown ${
+              isExpanded ? "" : "tool-inline-clamp"
+            }`}
+            showFilePath={showMessageFilePath}
+            workspacePath={workspacePath}
+            onOpenFileLink={onOpenFileLink}
+            onOpenFileLinkMenu={onOpenFileLinkMenu}
+            onOpenThreadLink={onOpenThreadLink}
+          />
+        )}
+      </div>
+    </div>
+  );
+});
+
+export const DiffRow = memo(function DiffRow({ item }: DiffRowProps) {
+  return (
+    <div className="item-card diff">
+      <div className="diff-header">
+        <span className="diff-title">{item.title}</span>
+        {item.status && <span className="item-status">{item.status}</span>}
+      </div>
+      <div className="diff-viewer-output">
+        <PierreDiffBlock diff={item.diff} displayPath={item.title} />
+      </div>
+    </div>
+  );
+});
+
+export const UserInputRow = memo(function UserInputRow({
+  item,
+  isExpanded,
+  onToggle,
+}: UserInputRowProps) {
+  const { t } = useTranslation("messages");
+  const first = item.questions[0];
+  const previewQuestion =
+    first?.question?.trim() || first?.header?.trim() || t("input.requested");
+  const firstAnswer = first?.answers[0]?.trim() || t("input.noAnswer");
+  const previewAnswer =
+    first && first.answers.length > 1
+      ? `${firstAnswer} +${first.answers.length - 1}`
+      : firstAnswer;
+  const extraQuestions = Math.max(0, item.questions.length - 1);
+
+  return (
+    <div className={`tool-inline user-input-inline ${isExpanded ? "tool-inline-expanded" : ""}`}>
+      <button
+        type="button"
+        className="tool-inline-bar-toggle"
+        onClick={() => onToggle(item.id)}
+        aria-expanded={isExpanded}
+        aria-label={t("details.toggleAnsweredInput")}
+      />
+      <div className="tool-inline-content">
+        <button
+          type="button"
+          className="tool-inline-summary tool-inline-toggle"
+          onClick={() => onToggle(item.id)}
+          aria-expanded={isExpanded}
+        >
+          <Check className="tool-inline-icon completed" size={14} aria-hidden />
+          <span className="tool-inline-label">{t("input.answered")}</span>
+          <span className="tool-inline-value user-input-inline-preview">
+            {previewQuestion}: {previewAnswer}
+            {extraQuestions > 0 ? ` ${t("input.more", { count: extraQuestions })}` : ""}
+          </span>
+        </button>
+        {isExpanded && (
+          <div className="user-input-inline-details">
+            {item.questions.map((question, index) => {
+              const title =
+                question.question ||
+                question.header ||
+                t("input.question", { number: index + 1 });
+              return (
+                <div
+                  key={`${question.id}-${index}`}
+                  className="user-input-inline-entry"
+                >
+                  <div className="user-input-inline-question">{title}</div>
+                  {question.answers.length > 0 ? (
+                    <div className="user-input-inline-answers">
+                      {question.answers.map((answer, answerIndex) => (
+                        <div
+                          key={`${question.id}-answer-${answerIndex}`}
+                          className="user-input-inline-answer"
+                        >
+                          {answer}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="user-input-inline-empty-answer">
+                      {t("input.noAnswerSentence")}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
+
+const SubagentExecutionTree = memo(function SubagentExecutionTree({
+  item,
+  onOpenThreadLink,
+}: {
+  item: Extract<ConversationItem, { kind: "tool" }>;
+  onOpenThreadLink?: (threadId: string) => void;
+}) {
+  const { t } = useTranslation("messages");
+  const agents =
+    item.collabReceivers && item.collabReceivers.length > 0
+      ? item.collabReceivers
+      : item.collabReceiver
+        ? [item.collabReceiver]
+        : [];
+  if (agents.length === 0) {
+    return null;
+  }
+  const statuses = new Map(
+    (item.collabStatuses ?? []).map((status) => [status.threadId, status.status]),
+  );
+
+  return (
+    <div className="subagent-execution-tree" aria-label={t("subagents.executionTree")}>
+      {agents.map((agent) => {
+        const status = statuses.get(agent.threadId) ?? item.status ?? "";
+        const tone = statusToneFromText(status);
+        const label = agent.nickname?.trim() || agent.role?.trim() || agent.threadId;
+        const role = agent.nickname?.trim() ? agent.role?.trim() : "";
+        const task = item.collabTask?.trim() || role || "";
+        const statusLabel =
+          tone === "processing"
+            ? t("toolStatus.processing")
+            : tone === "failed"
+              ? t("toolStatus.failed")
+              : t("toolStatus.completed");
+        return (
+          <button
+            key={agent.threadId}
+            type="button"
+            className="subagent-execution-node"
+            onClick={() => onOpenThreadLink?.(agent.threadId)}
+            aria-label={t("subagents.open", { agent: label })}
+          >
+            <span className="subagent-execution-branch" aria-hidden>
+              └
+            </span>
+            <span className={`subagent-execution-status ${tone}`} aria-hidden />
+            <span className="subagent-execution-name">{label}</span>
+            {task && (
+              <span className="subagent-execution-task" title={task}>
+                {task}
+              </span>
+            )}
+            <span className="subagent-execution-activity">{statusLabel}</span>
+            <span className="subagent-execution-open" aria-hidden>
+              ›
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+});
+
+export const ToolRow = memo(function ToolRow({
+  item,
+  isExpanded,
+  onToggle,
+  showMessageFilePath,
+  workspacePath,
+  onOpenFileLink,
+  onOpenFileLinkMenu,
+  onOpenThreadLink,
+  onRequestAutoScroll,
+}: ToolRowProps) {
+  const { t } = useTranslation("messages");
+  const isFileChange = item.toolType === "fileChange";
+  const isCommand = item.toolType === "commandExecution";
+  const isPlan = item.toolType === "plan";
+  const commandText = isCommand
+    ? item.title.replace(/^Command:\s*/i, "").trim()
+    : "";
+  const summary = buildToolSummary(item, commandText);
+  const changeNames = (item.changes ?? [])
+    .map((change) => basename(change.path))
+    .filter(Boolean);
+  const hasChanges = changeNames.length > 0;
+  const tone = toolStatusTone(item, hasChanges);
+  const ToolIcon = toolIconForSummary(item);
+  const summaryLabel = isFileChange
+    ? t("files.edited", { count: changeNames.length })
+    : isCommand
+      ? ""
+      : summary.label;
+  const inlineStatus = formatToolStatusLabel(item);
+  const summaryValue = isFileChange
+    ? changeNames.length > 1
+      ? `${changeNames[0]} +${changeNames.length - 1}`
+      : changeNames[0] || t("files.changes")
+    : summary.value;
+  const shouldFadeCommand =
+    isCommand && !isExpanded && (summaryValue?.length ?? 0) > 80;
+  const showToolOutput = isExpanded && (!isFileChange || !hasChanges);
+  const normalizedStatus = (item.status ?? "").toLowerCase();
+  const isCommandRunning = isCommand && /in[_\s-]*progress|running|started/.test(normalizedStatus);
+  const commandDurationMs =
+    typeof item.durationMs === "number" ? item.durationMs : null;
+  const isLongRunning = commandDurationMs !== null && commandDurationMs >= 1200;
+  const [showLiveOutput, setShowLiveOutput] = useState(false);
+  const [isExportingPlan, setIsExportingPlan] = useState(false);
+
+  useEffect(() => {
+    if (!isCommandRunning) {
+      setShowLiveOutput(false);
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      setShowLiveOutput(true);
+    }, 600);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [isCommandRunning]);
+
+  const showCommandOutput =
+    isCommand &&
+    summary.output &&
+    (isExpanded || (isCommandRunning && showLiveOutput) || isLongRunning);
+
+  useEffect(() => {
+    if (showCommandOutput && isCommandRunning && showLiveOutput) {
+      onRequestAutoScroll?.();
+    }
+  }, [isCommandRunning, onRequestAutoScroll, showCommandOutput, showLiveOutput]);
+
+  const handlePlanExport = useCallback(
+    async (event: MouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const output = (summary.output ?? "").trim();
+      if (!output) {
+        return;
+      }
+      setIsExportingPlan(true);
+      try {
+        await exportMarkdownFile(output, buildPlanExportFileName(item.id));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : t("plan.exportUnavailable");
+        pushErrorToast({
+          title: t("plan.exportFailed"),
+          message,
+        });
+      } finally {
+        setIsExportingPlan(false);
+      }
+    },
+    [item.id, summary.output, t],
+  );
+
+  return (
+    <div className={`tool-inline tool-inline-row ${isExpanded ? "tool-inline-expanded" : ""}`}>
+      <button
+        type="button"
+        className="tool-inline-bar-toggle"
+        onClick={() => onToggle(item.id)}
+        aria-expanded={isExpanded}
+        aria-label={t("details.toggleTool")}
+      />
+      <div className="tool-inline-content">
+        <button
+          type="button"
+          className="tool-inline-summary tool-inline-toggle"
+          onClick={() => onToggle(item.id)}
+          aria-expanded={isExpanded}
+        >
+          <ToolIcon className={`tool-inline-icon ${tone}`} size={14} aria-hidden />
+          <span className="tool-inline-main">
+            {summaryLabel && (
+              <span className="tool-inline-label">{summaryLabel}</span>
+            )}
+            {summaryValue && (
+              <span
+                className={`tool-inline-value ${isCommand ? "tool-inline-command" : ""} ${
+                  isCommand && isExpanded ? "tool-inline-command-full" : ""
+                } ${item.toolType === "mcpToolCall" ? "tool-inline-tool-name" : ""}`}
+              >
+                {isCommand ? (
+                  <span
+                    className={`tool-inline-command-text ${
+                      shouldFadeCommand ? "tool-inline-command-fade" : ""
+                    }`}
+                  >
+                    {summaryValue}
+                  </span>
+                ) : (
+                  summaryValue
+                )}
+              </span>
+            )}
+          </span>
+          {inlineStatus && (
+            <span className="tool-inline-status">{inlineStatus}</span>
+          )}
+        </button>
+        {item.toolType === "collabToolCall" && (
+          <SubagentExecutionTree
+            item={item}
+            onOpenThreadLink={onOpenThreadLink}
+          />
+        )}
+        {isExpanded && summary.detail && !isFileChange && (
+          <div className="tool-inline-detail">{summary.detail}</div>
+        )}
+        {isExpanded && isCommand && item.detail && (
+          <div className="tool-inline-detail tool-inline-muted">
+            {t("tool.cwd")} {item.detail}
+          </div>
+        )}
+        {isExpanded && isFileChange && hasChanges && (
+          <div className="tool-inline-change-list">
+            {item.changes?.map((change, index) => (
+              <div
+                key={`${change.path}-${index}`}
+                className="tool-inline-change"
+              >
+                <div className="tool-inline-change-header">
+                  {change.kind && (
+                    <span className="tool-inline-change-kind">
+                      {change.kind.toUpperCase()}
+                    </span>
+                  )}
+                  <span className="tool-inline-change-path">
+                    {basename(change.path)}
+                  </span>
+                </div>
+                {change.diff && (
+                  <div className="diff-viewer-output">
+                    <PierreDiffBlock diff={change.diff} displayPath={change.path} />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {isExpanded && isFileChange && !hasChanges && item.detail && (
+          <Markdown
+            value={item.detail}
+            className="item-text markdown"
+            showFilePath={showMessageFilePath}
+            workspacePath={workspacePath}
+            onOpenFileLink={onOpenFileLink}
+            onOpenFileLinkMenu={onOpenFileLinkMenu}
+            onOpenThreadLink={onOpenThreadLink}
+          />
+        )}
+        {showCommandOutput && <CommandOutput output={summary.output ?? ""} />}
+        {showToolOutput && summary.output && !isCommand && (
+          <Markdown
+            value={summary.output}
+            className="tool-inline-output markdown"
+            codeBlock={item.toolType !== "plan"}
+            showFilePath={showMessageFilePath}
+            workspacePath={workspacePath}
+            onOpenFileLink={onOpenFileLink}
+            onOpenFileLinkMenu={onOpenFileLinkMenu}
+            onOpenThreadLink={onOpenThreadLink}
+          />
+        )}
+        {showToolOutput && isPlan && (summary.output ?? "").trim() && (
+          <div className="tool-inline-actions">
+            <button
+              type="button"
+              className="ghost tool-inline-action"
+              onClick={handlePlanExport}
+              disabled={isExportingPlan}
+            >
+              {isExportingPlan ? t("plan.exporting") : t("plan.exportMarkdown")}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
+
+export const ExploreRow = memo(function ExploreRow({ item }: ExploreRowProps) {
+  const { t } = useTranslation("messages");
+  const title = item.status === "exploring" ? t("explore.exploring") : t("explore.explored");
+  return (
+    <div className="tool-inline explore-inline">
+      <div className="tool-inline-bar-toggle" aria-hidden />
+      <div className="tool-inline-content">
+        <div className="explore-inline-header">
+          <Terminal
+            className={`tool-inline-icon ${
+              item.status === "exploring" ? "processing" : "completed"
+            }`}
+            size={14}
+            aria-hidden
+          />
+          <span className="explore-inline-title">{title}</span>
+        </div>
+        <div className="explore-inline-list">
+          {item.entries.map((entry, index) => (
+            <div key={`${entry.kind}-${entry.label}-${index}`} className="explore-inline-item">
+              <span className="explore-inline-kind">{exploreKindLabel(entry.kind)}</span>
+              <span className="explore-inline-label">{entry.label}</span>
+              {entry.detail && entry.detail !== entry.label && (
+                <span className="explore-inline-detail">{entry.detail}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+});

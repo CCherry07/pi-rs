@@ -1,0 +1,243 @@
+import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
+import ChevronDown from "lucide-react/dist/esm/icons/chevron-down";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import * as Sentry from "@sentry/react";
+import { openWorkspaceIn } from "../../../services/tauri";
+import { pushErrorToast } from "../../../services/toasts";
+import type { OpenAppTarget } from "../../../types";
+import {
+  DEFAULT_OPEN_APP_ID,
+  DEFAULT_OPEN_APP_TARGETS,
+  OPEN_APP_STORAGE_KEY,
+} from "../constants";
+import {
+  PopoverMenuItem,
+  SplitActionMenu,
+} from "../../design-system/components/popover/PopoverPrimitives";
+import { GENERIC_APP_ICON, getKnownOpenAppIcon } from "../utils/openAppIcons";
+import { useMenuController } from "../hooks/useMenuController";
+
+type OpenTarget = {
+  id: string;
+  label: string;
+  icon: string;
+  target: OpenAppTarget;
+};
+
+type OpenAppMenuProps = {
+  path: string;
+  openTargets: OpenAppTarget[];
+  selectedOpenAppId: string;
+  onSelectOpenAppId: (id: string) => void;
+  iconById?: Record<string, string>;
+};
+
+export function OpenAppMenu({
+  path,
+  openTargets,
+  selectedOpenAppId,
+  onSelectOpenAppId,
+  iconById = {},
+}: OpenAppMenuProps) {
+  const { t } = useTranslation("app");
+  const openMenu = useMenuController();
+  const { isOpen: openMenuOpen, containerRef: openMenuRef } = openMenu;
+  const availableTargets =
+    openTargets.length > 0 ? openTargets : DEFAULT_OPEN_APP_TARGETS;
+  const openAppId = useMemo(
+    () =>
+      availableTargets.find((target) => target.id === selectedOpenAppId)?.id,
+    [availableTargets, selectedOpenAppId],
+  );
+  const resolvedOpenAppId =
+    openAppId ?? availableTargets[0]?.id ?? DEFAULT_OPEN_APP_ID;
+
+  const resolvedOpenTargets = useMemo<OpenTarget[]>(
+    () =>
+      availableTargets.map((target) => ({
+        id: target.id,
+        label: target.label,
+        icon:
+          getKnownOpenAppIcon(target.id) ??
+          iconById[target.id] ??
+          GENERIC_APP_ICON,
+        target,
+      })),
+    [availableTargets, iconById],
+  );
+
+  const fallbackTarget: OpenTarget = {
+    id: DEFAULT_OPEN_APP_ID,
+    label:
+      DEFAULT_OPEN_APP_TARGETS.find((target) => target.id === DEFAULT_OPEN_APP_ID)
+        ?.label ??
+      DEFAULT_OPEN_APP_TARGETS[0]?.label ??
+      t("openApp.open"),
+    icon: getKnownOpenAppIcon(DEFAULT_OPEN_APP_ID) ?? GENERIC_APP_ICON,
+    target:
+      DEFAULT_OPEN_APP_TARGETS.find((target) => target.id === DEFAULT_OPEN_APP_ID) ??
+      DEFAULT_OPEN_APP_TARGETS[0] ?? {
+        id: DEFAULT_OPEN_APP_ID,
+        label: "VS Code",
+        kind: "app",
+        appName: "Visual Studio Code",
+        command: null,
+        args: [],
+      },
+  };
+  const selectedOpenTarget =
+    resolvedOpenTargets.find((target) => target.id === resolvedOpenAppId) ??
+    resolvedOpenTargets[0] ??
+    fallbackTarget;
+
+  const reportOpenError = (error: unknown, target: OpenTarget) => {
+    const message = error instanceof Error ? error.message : String(error);
+    Sentry.captureException(error instanceof Error ? error : new Error(message), {
+      tags: {
+        feature: "open-app-menu",
+      },
+      extra: {
+        path,
+        targetId: target.id,
+        targetKind: target.target.kind,
+        targetAppName: target.target.appName ?? null,
+        targetCommand: target.target.command ?? null,
+      },
+    });
+    pushErrorToast({
+      title: t("openApp.failed"),
+      message,
+    });
+    console.warn("Failed to open workspace in target app", {
+      message,
+      path,
+      targetId: target.id,
+    });
+  };
+
+  const resolveAppName = (target: OpenTarget) =>
+    (target.target.appName ?? "").trim();
+  const resolveCommand = (target: OpenTarget) =>
+    (target.target.command ?? "").trim();
+  const canOpenTarget = (target: OpenTarget) => {
+    if (target.target.kind === "finder") {
+      return true;
+    }
+    if (target.target.kind === "command") {
+      return Boolean(resolveCommand(target));
+    }
+    return Boolean(resolveAppName(target));
+  };
+
+  const openWithTarget = async (target: OpenTarget) => {
+    try {
+      if (target.target.kind === "finder") {
+        await revealItemInDir(path);
+        return;
+      }
+      if (target.target.kind === "command") {
+        const command = resolveCommand(target);
+        if (!command) {
+          return;
+        }
+        await openWorkspaceIn(path, {
+          command,
+          args: target.target.args,
+        });
+        return;
+      }
+      const appName = resolveAppName(target);
+      if (!appName) {
+        return;
+      }
+      await openWorkspaceIn(path, {
+        appName,
+        args: target.target.args,
+      });
+    } catch (error) {
+      reportOpenError(error, target);
+    }
+  };
+
+  const handleOpen = async () => {
+    if (!selectedOpenTarget || !canOpenTarget(selectedOpenTarget)) {
+      return;
+    }
+    await openWithTarget(selectedOpenTarget);
+  };
+
+  const handleSelectOpenTarget = async (target: OpenTarget) => {
+    if (!canOpenTarget(target)) {
+      return;
+    }
+    onSelectOpenAppId(target.id);
+    window.localStorage.setItem(OPEN_APP_STORAGE_KEY, target.id);
+    openMenu.close();
+    await openWithTarget(target);
+  };
+
+  const selectedCanOpen = canOpenTarget(selectedOpenTarget);
+  const openLabel = selectedCanOpen
+    ? t("openApp.openIn", { app: selectedOpenTarget.label })
+    : selectedOpenTarget.target.kind === "command"
+      ? t("openApp.setCommand")
+      : t("openApp.setApp");
+
+  return (
+    <SplitActionMenu
+      containerRef={openMenuRef}
+      className="open-app-menu"
+      buttonGroupClassName="open-app-button"
+      actionButton={
+        <button
+          type="button"
+          className="ghost main-header-action open-app-action ds-tooltip-trigger"
+          onClick={handleOpen}
+          disabled={!selectedCanOpen}
+          data-tauri-drag-region="false"
+          aria-label={t("openApp.openIn", { app: selectedOpenTarget.label })}
+          title={openLabel}
+          data-tooltip={openLabel}
+          data-tooltip-placement="bottom"
+        >
+          <span className="open-app-label">
+            <img
+              className="open-app-icon"
+              src={selectedOpenTarget.icon}
+              alt=""
+              aria-hidden
+            />
+            {selectedOpenTarget.label}
+          </span>
+        </button>
+      }
+      isOpen={openMenuOpen}
+      onToggle={openMenu.toggle}
+      toggleClassName="ghost main-header-action open-app-toggle ds-tooltip-trigger"
+      toggleAriaLabel={t("openApp.selectEditor")}
+      toggleTitle={t("openApp.selectEditor")}
+      toggleTooltip={t("openApp.selectEditor")}
+      toggleTooltipPlacement="bottom"
+      toggleIcon={<ChevronDown size={14} aria-hidden />}
+      popoverClassName="open-app-dropdown"
+      popoverRole="menu"
+    >
+      {resolvedOpenTargets.map((target) => (
+        // Keep entries visible but disable ones missing required config.
+        <PopoverMenuItem
+          key={target.id}
+          className="open-app-option"
+          onClick={() => handleSelectOpenTarget(target)}
+          disabled={!canOpenTarget(target)}
+          role="menuitem"
+          data-tauri-drag-region="false"
+          icon={<img className="open-app-icon" src={target.icon} alt="" aria-hidden />}
+          active={target.id === resolvedOpenAppId}
+        >
+          {target.label}
+        </PopoverMenuItem>
+      ))}
+    </SplitActionMenu>
+  );
+}

@@ -1,0 +1,148 @@
+.update-toasts {
+  position: absolute;
+  bottom: 36px;
+  right: 20px;
+  width: min(360px, calc(100vw - 40px));
+  z-index: 5;
+  pointer-events: none;
+  -webkit-app-region: no-drag;
+}
+
+.update-toast {
+  --ds-toast-enter-duration: 0.2s;
+}
+
+.update-toast-header {
+  margin-bottom: 6px;
+}
+
+.update-toast-title {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.update-toast-version {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.update-toast-body {
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+.update-toast-progress {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.update-toast-progress-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-card-muted);
+  overflow: hidden;
+}
+
+.update-toast-progress-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #4fb8ff, #3be082);
+}
+
+.update-toast-progress-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.update-toast-error {
+  margin-bottom: 10px;
+}
+
+.update-toast-inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.update-toast-body-inline {
+  margin-bottom: 0;
+}
+
+.update-toast-notes {
+  margin-bottom: 10px;
+  max-height: min(44vh, 280px);
+  overflow: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-card-muted);
+  padding: 10px;
+}
+
+.update-toast-notes > *:first-child {
+  margin-top: 0;
+}
+
+.update-toast-notes > *:last-child {
+  margin-bottom: 0;
+}
+
+.update-toast-notes h1,
+.update-toast-notes h2,
+.update-toast-notes h3,
+.update-toast-notes h4,
+.update-toast-notes h5,
+.update-toast-notes h6 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.update-toast-notes p {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.update-toast-notes ul,
+.update-toast-notes ol {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.update-toast-notes li {
+  margin: 0 0 4px;
+}
+
+.update-toast-notes a {
+  color: var(--text-link);
+}
+
+.update-toast-notes code {
+  font-family: var(--code-font-family);
+  font-size: 11px;
+  border-radius: 4px;
+  background: var(--surface-card-strong);
+  padding: 0 4px;
+}
+
+.update-toast-notes pre {
+  margin: 0 0 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--surface-card-strong);
+  overflow: auto;
+}
+
+@media (max-width: 960px) {
+  .update-toasts {
+    top: auto;
+    bottom: 96px;
+    left: 50%;
+    transform: translateX(-50%);
+  }
+}

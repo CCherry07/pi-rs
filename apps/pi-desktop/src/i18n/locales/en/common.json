@@ -1,0 +1,52 @@
+{
+  "actions": {
+    "reset": "Reset",
+    "dismiss": "Dismiss",
+    "edit": "Edit",
+    "delete": "Delete",
+    "stop": "Stop",
+    "choose": "Choose…",
+    "clear": "Clear",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "cancel": "Cancel",
+    "save": "Save",
+    "copy": "Copy",
+    "close": "Close",
+    "back": "Back",
+    "add": "Add",
+    "create": "Create",
+    "retry": "Retry",
+    "refresh": "Refresh",
+    "browse": "Browse"
+  },
+  "default": "Default",
+  "notSet": "Not set",
+  "notFound": "Not found",
+  "truncated": "Truncated",
+  "saving": "Saving...",
+  "loading": "Loading...",
+  "relativeShort": {
+    "now": "now",
+    "minute": "{{count}}m",
+    "hour": "{{count}}h",
+    "day": "{{count}}d",
+    "week": "{{count}}w",
+    "month": "{{count}}mo",
+    "year": "{{count}}y"
+  },
+  "fileManager": {
+    "generic": "File Manager",
+    "revealIn": "Reveal in {{name}}",
+    "showIn": "Show in {{name}}",
+    "openIn": "Open in {{name}}"
+  },
+  "reasoning": {
+    "none": "None",
+    "minimal": "Minimal",
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+    "xhigh": "Extra high"
+  }
+}

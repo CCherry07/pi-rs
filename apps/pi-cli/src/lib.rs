@@ -1,16 +1,13 @@
 #![warn(unreachable_pub)]
 
 mod auth;
-mod builtin_providers;
 mod clipboard;
 mod config;
-mod dynamic_providers;
+mod markdown;
 mod output;
 mod package_commands;
 mod plugin_commands;
 mod plugin_ui;
-mod project_trust;
-mod session_factory;
 mod text_selection;
 mod tui;
 
@@ -22,9 +19,11 @@ use config::{AppConfig, Cli, CliCommand, OutputMode};
 use pi_core::PresentationMode;
 use pi_js_package_manager::PackageManager as JsPackageManager;
 use pi_js_plugin::JsPluginHost;
+use pi_sdk::{
+    ProductSessionFactory, ProjectTrustEvaluation, ProjectTrustPromptRequest, ProjectTrustService,
+};
 use pi_session::{MultiSessionManager, PiSession, PluginContextBinding, SessionLog};
 use pi_settings::{SettingsContext, SettingsManager};
-use project_trust::{ProjectTrustEvaluation, ProjectTrustPromptRequest, ProjectTrustService};
 use tokio::sync::mpsc;
 
 pub(crate) struct ResolvedProjectTrust {
@@ -135,7 +134,7 @@ async fn run(
     js_host: Option<Arc<dyn JsPluginHost>>,
     extension_flag_values: BTreeMap<String, serde_json::Value>,
 ) -> Result<(), String> {
-    let mut config = AppConfig::resolve(&cli)?;
+    let mut config = config::resolve_app_config(&cli)?;
     config.extension_flag_values = extension_flag_values;
     let settings = SettingsManager::new(&config.agent_dir);
     let startup_settings = settings.load(&SettingsContext::new(&config.cwd, false));
@@ -199,10 +198,9 @@ async fn run(
         plugin_selection_requests,
         plugin_multi_selection_requests,
     ) = plugin_ui::PluginUiService::channel();
-    let mut factory =
-        session_factory::ProductSessionFactory::new(config, trust.service.clone(), settings)
-            .with_plugin_context(cli_mode.presentation_mode(), plugin_context_binding.clone())
-            .with_plugin_ui_bridge(Arc::new(plugin_ui));
+    let mut factory = ProductSessionFactory::new(config, trust.service.clone(), settings)
+        .with_plugin_context(cli_mode.presentation_mode(), plugin_context_binding.clone())
+        .with_plugin_ui_bridge(Arc::new(plugin_ui));
     if let Some(js_host) = js_host {
         factory = factory.with_js_plugin_host(js_host);
     }
@@ -552,7 +550,6 @@ mod tests {
         CLIMode, Cli, PresentationMode, ensure_javascript_host_available, finish_run,
         split_extension_flags,
     };
-    use crate::config::AppConfig;
 
     fn cli(arguments: &[&str]) -> Cli {
         Cli::try_parse_pi_from(
@@ -697,7 +694,7 @@ mod tests {
             serde_json::to_vec(&json!({"packages": ["npm:todo-extension"]})).unwrap(),
         )
         .unwrap();
-        let config = AppConfig::resolve(&cli(&[
+        let config = crate::config::resolve_app_config(&cli(&[
             "--cwd",
             cwd.to_str().unwrap(),
             "--agent-dir",
@@ -712,7 +709,7 @@ mod tests {
         assert!(error.contains("--no-extensions"));
         assert!(ensure_javascript_host_available(&config, true, true, &settings).is_ok());
 
-        let disabled = AppConfig::resolve(&cli(&[
+        let disabled = crate::config::resolve_app_config(&cli(&[
             "--cwd",
             cwd.to_str().unwrap(),
             "--agent-dir",

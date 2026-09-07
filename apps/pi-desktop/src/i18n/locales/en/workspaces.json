@@ -1,0 +1,101 @@
+{
+  "clone": {
+    "title": "New clone agent",
+    "subtitle": "Create a new working copy of “{{workspace}}”.",
+    "name": "Copy name",
+    "folder": "Copies folder",
+    "suggested": "Suggested",
+    "suggestedFolder": "Suggested copies folder",
+    "useSuggested": "Use suggested",
+    "nameRequired": "Copy name is required.",
+    "folderRequired": "Copies folder is required."
+  },
+  "fromUrl": {
+    "title": "Add workspace from URL",
+    "url": "Remote Git URL",
+    "folderName": "Target folder name (optional)",
+    "folderNamePlaceholder": "Defaults to repo name",
+    "destination": "Destination parent folder",
+    "cloning": "Cloning…",
+    "confirm": "Clone and Add",
+    "urlRequired": "Remote Git URL is required.",
+    "destinationRequired": "Destination folder is required."
+  },
+  "worktree": {
+    "title": "New worktree agent",
+    "subtitle": "Create a worktree under “{{workspace}}”.",
+    "name": "Name",
+    "optional": "(Optional)",
+    "branch": "Branch name",
+    "noMatchingBranches": "No matching branches",
+    "noBranches": "No branches found",
+    "copyAgents": "Copy AGENTS.md into the worktree",
+    "setupScript": "Environment setup script",
+    "setupHelp": "Stored on the project (Settings → Environments) and runs once in a dedicated terminal after each new worktree is created.",
+    "branchRequired": "Branch name is required.",
+    "createFailed": "Failed to create worktree.",
+    "threadFailed": "Failed to start a worktree thread."
+  },
+  "home": {
+    "send": "Send",
+    "loading": "Loading…",
+    "saving": "Saving…",
+    "notFound": "Not found",
+    "truncated": "Truncated",
+    "largeFile": "Showing the first part of a large file.",
+    "agentPlaceholder": "Add workspace instructions for the agent…",
+    "recentRuns": "Recent runs",
+    "recentRunsEmpty": "Start a run to see its instances tracked here.",
+    "modeLocal": "Local",
+    "modeWorktree": "Worktree",
+    "instanceCount_one": "{{count}} instance",
+    "instanceCount_other": "{{count}} instances",
+    "failed": "Failed",
+    "partial": "Partial",
+    "more": "+{{count}} more",
+    "noInstances": "No instances were started.",
+    "preparing": "Instances are preparing...",
+    "recentThreads": "Recent threads",
+    "recentThreadsEmpty": "Threads from the sidebar will appear here.",
+    "agentActivity": "Agents activity",
+    "threadCount_one": "{{count}} thread",
+    "threadCount_other": "{{count}} threads",
+    "selectRunMode": "Select run mode",
+    "toggleRunMode": "Toggle run mode menu",
+    "selectModels": "Select models",
+    "toggleModels": "Toggle models menu",
+    "connectModels": "Connect this workspace to load available models.",
+    "thinkingMode": "Thinking mode",
+    "gitSetup": "Git setup",
+    "gitNotInitialized": "Git is not initialized for this project.",
+    "selectModelRequired": "Select at least one model to run in a worktree.",
+    "newRun": "New run",
+    "localThreadFailed": "Failed to start a local thread.",
+    "defaultModel": "Default model",
+    "modelSummary_one": "{{count}} model · {{runs}} runs",
+    "modelSummary_other": "{{count}} models · {{runs}} runs",
+    "partialFailure": "Started {{started}}/{{total}} runs. {{failed}} failed.",
+    "allFailed": "Failed to start any instances.",
+    "status": {
+      "running": "Running",
+      "idle": "Idle"
+    }
+  },
+  "agentMd": {
+    "loadFailed": "Couldn’t load AGENTS.md",
+    "saveFailed": "Couldn’t save AGENTS.md"
+  },
+  "rename": {
+    "branchExists": "Branch already exists. Renamed to “{{name}}”.",
+    "renamed": "Worktree renamed.",
+    "upstreamUpdated": "Upstream branch updated."
+  },
+  "groups": {
+    "nameRequired": "Group name is required.",
+    "alreadyExists": "Group name already exists.",
+    "reserved": "“{{name}}” is reserved."
+  },
+  "errors": {
+    "workspaceNotFound": "Workspace not found."
+  }
+}

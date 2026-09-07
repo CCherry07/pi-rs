@@ -1,0 +1,55 @@
+{
+  "validation": {
+    "nameRequired": "必须填写名称。",
+    "nameWhitespace": "名称不能包含空白字符。",
+    "workspaceRequired": "未选择工作区。"
+  },
+  "menu": {
+    "edit": "编辑",
+    "moveWorkspace": "移至工作区",
+    "moveGeneral": "移至通用",
+    "delete": "删除"
+  },
+  "row": {
+    "arguments": "参数",
+    "argumentsFor": "{{name}} 的参数",
+    "sendCurrent": "发送给当前智能体",
+    "send": "发送",
+    "sendNew": "发送给新智能体",
+    "newAgent": "新建智能体",
+    "actions": "提示词操作",
+    "deleteQuestion": "删除这个提示词吗？"
+  },
+  "panel": {
+    "count_one": "{{count}} 个提示词",
+    "count_other": "{{count}} 个提示词",
+    "none": "没有提示词",
+    "filter": "筛选提示词"
+  },
+  "editor": {
+    "name": "名称",
+    "namePlaceholder": "提示词名称",
+    "scope": "范围",
+    "workspace": "工作区",
+    "general": "通用",
+    "description": "描述",
+    "descriptionPlaceholder": "可选描述",
+    "argumentHint": "参数提示",
+    "argumentHintPlaceholder": "可选参数提示",
+    "content": "内容",
+    "contentPlaceholder": "提示词内容"
+  },
+  "workspace": {
+    "title": "工作区提示词",
+    "add": "添加工作区提示词",
+    "empty": "暂无工作区提示词",
+    "emptyPrefix": "可以在这里创建，或将 .md 文件放入",
+    "folder": "工作区提示词文件夹"
+  },
+  "general": {
+    "title": "通用提示词",
+    "add": "添加通用提示词",
+    "empty": "暂无通用提示词",
+    "emptyPrefix": "可以在这里创建，或将 .md 文件放入"
+  }
+}

@@ -31,12 +31,14 @@ crates/pi-prompt                pure Pi-style system prompt assembly
 crates/pi-resources             generic system/append prompts and project context discovery
 crates/pi-session               Pi v4 storage/runtime plus plugin contracts under plugin/ and types/
 crates/pi-settings              current-format settings documents, snapshots, and safe writes
+crates/pi-sdk                   headless product composition shared by CLI, desktop, and embedded adapters
 evals/pi-memory                 deterministic provider-only semantic-memory retrieval evaluation
 crates/pi-telemetry             typed Pi AI/harness span schemas and sink adapters
 crates/pi-rpc                   Pi JSON projector and stdin/stdout RPC adapter
 crates/pi-mcp                   protocol-neutral MCP client, tool projection, and process ownership
 crates/pi-acp                   official stable-v1 ACP adapter and ACP session policy
-apps/pi-md                     TUI-owned Markdown parsing, streaming repair, highlighting, and Ratatui rendering
+apps/pi-desktop                experimental Tauri/React shell with a Pi-to-thread event Adapter
+apps/pi-cli/src/markdown       TUI-owned Markdown parsing, streaming repair, highlighting, and Ratatui rendering
 crates/pi-plugin-sdk            native plugin author interface and descriptor types
 crates/pi-plugin-macros         static plugin preparation, agent hook-interest derivation, and native exports
 crates/pi-plugin-loader         manifest discovery, compatibility checks, and factory adapters
@@ -67,7 +69,8 @@ crates/pi-tool-support           shared path validation, argument, and truncatio
 plugins/tools/pi-plugin-{read,write,edit,hashline-edit,bash,grep,find,ls}
                                 one production tool per plugin crate
 e2e/                            runtime acceptance plus deterministic black-box product E2E
-apps/pi-cli/src/project_trust.rs product trust policy, persistence, and TUI request broker
+crates/pi-sdk/src/project_trust.rs product trust policy and persistence
+apps/pi-cli/src/tui.rs           terminal project-trust prompt Adapter
 ```
 
 Dependencies point inward:
@@ -79,6 +82,8 @@ pi-prompt            -> standard library only
 pi-resources         -> pi-prompt
 pi-session           -> pi-core + pi-prompt + pi-resources + pi-runtime
 pi-settings          -> serde JSON + filesystem persistence only
+pi-sdk               -> pi-session + pi-settings + pi-runtime + product providers, tools, resources,
+                        memory, skills, subagents, and plugin loaders
 pi-memory-eval       -> pi-plugin-memory-local
                         (development-only corpus, adapters, runner, metrics, and reports)
 pi-rpc               -> pi-agent + pi-core + pi-session
@@ -106,8 +111,8 @@ plugins/providers/pi-plugin-models
                      -> pi-core + pi-plugin-openai (credential-blind catalog and routing)
 other plugins/*      -> pi-core
 pi-runtime           -> pi-core + pi-agent + pi-prompt
-apps/pi-cli          -> pi-md + pi-rpc + pi-acp + product runtimes and plugins
-apps/pi-md           -> Ratatui presentation dependencies only
+apps/pi-cli          -> pi-sdk + pi-rpc + pi-acp + terminal and Markdown adapters
+apps/pi-desktop      -> pi-sdk + pi-session + Tauri
 pi-plugin-manager    -> HTTP + filesystem package source adapters
 pi-js-package-manager -> filesystem + npm/git process adapters (no Node dependency)
 pi-js-plugin         -> pi-core + pi-session (no Node or terminal dependency)
@@ -115,7 +120,7 @@ bindings/pi-napi     -> pi-js-plugin + apps/pi-cli + NAPI-RS
 packages/pi          -> Node + jiti + platform pi-napi artifact
 ```
 
-`apps/pi-md` is a private frontend library module rather than a reusable core crate. It owns the
+`apps/pi-cli/src/markdown` is a private frontend module rather than a reusable crate. It owns the
 Ratatui-specific Markdown adapter used by `pi-cli`; no crate under `crates/` or plugin may depend on
 it. Keeping parsing, streaming repair, highlighting, and rendering behind its small `render`
 interface gives the supported TUI locality without moving terminal presentation into the core
@@ -164,7 +169,9 @@ standalone Rust Adapter remains native-only. Before constructing a session, it a
 an active requirement fails with an actionable launcher message unless the user explicitly disabled
 discovery. This probe is read-only and never installs or updates a package.
 
-All frontend adapters enter the product through two public session Modules. `MultiSessionManager`
+All frontend adapters enter the product through `pi-sdk`, whose `Pi` Module owns the shared
+product composition and exposes the session manager. Beneath that interface, two public session
+Modules remain responsible for session behavior. `MultiSessionManager`
 owns the runtime factory, manager shutdown, and a private table of active handles. `PiSession` is the
 cloneable per-frontend handle for current-session events and new/resume/fork/reload transitions.
 There is deliberately no public `SessionRegistry`: duplicate-path checks and handle bookkeeping are
@@ -173,6 +180,28 @@ transaction used inside each `PiSession`, rather than a type frontend adapters c
 The print and NDJSON Adapters pin `PiSession::current()` for one invocation; the longer-lived TUI and
 RPC adapters watch the handle's replacement stream. This keeps generation changes behind the same
 Interface while preventing a single in-flight submission from crossing generations.
+
+`apps/pi-desktop` is an experimental desktop Adapter that provides workspace, thread, Git, file,
+terminal, and conversation presentation on top of the in-process `pi-sdk` / `MultiSessionManager`
+/ `PiSession` Interface. CLI and desktop do not assemble independent provider, tool, skill, or
+prompt runtimes; those product defaults belong to `pi-sdk`.
+`PiRuntimeState` owns native sessions, `SessionStore` owns create/open/fork/archive/unarchive/delete
+discovery, and one projection Module translates Pi lifecycle events into the UI's `thread/*`,
+`turn/*`, and `item/*` vocabulary. The Adapter emits that vocabulary through its own `pi-event`
+channel; there is no external app-server protocol or child-process boundary. Registered
+workspaces are immediately usable by path; the Adapter has no per-workspace connection lifecycle.
+The model selector reads the generation-local catalogue from `pi-sdk` and sends the exact
+provider/model identity back to `AgentSession`; thinking selection is constrained by that model's
+declared levels and persisted through the session configuration entries. The Adapter exposes no
+synthetic read-only, on-request, or full-access mode because filesystem and shell tools follow Pi's
+operating-system permission boundary.
+AI commit-message generation runs through a disposable Pi session and removes that session after
+collecting the response. The desktop has no account-login, hosted-usage, approval, review,
+remote-daemon, or external agent-configuration compatibility layer. Its only application-level
+infrastructure integrations are the app-owned updater/release-notes flow and Sentry.
+Desktop image attachments are decoded from data URLs by the Adapter and enter the same
+`SessionInput` Interface as text; submit, steer, and follow-up processing preserve those images
+through input hooks, durable queue records, and provider projection.
 
 `pi-rpc` is one external protocol-adapter Module above this session Interface. Its Pi JSON
 projector is the single erasure seam for both `--json` and Pi RPC: it emits the coding-agent v3
@@ -360,7 +389,7 @@ explicit `plugins.json` array order, and replaces a generated `plugins/installed
 Native plugin manifests do not declare runtime plugin dependencies: Rust crate dependencies remain
 build-time concerns, and hook registration order remains consumer policy rather than a package graph.
 
-`ProductSessionFactory` in `apps/pi-cli/src/session_factory.rs` is the production Adapter at the
+`ProductSessionFactory` in `crates/pi-sdk/src/session_factory.rs` is the production Adapter at the
 session-construction Seam. It prepares global package state and, after trust resolution, trusted
 project package state before native discovery. The manager holds a package-state guard and retains
 the previous lock and activation view until the complete runtime and session generation prepares
@@ -386,7 +415,7 @@ Interface to inspect registries, `ProductSessionFactory`, or plugin implementati
 
 Two Adapters make the process seam concrete. `native-cli` starts the standalone Rust binary;
 `node-napi` starts the compiled Node launcher and its selected NAPI binding. Both enter the same
-production `pi-cli` assembly and NDJSON frontend. A private local OpenAI-compatible SSE Adapter is
+production `pi-sdk` assembly and the CLI's NDJSON frontend. A private local OpenAI-compatible SSE Adapter is
 the local-substitutable provider dependency. The harness also owns temporary HOME/agent/session
 state, credential scrubbing, offline mode, process deadlines, exhaustive provider scripts, NDJSON
 decoding, and cleanup. CI YAML supplies toolchains and invokes this Interface; scenario and
@@ -999,8 +1028,12 @@ heuristics estimate context size, cut points never begin at a tool result, overs
 separate prefix summary, previous summaries update incrementally, and read/modified file metadata is
 carried forward. Summary calls use `PiRuntime::complete`, an isolated provider request with no tools
 that does not mutate the agent transcript. `AgentSession::compact` performs manual compaction;
-`AgentSessionOptions::context_window` enables threshold compaction before/after runs. Recoverable
-context overflow removes the failed assistant from the prepared context, compacts, and retries once.
+`AgentSessionOptions::context_window` enables threshold compaction before/after runs and proactively
+between a completed tool result and the next provider request in the same run. The session composes
+this policy over any existing `AgentTurnControl`; successful in-run compaction persists its checkpoint
+and replaces only the run-local context, then reconciles global Agent state after the run becomes idle.
+Failures are best effort and leave the original live context in place. Recoverable context overflow
+removes the failed assistant from the prepared context, compacts, and retries once.
 Retained pre-compaction usage is ignored for subsequent threshold decisions so it cannot cause an
 immediate compaction loop. It is also excluded from product context reporting: context usage is
 unknown immediately after compaction and becomes known again only after a later successful
@@ -1443,9 +1476,15 @@ wire records or disabling ordinary plugin tools. The caller's
 `PiSession` is never replaced. The manager registers
 the isolated handle like every other active session so path ownership, plugin-context binding, and
 shutdown remain centralized; frontends retain their explicitly returned primary `PiSession` rather
-than deriving presentation ownership from the manager inventory. Isolated files live below the
+than deriving presentation ownership from the manager inventory. An owner-scoped
+`IsolatedSessionObservation` exposes only the child's id, cwd, snapshot, ordered event subscription,
+and observation of its own isolated descendants. This lets product frontends display live child
+activity without exposing prompt, abort, replacement, or other control operations and without
+promoting the child to a frontend-owned `PiSession`. Isolated files live below the
 owning session's sibling directory and therefore do not enter the top-level resume listing. Closing
-an owner closes its registered isolated descendants. Fork seeding, detached-run reattachment, and
+an owner closes its registered isolated descendants. Completed child logs remain outside top-level
+resume discovery; a frontend may resolve one through its parent link as a read-only snapshot without
+registering or resuming it as a primary session. Fork seeding, detached-run reattachment, and
 background status remain later layers rather than widening this interface.
 
 `pi-plugin-subagents` is the first policy module over that seam. It registers one parallel-safe
@@ -1489,8 +1528,12 @@ tool result; multiple tool calls emitted in one assistant turn use the existing 
 scheduler. A positive profile `timeoutMs` bounds that wait, aborts the isolated handle on expiry,
 and returns a terminal timed-out result without widening the generic isolated-session Interface.
 A separate session-plugin adapter clears lineage on quit or logical-session replacement
-while retaining cumulative state across a generation reload. Frontends continue to render their
-explicitly held primary session.
+while retaining cumulative state across a generation reload. The desktop projector recognizes the
+feature-owned `isolatedSessionId` in subagent tool updates, observes that child read-only, and emits
+the same semantic thread/item stream used for primary sessions. It projects parent-child links as
+collaboration tool items so the existing desktop task hierarchy can render nested execution and
+select a child for inspection. The TUI and other frontends continue to render only their explicitly
+held primary session unless they opt into the observation seam.
 
 Each `PiSession` has one replaceable current `AgentSession`. Its internal `AgentSessionRuntime`
 serializes replacement, dispatches `session_before_switch` or `session_before_fork`, settles the

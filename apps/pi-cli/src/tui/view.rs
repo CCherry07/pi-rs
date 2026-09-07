@@ -2031,7 +2031,8 @@ pub(super) fn render_assistant_markdown_at(
     animation_frame: usize,
     working_elapsed_seconds: u64,
 ) -> Vec<Line<'static>> {
-    let mut lines = pi_md::render(text, streaming, markdown_theme(terminal_appearance)).lines;
+    let mut lines =
+        crate::markdown::render(text, streaming, markdown_theme(terminal_appearance)).lines;
     while lines.first().is_some_and(markdown_line_is_blank) {
         lines.remove(0);
     }

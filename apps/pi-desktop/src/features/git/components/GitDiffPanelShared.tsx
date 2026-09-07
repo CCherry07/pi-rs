@@ -1,0 +1,476 @@
+import type { GitLogEntry } from "../../../types";
+import type { MouseEvent as ReactMouseEvent } from "react";
+import { useTranslation } from "react-i18next";
+import Check from "lucide-react/dist/esm/icons/check";
+import Minus from "lucide-react/dist/esm/icons/minus";
+import Plus from "lucide-react/dist/esm/icons/plus";
+import RotateCcw from "lucide-react/dist/esm/icons/rotate-ccw";
+import Upload from "lucide-react/dist/esm/icons/upload";
+import X from "lucide-react/dist/esm/icons/x";
+import { formatRelativeTime } from "../../../utils/time";
+import {
+  getStatusClass,
+  getStatusSymbol,
+  splitNameAndExtension,
+  splitPath,
+} from "./GitDiffPanel.utils";
+
+export type DiffFile = {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+};
+
+export type SidebarErrorAction = {
+  label: string;
+  onAction: () => void | Promise<void>;
+  disabled?: boolean;
+  loading?: boolean;
+};
+
+type CommitButtonProps = {
+  commitMessage: string;
+  hasStagedFiles: boolean;
+  hasUnstagedFiles: boolean;
+  commitLoading: boolean;
+  onCommit?: () => void | Promise<void>;
+};
+
+export function CommitButton({
+  commitMessage,
+  hasStagedFiles,
+  hasUnstagedFiles,
+  commitLoading,
+  onCommit,
+}: CommitButtonProps) {
+  const { t } = useTranslation("git");
+  const hasMessage = commitMessage.trim().length > 0;
+  const hasChanges = hasStagedFiles || hasUnstagedFiles;
+  const canCommit = hasMessage && hasChanges && !commitLoading;
+
+  const handleCommit = () => {
+    if (canCommit) {
+      void onCommit?.();
+    }
+  };
+
+  return (
+    <div className="commit-button-container">
+      <button
+        type="button"
+        className="commit-button"
+        onClick={handleCommit}
+        disabled={!canCommit}
+        title={
+          !hasMessage
+            ? t("commit.enterMessage")
+            : !hasChanges
+              ? t("commit.noChanges")
+              : hasStagedFiles
+                ? t("commit.staged")
+                : t("commit.allUnstaged")
+        }
+      >
+        {commitLoading ? (
+          <span className="commit-button-spinner" aria-hidden />
+        ) : (
+          <svg
+            width={14}
+            height={14}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden
+          >
+            <path d="M20 6 9 17l-5-5" />
+          </svg>
+        )}
+        <span>{commitLoading ? t("commit.committing") : t("commit.action")}</span>
+      </button>
+    </div>
+  );
+}
+
+type SidebarErrorProps = {
+  variant?: "diff" | "commit";
+  message: string;
+  action?: SidebarErrorAction | null;
+  onDismiss: () => void;
+};
+
+export function SidebarError({
+  variant = "diff",
+  message,
+  action,
+  onDismiss,
+}: SidebarErrorProps) {
+  const { t } = useTranslation("git");
+  return (
+    <div className={`sidebar-error sidebar-error-${variant}`}>
+      <div className="sidebar-error-body">
+        <div className={variant === "commit" ? "commit-message-error" : "diff-error"}>
+          {message}
+        </div>
+        {action && (
+          <button
+            type="button"
+            className="ghost sidebar-error-action"
+            onClick={() => void action.onAction()}
+            disabled={action.disabled || action.loading}
+          >
+            {action.loading && <span className="commit-button-spinner" aria-hidden />}
+            <span>{action.label}</span>
+          </button>
+        )}
+      </div>
+      <button
+        type="button"
+        className="ghost icon-button sidebar-error-dismiss"
+        onClick={onDismiss}
+        aria-label={t("errors.dismiss")}
+        title={t("errors.dismiss")}
+      >
+        <X size={12} aria-hidden />
+      </button>
+    </div>
+  );
+}
+
+type DiffFileRowProps = {
+  file: DiffFile;
+  isSelected: boolean;
+  isActive: boolean;
+  section: "staged" | "unstaged";
+  onClick: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  onKeySelect: () => void;
+  onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  onStageFile?: (path: string) => Promise<void> | void;
+  onUnstageFile?: (path: string) => Promise<void> | void;
+  onDiscardFile?: (path: string) => Promise<void> | void;
+};
+
+function DiffFileRow({
+  file,
+  isSelected,
+  isActive,
+  section,
+  onClick,
+  onKeySelect,
+  onContextMenu,
+  onStageFile,
+  onUnstageFile,
+  onDiscardFile,
+}: DiffFileRowProps) {
+  const { t } = useTranslation("git");
+  const { name, dir } = splitPath(file.path);
+  const { base, extension } = splitNameAndExtension(name);
+  const statusSymbol = getStatusSymbol(file.status);
+  const statusClass = getStatusClass(file.status);
+  const showStage = section === "unstaged" && Boolean(onStageFile);
+  const showUnstage = section === "staged" && Boolean(onUnstageFile);
+  const showDiscard = section === "unstaged" && Boolean(onDiscardFile);
+
+  return (
+    <div
+      className={`diff-row ${isActive ? "active" : ""} ${isSelected ? "selected" : ""}`}
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onKeySelect();
+        }
+      }}
+      onContextMenu={onContextMenu}
+    >
+      <span className={`diff-icon ${statusClass}`} aria-hidden>
+        {statusSymbol}
+      </span>
+      <div className="diff-file">
+        <div className="diff-path">
+          <span className="diff-name">
+            <span className="diff-name-base">{base}</span>
+            {extension && <span className="diff-name-ext">.{extension}</span>}
+          </span>
+        </div>
+        {dir && <div className="diff-dir">{dir}</div>}
+      </div>
+      <div className="diff-row-meta">
+        <span className="diff-counts-inline" aria-label={`+${file.additions} -${file.deletions}`}>
+          <span className="diff-add">+{file.additions}</span>
+          <span className="diff-sep">/</span>
+          <span className="diff-del">-{file.deletions}</span>
+        </span>
+        <div className="diff-row-actions" role="group" aria-label={t("actions.fileActions")}>
+          {showStage && (
+            <button
+              type="button"
+              className="diff-row-action diff-row-action--stage ds-tooltip-trigger"
+              onClick={(event) => {
+                event.stopPropagation();
+                void onStageFile?.(file.path);
+              }}
+              data-tooltip={t("actions.stageChanges")}
+              data-tooltip-align="end"
+              aria-label={t("actions.stageFile")}
+            >
+              <Plus size={12} aria-hidden />
+            </button>
+          )}
+          {showUnstage && (
+            <button
+              type="button"
+              className="diff-row-action diff-row-action--unstage ds-tooltip-trigger"
+              onClick={(event) => {
+                event.stopPropagation();
+                void onUnstageFile?.(file.path);
+              }}
+              data-tooltip={t("actions.unstageChanges")}
+              data-tooltip-align="end"
+              aria-label={t("actions.unstageFile")}
+            >
+              <Minus size={12} aria-hidden />
+            </button>
+          )}
+          {showDiscard && (
+            <button
+              type="button"
+              className="diff-row-action diff-row-action--discard ds-tooltip-trigger"
+              onClick={(event) => {
+                event.stopPropagation();
+                void onDiscardFile?.(file.path);
+              }}
+              data-tooltip={t("actions.discardChanges")}
+              data-tooltip-align="end"
+              aria-label={t("actions.discardChanges")}
+            >
+              <RotateCcw size={12} aria-hidden />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type DiffSectionProps = {
+  title: string;
+  files: DiffFile[];
+  section: "staged" | "unstaged";
+  selectedFiles: Set<string>;
+  selectedPath: string | null;
+  onSelectFile?: (path: string) => void;
+  onStageAllChanges?: () => Promise<void> | void;
+  onStageFile?: (path: string) => Promise<void> | void;
+  onUnstageFile?: (path: string) => Promise<void> | void;
+  onDiscardFile?: (path: string) => Promise<void> | void;
+  onDiscardFiles?: (paths: string[]) => Promise<void> | void;
+  showWorktreeApplyAction?: boolean;
+  worktreeApplyTitle?: string | null;
+  worktreeApplyLoading?: boolean;
+  worktreeApplySuccess?: boolean;
+  onApplyWorktreeChanges?: () => Promise<void> | void;
+  onFileClick: (
+    event: ReactMouseEvent<HTMLDivElement>,
+    path: string,
+    section: "staged" | "unstaged",
+  ) => void;
+  onShowFileMenu: (
+    event: ReactMouseEvent<HTMLDivElement>,
+    path: string,
+    section: "staged" | "unstaged",
+  ) => void;
+};
+
+export function DiffSection({
+  title,
+  files,
+  section,
+  selectedFiles,
+  selectedPath,
+  onSelectFile,
+  onStageAllChanges,
+  onStageFile,
+  onUnstageFile,
+  onDiscardFile,
+  onDiscardFiles,
+  showWorktreeApplyAction = false,
+  worktreeApplyTitle = null,
+  worktreeApplyLoading = false,
+  worktreeApplySuccess = false,
+  onApplyWorktreeChanges,
+  onFileClick,
+  onShowFileMenu,
+}: DiffSectionProps) {
+  const { t } = useTranslation("git");
+  const filePaths = files.map((file) => file.path);
+  const canStageAll =
+    section === "unstaged" &&
+    (Boolean(onStageAllChanges) || Boolean(onStageFile)) &&
+    filePaths.length > 0;
+  const canUnstageAll = section === "staged" && Boolean(onUnstageFile) && filePaths.length > 0;
+  const canDiscardAll = section === "unstaged" && Boolean(onDiscardFiles) && filePaths.length > 0;
+  const canApplyWorktree =
+    showWorktreeApplyAction && Boolean(onApplyWorktreeChanges) && filePaths.length > 0;
+  const showSectionActions =
+    canApplyWorktree || canStageAll || canUnstageAll || canDiscardAll;
+
+  return (
+    <div className="diff-section">
+      <div className="diff-section-title diff-section-title--row">
+        <div className="diff-section-heading">
+          <span className="diff-section-label">{title}</span>
+          <span className="diff-section-count">{files.length}</span>
+        </div>
+        {showSectionActions && (
+          <div className="diff-section-actions" role="group" aria-label={t("actions.section", { title })}>
+            {canApplyWorktree && (
+              <button
+                type="button"
+                className="diff-row-action diff-row-action--apply ds-tooltip-trigger"
+                onClick={() => {
+                  void onApplyWorktreeChanges?.();
+                }}
+                disabled={worktreeApplyLoading || worktreeApplySuccess}
+                data-tooltip={worktreeApplyTitle ?? t("actions.applyParent")}
+                data-tooltip-align="end"
+                aria-label={t("actions.applyWorktree")}
+              >
+                <WorktreeApplyIcon success={worktreeApplySuccess} />
+              </button>
+            )}
+            {canStageAll && (
+              <button
+                type="button"
+                className="diff-row-action diff-row-action--stage ds-tooltip-trigger"
+                onClick={() => {
+                  if (onStageAllChanges) {
+                    void onStageAllChanges();
+                    return;
+                  }
+                  void (async () => {
+                    for (const path of filePaths) {
+                      await onStageFile?.(path);
+                    }
+                  })();
+                }}
+                data-tooltip={t("actions.stageAll")}
+                data-tooltip-align="end"
+                aria-label={t("actions.stageAll")}
+              >
+                <Plus size={12} aria-hidden />
+              </button>
+            )}
+            {canUnstageAll && (
+              <button
+                type="button"
+                className="diff-row-action diff-row-action--unstage ds-tooltip-trigger"
+                onClick={() => {
+                  void (async () => {
+                    for (const path of filePaths) {
+                      await onUnstageFile?.(path);
+                    }
+                  })();
+                }}
+                data-tooltip={t("actions.unstageAll")}
+                data-tooltip-align="end"
+                aria-label={t("actions.unstageAll")}
+              >
+                <Minus size={12} aria-hidden />
+              </button>
+            )}
+            {canDiscardAll && (
+              <button
+                type="button"
+                className="diff-row-action diff-row-action--discard ds-tooltip-trigger"
+                onClick={() => {
+                  void onDiscardFiles?.(filePaths);
+                }}
+                data-tooltip={t("actions.discardAll")}
+                data-tooltip-align="end"
+                aria-label={t("actions.discardAll")}
+              >
+                <RotateCcw size={12} aria-hidden />
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      <div className="diff-section-list">
+        {files.map((file) => {
+          const isSelected = selectedFiles.size > 1 && selectedFiles.has(file.path);
+          const isActive = selectedPath === file.path;
+          return (
+            <DiffFileRow
+              key={`${section}-${file.path}`}
+              file={file}
+              isSelected={isSelected}
+              isActive={isActive}
+              section={section}
+              onClick={(event) => onFileClick(event, file.path, section)}
+              onKeySelect={() => onSelectFile?.(file.path)}
+              onContextMenu={(event) => onShowFileMenu(event, file.path, section)}
+              onStageFile={onStageFile}
+              onUnstageFile={onUnstageFile}
+              onDiscardFile={onDiscardFile}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+type GitLogEntryRowProps = {
+  entry: GitLogEntry;
+  isSelected: boolean;
+  compact?: boolean;
+  onSelect?: (entry: GitLogEntry) => void;
+  onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void;
+};
+
+export function GitLogEntryRow({
+  entry,
+  isSelected,
+  compact = false,
+  onSelect,
+  onContextMenu,
+}: GitLogEntryRowProps) {
+  const { t } = useTranslation("git");
+  return (
+    <div
+      className={`git-log-entry ${compact ? "git-log-entry-compact" : ""} ${isSelected ? "active" : ""}`}
+      onClick={() => onSelect?.(entry)}
+      onContextMenu={onContextMenu}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onSelect?.(entry);
+        }
+      }}
+    >
+      <div className="git-log-summary">{entry.summary || t("log.noMessage")}</div>
+      <div className="git-log-meta">
+        <span className="git-log-sha">{entry.sha.slice(0, 7)}</span>
+        <span className="git-log-sep">·</span>
+        <span className="git-log-author">{entry.author || t("log.unknownAuthor")}</span>
+        <span className="git-log-sep">·</span>
+        <span className="git-log-date">{formatRelativeTime(entry.timestamp * 1000)}</span>
+      </div>
+    </div>
+  );
+}
+
+export function WorktreeApplyIcon({ success }: { success: boolean }) {
+  if (success) {
+    return <Check size={12} aria-hidden />;
+  }
+  return <Upload size={12} aria-hidden />;
+}

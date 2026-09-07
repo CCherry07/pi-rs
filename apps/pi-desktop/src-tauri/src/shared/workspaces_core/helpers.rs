@@ -1,0 +1,181 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use tokio::sync::Mutex;
+
+use crate::types::WorkspaceEntry;
+use crate::utils::normalize_windows_namespace_path;
+
+pub(crate) const WORKTREE_SETUP_MARKERS_DIR: &str = "worktree-setup";
+pub(crate) const WORKTREE_SETUP_MARKER_EXT: &str = "ran";
+pub(super) const AGENTS_MD_FILE_NAME: &str = "AGENTS.md";
+
+pub(super) fn copy_agents_md_from_parent_to_worktree(
+    parent_repo_root: &Path,
+    worktree_root: &Path,
+) -> Result<(), String> {
+    let source_path = parent_repo_root.join(AGENTS_MD_FILE_NAME);
+    if !source_path.is_file() {
+        return Ok(());
+    }
+
+    let destination_path = worktree_root.join(AGENTS_MD_FILE_NAME);
+    if destination_path.is_file() {
+        return Ok(());
+    }
+
+    let temp_path = worktree_root.join(format!("{AGENTS_MD_FILE_NAME}.tmp"));
+
+    std::fs::copy(&source_path, &temp_path).map_err(|err| {
+        format!(
+            "Failed to copy {} from {} to {}: {err}",
+            AGENTS_MD_FILE_NAME,
+            source_path.display(),
+            temp_path.display()
+        )
+    })?;
+
+    std::fs::rename(&temp_path, &destination_path).map_err(|err| {
+        let _ = std::fs::remove_file(&temp_path);
+        format!(
+            "Failed to finalize {} copy to {}: {err}",
+            AGENTS_MD_FILE_NAME,
+            destination_path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+pub(crate) fn normalize_setup_script(script: Option<String>) -> Option<String> {
+    match script {
+        Some(value) if value.trim().is_empty() => None,
+        Some(value) => Some(value),
+        None => None,
+    }
+}
+
+pub(crate) fn worktree_setup_marker_path(data_dir: &Path, workspace_id: &str) -> PathBuf {
+    data_dir
+        .join(WORKTREE_SETUP_MARKERS_DIR)
+        .join(format!("{workspace_id}.{WORKTREE_SETUP_MARKER_EXT}"))
+}
+
+pub(crate) fn is_workspace_path_dir_core(path: &str) -> bool {
+    normalize_workspace_path_input(path).is_dir()
+}
+
+pub(crate) fn normalize_workspace_path_input(path: &str) -> PathBuf {
+    let trimmed = path.trim();
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        if let Some(home) = crate::agent_paths::home_dir() {
+            return home.join(rest);
+        }
+    }
+    if trimmed == "~" {
+        if let Some(home) = crate::agent_paths::home_dir() {
+            return home;
+        }
+    }
+    PathBuf::from(trimmed)
+}
+
+pub(crate) fn workspace_path_to_string(path: &Path) -> String {
+    normalize_windows_namespace_path(&path.to_string_lossy())
+}
+
+pub(super) async fn resolve_workspace_root(
+    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
+    workspace_id: &str,
+) -> Result<PathBuf, String> {
+    let workspaces = workspaces.lock().await;
+    let entry = workspaces
+        .get(workspace_id)
+        .cloned()
+        .ok_or_else(|| "workspace not found".to_string())?;
+    Ok(PathBuf::from(entry.path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        copy_agents_md_from_parent_to_worktree, normalize_workspace_path_input,
+        workspace_path_to_string, AGENTS_MD_FILE_NAME,
+    };
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn make_temp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pi-monitor-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("failed to create temp dir");
+        dir
+    }
+
+    #[test]
+    fn copies_agents_md_when_missing_in_worktree() {
+        let parent = make_temp_dir();
+        let worktree = make_temp_dir();
+        let parent_agents = parent.join(AGENTS_MD_FILE_NAME);
+        let worktree_agents = worktree.join(AGENTS_MD_FILE_NAME);
+
+        std::fs::write(&parent_agents, "parent").expect("failed to write parent AGENTS.md");
+
+        copy_agents_md_from_parent_to_worktree(&parent, &worktree).expect("copy should succeed");
+
+        let copied = std::fs::read_to_string(&worktree_agents)
+            .expect("worktree AGENTS.md should exist after copy");
+        assert_eq!(copied, "parent");
+
+        let _ = std::fs::remove_dir_all(parent);
+        let _ = std::fs::remove_dir_all(worktree);
+    }
+
+    #[test]
+    fn does_not_overwrite_existing_worktree_agents_md() {
+        let parent = make_temp_dir();
+        let worktree = make_temp_dir();
+        let parent_agents = parent.join(AGENTS_MD_FILE_NAME);
+        let worktree_agents = worktree.join(AGENTS_MD_FILE_NAME);
+
+        std::fs::write(&parent_agents, "parent").expect("failed to write parent AGENTS.md");
+        std::fs::write(&worktree_agents, "branch-specific")
+            .expect("failed to write worktree AGENTS.md");
+
+        copy_agents_md_from_parent_to_worktree(&parent, &worktree).expect("copy should succeed");
+
+        let retained = std::fs::read_to_string(&worktree_agents)
+            .expect("worktree AGENTS.md should still exist");
+        assert_eq!(retained, "branch-specific");
+
+        let _ = std::fs::remove_dir_all(parent);
+        let _ = std::fs::remove_dir_all(worktree);
+    }
+
+    #[test]
+    fn normalize_workspace_path_input_expands_home_prefix() {
+        let _guard = ENV_LOCK.lock().expect("lock env");
+        let previous_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", "/tmp/cm-home");
+
+        assert_eq!(
+            normalize_workspace_path_input("~/dev/repo"),
+            PathBuf::from("/tmp/cm-home/dev/repo")
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn workspace_path_to_string_strips_windows_namespace_prefixes() {
+        assert_eq!(
+            workspace_path_to_string(&PathBuf::from(r"\\?\I:\gpt-projects\PiMonitor")),
+            r"I:\gpt-projects\PiMonitor"
+        );
+    }
+}

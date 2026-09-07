@@ -1,0 +1,57 @@
+[package]
+name = "pi-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+fs2 = "0.4.3"
+pi-agent.workspace = true
+pi-core.workspace = true
+pi-js-package-manager.workspace = true
+pi-js-plugin.workspace = true
+pi-memory-loader.workspace = true
+pi-plugin-anthropic.workspace = true
+pi-plugin-azure-openai.workspace = true
+pi-plugin-bash.workspace = true
+pi-plugin-bedrock.workspace = true
+pi-plugin-copilot.workspace = true
+pi-plugin-edit.workspace = true
+pi-plugin-find.workspace = true
+pi-plugin-google.workspace = true
+pi-plugin-grep.workspace = true
+pi-plugin-hashline-edit.workspace = true
+pi-plugin-loader.workspace = true
+pi-plugin-ls.workspace = true
+pi-plugin-manager.workspace = true
+pi-plugin-memory-hermes.workspace = true
+pi-plugin-memory-local.workspace = true
+pi-plugin-mistral.workspace = true
+pi-plugin-models.workspace = true
+pi-plugin-openai.workspace = true
+pi-plugin-openrouter.workspace = true
+pi-plugin-prompts.workspace = true
+pi-plugin-read.workspace = true
+pi-plugin-session-transfer.workspace = true
+pi-plugin-skills.workspace = true
+pi-plugin-subagents.workspace = true
+pi-plugin-write.workspace = true
+pi-plugin-xai.workspace = true
+pi-provider.workspace = true
+pi-resources.workspace = true
+pi-runtime.workspace = true
+pi-session.workspace = true
+pi-settings.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+uuid = { version = "1.18.1", features = ["v7"] }
+
+[dev-dependencies]
+base64 = "0.22"
+pi-test-support.workspace = true
+tempfile = "3.21.0"

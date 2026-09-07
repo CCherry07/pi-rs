@@ -1,0 +1,454 @@
+{
+  "shell": {
+    "title": "Settings",
+    "close": "Close settings",
+    "back": "Back to settings sections",
+    "sections": "Sections"
+  },
+  "sections": {
+    "projects": "Projects",
+    "archived": "Archived Tasks",
+    "environments": "Environments",
+    "display": "Display & Sound",
+    "composer": "Composer",
+    "dictation": "Dictation",
+    "shortcuts": "Shortcuts",
+    "openApps": "Open in",
+    "git": "Git",
+    "about": "About"
+  },
+  "archived": {
+    "title": "Archived Tasks",
+    "subtitle": "Review archived tasks, restore them to the task list, or permanently delete local session files.",
+    "listTitle": "Archived",
+    "listSubtitle": "Archiving hides a task from the main list. Deleting removes the underlying session file.",
+    "loading": "Loading archived tasks...",
+    "empty": "No archived tasks.",
+    "restore": "Restore",
+    "restoring": "Restoring...",
+    "deleting": "Deleting...",
+    "deleteAll": "Delete All",
+    "deletingAll": "Deleting all...",
+    "untitled": "Untitled task",
+    "unknownUpdatedAt": "Unknown update time",
+    "messageCount": "{{count}} messages",
+    "deleteTitle": "Delete archived task",
+    "deleteQuestion": "Permanently delete \"{{name}}\"? This removes the local session file and cannot be undone.",
+    "deleteAllTitle": "Delete all archived tasks",
+    "deleteAllQuestion": "Permanently delete all {{count}} archived tasks? This removes the local session files and cannot be undone.",
+    "deleteAllError": "Some archived tasks could not be deleted: {{message}}",
+    "error": "Failed to load archived tasks: {{message}}"
+  },
+  "display": {
+    "title": "Display & Sound",
+    "subtitle": "Tune visuals and audio alerts to your preferences.",
+    "sectionTitle": "Display",
+    "sectionSubtitle": "Adjust how the window renders backgrounds and effects.",
+    "language": "Language",
+    "languageOptions": {
+      "system": "System",
+      "en": "English",
+      "zhCN": "Simplified Chinese"
+    },
+    "theme": "Theme",
+    "themeOptions": {
+      "system": "System",
+      "light": "Light",
+      "dark": "Dark",
+      "dim": "Dim"
+    },
+    "messageFilePath": {
+      "title": "Show file path in messages",
+      "subtitle": "Display the parent path next to file links in messages."
+    },
+    "splitPanes": {
+      "title": "Split chat and diff center panes",
+      "subtitle": "Show chat and diff side by side instead of swapping between them."
+    },
+    "threadTitles": {
+      "title": "Auto-generate new thread titles",
+      "subtitle": "Generate a short title from your first message (uses extra tokens)."
+    },
+    "transparency": {
+      "title": "Reduce transparency",
+      "subtitle": "Use solid surfaces instead of glass."
+    },
+    "interfaceScale": "Interface scale",
+    "scaleShortcuts": {
+      "title": "{{key}}+ and {{key}}-, {{key}}+0 to reset.",
+      "text": "Shortcuts: {{key}}+ and {{key}}-, {{key}}+0 to reset."
+    },
+    "uiFont": {
+      "label": "UI font family",
+      "help": "Applies to all UI text. Leave empty to use the default system font stack."
+    },
+    "codeFont": {
+      "label": "Code font family",
+      "help": "Applies to git diffs and other mono-spaced readouts."
+    },
+    "codeFontSize": {
+      "label": "Code font size",
+      "help": "Adjusts code and diff text size."
+    }
+  },
+  "chat": {
+    "sectionTitle": "Chat",
+    "sectionSubtitle": "Control how much conversation history is retained per thread.",
+    "unlimited": {
+      "title": "Unlimited chat history",
+      "subtitle": "Keep full thread history in memory (may impact performance)."
+    },
+    "scrollbackPreset": "Scrollback preset",
+    "custom": "Custom",
+    "defaultValue": "{{value}} (Default)",
+    "scrollbackHelp": "Higher values keep more history but may increase memory usage. Use “Sync from server” on a thread to re-fetch older messages.",
+    "maxItems": "Max items per thread",
+    "rangeHelp": "Range: {{min}}–{{max}}. Counts messages, tool calls, and other conversation items."
+  },
+  "sounds": {
+    "sectionTitle": "Sounds",
+    "sectionSubtitle": "Control notification audio alerts.",
+    "notificationSounds": {
+      "title": "Notification sounds",
+      "subtitle": "Play a sound when a long-running agent finishes while the window is unfocused."
+    },
+    "systemNotifications": {
+      "title": "System notifications",
+      "subtitle": "Show a system notification when a long-running agent finishes while the window is unfocused."
+    },
+    "subagentNotifications": {
+      "title": "Sub-agent notifications",
+      "subtitle": "Include spawned sub-agent threads in system notifications."
+    },
+    "testSound": "Test sound",
+    "testNotification": "Test notification"
+  },
+  "projects": {
+    "title": "Projects",
+    "subtitle": "Group related workspaces and reorder projects within each group.",
+    "groups": {
+      "title": "Groups",
+      "subtitle": "Create group labels for related repositories.",
+      "newName": "New group name",
+      "add": "Add group",
+      "copiesFolder": "Copies folder",
+      "moveUp": "Move group up",
+      "moveDown": "Move group down",
+      "delete": "Delete group",
+      "empty": "No groups yet.",
+      "deleteTitle": "Delete Group",
+      "deleteQuestion": "Delete “{{name}}”?",
+      "deleteMove": "Projects in this group will move to “{{group}}”."
+    },
+    "projectList": {
+      "title": "Projects",
+      "subtitle": "Assign projects to groups and adjust their order.",
+      "moveUp": "Move project up",
+      "moveDown": "Move project down",
+      "delete": "Delete project",
+      "empty": "No projects yet."
+    }
+  },
+  "openApps": {
+    "title": "Open in",
+    "subtitle": "Customize the Open in menu shown in the title bar and file previews.",
+    "fields": {
+      "label": "Label",
+      "type": "Type",
+      "appName": "App name",
+      "command": "Command",
+      "args": "Args",
+      "labelNumber": "Open app label {{number}}",
+      "typeNumber": "Open app type {{number}}",
+      "appNameNumber": "Open app name {{number}}",
+      "commandNumber": "Open app command {{number}}",
+      "argsNumber": "Open app args {{number}}"
+    },
+    "types": {
+      "app": "App",
+      "command": "Command"
+    },
+    "validation": {
+      "label": "Label required",
+      "appName": "App name required",
+      "command": "Command required",
+      "requiredFields": "Complete required fields"
+    },
+    "incomplete": "Incomplete",
+    "remove": "Remove app",
+    "add": "Add app",
+    "commandPathHelp": "Commands receive the selected path as the final argument.",
+    "macHelp": "Apps open via `open -a` with optional args.",
+    "otherHelp": "Apps run as an executable with optional args.",
+    "newApp": "New App"
+  },
+  "environments": {
+    "title": "Environments",
+    "subtitle": "Configure per-project setup scripts and worktree locations.",
+    "globalRoot": {
+      "label": "Global worktrees root",
+      "help": "Default location for new worktrees when a project does not override it. Each project gets its own subfolder under this root.",
+      "pickerTitle": "Select global worktrees root"
+    },
+    "project": "Project",
+    "setupScript": {
+      "label": "Setup script",
+      "help": "Runs once in a dedicated terminal after each new worktree is created."
+    },
+    "projectRoot": {
+      "label": "Worktrees folder",
+      "help": "Custom location for this project's worktrees. Leave empty to use the global root or the built-in default.",
+      "pickerTitle": "Select worktrees folder"
+    },
+    "folderPickerFailed": "Failed to open folder picker",
+    "copyFailed": {
+      "title": "Copy failed",
+      "unavailable": "Clipboard access is unavailable in this environment. Copy the script manually instead.",
+      "write": "Could not write to the clipboard. Copy the script manually instead."
+    }
+  },
+  "composer": {
+    "title": "Composer",
+    "subtitle": "Control helpers and formatting behavior inside the message editor.",
+    "followUp": {
+      "title": "Follow-up behavior",
+      "queue": "Queue",
+      "steer": "Steer",
+      "steerUnavailable": "Steer is unavailable for the current model.",
+      "help": "Choose the default while a run is active. Press {{shortcut}} to send the opposite behavior for one message.",
+      "unavailableHelp": "Steer is unavailable for the current model. Follow-ups will queue."
+    },
+    "presets": {
+      "title": "Presets",
+      "subtitle": "Choose a starting point and fine-tune the toggles below.",
+      "label": "Preset",
+      "help": "Presets update the toggles below. Customize any setting after selecting.",
+      "options": {
+        "default": "Default (no helpers)",
+        "helpful": "Helpful",
+        "smart": "Smart"
+      }
+    },
+    "fences": {
+      "title": "Code fences",
+      "space": {
+        "title": "Expand fences on Space",
+        "subtitle": "Typing ``` then Space inserts a fenced block."
+      },
+      "enter": {
+        "title": "Expand fences on Enter",
+        "subtitle": "Use Enter to expand ``` lines when enabled."
+      },
+      "languageTags": {
+        "title": "Support language tags",
+        "subtitle": "Allows ```lang + Space to include a language."
+      },
+      "wrapSelection": {
+        "title": "Wrap selection in fences",
+        "subtitle": "Wraps selected text when creating a fence."
+      },
+      "copyWithout": {
+        "title": "Copy blocks without fences",
+        "subtitle": "When enabled, Copy is plain text. Hold {{key}} to include ``` fences."
+      }
+    },
+    "pasting": {
+      "title": "Pasting",
+      "multiline": {
+        "title": "Auto-wrap multi-line paste",
+        "subtitle": "Wraps multi-line paste inside a fenced block."
+      },
+      "codeLike": {
+        "title": "Auto-wrap code-like single lines",
+        "subtitle": "Wraps long single-line code snippets on paste."
+      }
+    },
+    "lists": {
+      "title": "Lists",
+      "continue": {
+        "title": "Continue lists on Shift+Enter",
+        "subtitle": "Continues numbered and bulleted lists when the line has content."
+      }
+    }
+  },
+  "dictation": {
+    "title": "Dictation",
+    "subtitle": "Enable microphone dictation with on-device transcription.",
+    "enable": {
+      "title": "Enable dictation",
+      "subtitle": "Downloads the selected Whisper model on first use."
+    },
+    "model": {
+      "label": "Dictation model",
+      "help": "{{note}} Download size: {{size}}."
+    },
+    "language": {
+      "label": "Preferred dictation language",
+      "auto": "Auto-detect only",
+      "help": "Auto-detect stays on; this nudges the decoder toward your preference.",
+      "options": {
+        "en": "English",
+        "es": "Spanish",
+        "fr": "French",
+        "de": "German",
+        "it": "Italian",
+        "pt": "Portuguese",
+        "nl": "Dutch",
+        "sv": "Swedish",
+        "no": "Norwegian",
+        "da": "Danish",
+        "fi": "Finnish",
+        "pl": "Polish",
+        "tr": "Turkish",
+        "ru": "Russian",
+        "uk": "Ukrainian",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "zh": "Chinese"
+      }
+    },
+    "holdKey": {
+      "label": "Hold-to-dictate key",
+      "off": "Off",
+      "help": "Hold the key to start dictation, release to stop and process."
+    },
+    "status": {
+      "label": "Model status ({{model}})",
+      "ready": "Ready for dictation.",
+      "missing": "Model not downloaded yet.",
+      "downloading": "Downloading model...",
+      "error": "Download error."
+    },
+    "actions": {
+      "download": "Download model",
+      "cancel": "Cancel download",
+      "remove": "Remove model"
+    },
+    "models": {
+      "tiny": {
+        "label": "Tiny",
+        "note": "Fastest, least accurate."
+      },
+      "base": {
+        "label": "Base",
+        "note": "Balanced default."
+      },
+      "small": {
+        "label": "Small",
+        "note": "Better accuracy."
+      },
+      "medium": {
+        "label": "Medium",
+        "note": "High accuracy."
+      },
+      "largeV3": {
+        "label": "Large V3",
+        "note": "Best accuracy, heavy download."
+      }
+    }
+  },
+  "shortcuts": {
+    "title": "Shortcuts",
+    "subtitle": "Customize keyboard shortcuts for file actions, composer, panels, and navigation.",
+    "typeShortcut": "Type shortcut",
+    "default": "Default: {{shortcut}}",
+    "pressNewDefault": "Press a new shortcut while focused. Default: {{shortcut}}",
+    "groups": {
+      "file": {
+        "title": "File",
+        "subtitle": "Create agents and worktrees from the keyboard."
+      },
+      "composer": {
+        "title": "Composer",
+        "subtitle": "Cycle between model and reasoning modes."
+      },
+      "panels": {
+        "title": "Panels",
+        "subtitle": "Toggle sidebars and panels."
+      },
+      "navigation": {
+        "title": "Navigation",
+        "subtitle": "Cycle between agents and workspaces."
+      }
+    },
+    "items": {
+      "newAgent": "New Agent",
+      "newWorktreeAgent": "New Worktree Agent",
+      "newCloneAgent": "New Clone Agent",
+      "archiveThread": "Archive active thread",
+      "cycleModel": "Cycle model",
+      "cycleReasoning": "Cycle reasoning mode",
+      "stopRun": "Stop active run",
+      "toggleProjects": "Toggle projects sidebar",
+      "toggleGit": "Toggle git sidebar",
+      "branchSwitcher": "Branch switcher",
+      "toggleDebug": "Toggle debug panel",
+      "toggleTerminal": "Toggle terminal panel",
+      "nextAgent": "Next agent",
+      "previousAgent": "Previous agent",
+      "nextWorkspace": "Next workspace",
+      "previousWorkspace": "Previous workspace"
+    },
+    "search": {
+      "label": "Search shortcuts",
+      "placeholder": "Search shortcuts",
+      "help": "Filter by section name, action, or default shortcut.",
+      "noMatch": "No shortcuts match your search.",
+      "noMatchQuery": "No shortcuts match \"{{query}}\"."
+    }
+  },
+  "git": {
+    "title": "Git",
+    "subtitle": "Manage how diffs are loaded in the Git sidebar.",
+    "preload": {
+      "title": "Preload git diffs",
+      "subtitle": "Make viewing git diff faster."
+    },
+    "ignoreWhitespace": {
+      "title": "Ignore whitespace changes",
+      "subtitle": "Hides whitespace-only changes in local and commit diffs."
+    },
+    "commitPrompt": {
+      "label": "Commit message prompt",
+      "helpBefore": "Used when generating commit messages. Include",
+      "helpAfter": "to insert the git diff."
+    },
+    "commitModel": {
+      "label": "Commit message model",
+      "help": "The model used when generating commit messages. Leave on default to use the workspace model."
+    }
+  },
+  "about": {
+    "title": "About",
+    "subtitle": "App version, build metadata, and update controls.",
+    "version": "Version",
+    "buildType": "Build type",
+    "branch": "Branch",
+    "commit": "Commit",
+    "buildDate": "Build date",
+    "unknown": "unknown",
+    "buildTypes": {
+      "debug": "debug",
+      "release": "release"
+    },
+    "updates": {
+      "title": "App Updates",
+      "automatic": {
+        "title": "Automatically check for app updates",
+        "subtitle": "When enabled, Pi checks for new app versions on launch."
+      },
+      "currentVersion": "Currently running version",
+      "unavailable": "Updates are unavailable in this runtime.",
+      "failed": "Update failed: {{error}}",
+      "downloading": "Downloading update...",
+      "installing": "Installing update...",
+      "restarting": "Restarting...",
+      "availableBefore": "Version",
+      "availableAfter": "is available.",
+      "latest": "You are on the latest version.",
+      "downloadInstall": "Download & Install",
+      "checking": "Checking...",
+      "check": "Check for updates"
+    }
+  }
+}

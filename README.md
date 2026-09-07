@@ -458,7 +458,8 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 
 | Directory                                        | Responsibility                                                                           |
 | ------------------------------------------------ | ---------------------------------------------------------------------------------------- |
-| `apps/pi-cli`                                    | CLI, TUI, terminal lifecycle, project trust, and product assembly                        |
+| `apps/pi-cli`                                    | CLI, TUI, and terminal lifecycle Adapter                                                  |
+| `crates/pi-sdk`                                  | Shared headless product assembly for CLI, desktop, and embedded adapters                 |
 | `crates/pi-core`                                 | Strongly typed contracts, registries, and plugin drivers                                 |
 | `crates/pi-agent`                                | Agent façade, agent loop, stream assembly, and tool scheduling                           |
 | `crates/pi-runtime`                              | Generation construction, prompt assembly, and atomic reload                              |
@@ -468,7 +469,7 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 | `crates/pi-telemetry`                            | Typed provider/harness span schemas and sink adapters                                    |
 | `crates/pi-provider`                             | Provider-neutral HTTP transport and SSE                                                  |
 | `crates/pi-prompt` / `pi-resources`              | System prompt and project context discovery                                              |
-| `apps/pi-md`                                     | TUI-owned Markdown parsing, streaming repair, syntax highlighting, and Ratatui rendering |
+| `apps/pi-cli/src/markdown`                       | TUI-owned Markdown parsing, streaming repair, syntax highlighting, and Ratatui rendering |
 | `crates/pi-plugin-sdk` / `pi-plugin-loader`      | Native author interface, compatibility checks, discovery, and factory adapters           |
 | `crates/pi-plugin-manager`                       | Package intent/lock, static Registry resolution, target selection, and CAS installation  |
 | `crates/pi-js-package-manager`                   | Pi-compatible JS/TS discovery and local/npm/git package management                       |

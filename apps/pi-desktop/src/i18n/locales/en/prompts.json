@@ -1,0 +1,55 @@
+{
+  "validation": {
+    "nameRequired": "Name is required.",
+    "nameWhitespace": "Name cannot include whitespace.",
+    "workspaceRequired": "No workspace selected."
+  },
+  "menu": {
+    "edit": "Edit",
+    "moveWorkspace": "Move to workspace",
+    "moveGeneral": "Move to general",
+    "delete": "Delete"
+  },
+  "row": {
+    "arguments": "Arguments",
+    "argumentsFor": "Arguments for {{name}}",
+    "sendCurrent": "Send to current agent",
+    "send": "Send",
+    "sendNew": "Send to a new agent",
+    "newAgent": "New agent",
+    "actions": "Prompt actions",
+    "deleteQuestion": "Delete this prompt?"
+  },
+  "panel": {
+    "count_one": "{{count}} prompt",
+    "count_other": "{{count}} prompts",
+    "none": "No prompts",
+    "filter": "Filter prompts"
+  },
+  "editor": {
+    "name": "Name",
+    "namePlaceholder": "Prompt name",
+    "scope": "Scope",
+    "workspace": "Workspace",
+    "general": "General",
+    "description": "Description",
+    "descriptionPlaceholder": "Optional description",
+    "argumentHint": "Argument hint",
+    "argumentHintPlaceholder": "Optional argument hint",
+    "content": "Content",
+    "contentPlaceholder": "Prompt content"
+  },
+  "workspace": {
+    "title": "Workspace prompts",
+    "add": "Add workspace prompt",
+    "empty": "No workspace prompts yet",
+    "emptyPrefix": "Create one here or drop a .md file into the",
+    "folder": "workspace prompts folder"
+  },
+  "general": {
+    "title": "General prompts",
+    "add": "Add general prompt",
+    "empty": "No general prompts yet",
+    "emptyPrefix": "Create one here or drop a .md file into"
+  }
+}

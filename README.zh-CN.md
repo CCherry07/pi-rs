@@ -380,7 +380,7 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 | `crates/pi-telemetry`                            | 强类型 Provider/harness span schema 与 sink adapter                 |
 | `crates/pi-provider`                             | Provider-neutral HTTP transport 与 SSE                              |
 | `crates/pi-prompt` / `pi-resources`              | 系统 prompt 和项目上下文发现                                        |
-| `apps/pi-md`                                     | TUI 所有的 Markdown 解析、streaming mend、语法高亮和 Ratatui 渲染   |
+| `apps/pi-cli/src/markdown`                       | TUI 所有的 Markdown 解析、streaming mend、语法高亮和 Ratatui 渲染   |
 | `crates/pi-plugin-sdk` / `pi-plugin-loader`      | 原生插件作者 interface、兼容校验、发现与 factory adapter            |
 | `crates/pi-plugin-manager`                       | Package intent/lock、静态 Registry、target 选择和 CAS 安装          |
 | `crates/pi-js-package-manager`                   | Pi 兼容的 JS/TS 发现与本地/npm/git package 管理                     |

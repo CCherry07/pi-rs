@@ -158,6 +158,7 @@ impl Tool for SubagentTool {
             )))],
             details: Some(json!({
                 "runId": run_id,
+                "isolatedSessionId": handle.id().as_str(),
                 "agent": profile_name,
                 "depth": depth,
                 "state": "running"
@@ -532,10 +533,9 @@ mod tests {
         );
         assert_eq!(result.details.as_ref().unwrap()["agent"], "reviewer");
         assert_eq!(result.details.as_ref().unwrap()["depth"], 1);
-        assert_eq!(
-            update_receiver.recv().await.unwrap().details.unwrap()["state"],
-            "running"
-        );
+        let update_details = update_receiver.recv().await.unwrap().details.unwrap();
+        assert_eq!(update_details["state"], "running");
+        assert_eq!(update_details["isolatedSessionId"], "isolated-1");
         let requests = access.requests.lock().unwrap();
         let CustomMessageContent::Text(prompt) = &requests[0].input else {
             panic!("expected text child prompt");

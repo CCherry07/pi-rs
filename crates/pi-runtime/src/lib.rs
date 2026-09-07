@@ -987,7 +987,7 @@ impl PiRuntime {
                 CommandOutcome::TransformInput(transformed) => text = transformed,
             }
         }
-        self.prepare_text_submission_locked(reload_guard, runtime, display_text, text)
+        self.prepare_submission_locked(reload_guard, runtime, display_text, text, None)
             .await
     }
 
@@ -997,27 +997,35 @@ impl PiRuntime {
     /// session without waiting on the old session's operation gate. The
     /// returned prompt still retains one generation lease across input hooks
     /// and the eventual agent run.
-    pub async fn prepare_text_submission_after_command(
+    pub async fn prepare_submission_after_command(
         &self,
         display_text: String,
         text: String,
+        images: Option<Vec<ImageContent>>,
     ) -> Result<PreparedTextSubmission, RuntimeError> {
         let reload_guard = Arc::clone(&self.reload_lock).lock_owned().await;
         let runtime = self.agent.runtime();
-        self.prepare_text_submission_locked(reload_guard, runtime, display_text, text)
+        self.prepare_submission_locked(reload_guard, runtime, display_text, text, images)
             .await
     }
 
-    async fn prepare_text_submission_locked(
+    async fn prepare_submission_locked(
         &self,
         reload_guard: tokio::sync::OwnedMutexGuard<()>,
         runtime: Arc<AgentRuntime>,
         display_text: String,
         mut text: String,
+        input_images: Option<Vec<ImageContent>>,
     ) -> Result<PreparedTextSubmission, RuntimeError> {
-        let mut images = Vec::new();
+        let mut images = input_images.clone().unwrap_or_default();
         match self
-            .process_input_locked(&runtime, &text, None, InputSource::Interactive, None)
+            .process_input_locked(
+                &runtime,
+                &text,
+                input_images,
+                InputSource::Interactive,
+                None,
+            )
             .await?
         {
             InputPatch::Handled => return Ok(PreparedTextSubmission::Handled),
@@ -1043,9 +1051,10 @@ impl PiRuntime {
     /// Runs command dispatch and input hooks against the generation currently
     /// owned by an active agent run. This deliberately does not acquire the
     /// reload mutex: the active prepared submission already holds that lease.
-    pub async fn process_queued_text(
+    pub async fn process_queued_input(
         &self,
         text: impl Into<String>,
+        input_images: Option<Vec<ImageContent>>,
         streaming_behavior: InputStreamingBehavior,
     ) -> Result<QueuedTextOutcome, RuntimeError> {
         let mut text = text.into();
@@ -1073,12 +1082,12 @@ impl PiRuntime {
                 CommandOutcome::TransformInput(transformed) => text = transformed,
             }
         }
-        let mut images = Vec::new();
+        let mut images = input_images.clone().unwrap_or_default();
         match self
             .process_input_locked(
                 &runtime,
                 &text,
-                None,
+                input_images,
                 InputSource::Interactive,
                 Some(streaming_behavior),
             )
@@ -1780,6 +1789,14 @@ mod tests {
     #[tokio::test]
     async fn input_hook_images_reach_the_provider_and_streaming_metadata_reaches_hooks() {
         let events = Arc::new(Mutex::new(Vec::new()));
+        let submitted_image = ImageContent {
+            data: "c3VibWl0dGVk".to_string(),
+            mime_type: "image/jpeg".to_string(),
+        };
+        let queued_image = ImageContent {
+            data: "cXVldWVk".to_string(),
+            mime_type: "image/webp".to_string(),
+        };
         let scripted = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".to_string())]);
         let provider = scripted.provider();
         let runtime = PiRuntime::builder()
@@ -1790,11 +1807,29 @@ mod tests {
             .build()
             .unwrap();
 
-        runtime.submit_text("review").await.unwrap();
-        runtime
-            .process_queued_text("follow", InputStreamingBehavior::FollowUp)
+        let PreparedTextSubmission::Agent(prepared) = runtime
+            .prepare_submission_after_command(
+                "review".to_string(),
+                "review".to_string(),
+                Some(vec![submitted_image.clone()]),
+            )
             .await
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("expected an agent submission");
+        };
+        prepared.run().await.unwrap();
+        let QueuedTextOutcome::Message { images, .. } = runtime
+            .process_queued_input(
+                "follow",
+                Some(vec![queued_image.clone()]),
+                InputStreamingBehavior::FollowUp,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected a queued message");
+        };
 
         assert!(
             matches!(&provider.requests()[0].messages[0], Message::User(user)
@@ -1803,14 +1838,17 @@ mod tests {
                     && image.data == "aW1hZ2U="
                     && image.mime_type == "image/png"))
         );
+        assert_eq!(images, vec![queued_image.clone()]);
         let events = events.lock().unwrap();
         assert_eq!(events[0].source, InputSource::Interactive);
         assert_eq!(events[0].streaming_behavior, None);
+        assert_eq!(events[0].images, Some(vec![submitted_image]));
         assert_eq!(events[1].source, InputSource::Interactive);
         assert_eq!(
             events[1].streaming_behavior,
             Some(InputStreamingBehavior::FollowUp)
         );
+        assert_eq!(events[1].images, Some(vec![queued_image]));
     }
 
     #[tokio::test]
@@ -1877,7 +1915,7 @@ mod tests {
         let QueuedTextOutcome::Message {
             display_text, text, ..
         } = runtime
-            .process_queued_text("/generation focus", InputStreamingBehavior::Steer)
+            .process_queued_input("/generation focus", None, InputStreamingBehavior::Steer)
             .await
             .unwrap()
         else {

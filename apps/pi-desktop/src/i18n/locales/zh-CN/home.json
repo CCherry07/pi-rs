@@ -1,0 +1,57 @@
+{
+  "hero": {
+    "subtitle": "在本地项目之间编排智能体。"
+  },
+  "actions": {
+    "addWorkspaces": "添加工作区",
+    "addFromUrl": "从 URL 添加工作区"
+  },
+  "latest": {
+    "title": "最近的智能体",
+    "fallbackReply": "智能体已回复。",
+    "running": "运行中",
+    "loading": "正在加载智能体",
+    "emptyTitle": "暂无智能体动态",
+    "emptySubtitle": "启动一个任务后，最新回复会显示在这里。"
+  },
+  "cards": {
+    "today": "今天",
+    "last7Days": "最近 7 天",
+    "last30Days": "最近 30 天",
+    "cacheHitRate": "缓存命中率",
+    "cachedTokens": "缓存 token",
+    "avgRun": "每次运行平均",
+    "avgActiveDay": "每个活跃日平均",
+    "peakDay": "峰值日",
+    "runs": "运行次数",
+    "longestStreak": "最长连续活跃",
+    "activeDays": "活跃天数",
+    "tokens": "token",
+    "latestDay": "最近有数据的一天",
+    "tokenIo": "{{day}} · 输入 {{input}} / 输出 {{output}}",
+    "avgPerDay": "日均 {{value}}",
+    "total": "总计 {{value}}",
+    "saved": "已节省",
+    "promptShare": "占提示词 token 的 {{percent}}%",
+    "runsIn7Days": "最近 7 天运行 {{count}} 次",
+    "noRuns": "暂无运行",
+    "agentTime": "智能体用时",
+    "runsSuffix": "次运行",
+    "runsIn30Days": "最近 30 天：{{count}} 次运行",
+    "acrossRuns": "基于 {{count}} 次运行",
+    "activeDaysIn7": "最近 7 天有 {{count}} 个活跃日",
+    "noActiveDays": "暂无活跃日",
+    "currentRange": "当前用量范围内",
+    "noStreak": "暂无连续活跃记录",
+    "rangeActivity": "当前范围内 {{active}} / {{total}}",
+    "noActivity": "暂无活动"
+  },
+  "format": {
+    "hoursMinutes": "{{hours}} 小时 {{minutes}} 分钟",
+    "hours": "{{count}} 小时",
+    "minutes": "{{count}} 分钟",
+    "seconds": "{{count}} 秒",
+    "dayCount_one": "{{count}} 天",
+    "dayCount_other": "{{count}} 天"
+  }
+}

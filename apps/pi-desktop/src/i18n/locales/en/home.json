@@ -1,0 +1,57 @@
+{
+  "hero": {
+    "subtitle": "Orchestrate agents across your local projects."
+  },
+  "actions": {
+    "addWorkspaces": "Add Workspaces",
+    "addFromUrl": "Add Workspace from URL"
+  },
+  "latest": {
+    "title": "Latest agents",
+    "fallbackReply": "Agent replied.",
+    "running": "Running",
+    "loading": "Loading agents",
+    "emptyTitle": "No agent activity yet",
+    "emptySubtitle": "Start a thread to see the latest responses here."
+  },
+  "cards": {
+    "today": "Today",
+    "last7Days": "Last 7 days",
+    "last30Days": "Last 30 days",
+    "cacheHitRate": "Cache hit rate",
+    "cachedTokens": "Cached tokens",
+    "avgRun": "Avg / run",
+    "avgActiveDay": "Avg / active day",
+    "peakDay": "Peak day",
+    "runs": "Runs",
+    "longestStreak": "Longest streak",
+    "activeDays": "Active days",
+    "tokens": "tokens",
+    "latestDay": "Latest available day",
+    "tokenIo": "{{day}} · {{input}} in / {{output}} out",
+    "avgPerDay": "Avg {{value}} / day",
+    "total": "Total {{value}}",
+    "saved": "saved",
+    "promptShare": "{{percent}}% of prompt tokens",
+    "runsIn7Days": "{{count}} runs in last 7 days",
+    "noRuns": "No runs yet",
+    "agentTime": "agent time",
+    "runsSuffix": "runs",
+    "runsIn30Days": "Last 30 days: {{count}} runs",
+    "acrossRuns": "Across {{count}} runs",
+    "activeDaysIn7": "{{count}} active days in last 7",
+    "noActiveDays": "No active days yet",
+    "currentRange": "Across current usage range",
+    "noStreak": "No active streak yet",
+    "rangeActivity": "{{active}} / {{total}} in current range",
+    "noActivity": "No activity yet"
+  },
+  "format": {
+    "hoursMinutes": "{{hours}}h {{minutes}}m",
+    "hours": "{{count}}h",
+    "minutes": "{{count}}m",
+    "seconds": "{{count}}s",
+    "dayCount_one": "{{count}} day",
+    "dayCount_other": "{{count}} days"
+  }
+}

@@ -15,8 +15,8 @@ use crate::{
     AgentSession, AgentSessionInitialModelSource, AgentSessionInitialState,
     AgentSessionReplacement, AgentSessionRuntime, AgentSessionRuntimeError,
     AgentSessionRuntimeFactory, AgentSessionRuntimeRequest, AgentSessionRuntimeTarget,
-    ForkPosition, PreparedAgentSession, SessionError, SessionFileFormat, SessionGenerationOverlay,
-    inspect_session_file,
+    ForkPosition, IsolatedSessionObservation, PreparedAgentSession, SessionError,
+    SessionFileFormat, SessionGenerationOverlay, inspect_session_file,
 };
 
 /// Owns and coordinates multiple active Pi sessions.
@@ -374,6 +374,21 @@ impl PiSession {
             .map_err(|error| PluginContextError::Failed(error.to_string()))?
             .isolated_sessions
             .abort(self.registration_id(), id)
+            .map_err(PluginContextError::Failed)
+    }
+
+    /// Returns a read-only observation handle for a live isolated child.
+    ///
+    /// Ownership is checked against this session just like wait and abort.
+    /// The child remains lifecycle-owned by the multi-session manager.
+    pub fn observe_isolated_session(
+        &self,
+        id: &IsolatedSessionId,
+    ) -> Result<IsolatedSessionObservation, PluginContextError> {
+        self.manager()
+            .map_err(|error| PluginContextError::Failed(error.to_string()))?
+            .isolated_sessions
+            .observe(self.registration_id(), id)
             .map_err(PluginContextError::Failed)
     }
 
@@ -943,7 +958,16 @@ mod tests {
             .await
             .unwrap();
 
+        let observation = owner.observe_isolated_session(&isolated_id).unwrap();
+        assert_eq!(observation.isolated_id(), &isolated_id);
+        assert_eq!(observation.cwd(), owner.cwd());
+        assert!(!observation.session_id().is_empty());
+        assert!(observation.snapshot().agent.is_running);
+        let subscription = observation.subscribe();
+        assert!(subscription.snapshot.revision <= observation.snapshot().revision);
+
         assert!(other.abort_isolated_session(&isolated_id).is_err());
+        assert!(other.observe_isolated_session(&isolated_id).is_err());
         let foreign_wait = tokio::time::timeout(
             std::time::Duration::from_secs(1),
             other.wait_for_isolated_session(&isolated_id),

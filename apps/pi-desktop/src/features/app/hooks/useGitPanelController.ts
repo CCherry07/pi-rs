@@ -1,0 +1,366 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type {
+  ConversationItem,
+  GitHubPullRequest,
+  GitHubPullRequestDiff,
+  WorkspaceInfo,
+} from "../../../types";
+import { useGitStatus } from "../../git/hooks/useGitStatus";
+import { useGitDiffs } from "../../git/hooks/useGitDiffs";
+import { useGitLog } from "../../git/hooks/useGitLog";
+import { useGitCommitDiffs } from "../../git/hooks/useGitCommitDiffs";
+import type { GitDiffSource, GitPanelMode } from "../../git/types";
+import { buildPerFileThreadDiffs } from "../../git/utils/perFileThreadDiffs";
+
+export function useGitPanelController({
+  activeWorkspace,
+  activeItems,
+  gitDiffPreloadEnabled,
+  gitDiffIgnoreWhitespaceChanges,
+  splitChatDiffView,
+  isCompact,
+  isTablet,
+  activeTab,
+  tabletTab,
+  setActiveTab,
+  prDiffs,
+  prDiffsLoading,
+  prDiffsError,
+}: {
+  activeWorkspace: WorkspaceInfo | null;
+  activeItems: ConversationItem[];
+  gitDiffPreloadEnabled: boolean;
+  gitDiffIgnoreWhitespaceChanges: boolean;
+  splitChatDiffView: boolean;
+  isCompact: boolean;
+  isTablet: boolean;
+  activeTab: "home" | "projects" | "chat" | "git" | "log";
+  tabletTab: "chat" | "git" | "log";
+  setActiveTab: (tab: "home" | "projects" | "chat" | "git" | "log") => void;
+  prDiffs: GitHubPullRequestDiff[];
+  prDiffsLoading: boolean;
+  prDiffsError: string | null;
+}) {
+  const [centerMode, setCenterMode] = useState<"chat" | "diff">("chat");
+  const [selectedDiffPath, setSelectedDiffPath] = useState<string | null>(null);
+  const [diffScrollRequestId, setDiffScrollRequestId] = useState(0);
+  const pendingDiffScrollRef = useRef(false);
+  const [gitPanelMode, setGitPanelMode] = useState<GitPanelMode>("diff");
+  const [gitDiffViewStyle, setGitDiffViewStyle] = useState<
+    "split" | "unified"
+  >("split");
+  const [filePanelMode, setFilePanelMode] = useState<
+    "git" | "files" | "prompts"
+  >("git");
+  const [selectedPullRequest, setSelectedPullRequest] =
+    useState<GitHubPullRequest | null>(null);
+  const [selectedCommitSha, setSelectedCommitSha] = useState<string | null>(
+    null,
+  );
+  const [diffSource, setDiffSource] = useState<GitDiffSource>("local");
+
+  const { groups: perFileDiffGroups, viewerEntries: perFileDiffs } = useMemo(
+    () => buildPerFileThreadDiffs(activeItems),
+    [activeItems],
+  );
+
+  const { status: gitStatus, refresh: refreshGitStatus } = useGitStatus(
+    activeWorkspace,
+  );
+  const gitStatusRefreshTimeoutRef = useRef<number | null>(null);
+  const activeWorkspaceIdRef = useRef<string | null>(activeWorkspace?.id ?? null);
+  const activeWorkspaceRef = useRef(activeWorkspace);
+
+  useEffect(() => {
+    activeWorkspaceIdRef.current = activeWorkspace?.id ?? null;
+  }, [activeWorkspace?.id]);
+
+  useEffect(() => {
+    activeWorkspaceRef.current = activeWorkspace;
+  }, [activeWorkspace]);
+
+  useEffect(() => {
+    return () => {
+      if (gitStatusRefreshTimeoutRef.current !== null) {
+        window.clearTimeout(gitStatusRefreshTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const queueGitStatusRefresh = useCallback(() => {
+    const workspaceId = activeWorkspaceIdRef.current;
+    if (!workspaceId) {
+      return;
+    }
+    if (gitStatusRefreshTimeoutRef.current !== null) {
+      window.clearTimeout(gitStatusRefreshTimeoutRef.current);
+    }
+    gitStatusRefreshTimeoutRef.current = window.setTimeout(() => {
+      gitStatusRefreshTimeoutRef.current = null;
+      if (activeWorkspaceIdRef.current !== workspaceId) {
+        return;
+      }
+      refreshGitStatus();
+    }, 500);
+  }, [refreshGitStatus]);
+
+  const preloadedWorkspaceIdsRef = useRef<Set<string>>(new Set());
+  const compactTab = isTablet ? tabletTab : activeTab;
+  const diffUiVisible =
+    centerMode === "diff" ||
+    (isCompact ? compactTab === "git" : gitPanelMode === "diff");
+  const shouldPreloadDiffs = Boolean(
+    gitDiffPreloadEnabled &&
+      activeWorkspace &&
+      !preloadedWorkspaceIdsRef.current.has(activeWorkspace.id),
+  );
+  const shouldLoadSelectedLocalDiff =
+    centerMode === "diff" && Boolean(selectedDiffPath);
+  const shouldLoadLocalDiffsForSplitView = splitChatDiffView && diffSource === "local";
+  const shouldLoadLocalDiffs =
+    Boolean(activeWorkspace) &&
+    (shouldPreloadDiffs ||
+      (gitDiffPreloadEnabled
+        ? diffUiVisible
+        : shouldLoadSelectedLocalDiff || shouldLoadLocalDiffsForSplitView));
+  const shouldLoadDiffs =
+    Boolean(activeWorkspace) &&
+    (diffSource === "local" ? shouldLoadLocalDiffs : diffUiVisible);
+  const shouldLoadGitLog =
+    Boolean(activeWorkspace) && (gitPanelMode === "log" || diffUiVisible);
+
+  const {
+    diffs: gitDiffs,
+    isLoading: isDiffLoading,
+    error: diffError,
+    refresh: refreshGitDiffs,
+  } = useGitDiffs(
+    activeWorkspace,
+    gitStatus.files,
+    shouldLoadLocalDiffs,
+    gitDiffIgnoreWhitespaceChanges,
+  );
+
+  useEffect(() => {
+    if (!activeWorkspace || !shouldPreloadDiffs) {
+      return;
+    }
+    if (!isDiffLoading && !diffError && gitDiffs.length === 0) {
+      return;
+    }
+    preloadedWorkspaceIdsRef.current.add(activeWorkspace.id);
+  }, [
+    activeWorkspace,
+    diffError,
+    gitDiffs.length,
+    isDiffLoading,
+    shouldPreloadDiffs,
+  ]);
+
+  const {
+    entries: gitLogEntries,
+    total: gitLogTotal,
+    ahead: gitLogAhead,
+    behind: gitLogBehind,
+    aheadEntries: gitLogAheadEntries,
+    behindEntries: gitLogBehindEntries,
+    upstream: gitLogUpstream,
+    isLoading: gitLogLoading,
+    error: gitLogError,
+    refresh: refreshGitLog,
+  } = useGitLog(activeWorkspace, shouldLoadGitLog);
+
+  const {
+    diffs: gitCommitDiffs,
+    isLoading: gitCommitDiffsLoading,
+    error: gitCommitDiffsError,
+  } = useGitCommitDiffs(
+    activeWorkspace,
+    selectedCommitSha,
+    shouldLoadDiffs && diffSource === "commit",
+    gitDiffIgnoreWhitespaceChanges,
+  );
+
+  const activeDiffs =
+    diffSource === "commit"
+      ? gitCommitDiffs
+      : diffSource === "perFile"
+        ? perFileDiffs
+      : diffSource === "pr"
+        ? prDiffs
+        : gitDiffs;
+  const activeDiffLoading =
+    diffSource === "commit"
+      ? gitCommitDiffsLoading
+      : diffSource === "perFile"
+        ? false
+      : diffSource === "pr"
+        ? prDiffsLoading
+        : isDiffLoading;
+  const activeDiffError =
+    diffSource === "commit"
+      ? gitCommitDiffsError
+      : diffSource === "perFile"
+        ? null
+      : diffSource === "pr"
+        ? prDiffsError
+        : diffError;
+
+  const handleSelectDiff = useCallback(
+    (path: string) => {
+      setSelectedDiffPath(path);
+      pendingDiffScrollRef.current = true;
+      setCenterMode("diff");
+      setGitPanelMode("diff");
+      setDiffSource("local");
+      setSelectedCommitSha(null);
+      setSelectedPullRequest(null);
+      if (isCompact) {
+        setActiveTab("git");
+      }
+    },
+    [isCompact, setActiveTab],
+  );
+
+  const handleSelectCommit = useCallback(
+    (sha: string) => {
+      setSelectedCommitSha(sha);
+      setSelectedDiffPath(null);
+      pendingDiffScrollRef.current = true;
+      setCenterMode("diff");
+      setGitPanelMode("log");
+      setDiffSource("commit");
+      setSelectedPullRequest(null);
+      if (isCompact) {
+        setActiveTab("git");
+      }
+    },
+    [isCompact, setActiveTab],
+  );
+
+  const handleActiveDiffPath = useCallback((path: string) => {
+    setSelectedDiffPath(path);
+  }, []);
+
+  const handleSelectPerFileDiff = useCallback(
+    (path: string) => {
+      setSelectedDiffPath(path);
+      pendingDiffScrollRef.current = true;
+      setCenterMode("diff");
+      setGitPanelMode("perFile");
+      setDiffSource("perFile");
+      setSelectedCommitSha(null);
+      setSelectedPullRequest(null);
+      if (isCompact) {
+        setActiveTab("git");
+      }
+    },
+    [isCompact, setActiveTab],
+  );
+
+  const handleGitPanelModeChange = useCallback(
+    (mode: GitPanelMode) => {
+      setGitPanelMode(mode);
+      if (mode === "perFile") {
+        if (diffSource !== "perFile") {
+          setSelectedDiffPath(null);
+        }
+        setDiffSource("perFile");
+        setSelectedPullRequest(null);
+        setSelectedCommitSha(null);
+        return;
+      }
+      if (mode !== "prs") {
+        if (diffSource === "pr" || diffSource === "perFile") {
+          setSelectedDiffPath(null);
+        }
+        setDiffSource("local");
+        setSelectedPullRequest(null);
+      }
+      if (mode !== "log") {
+        if (diffSource === "commit") {
+          setSelectedDiffPath(null);
+          setDiffSource("local");
+        }
+        setSelectedCommitSha(null);
+      }
+    },
+    [diffSource],
+  );
+
+  useEffect(() => {
+    if (!selectedDiffPath) {
+      pendingDiffScrollRef.current = false;
+    }
+  }, [selectedDiffPath]);
+
+  useEffect(() => {
+    if (!pendingDiffScrollRef.current) {
+      return;
+    }
+    if (!selectedDiffPath) {
+      return;
+    }
+    if (centerMode !== "diff") {
+      return;
+    }
+    if (!activeDiffs.some((entry) => entry.path === selectedDiffPath)) {
+      return;
+    }
+    setDiffScrollRequestId((current) => current + 1);
+    pendingDiffScrollRef.current = false;
+  }, [activeDiffs, centerMode, selectedDiffPath]);
+
+  return {
+    centerMode,
+    setCenterMode,
+    selectedDiffPath,
+    setSelectedDiffPath,
+    diffScrollRequestId,
+    gitPanelMode,
+    setGitPanelMode,
+    gitDiffViewStyle,
+    setGitDiffViewStyle,
+    filePanelMode,
+    setFilePanelMode,
+    selectedPullRequest,
+    setSelectedPullRequest,
+    selectedCommitSha,
+    setSelectedCommitSha,
+    diffSource,
+    setDiffSource,
+    gitStatus,
+    refreshGitStatus,
+    queueGitStatusRefresh,
+    gitDiffs,
+    isDiffLoading,
+    diffError,
+    refreshGitDiffs,
+    gitLogEntries,
+    gitLogTotal,
+    gitLogAhead,
+    gitLogBehind,
+    gitLogAheadEntries,
+    gitLogBehindEntries,
+    gitLogUpstream,
+    gitLogLoading,
+    gitLogError,
+    refreshGitLog,
+    gitCommitDiffs,
+    gitCommitDiffsLoading,
+    gitCommitDiffsError,
+    shouldLoadDiffs,
+    activeDiffs,
+    activeDiffLoading,
+    activeDiffError,
+    handleSelectDiff,
+    handleSelectPerFileDiff,
+    handleSelectCommit,
+    handleActiveDiffPath,
+    handleGitPanelModeChange,
+    perFileDiffGroups,
+    compactTab,
+    activeWorkspaceIdRef,
+    activeWorkspaceRef,
+  };
+}

@@ -36,7 +36,8 @@ mod usage;
 pub use agent_session::{
     AgentSession, AgentSessionOptions, AutoRetrySettings, PROMPT_SNAPSHOT_CUSTOM_TYPE,
     PreparedAgentSession, PromptSnapshot, RESOURCE_DIAGNOSTIC_CUSTOM_TYPE, ResourceSnapshot,
-    SessionRuntimeInventory, ShellExecutionOptions, SubmitOutcome, read_prompt_snapshot,
+    SessionInput, SessionRuntimeInventory, ShellExecutionOptions, SubmitOutcome,
+    read_prompt_snapshot,
 };
 pub use agent_session_runtime::{
     AgentSessionInitialModelSource, AgentSessionInitialState, AgentSessionReplacement,
@@ -54,6 +55,7 @@ pub use event::{
     AgentSessionEvent, AgentSessionSnapshot, AgentSessionSubscription, AutoRetrySnapshot,
     BashExecutionSnapshot, CompactionSnapshot, QueueSnapshot, RevisionedAgentSessionEvent,
 };
+pub use isolated_session::IsolatedSessionObservation;
 pub use jsonl::SessionLog;
 pub use legacy_import::{
     LegacySessionImportReport, SessionFileFormat, import_session_file, inspect_session_file,

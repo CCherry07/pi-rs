@@ -1,0 +1,367 @@
+import { useCallback, useRef } from "react";
+import { useTranslation } from "react-i18next";
+import type {
+  ChangeEvent,
+  ClipboardEvent,
+  KeyboardEvent,
+  RefObject,
+  SyntheticEvent,
+} from "react";
+import type { AutocompleteItem } from "../hooks/useComposerAutocomplete";
+import ImagePlus from "lucide-react/dist/esm/icons/image-plus";
+import ChevronDown from "lucide-react/dist/esm/icons/chevron-down";
+import ChevronUp from "lucide-react/dist/esm/icons/chevron-up";
+import Mic from "lucide-react/dist/esm/icons/mic";
+import Square from "lucide-react/dist/esm/icons/square";
+import X from "lucide-react/dist/esm/icons/x";
+import { useComposerImageDrop } from "../hooks/useComposerImageDrop";
+import { ComposerMobileActionsMenu } from "./ComposerMobileActionsMenu";
+import { ComposerSuggestionsPopover } from "./ComposerSuggestionsPopover";
+import { ComposerAttachments } from "./ComposerAttachments";
+import { DictationWaveform } from "../../dictation/components/DictationWaveform";
+import { useComposerDictationControls } from "../hooks/useComposerDictationControls";
+import { useComposerInputLayout } from "../hooks/useComposerInputLayout";
+import { useComposerMobileActions } from "../hooks/useComposerMobileActions";
+
+type ComposerInputProps = {
+  text: string;
+  disabled: boolean;
+  sendLabel: string;
+  canStop: boolean;
+  canSend: boolean;
+  isProcessing: boolean;
+  onStop: () => void;
+  onSend: () => void;
+  dictationState?: "idle" | "listening" | "processing";
+  dictationLevel?: number;
+  dictationEnabled?: boolean;
+  onToggleDictation?: () => void;
+  onCancelDictation?: () => void;
+  onOpenDictationSettings?: () => void;
+  dictationError?: string | null;
+  onDismissDictationError?: () => void;
+  dictationHint?: string | null;
+  onDismissDictationHint?: () => void;
+  attachments?: string[];
+  onAddAttachment?: () => void;
+  onAttachImages?: (paths: string[]) => void;
+  onRemoveAttachment?: (path: string) => void;
+  onTextChange: (next: string, selectionStart: number | null) => void;
+  onTextPaste?: (event: ClipboardEvent<HTMLTextAreaElement>) => void;
+  onSelectionChange: (selectionStart: number | null) => void;
+  onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  isExpanded?: boolean;
+  onToggleExpand?: () => void;
+  textareaRef: RefObject<HTMLTextAreaElement | null>;
+  suggestionsOpen: boolean;
+  suggestions: AutocompleteItem[];
+  highlightIndex: number;
+  onHighlightIndex: (index: number) => void;
+  onSelectSuggestion: (item: AutocompleteItem) => void;
+  suggestionsStyle?: React.CSSProperties;
+};
+
+export function ComposerInput({
+  text,
+  disabled,
+  sendLabel,
+  canStop,
+  canSend,
+  isProcessing,
+  onStop,
+  onSend,
+  dictationState = "idle",
+  dictationLevel = 0,
+  dictationEnabled = false,
+  onToggleDictation,
+  onCancelDictation,
+  onOpenDictationSettings,
+  dictationError = null,
+  onDismissDictationError,
+  dictationHint = null,
+  onDismissDictationHint,
+  attachments = [],
+  onAddAttachment,
+  onAttachImages,
+  onRemoveAttachment,
+  onTextChange,
+  onTextPaste,
+  onSelectionChange,
+  onKeyDown,
+  isExpanded = false,
+  onToggleExpand,
+  textareaRef,
+  suggestionsOpen,
+  suggestions,
+  highlightIndex,
+  onHighlightIndex,
+  onSelectSuggestion,
+  suggestionsStyle,
+}: ComposerInputProps) {
+  const { t } = useTranslation("messages");
+  const { t: tCommon } = useTranslation("common");
+  const suggestionListRef = useRef<HTMLDivElement | null>(null);
+  const suggestionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const { isPhoneLayout, isPhoneTallInput } = useComposerInputLayout({
+    isExpanded,
+    text,
+    textareaRef,
+  });
+  const { mobileActionsOpen, mobileActionsRef, setMobileActionsOpen } =
+    useComposerMobileActions({ disabled });
+  const {
+    dropTargetRef,
+    isDragOver,
+    handleDragOver,
+    handleDragEnter,
+    handleDragLeave,
+    handleDrop,
+    handlePaste,
+  } = useComposerImageDrop({
+    disabled,
+    onAttachImages,
+  });
+  const handleActionClick = useCallback(() => {
+    if (canStop) {
+      onStop();
+      return;
+    }
+    onSend();
+  }, [canStop, onSend, onStop]);
+  const {
+    handleMicClick,
+    isDictating,
+    isDictationBusy,
+    isDictationProcessing,
+    micAriaLabel,
+    micDisabled,
+    micTitle,
+  } = useComposerDictationControls({
+    disabled,
+    dictationEnabled,
+    dictationState,
+    onToggleDictation,
+    onCancelDictation,
+    onOpenDictationSettings,
+  });
+
+  const handleTextareaChange = useCallback(
+    (event: ChangeEvent<HTMLTextAreaElement>) => {
+      onTextChange(event.target.value, event.target.selectionStart);
+    },
+    [onTextChange],
+  );
+
+  const handleTextareaSelect = useCallback(
+    (event: SyntheticEvent<HTMLTextAreaElement>) => {
+      onSelectionChange((event.target as HTMLTextAreaElement).selectionStart);
+    },
+    [onSelectionChange],
+  );
+
+  const handleTextareaPaste = useCallback(
+    (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      void handlePaste(event);
+      if (!event.defaultPrevented) {
+        onTextPaste?.(event);
+      }
+    },
+    [handlePaste, onTextPaste],
+  );
+
+  const handleMobileAttachClick = useCallback(() => {
+    if (disabled || !onAddAttachment) {
+      return;
+    }
+    setMobileActionsOpen(false);
+    onAddAttachment();
+  }, [disabled, onAddAttachment, setMobileActionsOpen]);
+
+  const handleMobileExpandClick = useCallback(() => {
+    if (disabled || !onToggleExpand) {
+      return;
+    }
+    setMobileActionsOpen(false);
+    onToggleExpand();
+  }, [disabled, onToggleExpand, setMobileActionsOpen]);
+
+  const handleMobileDictationClick = useCallback(() => {
+    setMobileActionsOpen(false);
+    handleMicClick();
+  }, [handleMicClick, setMobileActionsOpen]);
+
+  return (
+    <div className={`composer-input${isPhoneLayout && isPhoneTallInput ? " is-phone-tall" : ""}`}>
+      <div
+        className={`composer-input-area${isDragOver ? " is-drag-over" : ""}`}
+        ref={dropTargetRef}
+        onDragOver={handleDragOver}
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        <ComposerAttachments
+          attachments={attachments}
+          disabled={disabled}
+          onRemoveAttachment={onRemoveAttachment}
+        />
+        <div className="composer-input-row">
+          <button
+            type="button"
+            className="composer-attach"
+            onClick={onAddAttachment}
+            disabled={disabled || !onAddAttachment}
+            aria-label={t("composer.addImage")}
+            title={t("composer.addImage")}
+          >
+            <ImagePlus size={14} aria-hidden />
+          </button>
+          <ComposerMobileActionsMenu
+            disabled={disabled}
+            handleMobileAttachClick={handleMobileAttachClick}
+            handleMobileDictationClick={handleMobileDictationClick}
+            handleMobileExpandClick={handleMobileExpandClick}
+            isDictating={isDictating}
+            isDictationProcessing={isDictationProcessing}
+            isExpanded={isExpanded}
+            micAriaLabel={micAriaLabel}
+            micDisabled={micDisabled}
+            mobileActionsOpen={mobileActionsOpen}
+            mobileActionsRef={mobileActionsRef}
+            onAddAttachment={onAddAttachment}
+            onToggleExpand={onToggleExpand}
+            setMobileActionsOpen={setMobileActionsOpen}
+            showDictationAction={Boolean(
+              onToggleDictation || onOpenDictationSettings || onCancelDictation,
+            )}
+          />
+          <textarea
+            ref={textareaRef}
+            placeholder={
+              disabled ? t("composer.unavailable") : t("composer.placeholder")
+            }
+            value={text}
+            onChange={handleTextareaChange}
+            onSelect={handleTextareaSelect}
+            disabled={disabled}
+            onKeyDown={onKeyDown}
+            onDragOver={handleDragOver}
+            onDragEnter={handleDragEnter}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            onPaste={handleTextareaPaste}
+          />
+          <div className="composer-input-actions">
+            {onToggleExpand && (
+              <button
+                className={`composer-action composer-action--expand${
+                  isExpanded ? " is-active" : ""
+                }`}
+                onClick={onToggleExpand}
+                disabled={disabled}
+                aria-label={
+                  isExpanded ? t("composer.collapseInput") : t("composer.expandInput")
+                }
+                title={
+                  isExpanded ? t("composer.collapseInput") : t("composer.expandInput")
+                }
+              >
+                {isExpanded ? <ChevronDown aria-hidden /> : <ChevronUp aria-hidden />}
+              </button>
+            )}
+            <button
+              className={`composer-action composer-action--mic${
+                isDictationBusy ? " is-active" : ""
+              }${isDictationProcessing ? " is-processing is-stop" : ""}${
+                micDisabled ? " is-disabled" : ""
+              }`}
+              onClick={handleMicClick}
+              disabled={micDisabled}
+              aria-label={micAriaLabel}
+              title={micTitle}
+            >
+              {isDictationProcessing ? (
+                <X aria-hidden />
+              ) : isDictating ? (
+                <Square aria-hidden />
+              ) : (
+                <Mic aria-hidden />
+              )}
+            </button>
+            <button
+              className={`composer-action${canStop ? " is-stop" : " is-send"}${
+                canStop && isProcessing ? " is-loading" : ""
+              }`}
+              onClick={handleActionClick}
+              disabled={(disabled && !canStop) || isDictationBusy || (!canStop && !canSend)}
+              aria-label={canStop ? tCommon("actions.stop") : sendLabel}
+              title={canStop ? tCommon("actions.stop") : sendLabel}
+            >
+              {canStop ? (
+                <>
+                  <span className="composer-action-stop-square" aria-hidden />
+                  {isProcessing && (
+                    <span className="composer-action-spinner" aria-hidden />
+                  )}
+                </>
+              ) : (
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden>
+                  <path
+                    d="M12 5l6 6m-6-6L6 11m6-6v14"
+                    stroke="currentColor"
+                    strokeWidth="1.7"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              )}
+            </button>
+          </div>
+        </div>
+        {isDictationBusy && (
+          <DictationWaveform
+            active={isDictating}
+            processing={dictationState === "processing"}
+            level={dictationLevel}
+          />
+        )}
+        {dictationError && (
+          <div className="composer-dictation-error" role="status">
+            <span>{dictationError}</span>
+            <button
+              type="button"
+              className="ghost composer-dictation-error-dismiss"
+              onClick={onDismissDictationError}
+            >
+              {tCommon("actions.dismiss")}
+            </button>
+          </div>
+        )}
+        {dictationHint && (
+          <div className="composer-dictation-hint" role="status">
+            <span>{dictationHint}</span>
+            {onDismissDictationHint && (
+              <button
+                type="button"
+                className="ghost composer-dictation-error-dismiss"
+                onClick={onDismissDictationHint}
+              >
+                {tCommon("actions.dismiss")}
+              </button>
+            )}
+          </div>
+        )}
+        <ComposerSuggestionsPopover
+          highlightIndex={highlightIndex}
+          onHighlightIndex={onHighlightIndex}
+          onSelectSuggestion={onSelectSuggestion}
+          suggestionListRef={suggestionListRef}
+          suggestionRefs={suggestionRefs}
+          suggestions={suggestions}
+          suggestionsOpen={suggestionsOpen}
+          suggestionsStyle={suggestionsStyle}
+        />
+      </div>
+    </div>
+  );
+}

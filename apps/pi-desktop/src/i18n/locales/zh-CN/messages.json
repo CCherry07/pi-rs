@@ -1,0 +1,219 @@
+{
+  "empty": {
+    "existingThread": "向Agent发送消息。",
+    "newThread": "发送消息以启动新Agent。",
+    "loading": "正在加载…"
+  },
+  "toolGroup": {
+    "toolCalls_one": "{{count}} 次工具调用",
+    "toolCalls_other": "{{count}} 次工具调用",
+    "messages_one": "{{count}} 条消息",
+    "messages_other": "{{count}} 条消息",
+    "summary": "{{toolCalls}}，{{messages}}",
+    "expand": "展开工具调用",
+    "collapse": "收起工具调用"
+  },
+  "status": {
+    "working": "处理中…",
+    "doneIn": "用时 {{duration}}",
+    "fetchCountdown_one": "将在 {{count}} 秒后获取新消息",
+    "fetchCountdown_other": "将在 {{count}} 秒后获取新消息"
+  },
+  "images": {
+    "imageNumber": "图片 {{number}}",
+    "open": "打开图片 {{number}}",
+    "closePreview": "关闭图片预览"
+  },
+  "messageActions": {
+    "quote": "引用消息",
+    "copy": "复制消息",
+    "copyCode": "复制代码块",
+    "copied": "已复制",
+    "copyShort": "复制",
+    "code": "代码"
+  },
+  "details": {
+    "toggleReasoning": "展开或收起推理详情",
+    "toggleAnsweredInput": "展开或收起已回答内容",
+    "toggleTool": "展开或收起工具详情"
+  },
+  "input": {
+    "requested": "需要输入",
+    "noAnswer": "未提供回答",
+    "noAnswerSentence": "未提供回答。",
+    "answered": "已回答：",
+    "more": "另有 {{count}} 项",
+    "question": "问题 {{number}}"
+  },
+  "files": {
+    "edited_one": "已编辑文件",
+    "edited_other": "已编辑文件",
+    "changes": "变更"
+  },
+  "plan": {
+    "exporting": "正在导出...",
+    "exportMarkdown": "导出 .md",
+    "exportDialogTitle": "将计划导出为 Markdown",
+    "exportFailed": "计划导出失败",
+    "exportUnavailable": "无法导出计划。",
+    "title": "计划",
+    "waiting": "正在等待计划...",
+    "empty": "当前没有计划。"
+  },
+  "explore": {
+    "exploring": "正在探索",
+    "explored": "已探索",
+    "searchIn": "在 {{path}} 中搜索 {{query}}"
+  },
+  "tool": {
+    "cwd": "工作目录：",
+    "plan": "计划",
+    "generatingPlan": "正在生成计划...",
+    "command": "命令",
+    "commandNamed": "命令：{{command}}",
+    "fileChanges": "文件更改",
+    "pendingChanges": "待处理的更改",
+    "tool": "工具：{{name}}",
+    "webSearch": "网页搜索",
+    "imageView": "图片查看",
+    "contextCompaction": "上下文压缩",
+    "compacting": "正在压缩对话上下文以适应 token 限制。",
+    "reasoning": "推理"
+  },
+  "toolSummary": {
+    "command": "命令",
+    "commandValue": "命令",
+    "searching": "正在搜索",
+    "searched": "已搜索",
+    "web": "网页",
+    "read": "读取",
+    "image": "图片",
+    "hook": "钩子",
+    "tool": "工具",
+    "waitingFor": "正在等待",
+    "waitedFor": "已等待",
+    "resuming": "正在恢复",
+    "resumed": "已恢复",
+    "closing": "正在关闭",
+    "closed": "已关闭",
+    "spawning": "正在创建",
+    "spawned": "已创建",
+    "sendingTo": "正在发送给",
+    "sentTo": "已发送给",
+    "subagent": "子Agent",
+    "collabCall": "协作调用",
+    "unknown": "未知"
+  },
+  "toolStatus": {
+    "processing": "处理中",
+    "completed": "已完成",
+    "failed": "失败"
+  },
+  "subagents": {
+    "executionTree": "子Agent执行树",
+    "open": "打开 {{agent}} 的执行进度"
+  },
+  "errors": {
+    "openFile": "无法打开文件",
+    "turnStartFailed": "本轮运行启动失败。",
+    "turnStartFailedWithMessage": "本轮运行启动失败：{{message}}",
+    "turnSteerFailedWithMessage": "本轮引导失败：{{message}}",
+    "compactionFailed": "无法启动上下文压缩。",
+    "requestFailed": "请求失败。",
+    "promptArgsMissingAssignment": "无法解析 {{command}}：应使用 key=value 格式，但发现了“{{token}}”。值中包含空格时请用双引号包裹。",
+    "promptArgsMissingKey": "无法解析 {{command}}：“{{token}}”中的 '=' 前缺少名称。",
+    "promptArgsMissingRequired": "{{command}} 缺少必填参数：{{names}}。请使用 key=value 格式（值中包含空格时请加引号）。",
+    "turnFailed": "本轮运行失败。",
+    "turnFailedWithMessage": "本轮运行失败：{{message}}"
+  },
+  "composer": {
+    "send": "发送",
+    "steer": "引导",
+    "queue": "排队",
+    "placeholder": "让 Pi 帮你完成任务...",
+    "unavailable": "对话暂时不可用。",
+    "addImage": "添加图片",
+    "collapseInput": "收起输入框",
+    "expandInput": "展开输入框",
+    "queueTitle": "已排队",
+    "queueMenu": "队列消息菜单",
+    "queuedImage_one": "{{count}} 张图片",
+    "queuedImage_other": "{{count}} 张图片",
+    "image": "图片",
+    "images": "多张图片",
+    "pastedImage": "粘贴的图片",
+    "removeAttachment": "移除 {{name}}",
+    "openIn": "在 {{target}} 中打开",
+    "setCommand": "在设置中配置命令",
+    "setAppName": "在设置中配置应用名称",
+    "downloadLinkedFile": "下载链接文件",
+    "copyLink": "复制链接",
+    "dictation": {
+      "openSettings": "打开听写设置",
+      "disabledOpenSettings": "听写已禁用，打开设置",
+      "cancel": "取消转写",
+      "stop": "停止听写",
+      "start": "开始听写"
+    },
+    "plan": "计划",
+    "model": "模型",
+    "noModels": "没有可用模型",
+    "fastMode": "快速模式已启用",
+    "thinkingMode": "思考模式",
+    "default": "默认",
+    "contextFreeUnknown": "上下文用量未知",
+    "contextUsage": "已用 {{used}} · 剩余 {{remaining}}（{{percent}}%）",
+    "mobile": {
+      "more": "更多操作"
+    },
+    "slash": {
+      "compact": "压缩当前任务上下文",
+      "fast": "切换后续轮次的快速模式",
+      "fork": "分叉为新任务",
+      "new": "开始新对话",
+      "resume": "刷新当前任务",
+      "status": "显示会话状态"
+    },
+    "groups": {
+      "Files": "文件",
+      "Skills": "技能",
+      "Slash": "命令",
+      "Prompts": "提示词"
+    }
+  },
+  "commands": {
+    "unknown": "未知",
+    "status": {
+      "title": "会话状态：",
+      "model": "- 模型：{{value}}",
+      "fastMode": "- 快速模式：{{value}}",
+      "reasoningEffort": "- 推理强度：{{value}}",
+      "default": "默认",
+      "on": "开启",
+      "off": "关闭"
+    },
+    "fast": {
+      "usage": "用法：/fast、/fast on、/fast off 或 /fast status。",
+      "status": "快速模式当前为{{state}}。",
+      "enabled": "快速模式已开启。",
+      "disabled": "快速模式已关闭。"
+    }
+  },
+  "notices": {
+    "sessionStopped": "会话已停止。"
+  },
+  "transcript": {
+    "user": "用户",
+    "assistant": "助手",
+    "reasoning": "推理：",
+    "question": "问题 {{number}}",
+    "noAnswer": "未提供回答",
+    "inputAnswered": "已回答输入：",
+    "tool": "工具：{{title}}",
+    "status": "状态：{{status}}",
+    "changes": "更改：",
+    "diff": "差异：{{title}}",
+    "exploring": "正在探索",
+    "explored": "探索完成"
+  }
+}

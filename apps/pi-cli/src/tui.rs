@@ -51,9 +51,9 @@ use crate::output::{assistant_text, shell_command};
 use crate::plugin_ui::{
     PluginConfirmationRequest, PluginMultiSelectionRequest, PluginSelectionRequest,
 };
-use crate::project_trust::{ProjectTrustOption, ProjectTrustPromptRequest, ProjectTrustService};
 use crate::text_selection::{ScreenSelection, ScreenTextSurface};
 use crate::{InteractiveRequestReceivers, auth, auth::AuthProviderInfo};
+use pi_sdk::{ProjectTrustOption, ProjectTrustPromptRequest, ProjectTrustService};
 
 mod components;
 mod controller;
@@ -232,12 +232,12 @@ fn code_block_background(appearance: TerminalAppearance) -> Color {
     markdown_theme(appearance).code_background()
 }
 
-fn markdown_theme(appearance: TerminalAppearance) -> pi_md::MarkdownTheme {
+fn markdown_theme(appearance: TerminalAppearance) -> crate::markdown::MarkdownTheme {
     let appearance = match appearance {
-        TerminalAppearance::Light => pi_md::Appearance::Light,
-        TerminalAppearance::Dark => pi_md::Appearance::Dark,
+        TerminalAppearance::Light => crate::markdown::Appearance::Light,
+        TerminalAppearance::Dark => crate::markdown::Appearance::Dark,
     };
-    pi_md::MarkdownTheme::new(appearance)
+    crate::markdown::MarkdownTheme::new(appearance)
 }
 
 // Editable composer behavior lives in `tui/components/composer.rs`.
@@ -2242,7 +2242,7 @@ mod tests {
         assert!(app.trust_prompt.is_none());
         assert_eq!(
             service.evaluate(&project).unwrap(),
-            crate::project_trust::ProjectTrustEvaluation::Known(true)
+            pi_sdk::ProjectTrustEvaluation::Known(true)
         );
     }
 

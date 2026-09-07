@@ -1,9 +1,7 @@
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use pi_js_package_manager::ResolveRequest as JsResolveRequest;
 
 #[derive(Debug, Parser)]
 #[command(name = "pi", version, about = "Pi coding agent for the terminal")]
@@ -114,6 +112,20 @@ pub(crate) enum ThinkingLevelArg {
     High,
     Xhigh,
     Max,
+}
+
+impl From<ThinkingLevelArg> for pi_core::ThinkingLevel {
+    fn from(value: ThinkingLevelArg) -> Self {
+        match value {
+            ThinkingLevelArg::Off => Self::Off,
+            ThinkingLevelArg::Minimal => Self::Minimal,
+            ThinkingLevelArg::Low => Self::Low,
+            ThinkingLevelArg::Medium => Self::Medium,
+            ThinkingLevelArg::High => Self::High,
+            ThinkingLevelArg::Xhigh => Self::XHigh,
+            ThinkingLevelArg::Max => Self::Max,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -240,130 +252,49 @@ pub(crate) enum PluginCommand {
     },
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct AppConfig {
-    pub(crate) cwd: PathBuf,
-    pub(crate) agent_dir: PathBuf,
-    pub(crate) session_path: PathBuf,
-    pub(crate) model: Option<String>,
-    pub(crate) thinking: Option<ThinkingLevelArg>,
-    pub(crate) fallback_model: String,
-    pub(crate) base_url: String,
-    pub(crate) api_key: Option<String>,
-    pub(crate) provider: String,
-    pub(crate) requested_provider: Option<String>,
-    pub(crate) trust_override: Option<bool>,
-    pub(crate) native_plugins: Vec<PathBuf>,
-    pub(crate) extensions: Vec<String>,
-    pub(crate) discover_extensions: bool,
-    pub(crate) extension_flag_values: BTreeMap<String, serde_json::Value>,
-    pub(crate) runtime_settings: pi_settings::SettingsValues,
-    pub(crate) settings_skill_paths: Vec<PathBuf>,
-    pub(crate) settings_prompt_paths: Vec<PathBuf>,
-    pub(crate) settings_diagnostics: Vec<pi_resources::ResourceDiagnostic>,
-}
+pub(crate) type AppConfig = pi_sdk::ProductConfig;
 
-impl AppConfig {
-    pub(crate) fn resolve(cli: &Cli) -> Result<Self, String> {
-        let cwd = std::fs::canonicalize(&cli.cwd)
-            .map_err(|error| format!("cannot access cwd {}: {error}", cli.cwd.display()))?;
-        let agent_dir = cli
-            .agent_dir
-            .clone()
-            .or_else(|| std::env::var_os("PI_AGENT_DIR").map(PathBuf::from))
-            .or_else(default_agent_dir)
-            .ok_or_else(|| "cannot determine agent directory; pass --agent-dir".to_string())?;
-        let session_path = cli.session.clone().unwrap_or_else(|| {
-            agent_dir
-                .join("sessions")
-                .join(format!("{}.jsonl", uuid::Uuid::now_v7()))
+pub(crate) fn resolve_app_config(cli: &Cli) -> Result<AppConfig, String> {
+    let cwd = std::fs::canonicalize(&cli.cwd)
+        .map_err(|error| format!("cannot access cwd {}: {error}", cli.cwd.display()))?;
+    let agent_dir = cli
+        .agent_dir
+        .clone()
+        .or_else(pi_sdk::default_agent_dir)
+        .ok_or_else(|| "cannot determine agent directory; pass --agent-dir".to_string())?;
+    let mut config = AppConfig::new(cwd, agent_dir);
+    if let Some(session_path) = &cli.session {
+        config.session_path.clone_from(session_path);
+    }
+    config.model = cli.model.clone().filter(|model| !model.trim().is_empty());
+    config.thinking = cli.thinking.map(Into::into);
+    config.base_url.clone_from(&cli.base_url);
+    config.requested_provider = cli
+        .provider
+        .clone()
+        .filter(|provider| !provider.trim().is_empty());
+    config.provider = config
+        .requested_provider
+        .clone()
+        .unwrap_or_else(|| "openai-compatible".to_string());
+    config.api_key = cli
+        .api_key
+        .clone()
+        .filter(|key| !key.trim().is_empty())
+        .or_else(|| {
+            (config.provider == "openai-compatible")
+                .then(|| std::env::var("OPENAI_API_KEY").ok())
+                .flatten()
+                .filter(|key| !key.trim().is_empty())
         });
-        let requested_provider = cli
-            .provider
-            .clone()
-            .filter(|provider| !provider.trim().is_empty());
-        let provider = requested_provider
-            .clone()
-            .unwrap_or_else(|| "openai-compatible".to_string());
-        let api_key = cli
-            .api_key
-            .clone()
-            .filter(|key| !key.trim().is_empty())
-            .or_else(|| {
-                (provider == "openai-compatible")
-                    .then(|| std::env::var("OPENAI_API_KEY").ok())
-                    .flatten()
-                    .filter(|key| !key.trim().is_empty())
-            });
-        let fallback_model = std::env::var("OPENAI_MODEL")
-            .ok()
-            .filter(|model| !model.trim().is_empty())
-            .unwrap_or_else(|| "gpt-4o-mini".to_string());
-        Ok(Self {
-            cwd,
-            agent_dir,
-            session_path,
-            model: cli.model.clone().filter(|model| !model.trim().is_empty()),
-            thinking: cli.thinking,
-            fallback_model,
-            base_url: cli.base_url.clone(),
-            api_key,
-            provider,
-            requested_provider,
-            trust_override: cli
-                .approve
-                .then_some(true)
-                .or(cli.no_approve.then_some(false)),
-            native_plugins: cli.native_plugins.clone(),
-            extensions: cli.extensions.clone(),
-            discover_extensions: !cli.no_extensions,
-            extension_flag_values: BTreeMap::new(),
-            runtime_settings: pi_settings::SettingsValues::default(),
-            settings_skill_paths: Vec::new(),
-            settings_prompt_paths: Vec::new(),
-            settings_diagnostics: Vec::new(),
-        })
-    }
-
-    pub(crate) fn javascript_resolve_request(&self, project_trusted: bool) -> JsResolveRequest {
-        JsResolveRequest {
-            cwd: self.cwd.clone(),
-            agent_dir: self.agent_dir.clone(),
-            project_trusted,
-            explicit_sources: self.extensions.clone(),
-            discover_extensions: self.discover_extensions,
-        }
-    }
-
-    /// Applies startup-only global settings that must be known before project
-    /// trust and the target session cwd can be resolved. An explicit session
-    /// path always wins.
-    pub(crate) fn apply_session_dir_setting(&mut self, session_dir: Option<&str>, explicit: bool) {
-        if explicit {
-            return;
-        }
-        let Some(session_dir) = session_dir.filter(|path| !path.trim().is_empty()) else {
-            return;
-        };
-        let directory = expand_tilde_path(session_dir);
-        let file_name = self.session_path.file_name().map_or_else(
-            || OsString::from(format!("{}.jsonl", uuid::Uuid::now_v7())),
-            OsString::from,
-        );
-        self.session_path = directory.join(file_name);
-    }
-}
-
-fn expand_tilde_path(path: &str) -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        if path == "~" {
-            return PathBuf::from(home);
-        }
-        if let Some(relative) = path.strip_prefix("~/") {
-            return PathBuf::from(home).join(relative);
-        }
-    }
-    PathBuf::from(path)
+    config.trust_override = cli
+        .approve
+        .then_some(true)
+        .or(cli.no_approve.then_some(false));
+    config.native_plugins.clone_from(&cli.native_plugins);
+    config.extensions.clone_from(&cli.extensions);
+    config.discover_extensions = !cli.no_extensions;
+    Ok(config)
 }
 
 impl Cli {
@@ -394,12 +325,6 @@ fn normalize_pi_arg(argument: OsString) -> OsString {
     }
 }
 
-fn default_agent_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".pi").join("agent"))
-}
-
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
@@ -407,7 +332,9 @@ mod tests {
 
     use clap::{CommandFactory, Parser};
 
-    use super::{AppConfig, AuthCommand, Cli, CliCommand, PluginCommand, normalize_pi_arg};
+    use super::{
+        AuthCommand, Cli, CliCommand, PluginCommand, normalize_pi_arg, resolve_app_config,
+    };
 
     #[test]
     fn help_never_renders_the_api_key_value() {
@@ -472,7 +399,7 @@ mod tests {
             no_approve: false,
         };
 
-        AppConfig::resolve(&cli).unwrap();
+        resolve_app_config(&cli).unwrap();
 
         assert!(!session_path.parent().unwrap().exists());
     }
@@ -488,7 +415,7 @@ mod tests {
             directory.path().join("agent").to_str().unwrap(),
         ])
         .unwrap();
-        let mut config = AppConfig::resolve(&cli).unwrap();
+        let mut config = resolve_app_config(&cli).unwrap();
         let original_name = config.session_path.file_name().unwrap().to_owned();
 
         config.apply_session_dir_setting(Some("custom-sessions"), false);
