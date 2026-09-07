@@ -523,7 +523,6 @@ async fn handle_command(
             current
                 .set_model(provider.into(), model_id.into())
                 .map_err(|error| error.to_string())?;
-            clamp_active_thinking(&current)?;
             Ok(Some(model_json(&model)?))
         }
         RpcCommand::CycleModel { .. } => {
@@ -541,7 +540,6 @@ async fn handle_command(
             current
                 .set_model(model.provider.clone(), model.id.clone())
                 .map_err(|error| error.to_string())?;
-            clamp_active_thinking(&current)?;
             Ok(Some(json!({
                 "model":model_json(&model)?,
                 "thinkingLevel":current.snapshot().agent.thinking_level,
@@ -560,7 +558,6 @@ async fn handle_command(
         }
         RpcCommand::SetThinkingLevel { level, .. } => {
             let current = session.current();
-            let level = clamp_thinking_level(level, &available_thinking_levels(&current));
             current
                 .set_thinking_level(level)
                 .map_err(|error| error.to_string())?;
@@ -845,65 +842,9 @@ fn state_json(session: &AgentSession) -> Result<Value, String> {
 fn available_thinking_levels(session: &AgentSession) -> Vec<ThinkingLevel> {
     let state = session.snapshot().agent;
     let Some(model) = session.runtime().model(&state.provider_id, &state.model_id) else {
-        return all_thinking_levels().to_vec();
+        return ThinkingLevel::ALL.to_vec();
     };
-    supported_thinking_levels(&model)
-}
-
-const fn all_thinking_levels() -> &'static [ThinkingLevel; 7] {
-    &[
-        ThinkingLevel::Off,
-        ThinkingLevel::Minimal,
-        ThinkingLevel::Low,
-        ThinkingLevel::Medium,
-        ThinkingLevel::High,
-        ThinkingLevel::XHigh,
-        ThinkingLevel::Max,
-    ]
-}
-
-fn supported_thinking_levels(model: &ModelSpec) -> Vec<ThinkingLevel> {
-    if !model.reasoning {
-        return vec![ThinkingLevel::Off];
-    }
-    all_thinking_levels()
-        .iter()
-        .copied()
-        .filter(|level| match model.thinking_level_map.get(level.as_str()) {
-            Some(None) => false,
-            Some(Some(_)) => true,
-            None => !matches!(level, ThinkingLevel::XHigh | ThinkingLevel::Max),
-        })
-        .collect()
-}
-
-fn clamp_thinking_level(requested: ThinkingLevel, available: &[ThinkingLevel]) -> ThinkingLevel {
-    if available.contains(&requested) {
-        return requested;
-    }
-    let levels = all_thinking_levels();
-    let requested_index = levels
-        .iter()
-        .position(|level| *level == requested)
-        .unwrap_or_default();
-    levels[requested_index..]
-        .iter()
-        .chain(levels[..requested_index].iter().rev())
-        .copied()
-        .find(|level| available.contains(level))
-        .or_else(|| available.first().copied())
-        .unwrap_or(ThinkingLevel::Off)
-}
-
-fn clamp_active_thinking(session: &AgentSession) -> Result<(), String> {
-    let active = session.snapshot().agent.thinking_level;
-    let effective = clamp_thinking_level(active, &available_thinking_levels(session));
-    if effective != active {
-        session
-            .set_thinking_level(effective)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
+    model.supported_thinking_levels()
 }
 
 fn model_json(model: &ModelSpec) -> Result<Value, String> {
@@ -1164,12 +1105,12 @@ mod tests {
     #[test]
     fn thinking_levels_respect_reasoning_and_explicit_maps() {
         let plain = ModelSpec::new("test", "plain", "Plain", "test-api");
-        assert_eq!(supported_thinking_levels(&plain), vec![ThinkingLevel::Off]);
+        assert_eq!(plain.supported_thinking_levels(), vec![ThinkingLevel::Off]);
 
         let mut reasoning = ModelSpec::new("test", "reasoning", "Reasoning", "test-api");
         reasoning.reasoning = true;
         assert_eq!(
-            supported_thinking_levels(&reasoning),
+            reasoning.supported_thinking_levels(),
             vec![
                 ThinkingLevel::Off,
                 ThinkingLevel::Minimal,
@@ -1185,7 +1126,7 @@ mod tests {
             .insert("xhigh".to_string(), Some("xhigh".to_string()));
         reasoning.thinking_level_map.insert("max".to_string(), None);
         assert_eq!(
-            supported_thinking_levels(&reasoning),
+            reasoning.supported_thinking_levels(),
             vec![
                 ThinkingLevel::Minimal,
                 ThinkingLevel::Low,

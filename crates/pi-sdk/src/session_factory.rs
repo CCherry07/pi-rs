@@ -916,13 +916,14 @@ fn settings_thinking_level(config: &ProductConfig) -> ThinkingLevel {
         return level;
     }
     match config.runtime_settings.default_thinking_level {
-        Some(ThinkingLevelSetting::Off) | None => ThinkingLevel::Off,
+        Some(ThinkingLevelSetting::Off) => ThinkingLevel::Off,
         Some(ThinkingLevelSetting::Minimal) => ThinkingLevel::Minimal,
         Some(ThinkingLevelSetting::Low) => ThinkingLevel::Low,
         Some(ThinkingLevelSetting::Medium) => ThinkingLevel::Medium,
         Some(ThinkingLevelSetting::High) => ThinkingLevel::High,
         Some(ThinkingLevelSetting::XHigh) => ThinkingLevel::XHigh,
         Some(ThinkingLevelSetting::Max) => ThinkingLevel::Max,
+        None => ThinkingLevel::Medium,
     }
 }
 
@@ -1516,6 +1517,14 @@ command = "fixture-command"
                 keep_recent_tokens: 456,
             }
         );
+    }
+
+    #[test]
+    fn product_thinking_defaults_to_pi_medium() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = app_config(directory.path(), None);
+
+        assert_eq!(settings_thinking_level(&config), ThinkingLevel::Medium);
     }
 
     #[test]

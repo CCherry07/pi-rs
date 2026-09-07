@@ -1,10 +1,6 @@
 import { memo, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  parsePatchFiles,
-  type AnnotationSide,
-  type FileDiffMetadata,
-} from "@pierre/diffs";
+import type { GetHoveredLineResult } from "@pierre/diffs";
 import { FileDiff } from "@pierre/diffs/react";
 import RotateCcw from "lucide-react/dist/esm/icons/rotate-ccw";
 import { parseDiff, type ParsedDiffLine } from "../../../utils/diff";
@@ -15,18 +11,12 @@ import {
 import { splitPath } from "./GitDiffPanel.utils";
 import type { GitDiffViewerItem } from "./GitDiffViewer.types";
 import {
+  buildPierreFileDiff,
   isFallbackRawDiffLineHighlightable,
-  normalizePatchName,
   parseRawDiffLines,
 } from "./GitDiffViewer.utils";
 
-type HoveredDiffLine =
-  | {
-      lineNumber: number;
-      side?: AnnotationSide;
-      annotationSide?: AnnotationSide;
-    }
-  | undefined;
+type HoveredDiffLine = GetHoveredLineResult<"diff"> | undefined;
 
 function isSelectableLine(
   line: ParsedDiffLine,
@@ -41,7 +31,7 @@ function resolveParsedLineForHover(
   if (!hovered) {
     return null;
   }
-  const side = hovered.annotationSide ?? hovered.side ?? "additions";
+  const side = hovered.side;
   const lineNumber = hovered.lineNumber;
 
   const matchForSide = (line: ParsedDiffLine) => {
@@ -105,26 +95,14 @@ export const DiffCard = memo(function DiffCard({
   );
 
   const fileDiff = useMemo(() => {
-    if (!entry.diff.trim()) {
-      return null;
-    }
-    const patch = parsePatchFiles(entry.diff);
-    const parsed = patch[0]?.files[0];
-    if (!parsed) {
-      return null;
-    }
-    const normalizedName = normalizePatchName(parsed.name || displayPath);
-    const normalizedPrevName = parsed.prevName
-      ? normalizePatchName(parsed.prevName)
-      : undefined;
-    return {
-      ...parsed,
-      name: normalizedName,
-      prevName: normalizedPrevName,
+    return buildPierreFileDiff({
+      diff: entry.diff,
+      displayPath,
       oldLines: entry.oldLines,
       newLines: entry.newLines,
-    } satisfies FileDiffMetadata;
-  }, [displayPath, entry.diff, entry.newLines, entry.oldLines]);
+      status: entry.status,
+    });
+  }, [displayPath, entry.diff, entry.newLines, entry.oldLines, entry.status]);
 
   const placeholder = useMemo(() => {
     if (isLoading) {
@@ -158,7 +136,7 @@ export const DiffCard = memo(function DiffCard({
       overflow: "scroll" as const,
       unsafeCSS: DIFF_VIEWER_SCROLL_CSS,
       disableFileHeader: true,
-      enableHoverUtility: lineActionEnabled,
+      enableGutterUtility: lineActionEnabled,
     }),
     [
       diffStyle,
@@ -200,7 +178,7 @@ export const DiffCard = memo(function DiffCard({
           <FileDiff
             fileDiff={fileDiff}
             options={diffOptions}
-            renderHoverUtility={
+            renderGutterUtility={
               lineActionEnabled
                 ? (getHoveredLine) => (
                     <button

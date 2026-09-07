@@ -167,6 +167,10 @@ Common commands:
 | `/quit`                       | Exit the application                                                  |
 | `/skill:<name>`               | Invoke a discovered skill                                             |
 
+Thinking follows Pi's ordered `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` scale.
+New product sessions default to `medium`; selectors show only levels supported by the active model,
+and an explicitly requested unsupported level clamps upward first, then downward.
+
 Plugin-provided commands are added to the same command palette as built-in commands and skills.
 
 Key bindings:

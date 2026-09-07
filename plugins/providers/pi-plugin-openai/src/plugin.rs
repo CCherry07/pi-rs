@@ -97,6 +97,7 @@ pub fn openai_codex_models() -> Vec<ModelSpec> {
             "GPT-5.3 Codex Spark",
             CODEX_SPARK_CONTEXT_WINDOW,
             false,
+            false,
             ModelCost {
                 input: 1.75,
                 output: 14.0,
@@ -110,6 +111,7 @@ pub fn openai_codex_models() -> Vec<ModelSpec> {
             "GPT-5.4",
             CODEX_CONTEXT_WINDOW,
             true,
+            false,
             long_context_cost(2.5, 15.0, 0.25, 0.0),
         ),
         codex_model(
@@ -117,6 +119,7 @@ pub fn openai_codex_models() -> Vec<ModelSpec> {
             "GPT-5.4 mini",
             CODEX_CONTEXT_WINDOW,
             true,
+            false,
             ModelCost {
                 input: 0.75,
                 output: 4.5,
@@ -130,12 +133,14 @@ pub fn openai_codex_models() -> Vec<ModelSpec> {
             "GPT-5.5",
             CODEX_CONTEXT_WINDOW,
             true,
+            false,
             long_context_cost(5.0, 30.0, 0.5, 0.0),
         ),
         codex_model(
             "gpt-5.6-luna",
             "GPT-5.6 Luna",
             CODEX_CONTEXT_WINDOW,
+            true,
             true,
             long_context_cost(0.2, 1.2, 0.02, 0.25),
         ),
@@ -144,12 +149,14 @@ pub fn openai_codex_models() -> Vec<ModelSpec> {
             "GPT-5.6 Sol",
             CODEX_CONTEXT_WINDOW,
             true,
+            true,
             long_context_cost(5.0, 30.0, 0.5, 6.25),
         ),
         codex_model(
             "gpt-5.6-terra",
             "GPT-5.6 Terra",
             CODEX_CONTEXT_WINDOW,
+            true,
             true,
             long_context_cost(2.0, 12.0, 0.2, 2.5),
         ),
@@ -161,6 +168,7 @@ fn codex_model(
     name: &str,
     context_window: u64,
     image_input: bool,
+    supports_max: bool,
     cost: ModelCost,
 ) -> ModelSpec {
     let mut model = ModelSpec::new(CODEX_PROVIDER, id, name, CODEX_API);
@@ -174,6 +182,17 @@ fn codex_model(
     model.cost = cost;
     model.context_window = context_window;
     model.max_tokens = CODEX_MAX_TOKENS;
+    model
+        .thinking_level_map
+        .insert("minimal".to_string(), Some("low".to_string()));
+    model
+        .thinking_level_map
+        .insert("xhigh".to_string(), Some("xhigh".to_string()));
+    if supports_max {
+        model
+            .thinking_level_map
+            .insert("max".to_string(), Some("max".to_string()));
+    }
     model
 }
 
@@ -316,6 +335,26 @@ mod tests {
         assert_eq!(model.max_tokens, 128_000);
         assert!(model.reasoning);
         assert!(model.input.contains(&pi_core::ModelInput::Image));
+        assert_eq!(
+            model.thinking_level_map.get("minimal"),
+            Some(&Some("low".to_string()))
+        );
+        assert_eq!(
+            model.thinking_level_map.get("xhigh"),
+            Some(&Some("xhigh".to_string()))
+        );
+        assert!(!model.thinking_level_map.contains_key("max"));
+
+        let latest = runtime
+            .model(
+                &ProviderId::new("openai-codex"),
+                &ModelId::new("gpt-5.6-sol"),
+            )
+            .unwrap();
+        assert_eq!(
+            latest.thinking_level_map.get("max"),
+            Some(&Some("max".to_string()))
+        );
 
         let spark = runtime
             .model(

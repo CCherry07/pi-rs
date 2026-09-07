@@ -899,14 +899,7 @@ impl App {
         THINKING_CHOICES
             .iter()
             .copied()
-            .filter(|choice| {
-                let level = choice.level.as_str();
-                match model.thinking_level_map.get(level) {
-                    Some(None) => false,
-                    Some(Some(_)) => true,
-                    None => !matches!(choice.level, ThinkingLevel::XHigh | ThinkingLevel::Max),
-                }
-            })
+            .filter(|choice| model.supports_thinking_level(choice.level))
             .collect()
     }
 

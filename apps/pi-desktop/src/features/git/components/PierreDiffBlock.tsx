@@ -1,6 +1,5 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { parsePatchFiles, type FileDiffMetadata } from "@pierre/diffs";
 import { FileDiff, WorkerPoolContextProvider } from "@pierre/diffs/react";
 import { parseDiff } from "../../../utils/diff";
 import { highlightLine, languageFromPath } from "../../../utils/syntax";
@@ -10,8 +9,8 @@ import {
   DIFF_VIEWER_SCROLL_CSS,
 } from "../../design-system/diff/diffViewerTheme";
 import {
+  buildPierreFileDiff,
   isFallbackRawDiffLineHighlightable,
-  normalizePatchName,
   parseRawDiffLines,
 } from "./GitDiffViewer.utils";
 
@@ -38,26 +37,12 @@ export function PierreDiffBlock({
   );
 
   const fileDiff = useMemo(() => {
-    if (!diff.trim()) {
-      return null;
-    }
-    const patch = parsePatchFiles(diff);
-    const parsed = patch[0]?.files[0];
-    if (!parsed) {
-      return null;
-    }
-    const normalizedName = normalizePatchName(parsed.name || displayPath);
-    const normalizedPrevName = parsed.prevName
-      ? normalizePatchName(parsed.prevName)
-      : undefined;
-
-    return {
-      ...parsed,
-      name: normalizedName,
-      prevName: normalizedPrevName,
+    return buildPierreFileDiff({
+      diff,
+      displayPath,
       oldLines,
       newLines,
-    } satisfies FileDiffMetadata;
+    });
   }, [diff, displayPath, oldLines, newLines]);
 
   const parsedLines = useMemo(() => {

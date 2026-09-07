@@ -34,7 +34,7 @@ export function ComposerMetaBar({
   reasoningSupported,
   contextUsage = null,
 }: ComposerMetaBarProps) {
-  const { t } = useTranslation("messages");
+  const { t } = useTranslation(["messages", "common"]);
   const selectedModel =
     models.find((model) => model.id === selectedModelId) ?? null;
   const selectedModelLabel =
@@ -148,7 +148,9 @@ export function ComposerMetaBar({
             )}
             {reasoningOptions.map((effort) => (
               <option key={effort} value={effort}>
-                {effort}
+                {t(`common:reasoning.${effort}` as "common:reasoning.low", {
+                  defaultValue: effort,
+                })}
               </option>
             ))}
           </select>

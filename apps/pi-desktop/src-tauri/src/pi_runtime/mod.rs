@@ -576,21 +576,6 @@ fn configure_session(
     let thinking_level = requested_effort
         .map(str::parse::<ThinkingLevel>)
         .transpose()?;
-    let selected_spec = selected.as_ref().or_else(|| {
-        models
-            .iter()
-            .find(|model| model.provider == state.provider_id && model.id == state.model_id)
-    });
-    if let (Some(model), Some(level)) = (selected_spec, thinking_level) {
-        if !model.supports_thinking_level(level) {
-            return Err(format!(
-                "model {}/{} does not support thinking level {}",
-                model.provider,
-                model.id,
-                level.as_str()
-            ));
-        }
-    }
     if let Some(model) = selected {
         if state.provider_id != model.provider || state.model_id != model.id {
             session
@@ -599,11 +584,9 @@ fn configure_session(
         }
     }
     if let Some(level) = thinking_level {
-        if state.thinking_level != level {
-            session
-                .set_thinking_level(level)
-                .map_err(|error| error.to_string())?;
-        }
+        session
+            .set_thinking_level(level)
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -640,39 +623,20 @@ fn select_model(
 }
 
 fn reasoning_efforts(model: &ModelSpec) -> Vec<Value> {
-    [
-        ThinkingLevel::Off,
-        ThinkingLevel::Minimal,
-        ThinkingLevel::Low,
-        ThinkingLevel::Medium,
-        ThinkingLevel::High,
-        ThinkingLevel::XHigh,
-        ThinkingLevel::Max,
-    ]
-    .into_iter()
-    .filter(|level| model.supports_thinking_level(*level))
-    .map(|level| {
-        json!({
-            "reasoningEffort": level.as_str(),
-            "description": format!("{} reasoning effort", level.as_str())
+    model
+        .supported_thinking_levels()
+        .into_iter()
+        .map(|level| {
+            json!({
+                "reasoningEffort": level.as_str(),
+                "description": format!("{} reasoning effort", level.as_str())
+            })
         })
-    })
-    .collect()
+        .collect()
 }
 
 fn default_thinking_level(model: &ModelSpec, current: ThinkingLevel) -> Option<ThinkingLevel> {
-    [
-        current,
-        ThinkingLevel::Off,
-        ThinkingLevel::Minimal,
-        ThinkingLevel::Low,
-        ThinkingLevel::Medium,
-        ThinkingLevel::High,
-        ThinkingLevel::XHigh,
-        ThinkingLevel::Max,
-    ]
-    .into_iter()
-    .find(|level| model.supports_thinking_level(*level))
+    (!model.supported_thinking_levels().is_empty()).then(|| model.clamp_thinking_level(current))
 }
 
 async fn ensure_forwarder(
@@ -1286,6 +1250,55 @@ mod tests {
         assert_eq!(
             default_thinking_level(&reasoning, ThinkingLevel::High),
             Some(ThinkingLevel::High)
+        );
+        assert_eq!(
+            default_thinking_level(&reasoning, ThinkingLevel::Max),
+            Some(ThinkingLevel::High)
+        );
+    }
+
+    #[tokio::test]
+    async fn desktop_configuration_clamps_unsupported_thinking_like_pi() {
+        struct Catalog;
+
+        #[pi_core::provider_plugin]
+        impl pi_core::ProviderPlugin for Catalog {
+            fn id(&self) -> pi_core::PluginId {
+                pi_core::PluginId::new("desktop-thinking-catalog")
+            }
+
+            fn register(
+                &self,
+                context: &mut pi_core::ProviderRegisterContext<'_>,
+            ) -> pi_core::Result<()> {
+                let mut model =
+                    ModelSpec::new("scripted", "desktop-reasoning", "Reasoning", "test");
+                model.reasoning = true;
+                context.register_model(model)
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
+            .provider_plugin(Catalog)
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("desktop-reasoning"),
+                cwd: directory.path().to_path_buf(),
+                ..AgentOptions::default()
+            })
+            .build()
+            .unwrap();
+        let session = AgentSession::create(runtime, directory.path().join("session.jsonl"))
+            .await
+            .unwrap();
+
+        configure_session(&session, None, Some("max")).unwrap();
+
+        assert_eq!(
+            session.runtime().agent().state().thinking_level,
+            ThinkingLevel::High
         );
     }
 

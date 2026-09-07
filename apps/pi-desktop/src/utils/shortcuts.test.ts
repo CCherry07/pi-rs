@@ -17,7 +17,6 @@ function withNavigatorPlatform(platform: string, fn: () => void) {
     if (originalUserAgentData) {
       Object.defineProperty(navigator, "userAgentData", originalUserAgentData);
     } else {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       delete (navigator as any).userAgentData;
     }
   }

@@ -80,6 +80,15 @@ test("accepts BotMux launch arguments and persists its agent_settled marker", as
   assert.ok(
     mutations.some(
       (mutation) =>
+        mutation.kind === "entry" &&
+        mutation.type === "thinking_level_change" &&
+        mutation.thinkingLevel === "medium",
+    ),
+    "new product sessions must use Pi's medium thinking default",
+  );
+  assert.ok(
+    mutations.some(
+      (mutation) =>
         mutation.kind === "fact" &&
         mutation.fact === "name" &&
         mutation.name === "BotMux compatibility",

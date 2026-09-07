@@ -42,11 +42,13 @@
     "openIn": "在 {{name}} 中打开"
   },
   "reasoning": {
+    "off": "关闭",
     "none": "无",
     "minimal": "最少",
     "low": "低",
     "medium": "中",
     "high": "高",
-    "xhigh": "超高"
+    "xhigh": "超高",
+    "max": "最高"
   }
 }

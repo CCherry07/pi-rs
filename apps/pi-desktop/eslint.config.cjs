@@ -1,4 +1,13 @@
-module.exports = {
+const js = require("@eslint/js");
+const { FlatCompat } = require("@eslint/eslintrc");
+
+const compat = new FlatCompat({
+  baseDirectory: __dirname,
+  recommendedConfig: js.configs.recommended,
+  allConfig: js.configs.all,
+});
+
+const legacyConfig = {
   root: true,
   env: {
     browser: true,
@@ -20,12 +29,13 @@ module.exports = {
     'eslint:recommended',
     'plugin:@typescript-eslint/recommended',
     'plugin:react/recommended',
-    'plugin:react-hooks/recommended',
   ],
   rules: {
     'react/react-in-jsx-scope': 'off',
     'react/jsx-uses-react': 'off',
     'react/no-unescaped-entities': 'off',
+    'react-hooks/rules-of-hooks': 'error',
+    'react-hooks/exhaustive-deps': 'warn',
     '@typescript-eslint/no-explicit-any': 'off',
     '@typescript-eslint/no-unused-vars': [
       'error',
@@ -206,3 +216,16 @@ module.exports = {
     },
   ],
 };
+
+module.exports = [
+  {
+    ignores: [
+      "node_modules/**",
+      "dist/**",
+      "release-artifacts/**",
+      "src-tauri/**",
+      "eslint.config.cjs",
+    ],
+  },
+  ...compat.config(legacyConfig),
+];

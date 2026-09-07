@@ -313,6 +313,17 @@ impl<'a> ModelRuntimeServices<'a> {
                 )
                 .map_err(|error| InitialModelResolveError::Apply(error.to_string()))?;
         }
+        if let Some(model) = self
+            .runtime
+            .model(&selection.model.provider, &selection.model.model_id)
+        {
+            let effective = model.clamp_thinking_level(state.thinking_level);
+            if effective != state.thinking_level {
+                self.runtime
+                    .set_thinking_level(effective)
+                    .map_err(|error| InitialModelResolveError::Apply(error.to_string()))?;
+            }
+        }
         Ok(selection)
     }
 }
@@ -468,6 +479,48 @@ mod tests {
         assert_eq!(scoped[1].thinking_level, Some(ThinkingLevel::High));
         assert_eq!(scoped[2].model.id.as_str(), "model:exact");
         assert_eq!(scoped[2].thinking_level, None);
+    }
+
+    #[test]
+    fn initial_model_selection_clamps_thinking_to_model_capabilities() {
+        struct Catalog;
+
+        #[pi_core::provider_plugin]
+        impl pi_core::ProviderPlugin for Catalog {
+            fn id(&self) -> pi_core::PluginId {
+                pi_core::PluginId::new("thinking-catalog")
+            }
+
+            fn register(
+                &self,
+                context: &mut pi_core::ProviderRegisterContext<'_>,
+            ) -> pi_core::Result<()> {
+                let mut model = ModelSpec::new("scripted", "sparse", "Sparse", "test");
+                model.reasoning = true;
+                for level in ["minimal", "low", "medium"] {
+                    model.thinking_level_map.insert(level.to_string(), None);
+                }
+                context.register_model(model)
+            }
+        }
+
+        let runtime = PiRuntime::builder()
+            .provider_plugin(pi_test_support::ScriptedProviderPlugin::scripted([]))
+            .provider_plugin(Catalog)
+            .agent_options(pi_agent::AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("test"),
+                thinking_level: ThinkingLevel::Low,
+                ..pi_agent::AgentOptions::default()
+            })
+            .build()
+            .unwrap();
+
+        ModelRuntimeServices::new(&runtime)
+            .select_initial_model(InitialModelRequest::default().requested("scripted", "sparse"))
+            .unwrap();
+
+        assert_eq!(runtime.agent().state().thinking_level, ThinkingLevel::High);
     }
 
     #[test]

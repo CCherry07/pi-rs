@@ -1,3 +1,8 @@
+import {
+  parsePatchFiles,
+  processFile,
+  type FileDiffMetadata,
+} from "@pierre/diffs";
 import type { ParsedDiffLine } from "../../../utils/diff";
 import type { DiffStats, GitDiffViewerItem } from "./GitDiffViewer.types";
 
@@ -15,6 +20,52 @@ export function normalizePatchName(name: string) {
     return name;
   }
   return name.replace(/^(?:a|b)\//, "");
+}
+
+export function buildPierreFileDiff({
+  diff,
+  displayPath,
+  oldLines,
+  newLines,
+  status,
+}: {
+  diff: string;
+  displayPath: string;
+  oldLines?: string[];
+  newLines?: string[];
+  status?: string;
+}): FileDiffMetadata | null {
+  if (!diff.trim()) {
+    return null;
+  }
+  const parsedPatch = parsePatchFiles(diff)[0]?.files[0];
+  if (!parsedPatch) {
+    return null;
+  }
+
+  const hasCompleteOldFile = oldLines !== undefined || status === "A";
+  const hasCompleteNewFile = newLines !== undefined || status === "D";
+  const parsed =
+    hasCompleteOldFile && hasCompleteNewFile
+      ? (processFile(diff, {
+          oldFile: {
+            name: parsedPatch.prevName ?? displayPath,
+            contents: (oldLines ?? []).join(""),
+          },
+          newFile: {
+            name: parsedPatch.name || displayPath,
+            contents: (newLines ?? []).join(""),
+          },
+        }) ?? parsedPatch)
+      : parsedPatch;
+
+  return {
+    ...parsed,
+    name: normalizePatchName(parsed.name || displayPath),
+    prevName: parsed.prevName
+      ? normalizePatchName(parsed.prevName)
+      : undefined,
+  };
 }
 
 export function parseRawDiffLines(diff: string): ParsedDiffLine[] {

@@ -858,10 +858,6 @@ fn next_websocket_request_id() -> String {
 pub(crate) fn responses_request_body(request: &ProviderRequest) -> Value {
     let input = input_items(&request.messages);
     let tools = response_tools(&request.tools);
-    let effort = match request.thinking_level {
-        pi_core::ThinkingLevel::Off => "low",
-        level => level.as_str(),
-    };
     let mut body = json!({
         "model": request.model.as_str(),
         "input": input,
@@ -871,9 +867,23 @@ pub(crate) fn responses_request_body(request: &ProviderRequest) -> Value {
         "tool_choice": "auto",
         "parallel_tool_calls": true,
         "text": {"verbosity": "medium"},
-        "include": ["reasoning.encrypted_content"],
-        "reasoning": {"effort": effort, "summary": "auto"}
+        "include": ["reasoning.encrypted_content"]
     });
+    if request.thinking_level != pi_core::ThinkingLevel::Off {
+        let mapped = request.model_spec.as_ref().and_then(|model| {
+            model
+                .thinking_level_map
+                .get(request.thinking_level.as_str())
+        });
+        let effort = match mapped {
+            Some(Some(effort)) => Some(effort.as_str()),
+            Some(None) => None,
+            None => Some(request.thinking_level.as_str()),
+        };
+        if let Some(effort) = effort {
+            body["reasoning"] = json!({"effort": effort, "summary": "auto"});
+        }
+    }
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools);
     }
@@ -944,10 +954,14 @@ mod tests {
     }
 
     #[test]
-    fn builds_codex_responses_payload() {
-        let request = ProviderRequest {
-            model: pi_core::ModelId::new("gpt-5.5"),
-            model_spec: None,
+    fn builds_codex_responses_payload_with_pi_thinking_mapping() {
+        let model_spec = crate::openai_codex_models()
+            .into_iter()
+            .find(|model| model.id.as_str() == "gpt-5.6-sol")
+            .unwrap();
+        let mut request = ProviderRequest {
+            model: pi_core::ModelId::new("gpt-5.6-sol"),
+            model_spec: Some(model_spec),
             system_prompt: "system".to_string(),
             messages: vec![Message::User(pi_core::UserMessage {
                 content: vec![ContentBlock::Text(pi_core::TextContent::new("hello"))],
@@ -965,6 +979,18 @@ mod tests {
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
         assert_eq!(body["reasoning"]["effort"], "high");
         assert!(body.get("max_output_tokens").is_none());
+
+        request.thinking_level = pi_core::ThinkingLevel::Minimal;
+        let body = responses_request_body(&request);
+        assert_eq!(body["reasoning"]["effort"], "low");
+
+        request.thinking_level = pi_core::ThinkingLevel::Max;
+        let body = responses_request_body(&request);
+        assert_eq!(body["reasoning"]["effort"], "max");
+
+        request.thinking_level = pi_core::ThinkingLevel::Off;
+        let body = responses_request_body(&request);
+        assert!(body.get("reasoning").is_none());
     }
 
     // The fixed tungstenite handshake callback contract owns a large HTTP

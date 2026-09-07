@@ -539,6 +539,16 @@ impl AgentSession {
         default_configure_session_message_conversion(&runtime)?;
         let path = path.into();
         let state = runtime.agent().state();
+        let effective_thinking = clamp_thinking_for_model(
+            &runtime,
+            &state.provider_id,
+            &state.model_id,
+            state.thinking_level,
+        );
+        if effective_thinking != state.thinking_level {
+            runtime.set_thinking_level(effective_thinking)?;
+        }
+        let state = runtime.agent().state();
         let initial_model = crate::InitialModelRequest::default()
             .requested(state.provider_id.clone(), state.model_id.as_str());
         if let Some(session_id) = &options.session_id {
@@ -1903,10 +1913,12 @@ impl AgentSession {
             .try_lock()
             .map_err(|_| SessionError::Busy)?;
         self.ensure_open()?;
+        let thinking_level = self.runtime.agent().state().thinking_level;
         self.runtime.set_model(provider.clone(), model_id.clone())?;
         let entry = SessionEntry::ModelChange(ModelChangeEntry { provider, model_id });
         let record = self.log.append_session_record(entry)?;
         self.events.publish_entry(record);
+        self.set_thinking_level_locked(thinking_level)?;
         Ok(())
     }
 
@@ -1916,6 +1928,24 @@ impl AgentSession {
             .try_lock()
             .map_err(|_| SessionError::Busy)?;
         self.ensure_open()?;
+        self.set_thinking_level_locked(thinking_level)?;
+        Ok(())
+    }
+
+    fn set_thinking_level_locked(
+        &self,
+        requested: ThinkingLevel,
+    ) -> Result<ThinkingLevel, SessionError> {
+        let state = self.runtime.agent().state();
+        let thinking_level = clamp_thinking_for_model(
+            &self.runtime,
+            &state.provider_id,
+            &state.model_id,
+            requested,
+        );
+        if thinking_level == state.thinking_level {
+            return Ok(thinking_level);
+        }
         self.runtime.set_thinking_level(thinking_level)?;
         let entry = SessionEntry::ThinkingLevelChange(ThinkingLevelEntry {
             thinking_level: thinking_level.as_str().to_string(),
@@ -1924,7 +1954,7 @@ impl AgentSession {
         self.events.publish_entry(record);
         self.events
             .publish_thinking(thinking_level, self.runtime.agent().state());
-        Ok(())
+        Ok(thinking_level)
     }
 
     pub async fn set_name(&self, name: Option<String>) -> Result<(), SessionError> {
@@ -3126,6 +3156,17 @@ fn default_configure_session_message_conversion(runtime: &PiRuntime) -> Result<(
     Ok(())
 }
 
+fn clamp_thinking_for_model(
+    runtime: &PiRuntime,
+    provider: &ProviderId,
+    model_id: &ModelId,
+    requested: ThinkingLevel,
+) -> ThinkingLevel {
+    runtime
+        .model(provider, model_id)
+        .map_or(requested, |model| model.clamp_thinking_level(requested))
+}
+
 fn restore_runtime_context(
     runtime: &PiRuntime,
     context: &SessionContext,
@@ -3147,13 +3188,15 @@ fn restore_runtime_context_with_request(
         .resolve_initial_model(request)
         .map_err(|error| SessionError::Runtime(error.to_string()))?;
     let SessionModel { provider, model_id } = selection.model;
+    let thinking_level = context
+        .thinking_level
+        .parse()
+        .map_err(SessionError::InvalidPayload)?;
+    let thinking_level = clamp_thinking_for_model(runtime, &provider, &model_id, thinking_level);
     runtime.restore_state(RuntimeRestoreState {
         provider_id: provider,
         model_id,
-        thinking_level: context
-            .thinking_level
-            .parse()
-            .map_err(SessionError::InvalidPayload)?,
+        thinking_level,
         active_tools: context
             .active_tool_names
             .clone()
@@ -4902,6 +4945,76 @@ mod tests {
             .set_model(ProviderId::new("scripted"), ModelId::new("large"))
             .unwrap();
         assert_eq!(session.active_context_window(), Some(1_000));
+    }
+
+    #[tokio::test]
+    async fn thinking_changes_and_model_switches_clamp_to_catalog_capabilities() {
+        struct Catalog;
+
+        #[pi_core::provider_plugin]
+        impl pi_core::ProviderPlugin for Catalog {
+            fn id(&self) -> pi_core::PluginId {
+                pi_core::PluginId::new("thinking-catalog")
+            }
+
+            fn register(
+                &self,
+                context: &mut pi_core::ProviderRegisterContext<'_>,
+            ) -> pi_core::Result<()> {
+                let mut sparse = pi_core::ModelSpec::new("scripted", "sparse", "Sparse", "test");
+                sparse.reasoning = true;
+                sparse.thinking_level_map.insert("off".to_string(), None);
+                sparse
+                    .thinking_level_map
+                    .insert("minimal".to_string(), None);
+                sparse.thinking_level_map.insert("low".to_string(), None);
+                sparse.thinking_level_map.insert("medium".to_string(), None);
+                context.register_model(sparse)?;
+                context.register_model(pi_core::ModelSpec::new(
+                    "scripted", "plain", "Plain", "test",
+                ))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
+            .provider_plugin(Catalog)
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("sparse"),
+                thinking_level: ThinkingLevel::High,
+                ..AgentOptions::default()
+            })
+            .build()
+            .unwrap();
+        let session = AgentSession::create(runtime, directory.path().join("session.jsonl"))
+            .await
+            .unwrap();
+
+        session.set_thinking_level(ThinkingLevel::Low).unwrap();
+        assert_eq!(
+            session.runtime().agent().state().thinking_level,
+            ThinkingLevel::High
+        );
+
+        session
+            .set_model(ProviderId::new("scripted"), ModelId::new("plain"))
+            .unwrap();
+        assert_eq!(
+            session.runtime().agent().state().thinking_level,
+            ThinkingLevel::Off
+        );
+        let document = session.log().load().unwrap();
+        let thinking_entries = document
+            .entries
+            .iter()
+            .filter_map(|record| match &record.entry {
+                SessionEntry::ThinkingLevelChange(entry) => Some(entry.thinking_level.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(thinking_entries, ["high", "off"]);
     }
 
     #[tokio::test]

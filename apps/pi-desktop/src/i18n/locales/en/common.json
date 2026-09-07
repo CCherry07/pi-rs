@@ -42,11 +42,13 @@
     "openIn": "Open in {{name}}"
   },
   "reasoning": {
+    "off": "Off",
     "none": "None",
     "minimal": "Minimal",
     "low": "Low",
     "medium": "Medium",
     "high": "High",
-    "xhigh": "Extra high"
+    "xhigh": "Extra high",
+    "max": "Maximum"
   }
 }

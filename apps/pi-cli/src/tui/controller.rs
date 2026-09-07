@@ -1487,7 +1487,10 @@ pub(super) async fn run_effect(
         session
             .set_thinking_level(level)
             .map_err(|error| error.to_string())?;
-        return Ok(format!("Thinking: {}", level.as_str()));
+        return Ok(format!(
+            "Thinking: {}",
+            session.snapshot().agent.thinking_level.as_str()
+        ));
     }
     if let Some((command, excluded)) = shell_command(&input) {
         let result = session

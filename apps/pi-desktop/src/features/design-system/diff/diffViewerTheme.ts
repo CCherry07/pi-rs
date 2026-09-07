@@ -1,7 +1,6 @@
 export const DIFF_VIEWER_SCROLL_CSS = `
 [data-column-number],
 [data-buffer],
-[data-separator-wrapper],
 [data-annotation-content] {
   position: static !important;
 }
@@ -10,7 +9,7 @@ export const DIFF_VIEWER_SCROLL_CSS = `
   background-image: none !important;
 }
 
-[data-hover-slot] {
+[data-gutter-utility-slot] {
   left: 0 !important;
   right: auto !important;
   justify-content: flex-start !important;
@@ -59,8 +58,8 @@ diffs-container,
     --diffs-bg: var(--ds-diff-lib-bg-system-light);
   }
 }
-`;
+`
 
 export const DIFF_VIEWER_HIGHLIGHTER_OPTIONS = {
-  theme: { dark: "pierre-dark", light: "pierre-light" },
-} as const;
+  theme: { dark: 'pierre-dark', light: 'pierre-light' },
+} as const

@@ -157,6 +157,32 @@ impl ModelSpec {
             None => !matches!(level, ThinkingLevel::XHigh | ThinkingLevel::Max),
         }
     }
+
+    /// Returns Pi's ordered thinking choices after applying this model's map.
+    pub fn supported_thinking_levels(&self) -> Vec<ThinkingLevel> {
+        ThinkingLevel::ALL
+            .iter()
+            .copied()
+            .filter(|level| self.supports_thinking_level(*level))
+            .collect()
+    }
+
+    /// Clamps a requested level using Pi's upward-first, then downward search.
+    pub fn clamp_thinking_level(&self, requested: ThinkingLevel) -> ThinkingLevel {
+        if self.supports_thinking_level(requested) {
+            return requested;
+        }
+        let requested_index = ThinkingLevel::ALL
+            .iter()
+            .position(|level| *level == requested)
+            .unwrap_or_default();
+        ThinkingLevel::ALL[requested_index..]
+            .iter()
+            .chain(ThinkingLevel::ALL[..requested_index].iter().rev())
+            .copied()
+            .find(|level| self.supports_thinking_level(*level))
+            .unwrap_or(ThinkingLevel::Off)
+    }
 }
 
 #[cfg(test)]
@@ -235,6 +261,11 @@ mod cost_tests {
         let mut model = ModelSpec::new("test", "reasoning", "Reasoning", "test");
         assert!(model.supports_thinking_level(ThinkingLevel::Off));
         assert!(!model.supports_thinking_level(ThinkingLevel::Low));
+        assert_eq!(model.supported_thinking_levels(), vec![ThinkingLevel::Off]);
+        assert_eq!(
+            model.clamp_thinking_level(ThinkingLevel::High),
+            ThinkingLevel::Off
+        );
 
         model.reasoning = true;
         assert!(model.supports_thinking_level(ThinkingLevel::Low));
@@ -245,6 +276,13 @@ mod cost_tests {
         assert!(model.supports_thinking_level(ThinkingLevel::Max));
         model.thinking_level_map.insert("off".to_string(), None);
         assert!(!model.supports_thinking_level(ThinkingLevel::Off));
+        model.thinking_level_map.insert("minimal".to_string(), None);
+        model.thinking_level_map.insert("low".to_string(), None);
+        model.thinking_level_map.insert("medium".to_string(), None);
+        assert_eq!(
+            model.clamp_thinking_level(ThinkingLevel::Low),
+            ThinkingLevel::High
+        );
     }
 }
 
@@ -275,6 +313,16 @@ pub enum ThinkingLevel {
 }
 
 impl ThinkingLevel {
+    pub const ALL: [Self; 7] = [
+        Self::Off,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
