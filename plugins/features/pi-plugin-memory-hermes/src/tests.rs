@@ -7,6 +7,8 @@ use pi_core::{
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::json;
 
+#[path = "tests/curator.rs"]
+mod curator_integration;
 #[path = "tests/memory_conformance.rs"]
 mod memory_conformance;
 #[path = "tests/review_policy.rs"]
@@ -24,6 +26,7 @@ fn plugin(root: &Path, config: HermesMemoryConfig) -> Arc<HermesMemoryPlugin> {
         live_index: Mutex::new(None),
         backfill: Mutex::new(None),
         config_warning_emitted: AtomicBool::new(false),
+        curator_worker: Mutex::new(None),
     })
 }
 
@@ -65,6 +68,34 @@ fn project_skills_are_repo_local_and_require_project_trust() {
         crate::skills::SkillError::ProjectUnavailable
     ));
     assert!(!repo.join(".hermes/skills/untrusted/SKILL.md").exists());
+}
+
+#[test]
+fn switching_between_same_named_checkouts_rebinds_project_skills() {
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("first/repo");
+    let second = root.path().join("second/repo");
+    for repo in [&first, &second] {
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+    }
+    let store = HermesMemoryStore::load(
+        root.path().join("agent"),
+        &first,
+        HermesMemoryConfig::default(),
+        Vec::new(),
+        true,
+    )
+    .unwrap();
+    store.bind_project(&second).unwrap();
+    assert_eq!(
+        store
+            .skill_root(crate::skills::SkillScope::Project)
+            .unwrap(),
+        std::fs::canonicalize(second)
+            .unwrap()
+            .join(".hermes/skills")
+    );
+    assert!(!first.join(".hermes").exists());
 }
 
 fn call(name: &str, args: serde_json::Value) -> ScriptedTurn {
@@ -1549,7 +1580,7 @@ async fn frozen_memory_changes_only_for_a_new_session_snapshot() {
 }
 
 #[tokio::test]
-async fn foreground_tool_created_skills_are_curatable_but_pinned_skills_are_not() {
+async fn foreground_skills_require_adoption_and_pins_protect_managed_skills() {
     let root = tempfile::tempdir().unwrap();
     let plugin = plugin(
         root.path(),
@@ -1573,8 +1604,13 @@ async fn foreground_tool_created_skills_are_curatable_but_pinned_skills_are_not(
     assert!(
         std::fs::read_to_string(&skill.path)
             .unwrap()
-            .contains("cargo test")
+            .contains("cargo check")
     );
+    let curator = crate::curator::Curator::new(
+        plugin.store.global_skill_root(),
+        crate::curator::Config::default(),
+    );
+    curator.adopt(&skill.name).unwrap();
     let meta = skill.path.with_file_name("curator.json");
     let mut value: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();

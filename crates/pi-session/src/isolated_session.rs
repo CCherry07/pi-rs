@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use pi_agent::AgentLoopStop;
 use pi_core::{
-    CustomMessageContent, IsolatedSessionId, IsolatedSessionOutcome, Message, UserMessage,
+    AbortHandle, CustomMessageContent, IsolatedSessionId, IsolatedSessionOutcome, Message,
+    UserMessage,
 };
 use tokio::sync::watch;
 
@@ -61,6 +62,19 @@ struct IsolatedSessionRun {
     result: watch::Receiver<Option<IsolatedResult>>,
 }
 
+/// Until launch returns its control handle, the launch future owns cancellation.
+/// In particular, a plugin shutting down while awaiting readiness must not
+/// leave an independently running child that it never received a handle for.
+struct LaunchGuard(Option<AbortHandle>);
+
+impl Drop for LaunchGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
+}
+
 impl Default for IsolatedSessionRegistry {
     fn default() -> Self {
         Self {
@@ -93,20 +107,26 @@ impl IsolatedSessionRegistry {
                     result,
                 }),
             );
+        let (launch_abort, launch_signal) = AbortHandle::new();
+        let mut launch_guard = LaunchGuard(Some(launch_abort));
         tokio::spawn(async move {
             let message = Message::User(UserMessage {
                 content: input.to_blocks(),
                 timestamp_ms: now_ms(),
             });
-            let result = prompt_session
-                .prompt(vec![message])
-                .await
+            let result = tokio::select! {
+                biased;
+                _ = launch_signal.wait() => {
+                    prompt_session.abort();
+                    Err("isolated session launch was cancelled".to_string())
+                }
+                result = prompt_session.prompt(vec![message]) => result.map_err(|error| error.to_string()),
+            }
                 .map(|outcome| IsolatedSessionOutcome {
                     session_id,
                     messages: outcome.new_messages,
                     aborted: outcome.stop == AgentLoopStop::Aborted,
-                })
-                .map_err(|error| error.to_string());
+                });
             result_sender.send_replace(Some(result));
         });
         while !running_session.runtime().agent().is_running() && readiness.borrow().is_none() {
@@ -115,6 +135,7 @@ impl IsolatedSessionRegistry {
             }
             tokio::task::yield_now().await;
         }
+        launch_guard.0.take();
         id
     }
 

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+pi_perf_script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec node "$pi_perf_script_dir/perf/run.mjs" "$@"

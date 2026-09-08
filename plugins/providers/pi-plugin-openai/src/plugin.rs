@@ -91,7 +91,19 @@ impl ProviderPlugin for OpenAiCodexCatalogPlugin {
 
 /// Returns the current Pi-compatible OpenAI Codex model catalog.
 pub fn openai_codex_models() -> Vec<ModelSpec> {
+    let mut astra = codex_model(
+        "gpt-6-astra",
+        "GPT-6 Astra",
+        CODEX_CONTEXT_WINDOW,
+        true,
+        true,
+        long_context_cost(10.0, 50.0, 1.0, 12.5),
+    );
+    astra.thinking_level_map.insert("off".to_string(), None);
+    astra.thinking_level_map.insert("minimal".to_string(), None);
+
     vec![
+        astra,
         codex_model(
             "gpt-5.3-codex-spark",
             "GPT-5.3 Codex Spark",
@@ -305,7 +317,7 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(runtime.models().len(), 7);
+        assert_eq!(runtime.models().len(), 8);
         assert!(runtime.available_models().is_empty());
         assert_eq!(
             runtime.provider_statuses()[0].availability,
@@ -327,7 +339,7 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(runtime.models().len(), 7);
+        assert_eq!(runtime.models().len(), 8);
         let model = runtime
             .model(&ProviderId::new("openai-codex"), &ModelId::new("gpt-5.5"))
             .unwrap();
@@ -354,6 +366,46 @@ mod tests {
         assert_eq!(
             latest.thinking_level_map.get("max"),
             Some(&Some("max".to_string()))
+        );
+
+        let astra = runtime
+            .model(
+                &ProviderId::new("openai-codex"),
+                &ModelId::new("gpt-6-astra"),
+            )
+            .unwrap();
+        assert_eq!(astra.name, "GPT-6 Astra");
+        assert_eq!(astra.context_window, 272_000);
+        assert_eq!(astra.max_tokens, 128_000);
+        assert_eq!(astra.cost.input, 10.0);
+        assert_eq!(astra.cost.output, 50.0);
+        assert_eq!(astra.cost.cache_read, 1.0);
+        assert_eq!(astra.cost.cache_write, 12.5);
+        assert_eq!(astra.cost.tiers.len(), 1);
+        assert_eq!(astra.cost.tiers[0].input_tokens_above, 272_000);
+        assert_eq!(astra.thinking_level_map.get("off"), Some(&None));
+        assert_eq!(astra.thinking_level_map.get("minimal"), Some(&None));
+        assert_eq!(
+            astra.thinking_level_map.get("xhigh"),
+            Some(&Some("xhigh".to_string()))
+        );
+        assert_eq!(
+            astra.thinking_level_map.get("max"),
+            Some(&Some("max".to_string()))
+        );
+        assert_eq!(
+            astra.supported_thinking_levels(),
+            vec![
+                pi_core::ThinkingLevel::Low,
+                pi_core::ThinkingLevel::Medium,
+                pi_core::ThinkingLevel::High,
+                pi_core::ThinkingLevel::XHigh,
+                pi_core::ThinkingLevel::Max,
+            ]
+        );
+        assert_eq!(
+            astra.clamp_thinking_level(pi_core::ThinkingLevel::Off),
+            pi_core::ThinkingLevel::Low
         );
 
         let spark = runtime

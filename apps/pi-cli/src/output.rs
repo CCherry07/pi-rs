@@ -3,13 +3,22 @@ use std::sync::Arc;
 use pi_core::{ContentBlock, Message};
 use pi_rpc::json_wire::{session_event_json, session_header_json};
 use pi_session::{
-    AgentSessionEvent, PiSession, RevisionedAgentSessionEvent, ShellExecutionOptions, SubmitOutcome,
+    AgentSessionEvent, PiSession, RevisionedAgentSessionEvent, SessionInput, ShellExecutionOptions,
+    SubmitOutcome,
 };
 use serde_json::Value;
 
-pub(crate) async fn run_print(session_handle: PiSession, input: String) -> Result<(), String> {
+pub(crate) async fn run_print(
+    session_handle: PiSession,
+    input: SessionInput,
+) -> Result<(), String> {
     let session = session_handle.current();
-    if let Some((command, excluded)) = shell_command(&input) {
+    if let Some((command, excluded)) = input
+        .images()
+        .is_empty()
+        .then(|| shell_command(input.text()))
+        .flatten()
+    {
         let result = session
             .execute_shell(
                 command,
@@ -79,14 +88,19 @@ fn print_extension_notice(
     }
 }
 
-pub(crate) async fn run_json(session_handle: PiSession, input: String) -> Result<(), String> {
+pub(crate) async fn run_json(session_handle: PiSession, input: SessionInput) -> Result<(), String> {
     let session = session_handle.current();
     let mut subscription = session.subscribe();
     emit(session_header_json(&session.log().header())?);
     let worker = {
         let session = Arc::clone(&session);
         tokio::spawn(async move {
-            if let Some((command, excluded)) = shell_command(&input) {
+            if let Some((command, excluded)) = input
+                .images()
+                .is_empty()
+                .then(|| shell_command(input.text()))
+                .flatten()
+            {
                 session
                     .execute_shell(
                         command,

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pi 性能看板</title>
+<style>
+:root{color-scheme:light;--bg:#f4f6f5;--surface:#fff;--ink:#172b2a;--muted:#637674;--line:#e1e8e5;--rust:#167d70;--ts:#cc7642}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}
+main{max-width:1280px;margin:auto;padding:32px 32px 60px}header{display:flex;justify-content:space-between;gap:20px;align-items:center}
+.brand{font-weight:750;letter-spacing:-.4px;font-size:18px}.brand span{color:var(--muted);font-size:12px;font-weight:450;margin-left:12px;letter-spacing:1.4px}
+button,select,input{font:inherit;border:1px solid var(--line);background:white;color:var(--ink);border-radius:8px;padding:8px 12px}
+button{cursor:pointer}button:hover{border-color:var(--rust)}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--rust);outline-offset:3px}
+.actions{display:flex;gap:10px;align-items:center}.pill{display:inline-flex;align-items:center;border-radius:30px;padding:5px 12px;font-size:12px;background:#e5f2ec;color:#14604f}
+.pill{white-space:nowrap}.pill.warn{background:#fff1dc;color:#855713}.hero{padding:42px 0 28px}.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:2px;color:var(--rust);font-weight:700}
+h1{font-size:38px;letter-spacing:-1.3px;line-height:1.25;margin:10px 0 13px}p{margin:6px 0;color:var(--muted)}h2{font-size:18px;margin:0 0 4px}h3{font-size:14px}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}.card,.panel{background:var(--surface);border:1px solid var(--line);border-radius:14px}
+.card{padding:18px 22px}.card small{color:var(--muted)}.number{font-size:26px;letter-spacing:-.7px;font-weight:650;line-height:1.4;margin-top:6px}
+.panel{margin-bottom:20px;overflow:hidden}.panel-head{padding:22px 24px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:20px}
+.controls{padding:14px 24px;display:flex;gap:9px;flex-wrap:wrap;border-bottom:1px solid var(--line)}.controls label{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}.controls input{width:170px}
+.legend{display:flex;gap:18px;font-size:12px;white-space:nowrap}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}.rust{background:var(--rust)}.ts{background:var(--ts)}
+.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;text-align:left}th{color:var(--muted);font-size:11px;font-weight:550;letter-spacing:.5px;background:#fafcfb}th,td{padding:13px 24px;border-bottom:1px solid var(--line)}
+tbody tr:last-child td{border:0}tbody tr:hover{background:#fbfdfc}td.metric{width:28%;min-width:225px}td.metric strong{font-weight:600;display:block}td.metric small{color:var(--muted);font-size:11px}
+.measure{min-width:125px;white-space:nowrap;font-variant-numeric:tabular-nums;font-weight:600}.measure em{font-style:normal;font-size:11px;color:var(--muted);font-weight:400}
+.bars{width:130px;display:grid;gap:5px}.bar{height:6px;min-width:1px;border-radius:3px}.ratio{white-space:nowrap;font-size:12px;color:var(--muted)}
+.caption{font-size:12px;padding:12px 24px;color:var(--muted);border-top:1px solid var(--line)}.detail-body{padding:20px 24px}.note{padding:12px 16px;border-left:3px solid #bad6d0;background:#f3f8f6;color:#42625b;font-size:12px;border-radius:0 8px 8px 0}
+#plot{width:100%;height:auto;display:block;margin:18px 0 10px}#plot text{fill:var(--muted);font-size:11px}#distribution{display:flex;gap:32px;flex-wrap:wrap;font-variant-numeric:tabular-nums;font-size:12px}
+details{padding:20px 24px}summary{font-weight:600;cursor:pointer}.method{display:grid;grid-template-columns:1fr 1fr;gap:15px 35px;margin-top:12px}.method p{font-size:12px}pre{font-size:11px;white-space:pre-wrap;word-break:break-word;background:#f5f7f6;padding:14px;border-radius:8px;max-height:360px;overflow:auto}
+#error{display:none;border:1px solid #e9c5a7;background:#fff4e8;color:#754e2d;padding:18px 22px;border-radius:12px;margin-bottom:20px;white-space:pre-wrap}
+footer{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;padding-top:10px}.empty{text-align:center;padding:36px;color:var(--muted)}
+@media(max-width:800px){main{padding:20px 14px}header{flex-direction:column;align-items:stretch;gap:12px}.actions{justify-content:space-between}.cards{grid-template-columns:1fr 1fr}.hero{padding:28px 0 20px}h1{font-size:30px}.panel-head{align-items:flex-start;flex-direction:column;padding:18px}.controls{padding:14px 18px}th,td{padding:12px 16px}.method{grid-template-columns:1fr}.brand span{display:none}.actions{gap:6px}.detail-body{padding:16px}footer{display:block}}
+</style>
+</head>
+<body>
+<main>
+<header><div class="brand">pi / performance <span>LOCAL BENCHMARK LAB</span></div><div class="actions"><span id="status" class="pill"></span><button id="download">导出原始 JSON ↓</button></div></header>
+<section class="hero"><div class="eyebrow">Rust × TypeScript</div><h1>Pi 性能看板</h1><p>同机顺序运行 · 独立进程采样 · 保留原始数据</p><p id="context"></p></section>
+<div id="error" role="alert"></div>
+<div class="cards"><div class="card"><small>有数据的测试项目</small><div class="number" id="metric-count">—</div></div><div class="card"><small>会话采样 / 每个实现与规模</small><div class="number" id="sampling">—</div></div><div class="card"><small>单条消息文本</small><div class="number" id="payload">—</div></div><div class="card"><small>CLI 构建入口</small><div class="number" id="build">—</div></div></div>
+<section class="panel">
+<div class="panel-head"><div><h2>性能对照</h2><p>越低越好。API 输出与调用方式有差异，详见每个指标的说明。</p></div><div class="legend"><span><i class="dot rust"></i>Rust</span><span><i class="dot ts"></i>TypeScript</span></div></div>
+<div class="controls"><label>统计值<select id="percentile"><option value="p50">P50 中位数</option><option value="p95">P95 尾部耗时</option><option value="mean">Mean 平均值</option></select></label><label>分类<select id="group"><option value="">全部指标</option></select></label><label>规模<select id="size"><option value="">全部规模</option></select></label><label>查找<input id="search" type="search" placeholder="fork / 读取 / RSS"></label></div>
+<div class="table-wrap"><table><thead><tr><th>测试项目 / 规模</th><th>Rust</th><th>TypeScript</th><th>相对值</th><th>TS / Rust</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div class="caption">每行柱形单独归一化，不能跨行比较长度。时间按量级显示 ms / μs；内存显示 MiB。缺失数据保持为空。</div>
+</section>
+<section class="panel">
+<div class="panel-head"><div><h2>样本分布</h2><p>横轴为采样顺序，纵轴为单次操作耗时或 RSS。</p></div><select id="detail" aria-label="查看指标样本"></select></div>
+<div class="detail-body"><div id="metric-note" class="note"></div><svg id="plot" viewBox="0 0 1000 225" role="img" aria-label="所选指标的原始样本分布"></svg><div id="distribution"></div></div>
+</section>
+<section class="panel"><details><summary>测试口径与环境</summary><div class="method"><div><h3>会话与内存</h3><p>确定性 ID、固定文本字节数、线性 user-message 分支。read 与 fork 在不同进程运行。每次 fork 都重新准备源仓库，计时不含准备、验证和销毁。</p><p>get100 / latest50 用批次平均减少计时噪声；P95 是批次平均值的分位数，不代表每次微操作的尾延迟。分位数采用 nearest-rank。</p><p>已加载会话 RSS 是同进程加载前后实际 RSS 的差。TS 强制 GC；RSS 仍受分配器影响。本看板不把它与峰值 RSS 混用。</p></div><div><h3>CLI 与适用范围</h3><p>Rust 使用 release 构建。TS CLI 的实际入口与指纹写入元数据，bundled 与 unbundled 不应混为同一基线。CLI 使用临时配置，RPC stdin 在响应前保持打开。</p><p>每种实现交替先运行；没有并发压测。不清除操作系统文件缓存；后台应用、温度与调度仍可能影响结果。</p><p>这是本地合成测试，不包含 LLM 响应、网络或交互式 TUI 渲染。测试失败时报告保留已完成的样本，不把失败当作零耗时。</p></div></div><pre id="metadata"></pre></details></section>
+<footer><span id="footer"></span><span>离线文件 · 无外部资源 · 不上传测试数据</span></footer>
+</main>
+<script id="perf-data" type="application/json">__PERF_DATA__</script>
+<script>
+"use strict";
+const data=JSON.parse(document.getElementById("perf-data").textContent);
+const $=id=>document.getElementById(id);
+const escape=value=>String(value).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+const definitions=data.definitions||{};
+const labels={complete:"测试完成",running:"正在测试",failed:"测试失败 · 部分结果",cancelled:"已取消 · 部分结果"};
+$("status").textContent=labels[data.status]||data.status;
+if(data.status!=="complete")$("status").classList.add("warn");
+const config=data.config||{}, env=data.environment||{};
+$("context").textContent=[env.cpu,env.platform,env.arch,new Date(data.startedAt).toLocaleString("zh-CN")].filter(Boolean).join(" · ");
+$("sampling").textContent=config.rounds+" × "+config.samples;
+$("payload").textContent=config.payloadBytes+" B";
+$("build").textContent=config.backend==="rust"?"Rust release":config.tsCliEntry?"TS custom":config.tsCli;
+if((data.errors||[]).length){$("error").style.display="block";$("error").textContent="本轮未完整完成，以下为已采集的数据。\n"+data.errors.join("\n");}
+const pairs=new Map();
+for(const row of data.summary||[]){
+  const key=JSON.stringify([row.name,row.size,row.unit]);
+  if(!pairs.has(key))pairs.set(key,{key,name:row.name,size:row.size,unit:row.unit});
+  pairs.get(key)[row.backend]=row;
+}
+const order=Object.keys(definitions);
+const metrics=[...pairs.values()].sort((a,b)=>order.indexOf(a.name)-order.indexOf(b.name)||a.size-b.size);
+$("metric-count").textContent=metrics.filter(m=>m.rust?.statistics||m.ts?.statistics).length;
+const title=m=>(definitions[m.name]?.[1]||m.name)+(m.size?" · "+m.size.toLocaleString()+" 条":"");
+const group=m=>definitions[m.name]?.[0]||"其他";
+function format(value,unit){
+  if(value===undefined||value===null||!Number.isFinite(value))return "—";
+  if(unit==="bytes")return (value/1048576).toFixed(2)+" MiB";
+  if(value<1)return (value*1000).toFixed(value<.001?3:2)+" μs";
+  return value.toFixed(2)+" ms";
+}
+for(const value of [...new Set(metrics.map(group))])$("group").add(new Option(value,value));
+for(const value of [...new Set(metrics.map(m=>m.size))].sort((a,b)=>a-b))$("size").add(new Option(value?value.toLocaleString()+" 条":"进程 / 空会话",String(value)));
+for(const [index,m]of metrics.entries())$("detail").add(new Option(title(m),String(index)));
+function render(){
+  const percentile=$("percentile").value;
+  const selected=metrics.filter(m=>(!$("group").value||group(m)===$("group").value)&&
+    ($("size").value===""||String(m.size)===$("size").value)&&
+    (title(m)+" "+m.name).toLowerCase().includes($("search").value.toLowerCase()));
+  $("rows").innerHTML=selected.map(m=>{
+    const r=m.rust?.statistics?.[percentile],t=m.ts?.statistics?.[percentile];
+    const max=Math.max(r||0,t||0,1e-12);
+    const cell=(v,row)=>'<span class="measure">'+format(v,m.unit)+'</span><br><small><em style="color:#637674;font-size:11px">n = '+(row?.statistics?.n??"—")+'</em></small>';
+    return '<tr><td class="metric"><strong>'+escape(definitions[m.name]?.[1]||m.name)+'</strong><small>'+escape(group(m))+' · '+(m.size?m.size.toLocaleString()+" 条":"进程 / 空会话")+'</small></td><td>'+cell(r,m.rust)+'</td><td>'+cell(t,m.ts)+'</td><td><div class="bars">'+
+      (r===undefined?"":'<div class="bar rust" style="width:'+Math.max(0,r/max*100)+'%"></div>')+
+      (t===undefined?"":'<div class="bar ts" style="width:'+Math.max(0,t/max*100)+'%"></div>')+
+      '</div></td><td class="ratio">'+(r>0&&t!==undefined?(t/r).toFixed(2)+"×":"—")+'</td></tr>';
+  }).join("")||'<tr><td colspan="5" class="empty">没有匹配的成功样本。</td></tr>';
+}
+function plot(){
+  const m=metrics[Number($("detail").value)];
+  if(!m){$("metric-note").textContent="尚无成功样本。";return;}
+  $("metric-note").textContent=definitions[m.name]?.[2]||"";
+  const values=[...(m.rust?.samples||[]),...(m.ts?.samples||[])];
+  const lo=Math.min(0,...values),hi=Math.max(...values,1e-12);
+  const y=v=>190-(v-lo)/(hi-lo)*165;
+  let svg="";
+  for(let i=0;i<=4;i++){const v=lo+(hi-lo)*i/4;svg+='<line x1="90" x2="985" y1="'+y(v)+'" y2="'+y(v)+'" stroke="#e1e8e5"/><text x="78" y="'+(y(v)+4)+'" text-anchor="end">'+format(v,m.unit)+'</text>';}
+  for(const [backend,color]of [["rust","#167d70"],["ts","#cc7642"]]){
+    const samples=m[backend]?.samples||[],step=Math.max(1,Math.ceil(samples.length/250));
+    const points=samples.map((v,i)=>({v,i})).filter((_,i)=>i%step===0||i===samples.length-1);
+    const x=i=>90+i/Math.max(1,samples.length-1)*895;
+    svg+='<polyline fill="none" stroke="'+color+'" stroke-width="1.7" opacity=".8" points="'+points.map(p=>x(p.i)+","+y(p.v)).join(" ")+'"/>';
+    svg+=points.map(p=>'<circle r="2" fill="'+color+'" cx="'+x(p.i)+'" cy="'+y(p.v)+'"><title>'+backend+' #'+(p.i+1)+': '+format(p.v,m.unit)+'</title></circle>').join("");
+  }
+  svg+='<text x="90" y="216">样本 1</text><text x="985" y="216" text-anchor="end">各实现独立采样序列 · 最多显示 250 个点</text>';
+  $("plot").innerHTML=svg;
+  $("distribution").innerHTML=["rust","ts"].map(backend=>{
+    const row=m[backend],s=row?.statistics;if(!s)return "";
+    const rounds=row.rounds.map(r=>r.statistics?"R"+r.round+" "+format(r.statistics.p50,m.unit):"").filter(Boolean).join(" / ");
+    return '<div><strong>'+backend.toUpperCase()+'</strong> · n='+s.n+' · P50 '+format(s.p50,m.unit)+' · P95 '+format(s.p95,m.unit)+'<br><span style="color:#637674">每轮 P50: '+escape(rounds)+'</span></div>';
+  }).join("");
+}
+for(const id of ["percentile","group","size"])$(id).addEventListener("change",render);
+$("search").addEventListener("input",render);$("detail").addEventListener("change",plot);
+$("download").addEventListener("click",()=>{
+  const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+  const url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="pi-perf-"+data.runId+".json";a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+$("metadata").textContent=JSON.stringify({runId:data.runId,status:data.status,startedAt:data.startedAt,finishedAt:data.finishedAt,config:data.config,environment:data.environment,implementations:data.implementations,load:data.load},null,2);
+$("footer").textContent="RUN "+data.runId+" · "+(config.quick?"快速冒烟模式（不作稳定性结论）":"完整 / 自定义采样")+" · schema "+data.schemaVersion;
+render();plot();
+</script>
+</body>
+</html>

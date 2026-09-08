@@ -15,10 +15,29 @@ pub(crate) struct HermesReviewPlugin {
 }
 
 impl HermesReviewPlugin {
-    pub(crate) fn new(runs: Arc<HermesRuns>) -> Self {
+    pub(crate) fn for_curator(
+        runs: Arc<HermesRuns>,
+        target: crate::curator::scope::Target,
+        dry_run: bool,
+    ) -> Self {
+        let mut state =
+            HermesRunState::with_kind(crate::execution::HermesRunKind::Curator { dry_run });
+        state.curator_target = Some(target);
         Self {
             runs,
-            state: Arc::new(HermesRunState::review()),
+            state: Arc::new(state),
+            binding: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn new(runs: Arc<HermesRuns>) -> Self {
+        Self::with_kind(runs, crate::execution::HermesRunKind::Review)
+    }
+
+    pub(crate) fn with_kind(runs: Arc<HermesRuns>, kind: crate::execution::HermesRunKind) -> Self {
+        Self {
+            runs,
+            state: Arc::new(HermesRunState::with_kind(kind)),
             binding: Mutex::new(None),
         }
     }

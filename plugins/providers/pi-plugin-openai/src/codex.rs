@@ -993,6 +993,41 @@ mod tests {
         assert!(body.get("reasoning").is_none());
     }
 
+    #[test]
+    fn builds_astra_payload_with_its_pi_thinking_mapping() {
+        let model_spec = crate::openai_codex_models()
+            .into_iter()
+            .find(|model| model.id.as_str() == "gpt-6-astra")
+            .unwrap();
+        let mut request = ProviderRequest {
+            model: pi_core::ModelId::new("gpt-6-astra"),
+            model_spec: Some(model_spec),
+            system_prompt: "system".to_string(),
+            messages: vec![Message::User(pi_core::UserMessage {
+                content: vec![ContentBlock::Text(pi_core::TextContent::new("hello"))],
+                timestamp_ms: 0,
+            })],
+            tools: Vec::new(),
+            thinking_level: pi_core::ThinkingLevel::Minimal,
+            thinking_budgets: None,
+            max_output_tokens: None,
+            headers: BTreeMap::new(),
+            sampling_params: BTreeMap::new(),
+            session_id: None,
+        };
+
+        let body = responses_request_body(&request);
+        assert!(body.get("reasoning").is_none());
+
+        request.thinking_level = pi_core::ThinkingLevel::Low;
+        let body = responses_request_body(&request);
+        assert_eq!(body["reasoning"]["effort"], "low");
+
+        request.thinking_level = pi_core::ThinkingLevel::Max;
+        let body = responses_request_body(&request);
+        assert_eq!(body["reasoning"]["effort"], "max");
+    }
+
     // The fixed tungstenite handshake callback contract owns a large HTTP
     // error response; this test only returns the supplied success response.
     #[allow(clippy::result_large_err)]

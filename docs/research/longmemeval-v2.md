@@ -6,6 +6,9 @@
 > 数据基线为 Hugging Face
 > [`f152293`](https://huggingface.co/datasets/xiaowu0162/longmemeval-v2/tree/f152293e235517d504809563c833d7190b8c713b)。
 > 本文只使用 UCLA 作者的论文、项目页、官方代码和官方数据集卡。
+>
+> 历史说明（2026-09-08）：本文面向现已移除的 `pi-plugin-memory-local` 与
+> `pi-memory-eval`，其中的本地实现映射和评测方案不再代表当前产品能力。
 
 ## 结论
 
@@ -219,8 +222,7 @@ LAFS 又只使用平均 query latency，因此 online consolidation 的模型、
 
 ## 6. 与当前 `pi-rs` 的映射
 
-当前 [`LocalMemoryProvider`](../../plugins/features/pi-plugin-memory-local/src/storage/mod.rs) 提供本地
-`apply` 和 `recall`；[`MemoryRecord`](../../plugins/features/pi-plugin-memory-local/src/types.rs) 是带 scope、kind、origin、evidence 和可选
+当时已移除的 `LocalMemoryProvider` 提供本地 `apply` 和 `recall`；`MemoryRecord` 是带 scope、kind、origin、evidence 和可选
 `supersedes` 的用户批准语义记录。Context hook 最多召回 8 条、默认预算 1,200 token、50ms 超时，
 并把结果作为不落盘的隐藏消息注入。这个产品模型与 LME-V2 的完整轨迹 experience memory 有意不同。
 

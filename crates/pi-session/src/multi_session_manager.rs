@@ -769,6 +769,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelling_launch_before_readiness_stops_the_unclaimed_child() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let directory = tempfile::tempdir().unwrap();
+        let manager = test_manager_with_turns([ScriptedTurn::WaitForAbort]);
+        let owner = manager
+            .create_session(directory.path(), directory.path().join("owner.jsonl"))
+            .await
+            .unwrap();
+        let child = manager
+            .create_session(directory.path(), directory.path().join("child.jsonl"))
+            .await
+            .unwrap();
+        let id = pi_core::IsolatedSessionId::new(child.registration_id().to_string());
+        let mut launch = Box::pin(manager.inner.isolated_sessions.launch(
+            owner.registration_id().to_string(),
+            child.clone(),
+            CustomMessageContent::Text("wait".into()),
+        ));
+        std::future::poll_fn(|context| {
+            assert!(launch.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(launch);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            owner.wait_for_isolated_session(&id),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        assert!(!child.current().runtime().agent().is_running());
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn fresh_isolated_session_runs_without_replacing_its_owner() {
         let directory = tempfile::tempdir().unwrap();
         let manager = test_manager_with_turns([ScriptedTurn::Text("isolated answer".to_string())]);

@@ -54,6 +54,12 @@ pub struct SkillInfo {
     pub disable_model_invocation: bool,
 }
 
+/// Observes successful explicit skill expansion. Catalog advertisement alone
+/// is not usage. Observers must be best effort and must not change the catalog.
+pub trait SkillActivityObserver: Send + Sync {
+    fn used(&self, skill: &SkillInfo);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillDiagnosticKind {
@@ -256,6 +262,7 @@ pub struct SkillsPlugin {
     catalog: SkillCatalog,
     enable_commands: bool,
     prompt_projector: Option<Arc<dyn SkillPromptProjector>>,
+    activity_observer: Option<Arc<dyn SkillActivityObserver>>,
 }
 
 impl SkillsPlugin {
@@ -269,6 +276,7 @@ impl SkillsPlugin {
             catalog: SkillCatalog::load(&options),
             enable_commands,
             prompt_projector: None,
+            activity_observer: None,
         }
     }
 
@@ -286,11 +294,20 @@ impl SkillsPlugin {
             catalog: SkillCatalog::from_skills(skills),
             enable_commands: true,
             prompt_projector: None,
+            activity_observer: None,
         }
     }
 
     pub fn skills(&self) -> &[SkillInfo] {
         self.catalog.skills()
+    }
+
+    pub fn with_activity_observer(
+        mut self,
+        observer: Option<Arc<dyn SkillActivityObserver>>,
+    ) -> Self {
+        self.activity_observer = observer;
+        self
     }
 
     pub fn diagnostics(&self) -> &[SkillDiagnostic] {
@@ -343,6 +360,7 @@ pub fn load_sourced_skills<T: Clone>(
 
 struct SkillCommand {
     skill: SkillInfo,
+    activity_observer: Option<Arc<dyn SkillActivityObserver>>,
 }
 
 #[async_trait]
@@ -362,6 +380,9 @@ impl Command for SkillCommand {
     ) -> Result<CommandOutcome, CommandError> {
         if context.signal().is_aborted() {
             return Err(CommandError::Aborted);
+        }
+        if let Some(observer) = &self.activity_observer {
+            observer.used(&self.skill);
         }
         Ok(CommandOutcome::TransformInput(render_skill_invocation(
             &self.skill,
@@ -402,6 +423,7 @@ impl AgentPlugin for SkillsPlugin {
         for skill in self.catalog.skills() {
             context.register_command(Arc::new(SkillCommand {
                 skill: skill.clone(),
+                activity_observer: self.activity_observer.clone(),
             }))?;
         }
         Ok(())
@@ -709,6 +731,14 @@ mod tests {
 
     #[tokio::test]
     async fn command_registry_expands_explicit_skill_invocation() {
+        #[derive(Default)]
+        struct Observer(std::sync::Mutex<Vec<PathBuf>>);
+        impl SkillActivityObserver for Observer {
+            fn used(&self, skill: &SkillInfo) {
+                self.0.lock().unwrap().push(skill.file_path.clone());
+            }
+        }
+        let observer = Arc::new(Observer::default());
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("SKILL.md");
         std::fs::write(
@@ -717,13 +747,16 @@ mod tests {
         )
         .unwrap();
         let runtime = PiRuntime::builder()
-            .agent_plugin(SkillsPlugin::from_skills([SkillInfo {
-                name: "grill-me".to_string(),
-                description: "Interview the user".to_string(),
-                file_path: path,
-                content: "# Instructions\nAsk questions.".to_string(),
-                disable_model_invocation: true,
-            }]))
+            .agent_plugin(
+                SkillsPlugin::from_skills([SkillInfo {
+                    name: "grill-me".to_string(),
+                    description: "Interview the user".to_string(),
+                    file_path: path.clone(),
+                    content: "# Instructions\nAsk questions.".to_string(),
+                    disable_model_invocation: true,
+                }])
+                .with_activity_observer(Some(observer.clone())),
+            )
             .build()
             .unwrap();
         let outcome = runtime
@@ -737,6 +770,7 @@ mod tests {
         assert!(text.contains("<skill name=\"grill-me\""));
         assert!(!text.contains("disable-model-invocation"));
         assert!(text.ends_with("sharpen this design"));
+        assert_eq!(*observer.0.lock().unwrap(), [path]);
     }
 
     #[test]
@@ -753,6 +787,7 @@ mod tests {
                 catalog: SkillCatalog::from_skills([skill]),
                 enable_commands: false,
                 prompt_projector: None,
+                activity_observer: None,
             })
             .build()
             .unwrap();

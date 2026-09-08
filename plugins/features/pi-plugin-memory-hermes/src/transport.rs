@@ -153,10 +153,20 @@ pub(crate) fn finish_review(
     config: &HermesMemoryConfig,
     outcome: &EphemeralSessionOutcome,
 ) -> Vec<String> {
+    finish_review_as(session, ui, config, outcome, "background_review")
+}
+
+pub(crate) fn finish_review_as(
+    session: &SessionContext,
+    ui: &UiContext,
+    config: &HermesMemoryConfig,
+    outcome: &EphemeralSessionOutcome,
+    task: &str,
+) -> Vec<String> {
     let mut errors = Vec::new();
     if outcome.api_calls > 0 || has_usage(&outcome.usage) {
         let mut details = serde_json::json!({
-            "task": "background_review",
+            "task": task,
             "apiCalls": outcome.api_calls,
         });
         if let Some(message) = outcome.messages.iter().find_map(|message| match message {
@@ -175,7 +185,14 @@ pub(crate) fn finish_review(
     if !summary.is_empty()
         && let Err(error) = ui.notify(
             pi_core::NoticeLevel::Info,
-            format!("💾 Self-improvement review: {summary}"),
+            format!(
+                "💾 {}: {summary}",
+                if task == "background_review" {
+                    "Self-improvement review"
+                } else {
+                    "Curator"
+                }
+            ),
         )
     {
         errors.push(format!("review notification failed: {error}"));

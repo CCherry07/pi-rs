@@ -382,6 +382,13 @@ pub(crate) fn delete(roots: &SkillRoots<'_>, skill_id: &str) -> Result<SkillDocu
     let (scope, path) = roots.path_for_id(skill_id)?;
     with_root_lock(roots.root(scope)?, || {
         let existing = view(roots, skill_id)?;
+        if super::curator::metadata::Metadata::read(path.parent().expect("skill directory"))
+            .is_ok_and(|m| m.pinned)
+        {
+            return Err(SkillError::UnsafeText(
+                "Pinned skills cannot be deleted; unpin first".into(),
+            ));
+        }
         fs::remove_file(&path)?;
         remove_empty_parents(
             path.parent().expect("skill path has parent"),

@@ -9,6 +9,7 @@ mod session_factory;
 
 pub use credentials::{StoredCredential, read_credentials, read_stored_credential};
 pub use host::{Pi, PiBuilder};
+pub use pi_plugin_memory_hermes::curator;
 pub use project_trust::{
     ProjectTrustError, ProjectTrustEvaluation, ProjectTrustOption, ProjectTrustPromptRequest,
     ProjectTrustService,

@@ -33,7 +33,7 @@ Protected skills (DO NOT edit these):
 - USER-OWNED skills: hand-written skills and anything not managed by this plugin. Loading or consulting a skill does not make it yours to edit.
 - Externally changed skills whose content no longer matches the plugin's recorded version.
 
-This review may maintain only agent-created, unpinned skills with an unchanged content hash recorded by this plugin. Skills created through this plugin's skill_manage tool carry that provenance, including creations in a foreground session. Do not change ownership metadata, remove a pin, or copy a protected skill to bypass these restrictions. If a protected skill is wrong or outdated, describe the proposed correction in your review reply and leave the change to the user in a foreground session. If all relevant skills are protected, make no skill writes.
+This review may maintain only agent-created, unpinned skills with an unchanged content hash recorded by this plugin, or skills the user explicitly adopted into management. Skills created in a background review carry this provenance. Foreground creations are user-managed until the user runs /curator adopt. Hashes cover the complete skill package. Do not change ownership metadata, remove a pin, or copy a protected skill to bypass these restrictions. If a protected skill is wrong or outdated, describe the proposed correction in your review reply and leave the change to the user in a foreground session. If all relevant skills are protected, make no skill writes.
 
 Do NOT capture (these become persistent self-imposed constraints that hurt later when the environment changes):
 

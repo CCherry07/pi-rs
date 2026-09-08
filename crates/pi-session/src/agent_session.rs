@@ -150,6 +150,14 @@ pub struct SessionInput {
 }
 
 impl SessionInput {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn images(&self) -> &[ImageContent] {
+        self.images.as_deref().unwrap_or_default()
+    }
+
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),

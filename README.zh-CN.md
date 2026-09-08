@@ -42,10 +42,17 @@ Pi 清晰的产品理念、克制的核心设计与 extension-first 架构，正
   headers 和凭据解析。
 - **凭据管理**：`/login`、`/logout` 与 `pi auth` 管理 Pi 兼容的 API key 和 OAuth 凭据，
   不会在 TUI 中回显 secret。
-- **内置工具**：`read`、`write`、`edit`、`hashline_edit`、`bash`、`grep`、`find`、`ls`。
+- **内置工具**：`read`、`write`、`edit`、`hashline_edit`、`bash`、`grep`、`find`、`ls`，
+  以及通过隔离子会话运行、支持 Markdown 角色定义的有界 `subagent` 委派。
+- **图片输入**：TUI、print、JSON 模式启动时支持 `@file` 图片附件，TUI 支持 `Ctrl+V`
+  粘贴本机剪贴板图片；图片校验、缩放和格式转换由共享模块处理。
 - **Skills 与 prompt templates**：自动发现全局和项目 Skills、注册 `/skill:<name>`，并从
   Markdown prompt template 注册 slash command，在每次 agent run 生成系统 prompt
   contribution。
+- **Hermes 记忆与 Curator**：持久化用户事实、后台学习，以及全局和可信项目 Skills 的
+  分 Scope 维护，包含托管权限检查、归档、备份和回滚。
+- **定时 Prompt**：通过 `schedule` 工具和 `/schedule` 管理持久化的单次、周期与 cron
+  任务；对应工作目录的主会话保持打开时，由独立子会话执行。
 - **Pi v4 会话**：支持延迟首次落盘、`/resume`、队列、分支/树语义、压缩、上下文修复、
   recovery reduction，以及非破坏式导入 Pi coding-agent v1/v2/v3 会话。
 - **项目 Trust**：使用 `<agent-dir>/trust.json` 保存最近祖先决策，统一控制项目 settings、
@@ -101,6 +108,9 @@ pi --print "summarize this repository"
 # 输出 NDJSON 产品事件
 pi --json "list the Rust crates"
 
+# 随 prompt 附加图片
+pi --print @before.png @after.png "Compare these screenshots"
+
 # 启动双向 Pi stdin/stdout RPC adapter
 pi --mode rpc
 
@@ -117,6 +127,11 @@ pi --print '!!git status --short'
 # 在指定项目目录启动
 pi --cwd /path/to/project
 ```
+
+图片附件支持 PNG、JPEG、GIF、WebP 和 BMP，BMP 会转换为 PNG。TUI 中的 `Ctrl+V`
+会把本机剪贴板图片保存为临时 PNG，并将路径插入输入框供 Agent 读取。SSH 环境不能读取
+本机原生剪贴板，可改用启动参数 `@file` 或粘贴文件路径。图片设置及输入行为见
+[CLI 使用说明](apps/pi-cli/README.md#interactive-workflow)；暂不支持音频和视频附件。
 
 查看全部 CLI 参数：
 
@@ -249,10 +264,16 @@ TUI 中使用 `/model` 查看和切换当前 generation 注册的模型。修改
 ├── auth.json            # Pi 兼容的 API key 与 OAuth 凭据
 ├── models.json          # Provider 与模型目录
 ├── settings.json        # 全局产品设置
+├── memory.json          # 记忆 Provider 选择与配置（可选）
 ├── trust.json           # 项目 Trust 决策
 ├── SYSTEM.md            # 全局系统 prompt（可选）
 ├── APPEND_SYSTEM.md     # 全局追加 prompt（可选）
 ├── skills/              # 全局 Skills
+├── pi-hermes-memory/    # 默认 Hermes 记忆目录
+│   ├── MEMORY.md        # 持久化事实和笔记
+│   ├── USER.md          # 用户偏好和信息
+│   └── skills/          # 记忆插件创建的全局 Skills
+├── schedule/            # 持久化定时 Prompt 与执行历史
 ├── prompts/             # 全局 Markdown prompt templates
 ├── extensions/          # 全局 JS/TS extensions
 ├── plugins.json         # 有序的原生插件意图
@@ -273,8 +294,10 @@ project/
 ├── AGENTS.md            # 项目上下文；不受 Trust gating
 ├── CLAUDE.md            # 项目上下文；不受 Trust gating
 ├── .agents/skills/      # 从 cwd 向 git root 搜索
+├── .hermes/skills/      # 可信 Git 根目录下的记忆插件 Skills
 └── .pi/
     ├── settings.json    # 项目 extensions 与 packages
+    ├── schedule/        # 可信 cwd 下的项目定时 Prompt
     ├── SYSTEM.md
     ├── APPEND_SYSTEM.md
     ├── prompts/         # 项目 Markdown prompt templates
@@ -303,6 +326,92 @@ project/
 
 > Project Trust 不是文件系统沙箱。与 Pi 一样，文件工具支持 cwd 相对路径、绝对路径、
 > `~`、`file://` 和越过 cwd 的父级路径；实际边界是运行进程的操作系统权限。
+
+## 记忆与 Skill 整理
+
+Hermes 是默认记忆 Provider。`<agent-dir>/pi-hermes-memory/` 下的 `MEMORY.md` 和
+`USER.md` 保存持久化事实和用户偏好，每个会话启动时读取冻结的 prompt 快照。写入成功后
+立即持久化，但不会替换当前会话的快照。`memory` 工具面向全局记忆或用户笔记，不写入
+项目专属记忆文件。后台 review 可以保存已验证的经验，也可通过 `/refine [focus]`
+显式触发。这些是受 Hermes 启发的 pi-rs 产品能力，不属于 Pi 内置行为的兼容性承诺。
+
+可复用流程仍保留 Skill Scope。`skill_manage` 可以把通用流程写到全局 Hermes Skill
+目录，或通过 `scope=project` 把仓库专属流程写到 `<git-root>/.hermes/skills`；项目访问
+需要已有的 Trust 决策。Curator 独立维护这两个库，不扫描其他项目、`.agents/skills`，
+也不整理 bundled 或外部 Skill 根目录。
+
+只有具备有效 `curator.json`、标记为托管、未 pin 且内容与最后记录的哈希一致的 Skill
+才会被自动整理。后台创建的 Skill 默认托管，前台创建的 Skill 保持用户管理。旧 metadata
+不做迁移，也不会自动接管；只有确定要授予 Curator 管理权限时，才使用
+`/curator adopt <skill-id>`。
+
+```text
+/curator status
+/curator run --scope project --dry-run
+/curator run --scope project --consolidate
+/curator pin project:my-repo:release
+/curator backup --scope project
+/curator rollback --scope project --list
+/curator rollback --scope project
+```
+
+查看状态和执行整理默认覆盖两个可用 Scope，可用 `--scope global|project|all` 选择范围。
+裸 Skill 名称和裸 rollback 默认指向全局；`project:<repo-name>:<skill-name>` 标识当前
+项目的 Skill。活动记录、暂停状态、归档、备份和回滚均按根目录隔离，合并不会跨 Scope。
+创建、归档、恢复或回滚 Skill 后，用 `/reload` 刷新 Skill 目录。
+
+自动 Curator 仅在保持打开且空闲的用户会话中检查：默认每七天整理一次，要求至少空闲
+两小时；连续 30 天无活动的 Skill 标记为 stale，90 天后可归档。模型辅助合并默认关闭。
+可在 `<agent-dir>/memory.json` 中配置，例如：
+
+```json
+{
+  "version": 1,
+  "provider": "hermes",
+  "providers": {
+    "hermes": {
+      "curator": {
+        "enabled": true,
+        "intervalHours": 168,
+        "minIdleHours": 2,
+        "consolidate": false
+      }
+    }
+  }
+}
+```
+
+如果 Agent 目录中存在 `hermes-memory-config.json`，它优先于上述 Hermes Provider
+配置；`memoryDir` 可以修改全局记忆目录。在 `memory.json` 顶层设置 `enabled: false`
+可禁用记忆 Provider。原 `local` Provider 及其评测 crate 已移除；仍选择 `local` 的旧配置
+需要改为 `hermes` 或禁用。
+
+独立的 `pi curator ...` 支持相同维护参数。检查、本地整理和备份/恢复不需要模型，
+`--consolidate` 则使用正常的 Provider 配置。命令行显式预览指定项目：
+
+```bash
+pi --cwd /path/to/project --approve curator run --scope project --dry-run
+```
+
+Review 策略和安全边界详见[记忆系统架构](docs/architecture.md#memory-systems)。
+
+## 定时 Prompt
+
+通过 `schedule` 工具或 `/schedule` 创建自包含 Prompt，支持相对延迟、周期、RFC3339
+时间戳和五字段 cron 表达式：
+
+```text
+/schedule create {"name":"Repository summary","schedule":"every 30m","scope":"project","prompt":"Summarize commits from the last 30 minutes in this repository.","max_runs":3}
+/schedule list project
+/schedule history <job-id> project
+/schedule pause <job-id> project
+```
+
+需要在任务的工作目录中保持一个 Pi 主会话打开；会话空闲且无排队输入时才调度。每次任务
+运行在全新的隔离会话中，不继承父会话历史。默认使用全局存储，项目存储需要 Trust，
+但两种 Scope 都只运行与当前打开 cwd 匹配的任务。关闭所有匹配会话后停止执行，它不是
+操作系统后台服务。错过的周期合并执行一次，不补跑积压任务；无法确认结果的中断尝试
+不会自动重试。时区、限制、存储和恢复机制见[定时任务说明](plugins/features/pi-plugin-schedule/README.md)。
 
 ## Native Plugin Package
 
@@ -350,6 +459,9 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 /help                       显示命令
 /quit                       退出
 /skill:<name> [task]        显式调用已发现 Skill
+/refine [focus]            回顾对话并提炼可复用经验（Hermes）
+/curator [arguments]       检查和维护不同 Scope 的 Hermes Skills
+/schedule [action]         管理持久化定时 Prompt
 ```
 
 输入 `/` 后可用上下键选择命令，`Tab` 补全。完整快捷键见
@@ -370,8 +482,10 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 
 | 目录                                             | 职责                                                                |
 | ------------------------------------------------ | ------------------------------------------------------------------- |
-| `apps/pi-cli`                                    | CLI、TUI、终端生命周期、Project Trust 和产品装配                    |
+| `apps/pi-cli`                                    | CLI、TUI 和终端生命周期 Adapter                                    |
+| `crates/pi-sdk`                                  | CLI、桌面与嵌入式 Adapter 共用的无界面产品装配                      |
 | `crates/pi-core`                                 | 强类型 contracts、registries 和插件 drivers                         |
+| `crates/pi-media`                                | 共享图片校验、缩放和格式转换                                        |
 | `crates/pi-agent`                                | Agent façade、agent loop、stream assembly 和工具调度                |
 | `crates/pi-runtime`                              | generation 构建、prompt 装配和原子 reload                           |
 | `crates/pi-session`                              | Pi v4 JSONL、树/分支、压缩、恢复 reducer 和 session runtime         |
@@ -387,13 +501,27 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 | `crates/pi-js-plugin` / `bindings/pi-napi`       | 强类型 JS lifecycle adapter 与 Node/NAPI 边界                       |
 | `packages/pi`                                    | Node 启动层、Pi extension 发现、Jiti loader 和 callback generations |
 | `plugins/`                                       | Prompt/Skill features、Provider catalog 和独立生产工具插件          |
+| `plugins/features/pi-plugin-memory-hermes`       | 持久化记忆、后台学习和分 Scope 的 Skill 整理                         |
+| `plugins/features/pi-plugin-schedule`            | 持久化定时 Prompt 与隔离会话调度                                    |
 | `legacy/pi`                                      | 当前 TypeScript Pi 行为参照                                         |
 | `e2e`                                            | runtime acceptance、黑盒产品 E2E 与示例项目                         |
+| `scripts/perf`                                   | Rust/TypeScript 性能测量和离线看板                                  |
 
 依赖保持向内：核心 contracts 不拥有终端、文件发现、会话存储或厂商路由策略。详细设计、
 hook 顺序和持久化不变量见 [docs/architecture.md](docs/architecture.md)。
 
 ## 开发与验证
+
+一条命令运行 Rust / TypeScript 性能测试并打开离线看板：
+
+```bash
+./scripts/bench-perf --open
+```
+
+性能测试要求 macOS/Linux 和 Node.js 22.19 或更新版本，比较 TypeScript 时需要准备本地 Pi
+checkout。快速验证可加 `--quick`；没有 TypeScript oracle 时使用 `--backend rust`。
+前置条件、测试口径、参数以及 JSON/CSV 原始数据输出见
+[scripts/perf/README.md](scripts/perf/README.md)。
 
 Pi 核心行为的测试子集及其与 TypeScript oracle 的映射见
 [docs/pi-core-test-matrix.md](docs/pi-core-test-matrix.md)。聚焦运行入口是：

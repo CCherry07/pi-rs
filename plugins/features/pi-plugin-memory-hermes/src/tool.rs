@@ -500,9 +500,15 @@ impl HermesMemoryTool {
         input: &Value,
     ) -> Result<ToolResult, ToolError> {
         let review = run.and_then(|run| run.review.as_ref());
-        crate::skill_review::execute(context, &self.store, review, input, |input| {
-            skill_manage(&self.store, input)
-        })
+        crate::skill_review::execute(
+            context,
+            &self.store,
+            review,
+            run.map_or_default(|r| r.kind),
+            run.and_then(|r| r.curator_target.as_ref()),
+            input,
+            |input| skill_manage(&self.store, input),
+        )
     }
 }
 
@@ -794,7 +800,18 @@ fn skill_input_error(error: impl Into<String>) -> ToolResult {
 }
 
 fn render_skill_document(skill: &SkillDocument) -> ToolResult {
-    let details = json!({"success":true,"skillId":skill.id,"scope":skill.scope.as_str(),"fileName":skill.file_name,"path":skill.path,"projectName":skill.project_name,"name":skill.name,"displayName":skill.display_name,"description":skill.description,"created":skill.created,"updated":skill.updated,"version":skill.version,"body":skill.body});
+    let supporting_files = skill
+        .path
+        .parent()
+        .and_then(|dir| crate::curator::metadata::fingerprint(dir).ok())
+        .map(|files| {
+            files
+                .into_keys()
+                .filter(|path| path != "SKILL.md")
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let details = json!({"success":true,"skillId":skill.id,"scope":skill.scope.as_str(),"fileName":skill.file_name,"path":skill.path,"projectName":skill.project_name,"name":skill.name,"displayName":skill.display_name,"description":skill.description,"created":skill.created,"updated":skill.updated,"version":skill.version,"body":skill.body,"supportingFiles":supporting_files});
     tool_json(details.to_string(), details, false)
 }
 

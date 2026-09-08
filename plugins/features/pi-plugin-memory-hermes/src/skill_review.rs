@@ -1,8 +1,9 @@
 //! Autonomous skill writes have provenance and read-before-write checks.
+use crate::curator::metadata::{self, Metadata};
+use crate::execution::HermesRunKind;
 use crate::{execution::ReviewObservations, store::HermesMemoryStore};
 use pi_core::{ToolContext, ToolError, ToolResult};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path};
@@ -28,14 +29,188 @@ fn atomic(path: &Path, content: &[u8]) -> Result<(), ToolError> {
 fn io(error: std::io::Error) -> ToolError {
     ToolError::Execution(error.to_string())
 }
-fn hash(path: &Path) -> Result<String, ToolError> {
-    Ok(format!("{:x}", Sha256::digest(fs::read(path).map_err(io)?)))
+
+fn resolve_skill(
+    store: &HermesMemoryStore,
+    target: Option<&crate::curator::scope::Target>,
+    id: &str,
+) -> Option<crate::skills::SkillDocument> {
+    let matches_scope = |d: &crate::skills::SkillDocument| {
+        target.is_none_or(|t| {
+            d.scope == t.scope && d.path.parent().and_then(Path::parent) == Some(t.root.as_path())
+        })
+    };
+    store.view_skill(id).ok().filter(matches_scope).or_else(|| {
+        store
+            .list_skills()
+            .ok()?
+            .into_iter()
+            .find(|d| d.name == id && matches_scope(d))
+    })
 }
 
 pub(crate) fn execute(
     context: &ToolContext,
     store: &HermesMemoryStore,
     review: Option<&ReviewObservations>,
+    kind: HermesRunKind,
+    target: Option<&crate::curator::scope::Target>,
+    input: &Value,
+    normal: impl FnOnce(&Value) -> Result<ToolResult, ToolError>,
+) -> Result<ToolResult, ToolError> {
+    if matches!(kind, HermesRunKind::Curator { .. }) && target.is_none() {
+        return Ok(error("Curator execution has no bound scope"));
+    }
+    let mut input = input.clone();
+    if input.get("action").and_then(Value::as_str) == Some("create") && input.get("scope").is_none()
+    {
+        input["scope"] = json!(target.map_or("global", |t| t.scope.as_str()));
+    }
+    let input = &input;
+    let action = input.get("action").and_then(Value::as_str).unwrap_or("");
+    if kind == (HermesRunKind::Curator { dry_run: true }) && action != "view" {
+        return Ok(error("Curator preview is read-only"));
+    }
+    let resolve = || {
+        if action == "create" {
+            return None;
+        }
+        let id = input
+            .get("skill_id")
+            .or_else(|| input.get("name"))
+            .and_then(Value::as_str)?;
+        resolve_skill(store, target, id)
+    };
+    let document = resolve();
+    let scope = document.as_ref().map(|d| d.scope).unwrap_or_else(|| {
+        if input.get("scope").and_then(Value::as_str) == Some("project") {
+            crate::skills::SkillScope::Project
+        } else {
+            target.map_or(crate::skills::SkillScope::Global, |t| t.scope)
+        }
+    });
+    if let Some(target) = target {
+        if input
+            .get("scope")
+            .and_then(Value::as_str)
+            .is_some_and(|scope| scope != target.scope.as_str())
+        {
+            return Ok(error(
+                "Requested scope is outside the Curator's bound scope",
+            ));
+        }
+        if scope != target.scope || store.skill_root(scope).ok().as_ref() != Some(&target.root) {
+            return Ok(error(
+                "Curator can access only its bound scope in the current trusted checkout",
+            ));
+        }
+        // An explicit ID must never become a bare-name lookup in another scope.
+        if input
+            .get("skill_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| {
+                (id.starts_with("global:") || id.starts_with("project:"))
+                    && !id.starts_with(&format!("{}:", target.key))
+            })
+        {
+            return Ok(error("Skill ID is outside the Curator's bound scope"));
+        }
+    }
+    let writing = !matches!(action, "view" | "");
+    let root = store
+        .skill_root(scope)
+        .map_err(|e| ToolError::Execution(e.to_string()))?;
+    let _gate = if writing {
+        Some(metadata::content_lock(&root).map_err(io)?)
+    } else {
+        None
+    };
+    // Re-resolve under the gate. Every publication rechecks the exact package.
+    let document = resolve();
+    let before = document.as_ref().and_then(|d| {
+        let directory = d.path.parent()?;
+        Metadata::read(directory)
+            .ok()
+            .filter(|m| m.unchanged(directory))
+    });
+    if action == "delete"
+        && document.as_ref().is_some_and(|d| {
+            Metadata::read(d.path.parent().expect("skill directory")).is_ok_and(|m| m.pinned)
+        })
+    {
+        return Ok(error(
+            "Pinned skills cannot be deleted; unpin explicitly first",
+        ));
+    }
+    if matches!(kind, HermesRunKind::Curator { .. })
+        && let Some(d) = &document
+        && !is_agent_owned(&d.path)
+    {
+        return Ok(error(
+            "Curator can access only unpinned managed skills with unchanged content",
+        ));
+    }
+    let result = execute_inner(context, store, review, kind, target, input, normal)?;
+    if !result.is_error {
+        if action == "create" {
+            if let Some(path) = result
+                .details
+                .as_ref()
+                .and_then(|v| v.get("path"))
+                .and_then(Value::as_str)
+            {
+                let directory = Path::new(path).parent().expect("skill directory");
+                let managed = kind != HermesRunKind::Foreground;
+                Metadata::new(
+                    directory,
+                    managed,
+                    if managed { "agent" } else { "user" },
+                    chrono::Utc::now().timestamp_millis(),
+                )
+                .map_err(io)?
+                .save(directory)
+                .map_err(io)?;
+            }
+        } else if let Some(document) = document {
+            let directory = document.path.parent().expect("skill directory");
+            if directory.exists() && kind != (HermesRunKind::Curator { dry_run: true }) {
+                let update = || -> std::io::Result<()> {
+                    if let Some(mut m) = if writing {
+                        before
+                    } else {
+                        Metadata::read(directory).ok()
+                    } {
+                        if writing {
+                            m.patch_count = m.patch_count.saturating_add(1);
+                            m.files = metadata::fingerprint(directory)?;
+                        } else {
+                            m.view_count = m.view_count.saturating_add(1);
+                        }
+                        // Maintenance reads must not make an idle skill immortal.
+                        if kind == HermesRunKind::Foreground || writing {
+                            m.last_activity_at = chrono::Utc::now().timestamp_millis();
+                        }
+                        m.save(directory)?;
+                    }
+                    Ok(())
+                };
+                if writing {
+                    update().map_err(io)?;
+                } else if let Ok(_read_gate) = metadata::content_lock(&root) {
+                    let _ = update();
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn execute_inner(
+    context: &ToolContext,
+    store: &HermesMemoryStore,
+    review: Option<&ReviewObservations>,
+    kind: HermesRunKind,
+    target: Option<&crate::curator::scope::Target>,
     input: &Value,
     normal: impl FnOnce(&Value) -> Result<ToolResult, ToolError>,
 ) -> Result<ToolResult, ToolError> {
@@ -50,20 +225,26 @@ pub(crate) fn execute(
         .get("skill_id")
         .or_else(|| input.get("name"))
         .and_then(Value::as_str);
-    let document = id.and_then(|id| {
-        store.view_skill(id).ok().or_else(|| {
-            store
-                .list_skills()
-                .ok()?
-                .into_iter()
-                .find(|skill| skill.name == id)
-        })
-    });
+    let document = id.and_then(|id| resolve_skill(store, target, id));
+    let requested_id = id.is_some();
     if let Some(document) = &document {
         input["skill_id"] = json!(document.id);
     }
-    if action == "create" && input.get("scope").is_none() {
-        input["scope"] = json!("global");
+    if matches!(kind, HermesRunKind::Curator { .. }) && action == "view" && document.is_none() {
+        if requested_id {
+            return Ok(error("Skill not found"));
+        }
+        let skills = store
+            .list_skills()
+            .map_err(|e| ToolError::Execution(e.to_string()))?
+            .into_iter()
+            .filter(|d| target.is_some_and(|t| d.scope == t.scope) && is_agent_owned(&d.path))
+            .map(|d| json!({"name":d.name,"skillId":d.id,"description":d.description}))
+            .collect::<Vec<_>>();
+        let details = json!({"success":true,"skills":skills});
+        let mut result = ToolResult::text(details.to_string());
+        result.details = Some(details);
+        return Ok(result);
     }
     // Hermes accepts a complete SKILL.md. Adapt its frontmatter to Pi's owned document.
     if matches!(action.as_str(), "create" | "edit" | "update")
@@ -142,9 +323,6 @@ pub(crate) fn execute(
                         .map_err(ToolError::Execution)?;
                 }
                 atomic(&target, updated.as_bytes())?;
-                if agent_owned {
-                    record(&document.path)?;
-                }
                 return Ok(changed("Skill patched"));
             }
             "delete" if background => {
@@ -158,25 +336,56 @@ pub(crate) fn execute(
                         .list_skills()
                         .map_err(|e| ToolError::Execution(e.to_string()))?
                         .iter()
-                        .any(|d| d.name == absorbed || d.id == absorbed)
+                        .any(|d| {
+                            (d.name == absorbed || d.id == absorbed)
+                                && d.scope == document.scope
+                                && is_agent_owned(&d.path)
+                        })
                 {
                     return Ok(error(
                         "Autonomous deletion requires an existing different absorbed_into skill; use verified consolidation.",
                     ));
                 }
-                let directory = document.path.parent().expect("skill directory");
-                let archive = directory
-                    .parent()
-                    .and_then(Path::parent)
-                    .ok_or_else(|| ToolError::Execution("Invalid skill root".into()))?
-                    .join("skill-archive");
-                fs::create_dir_all(&archive).map_err(io)?;
-                fs::rename(
-                    directory,
-                    archive.join(format!("{}-{}", document.name, uuid::Uuid::new_v4())),
-                )
-                .map_err(io)?;
-                return Ok(changed("Skill archived after consolidation"));
+                if matches!(kind, HermesRunKind::Curator { .. }) {
+                    let destination = store
+                        .list_skills()
+                        .map_err(|e| ToolError::Execution(e.to_string()))?
+                        .into_iter()
+                        .find(|d| {
+                            (d.name == absorbed || d.id == absorbed)
+                                && d.scope == document.scope
+                                && is_agent_owned(&d.path)
+                        })
+                        .expect("validated destination");
+                    let source_files =
+                        metadata::fingerprint(document.path.parent().expect("skill directory"))
+                            .map_err(io)?;
+                    let destination_files =
+                        metadata::fingerprint(destination.path.parent().expect("skill directory"))
+                            .map_err(io)?;
+                    if source_files.iter().any(|(path, digest)| {
+                        path != "SKILL.md"
+                            && !destination_files.values().any(|value| value == digest)
+                    }) {
+                        return Ok(error(
+                            "Preserve every supporting file in the destination before retiring its source Skill; skip consolidation if an asset cannot be copied safely.",
+                        ));
+                    }
+                }
+                let root = store
+                    .skill_root(document.scope)
+                    .map_err(|e| ToolError::Execution(e.to_string()))?;
+                let _store_lock = metadata::lock(&root, ".skill-store.lock", true).map_err(io)?;
+                let curator = crate::curator::Curator::new(root, crate::curator::Config::default());
+                let archive_id = curator
+                    .archive_locked(&document.name, "consolidation", Some(absorbed))
+                    .map_err(io)?;
+                let mut result = changed("Skill archived after consolidation");
+                if let Some(details) = &mut result.details {
+                    details["archiveId"] = json!(archive_id);
+                    details["absorbedInto"] = json!(absorbed);
+                }
+                return Ok(result);
             }
             "remove_file" => {
                 if target == document.path {
@@ -214,11 +423,6 @@ pub(crate) fn execute(
         && let Some(details) = &mut result.details
     {
         details["_change"] = json!(format!("Skill {action}"));
-        if (action == "create" || (agent_owned && action != "delete"))
-            && let Some(path) = details.get("path").and_then(Value::as_str)
-        {
-            record(Path::new(path))?;
-        }
     }
     Ok(result)
 }
@@ -236,13 +440,16 @@ fn supporting_target(path: &Path, input: &Value) -> Result<std::path::PathBuf, T
     let Some(relative) = input.get("file_path").and_then(Value::as_str) else {
         return Ok(path.to_path_buf());
     };
+    if relative.eq_ignore_ascii_case("SKILL.md") {
+        return Ok(path.to_path_buf());
+    }
     if relative.is_empty()
         || Path::new(relative)
             .components()
             .any(|c| !matches!(c, Component::Normal(_)))
         || Path::new(relative)
             .file_name()
-            .is_some_and(|name| name == "curator.json")
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("curator.json"))
     {
         return Err(ToolError::InvalidArguments(
             "Invalid supporting-file path".into(),
@@ -299,22 +506,6 @@ fn changed(label: &str) -> ToolResult {
 }
 
 fn is_agent_owned(path: &Path) -> bool {
-    let provenance: Value = fs::read(path.with_file_name("curator.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or(Value::Null);
-    provenance.get("created_by").and_then(Value::as_str) == Some("agent")
-        && provenance.get("pinned").and_then(Value::as_bool) != Some(true)
-        && hash(path).is_ok_and(|hash| {
-            provenance.get("sha256").and_then(Value::as_str) == Some(hash.as_str())
-        })
-}
-
-fn record(path: &Path) -> Result<(), ToolError> {
-    atomic(
-        &path.with_file_name("curator.json"),
-        json!({"created_by":"agent","pinned":false,"sha256":hash(path)?})
-            .to_string()
-            .as_bytes(),
-    )
+    path.parent()
+        .is_some_and(|directory| Metadata::read(directory).is_ok_and(|m| m.writable(directory)))
 }

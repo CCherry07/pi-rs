@@ -3,10 +3,13 @@
 > 调研快照：2026-09-02。本文只采用论文原文、ACL Anthology、PMLR、NeurIPS Proceedings、
 > OpenReview/ICLR、AAAI Proceedings 和 arXiv 作者稿等一手来源。论文结果来自各自不同的 benchmark、
 > reader 和预算，不能横向当成统一排行榜。
+>
+> 历史说明（2026-09-08）：本文评估的是现已移除的 `pi-plugin-memory-local` 与
+> `pi-memory-eval`。下述代码路径、实现状态和评测数据仅作为研究记录，不代表当前产品能力。
 
 ## 结论
 
-`pi-rs` 当前的方向并不落后：显式授权的 `MemoryRecord` 是可审计的语义记忆，Pi v4 JSONL 是事实来源，
+在这份快照中，`pi-rs` 的方向并不落后：显式授权的 `MemoryRecord` 是可审计的语义记忆，Pi v4 JSONL 是事实来源，
 SQLite/FTS5 与 dense/RRF 是可重建索引，本地 Provider 另有原始会话索引。最近论文真正值得引入的，不是
 立刻把 canonical record 换成一张由 LLM 自动维护的图，而是补齐三类能力：
 
@@ -23,10 +26,7 @@ A-MEM、HippoRAG 2 和 H-MEM 的图/层级结构适合做成 canonical records �
 
 ## 1. 与当前代码的对应关系
 
-当前的核心数据和实现见
-[`types.rs`](../../plugins/features/pi-plugin-memory-local/src/types.rs)、
-[`storage/mod.rs`](../../plugins/features/pi-plugin-memory-local/src/storage/mod.rs) 和
-[`ranking.rs`](../../plugins/features/pi-plugin-memory-local/src/ranking.rs)：
+当时的核心数据和实现位于已移除的 `pi-plugin-memory-local` crate：
 
 - `MemoryRecord` 已有 `scope`、`kind`、原始 session/entry/tool-call provenance、证据说明、写入时间和
   `supersedes`；`MemoryMutation` 只有显式 `Remember` 与 `Forget`。

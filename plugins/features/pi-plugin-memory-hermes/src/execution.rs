@@ -49,13 +49,31 @@ impl HermesRuns {
 
 #[derive(Default)]
 pub(crate) struct HermesRunState {
+    pub(crate) kind: HermesRunKind,
+    pub(crate) curator_target: Option<crate::curator::scope::Target>,
     pub(crate) consolidation: ConsolidationBudget,
     pub(crate) review: Option<ReviewObservations>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum HermesRunKind {
+    #[default]
+    Foreground,
+    Review,
+    Curator {
+        dry_run: bool,
+    },
+}
+
 impl HermesRunState {
+    #[cfg(test)]
     pub(crate) fn review() -> Self {
+        Self::with_kind(HermesRunKind::Review)
+    }
+
+    pub(crate) fn with_kind(kind: HermesRunKind) -> Self {
         Self {
+            kind,
             review: Some(ReviewObservations::default()),
             ..Self::default()
         }

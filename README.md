@@ -48,8 +48,14 @@ behavior, and being explicit whenever the Rust product diverges.
   credentials without exposing secrets in the TUI.
 - **Production tools**: `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`, `find`, `ls`, and
   bounded `subagent` delegation through isolated child sessions with Markdown-defined roles.
+- **Image input**: attach images with startup `@file` in TUI, print, or JSON mode; paste local
+  clipboard images with `Ctrl+V`. Shared image handling validates, resizes, and converts formats.
 - **Skills and prompt templates**: global and project discovery, `/skill:<name>` commands, Markdown
   prompt-template slash commands, and generation-time system prompt contributions.
+- **Hermes memory and Curator**: persistent user facts, background learning, and scoped maintenance
+  of global and trusted-project skills, with ownership checks, archives, backups, and rollback.
+- **Scheduled prompts**: persistent one-shot, interval, and cron jobs through `schedule` and
+  `/schedule`, dispatched into isolated sessions while a matching primary session remains open.
 - **Pi v4 sessions**: lazy first-response persistence, `/resume`, durable queues, branch/tree
   semantics, compaction, context repair, recovery reduction, and non-destructive import of Pi
   coding-agent v1/v2/v3 sessions.
@@ -107,6 +113,9 @@ pi --print "summarize this repository"
 # Emit NDJSON product events
 pi --json "list the Rust crates"
 
+# Attach images alongside the prompt
+pi --print @before.png @after.png "Compare these screenshots"
+
 # Start the bidirectional Pi stdin/stdout RPC adapter
 pi --mode rpc
 
@@ -132,6 +141,12 @@ pi --provider anthropic --model claude-sonnet-4-6
 export XAI_API_KEY="..."
 pi --provider xai --model grok-4.6
 ```
+
+Image attachments support PNG, JPEG, GIF, WebP, and BMP; BMP is converted to PNG. In the TUI,
+`Ctrl+V` saves a local clipboard image as a temporary PNG and inserts its path for the agent to
+read. Native clipboard access is unavailable over SSH; use startup `@file` or paste a file path
+instead. See [the CLI guide](apps/pi-cli/README.md#interactive-workflow) for image settings and
+input behavior. Audio and video attachments are not supported yet.
 
 The built-in Anthropic provider also accepts `ANTHROPIC_AUTH_TOKEN` (bearer auth), with precedence
 over `ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, and `<agent-dir>/auth.json`. Explicit `--api-key`
@@ -331,10 +346,16 @@ Default layout:
 ├── auth.json            # Pi-compatible API-key and OAuth credentials
 ├── models.json          # Provider and model catalog
 ├── settings.json        # Global product settings
+├── memory.json          # Memory provider selection and options (optional)
 ├── trust.json           # Project trust decisions
 ├── SYSTEM.md            # Optional global system prompt
 ├── APPEND_SYSTEM.md     # Optional global appended prompt
 ├── skills/              # Global skills
+├── pi-hermes-memory/    # Default Hermes memory directory
+│   ├── MEMORY.md        # Durable facts and notes
+│   ├── USER.md          # User preferences and profile
+│   └── skills/          # Global skills created by the memory plugin
+├── schedule/            # Persisted scheduled prompts and run history
 ├── prompts/             # Global Markdown prompt templates
 ├── extensions/          # Global JS/TS extensions
 ├── plugins.json         # Ordered native plugin intent
@@ -355,8 +376,10 @@ project/
 ├── AGENTS.md            # Project context; not gated by trust
 ├── CLAUDE.md            # Project context; not gated by trust
 ├── .agents/skills/      # Discovered from cwd toward the Git root
+├── .hermes/skills/      # Memory-plugin skills at the trusted Git root
 └── .pi/
     ├── settings.json    # Project extensions and packages
+    ├── schedule/        # Trusted cwd-local scheduled prompts
     ├── SYSTEM.md
     ├── APPEND_SYSTEM.md
     ├── prompts/         # Project Markdown prompt templates
@@ -387,6 +410,99 @@ Supported values are `ask`, `always`, and `never`.
 > Project trust is not a filesystem sandbox. Like Pi, filesystem tools accept cwd-relative paths,
 > absolute paths, `~`, `file://`, and parent-relative paths outside cwd. The process and operating
 > system permissions are the actual boundary.
+
+## Memory and skill curation
+
+Hermes is the default memory provider. `MEMORY.md` and `USER.md` under
+`<agent-dir>/pi-hermes-memory/` store durable facts and preferences; each session receives a frozen
+prompt snapshot. Successful writes persist immediately but do not replace that session's snapshot.
+The `memory` tool targets global memory or user notes, not project-specific memory files.
+Background reviews can save verified learning, and `/refine [focus]` starts a review explicitly.
+These are pi-rs product features inspired by Hermes, not built-in Pi compatibility guarantees.
+
+Reusable procedures remain scoped skills. `skill_manage` can create portable skills in the global
+Hermes skill root or repository-specific skills in `<git-root>/.hermes/skills` with `scope=project`.
+Project access requires the existing trust decision. Curator maintains those two libraries
+independently; it does not scan other projects, `.agents/skills`, or bundled/external skill roots.
+
+Only packages with valid `curator.json` metadata marked as managed, unpinned, and unchanged since
+the last recorded write are eligible. Background-created skills are managed; foreground-created
+skills remain user-managed. Older metadata is not migrated or automatically adopted. Use
+`/curator adopt <skill-id>` only when you intentionally grant Curator control of that skill.
+
+```text
+/curator status
+/curator run --scope project --dry-run
+/curator run --scope project --consolidate
+/curator pin project:my-repo:release
+/curator backup --scope project
+/curator rollback --scope project --list
+/curator rollback --scope project
+```
+
+Status and runs default to both available scopes; `--scope global|project|all` selects libraries.
+Bare skill names and rollback default to global, while `project:<repo-name>:<skill-name>` identifies
+a current-project skill. Activity, pause state, archives, backups, and rollback are independent per
+root, and consolidation never merges across scopes. Reload with `/reload` after creating,
+archiving, restoring, or rolling back skills to refresh the skill catalog.
+
+Automatic Curator checks run only in open, idle user sessions: by default, maintenance is due
+every seven days after at least two idle hours; skills become stale after 30 inactive days and
+eligible for archive after 90. Model-backed consolidation defaults off. Configure it through
+`<agent-dir>/memory.json`, for example:
+
+```json
+{
+  "version": 1,
+  "provider": "hermes",
+  "providers": {
+    "hermes": {
+      "curator": {
+        "enabled": true,
+        "intervalHours": 168,
+        "minIdleHours": 2,
+        "consolidate": false
+      }
+    }
+  }
+}
+```
+
+If present, `hermes-memory-config.json` in the agent directory takes precedence over the Hermes
+provider options above; `memoryDir` can change the global memory directory. Set `enabled: false`
+at the top level of `memory.json` to disable the memory provider. The former `local` provider and
+its evaluation crate have been removed; existing configurations selecting `local` must be changed
+to `hermes` or disabled.
+
+The standalone `pi curator ...` accepts the same maintenance arguments. Inspection, local pruning,
+and backup/restore need no model; `--consolidate` uses the normal provider setup. To preview a
+project explicitly from the CLI:
+
+```bash
+pi --cwd /path/to/project --approve curator run --scope project --dry-run
+```
+
+See [the memory architecture](docs/architecture.md#memory-systems) for review policy and safeguards.
+
+## Scheduled prompts
+
+Use the `schedule` tool or `/schedule` to create self-contained prompts with a relative delay,
+recurring interval, RFC3339 timestamp, or five-field cron expression:
+
+```text
+/schedule create {"name":"Repository summary","schedule":"every 30m","scope":"project","prompt":"Summarize commits from the last 30 minutes in this repository.","max_runs":3}
+/schedule list project
+/schedule history <job-id> project
+/schedule pause <job-id> project
+```
+
+Keep a primary Pi session open in the job's working directory. Jobs dispatch when that session is
+idle with no queued input and run in fresh isolated sessions without the parent conversation.
+Global storage is the default; project storage requires trust. Both scopes run only jobs matching
+the open cwd. Closing all matching sessions stops execution; this is not an OS background service.
+Missed intervals coalesce rather than replaying a backlog, and uncertain interrupted attempts are
+not automatically retried. See [the scheduling guide](plugins/features/pi-plugin-schedule/README.md)
+for time zones, limits, storage, and recovery behavior.
 
 ## Native plugin packages
 
@@ -435,6 +551,9 @@ Built-in commands include:
 /help                       Show commands
 /quit                       Exit
 /skill:<name> [task]        Invoke a discovered skill explicitly
+/refine [focus]            Review the conversation for reusable learning (Hermes)
+/curator [arguments]       Inspect and maintain scoped Hermes skill libraries
+/schedule [action]         Manage persistent scheduled prompts
 ```
 
 Type `/` and use the arrow keys to select a command; press `Tab` to complete it. See
@@ -461,6 +580,7 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 | `apps/pi-cli`                                    | CLI, TUI, and terminal lifecycle Adapter                                                  |
 | `crates/pi-sdk`                                  | Shared headless product assembly for CLI, desktop, and embedded adapters                 |
 | `crates/pi-core`                                 | Strongly typed contracts, registries, and plugin drivers                                 |
+| `crates/pi-media`                                | Shared image validation, resizing, and format conversion                               |
 | `crates/pi-agent`                                | Agent façade, agent loop, stream assembly, and tool scheduling                           |
 | `crates/pi-runtime`                              | Generation construction, prompt assembly, and atomic reload                              |
 | `crates/pi-session`                              | Pi v4 JSONL, tree/branch state, compaction, recovery reducer, and session runtime        |
@@ -476,14 +596,28 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 | `crates/pi-js-plugin` / `bindings/pi-napi`       | Typed JS lifecycle adapters and the Node/NAPI boundary                                   |
 | `packages/pi`                                    | Node launcher, Pi extension discovery, Jiti loader, and callback generations             |
 | `plugins/`                                       | Prompt/skill features, provider catalog, and independent production tool plugins         |
+| `plugins/features/pi-plugin-memory-hermes`       | Persistent memory, background learning, and scoped skill curation                       |
+| `plugins/features/pi-plugin-schedule`            | Persistent scheduled prompts and isolated-session dispatch                              |
 | `legacy/pi`                                      | Current TypeScript Pi behavioral oracle                                                  |
 | `e2e`                                            | Runtime acceptance, black-box product E2E, and example projects                          |
+| `scripts/perf`                                   | Rust/TypeScript performance measurements and an offline dashboard                       |
 
 Dependencies point inward: core contracts do not own terminal behavior, filesystem discovery,
 session storage, or vendor routing policy. See [docs/architecture.md](docs/architecture.md) for hook
 ordering, persistence invariants, and the detailed design.
 
 ## Development and validation
+
+Run the Rust / TypeScript performance suite and open its offline dashboard:
+
+```bash
+./scripts/bench-perf --open
+```
+
+The performance suite requires Node.js 22.19 or newer on macOS/Linux and a prepared local Pi
+checkout for TypeScript comparisons. Use `--quick` for a smoke run or `--backend rust` without the
+TypeScript oracle. Setup, measurement caveats, options, and raw JSON/CSV
+outputs are documented in [scripts/perf/README.md](scripts/perf/README.md).
 
 The Pi core conformance subset and its oracle mapping are documented in
 [docs/pi-core-test-matrix.md](docs/pi-core-test-matrix.md). Run that focused set with:

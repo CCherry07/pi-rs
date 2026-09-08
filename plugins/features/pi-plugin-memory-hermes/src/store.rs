@@ -276,7 +276,7 @@ impl HermesMemoryStore {
         cwd: &Path,
         project_trusted: bool,
     ) -> Vec<PathBuf> {
-        let config = HermesMemoryConfig::load(agent_dir, None);
+        let config = HermesMemoryConfig::load_profile(agent_dir);
         let mut roots = vec![config.global_dir(agent_dir).join("skills")];
         let project = detect_project(cwd);
         if project_trusted && let Some(root) = project.root {
@@ -373,14 +373,14 @@ impl HermesMemoryStore {
             }
         };
         let next_name = info.name.clone();
-        let current_name = self
+        let current_info = self
             .live
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .project
             .as_ref()
-            .and_then(|project| project.info.name.clone());
-        if current_name == next_name {
+            .map(|project| project.info.clone());
+        if current_info.as_ref() == Some(&info) {
             return Ok(next_name);
         }
         let project = if next_name.is_some() {
@@ -856,6 +856,27 @@ impl HermesMemoryStore {
             removed: mirror.removed,
             project_count,
             warnings: Vec::new(),
+        })
+    }
+
+    pub(crate) fn global_skill_root(&self) -> PathBuf {
+        self.global_dir.join("skills")
+    }
+
+    pub(crate) fn curator_targets(&self, cwd: &Path) -> Vec<crate::curator::scope::Target> {
+        crate::curator::scope::Target::discover(self.global_skill_root(), cwd, self.project_trusted)
+    }
+
+    pub(crate) fn skill_root(
+        &self,
+        scope: crate::skills::SkillScope,
+    ) -> Result<PathBuf, SkillError> {
+        self.with_skill_roots(|roots| match scope {
+            crate::skills::SkillScope::Global => Ok(roots.global_root.to_path_buf()),
+            crate::skills::SkillScope::Project => roots
+                .project_root
+                .map(Path::to_path_buf)
+                .ok_or(SkillError::ProjectUnavailable),
         })
     }
 

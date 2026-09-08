@@ -1,0 +1,28 @@
+[package]
+name = "pi-plugin-schedule"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+chrono = "0.4.42"
+chrono-tz = "0.10.4"
+croner = "4.0.0"
+fs2 = "0.4.3"
+pi-core.workspace = true
+pi-session.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3.21.0"
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid = { version = "1.18.1", features = ["v7"] }
+
+[dev-dependencies]
+pi-agent.workspace = true
+pi-runtime.workspace = true
+pi-test-support.workspace = true

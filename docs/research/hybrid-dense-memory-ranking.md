@@ -2,6 +2,9 @@
 
 > 调研快照：2026-09-02。本文只引用原论文、官方会议页面或作者公开版本，并区分
 > **论文直接结论**与**针对 `pi-rs` 的工程推断**。
+>
+> 历史说明（2026-09-08）：本文记录的 `pi-plugin-memory-local`、`pi-memory-eval`、实现路径和
+> 评测结果均已从产品中移除，仅保留为研究快照。
 
 ## 结论
 
@@ -18,15 +21,15 @@
 
 ## Raw RRF 为什么需要改
 
-改动前，[`ranking.rs`](../../plugins/features/pi-plugin-memory-local/src/ranking.rs) 中的 lexical `rerank` 会计算词项覆盖、
+改动前，已移除 local memory crate 的 `ranking.rs` 中 lexical `rerank` 会计算词项覆盖、
 短语顺序、code atom 和 sparse rank，然后执行 greedy diversity 与相对 cutoff；当时的
 `fuse_sparse_dense` 只对两个名次列表计算 RRF。随后
-[`storage/mod.rs`](../../plugins/features/pi-plugin-memory-local/src/storage/mod.rs) 的 `SparseDenseRrf` 分支直接返回该 RRF 列表，因此
+其 `storage/mod.rs` 的 `SparseDenseRrf` 分支直接返回该 RRF 列表，因此
 绕过了 lexical 的 confidence 与 diversity policy。
 
 这不是抽象风险。当前固定 seed eval 显示，raw RRF 把 holdout Recall@5 从 `0.767` 提高到 `0.867`，
 并补齐跨语言与 multi-hop，但把 dev Recall@5 从 `0.967` 降到 `0.833`，同时在 dev/holdout 引入
-`3/2` 个 distractor；详见 [`evals/pi-memory/README.md`](../../evals/pi-memory/README.md)。这与论文中
+`3/2` 个 distractor；这些结果来自现已移除的 `pi-memory-eval`。这与论文中
 “不同 retriever 互补，但无条件 fusion 也可能退化”的观察一致。
 
 现在的 `fuse_sparse_dense` 先运行 lexical `rerank` 得到 protected core，再对 BM25/dense 并集计算

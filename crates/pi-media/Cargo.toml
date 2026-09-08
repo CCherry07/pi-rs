@@ -1,0 +1,13 @@
+[package]
+name = "pi-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+base64 = "0.22.1"
+image = { version = "0.25.8", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+pi-core.workspace = true
+thiserror.workspace = true

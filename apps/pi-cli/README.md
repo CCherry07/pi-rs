@@ -163,6 +163,50 @@ pi --print '!!cargo test -p pi-core'
 
 ## Interactive workflow
 
+Curator maintains global Hermes skills and skills managed by the memory plugin under the current
+trusted Git checkout's `.hermes/skills`. Inspect both with `/curator status`; preview maintenance
+with `/curator run --dry-run`. Select one library with `--scope global` or `--scope project`:
+
+```text
+/curator run --scope project --dry-run
+/curator run --scope project --consolidate
+/curator adopt project:my-repo:release
+/curator pin project:my-repo:release
+/curator list-archived --scope project
+/curator rollback --scope project --list
+/curator rollback --scope project
+```
+
+The standalone `pi curator ...` accepts the same arguments and uses the existing project-trust
+policy. Local maintenance needs no model. Bare skill names and rollback default to global;
+status/run default to both available scopes. Archive and backup IDs for projects include their
+scope so they can be passed directly to `restore` or `rollback --id`. Each library has independent
+pause state, archives and backups; consolidation stays inside one scope. Handwritten, pinned or
+externally edited skills are protected unless explicitly adopted/unpinned as applicable.
+
+Attach image files at startup using `@file` in interactive, print or JSON mode:
+
+```bash
+pi @screenshot.png "Explain this error"
+pi --print @before.png @after.png "Compare these screenshots"
+pi --json '@screen shot.png'
+printf 'Context:\n' | pi --print @screenshot.png "Investigate"
+```
+
+PNG, JPEG, GIF, WebP and BMP are detected from file contents. Images normally fit within
+2000×2000 and the inline encoded-size limit; BMP is converted to PNG. `images.autoResize: false`
+in the effective settings disables resizing. `images.blockImages` retains its provider-input
+filtering behavior. Text files retain Pi's `<file>` markup and BOM handling, and piped text is
+combined before file references and the prompt. Empty files are skipped; malformed detected
+images produce visible omission notices.
+
+In the TUI, `Ctrl+V` reads an image or text from the local system clipboard. Following current Pi,
+an image is saved as a temporary PNG and its path is inserted into the composer for the agent to
+read. These files remain after exit so saved path references keep working. Terminal drag/drop
+and normal paste can also insert file paths. Native clipboard reads depend on the OS/session and
+are unavailable over SSH; use terminal text/path paste or startup `@file` there. Audio and video
+attachments are not implemented yet.
+
 While the agent is idle, `Enter` submits a new prompt. While it is working, `Enter` sends steering
 input into the active turn and `Alt+Enter` queues a follow-up for the next turn. Tool calls, provider
 errors, queued input, compaction, and session changes remain visible in the same transcript.
@@ -194,7 +238,6 @@ Common commands:
 | `/tree`                       | Navigate the current session tree                                     |
 | `/name [name]`                | Show or set the session name                                          |
 | `/session`                    | Show session path, ID, messages, tokens, and cost                     |
-| `/memory-local-*`             | Inspect, search, or rebuild the bundled local-memory index             |
 | `/reload`                     | Atomically rebuild plugins, models, resources, and session extensions |
 | `/trust`                      | Review or change trust for the current project                        |
 | `/copy`                       | Copy the last completed assistant response                            |
@@ -216,6 +259,7 @@ Key bindings:
 | `Enter`                  | Complete a selected command, submit while idle, or steer while running |
 | `Alt+Enter`              | Queue a follow-up message                                              |
 | `Ctrl+J`                 | Insert a newline                                                       |
+| `Ctrl+V`                 | Paste a local clipboard image path or text                             |
 | `Up` / `Down`            | Select a command or browse input history                               |
 | `Tab`                    | Complete the selected command or skill                                 |
 | `PageUp` / `PageDown`    | Scroll the transcript                                                  |
@@ -451,13 +495,51 @@ window metadata disables this optimization, not the review. Ordinary managed sub
 automatic memory/skill reviews (including opt-in lifecycle flushes), while keeping memory injection
 and normal memory/skill tools. Reload and nested delegation preserve that distinction.
 
-Skills created through the tool are marked agent-owned. Background modifications require
-agent ownership, no external edits, no pin, and a read of the exact file in this review. Deletion
+New foreground-created skills are user-managed; background review creations are curator-managed.
+Only the new versioned provenance is recognized: old skills are not migrated or adopted automatically.
+Background modifications require managed ownership, no external edits to any package file,
+no pin, and a read of the exact file in this review. Deletion
 requires verified consolidation into another skill and archives the original. Skills are stored
 under `<agent-dir>/pi-hermes-memory/skills/<slug>/SKILL.md`. Explicit project-scope creations use
 the active Git checkout's `.hermes/skills/<slug>/SKILL.md`; `.agents/skills` is also discovered as
 a cross-tool repository skill root. Repository skill loading and mutation require Pi project
 trust. Reload before using a newly created `/skill:<name>` command.
+
+Curator maintains the global Hermes-managed skill library separately from conversation reviews.
+It never prunes bundled/hub, external, project, pinned or user-owned skills. It runs in an idle
+user session (default: once per 168 hours, at least 2 hours idle), marks skills stale after 30
+inactive days, and recoverably archives them after 90 days. First use only initializes the
+scheduler. Model-based consolidation is optional and off by default.
+
+```text
+/curator status
+/curator run --dry-run                 # no skill-library writes
+/curator run                           # local inactivity maintenance
+/curator run --consolidate             # bounded private model-assisted consolidation
+/curator adopt cargo-validation        # explicitly opt a global skill into management
+/curator pin cargo-validation          # protect it; use unpin to remove the pin
+/curator pause                         # resume re-enables automatic runs
+/curator list-archived
+/curator archive cargo-validation      # managed, unpinned, unchanged packages only
+/curator restore <archive-id>          # refuses destination collisions
+/curator backup
+/curator rollback --list
+/curator rollback --id <backup-id>
+```
+
+The same arguments work as `pi curator ...`. Non-model commands need no credentials or session.
+Configure `curator` in `hermes-memory-config.json` (or the `providers.hermes` object in
+`memory.json`): `enabled`, `intervalHours`, `minIdleHours`, `staleAfterDays`, `archiveAfterDays`,
+`consolidate`, `maxInputTokens` (200,000) and `timeoutSeconds` (120). With `consolidate: true`,
+`run` also invokes the model. Explicit commands remain available when scheduling is disabled
+or paused. Model runs use `llmModelOverride` when configured, otherwise the session model;
+they never inherit the conversation or execute general filesystem/shell tools. Model dry-runs
+still incur/account for provider usage, but do not change the skill library.
+
+Packages are archived intact, including scripts and binary assets. Pre-run snapshots and reports
+live in hidden `.backups`, `.archive` and `.reports` directories under the global skill root;
+they are not automatically deleted. Rollback takes a safeguard snapshot and refuses newer
+external edits or pins. Use `/reload` after maintenance to rebuild the immutable skill catalog.
 
 Useful retained Pi commands include `/memory-insights`, `/memory-preview-context`,
 `/memory-consolidate`, `/memory-skills`, `/memory-index-sessions`, and
@@ -471,53 +553,8 @@ instructions remain Rust product extensions, not Hermes Agent's exact CLI. Corre
 longer trigger automatic writes.
 Extra pre-compaction/shutdown flushes are opt-in, off by default.
 
-Use `"provider": "local"` to select the independent semantic-memory provider described below.
 See [architecture](../../docs/architecture.md#memory-systems) for the pinned baseline, verified
 mechanisms, and remaining Rust-specific adaptations; this is not a byte-for-byte Hermes port.
-
-## Local semantic memory
-
-The built-in `memory` tool records explicit facts, preferences, decisions, instructions, and
-summaries in the current Pi v4 session before updating a local SQLite index. It supports
-`remember`, `correct`, `forget`, `list`, and `search`; `session_search` searches user/assistant text
-from active branches of sessions in the current project. Recall is injected only into the current
-provider request and is never copied into session history. Automatic capture is off, and the tool
-must not be used for passwords, API keys, tokens, private keys, or other secrets.
-
-The derived database is `<agent-dir>/memory/memory.sqlite3`. Current-session JSONL entries of type
-`pi.memory.v1` are reconciled when a session starts and settles, so an index failure does not replace
-the journal as the commit point. The user-facing management command supports:
-
-```text
-/memory-local-status                 # health and row counts
-/memory-local-list [query]           # active records in the current scopes, with provenance
-/memory-local-search <query>         # explicit search
-/memory-local-rebuild                # atomically rebuild from configured v4 session directories
-/memory-local-model-status           # local embedding assets and active ranking mode
-/memory-local-model-install          # download, verify, backfill, and activate dense recall
-/memory-local-model-backfill         # repair active records with missing vectors
-```
-
-Rebuild reads JSONL without repairing an actively written torn tail, skips legacy v1-v3 files until
-they are imported, and leaves the old index intact if any v4 source is invalid. If SQLite detects a
-corrupt database while loading the generation, pi-rs preserves it as `memory.sqlite3.corrupt-*`,
-creates a clean derived database, and reports the recovery through `/memory-local-status`; run
-`/memory-local-rebuild` to repopulate every saved session.
-
-Dense recall never triggers an implicit first-query download. Enable it either with the explicit
-model-install command or with the local provider's automatic initialization policy.
-The pinned `intfloat/multilingual-e5-small` ONNX model and tokenizer assets occupy about 465 MiB
-under `<agent-dir>/models/embeddings`. Installation verifies every SHA-256 digest before publishing
-the ready marker. Once installed, startup uses BM25 and cosine dense candidates with reciprocal-rank
-fusion; missing or invalid assets keep the existing lightweight lexical Hybrid mode. Normal startup,
-recall, and writes never access the model host, and a cached installation works offline.
-
-Run the opt-in real-model smoke test against an installed cache with:
-
-```bash
-PI_MEMORY_EMBEDDING_CACHE=<agent-dir>/models/embeddings \
-  cargo test -p pi-plugin-memory-local --test dense_model_smoke -- --ignored --nocapture
-```
 
 `<agent-dir>/memory.json` selects the provider; `settings.json` does not own durable-memory policy:
 

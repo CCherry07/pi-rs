@@ -13,7 +13,9 @@ chrono = "0.4.45"
 fs2 = "0.4.3"
 pi-core.workspace = true
 pi-memory-loader.workspace = true
+pi-plugin-skills.workspace = true
 pi-session.workspace = true
+pi-tool-support.workspace = true
 regex = "1.13.1"
 rusqlite = { version = "0.40.2", features = ["backup", "bundled"] }
 serde.workspace = true

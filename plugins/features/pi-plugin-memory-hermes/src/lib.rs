@@ -8,6 +8,7 @@ mod commands;
 mod config;
 mod consolidation;
 mod content_scanner;
+pub mod curator;
 mod database;
 mod execution;
 mod flush;
@@ -80,6 +81,7 @@ impl MemoryProviderFactory for HermesMemoryProviderFactory {
             live_index: Mutex::new(None),
             backfill: Mutex::new(None),
             config_warning_emitted: AtomicBool::new(false),
+            curator_worker: Mutex::new(None),
         }))
     }
 }
@@ -93,11 +95,13 @@ pub struct HermesMemoryPlugin {
     live_index: Mutex<Option<tokio::task::JoinHandle<()>>>,
     backfill: Mutex<Option<tokio::task::JoinHandle<()>>>,
     config_warning_emitted: AtomicBool,
+    curator_worker: Mutex<Option<curator::Worker>>,
 }
 
 struct ForegroundRun {
     session_id: Option<String>,
     _lease: HermesRunLease,
+    _activity: Vec<curator::metadata::ActivityLease>,
 }
 
 #[derive(Default)]
@@ -162,6 +166,12 @@ impl AgentPlugin for HermesMemoryPlugin {
     }
 
     fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+        curator::register(
+            context,
+            self.store.clone(),
+            self.config.clone(),
+            self.runs.clone(),
+        )?;
         commands::register(
             context,
             Arc::clone(&self.store),
@@ -177,6 +187,18 @@ impl AgentPlugin for HermesMemoryPlugin {
         context: AgentPluginContext,
         _: AgentStartEvent,
     ) -> Result<(), PluginError> {
+        let activity = if context.session.execution_origin().ok()
+            == Some(pi_core::SessionExecutionOrigin::User)
+        {
+            self.store
+                .curator_targets(context.cwd())
+                .into_iter()
+                .filter(|target| target.root.exists())
+                .filter_map(|target| curator::metadata::ActivityLease::acquire(&target.root).ok())
+                .collect()
+        } else {
+            Vec::new()
+        };
         let lease = self
             .runs
             .attach(
@@ -192,6 +214,7 @@ impl AgentPlugin for HermesMemoryPlugin {
                 ForegroundRun {
                     session_id: context.session.id().ok(),
                     _lease: lease,
+                    _activity: activity,
                 },
             );
         Ok(())
@@ -202,6 +225,9 @@ impl AgentPlugin for HermesMemoryPlugin {
         context: AgentPluginContext,
         _: AgentEndEvent,
     ) -> Result<(), PluginError> {
+        for target in self.store.curator_targets(context.cwd()) {
+            curator::runtime::observe_foreground(&target.root, &context);
+        }
         self.foreground_runs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -214,6 +240,17 @@ impl AgentPlugin for HermesMemoryPlugin {
         context: AgentPluginContext,
         event: BeforeAgentStartEvent,
     ) -> Result<BeforeAgentStartPatch, PluginError> {
+        if let Some(worker) = self
+            .curator_worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            worker.cancel_run();
+        }
+        for target in self.store.curator_targets(context.cwd()) {
+            curator::runtime::observe_foreground(&target.root, &context);
+        }
         self.store
             .bind_project(context.cwd())
             .map_err(|error| hook_error(self, "before_agent_start", error))?;
@@ -227,6 +264,26 @@ impl AgentPlugin for HermesMemoryPlugin {
                 messages: Vec::new(),
             }
         })
+    }
+
+    async fn tool_result(
+        &self,
+        context: AgentPluginContext,
+        event: pi_core::ToolResultEvent,
+    ) -> Result<pi_core::ToolResultPatch, PluginError> {
+        if !event.result.is_error
+            && matches!(event.tool_call.name.as_str(), "read" | "read_file")
+            && let Some(path) = event
+                .validated_args
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+            && let Ok(path) = pi_tool_support::resolve_read_path(context.cwd(), path)
+        {
+            for target in self.store.curator_targets(context.cwd()) {
+                curator::observe_read(&target.root, &path);
+            }
+        }
+        Ok(pi_core::ToolResultPatch::default())
     }
 
     async fn message_end(
@@ -429,6 +486,22 @@ impl SessionPlugin for HermesMemoryPlugin {
         self.store
             .start_session(&context.identity().cwd)
             .map_err(session_error)?;
+        if self.config.curator.enabled
+            && context.session.execution_origin()? == pi_core::SessionExecutionOrigin::User
+        {
+            let mut worker = self
+                .curator_worker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if worker.is_none() {
+                *worker = Some(curator::start_worker(
+                    self.store.curator_targets(&context.identity().cwd),
+                    self.config.clone(),
+                    self.runs.clone(),
+                    context.clone(),
+                ));
+            }
+        }
         let user_turn_count = context
             .session
             .snapshot()
@@ -541,6 +614,14 @@ impl SessionPlugin for HermesMemoryPlugin {
         context: &SessionPluginContext,
         event: &SessionBeforeCompactEvent,
     ) -> Result<Option<pi_session::SessionBeforeCompactResult>, SessionPluginError> {
+        if let Some(worker) = self
+            .curator_worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            worker.cancel_run();
+        }
         self.cancel_review(&context.identity().id).await;
         if self.config.flush_on_compact
             && context.session.execution_origin().map_err(session_error)?
@@ -568,6 +649,14 @@ impl SessionPlugin for HermesMemoryPlugin {
         context: &SessionPluginContext,
         event: &SessionShutdownEvent,
     ) -> Result<(), SessionPluginError> {
+        let worker = self
+            .curator_worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(worker) = worker {
+            worker.shutdown().await;
+        }
         self.cancel_review(&context.identity().id).await;
         if self.config.flush_on_shutdown
             && event.reason != SessionShutdownReason::Reload

@@ -21,11 +21,11 @@ use pi_plugin_manager::{
     InstallScope, PluginManager, PluginManagerOptions, PreparedPluginReconcile,
 };
 use pi_plugin_memory_hermes::{HermesMemoryProviderFactory, managed_skill_roots};
-use pi_plugin_memory_local::LocalMemoryProviderFactory;
 use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
 use pi_plugin_openai::{CodexTransport, CodexTransportOptions};
 use pi_plugin_prompts::{PromptTemplateLoaderOptions, PromptTemplatesPlugin};
 use pi_plugin_read::ConfiguredReadPlugin;
+use pi_plugin_schedule::{ScheduleOptions, SchedulePlugin, ScheduleSessionPlugin};
 use pi_plugin_session_transfer::SessionTransferPlugin;
 use pi_plugin_skills::{SkillLoaderOptions, SkillsPlugin};
 use pi_plugin_subagents::{
@@ -52,7 +52,7 @@ use crate::builtin_providers::BuiltinProviderSet;
 use crate::dynamic_providers::{DynamicProviderCandidate, DynamicProviderOverlay};
 use crate::project_trust::ProjectTrustService;
 
-const BUILTIN_TOOL_NAMES: [&str; 11] = [
+const BUILTIN_TOOL_NAMES: [&str; 12] = [
     "read",
     "grep",
     "find",
@@ -64,6 +64,7 @@ const BUILTIN_TOOL_NAMES: [&str; 11] = [
     "subagent",
     "memory",
     "session_search",
+    "schedule",
 ];
 
 #[derive(Clone)]
@@ -317,6 +318,10 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             let subagents = self.subagents.clone();
             move || SubagentsSessionPlugin::new(subagents.clone())
         });
+        let schedule_options =
+            ScheduleOptions::new(&config.cwd, &config.agent_dir, project_trusted);
+        let session_plugins = session_plugins
+            .plugin_factory(move || ScheduleSessionPlugin::new(schedule_options.clone()));
         let mut session_plugins = native_plugins.apply_session(session_plugins);
         if let Some(js_generation) = &js_generation {
             for plugin in js_generation.session_plugins() {
@@ -606,6 +611,7 @@ fn build_runtime_inner(
         .memory
         .as_ref()
         .is_some_and(|memory| memory.provider_id() == "hermes");
+    let mut skill_activity_observer = None;
     let transport = provider_transport(config)?;
     let codex_transport_options = codex_transport_options(config);
     let builtin_providers = BuiltinProviderSet::load(config, extras.codex_credentials.clone())?;
@@ -617,14 +623,11 @@ fn build_runtime_inner(
         .additional_paths
         .extend(config.settings_skill_paths.iter().cloned());
     if memory_is_hermes {
-        let mut roots =
-            managed_skill_roots(&config.agent_dir, &config.cwd, project_trusted).into_iter();
-        if let Some(global_root) = roots.next() {
-            skill_options.additional_paths.push(global_root);
-        }
-        if project_trusted {
-            skill_options.additional_paths.extend(roots);
-        }
+        let roots = managed_skill_roots(&config.agent_dir, &config.cwd, project_trusted);
+        skill_activity_observer = Some(pi_plugin_memory_hermes::curator::activity_observer(
+            roots.clone(),
+        ));
+        skill_options.additional_paths.extend(roots);
     }
     let mut prompt_template_options =
         PromptTemplateLoaderOptions::new(&config.cwd, &config.agent_dir);
@@ -702,14 +705,20 @@ fn build_runtime_inner(
         .agent_plugin_factory({
             let skill_options = skill_options.clone();
             let skill_prompt_projector = Arc::clone(&skill_prompt_projector);
+            let skill_activity_observer = skill_activity_observer.clone();
             move || {
                 SkillsPlugin::load_with_prompt_projector(
                     skill_options.clone(),
                     skill_prompt_projector.clone(),
                 )
+                .with_activity_observer(skill_activity_observer.clone())
             }
         })
         .agent_plugin_factory(SessionTransferPlugin::default)
+        .agent_plugin_factory({
+            let options = ScheduleOptions::new(&config.cwd, &config.agent_dir, project_trusted);
+            move || SchedulePlugin::new(options.clone())
+        })
         .agent_plugin_factory({
             let auto_resize_images = config.runtime_settings.images.auto_resize;
             move || ConfiguredReadPlugin::new(auto_resize_images)
@@ -808,7 +817,6 @@ async fn build_memory_provider(
     }
     MemoryLoader::new(options)
         .provider_factory(HermesMemoryProviderFactory)
-        .provider_factory(LocalMemoryProviderFactory)
         .load()
         .await
         .map_err(|error| error.to_string())
@@ -1292,6 +1300,28 @@ command = "fixture-command"
     }
 
     #[test]
+    fn product_runtime_registers_schedule_without_creating_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = build_runtime_with_codex_credentials(
+            &app_config(directory.path(), None),
+            false,
+            &NativePlugins::default(),
+            None,
+            None,
+            Some(pi_plugin_openai::CodexCredentials::default()),
+        )
+        .unwrap();
+        assert!(runtime.active_tools().iter().any(|tool| tool == "schedule"));
+        assert!(
+            runtime
+                .command_specs()
+                .iter()
+                .any(|command| command.name == "schedule")
+        );
+        assert!(!directory.path().join("schedule").exists());
+    }
+
+    #[test]
     fn product_runtime_registers_the_first_party_subagent_tool() {
         let directory = tempfile::tempdir().unwrap();
         let config = app_config(directory.path(), None);
@@ -1370,13 +1400,6 @@ command = "fixture-command"
                 "expected Hermes command {command}"
             );
         }
-        assert!(
-            !runtime
-                .command_specs()
-                .iter()
-                .any(|command| command.name.starts_with("memory-local-"))
-        );
-
         std::fs::write(
             directory.path().join("memory.json"),
             r#"{"version": 1, "enabled": false}"#,
@@ -1395,13 +1418,28 @@ command = "fixture-command"
             !disabled
                 .command_specs()
                 .iter()
-                .any(|command| command.name.starts_with("memory-local-"))
-        );
-        assert!(
-            !disabled
-                .command_specs()
-                .iter()
                 .any(|command| command.name.starts_with("memory-"))
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_local_memory_provider_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("memory.json"),
+            r#"{"version": 1, "provider": "local"}"#,
+        )
+        .unwrap();
+        let config = app_config(directory.path(), None);
+
+        let error = match build_runtime_with_first_party_memory(&config).await {
+            Ok(_) => panic!("the removed local provider must not be accepted"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "runtime build failed: memory.json selects unknown provider local; registered providers: hermes"
         );
     }
 

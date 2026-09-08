@@ -5,6 +5,46 @@ use base64::Engine as _;
 
 const OSC52_MAX_RAW_BYTES: usize = 100_000;
 
+/// Native image/text paste runs off the terminal event loop. Like current Pi,
+/// images become temporary file paths which the user can edit before submitting.
+pub(crate) async fn read_clipboard_paste() -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(|| {
+        if ClipboardEnvironment::detect().ssh_session {
+            return Err("native clipboard paste is unavailable over SSH; paste a file path or use @file at startup".to_string());
+        }
+        let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+        match clipboard.get_image() {
+            Ok(image) => {
+                let path = save_clipboard_image(image)?;
+                Ok(Some(path.to_string_lossy().into_owned()))
+            }
+            Err(arboard::Error::ContentNotAvailable) => match clipboard.get_text() {
+                Ok(text) => Ok(Some(text)),
+                Err(arboard::Error::ContentNotAvailable) => Ok(None),
+                Err(error) => Err(error.to_string()),
+            },
+            Err(error) => Err(error.to_string()),
+        }
+    }).await.map_err(|error| format!("clipboard task failed: {error}"))?
+}
+
+fn save_clipboard_image(image: arboard::ImageData<'_>) -> Result<std::path::PathBuf, String> {
+    let width = u32::try_from(image.width).map_err(|error| error.to_string())?;
+    let height = u32::try_from(image.height).map_err(|error| error.to_string())?;
+    let png = pi_media::image::encode_rgba_png(width, height, image.bytes.into_owned())
+        .map_err(|error| error.to_string())?;
+    let mut file = tempfile::Builder::new()
+        .prefix("pi-clipboard-")
+        .suffix(".png")
+        .tempfile()
+        .map_err(|error| error.to_string())?;
+    file.write_all(&png).map_err(|error| error.to_string())?;
+    // Keep the file after exit so a saved prompt's path remains readable, as in Pi.
+    file.into_temp_path()
+        .keep()
+        .map_err(|error| error.to_string())
+}
+
 pub(crate) trait ClipboardWriter {
     fn set_text(&mut self, text: &str) -> Result<(), String>;
 }
@@ -266,6 +306,29 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+
+    #[test]
+    fn clipboard_image_becomes_a_readable_png_file() {
+        let path = save_clipboard_image(arboard::ImageData {
+            width: 1,
+            height: 1,
+            bytes: std::borrow::Cow::Owned(vec![1, 2, 3, 255]),
+        })
+        .unwrap();
+        // Adopt ownership for cleanup only in the test; product files persist.
+        let file = tempfile::TempPath::try_from_path(path).unwrap();
+        let bytes = std::fs::read(&file).unwrap();
+        let image =
+            pi_media::image::process_image(&bytes, &pi_media::image::ImagePolicy::default())
+                .unwrap();
+        assert_eq!(image.content.mime_type, "image/png");
+        assert!(
+            file.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("pi-clipboard-")
+        );
+    }
 
     #[test]
     fn osc52_sequence_encodes_unicode_for_the_host_terminal() {

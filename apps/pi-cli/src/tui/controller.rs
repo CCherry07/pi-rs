@@ -1,5 +1,21 @@
 use super::*;
 
+pub(super) fn can_paste_to_composer(app: &App) -> bool {
+    app.trust_prompt.is_none()
+        && app.confirmation_prompt.is_none()
+        && app.selection_prompt.is_none()
+        && app.multi_selection_prompt.is_none()
+        && app.active_bottom_view().is_none()
+        && app.pending_auth.is_none()
+}
+
+pub(super) fn paste_into_composer(app: &mut App, text: &str) {
+    app.screen_selection = None;
+    app.input.insert_str(text);
+    app.input_history.reset_navigation();
+    app.command_palette.get_mut().reset();
+}
+
 pub(super) struct KeyUi<'a, C> {
     pub(super) clipboard: &'a mut C,
     pub(super) transcript_viewport_height: u16,
@@ -1284,12 +1300,13 @@ pub(super) fn spawn_effect(
     session: Arc<AgentSession>,
     session_handle: PiSession,
     epoch: u64,
-    input: String,
+    input: impl Into<SessionInput>,
     mode: EffectMode,
     sender: tokio::sync::mpsc::UnboundedSender<EffectDone>,
 ) {
+    let input = input.into();
     tokio::spawn(async move {
-        let refresh_transcript = input.starts_with("/tree ");
+        let refresh_transcript = input.images().is_empty() && input.text().starts_with("/tree ");
         let status = run_effect(&session_handle, &session, input, mode).await;
         let _ = sender.send(EffectDone {
             epoch,
@@ -1302,9 +1319,16 @@ pub(super) fn spawn_effect(
 pub(super) async fn run_effect(
     session_handle: &PiSession,
     session: &AgentSession,
-    input: String,
+    input: impl Into<SessionInput>,
     mode: EffectMode,
 ) -> Result<String, String> {
+    let submission = input.into();
+    // Image-bearing startup input must go through the same session pipeline as
+    // text and must never be interpreted as a local command.
+    if !submission.images().is_empty() {
+        return submit_session_input(session, submission, mode).await;
+    }
+    let input = submission.text();
     if input == "/clone" {
         let leaf = session
             .log()
@@ -1492,7 +1516,7 @@ pub(super) async fn run_effect(
             session.snapshot().agent.thinking_level.as_str()
         ));
     }
-    if let Some((command, excluded)) = shell_command(&input) {
+    if let Some((command, excluded)) = shell_command(input) {
         let result = session
             .execute_shell(
                 command,
@@ -1509,6 +1533,14 @@ pub(super) async fn run_effect(
             None => "Shell ended".to_string(),
         });
     }
+    submit_session_input(session, submission, mode).await
+}
+
+async fn submit_session_input(
+    session: &AgentSession,
+    input: SessionInput,
+    mode: EffectMode,
+) -> Result<String, String> {
     let outcome = match mode {
         EffectMode::Submit => session.submit(input).await,
         EffectMode::FollowUp => session.follow_up(input).await,

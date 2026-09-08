@@ -3,6 +3,7 @@
 mod auth;
 mod clipboard;
 mod config;
+mod input;
 mod markdown;
 mod output;
 mod package_commands;
@@ -25,7 +26,7 @@ use pi_sdk::{
 };
 use pi_session::{
     ExactSessionIdResolution, JsonlSessionRepo, MultiSessionManager, PiSession,
-    PluginContextBinding, SessionLog,
+    PluginContextBinding, SessionInput, SessionLog,
 };
 use pi_settings::{SettingsContext, SettingsManager};
 use tokio::sync::mpsc;
@@ -51,22 +52,44 @@ impl ResolvedProjectTrust {
 
 #[derive(Debug, PartialEq, Eq)]
 enum CLIMode {
-    Tui { initial_prompt: Option<String> },
-    Print { input: String },
-    Json { input: String },
+    Tui {
+        initial_prompt: Option<SessionInput>,
+    },
+    Print {
+        input: SessionInput,
+    },
+    Json {
+        input: SessionInput,
+    },
     Rpc,
     Acp,
 }
 
 impl CLIMode {
-    fn resolve(cli: &Cli, input: Option<String>, stdin_is_terminal: bool) -> Result<Self, String> {
+    fn requested_presentation(cli: &Cli, stdin_is_terminal: bool) -> PresentationMode {
+        if cli.acp || cli.mode == Some(OutputMode::Rpc) {
+            PresentationMode::Rpc
+        } else if cli.json || cli.mode == Some(OutputMode::Json) {
+            PresentationMode::Json
+        } else if cli.print || cli.mode == Some(OutputMode::Text) || !stdin_is_terminal {
+            PresentationMode::Print
+        } else {
+            PresentationMode::Tui
+        }
+    }
+
+    fn resolve(
+        cli: &Cli,
+        input: Option<SessionInput>,
+        stdin_is_terminal: bool,
+    ) -> Result<Self, String> {
         if cli.acp {
             return Ok(Self::Acp);
         }
         if cli.mode == Some(OutputMode::Rpc) {
             return Ok(Self::Rpc);
         }
-        if cli.json || cli.mode == Some(OutputMode::Json) {
+        if Self::requested_presentation(cli, stdin_is_terminal) == PresentationMode::Json {
             let error = if cli.json {
                 "--json requires a prompt or stdin"
             } else {
@@ -76,7 +99,7 @@ impl CLIMode {
                 .map(|input| Self::Json { input })
                 .ok_or_else(|| error.to_string());
         }
-        if cli.print || cli.mode == Some(OutputMode::Text) || !stdin_is_terminal {
+        if Self::requested_presentation(cli, stdin_is_terminal) == PresentationMode::Print {
             let error = if cli.print || !stdin_is_terminal {
                 "--print requires a prompt or stdin"
             } else {
@@ -91,6 +114,7 @@ impl CLIMode {
         })
     }
 
+    #[cfg(test)]
     fn is_interactive(&self) -> bool {
         matches!(self, Self::Tui { .. })
     }
@@ -134,7 +158,7 @@ pub async fn run_with_js_host(
 }
 
 async fn run(
-    cli: Cli,
+    mut cli: Cli,
     js_host: Option<Arc<dyn JsPluginHost>>,
     extension_flag_values: BTreeMap<String, serde_json::Value>,
 ) -> Result<(), String> {
@@ -146,6 +170,26 @@ async fn run(
         startup_settings.global().session_dir.as_deref(),
         cli.session.is_some(),
     );
+    let curator_command = if let Some(CliCommand::Curator { arguments }) = &cli.command {
+        let trust = resolve_project_trust(&cli, &config, false, &settings).await?;
+        let agent_dir = config.agent_dir.clone();
+        let cwd = config.cwd.clone();
+        let args = arguments.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            pi_sdk::curator::execute_local(&agent_dir, &cwd, trust.trusted(), &args)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        if let Some(output) = output {
+            println!("{output}");
+            return Ok(());
+        }
+        let command = format!("/curator {}", arguments.join(" "));
+        cli.print = true;
+        Some(command)
+    } else {
+        None
+    };
     if !matches!(cli.command, Some(CliCommand::Auth { .. })) {
         auth::refresh_oauth_if_needed(&config.agent_dir).await?;
     }
@@ -205,13 +249,30 @@ async fn run(
         })?;
     }
     let stdin_is_terminal = std::io::stdin().is_terminal();
-    let input = if cli.acp || cli.mode == Some(OutputMode::Rpc) {
+    let interactive =
+        CLIMode::requested_presentation(&cli, stdin_is_terminal) == PresentationMode::Tui;
+    let trust = resolve_project_trust(&cli, &config, interactive, &settings).await?;
+    let input = if let Some(command) = &curator_command {
+        Some(pi_session::SessionInput::new(command.clone()))
+    } else if cli.acp || cli.mode == Some(OutputMode::Rpc) {
         None
     } else {
-        resolve_input(&cli, stdin_is_terminal)?
+        let auto_resize = settings
+            .load(&SettingsContext::new(&config.cwd, trust.trusted()))
+            .effective()
+            .images
+            .auto_resize;
+        let arguments = cli.prompt.clone();
+        // Startup @files are relative to the invocation's --cwd, even when a
+        // resumed session restores a different working directory.
+        let cwd = cli.cwd.clone();
+        tokio::task::spawn_blocking(move || {
+            resolve_input(&arguments, &cwd, stdin_is_terminal, auto_resize)
+        })
+        .await
+        .map_err(|error| format!("input processing task failed: {error}"))??
     };
     let cli_mode = CLIMode::resolve(&cli, input, stdin_is_terminal)?;
-    let trust = resolve_project_trust(&cli, &config, cli_mode.is_interactive(), &settings).await?;
     if matches!(cli_mode, CLIMode::Acp)
         && javascript_host_required(&config, trust.trusted(), &settings)
     {
@@ -268,6 +329,19 @@ async fn run(
         sessions.create_session(&cwd, &session_path).await
     }
     .map_err(|error| error.to_string())?;
+    if curator_command.is_some()
+        && !session
+            .current()
+            .runtime()
+            .command_specs()
+            .iter()
+            .any(|s| s.name == "curator")
+    {
+        let _ = sessions.shutdown().await;
+        return Err(
+            "Curator consolidation requires the Hermes memory provider to be enabled.".into(),
+        );
+    }
     if let Some(name) = startup_name {
         session
             .current()
@@ -298,6 +372,7 @@ fn split_extension_flags(
     arguments: Vec<String>,
 ) -> (Vec<String>, BTreeMap<String, serde_json::Value>) {
     const SUBCOMMANDS: &[&str] = &[
+        "curator",
         "auth",
         "plugin",
         "install",
@@ -572,67 +647,35 @@ pub(crate) async fn resolve_project_trust(
     })
 }
 
-fn resolve_input(cli: &Cli, stdin_is_terminal: bool) -> Result<Option<String>, String> {
-    if !cli.prompt.is_empty() {
-        let mut file_text = String::new();
-        let mut messages = Vec::new();
-        for argument in &cli.prompt {
-            let Some(file) = argument.strip_prefix('@') else {
-                messages.push(argument.as_str());
-                continue;
-            };
-            if file.is_empty() {
-                return Err("@file requires a path".to_string());
-            }
-            let file = expand_prompt_path(file, &cli.cwd);
-            let metadata = std::fs::metadata(&file)
-                .map_err(|_| format!("File not found: {}", file.display()))?;
-            if metadata.len() == 0 {
-                continue;
-            }
-            let content = std::fs::read_to_string(&file)
-                .map_err(|error| format!("Could not read file {}: {error}", file.display()))?;
-            let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
-            file_text.push_str(&format!(
-                "<file name=\"{}\">\n{content}\n</file>\n",
-                file.display()
-            ));
-        }
-        file_text.push_str(&messages.join(" "));
-        return Ok((!file_text.is_empty()).then_some(file_text));
-    }
-    if !stdin_is_terminal {
-        let mut input = String::new();
+fn resolve_input(
+    arguments: &[String],
+    cwd: &std::path::Path,
+    stdin_is_terminal: bool,
+    auto_resize: bool,
+) -> Result<Option<SessionInput>, String> {
+    let stdin = if stdin_is_terminal {
+        None
+    } else {
+        let mut text = String::new();
         std::io::stdin()
-            .read_to_string(&mut input)
+            .read_to_string(&mut text)
             .map_err(|error| error.to_string())?;
-        let input = input.trim().to_string();
-        return Ok((!input.is_empty()).then_some(input));
-    }
-    Ok(None)
-}
-
-fn expand_prompt_path(path: &str, cwd: &std::path::Path) -> PathBuf {
-    let path = if path == "~" {
-        std::env::var_os("HOME").map_or_else(|| PathBuf::from(path), PathBuf::from)
-    } else if let Some(relative) = path.strip_prefix("~/") {
-        std::env::var_os("HOME").map_or_else(
-            || PathBuf::from(path),
-            |home| PathBuf::from(home).join(relative),
-        )
-    } else {
-        PathBuf::from(path)
+        Some(text)
     };
-    let path = if path.is_absolute() {
-        path
-    } else {
-        cwd.join(path)
-    };
-    std::path::absolute(&path).unwrap_or(path)
+    input::prepare_input(
+        arguments,
+        stdin.as_deref(),
+        cwd,
+        &pi_media::image::ImagePolicy {
+            auto_resize,
+            ..pi_media::image::ImagePolicy::default()
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use pi_session::SessionInput;
     use std::fs;
 
     use pi_settings::SettingsManager;
@@ -737,7 +780,10 @@ mod tests {
         parsed.cwd = directory.path().to_path_buf();
 
         assert_eq!(
-            resolve_input(&parsed, true).unwrap().as_deref(),
+            resolve_input(&parsed.prompt, &parsed.cwd, true, true)
+                .unwrap()
+                .as_ref()
+                .map(SessionInput::text),
             Some(
                 format!(
                     "<file name=\"{}\">\n# Task\n\nDo the work.\n</file>\n",
@@ -760,22 +806,18 @@ mod tests {
         assert!(tui.is_interactive());
         assert_eq!(tui.presentation_mode(), PresentationMode::Tui);
 
-        let print = CLIMode::resolve(&cli(&[]), Some("piped".to_string()), false).unwrap();
+        let print = CLIMode::resolve(&cli(&[]), Some("piped".into()), false).unwrap();
         assert_eq!(
             print,
             CLIMode::Print {
-                input: "piped".to_string()
+                input: "piped".into()
             }
         );
         assert!(!print.is_interactive());
         assert_eq!(print.presentation_mode(), PresentationMode::Print);
 
-        let json = CLIMode::resolve(
-            &cli(&["--print", "--json"]),
-            Some("prompt".to_string()),
-            true,
-        )
-        .unwrap();
+        let json =
+            CLIMode::resolve(&cli(&["--print", "--json"]), Some("prompt".into()), true).unwrap();
         assert_eq!(json.presentation_mode(), PresentationMode::Json);
 
         let rpc = CLIMode::resolve(&cli(&["--mode", "rpc"]), None, true).unwrap();

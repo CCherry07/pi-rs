@@ -138,6 +138,11 @@ impl From<ThinkingLevelArg> for pi_core::ThinkingLevel {
 
 #[derive(Debug, Clone, Subcommand)]
 pub(crate) enum CliCommand {
+    /// Maintain the Hermes-managed skill library.
+    Curator {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
@@ -367,6 +372,28 @@ mod tests {
             !Cli::try_parse_from(["pi", "--no-fullscreen"])
                 .unwrap()
                 .fullscreen_enabled()
+        );
+    }
+
+    #[test]
+    fn curator_preserves_maintenance_flags_as_subcommand_arguments() {
+        let scoped =
+            Cli::try_parse_from(["pi", "curator", "run", "--scope", "project", "--dry-run"])
+                .unwrap();
+        assert!(
+            matches!(scoped.command, Some(CliCommand::Curator { arguments }) if arguments == ["run", "--scope", "project", "--dry-run"])
+        );
+        let cli =
+            Cli::try_parse_from(["pi", "curator", "run", "--dry-run", "--consolidate"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(CliCommand::Curator { arguments })
+            if arguments == ["run", "--dry-run", "--consolidate"])
+        );
+        let cli =
+            Cli::try_parse_from(["pi", "curator", "rollback", "--id", "snapshot-123"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(CliCommand::Curator { arguments })
+            if arguments == ["rollback", "--id", "snapshot-123"])
         );
     }
 

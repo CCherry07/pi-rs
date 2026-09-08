@@ -65,6 +65,7 @@ pub(crate) enum MemoryNotificationMode {
 
 #[derive(Debug, Clone)]
 pub(crate) struct HermesMemoryConfig {
+    pub(crate) curator: crate::curator::Config,
     pub(crate) memory_char_limit: usize,
     pub(crate) user_char_limit: usize,
     pub(crate) project_char_limit: usize,
@@ -93,6 +94,7 @@ pub(crate) struct HermesMemoryConfig {
 impl Default for HermesMemoryConfig {
     fn default() -> Self {
         Self {
+            curator: crate::curator::Config::default(),
             memory_char_limit: DEFAULT_MEMORY_CHAR_LIMIT,
             user_char_limit: DEFAULT_USER_CHAR_LIMIT,
             project_char_limit: DEFAULT_PROJECT_CHAR_LIMIT,
@@ -121,6 +123,18 @@ impl Default for HermesMemoryConfig {
 }
 
 impl HermesMemoryConfig {
+    pub(crate) fn load_profile(agent_dir: &Path) -> Self {
+        let memory: Option<Value> = std::fs::read(agent_dir.join("memory.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        Self::load(
+            agent_dir,
+            memory
+                .as_ref()
+                .and_then(|m| m.get("providers")?.get("hermes")),
+        )
+    }
+
     pub(crate) fn load(agent_dir: &Path, provider_value: Option<&Value>) -> Self {
         let path = agent_dir.join("hermes-memory-config.json");
         let value = match std::fs::read_to_string(path) {
@@ -136,6 +150,16 @@ impl HermesMemoryConfig {
 
     fn from_object(object: &Map<String, Value>, agent_dir: &Path) -> Self {
         let mut config = Self::default();
+        if let Some(value) = object.get("curator") {
+            // Invalid configuration disables autonomous work; commands report
+            // invalid numeric limits through Config::validate.
+            config.curator =
+                serde_json::from_value(value.clone()).unwrap_or_else(|_| crate::curator::Config {
+                    enabled: false,
+                    interval_hours: 0,
+                    ..crate::curator::Config::default()
+                });
+        }
         set_usize(object, "memoryCharLimit", &mut config.memory_char_limit);
         set_usize(object, "userCharLimit", &mut config.user_char_limit);
         set_usize(object, "projectCharLimit", &mut config.project_char_limit);

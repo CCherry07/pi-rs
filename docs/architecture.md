@@ -27,12 +27,12 @@ crates/pi-core                  contracts, plugin-facing product capabilities, r
 crates/pi-agent                 Agent façade, AgentLoop, StreamAssembler, ToolScheduler
 crates/pi-runtime               plugin registration and Agent construction
 crates/pi-provider              vendor-neutral HTTP transport and SSE framing
+crates/pi-media                 multimodal byte processing; image detection, conversion and inline limits
 crates/pi-prompt                pure Pi-style system prompt assembly
 crates/pi-resources             generic system/append prompts and project context discovery
 crates/pi-session               Pi v4 storage/runtime plus plugin contracts under plugin/ and types/
 crates/pi-settings              current-format settings documents, snapshots, and safe writes
 crates/pi-sdk                   headless product composition shared by CLI, desktop, and embedded adapters
-evals/pi-memory                 deterministic provider-only semantic-memory retrieval evaluation
 crates/pi-telemetry             typed Pi AI/harness span schemas and sink adapters
 crates/pi-rpc                   Pi JSON projector and stdin/stdout RPC adapter
 crates/pi-mcp                   protocol-neutral MCP client, tool projection, and process ownership
@@ -60,11 +60,10 @@ plugins/features/pi-plugin-session-transfer
                                 first-party export/import/share commands
 plugins/features/pi-plugin-subagents
                                 profiled delegation and bounded recursive child-session policy
+plugins/features/pi-plugin-schedule
+                                persistent schedules, claim locks, isolated runs, history, lifecycle cleanup
 plugins/features/pi-plugin-memory-hermes
                                 default curated USER.md/MEMORY.md provider with frozen prompt snapshots
-plugins/features/pi-plugin-memory-local
-                                declared local Agent/Session plugin, SQLite/FTS/sqlite-vec storage, ranking,
-                                FastEmbed lifecycle, tools, recall injection, maintenance, and rebuild policy
 crates/pi-tool-support           shared path validation, argument, and truncation helpers
 plugins/tools/pi-plugin-{read,write,edit,hashline-edit,bash,grep,find,ls}
                                 one production tool per plugin crate
@@ -78,14 +77,13 @@ Dependencies point inward:
 ```text
 pi-agent             -> pi-core
 pi-provider          -> pi-core
+pi-media             -> pi-core + image codecs
 pi-prompt            -> standard library only
 pi-resources         -> pi-prompt
 pi-session           -> pi-core + pi-prompt + pi-resources + pi-runtime
 pi-settings          -> serde JSON + filesystem persistence only
 pi-sdk               -> pi-session + pi-settings + pi-runtime + product providers, tools, resources,
                         memory, skills, subagents, and plugin loaders
-pi-memory-eval       -> pi-plugin-memory-local
-                        (development-only corpus, adapters, runner, metrics, and reports)
 pi-rpc               -> pi-agent + pi-core + pi-session
 pi-mcp               -> pi-core + rmcp
 pi-acp               -> pi-agent + pi-core + pi-mcp + pi-session + official ACP SDK
@@ -95,6 +93,7 @@ pi-plugin-xai        -> pi-core + pi-provider + pi-plugin-openai::responses
 pi-plugin-google     -> pi-core + pi-provider
 pi-tool-support      -> pi-core
 production tools     -> pi-core + pi-tool-support
+pi-plugin-read       -> pi-media (shared image normalization)
 plugins/features/pi-plugin-skills
                      -> pi-core (skill discovery, prompt contribution, explicit invocation)
 pi-memory-loader     -> pi-core + pi-session
@@ -102,16 +101,12 @@ pi-memory-loader     -> pi-core + pi-session
 plugins/features/pi-plugin-memory-hermes
                      -> pi-memory-loader + filesystem locking
                         (default bounded, file-backed curated memory provider)
-plugins/features/pi-plugin-memory-local
-                     -> pi-memory-loader + SQLite + version-pinned sqlite-vec
-                        + FastEmbed + Hugging Face Hub
-                        (bundled local provider implementation, provider-owned initialization,
-                        factory, and maintenance policy)
 plugins/providers/pi-plugin-models
                      -> pi-core + pi-plugin-openai (credential-blind catalog and routing)
 other plugins/*      -> pi-core
 pi-runtime           -> pi-core + pi-agent + pi-prompt
 apps/pi-cli          -> pi-sdk + pi-rpc + pi-acp + terminal and Markdown adapters
+                        + pi-media (attachments) + pi-tool-support (Pi read-path semantics)
 apps/pi-desktop      -> pi-sdk + pi-session + Tauri
 pi-plugin-manager    -> HTTP + filesystem package source adapters
 pi-js-package-manager -> filesystem + npm/git process adapters (no Node dependency)
@@ -150,10 +145,31 @@ re-copy and stay distinct from `Ctrl+C`. Animation ticks pause while a selection
 Main-screen mode never enables mouse capture and leaves visible-text selection to the terminal.
 Semantic `/copy` remains independent and copies the last completed assistant message.
 
+`pi-media` owns provider-neutral multimodal byte processing. Its first Module, `image`, owns
+magic-byte detection, PNG conversion, dimension/encoded-size limits, and processing hints behind
+`process_image(bytes, policy)`. `pi-core::ImageContent` remains the message contract. The read tool
+and CLI both use that Interface on blocking workers; filesystem paths, settings, clipboard I/O,
+and terminal state remain with their owning Adapters. Video/audio Modules and message contracts
+are future work. The existing Rust PNG/Lanczos resize algorithm is retained, so processing limits
+and hints follow Pi intent without claiming byte-for-byte encoder equivalence.
+
+CLI startup prepares text and image attachments into `SessionInput`, preserved through TUI,
+print and NDJSON submission. As in current Pi's `cli/file-processor.ts` and `cli/initial-message.ts`,
+stdin precedes file markup and the prompt; image detection uses bytes rather than extensions,
+empty files are skipped, and processing failures become inline omission notices. File paths use
+Pi's shared read-path resolution. Startup resolves project trust before reading effective
+`images.autoResize`; `images.blockImages` remains request-time runtime policy.
+
 The clipboard Module retains its small `ClipboardWriter::set_text` Interface. Its system Adapter
 uses the native clipboard first for local sessions, PowerShell as the WSL fallback, and tmux then
 bounded OSC 52 for terminal-mediated copying. SSH deliberately skips the remote native clipboard so
 copied text reaches the user's local terminal.
+Its separate asynchronous read Interface supports local native image/text paste through `Ctrl+V`.
+Matching current Pi's interactive mode, RGBA pixels become a temporary PNG and its path is inserted
+at the composer cursor; later tool reads process that image through `pi-media`. These files remain
+available after exit for saved path references. Pending reads never insert into a replaced session,
+changed draft or focused selector. SSH has no native-read Adapter; terminal text/path paste and
+startup `@file` remain available. Native clipboard availability is platform/session dependent.
 
 `packages/pi` does not own a terminal frontend. Its executable creates the JavaScript extension host
 and invokes the NAPI `runPi` entry; interactive, print, JSON, RPC, piped-input, and plugin-management
@@ -733,9 +749,10 @@ The independent `pi-plugin-anthropic` provider owns Anthropic Messages projectio
 
 The built-in `openai-codex` plugin is installed in every product generation rather than only when Codex is initially selected. It owns the explicit Pi-compatible model catalog, Codex Device OAuth/refresh, and a Codex Responses Adapter. Reusable OpenAI Responses message/tool projection and SSE adaptation live directly in `pi-plugin-openai::responses`; the separate `pi-plugin-xai` provider depends on that plugin crate while retaining its own lifecycle, credentials, headers, payload policy, OAuth device flow, refresh, and Grok catalog. xAI exposes the current Grok 4.5/4.6 Responses models, resolves `XAI_API_KEY` or Pi-compatible stored credentials when rebuilding a generation, supports explicit xAI Device OAuth through `pi auth login xai --oauth`, and proactively refreshes stored xAI OAuth credentials before application startup. The built-in `pi-plugin-google` provider owns the Google Generative AI projection and current Gemini catalog, resolves `GEMINI_API_KEY` before Pi-compatible stored credentials, and exposes API-key login as `pi auth login google`; Google OAuth identities are not part of this provider. Anthropic and OpenAI Codex stored OAuth credentials use the same startup refresh transaction. `pi auth login` without a provider builds its selector from built-ins, validated JSONC `models.json` provider IDs, and existing stored credentials; unknown third-party providers receive API-key auth unless a future provider-owned OAuth capability declares otherwise. Device authorization validates xAI HTTPS verification URLs before invoking the platform browser Adapter; token polling and refresh remain provider-owned while locked atomic `auth.json` persistence remains CLI-owned. At generation construction the Codex plugin credential-blindly probes Codex CLI credentials from `~/.codex/auth.json` and `~/.config/codex/auth.json`; a valid access-token JWT with `chatgpt_account_id` makes the provider selectable. Requests use the ChatGPT Codex Responses endpoint and its required bearer, account, beta, originator, and user-agent headers. Its generation-local transport policy supports SSE, WebSocket, cached WebSocket continuation, and Pi's automatic preference: a WebSocket is reused by session/account, `previous_response_id` sends only a verified context suffix, and a transport failure before the first provider event activates SSE fallback for that session. Connect and per-frame idle waits remain abortable. An explicit HTTP proxy forces the proxied SSE path because the Rust WebSocket client has no proxy-tunnelling Adapter and must not bypass product proxy policy. This reuse does not write or refresh Codex CLI credentials and is not Pi's `/login` flow. The catalog supplies context windows, output limits, input modalities, reasoning support, and costs; it is not remote discovery. `ModelRuntime` keeps the complete registered catalog distinct from its credential-blind available view and exposes provider availability diagnostics. Providers report whether the current immutable generation has enough configuration to be selectable without resolving secret values. Initial selection and `/model` consume the available view, while restore and diagnostics can still inspect registered models. `AgentSession` derives compaction limits from the active generation's current `ModelSpec`, so model switches immediately change threshold and overflow decisions. An explicit session context-window option remains an embedding override.
 
-The built-in Codex catalog includes Pi-derived thinking maps. Every current Codex model maps
-semantic `minimal` to provider effort `low` and exposes `xhigh`; GPT-5.6 additionally exposes `max`,
-while semantic `off` omits the Codex reasoning object.
+The built-in Codex catalog includes Pi-derived thinking maps. Every current Codex model exposes
+`xhigh`; GPT-5.6 maps semantic `minimal` to provider effort `low` and additionally exposes `max`.
+GPT-6 Astra supports only `low` through `max`; unsupported `off` and `minimal` requests clamp to
+`low` before provider dispatch.
 
 Dedicated provider crates keep vendor behavior behind the same immutable generation boundary.
 Mistral owns its native chat projection and stream parser; Azure OpenAI Responses owns deployment
@@ -1248,20 +1265,81 @@ parent system prompt and tool definitions.
 
 Skills are active procedural memory: review may create class-level skills and improve existing
 ones using verified procedures, corrections, and pitfalls. Global creations live below
-`<agent-dir>/pi-hermes-memory/skills`; explicit project creations live below the active Git
+`<agent-dir>/pi-hermes-memory/skills`; project creations (including background review) live below the active Git
 checkout's `.hermes/skills` and require the same project-trust decision used for discovery.
-Trusted `.agents/skills` remains the cross-tool repository root. Skill-tool creations receive curator
-metadata, including foreground tool creations; this differs from Hermes's foreground ownership
-rule. Background edits require agent provenance, an unchanged content hash, an unpinned skill,
+Trusted `.agents/skills` remains the cross-tool repository root. New skill-tool creations receive
+versioned `curator.json` provenance. Foreground creations are user-managed; background review
+creations are curator-managed. `/curator adopt <name>` explicitly grants management of a global
+skill; `project:<project-name>:<skill-name>` or `--scope project` targets the current trusted
+checkout. There is no migration, compatibility reader or automatic adoption of old metadata.
+Background edits require managed provenance, unchanged whole-package hashes, an unpinned skill,
 and a successful read of the exact existing file during that review. User-owned and externally
 changed skills fail closed. Supporting files use relative, non-symlink paths. Autonomous deletion
-requires an existing `absorbed_into` skill and archives the source outside all skill roots.
+requires an existing `absorbed_into` skill and moves the complete source into its root's hidden
+`.archive` directory, excluded from ordinary skill discovery.
 Pi-native skill roots and immutable catalog ownership stay with `SkillsPlugin`; reload is required
 before newly created skills appear as `/skill:` commands.
 The learning prompts use Pi's `/skill:<name>` syntax and skill tools' `content` field. They leave
-protected-skill corrections to foreground user action and report overlap without promising a
-separate background curator or a Hermes adoption command. Memory instructions retain the Pi
+protected-skill corrections to foreground user action. Memory instructions retain the Pi
 policy against storing temporary task progress or secrets.
+
+Hermes owns a separate library-wide Curator module, adapted from the same pinned upstream
+`agent/curator.py` and `tools/skill_usage.py`. This is a deliberate Rust product addition, not
+Pi conformance. It processes immediate skill packages in the global Hermes root and the current
+trusted Git checkout's `.hermes/skills`. These are independent libraries with identical ownership
+checks; no historical project registry is scanned. Supporting autonomous project skills is a
+deliberate extension of upstream Hermes, which excludes repository-owned skills from curation.
+The project `.agents/skills` root, bundled/hub installs, external roots, missing/invalid provenance, pins and externally edited
+packages are excluded. In particular, no bundled/hub ownership manifest or bundled pruning is
+introduced. Provenance records creation, activity, usage/view/patch counts, active/stale state,
+ownership, pinning, and a hash of every package file except the provenance itself.
+`SkillsPlugin` exposes an optional semantic invocation observer; SDK wiring connects Hermes
+usage persistence without putting storage policy in the catalog, session, or memory-loader.
+Invocation and foreground activity observers cover both managed roots and identify packages by
+path, so same-named skills in different scopes do not share activity. Successful foreground
+`read`/`skill_view` calls also record activity. Maintenance reads do not
+refresh inactivity age. Catalogs remain generation-local and immutable: `/reload` is required
+after creations, archive, restore or rollback.
+
+The generation-owned Curator worker is enabled by default, checks every 30 seconds, and runs
+only in idle user sessions with no queued input: default interval 168 hours, minimum idle time
+2 hours, stale after 30 days and archive after 90 days. Its first eligibility check seeds the
+clock without doing maintenance. Durable timestamps, pause state and last-report identity are
+independent per skill root. Pausing the global library does not pause the project library.
+The worker checks both roots independently and skips absent project roots. Process-held
+foreground activity leases cover both existing roots and protect long requests across sessions;
+OS file locks serialize maintenance and package publication. Foreground work/compaction cancels
+an in-flight private run; shutdown/reload cancels and joins the worker.
+
+Optional model consolidation defaults off. It uses the existing bounded ephemeral Agent with
+a dedicated prompt, no parent history, no inherited Agent/session hooks, at most eight model
+iterations, a default 200,000 input-token budget and 120-second timeout. Only skill tools may
+execute; advertised schemas retain the normal ephemeral-session contract. Dry-run denies all
+mutations, including usage/provenance/scheduler/report writes inside the skill library. Model
+usage is still attributed once to the parent as `task=curator`, without transcript messages or
+a new resume entry. Actual changes are reported from successful tool receipts. Consolidation
+pins its scope and root in private invocation state. Each library runs separately: listing,
+viewing, creation, edits and consolidation targets must stay inside that bound scope, and omitted
+create scope defaults to it. Ordinary background-review consolidation also stays within one scope.
+Consolidation checks ownership again at publication, requires fresh exact-file reads, and refuses source
+retirement until all supporting-file content is preserved in the destination.
+
+`/curator` and the standalone `pi curator` adapter share the same command/policy implementation.
+Status, adoption, pinning, local pruning, pause/resume, archive/restore and backup/rollback need
+no provider. The standalone adapter resolves the existing project trust policy before passing
+cwd and trust into the same scope selector. `status`, `run`, `pause/resume`, backup and listing
+commands default to global plus the current trusted project. `--scope global|project|all` narrows
+that selection; single-object mutations and rollback require one scope. Bare names/IDs and a
+bare rollback retain global semantics; project skill, archive and backup IDs carry the
+`project:<project-name>:` prefix. Multi-scope output is keyed by library identity.
+Model-backed CLI runs use the normal session/provider construction path. Every
+maintenance pass that changes packages first snapshots all eligible packages under that root's `.backups`;
+archives retain complete packages, and restore never overwrites an existing destination.
+Rollback validates targets before mutation, takes a safeguard snapshot, and archives replaced
+versions. It refuses externally edited/pinned targets and never removes unrelated newly created
+skills. Partial snapshots without a completion marker are not selectable. Archives, backups and
+reports are retained without automatic deletion; exact storage format and retention are Rust
+adaptations, not full Hermes CLI/storage compatibility.
 
 Legacy project-memory Markdown remains indexed read-only so existing data is not deleted, but the
 project-memory mutation/switch surface is retired. Failure notes, FTS/session search, manual
@@ -1288,10 +1366,10 @@ remain Rust adaptations. The compressor
 implements the default window/retention profile and detached lifecycle, not every upstream
 compressor tuning option or recovery heuristic. This is not byte-for-byte or complete Hermes parity.
 
-The older local semantic provider is retained as an explicitly selected `"local"` provider for
-vector/FTS recall use cases. It is not the default and does not claim Hermes compatibility.
-`memory.json` selects exactly one provider; the loader never combines their tool contracts or
-storage semantics.
+Hermes is the only first-party memory provider registered by `pi-sdk`. `memory.json` selects
+exactly one provider; an unknown provider id, including the retired `"local"` id, rejects candidate
+generation instead of falling back or migrating data. Removing the local provider does not delete
+existing files under `<agent-dir>/memory`; the product simply no longer reads them.
 
 Memory providers do not add a fourth plugin Driver. `pi-memory-loader` is a host-side construction crate that
 owns `MemoryLoader`. The Loader reads `<agent-dir>/memory.json`, selects exactly one registered
@@ -1311,188 +1389,18 @@ authors receive configuration plus the ordinary plugin lifecycles and own their 
 model behind that seam. This avoids freezing the bundled SQLite provider's record and query shapes
 into every future provider before a second implementation demonstrates shared semantics.
 
-`pi-plugin-memory-local` is the deep bundled Provider Module. Its external construction Interface is
-`LocalMemoryProviderFactory`, while its public `LocalMemoryPlugin` directly implements both
-`AgentPlugin` and `SessionPlugin`. The local implementation owns the `memory` and `session_search`
-tools, tool schemas and write policy, local `MemoryRecord`/mutation/query types, transient context
-recall, per-run recall caching, start/compact/tree/shutdown reconciliation, maintenance commands,
-and on-device storage. Its `LocalMemoryProvider` implementation hides SQLite/FTS persistence,
-sqlite-vec dense retrieval, hybrid ranking, session indexing, embedding validation, and the pinned
-FastEmbed asset lifecycle. It stores a local database at
-`<agent-dir>/memory/memory.sqlite3`, uses WAL plus FTS5, sets the directory to `0700` and the
-database, WAL, and SHM files to `0600` on Unix, and opens a fresh connection in a blocking
-worker for each operation. SQLite, ranking, or embedding internals can change without changing the
-factory or lifecycle Interface. A different Provider remains free to register different tools and
-implement different lifecycle policy.
-
-The crate layout follows those responsibilities: `factory.rs` is the sole construction Adapter,
-`plugin.rs` owns agent/session hooks, `commands/` and `tools/` hide their concrete registrations,
-`embedding/` owns model acquisition and initialization, and `storage/` owns SQLite plus sqlite-vec.
-The pure ranking Module remains separate from storage mechanics. Provider initialization types are
-crate-private; the root exports only the product factory/plugin and concrete types required by the
-evaluation Adapter.
-
-Non-empty SQLite recall keeps four concrete ranking modes inside the local Provider Module. The
-product-default lightweight Hybrid mode asks FTS5/BM25 for 32–100 active,
-scope-filtered candidates; an internal ranking Module combines candidate-local term rarity, term
-coverage, phrase order, contiguous spans, code atoms, and reciprocal sparse rank. It does not infer
-query intent from language-specific keyword vocabularies or use `MemoryKind` as a lexical ranking
-prior. Greedy diversity promotes complementary evidence over near-duplicate records, and a relative
-confidence cutoff may return fewer than the requested maximum. `SqliteRecallRanking::Bm25` remains
-the deterministic sparse control. `SparseDenseRawRrf` is a historical evaluation control that
-deliberately omits confidence, cutoff, and diversity; it is selectable only through a concrete
-SQLite Adapter constructor and is never product construction policy.
-
-The optional `SparseDenseRrf` mode accepts one injected `MemoryEmbedder` at an internal seam and
-stores compact float32 vectors in a sqlite-vec `vec0` table. Its immutable
-model/revision/dimension descriptor owns the embedding space; a descriptor change atomically
-recreates the derived vector table. Cosine KNN applies `scope_key` metadata filters before its
-bounded candidate limit, while materialization repeats the active/scope predicate as defense in
-depth. The ranking Module first runs the ordinary lexical diversity/cutoff path to form a protected
-core. It then scores the BM25/dense union with lexical structure, normalized cosine similarity,
-and a bounded reciprocal-rank contribution; raw BM25 and distance values are never directly
-mixed. A dense rescue must add substantive query evidence not covered by the core, or strongly
-repeat at least three substantive query terms, before it enters the same seeded diversity and
-relative-cutoff policy. Within the rescue pool, a candidate that adds previously uncovered
-substantive evidence and expresses it as an adjacent query phrase or exact query code atom is
-selected before score-only repeated evidence; that coherent complement survives the relative
-cutoff that still applies to ordinary rescues. This prevents redundant subsystem summaries from
-consuming every multi-hop slot without globally lowering the cutoff. The substantive-token rule is
-shape based (CJK, digit-bearing, or at least four characters), not an intent vocabulary or a
-`MemoryKind` prior. Tombstones and supersession remove vectors regardless of replay order.
-Query/model failures return the ordinary lexical result, write-time model failures leave an active
-record pending rather than weakening the canonical write, and bounded backfill performs model work
-outside SQLite transactions. Empty-query recency and LIKE fallback behavior are unchanged.
-
-The local-provider Module privately owns sqlite-vec's required C entry-point conversion.
-Registration is process-wide, checked, and memoized. Unsafe code is denied crate-wide and allowed
-only in that single audited registration function; the module is not exported. Embeddings, model
-state, ranks, and backfill state remain derived provider data rather than canonical `MemoryRecord`
-fields.
-
-The same local Provider Module owns the concrete FastEmbed Adapter, its asset lifecycle, and its
-`LocalMemoryProviderInitializer`. `LocalMemoryProviderFactory` parses only `providers.local`,
-derives the database and model paths, awaits storage/model initialization, and returns the declared
-`LocalMemoryPlugin`; that plugin attaches the provider-specific `/memory-local-*` maintenance
-commands and owns its lifecycle implementation. An initialization error rejects the candidate generation and
-leaves the previous generation intact. The initial embedding space is
-`intfloat/multilingual-e5-small` at one immutable Hugging Face commit, 384
-dimensions, mean pooling, normalized FastEmbed output, and versioned E5 `query:` / `passage:`
-prefix policy. Model identity includes both the upstream commit and Pi Adapter-policy revision, so a
-change that would invalidate stored document vectors recreates the derived vector index. FastEmbed
-is opened from provider-verified local bytes rather than its automatic Hub constructor; `HF_HOME`
-cannot redirect ordinary inference, recall, or writes.
-
 The Memory Loader owns only the outer shape of `<agent-dir>/memory.json`; generic `settings.json`
-parsing neither decodes nor merges Memory policy, and project settings cannot redirect durable
+parsing neither decodes nor merges memory policy, and project settings cannot redirect durable
 memory. The versioned document selects the provider, recall budgets, and provider-specific
-configuration under `providers.<id>`. Each value in `providers` remains opaque JSON to the host.
-Only the selected subtree is passed to its factory; inactive provider configurations are neither
-decoded nor exposed to another provider. The provider developer owns that subtree's complete
-schema, defaults, paths, credentials, model acquisition, and validation policy.
-Missing configuration safely defaults to the Hermes curated provider. Selecting the local Provider
-with no `providers.local` configuration uses its `offline` initialization; an
-invalid existing document fails generation preparation so the previous generation remains
-published. For the local Provider, `providers.local.initialization` selects `offline` or
-`automatic`. Offline initialization creates and validates local storage and activates dense recall
-only when a complete verified model is already present; it never accesses the network. Automatic
-initialization lets the Provider download missing pinned assets, load the model, create the vector
-index, and backfill existing active records before the generation is published. Both paths verify
-exact sizes and SHA-256 digests and atomically publish a versioned completion marker under a
-cross-process file lock. `HF_ENDPOINT` may select a Hub mirror, but not a different model revision.
-The explicit `/memory-local-model-install` operation remains available: it prepares and backfills a dense
-Adapter, then performs the normal whole-generation reload. Installed model sessions are shared
-between overlapping generations in-process, avoiding a second 470 MB ONNX load during the atomic
-swap. `/memory-local-model-backfill` repairs pending rows, and `/memory-local-rebuild` backfills after replacing
-the canonical derived index.
-
-The Pi v4 JSONL session remains the source of truth. A curated write validates a compact
-`MemoryRecord`, appends a `pi.memory.v1` custom entry, and only then applies that mutation to the
-derived database. If indexing fails after the append, the tool reports the durable write as
-pending rather than inventing a second commit point; lifecycle reconciliation replays JSONL by
-mutation id. `remember` records and `forget` tombstones are immutable. A correction is a new record
-whose `supersedes` points at the old id, so replay from multiple sessions is commutative and does
-not depend on a global sequence number. Active queries exclude tombstoned and superseded ids.
-Reusing one mutation id with a different payload is rejected as journal corruption rather than
-silently accepting whichever session happened to reconcile first.
-
-SQLite maintenance remains a concrete local capability behind `LocalMemoryPlugin` rather than a
-requirement imposed on every provider. `/memory-local-status`
-reports schema, SQLite quick-check state, row counts, and index size; `/memory-local-list` and
-`/memory-local-search` expose active records with provenance; `/memory-local-rebuild` replaces all derived rows
-from the configured v4 session directories. A rebuild acquires an immediate SQLite write
-transaction before reading its sources, uses the non-repairing `SessionLog::read` path so an
-actively appended torn tail is ignored rather than truncated, and commits the complete replacement
-atomically. Concurrent curated writes append JSONL first and then wait behind the transaction, so
-they cannot be cleared by the replacement. Legacy v1-v3 files are skipped until explicitly imported
-through the existing session-import seam; invalid v4 files and duplicate session ids fail the whole
-rebuild and preserve the old index. If SQLite identifies the database as corrupt or not a database
-during generation construction, the file and any sidecars are preserved under a `.corrupt-*` name
-before a clean derived database is initialized; status directs the user to rebuild it from JSONL.
-
-The local Provider's `MemoryRecord` V1 contains id, exactly one user/project/session scope, kind,
-text, origin, required
-evidence, record time, and optional supersession. UUIDv7 identities make retries and reconciliation
-explicit. Embeddings, access counters, ranks, and future confidence/valid-time fields are derived
-provider data rather than canonical fields. Automatic capture is intentionally absent: the model
-can write only through the visible `memory` tool, whose contract forbids credentials and transient
-task details.
-
-Recall runs from the generation `context` hook with a bounded record count, approximate token
-budget, and timeout. Results are cached per agent run, rendered as one hidden custom message before
-the latest real user message, and never appended to JSONL. The wrapper says that current user
-instructions win and quoted memory cannot become a system/tool command. `session_search` indexes
-only user and assistant text from each current active branch; tool results are excluded because
-they commonly contain source files, credentials, or very large payloads. Replacing a session index
-therefore removes abandoned branch text. Project search is rooted at the nearest Git ancestor (or
-the canonical cwd when no Git root exists), while the database stays outside the project.
-
-`pi-memory-eval` is a development-only Module with its own narrow seam. Its `EvalBackend`
-Interface has one operation and receives only query text, scopes, and a result limit; question ids,
-ability labels, gold evidence, forbidden records, and expected answers remain runner-owned. The
-local production Adapter delegates to `LocalMemoryProvider::recall`, while no-recall and
-deliberately gold-privileged Oracle Adapters provide lower and upper bounds. The traced SQLite
-evaluation Adapter uses
-the concrete `recall_with_candidates` capability to return rank-ordered sparse/dense identities
-alongside the unchanged final result. For the product sparse/dense policy it additionally records
-protected-core, gate-eligible, and pre-cutoff identities; ordinary product recall does not collect
-any of those ids. The bundled corpus replays ordinary `MemoryMutation` values and scores
-evidence-hop Recall@1/5/8, all-hop success, MRR, scope/stale/distractor risk, evidence density,
-timeout rate, and latency percentiles. Report schema v5 also groups retrieval metrics by language
-relation and hop shape, compares gold coverage in the sparse, dense, and deduplicated candidate
-union, and aggregates coverage at each final-ranking boundary. Gold comparison happens only after
-`EvalBackend::gather` returns. Language relation, split membership, and every other gold field
-remain runner-owned and never cross the `EvalBackend` seam.
-
-Corpus schema v2 separates haystacks from evaluation suites: a suite references one haystack and an
-explicit ordered question-id set. The fixed-seed `small` haystack expands seven curated sessions to
-100 sessions and 306 records. Corpus version `1.3.0-holdout-v2` contains 45 unique questions:
-`small-dev`, the first frozen holdout, and a second pre-run frozen holdout select 15 questions each
-over those exact records. The fixed-seed `medium` haystack retains the curated needles and expands
-to 500 sessions, 1,506 records, and 1,507 replay mutations; its dev and two holdout suites reuse the
-corresponding small-tier question ids. Paired small/medium reports therefore isolate scale pressure,
-while only a never-before-run question split can measure unseen-query generalization. Fixture tests
-enforce shared mutations, ordered v2 question identity, ability/language/hop composition, Oracle
-upper bounds, and query-input uniqueness. This prevents split names from changing generated filler
-and makes lexical tuning failures visible on separately worded cross-language queries. Checked BM25
-and lightweight-hybrid baselines omit machine-specific latency while runtime reports retain it.
-This is a `pi-rs` provider benchmark inspired by LongMemEval-V2, not an official
-trajectory-benchmark score and not a reason to widen the production memory Interface.
-
-The explicit `sqlite-dense` evaluation Adapter loads the same pinned FastEmbed model and exercises
-the production protected-lexical/dense-rescue path through `LocalMemoryProvider::recall`; it never
-installs or downloads model assets. Its cache path is mandatory, haystack embedding occurs before timed
-queries, and the real-model regression is ignored by ordinary workspace tests. This keeps
-deterministic lexical controls and offline CI independent from a 470 MB asset while making the
-model-backed path reproducible on machines where that exact revision was installed.
-`sqlite-dense-raw-rrf` uses the same concrete Adapter and model but selects the historical
-equal-weight RRF control. The choice stays outside `LocalMemoryPlugin`, keeping evaluation
-ablations from becoming product plugin policy.
+configuration under `providers.<id>`. Each provider value remains opaque JSON to the host, and
+only the selected subtree is passed to its factory. Missing configuration defaults to Hermes;
+an invalid document or unknown provider rejects generation preparation so the previous generation
+remains published.
 
 The plugin-facing custom-entry capability permits an atomic extension-state append while the Agent
 itself owns the prompt operation. `SessionLog` still assigns the shared mutation sequence; busy
-compaction, switch, fork, and tree operations remain rejected. This lets a tool establish the JSONL
-commit before updating a derived provider without weakening other session mutation gates.
+compaction, switch, fork, and tree operations remain rejected. This preserves Pi extension-state
+semantics without weakening other session mutation gates.
 
 `SessionContext::launch_isolated_session` is a deliberate Rust product extension seam rather than
 Pi core workflow policy. It creates a fresh `PiSession` through the same
@@ -1591,6 +1499,43 @@ expansion, and GitHub CLI/viewer-URL behavior. Import validates and stages a uni
 requests confirmation through the semantic `UiContext`, then reuses command-session `switch`;
 cancellation or replacement failure removes the staged file. The CLI only renders the generic
 confirmation request and never switches on those command names.
+
+## Scheduled tasks
+
+`pi-plugin-schedule` is a first-party feature over the same managed isolated-session capability.
+`SchedulePlugin` registers the typed `schedule` tool and `/schedule` command;
+`ScheduleSessionPlugin` owns a cancellable, generation-local worker activated only by
+`session_start` and joined during `session_shutdown`. Both use independent factory registrations
+in `pi-sdk`. Factories never start timers or open task storage. Failed preparation keeps the old
+worker; successful reload cancels/records active work before retiring its context and starts a
+fresh worker in the new `session_start`. Child launch waits for the manager's registration gate.
+There is no scheduler binary, fourth plugin lifecycle, OS cron
+installation, or scheduling policy in `pi-core`/`pi-session`.
+
+Task definitions and execution records live together in the plugin-owned, versioned
+`<agent-dir>/schedule/jobs.json` or trusted `<cwd>/.pi/schedule/jobs.json`. Project trust gates all
+project schedule reads and writes. Global jobs still match the currently open session cwd.
+One-shots, fixed intervals, and five-field cron with explicit IANA timezones are durable;
+an idle primary session claims due work, while isolated origins cannot manage schedules or start
+workers. Creation snapshots model/thinking/tools; request-time credentials and the host's current
+capability ceiling remain authoritative. Every dispatch creates a fresh managed session, preserving
+ordinary resource/plugin construction and lazy Pi v4 persistence without copying parent history.
+Semantic notices carry results through the existing frontend stream; the plugin never writes stdout.
+
+An OS metadata lock and atomic file replacement commit a consumed occurrence and its running record
+before dispatch. A per-job OS lock spans execution and terminal recording across processes/windows.
+Missed windows coalesce; claiming advances the next occurrence rather than replaying a backlog.
+An orphaned attempt becomes `unknown` only after acquiring its run lock, and its effects are never
+automatically replayed. Shutdown/timeout abort and drain a child before releasing the lock; an
+unconfirmed cancellation pauses the job. Terminal history/output are bounded independently of the
+normal isolated-session transcripts. All workers stop with their Pi processes. This is a deliberate
+Rust product addition inspired by Hermes, using upstream Pi's resource-start/shutdown contract from
+`legacy/pi/packages/coding-agent/docs/extensions.md`.
+
+The generic isolated-session launch path owns cancellation until it returns a control handle.
+Dropping a launch future while it awaits child readiness aborts the unclaimed prompt, including
+when a scheduler's generation is shutting down. This is generic child ownership, not knowledge of
+the scheduling plugin, and does not change native ABI or Pi v4 records.
 
 ## Event ordering
 

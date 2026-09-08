@@ -24,8 +24,8 @@ use pi_core::{
 };
 use pi_session::{
     AgentSession, AgentSessionEvent, AgentSessionSnapshot, EntryOrder, EntryQuery, ForkPosition,
-    PiSession, QueueSnapshot, SessionEntry, SessionRuntimeInventory, ShellExecutionOptions,
-    SubmitOutcome, aggregate_document_usage, current_session_context_tokens,
+    PiSession, QueueSnapshot, SessionEntry, SessionInput, SessionRuntimeInventory,
+    ShellExecutionOptions, SubmitOutcome, aggregate_document_usage, current_session_context_tokens,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -1476,7 +1476,7 @@ struct EffectDone {
 pub(crate) async fn run(
     session_handle: PiSession,
     fullscreen: bool,
-    initial_prompt: Option<String>,
+    initial_prompt: Option<SessionInput>,
     project_trust: ProjectTrustService,
     interactive_requests: InteractiveRequestReceivers,
     agent_dir: PathBuf,
@@ -1527,7 +1527,7 @@ fn app_for_session(
 async fn run_loop(
     terminal: &mut TerminalSession,
     session_handle: PiSession,
-    initial_prompt: Option<String>,
+    initial_prompt: Option<SessionInput>,
     palette: UiPalette,
     project_trust: ProjectTrustService,
     interactive_requests: InteractiveRequestReceivers,
@@ -1544,8 +1544,10 @@ async fn run_loop(
     let mut subscription = session.subscribe();
     let mut app = app_for_session(&session, &subscription.snapshot, &agent_dir);
     let (effect_sender, mut effect_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (paste_sender, mut paste_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut paste_pending = false;
     if let Some(prompt) = initial_prompt {
-        app.input_history.record(&prompt);
+        app.input_history.record(prompt.text());
         app.awaiting_assistant = true;
         app.working_started_at = Some(Instant::now());
         app.status = "Working...".to_string();
@@ -1584,7 +1586,19 @@ async fn run_loop(
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         let copied_selection = terminal.fullscreen
                             && handle_copy_shortcut(key, &mut app, &surface, &mut clipboard);
-                        if !copied_selection {
+                        let paste_shortcut = key.code == KeyCode::Char('v') && key.modifiers == KeyModifiers::CONTROL;
+                        if !copied_selection && paste_shortcut && can_paste_to_composer(&app) {
+                            if !paste_pending {
+                                paste_pending = true;
+                                let sender = paste_sender.clone();
+                                let epoch = app.epoch;
+                                let draft = app.input.text();
+                                tokio::spawn(async move {
+                                    let result = crate::clipboard::read_clipboard_paste().await;
+                                    let _ = sender.send((epoch, draft, result));
+                                });
+                            }
+                        } else if !copied_selection {
                             app.screen_selection = None;
                             let mut ui = KeyUi {
                                 clipboard: &mut clipboard,
@@ -1674,6 +1688,16 @@ async fn run_loop(
                     app = refreshed;
                 } else if current_epoch {
                     app.sync_snapshot(&session.snapshot());
+                }
+            }
+            Some((epoch, draft, result)) = paste_receiver.recv() => {
+                paste_pending = false;
+                if epoch == app.epoch && draft == app.input.text() && can_paste_to_composer(&app) {
+                    match result {
+                        Ok(Some(text)) => paste_into_composer(&mut app, &text),
+                        Ok(None) => app.status = "Clipboard contains no image or text".to_string(),
+                        Err(error) => app.status = format!("Paste failed: {error}"),
+                    }
                 }
             }
             Some(request) = trust_requests.recv() => {
@@ -2542,6 +2566,98 @@ mod tests {
                 sort_mode: 1,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn image_attachments_reach_provider_and_storage_in_each_frontend() {
+        use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
+
+        for mode in ["tui", "print", "json"] {
+            let directory = tempfile::tempdir().unwrap();
+            let png = pi_media::image::encode_rgba_png(1, 1, vec![1, 2, 3, 255]).unwrap();
+            std::fs::write(directory.path().join("a.png"), png).unwrap();
+            let input = crate::input::prepare_input(
+                &["@a.png".to_string(), "inspect".to_string()],
+                None,
+                directory.path(),
+                &pi_media::image::ImagePolicy::default(),
+            )
+            .unwrap()
+            .unwrap();
+            let image = input.images()[0].clone();
+            let plugin = Arc::new(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
+                "done".to_string(),
+            )]));
+            let provider = plugin.provider();
+            let sessions = MultiSessionManager::new(move |request: AgentSessionRuntimeRequest| {
+                let plugin = plugin.clone();
+                async move {
+                    let AgentSessionRuntimeTarget::Create { cwd, path, .. } = request.target else {
+                        unreachable!()
+                    };
+                    let runtime = pi_runtime::PiRuntime::builder()
+                        .provider_plugin_arc(plugin)
+                        .agent_options(pi_agent::AgentOptions {
+                            provider_id: ProviderId::new("scripted"),
+                            model_id: ModelId::new("test"),
+                            cwd,
+                            ..pi_agent::AgentOptions::default()
+                        })
+                        .system_prompt(pi_runtime::SystemPrompt::Final("test".to_string()))
+                        .build()?;
+                    AgentSession::prepare_create(runtime, path).await
+                }
+            });
+            let path = directory.path().join("session.jsonl");
+            let handle = sessions
+                .create_session(directory.path(), &path)
+                .await
+                .unwrap();
+            let session = handle.current();
+            assert!(!path.exists());
+            match mode {
+                "tui" => {
+                    run_effect(&handle, &session, input, EffectMode::Submit)
+                        .await
+                        .unwrap();
+                }
+                "print" => crate::output::run_print(handle.clone(), input)
+                    .await
+                    .unwrap(),
+                "json" => crate::output::run_json(handle.clone(), input)
+                    .await
+                    .unwrap(),
+                _ => unreachable!(),
+            }
+            let requests = provider.requests();
+            assert_eq!(requests.len(), 1, "{mode}");
+            assert!(matches!(&requests[0].messages[0], Message::User(user) if
+                user.content.iter().any(|block| matches!(block, ContentBlock::Image(actual) if actual == &image))));
+            assert!(
+                std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains(&image.data)
+            );
+            let document = session.log().load().unwrap();
+            assert!(
+                matches!(document.messages()[0].as_standard(), Some(Message::User(user)) if
+                user.content.iter().any(|block| matches!(block, ContentBlock::Image(actual) if actual == &image)))
+            );
+            sessions.shutdown().await.unwrap();
+        }
+    }
+
+    #[test]
+    fn image_path_paste_edits_at_cursor_and_respects_focused_views() {
+        let mut app = demo_app();
+        app.input.set_text("look: ");
+        assert!(can_paste_to_composer(&app));
+        paste_into_composer(&mut app, "/tmp/pi-clipboard-test.png");
+        assert_eq!(app.input.text(), "look: /tmp/pi-clipboard-test.png");
+        app.push_bottom_view(BottomPaneView::Model);
+        assert!(!can_paste_to_composer(&app));
+        app.pop_bottom_view();
+        assert!(can_paste_to_composer(&app));
     }
 
     #[tokio::test]

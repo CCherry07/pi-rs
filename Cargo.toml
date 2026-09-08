@@ -2,6 +2,7 @@
 members = [
     "apps/pi-cli",
     "crates/pi-core",
+    "crates/pi-media",
     "crates/pi-agent",
     "crates/pi-runtime",
     "crates/pi-provider",
@@ -25,13 +26,12 @@ members = [
     "crates/pi-mcp",
     "bindings/pi-napi",
     "e2e",
-    "evals/pi-memory",
     "plugins/features/pi-plugin-prompts",
     "plugins/features/pi-plugin-skills",
     "plugins/features/pi-plugin-session-transfer",
     "plugins/features/pi-plugin-memory-hermes",
-    "plugins/features/pi-plugin-memory-local",
     "plugins/features/pi-plugin-subagents",
+    "plugins/features/pi-plugin-schedule",
     "plugins/providers/pi-plugin-models",
     "plugins/providers/pi-plugin-anthropic",
     "plugins/providers/pi-plugin-openai",
@@ -76,6 +76,7 @@ libloading = "0.8.9"
 toml = "0.8.23"
 
 pi-core = { path = "crates/pi-core" }
+pi-media = { path = "crates/pi-media" }
 pi-agent = { path = "crates/pi-agent" }
 pi-runtime = { path = "crates/pi-runtime" }
 pi-provider = { path = "crates/pi-provider" }
@@ -101,8 +102,8 @@ pi-plugin-prompts = { path = "plugins/features/pi-plugin-prompts" }
 pi-plugin-skills = { path = "plugins/features/pi-plugin-skills" }
 pi-plugin-session-transfer = { path = "plugins/features/pi-plugin-session-transfer" }
 pi-plugin-memory-hermes = { path = "plugins/features/pi-plugin-memory-hermes" }
-pi-plugin-memory-local = { path = "plugins/features/pi-plugin-memory-local" }
 pi-plugin-subagents = { path = "plugins/features/pi-plugin-subagents" }
+pi-plugin-schedule = { path = "plugins/features/pi-plugin-schedule" }
 pi-plugin-models = { path = "plugins/providers/pi-plugin-models" }
 pi-plugin-anthropic = { path = "plugins/providers/pi-plugin-anthropic" }
 pi-plugin-openai = { path = "plugins/providers/pi-plugin-openai" }

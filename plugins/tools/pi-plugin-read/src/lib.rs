@@ -1,15 +1,13 @@
 #![forbid(unsafe_code)]
 
-use std::io::Cursor;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::Engine as _;
-use image::ImageFormat;
 use pi_core::{
-    AgentPlugin, ContentBlock, ImageContent, PluginId, RegisterContext, Tool, ToolCallId,
-    ToolContext, ToolError, ToolResult, ToolSpec, ToolUpdateSink,
+    AgentPlugin, ContentBlock, PluginId, RegisterContext, Tool, ToolCallId, ToolContext, ToolError,
+    ToolResult, ToolSpec, ToolUpdateSink,
 };
+use pi_media::image::{ImagePolicy, detect_mime_type, process_image};
 use pi_tool_support::{
     execution, hashline_tag, optional_positive_usize, require_str, resolve_read_path, spec,
     with_prompt,
@@ -132,19 +130,27 @@ async fn execute_read(
         result = tokio::fs::read(&path) => result
             .map_err(|e| execution(format!("cannot read {requested}: {e}")))?,
     };
-    if let Some(mime_type) = image_mime_type(&bytes) {
-        let processed = process_image(bytes, mime_type, auto_resize_images).await?;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&processed.bytes);
-        let mut note = format!("Read image file [{}]", processed.mime_type);
-        if let Some(hint) = processed.hint {
+    if detect_mime_type(&bytes).is_some() {
+        let processed = tokio::task::spawn_blocking(move || {
+            process_image(
+                &bytes,
+                &ImagePolicy {
+                    auto_resize: auto_resize_images,
+                    ..ImagePolicy::default()
+                },
+            )
+        })
+        .await
+        .map_err(|error| execution(format!("image processing task failed: {error}")))?
+        .map_err(|error| execution(error.to_string()))?;
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
+        let mut note = format!("Read image file [{}]", processed.content.mime_type);
+        if !processed.hints.is_empty() {
             note.push('\n');
-            note.push_str(&hint);
+            note.push_str(&processed.hints.join("\n"));
         }
         let mut result = ToolResult::text(note);
-        result.content.push(ContentBlock::Image(ImageContent {
-            data: encoded,
-            mime_type: processed.mime_type.to_string(),
-        }));
+        result.content.push(ContentBlock::Image(processed.content));
         return Ok(result);
     }
 
@@ -347,213 +353,13 @@ fn format_size(bytes: usize) -> String {
     }
 }
 
-struct ProcessedImage {
-    bytes: Vec<u8>,
-    mime_type: &'static str,
-    hint: Option<String>,
-}
-
-async fn process_image(
-    bytes: Vec<u8>,
-    mime_type: &'static str,
-    auto_resize_images: bool,
-) -> Result<ProcessedImage, ToolError> {
-    const MAX_DIMENSION: u32 = 2_000;
-    const MAX_BASE64_BYTES: usize = 4_718_592;
-
-    if !auto_resize_images && mime_type != "image/bmp" {
-        return Ok(ProcessedImage {
-            bytes,
-            mime_type,
-            hint: None,
-        });
-    }
-
-    tokio::task::spawn_blocking(move || {
-        let format = match mime_type {
-            "image/png" => ImageFormat::Png,
-            "image/jpeg" => ImageFormat::Jpeg,
-            "image/gif" => ImageFormat::Gif,
-            "image/webp" => ImageFormat::WebP,
-            "image/bmp" => ImageFormat::Bmp,
-            _ => {
-                return Err(execution(
-                    "[Image omitted: could not be converted to a supported inline image format.]",
-                ));
-            }
-        };
-        let image = image::load_from_memory_with_format(&bytes, format).map_err(|_| {
-            execution(
-                "[Image omitted: could not be converted to a supported inline image format.]",
-            )
-        })?;
-        let original_width = image.width();
-        let original_height = image.height();
-        let within_dimensions =
-            original_width <= MAX_DIMENSION && original_height <= MAX_DIMENSION;
-        let within_size = base64_size(bytes.len()) < MAX_BASE64_BYTES;
-        if mime_type != "image/bmp" && within_dimensions && within_size {
-            return Ok(ProcessedImage {
-                bytes,
-                mime_type,
-                hint: None,
-            });
-        }
-
-        let (mut width, mut height) = fit_dimensions(
-            original_width,
-            original_height,
-            MAX_DIMENSION,
-            MAX_DIMENSION,
-        );
-        loop {
-            let resized = if width == original_width && height == original_height {
-                image.clone()
-            } else {
-                image.resize_exact(width, height, image::imageops::FilterType::Lanczos3)
-            };
-            let mut output = Cursor::new(Vec::new());
-            resized
-                .write_to(&mut output, ImageFormat::Png)
-                .map_err(|_| {
-                    execution(
-                        "[Image omitted: could not be resized below the inline image size limit.]",
-                    )
-                })?;
-            let encoded = output.into_inner();
-            if base64_size(encoded.len()) < MAX_BASE64_BYTES {
-                let mut hints = Vec::new();
-                if mime_type != "image/png" {
-                    hints.push(format!(
-                        "[Image converted from {mime_type} to image/png.]"
-                    ));
-                }
-                if width != original_width || height != original_height {
-                    let scale = f64::from(original_width) / f64::from(width);
-                    hints.push(format!(
-                        "[Image: original {original_width}x{original_height}, displayed at {width}x{height}. Multiply coordinates by {scale:.2} to map to original image.]"
-                    ));
-                }
-                return Ok(ProcessedImage {
-                    bytes: encoded,
-                    mime_type: "image/png",
-                    hint: (!hints.is_empty()).then(|| hints.join("\n")),
-                });
-            }
-            if width == 1 && height == 1 {
-                return Err(execution(
-                    "[Image omitted: could not be resized below the inline image size limit.]",
-                ));
-            }
-            width = (width.saturating_mul(3) / 4).max(1);
-            height = (height.saturating_mul(3) / 4).max(1);
-        }
-    })
-    .await
-    .map_err(|error| execution(format!("image processing task failed: {error}")))?
-}
-
-fn base64_size(bytes: usize) -> usize {
-    bytes.div_ceil(3).saturating_mul(4)
-}
-
-fn fit_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
-    let scale = (f64::from(max_width) / f64::from(width))
-        .min(f64::from(max_height) / f64::from(height))
-        .min(1.0);
-    (
-        (f64::from(width) * scale).round().max(1.0) as u32,
-        (f64::from(height) * scale).round().max(1.0) as u32,
-    )
-}
-
-fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n")
-        && bytes.get(12..16) == Some(b"IHDR")
-        && !is_animated_png(bytes)
-    {
-        Some("image/png")
-    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) && bytes.get(3) != Some(&0xf7) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF") {
-        Some("image/gif")
-    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
-        Some("image/webp")
-    } else if is_bmp(bytes) {
-        Some("image/bmp")
-    } else {
-        None
-    }
-}
-
-fn is_animated_png(bytes: &[u8]) -> bool {
-    let mut offset = 8usize;
-    while offset.saturating_add(8) <= bytes.len().min(4_100) {
-        let Some(length_bytes) = bytes.get(offset..offset + 4) else {
-            return false;
-        };
-        let length = u32::from_be_bytes(length_bytes.try_into().expect("four bytes")) as usize;
-        let chunk_type = bytes.get(offset + 4..offset + 8);
-        if chunk_type == Some(b"acTL") {
-            return true;
-        }
-        if chunk_type == Some(b"IDAT") {
-            return false;
-        }
-        let next = offset.saturating_add(12).saturating_add(length);
-        if next <= offset || next > bytes.len().min(4_100) {
-            return false;
-        }
-        offset = next;
-    }
-    false
-}
-
-fn is_bmp(bytes: &[u8]) -> bool {
-    if !bytes.starts_with(b"BM") || bytes.len() < 30 {
-        return false;
-    }
-    let read_u16 = |offset: usize| {
-        bytes
-            .get(offset..offset + 2)
-            .and_then(|value| value.try_into().ok())
-            .map(u16::from_le_bytes)
-    };
-    let read_u32 = |offset: usize| {
-        bytes
-            .get(offset..offset + 4)
-            .and_then(|value| value.try_into().ok())
-            .map(u32::from_le_bytes)
-    };
-    let Some(file_size) = read_u32(2) else {
-        return false;
-    };
-    let Some(pixel_offset) = read_u32(10) else {
-        return false;
-    };
-    let Some(header_size) = read_u32(14) else {
-        return false;
-    };
-    if (file_size != 0 && file_size < 26)
-        || pixel_offset < 14 + header_size
-        || (file_size != 0 && pixel_offset >= file_size)
-    {
-        return false;
-    }
-    let (planes, bits) = if header_size == 12 {
-        (read_u16(22), read_u16(24))
-    } else if (40..=124).contains(&header_size) {
-        (read_u16(26), read_u16(28))
-    } else {
-        return false;
-    };
-    planes == Some(1) && matches!(bits, Some(1 | 4 | 8 | 16 | 24 | 32))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
+    use image::ImageFormat;
     use pi_core::AbortHandle;
+    use std::io::Cursor;
 
     #[tokio::test]
     async fn returns_supported_image_block() {
