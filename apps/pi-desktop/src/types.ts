@@ -344,6 +344,7 @@ export type GitHubPullRequestComment = {
 };
 
 export type ThreadTokenUsage = {
+  totalTokens: number | null;
   contextTokens: number | null;
   modelContextWindow: number | null;
 };

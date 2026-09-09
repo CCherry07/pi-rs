@@ -3,10 +3,26 @@ import { BrainCog, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ServiceTier, ThreadTokenUsage } from "../../../types";
 
-export function formatContextTokens(tokens: number): string {
-  const value = Math.max(0, tokens) / 1000;
-  const digits = value < 10 && !Number.isInteger(value) ? 1 : 0;
-  return `${value.toFixed(digits).replace(/\.0$/, "")}k`;
+export function formatTokens(tokens: number): string {
+  const normalizedTokens = Math.max(0, tokens);
+  const useMillions = normalizedTokens >= 1_000_000;
+  const value = normalizedTokens / (useMillions ? 1_000_000 : 1_000);
+  const digits = useMillions
+    ? 3
+    : value < 10 && !Number.isInteger(value)
+      ? 1
+      : 0;
+  const compactValue = value
+    .toFixed(digits)
+    .replace(/(\.\d*?)0+$/, "$1")
+    .replace(/\.$/, "");
+  return `${compactValue}${useMillions ? "M" : "k"}`;
+}
+
+export function formatTokenUsageLabel(tokenUsage: ThreadTokenUsage | null): string {
+  return tokenUsage?.totalTokens === null || tokenUsage?.totalTokens === undefined
+    ? "--"
+    : formatTokens(tokenUsage.totalTokens);
 }
 
 type ComposerMetaBarProps = {
@@ -19,7 +35,7 @@ type ComposerMetaBarProps = {
   onSelectEffort: (effort: string) => void;
   selectedServiceTier: ServiceTier | null;
   reasoningSupported: boolean;
-  contextUsage?: ThreadTokenUsage | null;
+  tokenUsage?: ThreadTokenUsage | null;
 };
 
 export function ComposerMetaBar({
@@ -32,7 +48,7 @@ export function ComposerMetaBar({
   onSelectEffort,
   selectedServiceTier,
   reasoningSupported,
-  contextUsage = null,
+  tokenUsage = null,
 }: ComposerMetaBarProps) {
   const { t } = useTranslation(["messages", "common"]);
   const selectedModel =
@@ -42,8 +58,8 @@ export function ComposerMetaBar({
   const modelSelectStyle = {
     "--composer-model-select-width": `${Math.max(selectedModelLabel.length + 2, 8)}ch`,
   } as CSSProperties;
-  const contextWindow = contextUsage?.modelContextWindow ?? null;
-  const contextTokens = contextUsage?.contextTokens ?? null;
+  const contextWindow = tokenUsage?.modelContextWindow ?? null;
+  const contextTokens = tokenUsage?.contextTokens ?? null;
   const contextFreePercent =
     contextWindow && contextWindow > 0 && contextTokens !== null
       ? Math.max(
@@ -60,15 +76,16 @@ export function ComposerMetaBar({
     contextWindow && boundedUsedTokens !== null
       ? Math.max(0, contextWindow - boundedUsedTokens)
       : null;
-  const contextLabel =
-    contextWindow && contextWindow > 0
-      ? `${boundedUsedTokens === null ? "--" : formatContextTokens(boundedUsedTokens)} / ${formatContextTokens(contextWindow)}`
-      : "--";
+  const tokenUsageLabel = formatTokenUsageLabel(tokenUsage);
+  const tokenUsageTooltip =
+    tokenUsage?.totalTokens === null || tokenUsage?.totalTokens === undefined
+      ? t("composer.tokenUsageUnknown")
+      : t("composer.tokenUsage", { tokens: tokenUsageLabel });
   const contextTooltip =
     boundedUsedTokens !== null && remainingTokens !== null && contextFreePercent !== null
       ? t("composer.contextUsage", {
-          used: formatContextTokens(boundedUsedTokens),
-          remaining: formatContextTokens(remainingTokens),
+          used: formatTokens(boundedUsedTokens),
+          remaining: formatTokens(remainingTokens),
           percent: Math.round(contextFreePercent),
         })
       : t("composer.contextFreeUnknown");
@@ -157,8 +174,8 @@ export function ComposerMetaBar({
         </div>
       </div>
       <div className="composer-context">
-        <span className="composer-context-label" aria-hidden>
-          {contextLabel}
+        <span className="composer-context-label" title={tokenUsageTooltip}>
+          {tokenUsageLabel}
         </span>
         <div
           className="composer-context-ring"

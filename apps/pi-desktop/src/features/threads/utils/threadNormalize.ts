@@ -67,6 +67,17 @@ export function normalizeTokenUsage(
 ): ThreadTokenUsage {
   const source = raw ?? {};
   return {
+    totalTokens: (() => {
+      const value = source.totalTokens ?? source.total_tokens;
+      if (typeof value === "number") {
+        return Number.isFinite(value) ? value : null;
+      }
+      if (typeof value === "string") {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : null;
+      }
+      return null;
+    })(),
     contextTokens: (() => {
       const value = source.contextTokens ?? source.context_tokens;
       if (typeof value === "number") {

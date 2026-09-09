@@ -409,7 +409,7 @@ async fn project_event(
                     "thread/tokenUsage/updated",
                     json!({
                         "threadId": thread_id,
-                        "tokenUsage": live.context_usage()
+                        "tokenUsage": live.token_usage()
                     }),
                 );
                 if let Some(error) = &message.error_message {

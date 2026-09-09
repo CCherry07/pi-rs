@@ -56,7 +56,7 @@ type UseMainAppLayoutSurfacesArgs = {
   onPlanAccept: LayoutNodesOptions["primary"]["messagesProps"]["onPlanAccept"];
   onPlanSubmitChanges: LayoutNodesOptions["primary"]["messagesProps"]["onPlanSubmitChanges"];
   activePlan: LayoutNodesOptions["secondary"]["planPanelProps"]["plan"];
-  activeTokenUsage: ComposerProps["contextUsage"];
+  activeTokenUsage: ComposerProps["tokenUsage"];
   latestAgentRuns: LayoutNodesOptions["primary"]["homeProps"]["latestAgentRuns"];
   isLoadingLatestAgents: LayoutNodesOptions["primary"]["homeProps"]["isLoadingLatestAgents"];
   gitState: ReturnType<typeof useMainAppGitState>;
@@ -356,7 +356,7 @@ function buildPrimarySurface({
           disabled: activeThreadReadOnly,
           canStop: composerWorkspaceState.canInterrupt,
           onFileAutocompleteActiveChange: composerWorkspaceState.setFileAutocompleteActive,
-          contextUsage: activeTokenUsage,
+          tokenUsage: activeTokenUsage,
           queuedMessages: composerWorkspaceState.activeQueue,
           queuePausedReason: composerWorkspaceState.queuePausedReason,
           sendLabel: i18n.t("composer.send", { ns: "messages" }),

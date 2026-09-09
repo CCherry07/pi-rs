@@ -196,11 +196,11 @@ Pi 会实际调用 `ModelRuntime.refresh()` 更新远程 model catalogs（`legac
 
 ### 1. 真实 provider/OAuth 流的完整兼容性
 
-**状态：不确定需实机验证。** 当前产品 E2E 使用本地 scripted OpenAI server，测试 harness 明确注入 provider turns（`e2e/product/harness.ts:60-132`）；Rust runtime agent 测试也使用 scripted provider（`e2e/tests/runtime_agent.rs:123-167`）。这能验证协议编排，但不能证明 Anthropic、Codex、xAI、Google/Vertex、Mistral、Azure、Bedrock、OpenRouter 和 Copilot 的当前线上流式、错误、限流、credential refresh 与账号模型策略都与 Pi 相同。需要用隔离凭证做 smoke matrix，且不能把凭证写入 fixture/log。
+**状态：不确定需实机验证。** 独立的黑盒产品测试及本地 scripted OpenAI server harness 已移除；保留的 Rust runtime agent 测试使用 scripted provider（`e2e/tests/runtime_agent.rs`）。这能验证协议编排，但不能证明 Anthropic、Codex、xAI、Google/Vertex、Mistral、Azure、Bedrock、OpenRouter 和 Copilot 的当前线上流式、错误、限流、credential refresh 与账号模型策略都与 Pi 相同。需要用隔离凭证做 smoke matrix，且不能把凭证写入 fixture/log。
 
 ### 2. 真实 PTY 下的跨平台 TUI parity
 
-**状态：不确定需实机验证。** Rust 有大量 Ratatui layout/input 单测，但现有 product E2E 通过子进程 + scripted provider 跑非交互路径（`e2e/product/native-cli.test.ts:1-20`、`e2e/product/harness.ts:60-138`），未见 pseudo-terminal 驱动的 fullscreen/main-screen/IME/mouse selection/clipboard/suspend/resize conformance。至少需要 macOS、Linux、Windows Terminal 的 PTY/人工矩阵。
+**状态：不确定需实机验证。** Rust 有大量 Ratatui layout/input 单测，但独立的非交互 CLI/Node 黑盒产品测试已移除；当前也未见 pseudo-terminal 驱动的 fullscreen/main-screen/IME/mouse selection/clipboard/suspend/resize conformance。至少需要 macOS、Linux、Windows Terminal 的 PTY/人工矩阵。
 
 ### 3. 真实 Pi 扩展集合的端到端兼容率
 

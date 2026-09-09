@@ -161,6 +161,8 @@
     "fastMode": "快速模式已启用",
     "thinkingMode": "思考模式",
     "default": "默认",
+    "tokenUsageUnknown": "Token 用量未知",
+    "tokenUsage": "已使用 {{tokens}} token",
     "contextFreeUnknown": "上下文用量未知",
     "contextUsage": "已用 {{used}} · 剩余 {{remaining}}（{{percent}}%）",
     "mobile": {

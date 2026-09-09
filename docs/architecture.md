@@ -68,7 +68,7 @@ plugins/features/pi-plugin-memory-hermes
 crates/pi-tool-support           shared path validation, argument, and truncation helpers
 plugins/tools/pi-plugin-{read,write,edit,hashline-edit,bash,grep,find,ls}
                                 one production tool per plugin crate
-e2e/                            runtime acceptance plus deterministic black-box product E2E
+e2e/                            in-process runtime acceptance and frontend example resources
 crates/pi-sdk/src/project_trust.rs product trust policy and persistence
 apps/pi-cli/src/tui.rs           terminal project-trust prompt Adapter
 ```
@@ -452,29 +452,24 @@ tools preserve ABI 16 and the existing exact-build compatibility policy.
 
 ## End-to-end validation
 
-End-to-end validation is an outer Test Module and does not add a product runtime or a testing-only
-construction path. Its small Interface is `runProductScenario(scenario) -> ProductRun` under
-`e2e/product`. Scenarios declare product intent—a frontend adapter, input, deterministic provider
-turns, and optional fixture/extension paths—and assert on returned product events, captured provider
-requests, process output, and Pi v4 session data. They never reach through this
-Interface to inspect registries, `ProductSessionFactory`, or plugin implementation state.
+The in-process Rust test in `e2e/tests/runtime_agent.rs` covers prompt assembly, plugin hooks,
+production filesystem tools, agent loops, and session persistence through a deterministic scripted
+provider. It is included in `cargo test --workspace`, but bypasses argument parsing and
+`ProductSessionFactory` and is not black-box product coverage.
 
-Two Adapters make the process seam concrete. `native-cli` starts the standalone Rust binary;
-`node-napi` starts the compiled Node launcher and its selected NAPI binding. Both enter the same
-production `pi-sdk` assembly and the CLI's NDJSON frontend. A private local OpenAI-compatible SSE Adapter is
-the local-substitutable provider dependency. The harness also owns temporary HOME/agent/session
-state, credential scrubbing, offline mode, process deadlines, exhaustive provider scripts, NDJSON
-decoding, and cleanup. CI YAML supplies toolchains and invokes this Interface; scenario and
-transport policy do not live in workflow steps.
+The dedicated black-box CLI/Node product scenarios and their local SSE/process harness have been
+removed to reduce test infrastructure and fixture maintenance. No replacement product-E2E layer
+is implied: complete process-to-provider tool-loop coverage is now an explicit gap. The frontend
+example retains the project resources used by Rust acceptance and Node extension-host tests, but
+not the unrelated copied skill collection; npm is its sole maintained frontend package manager.
 
-The in-process Rust test in `e2e/tests/runtime_agent.rs` remains a runtime acceptance test. It gives
-fast, precise coverage of prompt assembly, plugin hooks, production filesystem tools, agent loops,
-settlement, and session persistence, but it is not labeled as black-box product coverage because it
-bypasses argument parsing and `ProductSessionFactory`. Focused Node/NAPI bridge tests likewise stay
-below the product-E2E seam. The deterministic product suite starts both real process Adapters on
-every pull request and uses no external network or credentials. Real-provider checks are a separate
-future opt-in layer, and fullscreen interaction requires a future PTY Adapter rather than terminal
-logic in the generic harness.
+Focused Node host and Node/NAPI bridge tests remain in `packages/pi/test`. CI runs the bridge
+checks against a freshly built native binding, and release builds retain their native bridge smoke
+checks. Bridge smoke cases launch a bounded child process with explicit stdin EOF and isolated
+configuration rather than calling the native CLI inside a node:test worker whose input pipe stays
+open. This is test-owned process isolation, not a change to the CLI's piped-input contract.
+These narrower tests do not prove the removed end-to-end scenarios. Real-provider checks
+remain a future opt-in layer, and fullscreen interaction requires a future PTY Adapter.
 
 ## Product packaging and release
 

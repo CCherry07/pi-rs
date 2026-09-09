@@ -537,12 +537,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 git diff --check
 ```
 
-下面的统一入口会构建 standalone CLI 与 Node/NAPI，并运行完整的 deterministic 黑盒产品 E2E：
+Workspace 测试包含进程内 runtime 验收。Node host 和原生 bridge 检查单独运行：
 
 ```bash
 npm ci --prefix packages/pi
-npm --prefix packages/pi run e2e
+npm --prefix packages/pi run check
+npm --prefix packages/pi test
+npm --prefix packages/pi run build:native
+npm --prefix packages/pi run test:native
 ```
+
+独立的 CLI/Node 黑盒产品测试套件已移除；上述聚焦测试不提供完整的进程到 Provider 工具循环覆盖。
 
 真实 Provider 测试不要把 API key 写入源码、日志或 fixtures。默认验证路径使用
 `pi-test-support` 中的 deterministic scripted provider。

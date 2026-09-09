@@ -72,7 +72,7 @@ jobs:
       - name: Validate release configuration
         run: npm run release:check
 
-  product-e2e:
+  native-bridge:
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -97,5 +97,8 @@ jobs:
       - name: Synchronize inherited workspace versions in Cargo.lock
         run: npm run --silent release:sync-lock
 
-      - name: Run deterministic product E2E stack
-        run: npm run e2e
+      - name: Build native binding
+        run: npm run build:native
+
+      - name: Test Node to NAPI to Rust bridge
+        run: npm run test:native

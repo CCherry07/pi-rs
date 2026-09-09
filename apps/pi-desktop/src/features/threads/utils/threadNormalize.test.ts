@@ -40,10 +40,12 @@ describe("normalizeTokenUsage", () => {
   it("normalizes a desktop context snapshot", () => {
     expect(
       normalizeTokenUsage({
+        totalTokens: 48_000,
         contextTokens: 32_000,
         modelContextWindow: 128_000,
       }),
     ).toEqual({
+      totalTokens: 48_000,
       contextTokens: 32_000,
       modelContextWindow: 128_000,
     });
@@ -52,10 +54,12 @@ describe("normalizeTokenUsage", () => {
   it("keeps context tokens unknown after compaction", () => {
     expect(
       normalizeTokenUsage({
+        totalTokens: 64_000,
         contextTokens: null,
         modelContextWindow: 128_000,
       }),
     ).toEqual({
+      totalTokens: 64_000,
       contextTokens: null,
       modelContextWindow: 128_000,
     });

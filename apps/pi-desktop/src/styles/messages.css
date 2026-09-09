@@ -1487,7 +1487,6 @@
 }
 
 .markdown .markdown-table-wrap {
-  --markdown-table-wide-col: max(18rem, 33%);
   margin: 10px 0;
   width: 100%;
   overflow-x: auto;
@@ -1498,11 +1497,11 @@
 }
 
 .markdown .markdown-table {
-  width: max(100%, calc(var(--markdown-table-wide-col) * 2 + 40rem));
+  width: 100%;
   min-width: 0;
   border-collapse: separate;
   border-spacing: 0;
-  table-layout: fixed;
+  table-layout: auto;
 }
 
 .markdown .markdown-table th,
@@ -1537,35 +1536,6 @@
 
 .markdown .markdown-table tbody tr:hover td {
   background: color-mix(in srgb, var(--surface-control-hover) 36%, transparent);
-}
-
-.message .markdown .markdown-table td:first-child {
-  width: 22rem;
-}
-
-.message .markdown .markdown-table th:first-child,
-.message .markdown .markdown-table td:first-child {
-  width: 22rem;
-}
-
-.message .markdown .markdown-table th:nth-child(2),
-.message .markdown .markdown-table td:nth-child(2) {
-  width: 10rem;
-}
-
-.message .markdown .markdown-table th:nth-child(3),
-.message .markdown .markdown-table td:nth-child(3),
-.message .markdown .markdown-table th:nth-child(4),
-.message .markdown .markdown-table td:nth-child(4) {
-  width: var(--markdown-table-wide-col);
-}
-
-.message .markdown .markdown-table th:last-child,
-.message .markdown .markdown-table td:last-child {
-  width: 8rem;
-  white-space: nowrap;
-  font-weight: 650;
-  text-transform: capitalize;
 }
 
 .message .markdown .markdown-table td p {

@@ -57,7 +57,7 @@ type ComposerProps = {
   skills: { name: string; description?: string }[];
   prompts: CustomPromptOption[];
   files: string[];
-  contextUsage?: ThreadTokenUsage | null;
+  tokenUsage?: ThreadTokenUsage | null;
   queuedMessages?: QueuedMessage[];
   queuePausedReason?: string | null;
   onSteerQueued?: (item: QueuedMessage) => void;
@@ -124,7 +124,7 @@ export const Composer = memo(function Composer({
   skills,
   prompts,
   files,
-  contextUsage = null,
+  tokenUsage = null,
   queuedMessages = [],
   queuePausedReason = null,
   onSteerQueued,
@@ -494,7 +494,7 @@ export const Composer = memo(function Composer({
         onSelectEffort={onSelectEffort}
         selectedServiceTier={selectedServiceTier}
         reasoningSupported={reasoningSupported}
-        contextUsage={contextUsage}
+        tokenUsage={tokenUsage}
       />
     </footer>
   );

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "target": "aarch64-apple-darwin",
-  "intent_sha256": "1a3c10752fd61102f65a5e447e6315df973bd8cbcd0439a1478855ff2d8347b2",
+  "intent_sha256": "b64938173fe2de51ad1d27feaad3c7a0a8a50caeacd52d3770f47c349c3c7e2e",
   "plugins": [
     {
       "id": "frontend-workflow",
@@ -13,8 +13,8 @@
       "artifact": "libfrontend_workflow.dylib",
       "options": {
         "checks": [
-          "pnpm lint",
-          "pnpm build"
+          "npm run lint",
+          "npm run build"
         ],
         "command": "frontend-check",
         "guidance": "Treat lint and production build failures as blocking before reporting frontend work complete.",

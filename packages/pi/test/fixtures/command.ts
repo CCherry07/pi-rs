@@ -4,9 +4,8 @@ export default function registerBridgeSmokeCommand(pi: PiExtensionApi) {
   pi.registerCommand("bridge-smoke", {
     description: "Verify that a Pi TypeScript command crossed the NAPI bridge",
     async handler(_arguments, context) {
-      // A handled command completes without requiring a provider. If this
-      // callback is not registered and invoked, the CLI tries to submit the
-      // slash command to the model and the smoke test fails.
+      // A handled command completes without a provider. The final marker proves
+      // these assertions ran; a provider error alone need not fail the CLI process.
       if (context.hasUI || context.isProjectTrusted()) {
         throw new Error("native context exposed incorrect product capabilities");
       }
@@ -50,6 +49,7 @@ export default function registerBridgeSmokeCommand(pi: PiExtensionApi) {
       if (context.sessionManager.getSessionId() !== replacementSessionId) {
         throw new Error("native reload changed the logical session identity");
       }
+      process.stdout.write("bridge-smoke: session replacement and reload verified\n");
     },
   });
 }

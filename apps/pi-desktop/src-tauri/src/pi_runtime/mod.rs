@@ -25,7 +25,7 @@ use crate::backend::events::PiEvent;
 use crate::state::AppState;
 
 use session_store::{
-    content_text, context_usage, SessionContextUsage, SessionModelCatalog, SessionStore,
+    content_text, token_usage, SessionModelCatalog, SessionStore, SessionTokenUsage,
     SessionSummary, StoredIsolatedSession,
 };
 
@@ -706,7 +706,7 @@ fn thread_from_session(session: &AgentSession) -> Value {
         &snapshot,
         &id,
         session.runtime().cwd(),
-        context_usage(session),
+        token_usage(session),
         json!("pi-rs"),
         None,
     )
@@ -724,7 +724,8 @@ fn thread_from_observation(
         &snapshot,
         &id,
         &cwd,
-        SessionContextUsage {
+        SessionTokenUsage {
+            total_tokens: None,
             context_tokens: None,
             model_context_window: None,
         },
@@ -800,7 +801,8 @@ fn thread_from_stored_isolated(stored: &StoredIsolatedSession) -> Result<Value, 
         &snapshot,
         &stored.document.header.id,
         &stored.document.header.cwd,
-        SessionContextUsage {
+        SessionTokenUsage {
+            total_tokens: None,
             context_tokens: None,
             model_context_window: None,
         },
@@ -821,7 +823,7 @@ fn thread_from_snapshot(
     snapshot: &AgentSessionSnapshot,
     id: &str,
     cwd: &Path,
-    token_usage: SessionContextUsage,
+    token_usage: SessionTokenUsage,
     source: Value,
     display_name: Option<&str>,
 ) -> Value {
@@ -1359,6 +1361,7 @@ mod tests {
         assert_eq!(thread["turns"][0]["items"][0]["type"], "userMessage");
         assert_eq!(thread["turns"][0]["items"][1]["type"], "agentMessage");
         assert_eq!(thread["turns"][0]["items"][1]["text"], "hello from pi-rs");
+        assert!(thread["tokenUsage"]["totalTokens"].as_u64().is_some());
         assert!(thread["tokenUsage"]["contextTokens"].as_u64().is_some());
 
         let summaries = store.list(directory.path()).unwrap();

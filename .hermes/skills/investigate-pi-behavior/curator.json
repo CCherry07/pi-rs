@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "curator_managed": true,
+  "created_by": "agent",
+  "pinned": false,
+  "state": "active",
+  "created_at": 1788943769149,
+  "last_activity_at": 1788944005076,
+  "use_count": 0,
+  "view_count": 1,
+  "patch_count": 1,
+  "files": {
+    "SKILL.md": "5066dc7bbeb1b2ab61dcaca11096a2a7e502cb406db5ee80a76448010e53dae1",
+    "references/reasoning-language.md": "eda84c31f1f4602b2d7a6ef387cff83d85996717f23cfd3529d7e4dc9ed6d01f"
+  }
+}

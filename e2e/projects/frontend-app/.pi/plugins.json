@@ -6,7 +6,7 @@
       "source": "path:pi-plugins/frontend-workflow",
       "version": "*",
       "options": {
-        "checks": ["pnpm lint", "pnpm build"]
+        "checks": ["npm run lint", "npm run build"]
       }
     }
   ]

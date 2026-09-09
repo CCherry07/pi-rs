@@ -7,9 +7,10 @@ use pi_core::{
     ThinkingLevel,
 };
 use pi_session::{
-    current_session_context_tokens, AgentSession, AgentSessionReplacement, AgentSessionSnapshot,
-    AgentSessionSubscription, ExactSessionIdResolution, ForkPosition, IsolatedSessionObservation,
-    JsonlSessionRepo, MultiSessionManager, PiSession, SessionDocument, SessionEntry, SessionLog,
+    aggregate_document_usage, current_session_context_tokens, AgentSession,
+    AgentSessionReplacement, AgentSessionSnapshot, AgentSessionSubscription,
+    ExactSessionIdResolution, ForkPosition, IsolatedSessionObservation, JsonlSessionRepo,
+    MultiSessionManager, PiSession, SessionDocument, SessionEntry, SessionLog,
 };
 use serde_json::Value;
 
@@ -59,10 +60,11 @@ impl LiveSession {
         }
     }
 
-    pub(crate) fn context_usage(&self) -> SessionContextUsage {
+    pub(crate) fn token_usage(&self) -> SessionTokenUsage {
         match &self.source {
-            LiveSessionSource::Primary(session) => context_usage(session),
-            LiveSessionSource::Isolated(_) => SessionContextUsage {
+            LiveSessionSource::Primary(session) => token_usage(session),
+            LiveSessionSource::Isolated(_) => SessionTokenUsage {
+                total_tokens: None,
                 context_tokens: None,
                 model_context_window: None,
             },
@@ -72,14 +74,19 @@ impl LiveSession {
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SessionContextUsage {
+pub(crate) struct SessionTokenUsage {
+    pub(crate) total_tokens: Option<u64>,
     pub(crate) context_tokens: Option<u64>,
     pub(crate) model_context_window: Option<u64>,
 }
 
-pub(crate) fn context_usage(session: &AgentSession) -> SessionContextUsage {
+pub(crate) fn token_usage(session: &AgentSession) -> SessionTokenUsage {
     let model_context_window = session.active_context_window();
-    let context_tokens = session.log().load().ok().and_then(|document| {
+    let document = session.log().load().ok();
+    let total_tokens = document
+        .as_ref()
+        .map(|document| aggregate_document_usage(document).total_tokens);
+    let context_tokens = document.as_ref().and_then(|document| {
         let branch = document
             .branch()
             .ok()?
@@ -89,7 +96,8 @@ pub(crate) fn context_usage(session: &AgentSession) -> SessionContextUsage {
         let context = document.context().ok()?;
         current_session_context_tokens(&branch, &context.messages).map(|usage| usage.tokens)
     });
-    SessionContextUsage {
+    SessionTokenUsage {
+        total_tokens,
         context_tokens,
         model_context_window,
     }

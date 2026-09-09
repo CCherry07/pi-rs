@@ -599,7 +599,7 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 | `plugins/features/pi-plugin-memory-hermes`       | Persistent memory, background learning, and scoped skill curation                       |
 | `plugins/features/pi-plugin-schedule`            | Persistent scheduled prompts and isolated-session dispatch                              |
 | `legacy/pi`                                      | Current TypeScript Pi behavioral oracle                                                  |
-| `e2e`                                            | Runtime acceptance, black-box product E2E, and example projects                          |
+| `e2e`                                            | In-process runtime acceptance and example projects                          |
 | `scripts/perf`                                   | Rust/TypeScript performance measurements and an offline dashboard                       |
 
 Dependencies point inward: core contracts do not own terminal behavior, filesystem discovery,
@@ -633,13 +633,19 @@ cargo clippy --workspace --all-targets -- -D warnings
 git diff --check
 ```
 
-Run the deterministic black-box product E2E stack, including the standalone CLI and Node/NAPI
-adapters, with:
+The workspace tests include in-process runtime acceptance. Run the separate Node host and
+native bridge checks with:
 
 ```bash
 npm ci --prefix packages/pi
-npm --prefix packages/pi run e2e
+npm --prefix packages/pi run check
+npm --prefix packages/pi test
+npm --prefix packages/pi run build:native
+npm --prefix packages/pi run test:native
 ```
+
+The dedicated black-box CLI/Node product suite has been removed; these focused checks do not
+provide complete process-to-provider tool-loop coverage.
 
 Never put real provider credentials in source, logs, or fixtures. The default validation path uses
 the deterministic scripted provider in `pi-test-support`.
