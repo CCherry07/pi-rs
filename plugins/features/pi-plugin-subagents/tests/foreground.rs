@@ -53,7 +53,7 @@ impl TestFactory {
         Self {
             nested: true,
             agent_paths: vec![
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../.pi/agents"),
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents"),
             ],
             ..Self::new()
         }

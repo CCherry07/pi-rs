@@ -4,6 +4,21 @@ Author-facing interface for version-locked native `pi-rs` plugins.
 
 ## Create a plugin / 创建插件
 
+The CLI can scaffold, build, verify and publish native plugins:
+
+~~~bash
+pi plugin new hello --kind agent
+pi --cwd hello plugin package
+pi plugin verify hello/dist
+pi plugin install ./hello/dist
+~~~
+
+For an unreleased working checkout, add --sdk /path/to/pi-rs to new and run the pi binary built
+from that same checkout. The scaffold pins its Rust toolchain and seeds Cargo.lock; commit the
+completed lock after the first build and use package --locked in CI. See the
+[author tools guide](../pi-plugin-tools/README.md) for provider/session templates, options,
+multi-platform release workflows, GitHub publication and static registry fragments.
+
 One crate exports exactly one plugin kind. Build both `cdylib` for loading and `rlib` for tests:
 
 ```toml
@@ -19,9 +34,10 @@ crate-type = ["cdylib", "rlib"]
 pi-plugin-sdk = { path = "/path/to/pi-rs/crates/pi-plugin-sdk", features = ["agent"] }
 ```
 
-The SDK is currently consumed from the workspace (or a pinned Git revision). Replace the path with
-an exact published version once native package distribution is released; host and plugin must use
-the same SDK build fingerprint.
+The SDK is currently consumed from the workspace (or a pinned Git revision). Independent crates.io
+publication is not available: the current fingerprint consumes the full workspace source/lock
+layout. Host and plugin must use the same SDK build fingerprint; a matching SDK semver alone does
+not establish native compatibility.
 
 无配置插件实现 `Default`，作者不需要写 native constructor 或 `id()`：
 

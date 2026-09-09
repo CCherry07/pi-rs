@@ -2879,6 +2879,7 @@ dependencies = [
  "pi-plugin-openrouter",
  "pi-plugin-session-transfer",
  "pi-plugin-skills",
+ "pi-plugin-tools",
  "pi-plugin-xai",
  "pi-rpc",
  "pi-runtime",
@@ -3465,6 +3466,24 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "pi-plugin-tools"
+version = "0.1.0"
+dependencies = [
+ "pi-plugin-loader",
+ "pi-plugin-manager",
+ "pi-plugin-sdk",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "toml",
+ "url",
 ]
 
 [[package]]

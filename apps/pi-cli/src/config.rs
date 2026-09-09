@@ -147,7 +147,7 @@ pub(crate) enum CliCommand {
         #[command(subcommand)]
         command: AuthCommand,
     },
-    /// Install and manage native plugins.
+    /// Create, package, publish, install and manage native plugins.
     Plugin {
         #[command(subcommand)]
         command: PluginCommand,
@@ -227,6 +227,64 @@ pub(crate) enum AuthCommand {
 
 #[derive(Debug, Clone, Subcommand)]
 pub(crate) enum PluginCommand {
+    /// Create a native plugin crate and release workflow.
+    New {
+        path: PathBuf,
+        /// Plugin/crate name (defaults to the destination directory name).
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value = "agent")]
+        kind: pi_plugin_tools::PluginKind,
+        /// Local pi-rs checkout or pi-plugin-sdk crate.
+        #[arg(long, conflicts_with = "sdk_rev")]
+        sdk: Option<PathBuf>,
+        /// Exact SDK commit; defaults to the commit used to build this host.
+        #[arg(long)]
+        sdk_rev: Option<String>,
+    },
+    /// Build and verify a native plugin for this host's target.
+    Package {
+        #[arg(long, default_value = "Cargo.toml")]
+        manifest_path: PathBuf,
+        #[arg(short, long, default_value = "dist")]
+        output: PathBuf,
+        /// Cargo compilation cache, separate from the release output.
+        #[arg(long)]
+        target_dir: Option<PathBuf>,
+        /// Require the existing Cargo.lock without updating dependency resolution.
+        #[arg(long)]
+        locked: bool,
+        /// Build with the dev profile (release is the default).
+        #[arg(long)]
+        debug: bool,
+    },
+    /// Verify all checksums and this host's native binary compatibility.
+    Verify {
+        #[arg(default_value = "dist")]
+        path: PathBuf,
+        /// Only check bundle structure and checksums; do not load native code.
+        #[arg(long)]
+        integrity_only: bool,
+    },
+    /// Merge release bundles produced on separate native runners.
+    Merge {
+        #[arg(required = true, num_args = 1..)]
+        bundles: Vec<PathBuf>,
+        #[arg(short, long, default_value = "release")]
+        output: PathBuf,
+    },
+    /// Publish a verified release through an authenticated GitHub CLI.
+    Publish {
+        #[command(subcommand)]
+        destination: PluginPublishCommand,
+    },
+    /// Print a static registry JSON fragment for a verified local bundle.
+    RegistryEntry {
+        #[arg(default_value = "dist")]
+        bundle: PathBuf,
+        #[arg(long)]
+        manifest_url: String,
+    },
     /// Resolve, verify, and install a native plugin package.
     Install {
         /// Local package path, release manifest URL, GitHub release, or registry source.
@@ -262,6 +320,22 @@ pub(crate) enum PluginCommand {
         /// Remove from the current project's .pi directory.
         #[arg(short = 'l', long = "local")]
         local: bool,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub(crate) enum PluginPublishCommand {
+    Github {
+        #[arg(long, default_value = "dist")]
+        bundle: PathBuf,
+        #[arg(long)]
+        repo: String,
+        /// Existing vX.Y.Z tag matching the plugin version.
+        #[arg(long)]
+        tag: String,
+        /// Leave the release as a draft after uploading.
+        #[arg(long)]
+        draft: bool,
     },
 }
 
@@ -521,6 +595,77 @@ mod tests {
                 PathBuf::from("first/pi-plugin.toml"),
                 PathBuf::from("second/plugin.dylib")
             ]
+        );
+    }
+
+    #[test]
+    fn native_author_commands_parse_without_becoming_prompts() {
+        let new = Cli::try_parse_from([
+            "pi", "plugin", "new", "hello", "--kind", "provider", "--sdk", "/sdk",
+        ])
+        .unwrap();
+        assert!(matches!(
+            new.command,
+            Some(CliCommand::Plugin {
+                command: PluginCommand::New {
+                    kind: pi_plugin_tools::PluginKind::Provider,
+                    ..
+                }
+            })
+        ));
+        assert!(new.prompt.is_empty());
+        for args in [
+            vec![
+                "pi",
+                "plugin",
+                "package",
+                "--locked",
+                "--output",
+                "dist-next",
+            ],
+            vec!["pi", "plugin", "verify", "dist", "--integrity-only"],
+            vec![
+                "pi", "plugin", "merge", "mac", "linux", "--output", "release",
+            ],
+            vec![
+                "pi",
+                "plugin",
+                "publish",
+                "github",
+                "--repo",
+                "owner/repo",
+                "--tag",
+                "v1.0.0",
+                "--draft",
+            ],
+            vec![
+                "pi",
+                "plugin",
+                "registry-entry",
+                "dist",
+                "--manifest-url",
+                "https://example.com/release.json",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(cli.command, Some(CliCommand::Plugin { .. })));
+            assert!(cli.prompt.is_empty());
+        }
+        assert!(
+            Cli::try_parse_from(["pi", "plugin", "new", "hello", "--kind", "unknown"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "pi",
+                "plugin",
+                "new",
+                "hello",
+                "--sdk",
+                "/sdk",
+                "--sdk-rev",
+                "abc"
+            ])
+            .is_err()
         );
     }
 

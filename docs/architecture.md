@@ -44,6 +44,7 @@ crates/pi-plugin-macros         static plugin preparation, agent hook-interest d
 crates/pi-plugin-loader         manifest discovery, compatibility checks, and factory adapters
 crates/pi-memory-loader         memory.json loading and provider construction Interface
 crates/pi-plugin-manager        package intent/lock, Registry resolution, CAS, and activation
+crates/pi-plugin-tools          native author scaffolding, Cargo builds, release verification and publication
 crates/pi-js-package-manager     Pi-compatible JS discovery and npm/git orchestration
 crates/pi-js-plugin             JS wire DTOs plus three Rust lifecycle adapters
 bindings/pi-napi                NAPI-RS boundary between Node callbacks and the Rust product
@@ -109,6 +110,7 @@ apps/pi-cli          -> pi-sdk + pi-rpc + pi-acp + terminal and Markdown adapter
                         + pi-media (attachments) + pi-tool-support (Pi read-path semantics)
 apps/pi-desktop      -> pi-sdk + pi-session + Tauri
 pi-plugin-manager    -> HTTP + filesystem package source adapters
+pi-plugin-tools      -> pi-plugin-manager release format + pi-plugin-loader + Cargo/GitHub CLI adapters
 pi-js-package-manager -> filesystem + npm/git process adapters (no Node dependency)
 pi-js-plugin         -> pi-core + pi-session (no Node or terminal dependency)
 bindings/pi-napi     -> pi-js-plugin + apps/pi-cli + NAPI-RS
@@ -425,6 +427,28 @@ The current static Registry is signed-data-ready transport only: SHA-256 proves 
 integrity but not publisher identity. Publisher signatures, Git repository and OCI adapters,
 package update/rollback commands, and store garbage collection remain explicit package-manager
 milestones.
+
+## Native plugin authoring
+
+Native plugin authoring is an outer Module at pi-plugin-tools, exposed through the CLI's
+plugin new/package/verify/merge/publish/registry-entry commands. This is a deliberate Rust product
+extension to Pi's npm/git author workflow. Cargo metadata and compiler messages locate the
+cdylib, while the existing loader owns descriptor/ABI/fingerprint checks. Packaging generates
+both the local manifest and the installer's shared version-one ReleaseManifest; it does not
+create another runtime registry or installation record. Outputs never replace an existing
+directory, and source files or credentials are not included in release assets.
+
+Each platform builds and validates on a native runner. Merge checks immutable snapshots of all
+input files and emits a deterministic multi-target release manifest, with no claim that foreign
+binaries have been loaded. Normal verify additionally requires this host's artifact to pass the
+loader; integrity-only verification explicitly omits that check. GitHub publication snapshots
+the checked files before creating a draft and uploading only the listed manifest/artifacts;
+existing releases are not overwritten and publication failures retain their draft.
+
+Scaffolds pin a full SDK Git revision (or use an explicit local checkout), the host's Rust
+toolchain and a seeded dependency lock. Independent crates.io publication remains open because
+the SDK fingerprint currently consumes the complete workspace source/lock layout. The author
+tools preserve ABI 16 and the existing exact-build compatibility policy.
 
 ## End-to-end validation
 

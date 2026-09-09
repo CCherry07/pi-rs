@@ -929,26 +929,27 @@ struct ResolvedCandidate {
     options: Value,
 }
 
-#[derive(Debug, Deserialize)]
+/// The version-one release format shared by package authors and the installer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct ReleaseManifest {
-    schema: u32,
-    id: String,
-    version: String,
-    kind: String,
+pub struct ReleaseManifest {
+    pub schema: u32,
+    pub id: String,
+    pub version: String,
+    pub kind: String,
     #[serde(default = "empty_options")]
-    options: Value,
-    artifacts: Vec<ReleaseArtifact>,
+    pub options: Value,
+    pub artifacts: Vec<ReleaseArtifact>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct ReleaseArtifact {
-    target: String,
-    url: String,
-    sha256: String,
-    #[serde(default)]
-    file_name: Option<String>,
+pub struct ReleaseArtifact {
+    pub target: String,
+    pub url: String,
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

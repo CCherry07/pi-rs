@@ -27,6 +27,7 @@ pi-core.workspace = true
 pi-media.workspace = true
 pi-tool-support.workspace = true
 pi-plugin-manager.workspace = true
+pi-plugin-tools.workspace = true
 pi-js-package-manager.workspace = true
 pi-js-plugin.workspace = true
 pi-runtime.workspace = true

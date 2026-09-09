@@ -17,6 +17,7 @@ members = [
     "crates/pi-plugin-loader",
     "crates/pi-memory-loader",
     "crates/pi-plugin-manager",
+    "crates/pi-plugin-tools",
     "crates/pi-js-package-manager",
     "crates/pi-js-plugin",
     "crates/pi-test-support",
@@ -91,6 +92,7 @@ pi-plugin-sdk = { path = "crates/pi-plugin-sdk" }
 pi-plugin-loader = { path = "crates/pi-plugin-loader" }
 pi-memory-loader = { path = "crates/pi-memory-loader" }
 pi-plugin-manager = { path = "crates/pi-plugin-manager" }
+pi-plugin-tools = { path = "crates/pi-plugin-tools" }
 pi-js-package-manager = { path = "crates/pi-js-package-manager" }
 pi-js-plugin = { path = "crates/pi-js-plugin" }
 pi-test-support = { path = "crates/pi-test-support" }

@@ -1,0 +1,23 @@
+[package]
+name = "pi-plugin-tools"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pi-plugin-loader.workspace = true
+pi-plugin-manager.workspace = true
+pi-plugin-sdk.workspace = true
+semver = "1.0.26"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+tempfile = "3.21.0"
+thiserror.workspace = true
+toml.workspace = true
+url = "2.5.8"
+
+[dev-dependencies]
+tokio.workspace = true

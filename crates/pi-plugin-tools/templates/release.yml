@@ -1,0 +1,103 @@
+name: Native plugin release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing plugin tag (vX.Y.Z)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-plugin-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+    runs-on: ${{ matrix.runner }}
+    env:
+      PLUGIN_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: CCherry07/pi-rs
+          ref: __SDK_REVISION__
+          path: pi-host
+          persist-credentials: false
+      - name: Install matching Rust toolchain
+        shell: bash
+        run: rustup toolchain install __RUST_VERSION__ --profile minimal
+      - name: Build matching host
+        shell: bash
+        run: cargo +__RUST_VERSION__ build --locked --release --target "$PLUGIN_TARGET" --manifest-path pi-host/Cargo.toml -p pi-cli
+      - name: Test, package and verify on native runner
+        shell: bash
+        run: |
+          cargo +__RUST_VERSION__ test --locked --target "$PLUGIN_TARGET"
+          pi_binary="$CARGO_TARGET_DIR/$PLUGIN_TARGET/release/pi"
+          if [ "$RUNNER_OS" = Windows ]; then pi_binary="$pi_binary.exe"; fi
+          "$pi_binary" plugin package --locked --output dist
+          "$pi_binary" plugin verify dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      PLUGIN_TAG: ${{ inputs.tag }}
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: CCherry07/pi-rs
+          ref: __SDK_REVISION__
+          path: pi-host
+          persist-credentials: false
+      - name: Install matching Rust toolchain
+        run: rustup toolchain install __RUST_VERSION__ --profile minimal
+      - name: Build matching host
+        run: cargo +__RUST_VERSION__ build --locked --release --target x86_64-unknown-linux-gnu --manifest-path pi-host/Cargo.toml -p pi-cli
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: plugin-*
+          path: bundles
+      - name: Merge, verify and publish
+        shell: bash
+        run: |
+          pi_binary="$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/pi"
+          "$pi_binary" plugin merge bundles/plugin-* --output release
+          "$pi_binary" plugin verify release
+          "$pi_binary" plugin publish github --bundle release --repo "$GH_REPO" --tag "$PLUGIN_TAG"

@@ -106,6 +106,11 @@ package。即使 intent 未变化，本地 package 的重编译 artifact 和 man
 
 ## Release manifest / 发布清单
 
+Plugin authors can generate this format with pi plugin package, merge native-runner bundles with
+pi plugin merge, and publish through pi plugin publish github. See the
+[author tools guide](../pi-plugin-tools/README.md) for the complete workflow and SDK compatibility
+requirements. The author tool and installer share the same ReleaseManifest/ReleaseArtifact types.
+
 A remote source is a small JSON release manifest. Artifact URLs may be absolute or relative to the
 manifest URL. The manager selects the entry matching its exact Rust target triple.
 

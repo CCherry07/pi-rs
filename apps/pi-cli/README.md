@@ -707,6 +707,22 @@ explicit compatibility gaps.
 
 ### Native Rust plugins
 
+Author commands scaffold all three plugin kinds, build on the current native target, and generate
+verified local/remote manifests:
+
+~~~bash
+pi plugin new hello --kind agent
+pi --cwd hello plugin package
+pi plugin verify hello/dist
+pi plugin merge bundles/mac bundles/linux --output release
+pi plugin publish github --bundle release --repo OWNER/REPO --tag v0.1.0
+~~~
+
+Use --sdk /path/to/pi-rs with new for a local SDK checkout. Builds default to release; --debug
+uses the dev profile and --locked requires the completed Cargo.lock. Outputs must not exist.
+See [native author tools](../../crates/pi-plugin-tools/README.md) for CI, registry metadata and
+exact-build SDK compatibility. These commands do not require provider credentials.
+
 Native plugins are version-locked dynamic libraries loaded from global manifests, trusted project
 manifests, or explicit `--plugin` paths.
 
