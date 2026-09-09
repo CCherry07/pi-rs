@@ -6,11 +6,14 @@ use std::sync::{Arc, Mutex};
 use pi_agent::AgentLoopStop;
 use pi_core::{
     AbortHandle, AbortSignal, CustomMessageContent, IsolatedSessionId, IsolatedSessionOutcome,
-    Message, UserMessage,
+    Message, Usage, UserMessage,
 };
 use tokio::sync::watch;
 
-use crate::{AgentSessionSnapshot, AgentSessionSubscription, PiSession, now_ms};
+use crate::{
+    AgentSessionSnapshot, AgentSessionSubscription, PiSession, aggregate_document_usage,
+    current_session_context_tokens, now_ms,
+};
 
 type IsolatedResult = Result<IsolatedSessionOutcome, String>;
 
@@ -22,6 +25,14 @@ type IsolatedResult = Result<IsolatedSessionOutcome, String>;
 pub struct IsolatedSessionObservation {
     id: IsolatedSessionId,
     session: PiSession,
+}
+
+/// Product-facing usage snapshot for one managed isolated session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IsolatedSessionUsageSnapshot {
+    pub usage: Usage,
+    pub context_tokens: Option<u64>,
+    pub model_context_window: Option<u64>,
 }
 
 impl IsolatedSessionObservation {
@@ -43,6 +54,27 @@ impl IsolatedSessionObservation {
 
     pub fn subscribe(&self) -> AgentSessionSubscription {
         self.session.current().subscribe()
+    }
+
+    /// Returns billed and current-context usage without exposing control over
+    /// the managed child session.
+    pub fn usage_snapshot(&self) -> Option<IsolatedSessionUsageSnapshot> {
+        let session = self.session.current();
+        let document = session.log().load().ok()?;
+        let context_tokens = document.context().ok().and_then(|context| {
+            let branch = document
+                .branch()
+                .ok()?
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            current_session_context_tokens(&branch, &context.messages).map(|usage| usage.tokens)
+        });
+        Some(IsolatedSessionUsageSnapshot {
+            usage: aggregate_document_usage(&document),
+            context_tokens,
+            model_context_window: session.active_context_window(),
+        })
     }
 
     /// Observes an isolated child owned by this observed session.
@@ -345,13 +377,18 @@ async fn run_prompt(
     if launch_cancelled {
         return Err("isolated session launch was cancelled".to_string());
     }
-    result
-        .map_err(|error| error.to_string())
-        .map(|outcome| IsolatedSessionOutcome {
-            session_id,
-            messages: outcome.new_messages,
-            aborted: outcome.stop == AgentLoopStop::Aborted,
-        })
+    let outcome = result.map_err(|error| error.to_string())?;
+    let usage = session
+        .log()
+        .load()
+        .map(|document| aggregate_document_usage(&document))
+        .map_err(|error| error.to_string())?;
+    Ok(IsolatedSessionOutcome {
+        session_id,
+        messages: outcome.new_messages,
+        aborted: outcome.stop == AgentLoopStop::Aborted,
+        usage,
+    })
 }
 
 async fn finish_cancelled_prompt<F: Future>(

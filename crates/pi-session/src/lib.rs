@@ -56,7 +56,7 @@ pub use event::{
     AgentSessionEvent, AgentSessionSnapshot, AgentSessionSubscription, AutoRetrySnapshot,
     BashExecutionSnapshot, CompactionSnapshot, QueueSnapshot, RevisionedAgentSessionEvent,
 };
-pub use isolated_session::IsolatedSessionObservation;
+pub use isolated_session::{IsolatedSessionObservation, IsolatedSessionUsageSnapshot};
 pub use jsonl::SessionLog;
 pub use legacy_import::{
     LegacySessionImportReport, SessionFileFormat, import_session_file, inspect_session_file,

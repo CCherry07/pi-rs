@@ -388,6 +388,7 @@ mod tests {
 
     struct FakeAccess {
         requests: Mutex<Vec<IsolatedSessionRequest>>,
+        recorded_usage: Mutex<Vec<(Usage, Option<Value>)>>,
         outcome: IsolatedSessionOutcome,
         panic_on_wait: bool,
     }
@@ -421,6 +422,11 @@ mod tests {
             assert!(!self.panic_on_wait, "injected child wait panic");
             Ok(self.outcome.clone())
         }
+
+        fn record_usage(&self, usage: Usage, details: Option<Value>) -> PluginContextResult<()> {
+            self.recorded_usage.lock().unwrap().push((usage, details));
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -443,6 +449,7 @@ mod tests {
 
     struct TimeoutAccess {
         requests: Mutex<Vec<IsolatedSessionRequest>>,
+        recorded_usage: Mutex<Vec<(Usage, Option<Value>)>>,
         aborted: AtomicBool,
         wake: Notify,
     }
@@ -478,7 +485,18 @@ mod tests {
                 session_id: "timed-out-child".to_string(),
                 messages: Vec::new(),
                 aborted: true,
+                usage: Usage {
+                    input: 11,
+                    output: 3,
+                    total_tokens: 14,
+                    ..Usage::default()
+                },
             })
+        }
+
+        fn record_usage(&self, usage: Usage, details: Option<Value>) -> PluginContextResult<()> {
+            self.recorded_usage.lock().unwrap().push((usage, details));
+            Ok(())
         }
 
         fn abort_isolated_session(
@@ -512,6 +530,13 @@ mod tests {
 
     #[tokio::test]
     async fn tool_launches_a_fresh_child_and_projects_its_final_answer() {
+        let child_usage = Usage {
+            input: 120,
+            output: 30,
+            cache_read: 50,
+            total_tokens: 200,
+            ..Usage::default()
+        };
         let outcome = IsolatedSessionOutcome {
             session_id: "child-session".to_string(),
             messages: vec![Message::Assistant(Arc::new(AssistantMessage {
@@ -531,9 +556,11 @@ mod tests {
                 timestamp_ms: 0,
             }))],
             aborted: false,
+            usage: child_usage.clone(),
         };
         let access = Arc::new(FakeAccess {
             requests: Mutex::new(Vec::new()),
+            recorded_usage: Mutex::new(Vec::new()),
             outcome,
             panic_on_wait: false,
         });
@@ -544,8 +571,9 @@ mod tests {
             ToolContext::with_plugin_context(PathBuf::from("/workspace"), signal, epoch.context());
         let (updates, mut update_receiver) = ToolUpdateSink::channel();
 
+        let runtime = SubagentRuntime::default();
         let result = SubagentTool::new(
-            SubagentRuntime::default(),
+            runtime.clone(),
             SubagentCatalog::builtins(),
             crate::runtime::DEFAULT_MAX_DEPTH,
         )
@@ -564,6 +592,34 @@ mod tests {
         );
         assert_eq!(result.details.as_ref().unwrap()["agent"], "reviewer");
         assert_eq!(result.details.as_ref().unwrap()["depth"], 1);
+        assert_eq!(
+            result.details.as_ref().unwrap()["usage"],
+            json!(child_usage)
+        );
+        {
+            let recorded = access.recorded_usage.lock().unwrap();
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(recorded[0].0, child_usage);
+            assert_eq!(recorded[0].1.as_ref().unwrap()["source"], "subagent");
+            assert_eq!(
+                recorded[0].1.as_ref().unwrap()["childSessionId"],
+                "child-session"
+            );
+        }
+        let run_id = result.details.as_ref().unwrap()["runId"].as_str().unwrap();
+        assert!(
+            runtime
+                .coordination()
+                .detach("root-session", run_id)
+                .is_ok()
+        );
+        assert!(
+            runtime
+                .coordination()
+                .detach("root-session", run_id)
+                .is_ok()
+        );
+        assert_eq!(access.recorded_usage.lock().unwrap().len(), 1);
         let update_details = update_receiver.recv().await.unwrap().details.unwrap();
         assert_eq!(update_details["state"], "running");
         assert_eq!(update_details["isolatedSessionId"], "isolated-1");
@@ -586,10 +642,12 @@ mod tests {
     async fn configured_zero_depth_blocks_before_creating_a_child_session() {
         let access = Arc::new(FakeAccess {
             requests: Mutex::new(Vec::new()),
+            recorded_usage: Mutex::new(Vec::new()),
             outcome: IsolatedSessionOutcome {
                 session_id: "unused-child".to_string(),
                 messages: Vec::new(),
                 aborted: false,
+                usage: Usage::default(),
             },
             panic_on_wait: false,
         });
@@ -630,10 +688,12 @@ mod tests {
         let catalog = SubagentCatalog::load(&loader).unwrap();
         let access = Arc::new(FakeAccess {
             requests: Mutex::new(Vec::new()),
+            recorded_usage: Mutex::new(Vec::new()),
             outcome: IsolatedSessionOutcome {
                 session_id: "child-session".to_string(),
                 messages: Vec::new(),
                 aborted: false,
+                usage: Usage::default(),
             },
             panic_on_wait: false,
         });
@@ -689,6 +749,7 @@ mod tests {
         let catalog = SubagentCatalog::load(&loader).unwrap();
         let access = Arc::new(TimeoutAccess {
             requests: Mutex::new(Vec::new()),
+            recorded_usage: Mutex::new(Vec::new()),
             aborted: AtomicBool::new(false),
             wake: Notify::new(),
         });
@@ -716,6 +777,8 @@ mod tests {
         assert!(result.is_error);
         assert_eq!(result.details.as_ref().unwrap()["state"], "timed_out");
         assert_eq!(result.details.as_ref().unwrap()["timeoutMs"], 5);
+        assert_eq!(result.details.as_ref().unwrap()["usage"]["totalTokens"], 14);
+        assert_eq!(access.recorded_usage.lock().unwrap().len(), 1);
         assert!(access.aborted.load(Ordering::SeqCst));
     }
 
@@ -723,10 +786,12 @@ mod tests {
     async fn panicking_child_wait_returns_a_terminal_failure_and_releases_capacity() {
         let access = Arc::new(FakeAccess {
             requests: Mutex::new(Vec::new()),
+            recorded_usage: Mutex::new(Vec::new()),
             outcome: IsolatedSessionOutcome {
                 session_id: "unused".into(),
                 messages: Vec::new(),
                 aborted: false,
+                usage: Usage::default(),
             },
             panic_on_wait: true,
         });
@@ -764,10 +829,12 @@ mod tests {
     async fn dropping_an_unpolled_monitor_publishes_failure_and_wakes_waiters() {
         let access = Arc::new(FakeAccess {
             requests: Mutex::new(Vec::new()),
+            recorded_usage: Mutex::new(Vec::new()),
             outcome: IsolatedSessionOutcome {
                 session_id: "unused".into(),
                 messages: vec![],
                 aborted: false,
+                usage: Usage::default(),
             },
             panic_on_wait: false,
         });
@@ -832,6 +899,7 @@ mod tests {
     async fn dropping_runtime_cancels_monitor_without_a_task_owner_cycle() {
         let access = Arc::new(TimeoutAccess {
             requests: Mutex::new(Vec::new()),
+            recorded_usage: Mutex::new(Vec::new()),
             aborted: AtomicBool::new(false),
             wake: Notify::new(),
         });

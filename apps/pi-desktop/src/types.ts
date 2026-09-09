@@ -89,6 +89,7 @@ export type CollabAgentRef = {
 
 export type CollabAgentStatus = CollabAgentRef & {
   status: string;
+  totalTokens?: number;
 };
 
 export type ConversationItem =

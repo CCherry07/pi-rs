@@ -25,8 +25,8 @@ use crate::backend::events::PiEvent;
 use crate::state::AppState;
 
 use session_store::{
-    content_text, token_usage, SessionModelCatalog, SessionStore, SessionSummary,
-    SessionTokenUsage, StoredIsolatedSession,
+    content_text, document_token_usage, token_usage, SessionModelCatalog, SessionStore,
+    SessionSummary, SessionTokenUsage, StoredIsolatedSession,
 };
 
 pub(crate) struct PiRuntimeState {
@@ -789,15 +789,19 @@ fn thread_from_observation(
     let snapshot = observation.snapshot();
     let id = observation.session_id();
     let cwd = observation.cwd();
+    let token_usage = observation
+        .usage_snapshot()
+        .map(|snapshot| SessionTokenUsage {
+            total_tokens: Some(snapshot.usage.total_tokens),
+            context_tokens: snapshot.context_tokens,
+            model_context_window: snapshot.model_context_window,
+        })
+        .unwrap_or_default();
     thread_from_snapshot(
         &snapshot,
         &id,
         &cwd,
-        SessionTokenUsage {
-            total_tokens: None,
-            context_tokens: None,
-            model_context_window: None,
-        },
+        token_usage,
         json!({
             "subAgent": {
                 "kind": agent,
@@ -871,11 +875,7 @@ fn thread_from_stored_isolated(stored: &StoredIsolatedSession) -> Result<Value, 
         &snapshot,
         &stored.document.header.id,
         &stored.document.header.cwd,
-        SessionTokenUsage {
-            total_tokens: None,
-            context_tokens: None,
-            model_context_window: None,
-        },
+        document_token_usage(&stored.document, None),
         json!({
             "subAgent": {
                 "kind": stored.agent,
@@ -1155,6 +1155,10 @@ fn historical_tool_item(
         let child_thread_id = details
             .and_then(|value| value.get("sessionId"))
             .and_then(Value::as_str);
+        let total_tokens = details
+            .and_then(|value| value.get("usage"))
+            .and_then(|usage| usage.get("totalTokens"))
+            .and_then(Value::as_u64);
         let prompt = arguments
             .get("task")
             .and_then(Value::as_str)
@@ -1173,6 +1177,7 @@ fn historical_tool_item(
                 "threadId": thread_id,
                 "agentRole": agent,
                 "status": status,
+                "totalTokens": total_tokens,
             })]).unwrap_or_default(),
         })
     } else {
@@ -1969,6 +1974,7 @@ mod tests {
                 "agent": "reviewer",
                 "sessionId": "child-session",
                 "state": "completed",
+                "usage": { "totalTokens": 321 },
             })),
             HistoricalToolContext {
                 cwd: Path::new("/workspace"),
@@ -1981,6 +1987,7 @@ mod tests {
         assert_eq!(item["newThreadId"], "child-session");
         assert_eq!(item["newAgentRole"], "reviewer");
         assert_eq!(item["agentStatuses"][0]["status"], "completed");
+        assert_eq!(item["agentStatuses"][0]["totalTokens"], 321);
     }
 
     #[test]
@@ -2162,6 +2169,8 @@ mod tests {
         assert!(live.changes.is_none());
         assert!(store.observed_isolated(&observation.session_id()).is_some());
         handle.wait_for_isolated_session(&child).await.unwrap();
+        assert_eq!(live.token_usage().total_tokens, Some(0));
+        assert!(live.token_usage().context_tokens.is_some());
     }
 
     #[tokio::test]
@@ -2195,6 +2204,7 @@ mod tests {
         assert_eq!(stored_child.agent, "subagent");
         let child_thread = thread_from_stored_isolated(&stored_child).unwrap();
         assert_eq!(child_thread["id"], child_id);
+        assert_eq!(child_thread["tokenUsage"]["totalTokens"], 0);
         assert_eq!(
             child_thread["source"]["subAgent"]["threadSpawn"]["parentThreadId"],
             session.log().header().id

@@ -78,16 +78,19 @@ impl LiveSession {
     pub(crate) fn token_usage(&self) -> SessionTokenUsage {
         match &self.source {
             LiveSessionSource::Primary(session) => token_usage(session),
-            LiveSessionSource::Isolated(_) => SessionTokenUsage {
-                total_tokens: None,
-                context_tokens: None,
-                model_context_window: None,
-            },
+            LiveSessionSource::Isolated(observation) => observation
+                .usage_snapshot()
+                .map(|snapshot| SessionTokenUsage {
+                    total_tokens: Some(snapshot.usage.total_tokens),
+                    context_tokens: snapshot.context_tokens,
+                    model_context_window: snapshot.model_context_window,
+                })
+                .unwrap_or_default(),
         }
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SessionTokenUsage {
     pub(crate) total_tokens: Option<u64>,
@@ -97,18 +100,27 @@ pub(crate) struct SessionTokenUsage {
 
 pub(crate) fn token_usage(session: &AgentSession) -> SessionTokenUsage {
     let model_context_window = session.active_context_window();
-    let document = session.log().load().ok();
-    let total_tokens = document
-        .as_ref()
-        .map(|document| aggregate_document_usage(document).total_tokens);
-    let context_tokens = document.as_ref().and_then(|document| {
+    let Ok(document) = session.log().load() else {
+        return SessionTokenUsage {
+            model_context_window,
+            ..SessionTokenUsage::default()
+        };
+    };
+    document_token_usage(&document, model_context_window)
+}
+
+pub(crate) fn document_token_usage(
+    document: &SessionDocument,
+    model_context_window: Option<u64>,
+) -> SessionTokenUsage {
+    let total_tokens = Some(aggregate_document_usage(document).total_tokens);
+    let context_tokens = document.context().ok().and_then(|context| {
         let branch = document
             .branch()
             .ok()?
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
-        let context = document.context().ok()?;
         current_session_context_tokens(&branch, &context.messages).map(|usage| usage.tokens)
     });
     SessionTokenUsage {

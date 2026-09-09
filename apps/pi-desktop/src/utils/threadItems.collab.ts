@@ -73,6 +73,7 @@ function buildCollabAgentStatus(
   statusValue: unknown,
   nicknameValue?: unknown,
   roleValue?: unknown,
+  totalTokensValue?: unknown,
 ): CollabAgentStatus | null {
   const status = asString(statusValue).trim();
   if (!status) {
@@ -82,7 +83,17 @@ function buildCollabAgentStatus(
   if (!base) {
     return null;
   }
-  return { ...base, status };
+  const totalTokens =
+    typeof totalTokensValue === "number" &&
+    Number.isFinite(totalTokensValue) &&
+    totalTokensValue >= 0
+      ? totalTokensValue
+      : undefined;
+  return {
+    ...base,
+    status,
+    ...(totalTokens === undefined ? {} : { totalTokens }),
+  };
 }
 
 function parseCollabAgentStatuses(value: unknown) {
@@ -104,6 +115,7 @@ function parseCollabAgentStatuses(value: unknown) {
           record.agentType ??
           record.agent_type ??
           record.role,
+        record.totalTokens ?? record.total_tokens,
       );
     })
     .filter((entry): entry is CollabAgentStatus => Boolean(entry));
@@ -134,6 +146,7 @@ function parseCollabAgentStatusesFromMap(value: unknown) {
           stateRecord?.agentType ??
           stateRecord?.agent_type ??
           stateRecord?.role,
+        stateRecord?.totalTokens ?? stateRecord?.total_tokens,
       );
     })
     .filter((entry): entry is CollabAgentStatus => Boolean(entry));
@@ -153,6 +166,7 @@ function mergeCollabAgentStatuses(...lists: CollabAgentStatus[][]) {
         status: existing.status || entry.status,
         nickname: existing.nickname ?? entry.nickname,
         role: existing.role ?? entry.role,
+        totalTokens: existing.totalTokens ?? entry.totalTokens,
       });
     });
   });

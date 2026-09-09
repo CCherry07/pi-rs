@@ -255,6 +255,10 @@ pub struct IsolatedSessionOutcome {
     pub session_id: String,
     pub messages: Vec<Message>,
     pub aborted: bool,
+    /// All usage billed to the isolated session, including metered tools,
+    /// compaction, and usage attributed by nested managed children.
+    #[serde(default)]
+    pub usage: Usage,
 }
 
 /// Generation-bound control handle for one independently running session.

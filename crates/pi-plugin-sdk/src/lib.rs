@@ -22,7 +22,8 @@ pub use pi_session::plugin::SessionPlugin;
 
 /// Version of the trusted Rust-ABI plugin contract.
 ///
-/// ABI 17 adds explicit fresh/fork initialization to isolated-session options.
+/// ABI 18 adds aggregate usage to managed isolated-session outcomes. ABI 17 adds
+/// explicit fresh/fork initialization to isolated-session options.
 /// ABI 16 adds detached provider usage/call accounting and the session usage
 /// recording capability. ABI 15 replaces core tool-run state with a run identity and explicit
 /// invocation-private Agent plugins for ephemeral Agents.
@@ -40,7 +41,7 @@ pub use pi_session::plugin::SessionPlugin;
 /// tool argument preparation.
 /// Hosts must reject older artifacts before resolving their Rust-ABI
 /// constructors.
-pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 17;
+pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 18;
 pub const BUILD_FINGERPRINT: &str = env!("PI_PLUGIN_BUILD_FINGERPRINT");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -112,15 +113,15 @@ pub type PluginDescriptorFnV1 = unsafe extern "C" fn() -> *const NativePluginDes
 pub type PluginOptionsSchemaFnV1 = unsafe fn() -> String;
 
 #[cfg(feature = "agent")]
-pub type AgentPluginCreateV17 =
+pub type AgentPluginCreateV18 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn AgentPlugin>, PluginLoadError>;
 
 #[cfg(feature = "provider")]
-pub type ProviderPluginCreateV17 =
+pub type ProviderPluginCreateV18 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn ProviderPlugin>, PluginLoadError>;
 
 #[cfg(feature = "session")]
-pub type SessionPluginCreateV17 =
+pub type SessionPluginCreateV18 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn SessionPlugin>, PluginLoadError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

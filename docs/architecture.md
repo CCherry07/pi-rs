@@ -990,7 +990,7 @@ Each assistant stream owns one mutable assembler state behind a read-only `Assis
 reducer, ordered native hooks, and listeners therefore do not clone cumulative content. Consumers
 that require a full message call `snapshot()` explicitly, while `message_end` and `turn_end` share
 the completed immutable assistant message. These hook fields were introduced in native ABI 7;
-ABI 17 adds fresh/fork isolated-context initialization. ABI 16 adds detached usage attribution and ephemeral usage/call outcomes. ABI 8 adds UI
+ABI 18 adds aggregate managed-isolated-session usage outcomes. ABI 17 adds fresh/fork isolated-context initialization. ABI 16 adds detached usage attribution and ephemeral usage/call outcomes. ABI 8 adds UI
 confirmation, ABI 9 adds isolated-session control, ABI 10 adds isolated-session
 initial runtime selection, ABI 11 adds direct tool-free completion, ABI 12 adds ephemeral tool loops,
 ABI 13 adds inherited prompt/history, guarded dispatch and invocation observations, and ABI 14 adds
@@ -1522,8 +1522,8 @@ child compaction expands its messages and treats ancestor usage as an obsolete c
 An estimated seed at or above the child's known context window fails before launch, with instructions
 to compact the parent or choose fresh context; initialization never silently truncates the seed.
 The seed remains separate from child-authored message entries and returned run outcomes. Native ABI
-17 includes the new context-mode field; exact-build plugin compatibility and pinned-library lifetime
-are unchanged.
+17 includes the context-mode field; ABI 18 adds aggregate usage to managed isolated-session
+outcomes. Exact-build plugin compatibility and pinned-library lifetime are otherwise unchanged.
 
 `pi-plugin-subagents` is the first policy module over that seam. It registers the parallel-safe
 `subagent` tool with focused `scout`, `worker`, `reviewer`, `oracle`, and `delegate` built-ins, plus
@@ -1591,12 +1591,23 @@ finishes. Monitors weakly reference their runtime to avoid owning their own task
 or dropping a monitor publishes a terminal failure and releases capacity; ordinary wait cancellation
 still leaves a detached child running. Only terminal completion releases active capacity. Role/skill assignments remain until session
 shutdown so a later nested-child notification cannot promote its supervisor into a root agent.
+A terminal child outcome includes aggregate billed usage from its independent session document.
+The monitor records that usage exactly once as an immediate-parent usage adjustment, including
+timeout and abort settlements; repeated terminal-receipt reads never re-attribute it. Nested child
+adjustments therefore roll into their owning child's aggregate before that aggregate reaches the
+next parent, making each session total subtree-inclusive without charging fork-seed history. The
+tool result exposes the same child aggregate under `details.usage` for presentation, but deliberately
+does not set `ToolResult.usage`, which repeated `bg_wait` calls could otherwise count more than once.
+A failure to persist the parent adjustment remains visible as a result warning rather than silently
+claiming complete accounting.
 A separate session-plugin adapter clears lineage on quit or logical-session replacement
 while retaining cumulative state across a generation reload. The desktop projector recognizes the
 feature-owned `isolatedSessionId` in subagent tool updates, observes that child read-only, and emits
 the same semantic thread/item stream used for primary sessions. It projects parent-child links as
 collaboration tool items so the existing desktop task hierarchy can render nested execution and
-select a child for inspection. The TUI and other frontends continue to render only their explicitly
+select a child for inspection. Parent token updates include attributed child usage, while each
+collaboration node and isolated child thread exposes that child's aggregate total independently.
+The TUI and other frontends continue to render only their explicitly
 held primary session unless they opt into the observation seam.
 
 Supervisor tools follow `nicobailon/pi-subagents` revision
@@ -1630,7 +1641,10 @@ No notification state survives process restart.
 The deliberate Rust divergence is an in-process mailbox/watch implementation instead of upstream
 filesystem IPC. There is no standalone detached runner, process-restart reattachment, external
 background-work provider, or non-blocking durable wait subscription; `nonBlocking: true` fails
-explicitly. No native ABI or Pi v4 record shape changes are needed. Coordination guidance is
+explicitly. The usage rollup is a deliberate product enhancement over the current upstream
+pi-subagents example, which reports child usage in result details but does not attribute it to the
+parent session. It requires native ABI 18 but no Pi v4 record-shape change: attribution uses the
+existing usage-adjustment entry. Coordination guidance is
 run-local and capability-gated. The child launch plan injects coordination tools only within the
 parent's active ceiling; exclusions and explicit `tools: []` keep the bridge off. Leaf children
 receive `contact_supervisor`; nested coordinators may also receive the reply/wait tools. Parent

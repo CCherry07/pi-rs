@@ -820,6 +820,7 @@ describe("threadItems", () => {
           status: "completed",
           agent_nickname: "Robie",
           agent_role: "explorer",
+          total_tokens: 12_400,
         },
       ],
       prompt: "Wait for workers",
@@ -847,6 +848,7 @@ describe("threadItems", () => {
           nickname: "Robie",
           role: "explorer",
           status: "completed",
+          totalTokens: 12_400,
         },
       ]);
       expect(item.detail).toContain("Robie [explorer]");

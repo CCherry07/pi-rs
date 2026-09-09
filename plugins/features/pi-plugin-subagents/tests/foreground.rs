@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use pi_agent::AgentOptions;
 use pi_core::{
     Message, ModelId, PluginContext, PresentationMode, ProviderId, TextContent, ToolCall,
-    ToolCallId, UserMessage,
+    ToolCallId, Usage, UserMessage,
 };
 use pi_plugin_find::FindPlugin;
 use pi_plugin_grep::GrepPlugin;
@@ -20,7 +20,7 @@ use pi_runtime::PiRuntime;
 use pi_session::{
     AgentSession, AgentSessionOptions, AgentSessionRuntimeFactory, AgentSessionRuntimeRequest,
     AgentSessionRuntimeTarget, MultiSessionManager, PiPluginContext, PluginContextBinding,
-    PreparedAgentSession, SessionError, SessionPlugins,
+    PreparedAgentSession, SessionError, SessionPlugins, aggregate_document_usage,
 };
 use pi_test_support::{ScriptedProvider, ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::json;
@@ -122,7 +122,34 @@ impl AgentSessionRuntimeFactory for TestFactory {
         } else if self.nested {
             nested_turns(depth)
         } else if depth > 0 {
-            vec![ScriptedTurn::Text("child review complete".to_string())]
+            vec![ScriptedTurn::Events(vec![
+                pi_core::StreamEvent::Start {
+                    metadata: pi_core::ResponseMetadata::new(
+                        ProviderId::new("scripted"),
+                        ModelId::new("test"),
+                        "scripted",
+                        0,
+                    ),
+                },
+                pi_core::StreamEvent::TextStart { content_index: 0 },
+                pi_core::StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: "child review complete".to_string(),
+                },
+                pi_core::StreamEvent::TextEnd {
+                    content_index: 0,
+                    text_signature: None,
+                },
+                pi_core::StreamEvent::Done {
+                    reason: pi_core::StopReason::Stop,
+                    usage: Usage {
+                        input: 18,
+                        output: 5,
+                        total_tokens: 23,
+                        ..Usage::default()
+                    },
+                },
+            ])]
         } else {
             let mut turns = vec![
                 ScriptedTurn::ToolCalls((0..self.batch_size).map(|index| ToolCall::new(
@@ -301,6 +328,14 @@ async fn foreground_tool_runs_a_profiled_child_through_the_shared_session_manage
     assert!(subagent_result.content.iter().any(|content| {
         matches!(content, pi_core::ContentBlock::Text(text) if text.text == "child review complete")
     }));
+    assert_eq!(
+        subagent_result.details.as_ref().unwrap()["usage"]["totalTokens"],
+        23
+    );
+    assert_eq!(
+        aggregate_document_usage(&root.current().log().load().unwrap()).total_tokens,
+        23
+    );
     assert_eq!(root.path(), PathBuf::from(&root_path));
     assert_eq!(manager.sessions().len(), 2);
 

@@ -17,6 +17,7 @@ pub(crate) type ForwarderRegistry = Arc<Mutex<HashSet<String>>>;
 struct SubagentProjection {
     child_thread_id: String,
     agent: String,
+    total_tokens: Option<u64>,
 }
 
 struct EventProjectionContext<'a> {
@@ -492,6 +493,15 @@ async fn project_event(
             }
             emit_status(app, workspace_id, thread_id, "idle");
         }
+        AgentSessionEvent::UsageRecorded { .. } => emit(
+            app,
+            workspace_id,
+            "thread/tokenUsage/updated",
+            json!({
+                "threadId": thread_id,
+                "tokenUsage": live.token_usage()
+            }),
+        ),
         AgentSessionEvent::EntryAppended { entry } => {
             let SessionEntry::Message(message_entry) = &entry.entry else {
                 return;
@@ -629,6 +639,10 @@ async fn project_subagent(
     let projected = SubagentProjection {
         child_thread_id: child_thread_id.clone(),
         agent: agent.clone(),
+        total_tokens: details
+            .get("usage")
+            .and_then(|usage| usage.get("totalTokens"))
+            .and_then(Value::as_u64),
     };
     let should_start = forwarders.lock().await.insert(child_thread_id.clone());
     if should_start {
@@ -690,6 +704,7 @@ fn subagent_tool_item(
             "threadId": thread_id,
             "agentRole": agent,
             "status": status,
+            "totalTokens": projection.and_then(|projection| projection.total_tokens),
         })]).unwrap_or_default(),
     })
 }
@@ -804,6 +819,7 @@ mod tests {
         let projection = SubagentProjection {
             child_thread_id: "child-session".to_string(),
             agent: "reviewer".to_string(),
+            total_tokens: Some(12_400),
         };
         let item = subagent_tool_item(
             "call-1",
@@ -819,5 +835,6 @@ mod tests {
         assert_eq!(item["newThreadId"], "child-session");
         assert_eq!(item["prompt"], "Review the parser");
         assert_eq!(item["agentStatuses"][0]["status"], "inProgress");
+        assert_eq!(item["agentStatuses"][0]["totalTokens"], 12_400);
     }
 }

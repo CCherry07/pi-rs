@@ -112,7 +112,8 @@
   },
   "subagents": {
     "executionTree": "Sub-agent execution tree",
-    "open": "Open {{agent}} progress"
+    "open": "Open {{agent}} progress",
+    "tokens": "{{tokens}} tokens"
   },
   "errors": {
     "openFile": "Couldn’t open file",

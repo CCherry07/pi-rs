@@ -126,6 +126,7 @@ impl SessionContextAccess for StaticAccess {
             session_id: "child-session".to_string(),
             messages: Vec::new(),
             aborted: false,
+            usage: Usage::default(),
         })
     }
 

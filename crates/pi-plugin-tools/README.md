@@ -49,7 +49,7 @@ default; --debug uses the dev profile. Cross-compilation is intentionally not of
 artifact must be loaded and checked on its native runner before publication.
 
 The actual binary descriptor supplies plugin ID, version and kind. The binary version must
-match Cargo metadata. The existing loader checks ABI 17, the SDK build fingerprint and the
+match Cargo metadata. The existing loader checks ABI 18, the SDK build fingerprint and the
 matching constructor export. Verification can run native library initialization code, but does
 not invoke plugin constructors or register hooks.
 

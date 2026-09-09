@@ -1,7 +1,7 @@
 ---
 name: "investigate-pi-behavior"
 description: "Trace how user-visible Pi/pi-rs behavior is produced across provider events, runtime projection, persistence, and frontend rendering, and identify the correct user configuration seam."
-version: 2
+version: 3
 created: "2026-09-09"
 updated: "2026-09-09"
 ---
@@ -13,12 +13,13 @@ Use when a user asks why a Pi/pi-rs UI node, label, language, transcript item, o
 2. Start from the visible artifact or named capability and search its exact text/tool name. If dynamic, work backward through rendering or tool schema, state reduction, event handling, runtime/session ownership, persistence, and provider execution.
 3. Distinguish fixed localized UI text, frontend-derived text, provider/model-generated content, and runtime capability semantics. Do not infer implementation status from wording such as “detached” or “background.”
 4. For reasoning items, verify whether the transport supplies a separate summary. If summary is empty, inspect fallback title extraction before claiming another model call generated the title.
-5. For subagents and background work, trace launch, ownership, monitor, coordination channel, completion, cancellation, and persistence separately. Distinguish an isolated session from an OS process, and distinguish detachment from a tool wait from survival beyond process exit. Consult references/subagent-execution-model.md.
-6. When recommending prompt customization, prefer APPEND_SYSTEM.md for additive instructions. Explain that SYSTEM.md replaces the normal system prompt and is inappropriate for a small preference unless replacement is intentional.
-7. State configuration scope and precedence: global agent directory versus trusted project .pi resources. Confirm the effective agent directory, including PI_AGENT_DIR overrides, rather than assuming ~/.pi/agent.
-8. State the activation boundary accurately: whether reload, a new session, or application restart is required. If the frontend has no proven reload path for resource generations, recommend a full restart and a new conversation.
-9. Separate verified mechanics from model compliance or future product requirements. Do not present an independent worker process as inherently more concurrent than Tokio; tie it to lifecycle, fault-isolation, resource-control, or durability requirements.
-10. For the verified reasoning-language and APPEND_SYSTEM.md example, consult references/reasoning-language.md.
+5. For subagents and background work, trace launch, ownership, monitor, coordination channel, completion, cancellation, persistence, and usage attribution separately. Distinguish an isolated session from an OS process, and distinguish detachment from a tool wait from survival beyond process exit. Consult references/subagent-execution-model.md.
+6. For token-count discrepancies, define the metric before calculating: current/root session product total, per-file provider-call total, or recursive physical work across isolated sessions. Inspect parent usage adjustments before adding child files to avoid double counting. Consult references/session-token-accounting.md.
+7. When recommending prompt customization, prefer APPEND_SYSTEM.md for additive instructions. Explain that SYSTEM.md replaces the normal system prompt and is inappropriate for a small preference unless replacement is intentional.
+8. State configuration scope and precedence: global agent directory versus trusted project .pi resources. Confirm the effective agent directory, including PI_AGENT_DIR overrides, rather than assuming ~/.pi/agent.
+9. State the activation boundary accurately: whether reload, a new session, or application restart is required. If the frontend has no proven reload path for resource generations, recommend a full restart and a new conversation.
+10. Separate verified mechanics from model compliance or future product requirements. Do not present an independent worker process as inherently more concurrent than Tokio; tie it to lifecycle, fault-isolation, resource-control, or durability requirements.
+11. For the verified reasoning-language and APPEND_SYSTEM.md example, consult references/reasoning-language.md.
 ## Pitfalls
 - Inferring the origin of a title from its appearance without following the data path.
 - Confusing reasoning effort selection with reasoning language selection.

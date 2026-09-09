@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pi_core::{
     AbortHandle, CustomMessageContent, CustomMessageInput, PluginContextHandle, SendMessageOptions,
-    ToolResult,
+    ToolResult, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -141,6 +141,20 @@ impl Coordination {
         for run_id in ready {
             self.deliver_completion(&run_id);
         }
+    }
+
+    /// Attributes completed child work to its immediate owner. The current
+    /// generation handle is resolved at commit time so a detached run can
+    /// finish across a parent reload.
+    pub fn record_usage(&self, owner: &str, usage: Usage, details: Value) -> Result<(), String> {
+        let handle = self.lock().sessions.get(owner).cloned().ok_or_else(|| {
+            "Subagent owner is no longer available for usage accounting.".to_string()
+        })?;
+        handle
+            .access_for_adapter()
+            .map_err(|error| error.to_string())?
+            .record_usage(usage, Some(details))
+            .map_err(|error| error.to_string())
     }
 
     pub fn reserve(&self, id: &str, run: ManagedRun) {

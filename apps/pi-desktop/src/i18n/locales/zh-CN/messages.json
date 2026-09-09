@@ -112,7 +112,8 @@
   },
   "subagents": {
     "executionTree": "子Agent执行树",
-    "open": "打开 {{agent}} 的执行进度"
+    "open": "打开 {{agent}} 的执行进度",
+    "tokens": "{{tokens}} token"
   },
   "errors": {
     "openFile": "无法打开文件",

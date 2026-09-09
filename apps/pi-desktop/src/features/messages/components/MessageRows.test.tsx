@@ -28,6 +28,7 @@ const item: Extract<ConversationItem, { kind: "tool" }> = {
       threadId: "child-thread",
       role: "reviewer",
       status: "inProgress",
+      totalTokens: 12_400,
     },
   ],
 };
@@ -58,7 +59,7 @@ describe("ToolRow sub-agent execution tree", () => {
     expect(screen.getByLabelText("Sub-agent execution tree")).toBeTruthy();
     expect(screen.getByText("reviewer")).toBeTruthy();
     expect(screen.getByText("Review the parser")).toBeTruthy();
-    expect(screen.getByText("processing")).toBeTruthy();
+    expect(screen.getByText("processing · 12k tokens")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Open reviewer progress" }));
     expect(onOpenThreadLink).toHaveBeenCalledWith("child-thread");

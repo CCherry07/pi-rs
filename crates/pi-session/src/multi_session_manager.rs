@@ -727,7 +727,10 @@ fn comparable_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use pi_agent::AgentOptions;
-    use pi_core::{ContentBlock, CustomMessageContent, Message, ModelId, ProviderId};
+    use pi_core::{
+        ContentBlock, CustomMessageContent, Message, ModelId, ProviderId, ResponseMetadata,
+        StopReason, StreamEvent, Usage,
+    };
     use pi_runtime::PiRuntime;
     use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 
@@ -736,6 +739,31 @@ mod tests {
 
     fn test_manager() -> MultiSessionManager {
         test_manager_with_turns([])
+    }
+
+    fn text_turn_with_usage(text: &str, total_tokens: u64) -> ScriptedTurn {
+        ScriptedTurn::Events(vec![
+            StreamEvent::Start {
+                metadata: ResponseMetadata::new("scripted".into(), "test".into(), "scripted", 0),
+            },
+            StreamEvent::TextStart { content_index: 0 },
+            StreamEvent::TextDelta {
+                content_index: 0,
+                delta: text.to_string(),
+            },
+            StreamEvent::TextEnd {
+                content_index: 0,
+                text_signature: None,
+            },
+            StreamEvent::Done {
+                reason: StopReason::Stop,
+                usage: Usage {
+                    input: total_tokens,
+                    total_tokens,
+                    ..Usage::default()
+                },
+            },
+        ])
     }
 
     fn test_manager_with_turns(
@@ -843,7 +871,7 @@ mod tests {
     #[tokio::test]
     async fn fresh_isolated_session_runs_without_replacing_its_owner() {
         let directory = tempfile::tempdir().unwrap();
-        let manager = test_manager_with_turns([ScriptedTurn::Text("isolated answer".to_string())]);
+        let manager = test_manager_with_turns([text_turn_with_usage("isolated answer", 37)]);
         let owner_path = directory.path().join("primary.jsonl");
         let owner = manager
             .create_session(directory.path(), &owner_path)
@@ -865,6 +893,7 @@ mod tests {
         assert_eq!(owner.current().log().leaf_id(), owner_leaf);
         assert!(!owner.current().runtime().agent().is_running());
         assert!(!outcome.aborted);
+        assert_eq!(outcome.usage.total_tokens, 37);
         assert!(outcome.messages.iter().any(|message| {
             matches!(message, Message::Assistant(assistant)
             if assistant.content.iter().any(|content| {
@@ -877,6 +906,10 @@ mod tests {
             .find(|session| session.registration_id() == isolated_id.as_str())
             .unwrap();
         assert_eq!(outcome.session_id, child.id());
+        let observed = owner.observe_isolated_session(&isolated_id).unwrap();
+        let usage = observed.usage_snapshot().unwrap();
+        assert_eq!(usage.usage.total_tokens, 37);
+        assert!(usage.context_tokens.is_some());
         assert_eq!(
             owner.current().runtime().execution_origin(),
             pi_core::SessionExecutionOrigin::User
