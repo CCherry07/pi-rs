@@ -124,32 +124,6 @@ impl SubagentCatalog {
             .filter(|name| seen.insert(name.clone()))
             .collect()
     }
-
-    pub(crate) fn formatted_catalog(&self) -> String {
-        let canonical = self
-            .profiles
-            .iter()
-            .map(|profile| profile.name.as_str())
-            .collect::<HashSet<_>>();
-        self.profiles
-            .iter()
-            .map(|profile| {
-                let aliases = profile
-                    .aliases
-                    .iter()
-                    .filter(|alias| !canonical.contains(alias.as_str()))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let aliases = if aliases.is_empty() {
-                    String::new()
-                } else {
-                    format!(" (aliases: {})", aliases.join(", "))
-                };
-                format!("- `{}`{aliases}: {}", profile.name, profile.description)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
 }
 
 fn validate_aliases(profiles: &[SubagentProfile]) -> Result<(), SubagentCatalogError> {
@@ -260,6 +234,7 @@ struct AgentFrontmatter {
     #[serde(default)]
     aliases: StringList,
     system_prompt_mode: Option<String>,
+    inherit_project_context: Option<bool>,
     #[serde(default)]
     allow_nested_subagents: bool,
     max_subagent_depth: Option<usize>,
@@ -269,6 +244,8 @@ struct AgentFrontmatter {
     exclude_tools: StringList,
     model: Option<String>,
     thinking: Option<ThinkingSetting>,
+    #[serde(default)]
+    default_context: pi_core::IsolatedContextMode,
     #[serde(default)]
     inherit_skills: bool,
     #[serde(default)]
@@ -428,6 +405,9 @@ fn load_definition(path: &Path) -> Result<SubagentProfile, SubagentCatalogError>
             ));
         }
     };
+    let inherit_project_context = frontmatter
+        .inherit_project_context
+        .unwrap_or(name == "delegate");
     let model = match frontmatter.model {
         None => None,
         Some(model) => {
@@ -463,12 +443,14 @@ fn load_definition(path: &Path) -> Result<SubagentProfile, SubagentCatalogError>
         description: description.to_string(),
         instructions: body.trim().to_string(),
         system_prompt_mode,
+        inherit_project_context,
         allow_nested_subagents: frontmatter.allow_nested_subagents,
         max_subagent_depth: frontmatter.max_subagent_depth,
         tools: frontmatter.tools.0,
         excluded_tools: frontmatter.exclude_tools.0,
         model,
         thinking_level: frontmatter.thinking.map(|thinking| thinking.0),
+        default_context: frontmatter.default_context,
         inherit_skills: frontmatter.inherit_skills,
         skills: frontmatter.skills.0,
         skill_paths,
@@ -639,7 +621,7 @@ mod tests {
         write_definition(
             &root,
             "configured",
-            "---\nname: configured\ndescription: Configured child\ntools: read, grep, read\nmodel: provider/model\nthinking: high\ninheritSkills: true\nmaxSubagentDepth: 4\n---\nInspect code.",
+            "---\nname: configured\ndescription: Configured child\ntools: read, grep, read\nmodel: provider/model\nthinking: high\ninheritProjectContext: true\ninheritSkills: true\nmaxSubagentDepth: 4\n---\nInspect code.",
         );
         write_definition(
             &root,
@@ -653,12 +635,14 @@ mod tests {
         assert_eq!(configured.tools, Some(vec!["read".into(), "grep".into()]));
         assert_eq!(configured.model.as_deref(), Some("provider/model"));
         assert_eq!(configured.thinking_level, Some(ThinkingLevel::High));
+        assert!(configured.inherit_project_context);
         assert!(configured.inherit_skills);
         assert_eq!(configured.max_subagent_depth, Some(4));
         let inherited = catalog.profile("inherited").unwrap();
         assert_eq!(inherited.tools, Some(Vec::new()));
         assert_eq!(inherited.model, None);
         assert_eq!(inherited.thinking_level, Some(ThinkingLevel::Off));
+        assert!(!inherited.inherit_project_context);
         assert!(!inherited.inherit_skills);
         assert_eq!(inherited.max_subagent_depth, None);
     }

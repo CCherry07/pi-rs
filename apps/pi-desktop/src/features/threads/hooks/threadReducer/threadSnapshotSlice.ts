@@ -5,6 +5,11 @@ export function reduceThreadSnapshots(
   action: ThreadAction,
 ): ThreadState {
   switch (action.type) {
+    case "setThreadCommands":
+      return {
+        ...state,
+        commandsByThread: { ...state.commandsByThread, [action.threadId]: action.commands },
+      };
     case "setLastAgentMessage":
       if (
         state.lastAgentMessageByThread[action.threadId]?.timestamp >= action.timestamp

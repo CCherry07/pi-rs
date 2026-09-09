@@ -3449,6 +3449,7 @@ name = "pi-plugin-subagents"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "pi-agent",
  "pi-core",
  "pi-plugin-find",

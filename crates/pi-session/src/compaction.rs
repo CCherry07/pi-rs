@@ -296,16 +296,16 @@ pub fn estimate_context_tokens(messages: &[AgentMessage]) -> ContextUsageEstimat
 }
 
 /// Estimates the active session context while rejecting usage blocks retained
-/// from before the latest compaction. Those blocks describe the old, larger
-/// context and would otherwise immediately retrigger compaction.
+/// from before the latest compaction or isolated-context seed. Those blocks
+/// describe the old context and could otherwise immediately retrigger compaction.
 pub fn estimate_session_context_tokens(
     path_entries: &[SessionRecord],
     messages: &[AgentMessage],
 ) -> ContextUsageEstimate {
-    let Some(compaction_index) = path_entries
-        .iter()
-        .rposition(|entry| matches!(entry.entry, SessionEntry::Compaction(_)))
-    else {
+    let Some(compaction_index) = path_entries.iter().rposition(|entry| {
+        matches!(entry.entry, SessionEntry::Compaction(_))
+            || crate::isolated_context::is_seed(&entry.entry)
+    }) else {
         return estimate_context_tokens(messages);
     };
     if get_last_assistant_usage(&path_entries[compaction_index + 1..]).is_some() {
@@ -330,10 +330,10 @@ pub fn current_session_context_tokens(
     path_entries: &[SessionRecord],
     messages: &[AgentMessage],
 ) -> Option<ContextUsageEstimate> {
-    let Some(compaction_index) = path_entries
-        .iter()
-        .rposition(|entry| matches!(entry.entry, SessionEntry::Compaction(_)))
-    else {
+    let Some(compaction_index) = path_entries.iter().rposition(|entry| {
+        matches!(entry.entry, SessionEntry::Compaction(_))
+            || crate::isolated_context::is_seed(&entry.entry)
+    }) else {
         return Some(estimate_context_tokens(messages));
     };
     get_last_assistant_usage(&path_entries[compaction_index + 1..])
@@ -431,13 +431,13 @@ pub fn prepare_compaction(
             .chain(
                 path_entries[index + 1..]
                     .iter()
-                    .map(CompactableEntry::from_record),
+                    .flat_map(CompactableEntry::expand_record),
             )
             .collect::<Vec<_>>()
     } else {
         path_entries
             .iter()
-            .map(CompactableEntry::from_record)
+            .flat_map(CompactableEntry::expand_record)
             .collect::<Vec<_>>()
     };
 
@@ -725,6 +725,13 @@ enum CompactableEntry {
 }
 
 impl CompactableEntry {
+    fn expand_record(record: &SessionRecord) -> Vec<Self> {
+        match crate::isolated_context::read_seed(&record.entry) {
+            Some(seed) => seed.messages.into_iter().map(Self::Message).collect(),
+            None => vec![Self::from_record(record)],
+        }
+    }
+
     fn from_record(record: &SessionRecord) -> Self {
         match &record.entry {
             SessionEntry::Message(message) => Self::Message(message.message.clone()),

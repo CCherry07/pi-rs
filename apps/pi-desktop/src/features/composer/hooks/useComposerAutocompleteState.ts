@@ -9,6 +9,7 @@ import {
   findPromptArgRangeAtCursor,
   getPromptArgumentHint,
 } from "../../../utils/customPrompts";
+import { DESKTOP_COMMANDS, isDesktopCommandName, type RuntimeCommand } from "../../../utils/desktopCommands";
 import { isComposingEvent } from "../../../utils/keys";
 
 type Skill = { name: string; description?: string };
@@ -17,6 +18,7 @@ type UseComposerAutocompleteStateArgs = {
   selectionStart: number | null;
   disabled: boolean;
   skills: Skill[];
+  runtimeCommands?: RuntimeCommand[];
   prompts: CustomPromptOption[];
   files: string[];
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
@@ -69,6 +71,7 @@ export function useComposerAutocompleteState({
   selectionStart,
   disabled,
   skills,
+  runtimeCommands = [],
   prompts,
   files,
   textareaRef,
@@ -141,56 +144,33 @@ export function useComposerAutocompleteState({
   );
 
   const slashCommandItems = useMemo<AutocompleteItem[]>(() => {
-    const commands: AutocompleteItem[] = [
-      {
-        id: "compact",
-        label: "compact",
-        description: t("composer.slash.compact"),
-        insertText: "compact",
-        group: "Slash",
-      },
-      {
-        id: "fast",
-        label: "fast",
-        description: t("composer.slash.fast"),
-        insertText: "fast",
-        group: "Slash",
-      },
-      {
-        id: "fork",
-        label: "fork",
-        description: t("composer.slash.fork"),
-        insertText: "fork",
-        group: "Slash",
-      },
-      {
-        id: "new",
-        label: "new",
-        description: t("composer.slash.new"),
-        insertText: "new",
-        group: "Slash",
-      },
-      {
-        id: "resume",
-        label: "resume",
-        description: t("composer.slash.resume"),
-        insertText: "resume",
-        group: "Slash",
-      },
-      {
-        id: "status",
-        label: "status",
-        description: t("composer.slash.status"),
-        insertText: "status",
-        group: "Slash",
-      },
-    ];
-    return commands.sort((a, b) => a.label.localeCompare(b.label));
+    return DESKTOP_COMMANDS.map((name): AutocompleteItem => ({
+      id: `desktop:${name}`,
+      label: name,
+      description: t(`composer.slash.${name}`),
+      insertText: name,
+      group: "Slash",
+    }));
   }, [t]);
 
   const slashItems = useMemo<AutocompleteItem[]>(
-    () => [...slashCommandItems, ...slashSkillItems, ...promptItems],
-    [promptItems, slashCommandItems, slashSkillItems],
+    () => {
+      const runtimeItems = runtimeCommands
+        .filter((command) => !isDesktopCommandName(command.name))
+        .map((command): AutocompleteItem => ({
+          id: `runtime:${command.name}`,
+          label: command.name,
+          description: command.description,
+          hint: command.argumentHint ?? undefined,
+          insertText: command.name,
+          group: "Slash",
+        }));
+      // Desktop prompt expansion owns /prompts:*; registered commands own all
+      // remaining runtime names (including /skill:*).
+      const items = [...slashCommandItems, ...promptItems, ...runtimeItems, ...slashSkillItems];
+      return items.filter((item, index) => items.findIndex((other) => other.label === item.label) === index);
+    },
+    [promptItems, runtimeCommands, slashCommandItems, slashSkillItems],
   );
 
   const triggers = useMemo(

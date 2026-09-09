@@ -103,6 +103,7 @@ type UseMainAppLayoutSurfacesArgs = {
   handleAddWorktreeAgent: SidebarProps["onAddWorktreeAgent"];
   handleAddCloneAgent: SidebarProps["onAddCloneAgent"];
   handleOpenThreadLink: LayoutNodesOptions["primary"]["messagesProps"]["onOpenThreadLink"];
+  onForkMessage: LayoutNodesOptions["primary"]["messagesProps"]["onForkMessage"];
   handleSelectOpenAppId: MainHeaderProps["onSelectOpenAppId"];
   handleCopyThread: MainHeaderProps["onCopyThread"];
   handleToggleTerminalWithFocus: MainHeaderProps["onToggleTerminal"];
@@ -126,8 +127,10 @@ type UseMainAppLayoutSurfacesArgs = {
   selectedEffort: ComposerProps["selectedEffort"];
   onSelectEffort: ComposerProps["onSelectEffort"];
   selectedServiceTier: ComposerProps["selectedServiceTier"];
+  onSelectServiceTier: ComposerProps["onSelectServiceTier"];
   reasoningSupported: boolean;
   skills: ComposerProps["skills"];
+  runtimeCommands: ComposerProps["runtimeCommands"];
   prompts: ComposerProps["prompts"];
   composerInputRef: RefObject<HTMLTextAreaElement | null>;
   composerEditorSettings: ComposerEditorSettings;
@@ -223,6 +226,7 @@ function buildPrimarySurface({
   handleAddWorktreeAgent,
   handleAddCloneAgent,
   handleOpenThreadLink,
+  onForkMessage,
   handleSelectOpenAppId,
   handleCopyThread,
   handleToggleTerminalWithFocus,
@@ -235,8 +239,10 @@ function buildPrimarySurface({
   selectedEffort,
   onSelectEffort,
   selectedServiceTier,
+  onSelectServiceTier,
   reasoningSupported,
   skills,
+  runtimeCommands,
   prompts,
   composerInputRef,
   composerEditorSettings,
@@ -333,6 +339,10 @@ function buildPrimarySurface({
       onPlanAccept,
       onPlanSubmitChanges,
       onOpenThreadLink: handleOpenThreadLink,
+      onForkMessage:
+        !activeThreadReadOnly && !composerWorkspaceState.isProcessing
+          ? onForkMessage
+          : undefined,
       onQuoteMessage: composerWorkspaceState.canInsertComposerText
         ? composerWorkspaceState.handleInsertComposerText
         : undefined,
@@ -391,8 +401,10 @@ function buildPrimarySurface({
           selectedEffort,
           onSelectEffort,
           selectedServiceTier,
+          onSelectServiceTier,
           reasoningSupported,
           skills,
+          runtimeCommands,
           prompts,
           files: composerWorkspaceState.files,
           textareaRef: composerInputRef,
@@ -822,6 +834,7 @@ export function useMainAppLayoutSurfaces({
   handleAddWorktreeAgent,
   handleAddCloneAgent,
   handleOpenThreadLink,
+  onForkMessage,
   handleSelectOpenAppId,
   handleCopyThread,
   handleToggleTerminalWithFocus,
@@ -834,8 +847,10 @@ export function useMainAppLayoutSurfaces({
   selectedEffort,
   onSelectEffort,
   selectedServiceTier,
+  onSelectServiceTier,
   reasoningSupported,
   skills,
+  runtimeCommands,
   prompts,
   composerInputRef,
   composerEditorSettings,
@@ -932,6 +947,7 @@ export function useMainAppLayoutSurfaces({
     handleAddWorktreeAgent,
     handleAddCloneAgent,
     handleOpenThreadLink,
+    onForkMessage,
     handleSelectOpenAppId,
     handleCopyThread,
     handleToggleTerminalWithFocus,
@@ -944,8 +960,10 @@ export function useMainAppLayoutSurfaces({
     selectedEffort,
     onSelectEffort,
     selectedServiceTier,
+    onSelectServiceTier,
     reasoningSupported,
     skills,
+    runtimeCommands,
     prompts,
     composerInputRef,
     composerEditorSettings,

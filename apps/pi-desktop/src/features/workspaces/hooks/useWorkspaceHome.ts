@@ -7,6 +7,7 @@ import type {
   WorkspaceInfo,
 } from "../../../types";
 import { generateRunMetadata } from "../../../services/tauri";
+import { resolveDesktopCommand } from "../../../utils/desktopCommands";
 
 export type WorkspaceRunMode = "local" | "worktree";
 
@@ -67,6 +68,7 @@ type UseWorkspaceHomeOptions = {
       serviceTier?: ServiceTier | null | undefined;
     },
   ) => Promise<void | SendMessageResult>;
+  reloadWorkspace?: () => Promise<void>;
   onWorktreeCreated?: (worktree: WorkspaceInfo, parent: WorkspaceInfo) => Promise<void> | void;
 };
 
@@ -82,6 +84,7 @@ type WorkspaceHomeState = {
 const DEFAULT_MODE: WorkspaceRunMode = "local";
 const EMPTY_SELECTIONS: Record<string, number> = {};
 const MAX_TITLE_LENGTH = 56;
+const noopReloadWorkspace = () => Promise.resolve();
 
 const createRunId = () =>
   `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -192,6 +195,7 @@ export function useWorkspaceHome({
   addWorktreeAgent,
   startThreadForWorkspace,
   sendUserMessageToThread,
+  reloadWorkspace = noopReloadWorkspace,
   onWorktreeCreated,
 }: UseWorkspaceHomeOptions) {
   const { t } = useTranslation("workspaces");
@@ -393,6 +397,21 @@ export function useWorkspaceHome({
     const hasImages = images.length > 0;
     if ((!prompt && !hasImages) || isSubmitting) {
       return false;
+    }
+
+    if (resolveDesktopCommand(prompt) === "reload") {
+      setSubmitting(true);
+      setWorkspaceError(null);
+      try {
+        await reloadWorkspace();
+        setDraft("");
+        return true;
+      } catch (error) {
+        setWorkspaceError(error instanceof Error ? error.message : String(error));
+        return false;
+      } finally {
+        setSubmitting(false);
+      }
     }
 
     const selectedModels = Object.entries(modelSelections)
@@ -623,6 +642,8 @@ export function useWorkspaceHome({
     selectedModelId,
     serviceTier,
     sendUserMessageToThread,
+    reloadWorkspace,
+    setDraft,
     setSubmitting,
     setWorkspaceError,
     startThreadForWorkspace,

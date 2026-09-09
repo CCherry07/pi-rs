@@ -25,6 +25,7 @@
     "closePreview": "Close image preview"
   },
   "messageActions": {
+    "fork": "Fork from this message",
     "quote": "Quote message",
     "copy": "Copy message",
     "copyCode": "Copy code block",
@@ -158,7 +159,7 @@
     "plan": "Plan",
     "model": "Model",
     "noModels": "No models",
-    "fastMode": "Fast mode enabled",
+    "fastModeToggle": "Toggle Fast mode",
     "thinkingMode": "Thinking mode",
     "default": "Default",
     "tokenUsageUnknown": "Token usage unavailable",
@@ -170,35 +171,13 @@
     },
     "slash": {
       "compact": "compact the active thread context",
-      "fast": "toggle Fast mode for upcoming turns",
-      "fork": "branch into a new thread",
-      "new": "start a new chat",
-      "resume": "refresh the active thread",
-      "status": "show session status"
+      "reload": "reload plugins, models, and resources"
     },
     "groups": {
       "Files": "Files",
       "Skills": "Skills",
       "Slash": "Commands",
       "Prompts": "Prompts"
-    }
-  },
-  "commands": {
-    "unknown": "unknown",
-    "status": {
-      "title": "Session status:",
-      "model": "- Model: {{value}}",
-      "fastMode": "- Fast mode: {{value}}",
-      "reasoningEffort": "- Reasoning effort: {{value}}",
-      "default": "default",
-      "on": "on",
-      "off": "off"
-    },
-    "fast": {
-      "usage": "Usage: /fast, /fast on, /fast off, or /fast status.",
-      "status": "Fast mode is {{state}}.",
-      "enabled": "Fast mode enabled.",
-      "disabled": "Fast mode disabled."
     }
   },
   "notices": {

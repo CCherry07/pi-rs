@@ -64,19 +64,14 @@ type UseMainAppComposerWorkspaceStateArgs = {
   };
   actions: {
     addWorktreeAgent: Parameters<typeof useWorkspaceHome>[0]["addWorktreeAgent"];
-    startThreadForWorkspace: Parameters<typeof useComposerController>[0]["startThreadForWorkspace"] &
-      Parameters<typeof useWorkspaceHome>[0]["startThreadForWorkspace"];
+    startThreadForWorkspace: Parameters<typeof useWorkspaceHome>[0]["startThreadForWorkspace"];
     sendUserMessage: Parameters<typeof useComposerController>[0]["sendUserMessage"];
-    sendUserMessageToThread: Parameters<typeof useComposerController>[0]["sendUserMessageToThread"] &
-      Parameters<typeof useWorkspaceHome>[0]["sendUserMessageToThread"];
+    sendUserMessageToThread: Parameters<typeof useWorkspaceHome>[0]["sendUserMessageToThread"];
     seedThreadRunParams: NonNullable<
       Parameters<typeof useWorkspaceHome>[0]["seedThreadRunParams"]
     >;
-    startFork: Parameters<typeof useComposerController>[0]["startFork"];
-    startResume: Parameters<typeof useComposerController>[0]["startResume"];
     startCompact: Parameters<typeof useComposerController>[0]["startCompact"];
-    startFast: Parameters<typeof useComposerController>[0]["startFast"];
-    startStatus: Parameters<typeof useComposerController>[0]["startStatus"];
+    startReload: Parameters<typeof useComposerController>[0]["startReload"];
     handleWorktreeCreated?: Parameters<typeof useWorkspaceHome>[0]["onWorktreeCreated"];
     addDebugEntry: (entry: DebugEntry) => void;
   };
@@ -127,11 +122,8 @@ export function useMainAppComposerWorkspaceState({
     sendUserMessage,
     sendUserMessageToThread,
     seedThreadRunParams,
-    startFork,
-    startResume,
     startCompact,
-    startFast,
-    startStatus,
+    startReload,
     handleWorktreeCreated,
     addDebugEntry,
   } = actions;
@@ -197,19 +189,13 @@ export function useMainAppComposerWorkspaceState({
     activeThreadId,
     activeTurnId,
     activeWorkspaceId,
-    activeWorkspace,
     isProcessing,
     queueFlushPaused,
     steerEnabled: settings.steerEnabled,
     followUpMessageBehavior: settings.followUpMessageBehavior,
-    startThreadForWorkspace,
     sendUserMessage,
-    sendUserMessageToThread,
-    startFork,
-    startResume,
     startCompact,
-    startFast,
-    startStatus,
+    startReload,
   });
 
   const workspaceHomeState = useWorkspaceHome({
@@ -222,6 +208,7 @@ export function useMainAppComposerWorkspaceState({
     addWorktreeAgent,
     startThreadForWorkspace,
     sendUserMessageToThread,
+    reloadWorkspace: () => startReload("/reload"),
     onWorktreeCreated: handleWorktreeCreated,
   });
 

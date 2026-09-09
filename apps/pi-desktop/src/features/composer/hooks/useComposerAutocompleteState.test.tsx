@@ -6,6 +6,7 @@ import { useComposerAutocompleteState } from "./useComposerAutocompleteState";
 
 function renderAutocomplete(text: string, options?: {
   files?: string[];
+  runtimeCommands?: import("../../../utils/desktopCommands").RuntimeCommand[];
   skills?: Array<{ name: string; description: string }>;
 }) {
   const textareaRef = createRef<HTMLTextAreaElement>();
@@ -20,6 +21,7 @@ function renderAutocomplete(text: string, options?: {
       selectionStart: text.length,
       disabled: false,
       skills: options?.skills ?? [],
+      runtimeCommands: options?.runtimeCommands,
       prompts: [],
       files: options?.files ?? [],
       textareaRef,
@@ -30,6 +32,18 @@ function renderAutocomplete(text: string, options?: {
 }
 
 describe("useComposerAutocompleteState", () => {
+  it("completes native names and hints while Desktop descriptions win collisions", () => {
+    const { result } = renderAutocomplete("/", { runtimeCommands: [
+      { name: "native", description: "Native command", argumentHint: "[action]" },
+      { name: "compact", description: "Wrong runtime description" },
+      { name: "COMPACT", description: "Wrong uppercase description" },
+    ] });
+    const items = result.current.autocompleteMatches;
+    expect(items.find((item) => item.label === "native")).toMatchObject({ insertText: "native", hint: "[action]", description: "Native command" });
+    expect(items.filter((item) => item.label.toLowerCase() === "compact")).toHaveLength(1);
+    expect(items.find((item) => item.label === "compact")?.description).not.toContain("Wrong");
+  });
+
   it("suggests a file even if it is already mentioned earlier", () => {
     const { result } = renderAutocomplete(
       "Please review @src/App.tsx and also @",
@@ -57,11 +71,7 @@ describe("useComposerAutocompleteState", () => {
 
     expect(result.current.autocompleteMatches.map((item) => item.label)).toEqual([
       "compact",
-      "fast",
-      "fork",
-      "new",
-      "resume",
-      "status",
+      "reload",
     ]);
   });
 

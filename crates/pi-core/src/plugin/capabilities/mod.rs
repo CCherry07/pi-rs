@@ -17,7 +17,7 @@ pub use epoch::{PluginContextEpoch, PluginContextHandle, PluginContextReplacemen
 pub use models::{CommandModelsContext, ModelsContext, ModelsContextAccess};
 pub use session::{
     CommandSessionContext, DirectCompletionRequest, EphemeralCompactionOptions,
-    EphemeralSessionOutcome, EphemeralSessionRequest, EphemeralSessionStatus,
+    EphemeralSessionOutcome, EphemeralSessionRequest, EphemeralSessionStatus, IsolatedContextMode,
     IsolatedSessionHandle, IsolatedSessionId, IsolatedSessionOptions, IsolatedSessionOutcome,
     IsolatedSessionRequest, ReplacedSessionContext, SessionContext, SessionContextAccess,
     SessionEntryKind, SessionEntryView, SessionExecutionOrigin, SessionReplacement,

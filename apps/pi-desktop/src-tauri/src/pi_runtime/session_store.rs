@@ -19,6 +19,8 @@ pub(crate) struct SessionStore {
     manager: MultiSessionManager,
     agent_dir: PathBuf,
     sessions: Arc<RwLock<HashMap<String, PiSession>>>,
+    drafts: Arc<tokio::sync::Mutex<HashMap<PathBuf, PiSession>>>,
+    open_gate: Arc<tokio::sync::Mutex<()>>,
     observed_isolated: Arc<RwLock<HashMap<String, ObservedIsolatedSession>>>,
 }
 
@@ -38,6 +40,7 @@ pub(crate) struct StoredIsolatedSession {
 pub(crate) struct LiveSession {
     source: LiveSessionSource,
     pub(crate) subscription: AgentSessionSubscription,
+    pub(crate) changes: Option<tokio::sync::watch::Receiver<Arc<AgentSession>>>,
 }
 
 enum LiveSessionSource {
@@ -46,6 +49,18 @@ enum LiveSessionSource {
 }
 
 impl LiveSession {
+    pub(crate) fn replace(&mut self, session: Arc<AgentSession>) {
+        self.subscription = session.subscribe();
+        self.source = LiveSessionSource::Primary(session);
+    }
+
+    pub(crate) fn primary(&self) -> Option<&Arc<AgentSession>> {
+        match &self.source {
+            LiveSessionSource::Primary(session) => Some(session),
+            LiveSessionSource::Isolated(_) => None,
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> AgentSessionSnapshot {
         match &self.source {
             LiveSessionSource::Primary(session) => session.snapshot(),
@@ -126,11 +141,60 @@ impl SessionStore {
             manager,
             agent_dir,
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            drafts: Arc::default(),
+            open_gate: Arc::new(tokio::sync::Mutex::new(())),
             observed_isolated: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     pub(crate) async fn create(&self, cwd: &Path) -> Result<Arc<AgentSession>, String> {
+        Ok(self.create_handle(cwd).await?.current())
+    }
+
+    // Preparation is idempotent per workspace. The eventual user thread claims
+    // this same generation, so displayed commands and command execution agree.
+    pub(crate) async fn prepare_thread(&self, cwd: &Path) -> Result<Arc<AgentSession>, String> {
+        Ok(self.prepare_handle(cwd).await?.current())
+    }
+
+    async fn prepare_handle(&self, cwd: &Path) -> Result<PiSession, String> {
+        let cwd = std::fs::canonicalize(cwd)
+            .map_err(|error| format!("cannot access workspace {}: {error}", cwd.display()))?;
+        let mut drafts = self.drafts.lock().await;
+        if let Some(session) = drafts.get(&cwd) {
+            return Ok(session.clone());
+        }
+        let session = self.create_handle(&cwd).await?;
+        drafts.insert(cwd, session.clone());
+        Ok(session)
+    }
+
+    pub(crate) async fn reload_prepared(&self, cwd: &Path) -> Result<Arc<AgentSession>, String> {
+        let session = self.prepare_handle(cwd).await?;
+        session.reload().await.map_err(|error| error.to_string())?;
+        Ok(session.current())
+    }
+
+    pub(crate) async fn reload(&self, id: &str) -> Result<Arc<AgentSession>, String> {
+        self.open(id).await?;
+        let (_, session) = self
+            .handle(id)
+            .ok_or_else(|| format!("unknown Pi session: {id}"))?;
+        session.reload().await.map_err(|error| error.to_string())?;
+        Ok(session.current())
+    }
+
+    pub(crate) async fn start_thread(&self, cwd: &Path) -> Result<Arc<AgentSession>, String> {
+        let cwd = std::fs::canonicalize(cwd)
+            .map_err(|error| format!("cannot access workspace {}: {error}", cwd.display()))?;
+        let mut drafts = self.drafts.lock().await;
+        if let Some(session) = drafts.remove(&cwd) {
+            return Ok(session.current());
+        }
+        self.create(&cwd).await
+    }
+
+    async fn create_handle(&self, cwd: &Path) -> Result<PiSession, String> {
         let cwd = std::fs::canonicalize(cwd)
             .map_err(|error| format!("cannot access workspace {}: {error}", cwd.display()))?;
         if !cwd.is_dir() {
@@ -151,47 +215,35 @@ impl SessionStore {
             .create_session_with_id(cwd, path, session_id)
             .await
             .map_err(|error| error.to_string())?;
-        let current = session.current();
         self.sessions
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(session.id(), session);
-        Ok(current)
+            .insert(uuid::Uuid::now_v7().to_string(), session.clone());
+        Ok(session)
     }
 
-    pub(crate) async fn command_catalog(&self, cwd: &Path) -> Result<Vec<CommandSpec>, String> {
-        let cwd = std::fs::canonicalize(cwd)
-            .map_err(|error| format!("cannot access workspace {}: {error}", cwd.display()))?;
-        let path = self
-            .agent_dir
-            .join("sessions")
-            .join(format!("{}.jsonl", uuid::Uuid::now_v7()));
-        let handle = self
-            .manager
-            .create_session(cwd, path)
-            .await
-            .map_err(|error| error.to_string())?;
-        let commands = handle.current().runtime().command_specs();
-        self.manager
-            .close_session(&handle)
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(commands)
+    pub(crate) async fn command_catalog(&self, id: &str) -> Result<Vec<CommandSpec>, String> {
+        Ok(self.open(id).await?.runtime().command_specs())
+    }
+
+    // Keys are stable frontend-handle identities, not replaceable JSONL IDs.
+    pub(super) fn handle(&self, id: &str) -> Option<(String, PiSession)> {
+        self.sessions
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(_, session)| session.id() == id)
+            .map(|(key, session)| (key.clone(), session.clone()))
+    }
+
+    pub(crate) fn forwarder_key(&self, id: &str) -> Result<String, String> {
+        self.handle(id)
+            .map(|(key, _)| key)
+            .ok_or_else(|| format!("unknown Pi session: {id}"))
     }
 
     pub(crate) async fn model_catalog(&self, cwd: &Path) -> Result<SessionModelCatalog, String> {
-        let cwd = std::fs::canonicalize(cwd)
-            .map_err(|error| format!("cannot access workspace {}: {error}", cwd.display()))?;
-        let path = self
-            .agent_dir
-            .join("sessions")
-            .join(format!("{}.jsonl", uuid::Uuid::now_v7()));
-        let handle = self
-            .manager
-            .create_session(cwd, path)
-            .await
-            .map_err(|error| error.to_string())?;
-        let session = handle.current();
+        let session = self.prepare_thread(cwd).await?;
         let state = session.runtime().agent().state();
         let catalog = SessionModelCatalog {
             models: session.runtime().available_models(),
@@ -199,21 +251,12 @@ impl SessionStore {
             selected_model: state.model_id,
             selected_thinking: state.thinking_level,
         };
-        self.manager
-            .close_session(&handle)
-            .await
-            .map_err(|error| error.to_string())?;
         Ok(catalog)
     }
 
     pub(crate) async fn open(&self, id: &str) -> Result<Arc<AgentSession>, String> {
-        if let Some(session) = self
-            .sessions
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(id)
-            .cloned()
-        {
+        let _open = self.open_gate.lock().await;
+        if let Some((_, session)) = self.handle(id) {
             return Ok(session.current());
         }
         let path = self.find_path(id)?;
@@ -226,37 +269,19 @@ impl SessionStore {
         self.sessions
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(session.id(), session);
+            .insert(uuid::Uuid::now_v7().to_string(), session);
         Ok(current)
     }
 
-    pub(crate) async fn fork(&self, id: &str) -> Result<Arc<AgentSession>, String> {
+    pub(crate) async fn fork(
+        &self,
+        id: &str,
+        entry_id: impl Into<String>,
+    ) -> Result<Arc<AgentSession>, String> {
         let _ = self.open(id).await?;
-        let session = self
-            .sessions
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(id)
-            .cloned()
+        let (_, session) = self
+            .handle(id)
             .ok_or_else(|| format!("unknown Pi session: {id}"))?;
-        let document =
-            SessionLog::read(session.current().log().path()).map_err(|error| error.to_string())?;
-        let entry_id = document
-            .entries
-            .iter()
-            .rev()
-            .find(|record| {
-                matches!(
-                    &record.entry,
-                    SessionEntry::Message(entry)
-                        if matches!(
-                            entry.message.as_standard(),
-                            Some(Message::User(_) | Message::Assistant(_))
-                        )
-                )
-            })
-            .map(|record| record.id.clone())
-            .ok_or_else(|| "the Pi session has no message to fork".to_string())?;
         let replacement = session
             .fork_session(entry_id, ForkPosition::At)
             .await
@@ -264,15 +289,7 @@ impl SessionStore {
         if replacement == AgentSessionReplacement::Cancelled {
             return Err("Pi session fork was cancelled by a session plugin".to_string());
         }
-        let new_id = session.id();
-        let current = session.current();
-        let mut sessions = self
-            .sessions
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        sessions.remove(id);
-        sessions.insert(new_id, session);
-        Ok(current)
+        Ok(session.current())
     }
 
     pub(crate) async fn rename(&self, id: &str, name: String) -> Result<(), String> {
@@ -361,11 +378,13 @@ impl SessionStore {
         id: &str,
         include_archived: bool,
     ) -> Result<PathBuf, String> {
-        let active = self
-            .sessions
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(id);
+        let key = self.handle(id).map(|(key, _)| key);
+        let active = key.and_then(|key| {
+            self.sessions
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&key)
+        });
         let path = active
             .as_ref()
             .map(|session| session.current().log().path().to_path_buf())
@@ -380,17 +399,15 @@ impl SessionStore {
     }
 
     pub(crate) fn subscribe(&self, id: &str) -> Result<LiveSession, String> {
-        let session = self
-            .sessions
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(id)
-            .cloned()
-            .ok_or_else(|| format!("unknown Pi session: {id}"))?
-            .current();
+        let (_, handle) = self
+            .handle(id)
+            .ok_or_else(|| format!("unknown Pi session: {id}"))?;
+        let mut changes = handle.subscribe();
+        let current = Arc::clone(&changes.borrow_and_update());
         Ok(LiveSession {
-            subscription: session.subscribe(),
-            source: LiveSessionSource::Primary(session),
+            subscription: current.subscribe(),
+            source: LiveSessionSource::Primary(current),
+            changes: Some(changes),
         })
     }
 
@@ -401,13 +418,7 @@ impl SessionStore {
         agent: &str,
     ) -> Result<(IsolatedSessionObservation, LiveSession), String> {
         let id = IsolatedSessionId::new(isolated_id.to_string());
-        let observation = if let Some(owner) = self
-            .sessions
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(owner_id)
-            .cloned()
-        {
+        let observation = if let Some((_, owner)) = self.handle(owner_id) {
             owner
                 .observe_isolated_session(&id)
                 .map_err(|error| error.to_string())?
@@ -437,6 +448,7 @@ impl SessionStore {
         let live = LiveSession {
             subscription: observation.subscribe(),
             source: LiveSessionSource::Isolated(observation.clone()),
+            changes: None,
         };
         Ok((observation, live))
     }

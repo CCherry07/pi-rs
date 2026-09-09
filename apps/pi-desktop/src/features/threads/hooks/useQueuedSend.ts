@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { resolveDesktopCommand as parseSlashCommand, type DesktopCommand as SlashCommandKind } from "@/utils/desktopCommands";
 import type {
   ComposerSendIntent,
   FollowUpMessageBehavior,
   QueuedMessage,
   SendMessageResult,
-  WorkspaceInfo,
 } from "@/types";
 
 type UseQueuedSendOptions = {
@@ -14,27 +14,13 @@ type UseQueuedSendOptions = {
   queueFlushPaused?: boolean;
   steerEnabled: boolean;
   followUpMessageBehavior: FollowUpMessageBehavior;
-  activeWorkspace: WorkspaceInfo | null;
-  startThreadForWorkspace: (
-    workspaceId: string,
-    options?: { activate?: boolean },
-  ) => Promise<string | null>;
   sendUserMessage: (
     text: string,
     images?: string[],
     options?: { sendIntent?: ComposerSendIntent },
   ) => Promise<SendMessageResult>;
-  sendUserMessageToThread: (
-    workspace: WorkspaceInfo,
-    threadId: string,
-    text: string,
-    images?: string[],
-  ) => Promise<void | SendMessageResult>;
-  startFork: (text: string) => Promise<void>;
-  startResume: (text: string) => Promise<void>;
   startCompact: (text: string) => Promise<void>;
-  startFast: (text: string) => Promise<void>;
-  startStatus: (text: string) => Promise<void>;
+  startReload: (text: string) => Promise<void>;
   clearActiveImages: () => void;
 };
 
@@ -54,36 +40,6 @@ type UseQueuedSendResult = {
   removeQueuedMessage: (threadId: string, messageId: string) => void;
 };
 
-type SlashCommandKind =
-  | "compact"
-  | "fast"
-  | "fork"
-  | "new"
-  | "resume"
-  | "status";
-
-function parseSlashCommand(text: string): SlashCommandKind | null {
-  if (/^\/fork\b/i.test(text)) {
-    return "fork";
-  }
-  if (/^\/fast\b/i.test(text)) {
-    return "fast";
-  }
-  if (/^\/compact\b/i.test(text)) {
-    return "compact";
-  }
-  if (/^\/new\b/i.test(text)) {
-    return "new";
-  }
-  if (/^\/resume\b/i.test(text)) {
-    return "resume";
-  }
-  if (/^\/status\b/i.test(text)) {
-    return "status";
-  }
-  return null;
-}
-
 export function useQueuedSend({
   activeThreadId,
   activeTurnId,
@@ -91,15 +47,9 @@ export function useQueuedSend({
   queueFlushPaused = false,
   steerEnabled,
   followUpMessageBehavior,
-  activeWorkspace,
-  startThreadForWorkspace,
   sendUserMessage,
-  sendUserMessageToThread,
-  startFork,
-  startResume,
   startCompact,
-  startFast,
-  startStatus,
+  startReload,
   clearActiveImages,
 }: UseQueuedSendOptions): UseQueuedSendResult {
   const [queuedByThread, setQueuedByThread] = useState<
@@ -155,43 +105,18 @@ export function useQueuedSend({
 
   const runSlashCommand = useCallback(
     async (command: SlashCommandKind, trimmed: string) => {
-      if (command === "fork") {
-        await startFork(trimmed);
-        return;
-      }
-      if (command === "resume") {
-        await startResume(trimmed);
-        return;
-      }
       if (command === "compact") {
         await startCompact(trimmed);
         return;
       }
-      if (command === "fast") {
-        await startFast(trimmed);
+      if (command === "reload") {
+        await startReload(trimmed);
         return;
-      }
-      if (command === "status") {
-        await startStatus(trimmed);
-        return;
-      }
-      if (command === "new" && activeWorkspace) {
-        const threadId = await startThreadForWorkspace(activeWorkspace.id);
-        const rest = trimmed.replace(/^\/new\b/i, "").trim();
-        if (threadId && rest) {
-          await sendUserMessageToThread(activeWorkspace, threadId, rest, []);
-        }
       }
     },
     [
-      activeWorkspace,
-      sendUserMessageToThread,
-      startFork,
-      startResume,
       startCompact,
-      startFast,
-      startStatus,
-      startThreadForWorkspace,
+      startReload,
     ],
   );
 
@@ -226,9 +151,10 @@ export function useQueuedSend({
         clearActiveImages();
         return;
       }
+      // Consume this draft now: submit can await an entire provider turn.
+      clearActiveImages();
       if (command) {
         await runSlashCommand(command, trimmed);
-        clearActiveImages();
         return;
       }
       const sendResult = await sendUserMessage(trimmed, nextImages, {
@@ -241,7 +167,6 @@ export function useQueuedSend({
       ) {
         enqueueMessage(activeThreadId, createQueuedItem(trimmed, nextImages));
       }
-      clearActiveImages();
     },
     [
       activeThreadId,
@@ -357,14 +282,18 @@ export function useQueuedSend({
       try {
         const trimmed = nextItem.text.trim();
         const command = parseSlashCommand(trimmed);
-        if (command) {
-          await runSlashCommand(command, trimmed);
-        } else {
-          await sendUserMessage(nextItem.text, nextItem.images ?? []);
+        const result = command
+          ? (await runSlashCommand(command, trimmed), { status: "handled" })
+          : await sendUserMessage(nextItem.text, nextItem.images ?? []);
+        // Handled commands have no AgentStart/Settled cycle. A completed
+        // submission may also settle before React observes isProcessing=true.
+        if (result.status !== "sent") {
+          setInFlightByThread((prev) => prev[threadId]?.id === nextItem.id
+            ? { ...prev, [threadId]: null } : prev);
         }
       } catch {
-        setInFlightByThread((prev) => ({ ...prev, [threadId]: null }));
-        setHasStartedByThread((prev) => ({ ...prev, [threadId]: false }));
+        setInFlightByThread((prev) => prev[threadId]?.id === nextItem.id
+          ? { ...prev, [threadId]: null } : prev);
         prependQueuedMessage(threadId, nextItem);
       }
     })();

@@ -1,3 +1,4 @@
+import { commandsFromThread } from "@utils/desktopCommands";
 import { useCallback, useRef } from "react";
 import type { Dispatch, MutableRefObject } from "react";
 import i18n from "@/i18n";
@@ -123,6 +124,9 @@ export function useThreadTurnEvents({
       }
       if (shouldIgnoreOrphanSubagentThread(thread)) {
         return;
+      }
+      if (Array.isArray(thread.commands)) {
+        dispatch({ type: "setThreadCommands", threadId, commands: commandsFromThread(thread) });
       }
       const subagentSummaryPatch = getLiveThreadSubagentSummaryPatch(thread);
       dispatch({ type: "ensureThread", workspaceId, threadId });

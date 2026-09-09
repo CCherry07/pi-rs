@@ -18,6 +18,8 @@ export const SUPPORTED_PI_EVENT_METHODS = [
   "thread/closed",
   "thread/deleted",
   "thread/name/updated",
+  "thread/notice",
+  "thread/replaced",
   "thread/status/changed",
   "thread/started",
   "thread/tokenUsage/updated",

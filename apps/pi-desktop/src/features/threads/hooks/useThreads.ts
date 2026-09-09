@@ -1,3 +1,4 @@
+import { commandsFromThread } from "@utils/desktopCommands";
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import * as Sentry from "@sentry/react";
 import type {
@@ -8,6 +9,7 @@ import type {
   ThreadListSortKey,
   WorkspaceInfo,
 } from "@/types";
+import { buildItemsFromThread } from "@utils/threadItems";
 import { CHAT_SCROLLBACK_DEFAULT } from "@utils/chatScrollback";
 import { usePiEvents } from "@app/hooks/usePiEvents";
 import { initialState, threadReducer } from "./useThreadsReducer";
@@ -18,10 +20,12 @@ import { useThreadActions } from "./useThreadActions";
 import { useThreadMessaging } from "./useThreadMessaging";
 import { useThreadSelectors } from "./useThreadSelectors";
 import { useThreadStatus } from "./useThreadStatus";
+import { useWorkspaceDraft } from "./useWorkspaceDraft";
 import { useThreadTitleAutogeneration } from "./useThreadTitleAutogeneration";
 import {
   archiveThread as archiveThreadService,
   readThread as readThreadService,
+  reloadThread as reloadThreadService,
   setThreadName as setThreadNameService,
 } from "@services/tauri";
 import {
@@ -41,7 +45,6 @@ type UseThreadsOptions = {
   model?: string | null;
   effort?: string | null;
   serviceTier?: ServiceTier | null | undefined;
-  onSelectServiceTier?: (tier: ServiceTier | null | undefined) => void;
   steerEnabled?: boolean;
   threadTitleAutogenerationEnabled?: boolean;
   chatHistoryScrollbackItems?: number | null;
@@ -67,7 +70,6 @@ export function useThreads({
   model,
   effort,
   serviceTier,
-  onSelectServiceTier,
   steerEnabled = false,
   threadTitleAutogenerationEnabled = false,
   chatHistoryScrollbackItems,
@@ -127,8 +129,10 @@ export function useThreads({
     itemsByThread: state.itemsByThread,
     threadsByWorkspace: state.threadsByWorkspace,
   });
+  const { commands: draftCommands, reload: reloadWorkspaceDraft } =
+    useWorkspaceDraft(activeWorkspaceId, activeThreadId, onDebug);
 
-  const { markProcessing, setActiveTurnId } = useThreadStatus({
+  const { markProcessing, setActiveTurnId, getStatusRevision } = useThreadStatus({
     dispatch,
   });
 
@@ -153,6 +157,36 @@ export function useThreads({
       // Ignore refresh errors to avoid breaking the UI.
     }
   }, [onMessageActivity]);
+
+  const startReload = useCallback(async () => {
+    if (!activeWorkspaceId) {
+      return;
+    }
+    if (!activeThreadId) {
+      await reloadWorkspaceDraft();
+      return;
+    }
+    if (state.threadStatusById[activeThreadId]?.isProcessing) {
+      return;
+    }
+    try {
+      await reloadThreadService(activeWorkspaceId, activeThreadId);
+    } catch (error) {
+      pushThreadErrorMessage(
+        activeThreadId,
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      safeMessageActivity();
+    }
+  }, [
+    activeThreadId,
+    activeWorkspaceId,
+    pushThreadErrorMessage,
+    reloadWorkspaceDraft,
+    safeMessageActivity,
+    state.threadStatusById,
+  ]);
 
   const setThreadLoaded = useCallback((threadId: string, isLoaded: boolean) => {
     loadedThreadsRef.current[threadId] = isLoaded;
@@ -461,6 +495,31 @@ export function useThreads({
   const handlers = useMemo(
     () => ({
       ...threadHandlers,
+      onThreadNotice: (_workspaceId: string, threadId: string, message: string, level: string) => {
+        dispatch({ type: "addNotice", threadId, itemId: `notice-${crypto.randomUUID()}`, text: message, level });
+      },
+      onThreadReplaced: (workspaceId: string, previousThreadId: string, thread: Record<string, unknown>) => {
+        const threadId = String(thread.id);
+        markProcessing(previousThreadId, false);
+        setActiveTurnId(previousThreadId, null);
+        handleThreadStarted(workspaceId, thread);
+        loadedThreadsRef.current[threadId] = true;
+        const status = thread.status;
+        if (status && typeof status === "object" && !Array.isArray(status)) {
+          threadHandlers.onThreadStatusChanged(workspaceId, threadId, status as Record<string, unknown>);
+        }
+        dispatch({
+          type: "replaceThread", workspaceId, previousThreadId, threadId,
+          items: buildItemsFromThread(thread), commands: commandsFromThread(thread),
+          isProcessing: (status as { type?: string } | undefined)?.type === "active",
+          turnId: typeof thread.activeTurnId === "string" ? thread.activeTurnId : null,
+          timestamp: Date.now(),
+        });
+        onThreadRunMetadataDetected?.(workspaceId, threadId, {
+          modelId: thread.modelProvider && thread.model ? `${thread.modelProvider}/${thread.model}` : null,
+          effort: typeof thread.effort === "string" ? thread.effort : null,
+        });
+      },
       onThreadStarted: handleThreadStarted,
       onThreadArchived: handleThreadArchived,
       onThreadUnarchived: handleThreadUnarchived,
@@ -470,6 +529,9 @@ export function useThreads({
       handleThreadStarted,
       handleThreadArchived,
       handleThreadUnarchived,
+      markProcessing,
+      setActiveTurnId,
+      onThreadRunMetadataDetected,
     ],
   );
 
@@ -497,6 +559,7 @@ export function useThreads({
     threadSortKey,
     onDebug,
     getCustomName,
+    renameThread,
     threadActivityRef,
     loadedThreadsRef,
     replaceOnResumeRef,
@@ -544,18 +607,13 @@ export function useThreads({
     interruptTurn,
     sendUserMessage,
     sendUserMessageToThread,
-    startFork,
-    startResume,
     startCompact,
-    startFast,
-    startStatus,
   } = useThreadMessaging({
     activeWorkspace,
     activeThreadId,
     model,
     effort,
     serviceTier,
-    onSelectServiceTier,
     steerEnabled,
     customPrompts,
     threadStatusById: state.threadStatusById,
@@ -563,6 +621,7 @@ export function useThreads({
     pendingInterruptsRef,
     dispatch,
     getCustomName,
+    getStatusRevision,
     markProcessing,
     setActiveTurnId,
     recordThreadActivity,
@@ -570,10 +629,25 @@ export function useThreads({
     onDebug,
     pushThreadErrorMessage,
     ensureThreadForActiveWorkspace,
-    refreshThread,
-    forkThreadForWorkspace,
-    updateThreadParent,
   });
+
+  const forkMessage = useCallback(
+    async (entryId: string) => {
+      if (!activeWorkspaceId || !activeThreadId) {
+        return;
+      }
+      if (state.threadStatusById[activeThreadId]?.isProcessing) {
+        return;
+      }
+      await forkThreadForWorkspace(activeWorkspaceId, activeThreadId, entryId);
+    },
+    [
+      activeThreadId,
+      activeWorkspaceId,
+      forkThreadForWorkspace,
+      state.threadStatusById,
+    ],
+  );
 
   const hasLocalThreadSnapshot = useCallback(
     (threadId: string | null) => {
@@ -639,6 +713,7 @@ export function useThreads({
     setActiveThreadId,
     hasLocalThreadSnapshot,
     activeItems,
+    runtimeCommands: activeThreadId ? state.commandsByThread[activeThreadId] ?? [] : draftCommands,
     threadsByWorkspace: state.threadsByWorkspace,
     threadParentById: state.threadParentById,
     isSubagentThread,
@@ -670,10 +745,8 @@ export function useThreads({
     loadOlderThreadsForWorkspace,
     sendUserMessage,
     sendUserMessageToThread,
-    startFork,
-    startResume,
     startCompact,
-    startFast,
-    startStatus,
+    startReload,
+    forkMessage,
   };
 }

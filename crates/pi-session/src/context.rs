@@ -111,6 +111,10 @@ pub fn session_entry_to_context_messages(
                 .expect("built-in branch summary is a valid agent message"),
             ]
         }
+        SessionEntry::Custom(_) if crate::isolated_context::is_seed(&record.entry) => {
+            crate::isolated_context::read_seed(&record.entry)
+                .map_or_else(Vec::new, |seed| seed.messages)
+        }
         SessionEntry::Custom(custom) => options
             .entry_projectors
             .get(&custom.custom_type)
@@ -520,6 +524,60 @@ mod tests {
             timestamp_ms: 2,
         })
         .into()
+    }
+
+    #[test]
+    fn isolated_fork_excludes_the_whole_active_batch_even_after_a_sibling_result() {
+        let current = assistant_tool_call("child-b", "subagent");
+        let mut entries = vec![
+            record(
+                "user",
+                1,
+                None,
+                SessionEntry::message(user("current request")),
+            ),
+            record(
+                "batch",
+                2,
+                Some("user"),
+                SessionEntry::message(current.clone()),
+            ),
+        ];
+        let first = crate::isolated_context::fork_entries(&entries, current.as_standard()).to_vec();
+        entries.push(record(
+            "result",
+            3,
+            Some("batch"),
+            SessionEntry::message(Message::ToolResult(
+                ToolResultMessage {
+                    tool_call_id: ToolCallId::new("child-a"),
+                    tool_name: "subagent".into(),
+                    content: vec![ContentBlock::Text(TextContent::new("sibling finished"))],
+                    details: None,
+                    is_error: false,
+                    usage: None,
+                    added_tool_names: None,
+                    timestamp_ms: 3,
+                }
+                .into(),
+            )),
+        ));
+        let second = crate::isolated_context::fork_entries(&entries, current.as_standard());
+        assert_eq!(first, second);
+        assert_eq!(
+            build_session_context(second, &Default::default()).provider_messages(),
+            vec![Message::User(UserMessage::text("current request", 1))]
+        );
+        assert_eq!(
+            crate::isolated_context::fork_entries(&entries, None),
+            entries
+        );
+        // A message_end hook may run before the current assistant reaches the log.
+        let not_persisted = assistant_tool_call("next-batch", "subagent");
+        assert_eq!(
+            crate::isolated_context::fork_entries(&entries, not_persisted.as_standard()),
+            entries
+        );
     }
 
     #[test]

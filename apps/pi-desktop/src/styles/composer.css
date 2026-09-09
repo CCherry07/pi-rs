@@ -635,9 +635,6 @@
   white-space: normal;
   overflow-wrap: anywhere;
   word-break: break-word;
-}
-
-.composer-suggestion-description--skill {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -844,9 +841,30 @@
   justify-content: center;
   width: 16px;
   height: 16px;
+  padding: 0;
+  border: 0;
   border-radius: 999px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.composer-fast-indicator:hover:not(:disabled),
+.composer-fast-indicator:focus-visible {
+  color: var(--text-strong);
+  background: var(--surface-control-hover);
+}
+
+.composer-fast-indicator--active,
+.composer-fast-indicator--active:hover:not(:disabled),
+.composer-fast-indicator--active:focus-visible {
   color: var(--accent-warning-strong, #b45309);
   background: color-mix(in srgb, var(--accent-warning-strong, #b45309) 16%, transparent);
+}
+
+.composer-fast-indicator:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .composer-select {

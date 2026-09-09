@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use pi_core::{AgentEvent, ContentBlock, Message, StreamEvent, ToolResult};
-use pi_session::{AgentSessionEvent, RevisionedAgentSessionEvent};
+use pi_session::{AgentSessionEvent, RevisionedAgentSessionEvent, SessionEntry};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{broadcast, Mutex};
@@ -32,6 +32,7 @@ struct EventProjectionContext<'a> {
 struct ProjectionState {
     turn_id: Option<String>,
     message_id: Option<String>,
+    pending_message_items: HashMap<bool, VecDeque<String>>,
     reasoning_ids: HashMap<usize, String>,
     reasoning_text: HashMap<usize, String>,
     tool_names: HashMap<String, String>,
@@ -44,12 +45,13 @@ pub(crate) fn spawn_session_forwarder(
     app: AppHandle,
     workspace_id: String,
     thread_id: String,
+    key: String,
     live: LiveSession,
     store: SessionStore,
     forwarders: ForwarderRegistry,
 ) {
     tauri::async_runtime::spawn(async move {
-        forward_session_events(app, workspace_id, thread_id, live, store, forwarders).await;
+        forward_session_events(app, workspace_id, thread_id, key, live, store, forwarders).await;
     });
 }
 
@@ -57,15 +59,45 @@ async fn forward_session_events(
     app: AppHandle,
     workspace_id: String,
     thread_id: String,
+    key: String,
     mut live: LiveSession,
     store: SessionStore,
     forwarders: ForwarderRegistry,
 ) {
     let mut state = ProjectionState::default();
+    let mut thread_id = thread_id;
+    let mut changes = live.changes.take();
+    let mut refresh_after_run = live.subscription.snapshot.agent.is_running;
     loop {
-        match live.subscription.events.recv().await {
+        let event = tokio::select! {
+            biased;
+            changed = async {
+                match &mut changes {
+                    Some(receiver) => receiver.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_err() { break; }
+                let current = Arc::clone(&changes.as_mut().unwrap().borrow_and_update());
+                let previous_id = thread_id;
+                thread_id = current.log().header().id;
+                // The watch may coalesce replacements. Rehydrate the latest session
+                // at its new subscription boundary instead of replaying old streams.
+                live.replace(current);
+                refresh_after_run = live.subscription.snapshot.agent.is_running;
+                state = ProjectionState::default();
+                emit(&app, &workspace_id, "thread/replaced", json!({
+                    "previousThreadId": previous_id,
+                    "thread": super::thread_from_subscription(&live),
+                }));
+                continue;
+            }
+            event = live.subscription.events.recv() => event,
+        };
+        match event {
             Ok(event) if event.revision <= live.subscription.snapshot.revision => continue,
             Ok(event) => {
+                let settled = matches!(event.event, AgentSessionEvent::AgentSettled);
                 project_event(
                     EventProjectionContext {
                         app: &app,
@@ -78,28 +110,34 @@ async fn forward_session_events(
                     &mut state,
                     event,
                 )
-                .await
+                .await;
+                // A subscription installed mid-response can miss MessageStart.
+                // Once that run settles, recover its complete history from snapshot.
+                if settled && refresh_after_run {
+                    refresh_after_run = false;
+                    if let Some(session) = live.primary().cloned() {
+                        live.replace(session);
+                        refresh_after_run = live.subscription.snapshot.agent.is_running;
+                        state = ProjectionState::default();
+                        emit(
+                            &app,
+                            &workspace_id,
+                            "thread/replaced",
+                            json!({
+                                "previousThreadId": thread_id,
+                                "thread": super::thread_from_subscription(&live),
+                            }),
+                        );
+                    }
+                }
             }
             Err(broadcast::error::RecvError::Lagged(_)) => {
-                emit(
-                    &app,
-                    &workspace_id,
-                    "thread/status/changed",
-                    json!({
-                        "threadId": thread_id,
-                        "status": {
-                            "type": if live.snapshot().agent.is_running {
-                                "active"
-                            } else {
-                                "idle"
-                            }
-                        }
-                    }),
-                );
+                emit_snapshot_status(&app, &workspace_id, &thread_id, &live);
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
     }
+    forwarders.lock().await.remove(&key);
 }
 
 async fn project_event(
@@ -132,20 +170,28 @@ async fn project_event(
                 emit_status(app, workspace_id, thread_id, "active");
             }
             AgentEvent::MessageStart { message } => match message {
-                Message::User(message) => emit(
-                    app,
-                    workspace_id,
-                    "item/completed",
-                    json!({
-                        "threadId": thread_id,
-                        "turnId": state.turn_id,
-                        "item": {
-                            "id": format!("user-{}", message.timestamp_ms),
-                            "type": "userMessage",
-                            "content": user_item_content(&message.content)
-                        }
-                    }),
-                ),
+                Message::User(message) => {
+                    let item_id = format!("user-{}", message.timestamp_ms);
+                    state
+                        .pending_message_items
+                        .entry(true)
+                        .or_default()
+                        .push_back(item_id.clone());
+                    emit(
+                        app,
+                        workspace_id,
+                        "item/completed",
+                        json!({
+                            "threadId": thread_id,
+                            "turnId": state.turn_id,
+                            "item": {
+                                "id": item_id,
+                                "type": "userMessage",
+                                "content": user_item_content(&message.content)
+                            }
+                        }),
+                    );
+                }
                 Message::Assistant(_) => {
                     let id = format!("message-{}", uuid::Uuid::new_v4());
                     state.message_id = Some(id);
@@ -247,6 +293,11 @@ async fn project_event(
                     if let Some(item_id) =
                         state.message_id.take().filter(|_| !text.trim().is_empty())
                     {
+                        state
+                            .pending_message_items
+                            .entry(false)
+                            .or_default()
+                            .push_back(item_id.clone());
                         emit(
                             app,
                             workspace_id,
@@ -441,6 +492,58 @@ async fn project_event(
             }
             emit_status(app, workspace_id, thread_id, "idle");
         }
+        AgentSessionEvent::EntryAppended { entry } => {
+            let SessionEntry::Message(message_entry) = &entry.entry else {
+                return;
+            };
+            let Some(message) = message_entry.message.as_standard() else {
+                return;
+            };
+            let Some((is_user, _)) = super::message_key(message) else {
+                return;
+            };
+            let Some(item_id) = state
+                .pending_message_items
+                .get_mut(&is_user)
+                .and_then(VecDeque::pop_front)
+            else {
+                return;
+            };
+            let item = match message {
+                Message::User(message) => json!({
+                    "id": item_id,
+                    "type": "userMessage",
+                    "entryId": entry.id,
+                    "content": user_item_content(&message.content)
+                }),
+                Message::Assistant(message) => json!({
+                    "id": item_id,
+                    "type": "agentMessage",
+                    "entryId": entry.id,
+                    "text": message.content.iter().filter_map(|block| match block {
+                        ContentBlock::Text(text) => Some(text.text.as_str()),
+                        _ => None,
+                    }).collect::<Vec<_>>().join("")
+                }),
+                _ => return,
+            };
+            emit(
+                app,
+                workspace_id,
+                "item/completed",
+                json!({
+                    "threadId": thread_id,
+                    "turnId": state.turn_id,
+                    "item": item
+                }),
+            );
+        }
+        AgentSessionEvent::PluginNotice { message, level } => emit(
+            app,
+            workspace_id,
+            "thread/notice",
+            notice_params(thread_id, &message, level),
+        ),
         AgentSessionEvent::SessionInfoChanged { name } => emit(
             app,
             workspace_id,
@@ -546,6 +649,7 @@ async fn project_subagent(
         spawn_session_forwarder(
             app.clone(),
             workspace_id.to_string(),
+            child_thread_id.clone(),
             child_thread_id,
             live,
             store.clone(),
@@ -642,6 +746,23 @@ fn user_item_content(content: &[ContentBlock]) -> Vec<Value> {
         .collect()
 }
 
+fn notice_params(thread_id: &str, message: &str, level: pi_core::NoticeLevel) -> Value {
+    json!({ "threadId": thread_id, "message": message, "level": level })
+}
+
+fn emit_snapshot_status(app: &AppHandle, workspace_id: &str, thread_id: &str, live: &LiveSession) {
+    emit_status(
+        app,
+        workspace_id,
+        thread_id,
+        if live.snapshot().agent.is_running {
+            "active"
+        } else {
+            "idle"
+        },
+    );
+}
+
 fn emit_status(app: &AppHandle, workspace_id: &str, thread_id: &str, status: &str) {
     emit(
         app,
@@ -664,6 +785,19 @@ fn emit(app: &AppHandle, workspace_id: &str, method: &str, params: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_notice_projection_preserves_severity_and_text_without_a_fake_turn() {
+        let params = notice_params(
+            "thread",
+            "Native command output",
+            pi_core::NoticeLevel::Warning,
+        );
+        assert_eq!(params["threadId"], "thread");
+        assert_eq!(params["level"], "warning");
+        assert_eq!(params["message"], "Native command output");
+        assert!(params.get("turnId").is_none());
+    }
 
     #[test]
     fn subagent_tool_items_expose_child_identity_and_live_status() {

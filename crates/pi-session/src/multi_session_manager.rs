@@ -192,9 +192,10 @@ impl MultiSessionManager {
 
     pub async fn shutdown(&self) -> Result<(), MultiSessionManagerError> {
         let _operation = self.inner.operation_gate.lock().await;
-        if self.inner.closed.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
+        // Drain on repeated calls too: a previously cancelled shutdown future
+        // must leave the registry's task ownership available for the next caller.
+        self.inner.closed.store(true, Ordering::Release);
+        self.inner.isolated_sessions.drain_all().await;
         let sessions = self
             .inner
             .sessions
@@ -223,7 +224,7 @@ impl MultiSessionManager {
         let _operation = self.inner.operation_gate.lock().await;
         self.inner.ensure_open()?;
         self.inner
-            .acquire_locked(target, existing, generation_overlay, None)
+            .acquire_locked(target, existing, generation_overlay, None, None)
             .await
     }
 }
@@ -235,6 +236,7 @@ impl MultiSessionManagerInner {
         existing: ExistingSessionPolicy,
         generation_overlay: SessionGenerationOverlay,
         initial_state: Option<AgentSessionInitialState>,
+        initial_context: Option<crate::isolated_context::IsolatedContextSeed>,
     ) -> Result<PiSession, MultiSessionManagerError> {
         let path = comparable_path(target.path());
         if let Some(active) = self.session_at_path(&path) {
@@ -250,6 +252,7 @@ impl MultiSessionManagerInner {
             target,
             generation_overlay,
             initial_state,
+            initial_context,
         )
         .await?;
         let registration_id: Arc<str> = Arc::from(uuid::Uuid::now_v7().to_string());
@@ -283,13 +286,11 @@ impl MultiSessionManagerInner {
         while let Some(session) = pending.pop() {
             let children = self
                 .isolated_sessions
-                .remove_owned(session.registration_id());
-            for child in &children {
-                child.abort();
-            }
+                .owned_sessions(session.registration_id());
             pending.extend(children);
             sessions.push(session);
         }
+        self.isolated_sessions.drain_sessions(&sessions).await;
         for session in &sessions {
             self.isolated_sessions
                 .remove_session(session.registration_id());
@@ -298,10 +299,15 @@ impl MultiSessionManagerInner {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(session.registration_id());
         }
+        let mut first_error = None;
         for session in sessions.into_iter().rev() {
-            session.runtime.shutdown().await?;
+            if let Err(error) = session.runtime.shutdown().await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), |error| Err(error.into()))
     }
 }
 
@@ -354,7 +360,21 @@ impl PiSession {
         {
             return Err(MultiSessionManagerError::UnknownSession);
         }
-        let initial_state = resolve_isolated_initial_state(&self.current(), request.options)?;
+        let parent = self.current();
+        let initial_context = match request.options.context {
+            pi_core::IsolatedContextMode::Fresh => None,
+            pi_core::IsolatedContextMode::Fork => {
+                if !parent.log().is_materialized() {
+                    return Err(MultiSessionManagerError::InvalidIsolatedRequest(
+                        "cannot fork an unsaved session; wait for the first assistant response or use fresh context".to_string(),
+                    ));
+                }
+                Some(parent.isolated_context_seed().map_err(|error| {
+                    MultiSessionManagerError::InvalidIsolatedRequest(error.to_string())
+                })?)
+            }
+        };
+        let initial_state = resolve_isolated_initial_state(&parent, request.options)?;
         let path = isolated_session_path(&self.path());
         let child = manager
             .acquire_locked(
@@ -363,6 +383,7 @@ impl PiSession {
                 SessionGenerationOverlay::default()
                     .with_execution_origin(pi_core::SessionExecutionOrigin::Subagent),
                 Some(initial_state),
+                initial_context,
             )
             .await?;
         Ok(manager
@@ -375,12 +396,25 @@ impl PiSession {
         &self,
         id: &IsolatedSessionId,
     ) -> Result<IsolatedSessionOutcome, PluginContextError> {
-        self.manager()
+        self.isolated_session_waiter(id)?.await
+    }
+
+    pub(crate) fn isolated_session_waiter(
+        &self,
+        id: &IsolatedSessionId,
+    ) -> Result<
+        impl Future<Output = Result<IsolatedSessionOutcome, PluginContextError>>
+        + Send
+        + 'static
+        + use<>,
+        PluginContextError,
+    > {
+        let waiting = self
+            .manager()
             .map_err(|error| PluginContextError::Failed(error.to_string()))?
             .isolated_sessions
-            .wait(self.registration_id(), id)
-            .await
-            .map_err(PluginContextError::Failed)
+            .wait(self.registration_id(), id);
+        Ok(async move { waiting.await.map_err(PluginContextError::Failed) })
     }
 
     pub fn abort_isolated_session(&self, id: &IsolatedSessionId) -> Result<(), PluginContextError> {
@@ -906,6 +940,7 @@ mod tests {
                         active_tools: Some(Vec::new()),
                         model: Some(ModelSelection::new("scripted", "child-model")),
                         thinking_level: Some(pi_core::ThinkingLevel::High),
+                        ..IsolatedSessionOptions::default()
                     }),
             )
             .await
@@ -938,6 +973,106 @@ mod tests {
 
         owner.abort_isolated_session(&isolated_id).unwrap();
         owner.wait_for_isolated_session(&isolated_id).await.unwrap();
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_context_rejects_an_unsaved_parent_before_creating_a_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = test_manager();
+        let owner = manager
+            .create_session(directory.path(), directory.path().join("unsaved.jsonl"))
+            .await
+            .unwrap();
+        let error = owner
+            .launch_isolated_session(
+                IsolatedSessionRequest::new(CustomMessageContent::Text("child task".into()))
+                    .options(IsolatedSessionOptions {
+                        context: pi_core::IsolatedContextMode::Fork,
+                        ..Default::default()
+                    }),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot fork an unsaved session"));
+        assert_eq!(manager.sessions().len(), 1);
+        assert!(!owner.path().exists());
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn forked_context_survives_reload_without_importing_configuration_or_usage() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = test_manager_with_turns([ScriptedTurn::Text("answer".into())]);
+        let owner = manager
+            .create_session(directory.path(), directory.path().join("parent.jsonl"))
+            .await
+            .unwrap();
+        owner.current().prompt("parent history").await.unwrap();
+        let extension = crate::AgentMessage::custom(serde_json::json!({
+            "role": "user", "content": [{"type": "text", "text": "retained user"},
+                {"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"}],
+            "timestamp": 2, "futureExtension": {"preserve": true}
+        }))
+        .unwrap();
+        owner
+            .current()
+            .log()
+            .append_session_record(crate::SessionEntry::Compaction(crate::CompactionEntry {
+                summary: "parent compacted summary".into(),
+                retained_tail: vec![extension.clone()],
+                tokens_before: 10000,
+                details: None,
+                usage: None,
+            }))
+            .unwrap();
+        let before = owner.current().log().load().unwrap();
+        let expected = before.context().unwrap().messages;
+        let id = owner
+            .launch_isolated_session(
+                IsolatedSessionRequest::new(CustomMessageContent::Text("child task".into()))
+                    .options(IsolatedSessionOptions {
+                        context: pi_core::IsolatedContextMode::Fork,
+                        active_tools: Some(Vec::new()),
+                        ..Default::default()
+                    }),
+            )
+            .await
+            .unwrap();
+        let outcome = owner.wait_for_isolated_session(&id).await.unwrap();
+        assert_eq!(outcome.messages.len(), 2);
+        let child = manager
+            .sessions()
+            .into_iter()
+            .find(|session| session.registration_id() == id.as_str())
+            .unwrap();
+        let document = child.current().log().load().unwrap();
+        assert_eq!(
+            serde_json::to_value(&document.context().unwrap().messages[..expected.len()]).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(document.messages().len(), 2);
+        let seed_entry = document.entries.iter().find(|record| matches!(&record.entry, crate::SessionEntry::Custom(custom) if custom.custom_type == crate::isolated_context::CUSTOM_TYPE)).unwrap();
+        assert!(crate::session_entry_usage(&seed_entry.entry).is_none());
+        let child_history = child.current().runtime().agent().state().messages;
+        child.reload().await.unwrap();
+        assert_eq!(
+            child.current().runtime().agent().state().messages,
+            child_history
+        );
+        assert!(
+            child
+                .current()
+                .runtime()
+                .agent()
+                .state()
+                .active_tools
+                .is_empty()
+        );
+        assert_eq!(
+            owner.current().log().load().unwrap().entries,
+            before.entries
+        );
         manager.shutdown().await.unwrap();
     }
 

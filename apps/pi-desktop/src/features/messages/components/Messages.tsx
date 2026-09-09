@@ -36,6 +36,7 @@ type MessagesProps = {
   onPlanSubmitChanges?: (changes: string) => void;
   onOpenThreadLink?: (threadId: string, workspaceId?: string | null) => void;
   onQuoteMessage?: (text: string) => void;
+  onForkMessage?: (entryId: string) => void;
 };
 
 export const Messages = memo(function Messages({
@@ -57,6 +58,7 @@ export const Messages = memo(function Messages({
   onPlanSubmitChanges,
   onOpenThreadLink,
   onQuoteMessage,
+  onForkMessage,
 }: MessagesProps) {
   const { t } = useTranslation("messages");
   const { openFileLink, showFileLinkMenu } = useFileLinkOpener(
@@ -126,6 +128,15 @@ export const Messages = memo(function Messages({
           isCopied={isCopied}
           onCopy={handleCopyMessage}
           onQuote={onQuoteMessage ? handleQuoteMessage : undefined}
+          onFork={
+            onForkMessage && item.entryId
+              ? (message) => {
+                  if (message.entryId) {
+                    onForkMessage(message.entryId);
+                  }
+                }
+              : undefined
+          }
           codeBlockCopyUseModifier={codeBlockCopyUseModifier}
           showMessageFilePath={showMessageFilePath}
           workspacePath={workspacePath}

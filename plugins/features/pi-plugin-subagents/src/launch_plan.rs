@@ -38,6 +38,7 @@ impl SubagentLaunchPlan {
                 active_tools: Some(active_tools),
                 model,
                 thinking_level: profile.thinking_level,
+                context: profile.default_context,
             },
         })
     }
@@ -107,6 +108,29 @@ fn resolve_tool_names(
             )));
         }
         selected.push("read".to_string());
+    }
+    // Coordination remains within the parent's capability ceiling. Explicit
+    // exclusions and tools: [] disable the child bridge as well.
+    let parent_can_supervise = ["subagent_supervisor", "bg_wait"]
+        .iter()
+        .all(|tool| ceiling.contains(*tool));
+    if selected.iter().any(|name| name == "contact_supervisor") && !parent_can_supervise {
+        return Err(ToolError::Execution("contact_supervisor requires subagent_supervisor and bg_wait in the parent capability ceiling.".into()));
+    }
+    if !selected.is_empty() && profile.tools.as_ref().is_none_or(|tools| !tools.is_empty()) {
+        for tool in ["contact_supervisor", "subagent_supervisor", "bg_wait"] {
+            if (tool == "contact_supervisor" || profile.allow_nested_subagents)
+                && (tool != "contact_supervisor" || parent_can_supervise)
+                && ceiling.contains(tool)
+                && !excluded.contains(tool)
+                && !selected.iter().any(|name| name == tool)
+            {
+                selected.push(tool.to_string());
+            }
+        }
+    }
+    if !profile.allow_nested_subagents {
+        selected.retain(|name| name != "subagent_supervisor" && name != "bg_wait");
     }
     Ok(selected)
 }
@@ -259,6 +283,8 @@ mod tests {
     #[test]
     fn excluded_tools_narrow_inherited_and_explicit_tool_sets() {
         let mut inherited = builtin_profile("scout");
+        inherited.tools = None;
+        inherited.allow_nested_subagents = true;
         inherited.excluded_tools = vec!["bash".into(), "missing".into()];
         assert_eq!(
             resolve_tool_names(

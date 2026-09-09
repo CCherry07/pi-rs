@@ -24,12 +24,13 @@ pub(crate) struct SubagentTool {
 struct SubagentInput {
     agent: String,
     task: String,
+    context: Option<pi_core::IsolatedContextMode>,
 }
 
 struct RunGuard {
     runtime: SubagentRuntime,
     run_id: String,
-    launched: bool,
+    transferred: bool,
 }
 
 impl RunGuard {
@@ -37,21 +38,29 @@ impl RunGuard {
         Self {
             runtime,
             run_id: ticket.run_id().to_string(),
-            launched: false,
+            transferred: false,
         }
     }
 
     fn mark_launched(&mut self) {
-        self.launched = true;
+        self.transferred = true;
     }
 }
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
-        if self.launched {
-            self.runtime.finish(&self.run_id);
-        } else {
+        if !self.transferred {
+            self.runtime.coordination().remove(&self.run_id);
             self.runtime.cancel_unlaunched(&self.run_id);
+        }
+    }
+}
+
+struct ForegroundGuard(Option<pi_core::AbortHandle>);
+impl Drop for ForegroundGuard {
+    fn drop(&mut self) {
+        if let Some(abort) = &self.0 {
+            abort.abort();
         }
     }
 }
@@ -76,7 +85,7 @@ impl Tool for SubagentTool {
         ToolSpec {
             name: "subagent".to_string(),
             label: "Delegate task".to_string(),
-            description: "Delegate one focused task to an isolated child Pi session and return its final response. Multiple independent calls in one assistant turn can run in parallel.".to_string(),
+            description: "Delegate to configured subagents.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -84,6 +93,11 @@ impl Tool for SubagentTool {
                         "type": "string",
                         "enum": self.catalog.profile_names(),
                         "description": "Focused child role"
+                    },
+                    "context": {
+                        "type": "string",
+                        "enum": ["fresh", "fork"],
+                        "description": "History initialization. Omit to use the role default; fork copies the parent context before this tool batch."
                     },
                     "task": {
                         "type": "string",
@@ -95,20 +109,8 @@ impl Tool for SubagentTool {
                 "additionalProperties": false
             }),
             execution_mode: ToolExecutionMode::Parallel,
-            prompt_snippet: Some(format!(
-                "Delegate focused work to an isolated child session. Available roles:\n{}",
-                self.catalog.formatted_catalog()
-            )),
-            prompt_guidelines: vec![
-                "Give the child a self-contained task with the relevant goal, constraints, and paths."
-                    .to_string(),
-                "Use separate subagent calls for independent work; calls emitted together execute in parallel."
-                    .to_string(),
-                "Keep one `worker` as the writer for overlapping files; parallelize `scout`, `reviewer`, and `oracle` work instead."
-                    .to_string(),
-                "Children may delegate recursively, but the feature runtime enforces depth, cumulative spawn, and active-run limits."
-                    .to_string(),
-            ],
+            prompt_snippet: None,
+            prompt_guidelines: Vec::new(),
         }
     }
 
@@ -132,9 +134,11 @@ impl Tool for SubagentTool {
         let launch_plan = SubagentLaunchPlan::resolve(&profile, &context)?;
         let profile_name = profile.name.clone();
         let timeout = profile.timeout;
-        let timeout_ms =
-            timeout.map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX));
         let parent_session_id = context.session.id()?;
+        self.runtime.coordination().bind_session(
+            parent_session_id.clone(),
+            context.session.handle_for_adapter(),
+        );
         let ticket = self
             .runtime
             .begin_launch_with_max_depth(&parent_session_id, profile, self.max_depth)
@@ -142,15 +146,28 @@ impl Tool for SubagentTool {
         let mut guard = RunGuard::reserved(self.runtime.clone(), &ticket);
         let run_id = ticket.run_id().to_string();
         let depth = ticket.depth();
+        let mut options = launch_plan.into_options();
+        if let Some(mode) = input.context {
+            options.context = mode;
+        }
+        let context_mode = options.context;
+        let (abort, signal) = pi_core::AbortHandle::new();
+        self.runtime.coordination().reserve(&run_id, crate::coordination::ManagedRun {
+            owner: parent_session_id.clone(),
+            details: json!({"runId":run_id,"agent":profile_name,"depth":depth,"context":context_mode,"state":"running"}),
+            abort: abort.clone(), result: None, detached: false,
+        });
         let request = IsolatedSessionRequest::new(CustomMessageContent::Text(
             ticket.child_prompt(&input.task),
         ))
-        .options(launch_plan.into_options());
+        .options(options);
         let handle = match context.session.launch_isolated_session(request).await {
             Ok(handle) => handle,
             Err(error) => return Err(error.into()),
         };
-        guard.mark_launched();
+        self.runtime
+            .coordination()
+            .launched(&run_id, handle.id().as_str());
         updates.send(ToolUpdate {
             content: vec![ContentBlock::Text(TextContent::new(format!(
                 "{} subagent running",
@@ -161,70 +178,64 @@ impl Tool for SubagentTool {
                 "isolatedSessionId": handle.id().as_str(),
                 "agent": profile_name,
                 "depth": depth,
+                "context": context_mode,
                 "state": "running"
             })),
         });
 
-        let deadline = async {
-            match timeout {
-                Some(timeout) => tokio::time::sleep(timeout).await,
-                None => std::future::pending::<()>().await,
+        let mut changed = self.runtime.coordination().subscribe();
+        let (started, readiness) = tokio::sync::oneshot::channel();
+        // Cancellation remains armed while the monitor acquires its live wait.
+        let mut foreground = ForegroundGuard(Some(abort));
+        self.runtime.spawn_monitor(
+            parent_session_id.clone(),
+            run_id.clone(),
+            crate::child_run::ChildRun {
+                runtime: self.runtime.downgrade(),
+                run_id: run_id.clone(),
+                owner: parent_session_id.clone(),
+                handle,
+                signal,
+                timeout,
             }
-        };
-        tokio::pin!(deadline);
-        let outcome = tokio::select! {
-            outcome = handle.wait() => outcome?,
-            () = context.signal().wait() => {
-                let _ = handle.abort();
-                let _ = handle.wait().await;
-                return Err(ToolError::Aborted);
+            .monitor(started),
+        );
+        guard.mark_launched();
+        tokio::select! {
+            () = context.signal().wait() => return Err(ToolError::Aborted),
+            _ = readiness => {}
+        }
+        loop {
+            let run = self
+                .runtime
+                .coordination()
+                .run(&parent_session_id, &run_id)
+                .map_err(ToolError::Execution)?;
+            if let Some(result) = run.result {
+                foreground.0.take();
+                return result.map_err(ToolError::Execution);
             }
-            () = &mut deadline => {
-                let _ = handle.abort();
-                let warnings = self.runtime.warnings(&run_id);
-                let mut result = ToolResult::error(with_warnings(
-                    format!(
-                        "{} subagent timed out after {} ms",
-                        profile_name,
-                        timeout_ms.expect("deadline exists only for configured timeouts")
-                    ),
-                    &warnings,
-                ));
-                result.details = Some(json!({
-                    "runId": run_id,
-                    "isolatedSessionId": handle.id().as_str(),
-                    "agent": profile_name,
-                    "depth": depth,
-                    "state": "timed_out",
-                    "timeoutMs": timeout_ms.expect("deadline exists only for configured timeouts"),
-                    "warnings": warnings,
-                }));
+            // All foreground waits owned by this session must yield together:
+            // a parallel sibling otherwise prevents the parent's next turn.
+            if !self
+                .runtime
+                .coordination()
+                .pending(&parent_session_id)
+                .is_empty()
+            {
+                let result = self
+                    .runtime
+                    .coordination()
+                    .detach(&parent_session_id, &run_id)
+                    .map_err(ToolError::Execution)?;
+                foreground.0.take();
                 return Ok(result);
             }
-        };
-        let warnings = self.runtime.warnings(&run_id);
-        let text = with_warnings(final_text(&outcome.messages), &warnings);
-        let details = json!({
-            "runId": run_id,
-            "isolatedSessionId": handle.id().as_str(),
-            "sessionId": outcome.session_id,
-            "agent": profile_name,
-            "depth": depth,
-            "state": if outcome.aborted { "aborted" } else { "completed" },
-            "aborted": outcome.aborted,
-            "warnings": warnings,
-        });
-        if outcome.aborted {
-            let mut result = ToolResult::error(format!(
-                "{} subagent was aborted before it completed",
-                profile_name
-            ));
-            result.details = Some(details);
-            return Ok(result);
+            tokio::select! {
+                () = context.signal().wait() => return Err(ToolError::Aborted),
+                _ = changed.changed() => {}
+            }
         }
-        let mut result = ToolResult::text(text);
-        result.details = Some(details);
-        Ok(result)
     }
 }
 
@@ -253,10 +264,11 @@ fn parse_input(input: Value, catalog: &SubagentCatalog) -> Result<SubagentInput,
     Ok(SubagentInput {
         agent: agent.to_string(),
         task: task.to_string(),
+        context: parsed.context,
     })
 }
 
-fn final_text(messages: &[Message]) -> String {
+pub(crate) fn final_text(messages: &[Message]) -> String {
     messages
         .iter()
         .rev()
@@ -279,7 +291,7 @@ fn final_text(messages: &[Message]) -> String {
         .unwrap_or_else(|| "Subagent completed without a textual response.".to_string())
 }
 
-fn with_warnings(mut text: String, warnings: &[String]) -> String {
+pub(crate) fn with_warnings(mut text: String, warnings: &[String]) -> String {
     if warnings.is_empty() {
         return text;
     }
@@ -320,6 +332,20 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.agent, "reviewer");
         assert_eq!(parsed.task, "inspect");
+        assert_eq!(parsed.context, None);
+        let fork = parse_input(
+            json!({"agent": "worker", "task": "inspect", "context": "fork"}),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(fork.context, Some(pi_core::IsolatedContextMode::Fork));
+        assert!(
+            parse_input(
+                json!({"agent": "worker", "task": "inspect", "context": "invalid"}),
+                &catalog
+            )
+            .is_err()
+        );
         assert!(parse_input(json!({"agent": "unknown", "task": "inspect"}), &catalog).is_err());
         assert!(
             parse_input(
@@ -363,6 +389,7 @@ mod tests {
     struct FakeAccess {
         requests: Mutex<Vec<IsolatedSessionRequest>>,
         outcome: IsolatedSessionOutcome,
+        panic_on_wait: bool,
     }
 
     #[async_trait]
@@ -372,7 +399,9 @@ mod tests {
         }
 
         fn active_tools(&self) -> PluginContextResult<Vec<String>> {
-            Ok(["read", "grep", "subagent"].map(str::to_string).to_vec())
+            Ok(["read", "grep", "find", "ls", "subagent"]
+                .map(str::to_string)
+                .to_vec())
         }
 
         async fn launch_isolated_session(
@@ -389,6 +418,7 @@ mod tests {
             _scope: PluginContextScope,
             _id: IsolatedSessionId,
         ) -> PluginContextResult<IsolatedSessionOutcome> {
+            assert!(!self.panic_on_wait, "injected child wait panic");
             Ok(self.outcome.clone())
         }
     }
@@ -505,6 +535,7 @@ mod tests {
         let access = Arc::new(FakeAccess {
             requests: Mutex::new(Vec::new()),
             outcome,
+            panic_on_wait: false,
         });
         let plugin_access: Arc<dyn PluginContext> = access.clone();
         let epoch = PluginContextEpoch::new(plugin_access);
@@ -540,12 +571,14 @@ mod tests {
         let CustomMessageContent::Text(prompt) = &requests[0].input else {
             panic!("expected text child prompt");
         };
-        assert!(run_marker(prompt).is_some());
-        assert!(prompt.contains("`reviewer` delegated subagent"));
-        assert!(prompt.contains("Review the parser"));
+        let run_id = run_marker(prompt).expect("child prompt must retain runtime metadata");
+        assert_eq!(
+            prompt.as_str(),
+            format!("<!-- pi-rs-subagent-run:{run_id} -->\nReview the parser")
+        );
         assert_eq!(
             requests[0].options.active_tools,
-            Some(["read", "grep", "subagent"].map(str::to_string).to_vec())
+            Some(["read", "grep", "find", "ls"].map(str::to_string).to_vec())
         );
     }
 
@@ -558,6 +591,7 @@ mod tests {
                 messages: Vec::new(),
                 aborted: false,
             },
+            panic_on_wait: false,
         });
         let plugin_access: Arc<dyn PluginContext> = access.clone();
         let epoch = PluginContextEpoch::new(plugin_access);
@@ -601,6 +635,7 @@ mod tests {
                 messages: Vec::new(),
                 aborted: false,
             },
+            panic_on_wait: false,
         });
         let plugin_access: Arc<dyn PluginContext> = access.clone();
         let epoch = PluginContextEpoch::new(plugin_access);
@@ -682,6 +717,176 @@ mod tests {
         assert_eq!(result.details.as_ref().unwrap()["state"], "timed_out");
         assert_eq!(result.details.as_ref().unwrap()["timeoutMs"], 5);
         assert!(access.aborted.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn panicking_child_wait_returns_a_terminal_failure_and_releases_capacity() {
+        let access = Arc::new(FakeAccess {
+            requests: Mutex::new(Vec::new()),
+            outcome: IsolatedSessionOutcome {
+                session_id: "unused".into(),
+                messages: Vec::new(),
+                aborted: false,
+            },
+            panic_on_wait: true,
+        });
+        let epoch = PluginContextEpoch::new(access);
+        let runtime = SubagentRuntime::default();
+        let tool = SubagentTool::new(runtime.clone(), SubagentCatalog::builtins(), 1);
+        // More sequential failures than the active-run limit must still launch.
+        for _ in 0..21 {
+            let (_, signal) = AbortHandle::new();
+            let context = ToolContext::with_plugin_context(".".into(), signal, epoch.context());
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                tool.execute(
+                    context,
+                    ToolCallId::new("panic"),
+                    json!({"agent":"reviewer","task":"Inspect"}),
+                    ToolUpdateSink::channel().0,
+                ),
+            )
+            .await
+            .expect("monitor panic must wake the foreground waiter")
+            .unwrap_err();
+            assert!(error.to_string().contains("panicked"), "{error}");
+        }
+        assert!(
+            runtime
+                .coordination()
+                .run_ids("root-session", None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_an_unpolled_monitor_publishes_failure_and_wakes_waiters() {
+        let access = Arc::new(FakeAccess {
+            requests: Mutex::new(Vec::new()),
+            outcome: IsolatedSessionOutcome {
+                session_id: "unused".into(),
+                messages: vec![],
+                aborted: false,
+            },
+            panic_on_wait: false,
+        });
+        let epoch = PluginContextEpoch::new(access);
+        let runtime = SubagentRuntime::default();
+        let ticket = runtime
+            .begin_launch("root-session", crate::profiles::builtin_profile("reviewer"))
+            .unwrap();
+        let (abort, signal) = AbortHandle::new();
+        let context = ToolContext::with_plugin_context(".".into(), signal.clone(), epoch.context());
+        let handle = context
+            .session
+            .launch_isolated_session(IsolatedSessionRequest::new(CustomMessageContent::Text(
+                "Inspect".into(),
+            )))
+            .await
+            .unwrap();
+        runtime.coordination().reserve(
+            ticket.run_id(),
+            crate::coordination::ManagedRun {
+                owner: "root-session".into(),
+                details: json!({}),
+                abort,
+                result: None,
+                detached: false,
+            },
+        );
+        let (started, _) = tokio::sync::oneshot::channel();
+        let monitor = crate::child_run::ChildRun {
+            runtime: runtime.downgrade(),
+            run_id: ticket.run_id().into(),
+            owner: "root-session".into(),
+            handle,
+            signal,
+            timeout: None,
+        }
+        .monitor(started);
+        let mut changed = runtime.coordination().subscribe();
+        drop(monitor);
+        tokio::time::timeout(std::time::Duration::from_secs(1), changed.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let error = runtime
+            .coordination()
+            .run("root-session", ticket.run_id())
+            .unwrap()
+            .result
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("cancelled"));
+        assert!(
+            runtime
+                .coordination()
+                .run_ids("root-session", None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_runtime_cancels_monitor_without_a_task_owner_cycle() {
+        let access = Arc::new(TimeoutAccess {
+            requests: Mutex::new(Vec::new()),
+            aborted: AtomicBool::new(false),
+            wake: Notify::new(),
+        });
+        let epoch = PluginContextEpoch::new(access.clone());
+        let runtime = SubagentRuntime::default();
+        let weak = runtime.downgrade();
+        let ticket = runtime
+            .begin_launch("root-session", crate::profiles::builtin_profile("reviewer"))
+            .unwrap();
+        let (abort, signal) = AbortHandle::new();
+        let context = ToolContext::with_plugin_context(".".into(), signal.clone(), epoch.context());
+        let handle = context
+            .session
+            .launch_isolated_session(IsolatedSessionRequest::new(CustomMessageContent::Text(
+                "Wait".into(),
+            )))
+            .await
+            .unwrap();
+        runtime.coordination().reserve(
+            ticket.run_id(),
+            crate::coordination::ManagedRun {
+                owner: "root-session".into(),
+                details: json!({}),
+                abort,
+                result: None,
+                detached: false,
+            },
+        );
+        let (started, ready) = tokio::sync::oneshot::channel();
+        runtime.spawn_monitor(
+            "root-session".into(),
+            ticket.run_id().into(),
+            crate::child_run::ChildRun {
+                runtime: runtime.downgrade(),
+                run_id: ticket.run_id().into(),
+                owner: "root-session".into(),
+                handle,
+                signal,
+                timeout: None,
+            }
+            .monitor(started),
+        );
+        ready.await.unwrap();
+        drop(runtime);
+        assert!(
+            weak.upgrade().is_none(),
+            "monitor must not keep its own runtime alive"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !access.aborted.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     fn reasoning_model(id: &str) -> ModelSpec {

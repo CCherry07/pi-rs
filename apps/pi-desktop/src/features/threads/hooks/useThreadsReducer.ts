@@ -1,3 +1,4 @@
+import type { RuntimeCommand } from "@utils/desktopCommands";
 import type {
   ConversationItem,
   ThreadListSortKey,
@@ -21,6 +22,7 @@ type ThreadActivityStatus = {
 export type ThreadState = {
   activeThreadIdByWorkspace: Record<string, string | null>;
   itemsByThread: Record<string, ConversationItem[]>;
+  commandsByThread: Record<string, RuntimeCommand[]>;
   maxItemsPerThread: number | null;
   threadsByWorkspace: Record<string, ThreadSummary[]>;
   hiddenThreadIdsByWorkspace: Record<string, Record<string, true>>;
@@ -40,6 +42,18 @@ export type ThreadState = {
 
 export type ThreadAction =
   | { type: "setActiveThreadId"; workspaceId: string; threadId: string | null }
+  | {
+      type: "replaceThread";
+      workspaceId: string;
+      previousThreadId: string;
+      threadId: string;
+      items: ConversationItem[];
+      commands: RuntimeCommand[];
+      isProcessing: boolean;
+      turnId: string | null;
+      timestamp: number;
+    }
+  | { type: "setThreadCommands"; threadId: string; commands: RuntimeCommand[] }
   | { type: "setMaxItemsPerThread"; maxItemsPerThread: number | null }
   | { type: "ensureThread"; workspaceId: string; threadId: string }
   | { type: "hideThread"; workspaceId: string; threadId: string }
@@ -53,6 +67,7 @@ export type ThreadAction =
     }
   | { type: "markUnread"; threadId: string; hasUnread: boolean }
   | { type: "addAssistantMessage"; threadId: string; text: string }
+  | { type: "addNotice"; threadId: string; itemId: string; text: string; level: string }
   | { type: "setThreadName"; workspaceId: string; threadId: string; name: string }
   | {
       type: "mergeThreadSummary";
@@ -159,6 +174,7 @@ const emptyItems: Record<string, ConversationItem[]> = {};
 export const initialState: ThreadState = {
   activeThreadIdByWorkspace: {},
   itemsByThread: emptyItems,
+  commandsByThread: {},
   maxItemsPerThread: CHAT_SCROLLBACK_DEFAULT,
   threadsByWorkspace: {},
   hiddenThreadIdsByWorkspace: {},
@@ -186,6 +202,31 @@ const threadSliceReducers: ThreadSliceReducer[] = [
 ];
 
 export function threadReducer(state: ThreadState, action: ThreadAction): ThreadState {
+  if (action.type === "replaceThread") {
+    // Keep displayed notices on reload; history and commands come from one snapshot.
+    const notices = action.previousThreadId === action.threadId
+      ? (state.itemsByThread[action.threadId] ?? []).filter(
+          (item) => item.kind === "tool" && item.toolType === "notice",
+        )
+      : [];
+    let next = reduceThreadItems(state, {
+      type: "setThreadItems", threadId: action.threadId, items: [...action.items, ...notices],
+    });
+    next = reduceThreadLifecycle(next, {
+      type: "markProcessing", threadId: action.threadId,
+      isProcessing: action.isProcessing, timestamp: action.timestamp,
+    });
+    return {
+      ...next,
+      commandsByThread: { ...next.commandsByThread, [action.threadId]: action.commands },
+      activeTurnIdByThread: { ...next.activeTurnIdByThread, [action.threadId]: action.turnId },
+      activeThreadIdByWorkspace: {
+        ...next.activeThreadIdByWorkspace,
+        [action.workspaceId]: state.activeThreadIdByWorkspace[action.workspaceId] === action.previousThreadId
+          ? action.threadId : state.activeThreadIdByWorkspace[action.workspaceId] ?? null,
+      },
+    };
+  }
   for (const reduceSlice of threadSliceReducers) {
     const nextState = reduceSlice(state, action);
     if (nextState !== state) {

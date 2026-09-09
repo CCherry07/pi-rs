@@ -159,6 +159,7 @@ pub fn run() {
             pi_runtime::pi_unarchive_thread,
             pi_runtime::pi_delete_thread,
             pi_runtime::pi_compact_thread,
+            pi_runtime::pi_reload_thread,
             pi_runtime::pi_set_thread_name,
             pi_runtime::pi_configure_thread,
             git::get_git_status,

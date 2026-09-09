@@ -4,7 +4,6 @@ import type {
   FollowUpMessageBehavior,
   QueuedMessage,
   SendMessageResult,
-  WorkspaceInfo,
 } from "../../../types";
 import { useComposerImages } from "../../composer/hooks/useComposerImages";
 import { useQueuedSend } from "../../threads/hooks/useQueuedSend";
@@ -13,48 +12,28 @@ export function useComposerController({
   activeThreadId,
   activeTurnId,
   activeWorkspaceId,
-  activeWorkspace,
   isProcessing,
   queueFlushPaused = false,
   steerEnabled,
   followUpMessageBehavior,
-  startThreadForWorkspace,
   sendUserMessage,
-  sendUserMessageToThread,
-  startFork,
-  startResume,
   startCompact,
-  startFast,
-  startStatus,
+  startReload,
 }: {
   activeThreadId: string | null;
   activeTurnId: string | null;
   activeWorkspaceId: string | null;
-  activeWorkspace: WorkspaceInfo | null;
   isProcessing: boolean;
   queueFlushPaused?: boolean;
   steerEnabled: boolean;
   followUpMessageBehavior: FollowUpMessageBehavior;
-  startThreadForWorkspace: (
-    workspaceId: string,
-    options?: { activate?: boolean },
-  ) => Promise<string | null>;
   sendUserMessage: (
     text: string,
     images?: string[],
     options?: { sendIntent?: ComposerSendIntent },
-  ) => Promise<{ status: "sent" | "blocked" | "steer_failed" }>;
-  sendUserMessageToThread: (
-    workspace: WorkspaceInfo,
-    threadId: string,
-    text: string,
-    images?: string[],
-  ) => Promise<void | SendMessageResult>;
-  startFork: (text: string) => Promise<void>;
-  startResume: (text: string) => Promise<void>;
+  ) => Promise<SendMessageResult>;
   startCompact: (text: string) => Promise<void>;
-  startFast: (text: string) => Promise<void>;
-  startStatus: (text: string) => Promise<void>;
+  startReload: (text: string) => Promise<void>;
 }) {
   const [composerDraftsByThread, setComposerDraftsByThread] = useState<
     Record<string, string>
@@ -87,15 +66,9 @@ export function useComposerController({
     queueFlushPaused,
     steerEnabled,
     followUpMessageBehavior,
-    activeWorkspace,
-    startThreadForWorkspace,
     sendUserMessage,
-    sendUserMessageToThread,
-    startFork,
-    startResume,
     startCompact,
-    startFast,
-    startStatus,
+    startReload,
     clearActiveImages,
   });
 

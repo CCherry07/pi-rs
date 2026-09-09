@@ -25,6 +25,7 @@
     "closePreview": "关闭图片预览"
   },
   "messageActions": {
+    "fork": "从此消息分叉",
     "quote": "引用消息",
     "copy": "复制消息",
     "copyCode": "复制代码块",
@@ -158,7 +159,7 @@
     "plan": "计划",
     "model": "模型",
     "noModels": "没有可用模型",
-    "fastMode": "快速模式已启用",
+    "fastModeToggle": "切换快速模式",
     "thinkingMode": "思考模式",
     "default": "默认",
     "tokenUsageUnknown": "Token 用量未知",
@@ -170,35 +171,13 @@
     },
     "slash": {
       "compact": "压缩当前任务上下文",
-      "fast": "切换后续轮次的快速模式",
-      "fork": "分叉为新任务",
-      "new": "开始新对话",
-      "resume": "刷新当前任务",
-      "status": "显示会话状态"
+      "reload": "重新加载插件、模型和资源"
     },
     "groups": {
       "Files": "文件",
       "Skills": "技能",
       "Slash": "命令",
       "Prompts": "提示词"
-    }
-  },
-  "commands": {
-    "unknown": "未知",
-    "status": {
-      "title": "会话状态：",
-      "model": "- 模型：{{value}}",
-      "fastMode": "- 快速模式：{{value}}",
-      "reasoningEffort": "- 推理强度：{{value}}",
-      "default": "默认",
-      "on": "开启",
-      "off": "关闭"
-    },
-    "fast": {
-      "usage": "用法：/fast、/fast on、/fast off 或 /fast status。",
-      "status": "快速模式当前为{{state}}。",
-      "enabled": "快速模式已开启。",
-      "disabled": "快速模式已关闭。"
     }
   },
   "notices": {

@@ -34,6 +34,7 @@ type ComposerMetaBarProps = {
   selectedEffort: string | null;
   onSelectEffort: (effort: string) => void;
   selectedServiceTier: ServiceTier | null;
+  onSelectServiceTier: (tier: ServiceTier | null) => void;
   reasoningSupported: boolean;
   tokenUsage?: ThreadTokenUsage | null;
 };
@@ -47,6 +48,7 @@ export function ComposerMetaBar({
   selectedEffort,
   onSelectEffort,
   selectedServiceTier,
+  onSelectServiceTier,
   reasoningSupported,
   tokenUsage = null,
 }: ComposerMetaBarProps) {
@@ -138,16 +140,19 @@ export function ComposerMetaBar({
               </option>
             ))}
           </select>
-          {selectedServiceTier === "fast" && (
-            <span
-              className="composer-fast-indicator"
-              role="status"
-              aria-label={t("composer.fastMode")}
-              title={t("composer.fastMode")}
-            >
-              <Zap size={12} strokeWidth={1.8} />
-            </span>
-          )}
+          <button
+            type="button"
+            className={`composer-fast-indicator${selectedServiceTier === "fast" ? " composer-fast-indicator--active" : ""}`}
+            aria-label={t("composer.fastModeToggle")}
+            aria-pressed={selectedServiceTier === "fast"}
+            title={t("composer.fastModeToggle")}
+            disabled={disabled}
+            onClick={() =>
+              onSelectServiceTier(selectedServiceTier === "fast" ? null : "fast")
+            }
+          >
+            <Zap size={12} strokeWidth={1.8} />
+          </button>
         </div>
         <div className="composer-select-wrap composer-select-wrap--effort">
           <span className="composer-icon composer-icon--effort" aria-hidden>

@@ -94,6 +94,7 @@ export type CollabAgentStatus = CollabAgentRef & {
 export type ConversationItem =
   | {
       id: string;
+      entryId?: string;
       kind: "message";
       role: "user" | "assistant";
       text: string;
@@ -160,7 +161,7 @@ export type UiLocale = "system" | "en" | "zh-CN";
 export type FollowUpMessageBehavior = "queue" | "steer";
 export type ComposerSendIntent = "default" | "queue" | "steer";
 export type SendMessageResult = {
-  status: "sent" | "blocked" | "steer_failed";
+  status: "sent" | "completed" | "handled" | "queued" | "blocked" | "steer_failed";
 };
 
 export type ComposerEditorPreset = "default" | "helpful" | "smart";

@@ -7,7 +7,6 @@ import { usePullRequestComposer } from "@/features/git/hooks/usePullRequestCompo
 import { useAutoExitEmptyDiff } from "@/features/git/hooks/useAutoExitEmptyDiff";
 import { isMissingRepo } from "@/features/git/utils/repoErrors";
 import { useModels } from "@/features/models/hooks/useModels";
-import { useSkills } from "@/features/skills/hooks/useSkills";
 import { useCustomPrompts } from "@/features/prompts/hooks/useCustomPrompts";
 import { useBranchSwitcherShortcut } from "@/features/git/hooks/useBranchSwitcherShortcut";
 import { useRenameWorktreePrompt } from "@/features/workspaces/hooks/useRenameWorktreePrompt";
@@ -316,7 +315,7 @@ export default function MainApp() {
     reasoningSupported,
     onFocusComposer: () => composerInputRef.current?.focus(),
   });
-  const { skills } = useSkills({ activeWorkspace, onDebug: addDebugEntry });
+
   const {
     prompts,
     createPrompt,
@@ -370,18 +369,16 @@ export default function MainApp() {
     refreshThread,
     sendUserMessage,
     sendUserMessageToThread,
-    startFork,
-    startResume,
+    forkMessage,
     startCompact,
-    startFast,
-    startStatus,
+    startReload,
+    runtimeCommands,
   } = useThreads({
     activeWorkspace,
     onDebug: addDebugEntry,
     model: resolvedModel,
     effort: resolvedEffort,
     serviceTier: selectedServiceTier,
-    onSelectServiceTier: handleSelectServiceTier,
     steerEnabled: appSettings.steerEnabled,
     threadTitleAutogenerationEnabled: appSettings.threadTitleAutogenerationEnabled,
     chatHistoryScrollbackItems: appSettingsLoading
@@ -392,6 +389,9 @@ export default function MainApp() {
     threadSortKey: threadListSortKey,
     onThreadRunMetadataDetected: handleThreadRunMetadataDetected,
   });
+  const skills = runtimeCommands.filter((command) => command.name.startsWith("skill:"))
+    .map((command) => ({ name: command.name.slice(6), description: command.description, path: "" }));
+
   useEffect(() => {
     const workspaceId = activeWorkspace?.id ?? null;
     if (!workspaceId || !activeThreadId || (!resolvedModel && !resolvedEffort)) {
@@ -933,11 +933,8 @@ export default function MainApp() {
       sendUserMessage,
       sendUserMessageToThread,
       seedThreadRunParams: patchThreadRunParams,
-      startFork,
-      startResume,
       startCompact,
-      startFast,
-      startStatus,
+      startReload,
       addWorktreeAgent,
       handleWorktreeCreated,
       addDebugEntry,
@@ -1271,6 +1268,7 @@ export default function MainApp() {
           threadStatusById,
           onSelectInstance: handleSelectWorkspaceInstance,
           skills,
+          runtimeCommands,
           prompts,
           files,
           onFileAutocompleteActiveChange: setFileAutocompleteActive,
@@ -1397,6 +1395,7 @@ export default function MainApp() {
     handleAddWorktreeAgent,
     handleAddCloneAgent,
     handleOpenThreadLink,
+    onForkMessage: forkMessage,
     handleSelectOpenAppId,
     handleCopyThread,
     handleToggleTerminalWithFocus,
@@ -1408,8 +1407,10 @@ export default function MainApp() {
     reasoningOptions,
     selectedEffort,
     onSelectEffort: handleSelectEffort,
+    onSelectServiceTier: handleSelectServiceTier,
     reasoningSupported,
     skills,
+    runtimeCommands,
     prompts,
     composerInputRef,
     composerEditorSettings,

@@ -8,6 +8,7 @@ import Copy from "lucide-react/dist/esm/icons/copy";
 import Diff from "lucide-react/dist/esm/icons/diff";
 import FileDiffIcon from "lucide-react/dist/esm/icons/file-diff";
 import FileText from "lucide-react/dist/esm/icons/file-text";
+import GitFork from "lucide-react/dist/esm/icons/git-fork";
 import Image from "lucide-react/dist/esm/icons/image";
 import Quote from "lucide-react/dist/esm/icons/quote";
 import Search from "lucide-react/dist/esm/icons/search";
@@ -61,6 +62,7 @@ type MessageRowProps = MarkdownFileLinkProps & {
   isCopied: boolean;
   onCopy: (item: Extract<ConversationItem, { kind: "message" }>) => void;
   onQuote?: (item: Extract<ConversationItem, { kind: "message" }>, selectedText?: string) => void;
+  onFork?: (item: Extract<ConversationItem, { kind: "message" }>) => void;
   codeBlockCopyUseModifier?: boolean;
 };
 
@@ -366,6 +368,7 @@ export const MessageRow = memo(function MessageRow({
   isCopied,
   onCopy,
   onQuote,
+  onFork,
   codeBlockCopyUseModifier,
   showMessageFilePath,
   workspacePath,
@@ -418,7 +421,11 @@ export const MessageRow = memo(function MessageRow({
         return false;
       }
       const element = node instanceof Element ? node : node.parentElement;
-      return Boolean(element?.closest(".message-quote-button, .message-copy-button"));
+      return Boolean(
+        element?.closest(
+          ".message-fork-button, .message-quote-button, .message-copy-button",
+        ),
+      );
     };
 
     if (isWithinMessageControls(selection.anchorNode) || isWithinMessageControls(selection.focusNode)) {
@@ -484,6 +491,17 @@ export const MessageRow = memo(function MessageRow({
             title={t("messageActions.quote")}
           >
             <Quote size={14} aria-hidden />
+          </button>
+        )}
+        {onFork && item.entryId && (
+          <button
+            type="button"
+            className="ghost message-fork-button"
+            onClick={() => onFork(item)}
+            aria-label={t("messageActions.fork")}
+            title={t("messageActions.fork")}
+          >
+            <GitFork size={14} aria-hidden />
           </button>
         )}
         <button
@@ -808,6 +826,17 @@ export const ToolRow = memo(function ToolRow({
     },
     [item.id, summary.output, t],
   );
+
+  if (item.toolType === "notice") {
+    return (
+      <div className="tool-inline tool-inline-row" role={item.status === "failed" ? "alert" : "status"}>
+        <div className="tool-inline-content">
+          <span className="tool-inline-label">{item.title}</span>
+          <div className="tool-inline-detail">{item.detail}</div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`tool-inline tool-inline-row ${isExpanded ? "tool-inline-expanded" : ""}`}>

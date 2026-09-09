@@ -5,12 +5,13 @@
   "pinned": false,
   "state": "active",
   "created_at": 1788943769149,
-  "last_activity_at": 1788944005076,
+  "last_activity_at": 1788980165153,
   "use_count": 0,
-  "view_count": 1,
-  "patch_count": 1,
+  "view_count": 6,
+  "patch_count": 4,
   "files": {
-    "SKILL.md": "5066dc7bbeb1b2ab61dcaca11096a2a7e502cb406db5ee80a76448010e53dae1",
-    "references/reasoning-language.md": "eda84c31f1f4602b2d7a6ef387cff83d85996717f23cfd3529d7e4dc9ed6d01f"
+    "SKILL.md": "f3c6368c79151f94b110341437d1639311a500ef87d3e4ad02022dac605d23fc",
+    "references/reasoning-language.md": "eda84c31f1f4602b2d7a6ef387cff83d85996717f23cfd3529d7e4dc9ed6d01f",
+    "references/subagent-execution-model.md": "6d519c8d510d8314695595e1d0b1d0146cda2acc93acd6dfdff77e665a8b574f"
   }
 }

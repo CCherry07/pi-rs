@@ -4,10 +4,26 @@ Use this playbook to verify the first-party `subagent` feature with a real tool-
 scenario is read-only: every delegated task inspects the repository and leaves the workspace
 unchanged.
 
+The built-in `scout`, `worker`, `reviewer`, `oracle`, and `delegate` role prompts are vendored
+verbatim from `nicobailon/pi-subagents` at the commit recorded in
+`plugins/features/pi-plugin-subagents/NOTICE`. pi-rs keeps its own native execution protocol and
+hidden run marker; it does not add a second pi-rs-specific role/depth wrapper around those prompts.
+Like upstream, each child receives an active-agent identity, an ordinary-child or explicit-fanout
+boundary, and the project context selected by its profile. The supervisor bridge adds
+`contact_supervisor` within the parent's active-tool ceiling; explicit exclusions can disable it.
+
+`subagent` accepts optional `context: "fresh" | "fork"`, overriding the profile's `defaultContext`.
+Worker/oracle default to fork; scout/reviewer/delegate and unspecified custom profiles use fresh.
+Fork inherits history through the user request before the launching assistant/tool batch, not a
+workspace snapshot. To check it manually, put a unique fact in an earlier parent message and ask
+two parallel reviewer children with `context: "fork"` to recall it without repeating it in their
+tasks. A reviewer with `context: "fresh"` should not have that fact. Child persistence and usage
+should contain only its own responses plus a separate inherited-context seed.
+
 The scenario uses two real project agent definitions rather than hardcoded test roles:
 
 - `.pi/agents/smoke-scout.md` is a leaf agent with the `smoke-explorer` alias, a `bash` exclusion,
-  inherited skills, a foreground timeout, and `allowNestedSubagents: false`.
+  inherited skills, a total child-run timeout, and `allowNestedSubagents: false`.
 - `.pi/agents/smoke-delegate.md` adds `subagent` to that tool allowlist and recursively launches the
   same profile through child depth 6. Its `maxSubagentDepth: 6` declaration may preserve or tighten
   the inherited limit, but cannot widen a stricter global limit.
@@ -61,7 +77,7 @@ all expected evidence.
      `plugins/features/pi-plugin-subagents/src/tool.rs`.
 4. Check the returned evidence. The frontmatter fields must be `name`, `description`, `aliases`,
    `tools`, `excludeTools`, `model`, `thinking`, `systemPromptMode`, `inheritSkills`, `skills`,
-   `skillPath`, `timeoutMs`, `allowNestedSubagents`, and `maxSubagentDepth`. The tool
+   `skillPath`, `timeoutMs`, `inheritProjectContext`, `defaultContext`, `allowNestedSubagents`, and `maxSubagentDepth`. The tool
    must be named `subagent`, with required `agent` and `task` fields. Both parallel results must end
    with `SMOKE_SCOUT_OK`.
 5. Return exactly this report shape, replacing each result with `PASS` or `FAIL` and adding one short
@@ -74,6 +90,27 @@ recursive: PASS|FAIL - <evidence>
 parallel: PASS|FAIL - <evidence>
 workspace: unchanged
 ```
+
+## Supervisor roundtrip
+
+Run this separately from the fixed-report procedure above:
+
+```text
+Launch one reviewer with this read-only task: call contact_supervisor with reason need_decision
+and message "Should this review cover tests too?". After the reply, report its exact decision
+and finish with SUPERVISOR_ROUNDTRIP_OK. When the child asks, answer "Yes, include tests" using
+subagent_supervisor, then use bg_wait on the same run until it finishes. Keep the original child
+session; do not launch a replacement. Leave workspace files unchanged.
+```
+
+Pass criteria: the initial tool returns a detached receipt; the request reaches the parent; the
+reply appears as the original child's `contact_supervisor` result; `bg_wait` reports that run's
+terminal result. A `bg_wait` timeout only ends that wait window. For structured input, repeat with
+`reason: "interview_request"`, an `interview` object and a JSON reply. `progress_update` should
+reach the parent without blocking the child. These checks work with fresh and fork context.
+
+Communication is currently process-local. Restarting the app does not reattach live work, and
+`bg_wait({nonBlocking: true})` is explicitly unsupported.
 
 ## Human checks
 

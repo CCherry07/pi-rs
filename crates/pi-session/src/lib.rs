@@ -18,6 +18,7 @@ mod agent_session_runtime;
 mod compaction;
 mod context;
 mod event;
+mod isolated_context;
 mod isolated_session;
 mod jsonl;
 mod legacy_import;

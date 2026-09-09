@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
+futures.workspace = true
 pi-core.workspace = true
 pi-plugin-skills.workspace = true
 pi-session.workspace = true

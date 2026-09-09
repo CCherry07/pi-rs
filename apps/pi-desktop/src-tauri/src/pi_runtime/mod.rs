@@ -1,7 +1,7 @@
 mod projection;
 mod session_store;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -13,8 +13,8 @@ use pi_core::{
 };
 use pi_sdk::{Pi, ProductConfig};
 use pi_session::{
-    AgentSession, AgentSessionSnapshot, IsolatedSessionObservation, QueueSnapshot, SessionEntry,
-    SessionInput,
+    AgentSession, AgentSessionSnapshot, BranchQuery, EntryOrder, EntryQuery,
+    IsolatedSessionObservation, QueueSnapshot, SessionEntry, SessionInput, SubmitOutcome,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -25,8 +25,8 @@ use crate::backend::events::PiEvent;
 use crate::state::AppState;
 
 use session_store::{
-    content_text, token_usage, SessionModelCatalog, SessionStore, SessionTokenUsage,
-    SessionSummary, StoredIsolatedSession,
+    content_text, token_usage, SessionModelCatalog, SessionStore, SessionSummary,
+    SessionTokenUsage, StoredIsolatedSession,
 };
 
 pub(crate) struct PiRuntimeState {
@@ -83,12 +83,17 @@ pub(crate) fn pi_desktop_info(state: State<'_, PiRuntimeState>) -> PiDesktopInfo
 #[tauri::command]
 pub(crate) async fn pi_start_thread(
     workspace_id: String,
+    prepare_only: Option<bool>,
     state: State<'_, AppState>,
     pi: State<'_, PiRuntimeState>,
     app: AppHandle,
 ) -> Result<Value, String> {
     let cwd = workspace_path(&state, &workspace_id).await?;
-    let session = pi.store.create(&cwd).await?;
+    if prepare_only.unwrap_or(false) {
+        let session = pi.store.prepare_thread(&cwd).await?;
+        return Ok(json!({ "thread": thread_from_session(&session) }));
+    }
+    let session = pi.store.start_thread(&cwd).await?;
     ensure_forwarder(&app, &pi, &workspace_id, session.log().header().id.clone()).await?;
     let thread = thread_from_session(&session);
     emit(
@@ -190,10 +195,11 @@ pub(crate) async fn pi_thread_live_unsubscribe(
 pub(crate) async fn pi_fork_thread(
     workspace_id: String,
     thread_id: String,
+    entry_id: String,
     pi: State<'_, PiRuntimeState>,
     app: AppHandle,
 ) -> Result<Value, String> {
-    let session = pi.store.fork(&thread_id).await?;
+    let session = pi.store.fork(&thread_id, entry_id).await?;
     let new_id = session.log().header().id.clone();
     ensure_forwarder(&app, &pi, &workspace_id, new_id).await?;
     Ok(json!({ "thread": thread_from_session(&session) }))
@@ -247,7 +253,6 @@ pub(crate) async fn pi_archive_thread(
     app: AppHandle,
 ) -> Result<Value, String> {
     pi.store.archive(&thread_id).await?;
-    pi.forwarders.lock().await.remove(&thread_id);
     emit(
         &app,
         &workspace_id,
@@ -283,7 +288,6 @@ pub(crate) async fn pi_delete_thread(
     app: AppHandle,
 ) -> Result<Value, String> {
     pi.store.delete(&thread_id).await?;
-    pi.forwarders.lock().await.remove(&thread_id);
     emit(
         &app,
         &workspace_id,
@@ -306,6 +310,25 @@ pub(crate) async fn pi_compact_thread(
         let _ = session.compact(None).await;
     });
     Ok(json!({ "status": "started" }))
+}
+
+#[tauri::command]
+pub(crate) async fn pi_reload_thread(
+    workspace_id: String,
+    thread_id: Option<String>,
+    state: State<'_, AppState>,
+    pi: State<'_, PiRuntimeState>,
+    app: AppHandle,
+) -> Result<Value, String> {
+    let session = if let Some(thread_id) = thread_id {
+        let session = pi.store.reload(&thread_id).await?;
+        ensure_forwarder(&app, &pi, &workspace_id, thread_id).await?;
+        session
+    } else {
+        let cwd = workspace_path(&state, &workspace_id).await?;
+        pi.store.reload_prepared(&cwd).await?
+    };
+    Ok(json!({ "thread": thread_from_session(&session) }))
 }
 
 #[tauri::command]
@@ -364,38 +387,31 @@ pub(crate) async fn pi_send_user_message(
         effort.as_deref().filter(|value| !value.trim().is_empty()),
     )?;
     let input = session_input(text, images)?;
-    let turn_id = format!("pi-turn-{thread_id}");
-    let event_app = app.clone();
-    let event_workspace_id = workspace_id.clone();
-    let event_thread_id = thread_id.clone();
-    let event_turn_id = turn_id.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = session.submit(input).await {
-            emit(
-                &event_app,
-                &event_workspace_id,
-                "error",
-                json!({
-                    "threadId": event_thread_id,
-                    "turnId": event_turn_id,
-                    "error": { "message": error.to_string() },
-                    "willRetry": false
-                }),
-            );
-            emit(
-                &event_app,
-                &event_workspace_id,
-                "thread/status/changed",
-                json!({
-                    "threadId": event_thread_id,
-                    "status": { "type": "idle" }
-                }),
-            );
+    // submit owns command dispatch, input hooks, and queuing. Never pre-execute
+    // a command here: transformed input must pass through that pipeline once.
+    let (_, handle) = pi
+        .store
+        .handle(&thread_id)
+        .ok_or("session is no longer active")?;
+    let outcome = session
+        .submit(input)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(submit_receipt(&outcome, &handle.current()))
+}
+
+fn submit_receipt(outcome: &SubmitOutcome, session: &AgentSession) -> Value {
+    let mut receipt = match outcome {
+        SubmitOutcome::Handled => json!({ "status": "handled" }),
+        SubmitOutcome::Queued { entry_id, .. } => {
+            json!({ "status": "queued", "entryId": entry_id })
         }
-    });
-    Ok(json!({
-        "turn": { "id": turn_id, "status": "inProgress" }
-    }))
+        SubmitOutcome::Agent(_) => json!({ "status": "completed" }),
+        _ => json!({ "status": "handled" }),
+    };
+    receipt["isRunning"] = json!(session.snapshot().agent.is_running);
+    receipt["threadId"] = json!(session.log().header().id);
+    receipt
 }
 
 #[tauri::command]
@@ -411,11 +427,17 @@ pub(crate) async fn pi_turn_steer(
     let session = pi.store.open(&thread_id).await?;
     ensure_forwarder(&app, &pi, &workspace_id, thread_id.clone()).await?;
     let input = session_input(text, images)?;
-    session
-        .steer(input)
+    let (_, handle) = pi
+        .store
+        .handle(&thread_id)
+        .ok_or("session is no longer active")?;
+    let outcome = session
+        .submit(input)
         .await
         .map_err(|error| error.to_string())?;
-    Ok(json!({ "status": "queued", "turnId": turn_id }))
+    let mut receipt = submit_receipt(&outcome, &handle.current());
+    receipt["turnId"] = json!(turn_id);
+    Ok(receipt)
 }
 
 #[tauri::command]
@@ -460,14 +482,22 @@ pub(crate) async fn pi_model_list(
 #[tauri::command]
 pub(crate) async fn pi_skills_list(
     workspace_id: String,
+    thread_id: Option<String>,
     state: State<'_, AppState>,
     pi: State<'_, PiRuntimeState>,
 ) -> Result<Value, String> {
-    let cwd = workspace_path(&state, &workspace_id).await?;
-    let skills = pi
-        .store
-        .command_catalog(&cwd)
-        .await?
+    let commands = match thread_id {
+        Some(id) => pi.store.command_catalog(&id).await?,
+        None => {
+            let cwd = workspace_path(&state, &workspace_id).await?;
+            pi.store
+                .prepare_thread(&cwd)
+                .await?
+                .runtime()
+                .command_specs()
+        }
+    };
+    let skills = commands
         .into_iter()
         .filter_map(|command| {
             command.name.strip_prefix("skill:").map(|name| {
@@ -646,16 +676,17 @@ async fn ensure_forwarder(
     workspace_id: &str,
     thread_id: String,
 ) -> Result<(), String> {
+    let key = pi.store.forwarder_key(&thread_id)?;
     {
         let mut forwarders = pi.forwarders.lock().await;
-        if !forwarders.insert(thread_id.clone()) {
+        if !forwarders.insert(key.clone()) {
             return Ok(());
         }
     }
     let live = match pi.store.subscribe(&thread_id) {
         Ok(live) => live,
         Err(error) => {
-            pi.forwarders.lock().await.remove(&thread_id);
+            pi.forwarders.lock().await.remove(&key);
             return Err(error);
         }
     };
@@ -666,6 +697,7 @@ async fn ensure_forwarder(
         app,
         workspace_id,
         thread_id,
+        key,
         live,
         store,
         Arc::clone(&pi.forwarders),
@@ -699,17 +731,54 @@ fn summary_thread(summary: &SessionSummary) -> Value {
     })
 }
 
+fn command_catalog_json(session: &AgentSession) -> Value {
+    json!(session
+        .runtime()
+        .command_specs()
+        .iter()
+        .map(|command| json!({
+            "name": command.name,
+            "description": command.description,
+            "argumentHint": command.argument_hint,
+        }))
+        .collect::<Vec<_>>())
+}
+
+fn thread_from_subscription(live: &session_store::LiveSession) -> Value {
+    // Hydrate the subscription snapshot so subsequent events cannot duplicate
+    // messages already included in the replacement payload.
+    let session = live.primary().expect("replacement is a primary session");
+    let mut thread = thread_from_snapshot(
+        &live.subscription.snapshot,
+        &session.log().header().id,
+        session.runtime().cwd(),
+        SessionTokenUsage {
+            total_tokens: None,
+            context_tokens: None,
+            model_context_window: session.active_context_window(),
+        },
+        json!("pi-rs"),
+        None,
+        message_entry_ids(session),
+    );
+    thread["commands"] = command_catalog_json(session);
+    thread
+}
+
 fn thread_from_session(session: &AgentSession) -> Value {
     let snapshot = session.snapshot();
     let id = session.log().header().id;
-    thread_from_snapshot(
+    let mut thread = thread_from_snapshot(
         &snapshot,
         &id,
         session.runtime().cwd(),
         token_usage(session),
         json!("pi-rs"),
         None,
-    )
+        message_entry_ids(session),
+    );
+    thread["commands"] = command_catalog_json(session);
+    thread
 }
 
 fn thread_from_observation(
@@ -739,6 +808,7 @@ fn thread_from_observation(
             }
         }),
         Some(agent),
+        HashMap::new(),
     )
 }
 
@@ -816,7 +886,68 @@ fn thread_from_stored_isolated(stored: &StoredIsolatedSession) -> Result<Value, 
             }
         }),
         Some(&stored.agent),
+        HashMap::new(),
     ))
+}
+
+type MessageEntryIds = HashMap<bool, VecDeque<(i64, String)>>;
+
+fn message_key(message: &Message) -> Option<(bool, i64)> {
+    match message {
+        Message::User(message) => Some((true, message.timestamp_ms)),
+        Message::Assistant(message) => Some((false, message.timestamp_ms)),
+        _ => None,
+    }
+}
+
+fn message_entry_ids(session: &AgentSession) -> MessageEntryIds {
+    let query = BranchQuery {
+        entries: EntryQuery {
+            order: EntryOrder::OldestFirst,
+            ..EntryQuery::default()
+        },
+        ..BranchQuery::default()
+    };
+    let Ok(records) = session.log().find_entries_on_branch(&query) else {
+        return HashMap::new();
+    };
+    let mut ids = MessageEntryIds::new();
+    for record in records {
+        let SessionEntry::Message(entry) = &record.entry else {
+            continue;
+        };
+        let Some(message) = entry.message.as_standard() else {
+            continue;
+        };
+        let Some(key) = message_key(message) else {
+            continue;
+        };
+        ids.entry(key.0).or_default().push_back((key.1, record.id));
+    }
+    ids
+}
+
+fn take_message_entry_id(ids: &mut MessageEntryIds, message: &Message) -> Option<String> {
+    const MAX_TIMESTAMP_DRIFT_MS: u64 = 1_000;
+
+    let (is_user, timestamp_ms) = message_key(message)?;
+    let candidates = ids.get_mut(&is_user)?;
+    let index = candidates
+        .iter()
+        .position(|(candidate_timestamp, _)| *candidate_timestamp == timestamp_ms)
+        .or_else(|| {
+            candidates
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (candidate_timestamp, _))| {
+                    candidate_timestamp.abs_diff(timestamp_ms)
+                })
+                .filter(|(_, (candidate_timestamp, _))| {
+                    candidate_timestamp.abs_diff(timestamp_ms) <= MAX_TIMESTAMP_DRIFT_MS
+                })
+                .map(|(index, _)| index)
+        })?;
+    candidates.remove(index).map(|(_, id)| id)
 }
 
 fn thread_from_snapshot(
@@ -826,6 +957,7 @@ fn thread_from_snapshot(
     token_usage: SessionTokenUsage,
     source: Value,
     display_name: Option<&str>,
+    mut message_entry_ids: MessageEntryIds,
 ) -> Value {
     let messages = &snapshot.agent.messages;
     let mut turns = Vec::<Value>::new();
@@ -857,6 +989,7 @@ fn thread_from_snapshot(
     };
 
     for message in messages {
+        let entry_id = take_message_entry_id(&mut message_entry_ids, message);
         let timestamp = message_timestamp(message);
         if created_at == 0 {
             created_at = timestamp;
@@ -878,6 +1011,7 @@ fn thread_from_snapshot(
                 items.push(json!({
                     "id": format!("user-{turn_index}-{}", message.timestamp_ms),
                     "type": "userMessage",
+                    "entryId": entry_id,
                     "content": content
                 }));
             }
@@ -887,6 +1021,7 @@ fn thread_from_snapshot(
                         ContentBlock::Text(text) if !text.text.is_empty() => items.push(json!({
                             "id": format!("agent-{turn_index}-{}-{content_index}", message.timestamp_ms),
                             "type": "agentMessage",
+                            "entryId": entry_id,
                             "text": text.text
                         })),
                         ContentBlock::Thinking(thinking) if !thinking.thinking.is_empty() => {
@@ -1136,17 +1271,121 @@ mod tests {
 
     use super::*;
 
+    #[derive(Default)]
+    struct CommandFixture {
+        builds: std::sync::atomic::AtomicUsize,
+        calls: std::sync::atomic::AtomicUsize,
+        fail_reload: std::sync::atomic::AtomicBool,
+        binding: pi_session::PluginContextBinding,
+        wait_for_abort: bool,
+        skill_paths: Vec<PathBuf>,
+    }
+
+    struct FixturePlugin(Arc<CommandFixture>, usize);
+    struct FixtureCommand(Arc<CommandFixture>, usize);
+
+    #[pi_core::agent_plugin]
+    impl pi_core::AgentPlugin for FixturePlugin {
+        fn id(&self) -> pi_core::PluginId {
+            pi_core::PluginId::new("desktop-commands")
+        }
+        fn register(&self, context: &mut pi_core::RegisterContext<'_>) -> pi_core::Result<()> {
+            context.register_command(Arc::new(FixtureCommand(Arc::clone(&self.0), self.1)))
+        }
+    }
+
+    #[pi_core::__plugin_async_trait]
+    impl pi_core::Command for FixtureCommand {
+        fn spec(&self) -> pi_core::CommandSpec {
+            pi_core::CommandSpec {
+                name: "native".into(),
+                description: format!("generation {}", self.1),
+                argument_hint: Some("[action]".into()),
+            }
+        }
+        async fn execute(
+            &self,
+            context: pi_core::CommandContext,
+            arguments: String,
+        ) -> Result<pi_core::CommandOutcome, pi_core::CommandError> {
+            self.0
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match arguments.as_str() {
+                "reload" => {
+                    context.session.reload().await?;
+                }
+                "reload-send" => {
+                    let next = context.session.reload().await?;
+                    next.send_user_message(
+                        pi_core::CustomMessageContent::Text("after reload".into()),
+                        Default::default(),
+                    )
+                    .await?;
+                }
+                "transform" => {
+                    return Ok(pi_core::CommandOutcome::TransformInput("expanded".into()))
+                }
+                "error" => return Err(pi_core::CommandError::Execution("fixture error".into())),
+                _ => context
+                    .ui
+                    .notify(pi_core::NoticeLevel::Info, "native notice")?,
+            }
+            Ok(pi_core::CommandOutcome::Handled)
+        }
+    }
+
     fn scripted_store(agent_dir: PathBuf) -> SessionStore {
-        let manager = MultiSessionManager::new(|request: AgentSessionRuntimeRequest| async move {
+        scripted_store_with_fixture(agent_dir, Arc::new(CommandFixture::default()))
+    }
+
+    struct ScriptedFactory(Arc<CommandFixture>);
+
+    #[pi_core::__plugin_async_trait]
+    impl pi_session::AgentSessionRuntimeFactory for ScriptedFactory {
+        fn session_registered(&self, session: &pi_session::PiSession) {
+            self.0.binding.bind(session.clone());
+        }
+        async fn prepare(
+            &self,
+            request: AgentSessionRuntimeRequest,
+        ) -> Result<pi_session::PreparedAgentSession, pi_session::SessionError> {
+            let fixture = Arc::clone(&self.0);
+            if fixture
+                .fail_reload
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(pi_session::SessionError::Runtime(
+                    "fixture reload failed".to_string(),
+                ));
+            }
+            let generation = fixture
+                .builds
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
             let cwd = match &request.target {
                 AgentSessionRuntimeTarget::Create { cwd, .. } => cwd.clone(),
                 AgentSessionRuntimeTarget::Open { path } => SessionLog::read(path)?.header.cwd,
                 AgentSessionRuntimeTarget::Reuse { log } => log.header().cwd,
             };
+            let context = Arc::new(pi_session::PiPluginContext::new(
+                PresentationMode::Rpc,
+                true,
+                fixture.binding.clone(),
+            ));
+            let turn = if fixture.wait_for_abort {
+                ScriptedTurn::WaitForAbort
+            } else {
+                ScriptedTurn::Text("hello from pi-rs".to_string())
+            };
+            let mut skills = pi_plugin_skills::SkillLoaderOptions::new(&cwd, cwd.join("agent"));
+            skills.include_defaults = false;
+            skills.additional_paths = fixture.skill_paths.clone();
             let runtime = PiRuntime::builder()
-                .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
-                    "hello from pi-rs".to_string(),
-                )]))
+                .plugin_context(context.clone())
+                .agent_plugin(pi_plugin_skills::SkillsPlugin::new(skills))
+                .agent_plugin(FixturePlugin(fixture, generation))
+                .provider_plugin(ScriptedProviderPlugin::scripted([turn]))
                 .agent_options(AgentOptions {
                     provider_id: ProviderId::new("scripted"),
                     model_id: ModelId::new("desktop-test"),
@@ -1154,7 +1393,7 @@ mod tests {
                     ..AgentOptions::default()
                 })
                 .build()?;
-            match request.target {
+            let prepared = match request.target {
                 AgentSessionRuntimeTarget::Create {
                     path,
                     parent_session,
@@ -1186,9 +1425,506 @@ mod tests {
                     )
                     .await
                 }
+            }?;
+            context.bind_generation_session(prepared.session());
+            Ok(prepared)
+        }
+    }
+
+    fn scripted_store_with_fixture(
+        agent_dir: PathBuf,
+        fixture: Arc<CommandFixture>,
+    ) -> SessionStore {
+        SessionStore::new(
+            MultiSessionManager::new(ScriptedFactory(fixture)),
+            agent_dir,
+        )
+    }
+
+    async fn observe_latest(live: &mut session_store::LiveSession) -> Arc<AgentSession> {
+        let changes = live.changes.as_mut().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), changes.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let current = Arc::clone(&changes.borrow_and_update());
+        live.replace(Arc::clone(&current));
+        current
+    }
+
+    async fn wait_for_standard_message_entries(
+        subscription: &mut pi_session::AgentSessionSubscription,
+        expected: usize,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut count = 0;
+            while count < expected {
+                let event = subscription.events.recv().await.unwrap();
+                if matches!(
+                    event.event,
+                    pi_session::AgentSessionEvent::EntryAppended { ref entry }
+                        if matches!(
+                            &entry.entry,
+                            SessionEntry::Message(message)
+                                if message.message.as_standard().is_some()
+                        )
+                ) {
+                    count += 1;
+                }
             }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn workspace_prepares_commands_and_skills_once_and_reuses_the_draft_on_send() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let directory = tempfile::tempdir().unwrap();
+        let skill_root = directory.path().join("skills/startup");
+        std::fs::create_dir_all(&skill_root).unwrap();
+        std::fs::write(skill_root.join("SKILL.md"),
+            "---\nname: startup\ndescription: Workspace startup checks\n---\nInspect the project before editing.\n",
+        ).unwrap();
+        let fixture = Arc::new(CommandFixture {
+            skill_paths: vec![skill_root],
+            ..CommandFixture::default()
         });
-        SessionStore::new(manager, agent_dir)
+        let store =
+            scripted_store_with_fixture(directory.path().join("agent"), Arc::clone(&fixture));
+        let (first, second) = tokio::join!(
+            store.prepare_thread(directory.path()),
+            store.prepare_thread(directory.path()),
+        );
+        let draft = first.unwrap();
+        assert!(Arc::ptr_eq(&draft, &second.unwrap()));
+        assert_eq!(fixture.builds.load(SeqCst), 1);
+        let thread = thread_from_session(&draft);
+        let commands = thread["commands"].as_array().unwrap();
+        assert!(commands.iter().any(|command| command["name"] == "native"));
+        assert!(commands
+            .iter()
+            .any(|command| command["name"] == "skill:startup"));
+        assert!(!draft.log().path().exists());
+        assert!(store.list(directory.path()).unwrap().is_empty());
+
+        // The workspace model selector reads the same prepared runtime.
+        store.model_catalog(directory.path()).await.unwrap();
+        assert_eq!(fixture.builds.load(SeqCst), 1);
+        let started = store.start_thread(directory.path()).await.unwrap();
+        assert!(Arc::ptr_eq(&draft, &started));
+        assert_eq!(fixture.builds.load(SeqCst), 1);
+        assert_eq!(command_catalog_json(&started), thread["commands"]);
+        assert!(matches!(
+            started.submit("/native notice").await.unwrap(),
+            SubmitOutcome::Handled
+        ));
+        assert_eq!(fixture.calls.load(SeqCst), 1);
+        assert!(!started.log().path().exists());
+        assert!(matches!(
+            started.submit("/skill:startup").await.unwrap(),
+            SubmitOutcome::Agent(_)
+        ));
+        assert!(started.log().path().exists());
+        assert_eq!(store.list(directory.path()).unwrap().len(), 1);
+
+        let next = store.start_thread(directory.path()).await.unwrap();
+        assert_ne!(next.log().header().id, started.log().header().id);
+        assert_eq!(fixture.builds.load(SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn workspace_reload_rebuilds_the_prepared_generation_without_materializing_it() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Arc::new(CommandFixture::default());
+        let store =
+            scripted_store_with_fixture(directory.path().join("agent"), Arc::clone(&fixture));
+        let first = store.prepare_thread(directory.path()).await.unwrap();
+        assert_eq!(fixture.builds.load(SeqCst), 1);
+
+        let reloaded = store.reload_prepared(directory.path()).await.unwrap();
+        assert!(!Arc::ptr_eq(&first, &reloaded));
+        assert_eq!(fixture.builds.load(SeqCst), 2);
+        assert_eq!(
+            reloaded.runtime().command_specs()[0].description,
+            "generation 2"
+        );
+        assert!(!reloaded.log().path().exists());
+        assert!(store.list(directory.path()).unwrap().is_empty());
+        let started = store.start_thread(directory.path()).await.unwrap();
+        assert!(Arc::ptr_eq(&reloaded, &started));
+
+        let active = store.reload(&started.log().header().id).await.unwrap();
+        assert!(!Arc::ptr_eq(&started, &active));
+        assert_eq!(fixture.builds.load(SeqCst), 3);
+        assert_eq!(
+            active.runtime().command_specs()[0].description,
+            "generation 3"
+        );
+        assert!(!active.log().path().exists());
+    }
+
+    #[tokio::test]
+    async fn workspace_drafts_are_separate_from_other_workspaces_and_background_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let other = directory.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        let store = scripted_store(directory.path().join("agent"));
+        let first = store.prepare_thread(directory.path()).await.unwrap();
+        let second = store.prepare_thread(&other).await.unwrap();
+        assert_ne!(first.log().header().id, second.log().header().id);
+        let background = store.create(directory.path()).await.unwrap();
+        assert_ne!(background.log().header().id, first.log().header().id);
+        assert!(Arc::ptr_eq(
+            &first,
+            &store.start_thread(directory.path()).await.unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &second,
+            &store.start_thread(&other).await.unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_workspace_preparation_can_be_retried() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Arc::new(CommandFixture::default());
+        let store =
+            scripted_store_with_fixture(directory.path().join("agent"), Arc::clone(&fixture));
+        fixture.fail_reload.store(true, SeqCst);
+        assert!(store.prepare_thread(directory.path()).await.is_err());
+        fixture.fail_reload.store(false, SeqCst);
+        let draft = store.prepare_thread(directory.path()).await.unwrap();
+        assert!(Arc::ptr_eq(
+            &draft,
+            &store.start_thread(directory.path()).await.unwrap()
+        ));
+        assert_eq!(fixture.builds.load(SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn command_catalog_uses_live_generation_and_failed_reload_keeps_subscription() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Arc::new(CommandFixture::default());
+        let store =
+            scripted_store_with_fixture(directory.path().join("agent"), Arc::clone(&fixture));
+        let first = store.create(directory.path()).await.unwrap();
+        let id = first.log().header().id;
+        let mut live = store.subscribe(&id).unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                store.command_catalog(&id).await.unwrap()[0].description,
+                "generation 1"
+            );
+        }
+        assert_eq!(fixture.builds.load(SeqCst), 1);
+        assert!(!first.log().path().exists());
+        assert_eq!(
+            submit_receipt(&first.submit("/native notice").await.unwrap(), &first)["status"],
+            "handled"
+        );
+        let event = live.subscription.events.recv().await.unwrap();
+        assert!(matches!(
+            event.event,
+            pi_session::AgentSessionEvent::PluginNotice { .. }
+        ));
+        assert_eq!(fixture.calls.load(SeqCst), 1);
+        first.submit("/native reload").await.unwrap();
+        let next = observe_latest(&mut live).await;
+        assert!(!Arc::ptr_eq(&first, &next));
+        assert_eq!(
+            store.command_catalog(&id).await.unwrap()[0].description,
+            "generation 2"
+        );
+        fixture.fail_reload.store(true, SeqCst);
+        assert!(next
+            .submit("/native reload")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("fixture reload failed"));
+        assert!(!live.changes.as_ref().unwrap().has_changed().unwrap());
+        assert!(Arc::ptr_eq(&store.open(&id).await.unwrap(), &next));
+        next.submit("/native notice").await.unwrap();
+        assert!(matches!(
+            live.subscription.events.recv().await.unwrap().event,
+            pi_session::AgentSessionEvent::PluginNotice { .. }
+        ));
+        assert_eq!(
+            store.command_catalog(&id).await.unwrap()[0].description,
+            "generation 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_observation_hydrates_latest_history_status_and_commands() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = scripted_store(directory.path().join("agent"));
+        let first = store.create(directory.path()).await.unwrap();
+        let id = first.log().header().id;
+        let mut live = store.subscribe(&id).unwrap();
+        first.submit("/native reload").await.unwrap();
+        store
+            .open(&id)
+            .await
+            .unwrap()
+            .submit("/native reload-send")
+            .await
+            .unwrap();
+
+        // Even if the UI has not consumed a change yet, it catches up to the
+        // latest complete snapshot without needing intermediate generations.
+        let current = observe_latest(&mut live).await;
+        assert!(Arc::ptr_eq(&current, &store.open(&id).await.unwrap()));
+        let thread = thread_from_subscription(&live);
+        assert_eq!(thread["id"], id);
+        assert_eq!(thread["status"]["type"], "idle");
+        assert_eq!(thread["commands"][0]["description"], "generation 3");
+        assert_eq!(thread["turns"].as_array().unwrap().len(), 1);
+        assert!(thread.to_string().contains("after reload"));
+        assert!(thread.to_string().contains("hello from pi-rs"));
+        assert!(live.subscription.events.try_recv().is_err());
+        assert!(!live.changes.as_ref().unwrap().has_changed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn navigation_hydrates_history_once_at_the_new_subscription_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = scripted_store(directory.path().join("agent"));
+        let first = store.create(directory.path()).await.unwrap();
+        first.submit("persisted branch").await.unwrap();
+        let id = first.log().header().id;
+        let mut live = store.subscribe(&id).unwrap();
+        let handle = store.handle(&id).unwrap().1;
+        handle
+            .new_session(directory.path(), directory.path().join("next.jsonl"))
+            .await
+            .unwrap();
+        let current = handle.current();
+        current.submit("immediate message").await.unwrap();
+        observe_latest(&mut live).await;
+        // Snapshot contains messages produced before the forwarder caught up.
+        let hydrated = thread_from_subscription(&live);
+        assert_ne!(hydrated["id"], id);
+        assert_eq!(hydrated["turns"].as_array().unwrap().len(), 1);
+        assert!(hydrated.to_string().contains("immediate message"));
+        assert!(!hydrated.to_string().contains("persisted branch"));
+        assert!(live.subscription.events.try_recv().is_err());
+
+        // Messages after subscription are delivered only by the new event stream.
+        current.submit("later message").await.unwrap();
+        assert!(!thread_from_subscription(&live)
+            .to_string()
+            .contains("later message"));
+        let mut users = 0;
+        while let Ok(event) = live.subscription.events.try_recv() {
+            assert!(event.revision > live.subscription.snapshot.revision);
+            if matches!(event.event, pi_session::AgentSessionEvent::Agent(event)
+                if matches!(*event, pi_core::AgentEvent::MessageStart { message: Message::User(_) }))
+            {
+                users += 1;
+            }
+        }
+        assert_eq!(users, 1);
+
+        handle.resume_session(first.log().path()).await.unwrap();
+        handle.current().submit("after resume").await.unwrap();
+        observe_latest(&mut live).await;
+        let hydrated = thread_from_subscription(&live);
+        assert_eq!(hydrated["id"], id);
+        assert_eq!(hydrated["turns"].as_array().unwrap().len(), 2);
+        assert!(hydrated.to_string().contains("persisted branch"));
+        assert!(hydrated.to_string().contains("after resume"));
+        assert!(live.subscription.events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn closing_managed_session_closes_watch_without_polling() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = scripted_store(directory.path().join("agent"));
+        let session = store.create(directory.path()).await.unwrap();
+        session.submit("persist").await.unwrap();
+        let id = session.log().header().id;
+        let mut live = store.subscribe(&id).unwrap();
+        store.archive(&id).await.unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            live.changes.as_mut().unwrap().changed(),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn replacement_snapshot_recovers_a_response_that_started_before_subscription() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Arc::new(CommandFixture {
+            wait_for_abort: true,
+            ..CommandFixture::default()
+        });
+        let store = scripted_store_with_fixture(directory.path().join("agent"), fixture);
+        let first = store.create(directory.path()).await.unwrap();
+        let id = first.log().header().id;
+        let mut live = store.subscribe(&id).unwrap();
+        first.submit("/native reload").await.unwrap();
+        let current = store.open(&id).await.unwrap();
+        let mut events = current.subscribe();
+        let run = tokio::spawn({
+            let current = Arc::clone(&current);
+            async move { current.submit("response before subscription").await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if matches!(events.events.recv().await.unwrap().event,
+                    pi_session::AgentSessionEvent::Agent(event)
+                    if matches!(*event, pi_core::AgentEvent::AgentStart))
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        observe_latest(&mut live).await;
+        assert!(live.subscription.snapshot.agent.is_running);
+        assert_eq!(thread_from_subscription(&live)["status"]["type"], "active");
+        current.abort();
+        tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        // The forwarder refreshes from this boundary on AgentSettled.
+        live.replace(current);
+        let thread = thread_from_subscription(&live);
+        assert_eq!(thread["status"]["type"], "idle");
+        assert!(thread.to_string().contains("response before subscription"));
+    }
+
+    #[tokio::test]
+    async fn busy_commands_dispatch_once_and_preserve_active_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Arc::new(CommandFixture {
+            wait_for_abort: true,
+            ..CommandFixture::default()
+        });
+        let store =
+            scripted_store_with_fixture(directory.path().join("agent"), Arc::clone(&fixture));
+        let session = store.create(directory.path()).await.unwrap();
+        let mut events = session.subscribe();
+        let run = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move { session.submit("start").await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if matches!(events.events.recv().await.unwrap().event,
+                    pi_session::AgentSessionEvent::Agent(event) if matches!(*event, pi_core::AgentEvent::AgentStart)) { break; }
+            }
+        }).await.unwrap();
+        let handled = session.submit("/native notice").await.unwrap();
+        assert_eq!(submit_receipt(&handled, &session)["status"], "handled");
+        assert_eq!(submit_receipt(&handled, &session)["isRunning"], true);
+        let queued = session.submit("/native transform").await.unwrap();
+        assert_eq!(submit_receipt(&queued, &session)["status"], "queued");
+        assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        session.abort();
+        tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn replacement_identity_never_routes_old_id_to_new_thread() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = scripted_store(directory.path().join("agent"));
+        let first = store.create(directory.path()).await.unwrap();
+        let old_id = first.log().header().id;
+        let (key, handle) = store.handle(&old_id).unwrap();
+        let mut live = store.subscribe(&old_id).unwrap();
+        handle
+            .new_session(directory.path(), directory.path().join("next.jsonl"))
+            .await
+            .unwrap();
+        observe_latest(&mut live).await;
+        let next = handle.current();
+        let new_id = next.log().header().id;
+        assert_ne!(old_id, new_id);
+        assert_eq!(store.forwarder_key(&new_id).unwrap(), key);
+        assert!(store.open(&old_id).await.is_err());
+        assert!(Arc::ptr_eq(&store.open(&new_id).await.unwrap(), &next));
+    }
+
+    #[tokio::test]
+    async fn fork_and_resume_keep_distinct_store_and_forwarder_identities() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = scripted_store(directory.path().join("agent"));
+        let first = store.create(directory.path()).await.unwrap();
+        let mut subscription = first.subscribe();
+        first.submit("persist").await.unwrap();
+        wait_for_standard_message_entries(&mut subscription, 2).await;
+        let old_id = first.log().header().id;
+        let original_key = store.forwarder_key(&old_id).unwrap();
+        let entry_id = first
+            .log()
+            .find_entries_on_branch(&BranchQuery {
+                entries: EntryQuery {
+                    order: EntryOrder::OldestFirst,
+                    ..EntryQuery::default()
+                },
+                ..BranchQuery::default()
+            })
+            .unwrap()
+            .into_iter()
+            .find(|record| {
+                matches!(
+                    &record.entry,
+                    SessionEntry::Message(entry)
+                        if matches!(entry.message.as_standard(), Some(Message::User(_)))
+                )
+            })
+            .unwrap()
+            .id;
+        let fork = store.fork(&old_id, entry_id.clone()).await.unwrap();
+        let fork_id = fork.log().header().id;
+        assert_eq!(fork.log().leaf_id().as_deref(), Some(entry_id.as_str()));
+        assert_eq!(store.forwarder_key(&fork_id).unwrap(), original_key);
+        let (left, right) = tokio::join!(store.open(&old_id), store.open(&old_id));
+        assert!(Arc::ptr_eq(&left.unwrap(), &right.unwrap()));
+        assert_ne!(store.forwarder_key(&old_id).unwrap(), original_key);
+        assert_eq!(
+            store.open(&fork_id).await.unwrap().log().header().id,
+            fork_id
+        );
+    }
+
+    #[tokio::test]
+    async fn transformed_command_runs_once_and_receipt_is_not_in_progress() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Arc::new(CommandFixture::default());
+        let store =
+            scripted_store_with_fixture(directory.path().join("agent"), Arc::clone(&fixture));
+        let session = store.create(directory.path()).await.unwrap();
+        let outcome = session.submit("/native transform").await.unwrap();
+        let receipt = submit_receipt(&outcome, &session);
+        assert_eq!(receipt["status"], "completed");
+        assert_eq!(receipt["isRunning"], false);
+        assert!(receipt.get("turn").is_none());
+        assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(session.snapshot().agent.messages.len(), 2);
+        assert!(session.submit("/native error").await.is_err());
+        let queued = SubmitOutcome::Queued {
+            kind: pi_session::QueueKind::Steer,
+            entry_id: "entry".into(),
+        };
+        assert_eq!(submit_receipt(&queued, &session)["status"], "queued");
     }
 
     #[test]
@@ -1352,8 +2088,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = scripted_store(directory.path().join("agent"));
         let session = store.create(directory.path()).await.unwrap();
+        let mut subscription = session.subscribe();
 
         session.submit("hello desktop").await.unwrap();
+        wait_for_standard_message_entries(&mut subscription, 2).await;
         let thread = thread_from_session(&session);
 
         assert_eq!(thread["source"], "pi-rs");
@@ -1361,6 +2099,12 @@ mod tests {
         assert_eq!(thread["turns"][0]["items"][0]["type"], "userMessage");
         assert_eq!(thread["turns"][0]["items"][1]["type"], "agentMessage");
         assert_eq!(thread["turns"][0]["items"][1]["text"], "hello from pi-rs");
+        assert!(thread["turns"][0]["items"][0]["entryId"].as_str().is_some());
+        assert!(thread["turns"][0]["items"][1]["entryId"].as_str().is_some());
+        assert_ne!(
+            thread["turns"][0]["items"][0]["entryId"],
+            thread["turns"][0]["items"][1]["entryId"]
+        );
         assert!(thread["tokenUsage"]["totalTokens"].as_u64().is_some());
         assert!(thread["tokenUsage"]["contextTokens"].as_u64().is_some());
 
@@ -1395,6 +2139,29 @@ mod tests {
 
         assert_eq!(response, "hello from pi-rs");
         assert!(pi.store.list(directory.path()).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stable_primary_keys_do_not_block_isolated_observation() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = scripted_store(directory.path().join("agent"));
+        let parent = store.create(directory.path()).await.unwrap();
+        let parent_id = parent.log().header().id;
+        let (key, handle) = store.handle(&parent_id).unwrap();
+        assert_ne!(key, parent_id);
+        let child = handle
+            .launch_isolated_session(pi_core::IsolatedSessionRequest::new(
+                pi_core::CustomMessageContent::Text("child".into()),
+            ))
+            .await
+            .unwrap();
+        let (observation, live) = store
+            .subscribe_isolated(&parent_id, child.as_str(), "worker")
+            .unwrap();
+        assert!(live.primary().is_none());
+        assert!(live.changes.is_none());
+        assert!(store.observed_isolated(&observation.session_id()).is_some());
+        handle.wait_for_isolated_session(&child).await.unwrap();
     }
 
     #[tokio::test]

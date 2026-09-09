@@ -238,6 +238,16 @@ impl AgentSessionEventHub {
         );
     }
 
+    pub(crate) fn publish_initialized_context(
+        &self,
+        entry: SessionRecord,
+        agent: AgentStateSnapshot,
+    ) {
+        self.publish(AgentSessionEvent::EntryAppended { entry }, |snapshot| {
+            snapshot.agent = agent
+        });
+    }
+
     pub(crate) fn publish_usage(&self, usage: Usage) {
         self.publish(AgentSessionEvent::UsageRecorded { usage }, |_| {});
     }

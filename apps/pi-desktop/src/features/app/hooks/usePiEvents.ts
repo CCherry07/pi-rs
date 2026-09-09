@@ -30,6 +30,8 @@ type HookEvent = {
 };
 
 type PiEventHandlers = {
+  onThreadNotice?: (workspaceId: string, threadId: string, message: string, level: string) => void;
+  onThreadReplaced?: (workspaceId: string, previousThreadId: string, thread: Record<string, unknown>) => void;
   onThreadStarted?: (workspaceId: string, thread: Record<string, unknown>) => void;
   onThreadNameUpdated?: (
     workspaceId: string,
@@ -106,6 +108,8 @@ export const METHODS_ROUTED_IN_USE_PI_EVENTS = [
   "thread/closed",
   "thread/deleted",
   "thread/name/updated",
+  "thread/notice",
+  "thread/replaced",
   "thread/status/changed",
   "thread/started",
   "thread/tokenUsage/updated",
@@ -214,6 +218,23 @@ export function usePiEvents(handlers: PiEventHandlers) {
         const threadId = String(thread?.id ?? "");
         if (thread && threadId) {
           currentHandlers.onThreadStarted?.(workspace_id, thread);
+        }
+        return;
+      }
+
+      if (method === "thread/replaced") {
+        const thread = params.thread as Record<string, unknown> | undefined;
+        const previousThreadId = String(params.previousThreadId ?? "");
+        if (previousThreadId && thread && typeof thread.id === "string") {
+          currentHandlers.onThreadReplaced?.(workspace_id, previousThreadId, thread);
+        }
+        return;
+      }
+
+      if (method === "thread/notice") {
+        const threadId = String(params.threadId ?? "");
+        if (threadId && typeof params.message === "string") {
+          currentHandlers.onThreadNotice?.(workspace_id, threadId, params.message, String(params.level ?? "info"));
         }
         return;
       }

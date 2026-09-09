@@ -36,7 +36,7 @@ impl IsolatedSessionId {
     }
 }
 
-/// Input for a fresh session that runs independently of the caller's current
+/// Input for a session that runs independently of the caller's current
 /// [`crate::SessionContext`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -205,13 +205,27 @@ pub struct EphemeralSessionOutcome {
     pub api_calls: u64,
 }
 
-/// Initial runtime selections for a fresh isolated session.
+/// History initialization for an independently running session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IsolatedContextMode {
+    #[default]
+    Fresh,
+    /// Copy the caller's effective branch, excluding its active tool batch.
+    /// The caller must have persisted its first assistant response.
+    /// Subsequent messages are independent; filesystem state is not copied.
+    Fork,
+}
+
+/// Initial runtime selections for an isolated session.
 ///
-/// An omitted field inherits the corresponding selection from the calling
-/// session. `Some(Vec::new())` explicitly starts with no active tools.
+/// Omitted model, thinking and tools inherit the calling session's selections.
+/// Context defaults to fresh. `Some(Vec::new())` starts with no active tools.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IsolatedSessionOptions {
+    #[serde(default)]
+    pub context: IsolatedContextMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

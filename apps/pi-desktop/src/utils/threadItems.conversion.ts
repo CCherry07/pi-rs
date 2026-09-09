@@ -58,6 +58,7 @@ export function buildConversationItem(
     const { text, images } = parseUserInputs(content as Array<Record<string, unknown>>);
     return {
       id,
+      entryId: asString(item.entryId ?? item.entry_id) || undefined,
       kind: "message",
       role: "user",
       text,
@@ -216,6 +217,7 @@ export function buildConversationItemFromThreadItem(
     const { text, images } = parseUserInputs(content as Array<Record<string, unknown>>);
     return {
       id,
+      entryId: asString(item.entryId ?? item.entry_id) || undefined,
       kind: "message",
       role: "user",
       text,
@@ -225,6 +227,7 @@ export function buildConversationItemFromThreadItem(
   if (type === "agentMessage") {
     return {
       id,
+      entryId: asString(item.entryId ?? item.entry_id) || undefined,
       kind: "message",
       role: "assistant",
       text: asString(item.text),

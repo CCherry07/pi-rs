@@ -117,8 +117,6 @@ export function ComposerSuggestionsPopover({
           const showGroup = Boolean(item.group && item.group !== prevGroup);
           const Icon = suggestionIcon(item);
           const fileSuggestion = isFileSuggestion(item);
-          const skillSuggestion =
-            item.id.startsWith("skill:") || item.id.startsWith("slash-skill:");
           const title = fileSuggestion ? fileTitle(item.label) : item.label;
           const description = fileSuggestion ? item.label : item.description;
           const fileTypeIconUrl = fileSuggestion ? getFileTypeIconUrl(item.label) : null;
@@ -160,15 +158,14 @@ export function ComposerSuggestionsPopover({
                     <span className="composer-suggestion-title">{title}</span>
                     {description && (
                       <span
-                        className={`composer-suggestion-description${
-                          skillSuggestion ? " composer-suggestion-description--skill" : ""
-                        }`}
+                        className="composer-suggestion-description"
+                        title={description}
                       >
                         {description}
                       </span>
                     )}
                     {!fileSuggestion && item.hint && (
-                      <span className="composer-suggestion-description">{item.hint}</span>
+                      <span className="composer-suggestion-description" title={item.hint}>{item.hint}</span>
                     )}
                   </span>
                 </span>

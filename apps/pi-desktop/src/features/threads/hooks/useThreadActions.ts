@@ -1,3 +1,4 @@
+import { commandsFromThread } from "@utils/desktopCommands";
 import { useCallback, useRef } from "react";
 import type { Dispatch, MutableRefObject } from "react";
 import type {
@@ -42,6 +43,17 @@ const THREAD_LIST_PAGE_SIZE = 100;
 const THREAD_LIST_MAX_PAGES_OLDER = 6;
 const THREAD_LIST_MAX_PAGES_DEFAULT = 6;
 const THREAD_LIST_CURSOR_PAGE_START = "__pi_monitor_page_start__";
+const FORK_NAME_SUFFIX = /\s+\(\d+\)$/;
+
+function nextForkThreadName(sourceName: string, threads: ThreadSummary[]) {
+  const baseName = sourceName.trim().replace(FORK_NAME_SUFFIX, "") || "New Agent";
+  const existingNames = new Set(threads.map((thread) => thread.name.trim()));
+  let index = 1;
+  while (existingNames.has(`${baseName} (${index})`)) {
+    index += 1;
+  }
+  return `${baseName} (${index})`;
+}
 
 type UseThreadActionsOptions = {
   dispatch: Dispatch<ThreadAction>;
@@ -55,6 +67,7 @@ type UseThreadActionsOptions = {
   threadSortKey: ThreadListSortKey;
   onDebug?: (entry: DebugEntry) => void;
   getCustomName: (workspaceId: string, threadId: string) => string | undefined;
+  renameThread: (workspaceId: string, threadId: string, name: string) => void;
   threadActivityRef: MutableRefObject<Record<string, Record<string, number>>>;
   loadedThreadsRef: MutableRefObject<Record<string, boolean>>;
   replaceOnResumeRef: MutableRefObject<Record<string, boolean>>;
@@ -84,6 +97,7 @@ export function useThreadActions({
   threadSortKey,
   onDebug,
   getCustomName,
+  renameThread,
   threadActivityRef,
   loadedThreadsRef,
   replaceOnResumeRef,
@@ -165,6 +179,8 @@ export function useThreadActions({
         });
         const threadId = extractThreadId(response);
         if (threadId) {
+          const thread = extractThreadFromResponse(response);
+          if (thread) dispatch({ type: "setThreadCommands", threadId, commands: commandsFromThread(thread) });
           dispatch({ type: "ensureThread", workspaceId, threadId });
           if (shouldActivate) {
             dispatch({ type: "setActiveThreadId", workspaceId, threadId });
@@ -238,6 +254,7 @@ export function useThreadActions({
         });
         const thread = extractThreadFromResponse(response);
         if (thread) {
+          dispatch({ type: "setThreadCommands", threadId, commands: commandsFromThread(thread) });
           dispatch({ type: "ensureThread", workspaceId, threadId });
           const tokenUsage = thread.tokenUsage ?? thread.token_usage;
           if (tokenUsage && typeof tokenUsage === "object") {
@@ -358,21 +375,28 @@ export function useThreadActions({
     async (
       workspaceId: string,
       threadId: string,
+      entryId: string,
       options?: { activate?: boolean },
     ) => {
       if (!threadId) {
         return null;
       }
       const shouldActivate = options?.activate !== false;
+      const workspaceThreads = threadsByWorkspace[workspaceId] ?? [];
+      const sourceName =
+        getCustomName(workspaceId, threadId) ??
+        workspaceThreads.find((thread) => thread.id === threadId)?.name ??
+        "New Agent";
+      const forkedThreadName = nextForkThreadName(sourceName, workspaceThreads);
       onDebug?.({
         id: `${Date.now()}-client-thread-fork`,
         timestamp: Date.now(),
         source: "client",
         label: "thread/fork",
-        payload: { workspaceId, threadId },
+        payload: { workspaceId, threadId, entryId },
       });
       try {
-        const response = await forkThreadService(workspaceId, threadId);
+        const response = await forkThreadService(workspaceId, threadId, entryId);
         onDebug?.({
           id: `${Date.now()}-server-thread-fork`,
           timestamp: Date.now(),
@@ -392,8 +416,10 @@ export function useThreadActions({
             threadId: forkedThreadId,
           });
         }
+        updateThreadParent(threadId, [forkedThreadId]);
         loadedThreadsRef.current[forkedThreadId] = false;
         await resumeThreadForWorkspace(workspaceId, forkedThreadId, true, true);
+        renameThread(workspaceId, forkedThreadId, forkedThreadName);
         return forkedThreadId;
       } catch (error) {
         onDebug?.({
@@ -409,9 +435,13 @@ export function useThreadActions({
     [
       dispatch,
       extractThreadId,
+      getCustomName,
       loadedThreadsRef,
       onDebug,
+      renameThread,
       resumeThreadForWorkspace,
+      threadsByWorkspace,
+      updateThreadParent,
     ],
   );
 

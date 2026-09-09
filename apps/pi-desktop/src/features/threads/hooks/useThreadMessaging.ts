@@ -20,10 +20,8 @@ import { expandCustomPromptText } from "@utils/customPrompts";
 import { asString, extractRpcErrorMessage } from "@threads/utils/threadNormalize";
 import type { ThreadAction, ThreadState } from "./useThreadsReducer";
 import {
-  buildStatusLines,
   buildTurnStartPayload,
   isStaleSteerTurnError,
-  parseFastCommand,
   resolveSendMessageOptions,
   type SendMessageOptions,
 } from "./threadMessagingHelpers";
@@ -34,7 +32,6 @@ type UseThreadMessagingOptions = {
   model?: string | null;
   effort?: string | null;
   serviceTier?: ServiceTier | null | undefined;
-  onSelectServiceTier?: (tier: ServiceTier | null | undefined) => void;
   steerEnabled: boolean;
   customPrompts: CustomPromptOption[];
   threadStatusById: ThreadState["threadStatusById"];
@@ -43,6 +40,7 @@ type UseThreadMessagingOptions = {
   dispatch: Dispatch<ThreadAction>;
   getCustomName: (workspaceId: string, threadId: string) => string | undefined;
   markProcessing: (threadId: string, isProcessing: boolean) => void;
+  getStatusRevision: (threadId: string) => number;
   setActiveTurnId: (threadId: string, turnId: string | null) => void;
   recordThreadActivity: (
     workspaceId: string,
@@ -53,13 +51,6 @@ type UseThreadMessagingOptions = {
   onDebug?: (entry: DebugEntry) => void;
   pushThreadErrorMessage: (threadId: string, message: string) => void;
   ensureThreadForActiveWorkspace: () => Promise<string | null>;
-  refreshThread: (workspaceId: string, threadId: string) => Promise<string | null>;
-  forkThreadForWorkspace: (
-    workspaceId: string,
-    threadId: string,
-    options?: { activate?: boolean },
-  ) => Promise<string | null>;
-  updateThreadParent: (parentId: string, childIds: string[]) => void;
 };
 
 export function useThreadMessaging({
@@ -68,7 +59,6 @@ export function useThreadMessaging({
   model,
   effort,
   serviceTier,
-  onSelectServiceTier,
   steerEnabled,
   customPrompts,
   threadStatusById,
@@ -77,15 +67,13 @@ export function useThreadMessaging({
   dispatch,
   getCustomName,
   markProcessing,
+  getStatusRevision,
   setActiveTurnId,
   recordThreadActivity,
   safeMessageActivity,
   onDebug,
   pushThreadErrorMessage,
   ensureThreadForActiveWorkspace,
-  refreshThread,
-  forkThreadForWorkspace,
-  updateThreadParent,
 }: UseThreadMessagingOptions) {
   const sendMessageToThread = useCallback(
     async (
@@ -151,6 +139,14 @@ export function useThreadMessaging({
         timestamp,
       });
       markProcessing(threadId, true);
+      const submissionRevision = getStatusRevision(threadId);
+      const ownsStatus = () => getStatusRevision(threadId) === submissionRevision;
+      const clearOwnedStatus = () => {
+        if (ownsStatus()) {
+          markProcessing(threadId, false);
+          setActiveTurnId(threadId, null);
+        }
+      };
       safeMessageActivity();
       onDebug?.({
         id: `${Date.now()}-${shouldSteer ? "client-turn-steer" : "client-turn-start"}`,
@@ -202,8 +198,7 @@ export function useThreadMessaging({
         });
         if (rpcError) {
           if (requestMode !== "steer") {
-            markProcessing(threadId, false);
-            setActiveTurnId(threadId, null);
+            clearOwnedStatus();
             pushThreadErrorMessage(
               threadId,
               i18n.t("errors.turnStartFailedWithMessage", {
@@ -215,8 +210,7 @@ export function useThreadMessaging({
             return { status: "blocked" };
           }
           if (isStaleSteerTurnError(rpcError)) {
-            markProcessing(threadId, false);
-            setActiveTurnId(threadId, null);
+            clearOwnedStatus();
           }
           pushThreadErrorMessage(
             threadId,
@@ -228,22 +222,26 @@ export function useThreadMessaging({
           safeMessageActivity();
           return { status: "steer_failed" };
         }
+        const result = (response?.result ?? response) as Record<string, unknown>;
+        if (result.status === "handled" || result.status === "completed" || result.status === "queued") {
+          if (result.isRunning === false || (result.isRunning === undefined && result.status !== "queued")) {
+            clearOwnedStatus();
+          }
+          return { status: result.status };
+        }
         if (requestMode === "steer") {
-          const result = (response?.result ?? response) as Record<string, unknown>;
           const steeredTurnId = asString(result?.turnId ?? result?.turn_id ?? "");
-          if (steeredTurnId) {
+          if (steeredTurnId && ownsStatus()) {
             setActiveTurnId(threadId, steeredTurnId);
           }
           return { status: "sent" };
         }
-        const result = (response?.result ?? response) as Record<string, unknown>;
         const turn = (result?.turn ?? response?.turn ?? null) as
           | Record<string, unknown>
           | null;
         const turnId = asString(turn?.id ?? "");
         if (!turnId) {
-          markProcessing(threadId, false);
-          setActiveTurnId(threadId, null);
+          clearOwnedStatus();
           pushThreadErrorMessage(
             threadId,
             i18n.t("errors.turnStartFailed", { ns: "messages" }),
@@ -251,16 +249,14 @@ export function useThreadMessaging({
           safeMessageActivity();
           return { status: "blocked" };
         }
-        setActiveTurnId(threadId, turnId);
+        if (ownsStatus()) {
+          setActiveTurnId(threadId, turnId);
+        }
         return { status: "sent" };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        if (requestMode !== "steer") {
-          markProcessing(threadId, false);
-          setActiveTurnId(threadId, null);
-        } else if (isStaleSteerTurnError(errorMessage)) {
-          markProcessing(threadId, false);
-          setActiveTurnId(threadId, null);
+        if (requestMode !== "steer" || isStaleSteerTurnError(errorMessage)) {
+          clearOwnedStatus();
         }
         onDebug?.({
           id: `${Date.now()}-${requestMode === "steer" ? "client-turn-steer-error" : "client-turn-start-error"}`,
@@ -289,6 +285,7 @@ export function useThreadMessaging({
       serviceTier,
       activeTurnIdByThread,
       getCustomName,
+      getStatusRevision,
       markProcessing,
       model,
       onDebug,
@@ -426,155 +423,6 @@ export function useThreadMessaging({
     setActiveTurnId,
   ]);
 
-  const startStatus = useCallback(
-    async (_text: string) => {
-      if (!activeWorkspace) {
-        return;
-      }
-      const threadId = await ensureThreadForActiveWorkspace();
-      if (!threadId) {
-        return;
-      }
-
-      const lines = buildStatusLines({
-        model,
-        serviceTier,
-        effort,
-      });
-      const timestamp = Date.now();
-      recordThreadActivity(activeWorkspace.id, threadId, timestamp);
-      dispatch({
-        type: "addAssistantMessage",
-        threadId,
-        text: lines.join("\n"),
-      });
-      safeMessageActivity();
-    },
-    [
-      activeWorkspace,
-      dispatch,
-      effort,
-      ensureThreadForActiveWorkspace,
-      model,
-      serviceTier,
-      recordThreadActivity,
-      safeMessageActivity,
-    ],
-  );
-
-  const startFast = useCallback(
-    async (text: string) => {
-      if (!activeWorkspace) {
-        return;
-      }
-      const threadId = await ensureThreadForActiveWorkspace();
-      if (!threadId) {
-        return;
-      }
-
-      const action = parseFastCommand(text);
-      const isEnabled = serviceTier === "fast";
-      let nextTier = serviceTier ?? null;
-      let message = "";
-
-      if (action === "invalid") {
-        message = i18n.t("commands.fast.usage", { ns: "messages" });
-      } else if (action === "status") {
-        message = i18n.t("commands.fast.status", {
-          ns: "messages",
-          state: i18n.t(
-            isEnabled ? "commands.status.on" : "commands.status.off",
-            { ns: "messages" },
-          ),
-        });
-      } else {
-        nextTier =
-          action === "on"
-            ? "fast"
-            : action === "off"
-              ? null
-              : isEnabled
-                ? null
-                : "fast";
-        onSelectServiceTier?.(nextTier);
-        message = i18n.t(
-          nextTier === "fast"
-            ? "commands.fast.enabled"
-            : "commands.fast.disabled",
-          { ns: "messages" },
-        );
-      }
-
-      const timestamp = Date.now();
-      recordThreadActivity(activeWorkspace.id, threadId, timestamp);
-      dispatch({
-        type: "addAssistantMessage",
-        threadId,
-        text: message,
-      });
-      safeMessageActivity();
-    },
-    [
-      activeWorkspace,
-      dispatch,
-      ensureThreadForActiveWorkspace,
-      onSelectServiceTier,
-      recordThreadActivity,
-      safeMessageActivity,
-      serviceTier,
-    ],
-  );
-
-  const startFork = useCallback(
-    async (text: string) => {
-      if (!activeWorkspace || !activeThreadId) {
-        return;
-      }
-      const trimmed = text.trim();
-      const rest = trimmed.replace(/^\/fork\b/i, "").trim();
-      const threadId = await forkThreadForWorkspace(activeWorkspace.id, activeThreadId);
-      if (!threadId) {
-        return;
-      }
-      updateThreadParent(activeThreadId, [threadId]);
-      if (rest) {
-        await sendMessageToThread(activeWorkspace, threadId, rest, []);
-      }
-    },
-    [
-      activeThreadId,
-      activeWorkspace,
-      forkThreadForWorkspace,
-      sendMessageToThread,
-      updateThreadParent,
-    ],
-  );
-
-  const startResume = useCallback(
-    async (_text: string) => {
-      if (!activeWorkspace) {
-        return;
-      }
-      if (activeThreadId && threadStatusById[activeThreadId]?.isProcessing) {
-        return;
-      }
-      const threadId = activeThreadId ?? (await ensureThreadForActiveWorkspace());
-      if (!threadId) {
-        return;
-      }
-      await refreshThread(activeWorkspace.id, threadId);
-      safeMessageActivity();
-    },
-    [
-      activeThreadId,
-      activeWorkspace,
-      ensureThreadForActiveWorkspace,
-      refreshThread,
-      safeMessageActivity,
-      threadStatusById,
-    ],
-  );
-
   const startCompact = useCallback(
     async (_text: string) => {
       if (!activeWorkspace) {
@@ -610,10 +458,6 @@ export function useThreadMessaging({
     interruptTurn,
     sendUserMessage,
     sendUserMessageToThread,
-    startFork,
-    startResume,
     startCompact,
-    startFast,
-    startStatus,
   };
 }

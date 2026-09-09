@@ -44,6 +44,34 @@ const models: ModelOption[] = [
 ];
 
 describe("useWorkspaceHome", () => {
+  it("reloads the prepared workspace without starting a thread", async () => {
+    const reloadWorkspace = vi.fn().mockResolvedValue(undefined);
+    const startThreadForWorkspace = vi.fn();
+    const sendUserMessageToThread = vi.fn();
+    const { result } = renderHook(() =>
+      useWorkspaceHome({
+        activeWorkspace: workspace,
+        models,
+        selectedModelId: "openai/gpt-5.1-max",
+        addWorktreeAgent: vi.fn(),
+        startThreadForWorkspace,
+        sendUserMessageToThread,
+        reloadWorkspace,
+      }),
+    );
+
+    act(() => result.current.setDraft("/reload"));
+    await act(async () => {
+      expect(await result.current.startRun()).toBe(true);
+    });
+
+    expect(reloadWorkspace).toHaveBeenCalledOnce();
+    expect(startThreadForWorkspace).not.toHaveBeenCalled();
+    expect(sendUserMessageToThread).not.toHaveBeenCalled();
+    expect(result.current.draft).toBe("");
+    expect(result.current.runs).toEqual([]);
+  });
+
   it("uses provider-qualified model identity for worktree runs", async () => {
     const addWorktreeAgent = vi.fn().mockResolvedValue(worktreeWorkspace);
     const startThreadForWorkspace = vi.fn().mockResolvedValue("thread-1");

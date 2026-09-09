@@ -835,7 +835,10 @@ impl SessionContextAccess for PiPluginContext {
         _scope: PluginContextScope,
         id: IsolatedSessionId,
     ) -> Result<IsolatedSessionOutcome, PluginContextError> {
-        self.pi_session()?.wait_for_isolated_session(&id).await
+        // Capture only the receipt channel before awaiting. Retaining a parent
+        // PiSession here would keep its plugin runtime (and monitor owner) alive.
+        let waiting = self.pi_session()?.isolated_session_waiter(&id)?;
+        waiting.await
     }
 
     fn abort_isolated_session(

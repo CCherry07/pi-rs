@@ -65,6 +65,7 @@ type WorkspaceHomeProps = {
   threadStatusById: ThreadStatusById;
   onSelectInstance: (workspaceId: string, threadId: string) => void;
   skills: SkillOption[];
+  runtimeCommands?: import("../../../utils/desktopCommands").RuntimeCommand[];
   prompts: CustomPromptOption[];
   files: string[];
   dictationEnabled: boolean;
@@ -123,6 +124,7 @@ export function WorkspaceHome({
   threadStatusById,
   onSelectInstance,
   skills,
+  runtimeCommands,
   prompts,
   files,
   dictationEnabled,
@@ -184,6 +186,7 @@ export function WorkspaceHome({
     selectionStart,
     disabled: isSubmitting,
     skills,
+    runtimeCommands,
     prompts,
     files,
     textareaRef,

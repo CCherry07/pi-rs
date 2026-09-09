@@ -25,12 +25,30 @@ impl SessionPlugin for SubagentsSessionPlugin {
         PluginId::new("subagents")
     }
 
+    async fn session_start(
+        &self,
+        context: &SessionPluginContext,
+        _event: &pi_session::SessionStartEvent,
+    ) -> Result<(), SessionPluginError> {
+        self.runtime.coordination().bind_session(
+            context.identity().id.clone(),
+            context.plugin_context_handle(),
+        );
+        Ok(())
+    }
+
     async fn session_shutdown(
         &self,
         context: &SessionPluginContext,
         event: &SessionShutdownEvent,
     ) -> Result<(), SessionPluginError> {
         if event.reason != SessionShutdownReason::Reload {
+            // Retain the current generation's control handle until monitors
+            // have aborted/drained their children, including after a reload.
+            self.runtime
+                .coordination()
+                .cancel_owner(&context.identity().id);
+            self.runtime.drain_monitors(&context.identity().id).await;
             self.runtime.forget_session(&context.identity().id);
         }
         Ok(())

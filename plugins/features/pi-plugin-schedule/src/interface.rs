@@ -178,6 +178,7 @@ impl Tool for ScheduleTool {
                 model: context.models.selection()?,
                 thinking_level: context.models.thinking_level()?,
                 active_tools: Some(context.session.active_tools()?),
+                ..IsolatedSessionOptions::default()
             }
         } else {
             IsolatedSessionOptions::default()
@@ -232,6 +233,7 @@ impl Command for ScheduleCommand {
                 model: context.models.selection()?,
                 thinking_level: context.models.thinking_level()?,
                 active_tools: Some(context.session.active_tools()?),
+                ..IsolatedSessionOptions::default()
             }
         } else {
             IsolatedSessionOptions::default()

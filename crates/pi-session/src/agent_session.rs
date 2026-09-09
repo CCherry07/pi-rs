@@ -847,6 +847,73 @@ impl AgentSession {
         &self.log
     }
 
+    pub(crate) fn isolated_context_seed(
+        &self,
+    ) -> Result<crate::isolated_context::IsolatedContextSeed, SessionError> {
+        let document = self.log.load()?;
+        let entries = document.branch()?.into_iter().cloned().collect::<Vec<_>>();
+        let state = self.runtime.agent().state();
+        let request = state
+            .is_running
+            .then(|| {
+                state
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| !matches!(message, Message::ToolResult(_)))
+            })
+            .flatten();
+        let entries = crate::isolated_context::fork_entries(&entries, request);
+        Ok(crate::isolated_context::IsolatedContextSeed {
+            parent_session_id: document.header.id.clone(),
+            messages: crate::build_session_context(entries, &self.context_options).messages,
+        })
+    }
+
+    /// Called only on a prepared fresh session, before session_start or input.
+    /// A custom entry keeps inherited messages out of configuration and billing
+    /// reducers, and does not trigger first-assistant materialization.
+    pub(crate) fn initialize_isolated_context(
+        &self,
+        seed: crate::isolated_context::IsolatedContextSeed,
+    ) -> Result<(), SessionError> {
+        let estimated = seed
+            .messages
+            .iter()
+            .map(crate::estimate_tokens)
+            .sum::<u64>();
+        if let Some(window) = self.active_context_window()
+            && estimated >= window
+        {
+            return Err(SessionError::Runtime(format!(
+                "fork context estimate ({estimated} tokens) exceeds child context window ({window}); compact the parent or use fresh context"
+            )));
+        }
+        let record = self
+            .log
+            .append_session_record(SessionEntry::Custom(CustomEntry {
+                custom_type: crate::isolated_context::CUSTOM_TYPE.to_string(),
+                data: Some(
+                    serde_json::to_value(seed)
+                        .map_err(|error| SessionError::InvalidPayload(error.to_string()))?,
+                ),
+            }))?;
+        let context = self
+            .log
+            .load()?
+            .context_with_options(&self.context_options)?;
+        let state = self.runtime.agent().state();
+        restore_runtime_context_with_request(
+            &self.runtime,
+            &context,
+            crate::InitialModelRequest::default()
+                .requested(state.provider_id, state.model_id.as_str()),
+        )?;
+        self.events
+            .publish_initialized_context(record, self.runtime.agent().state());
+        Ok(())
+    }
+
     /// Returns the authoritative frontend state at its current revision.
     pub fn snapshot(&self) -> crate::AgentSessionSnapshot {
         self.events.snapshot()
@@ -4291,6 +4358,127 @@ mod tests {
             ));
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn isolated_seed_is_deferred_and_does_not_bill_ancestor_responses() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = |tokens| {
+            PiRuntime::builder()
+                .provider_plugin(ScriptedProviderPlugin::scripted([text_turn_with_usage(
+                    "answer", tokens,
+                )]))
+                .agent_options(AgentOptions {
+                    provider_id: "scripted".into(),
+                    model_id: "test".into(),
+                    ..Default::default()
+                })
+                .build()
+                .unwrap()
+        };
+        let parent = AgentSession::create(runtime(100), directory.path().join("parent.jsonl"))
+            .await
+            .unwrap();
+        parent.prompt("parent request").await.unwrap();
+        let small_path = directory.path().join("too-small.jsonl");
+        let small = AgentSession::prepare_create_with_options(
+            runtime(7),
+            &small_path,
+            AgentSessionOptions {
+                context_window: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let error = small
+            .session()
+            .initialize_isolated_context(parent.isolated_context_seed().unwrap())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("compact the parent or use fresh")
+        );
+        assert!(!small_path.exists());
+        assert!(
+            small
+                .session()
+                .log()
+                .append_session_record(SessionEntry::Custom(CustomEntry {
+                    custom_type: crate::isolated_context::CUSTOM_TYPE.into(),
+                    data: Some(serde_json::json!({"messages": "corrupt"})),
+                }))
+                .is_err()
+        );
+        assert!(
+            small
+                .session()
+                .log()
+                .load()
+                .unwrap()
+                .context()
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        let path = directory.path().join("child.jsonl");
+        let prepared = AgentSession::prepare_create(runtime(7), &path)
+            .await
+            .unwrap();
+        let child = prepared.session();
+        child
+            .initialize_isolated_context(parent.isolated_context_seed().unwrap())
+            .unwrap();
+        assert!(!path.exists());
+        assert_eq!(
+            crate::aggregate_document_usage(&child.log().load().unwrap()).total_tokens,
+            0
+        );
+        assert_eq!(child.runtime().agent().state().messages.len(), 2);
+        assert_eq!(child.snapshot().agent.messages.len(), 2);
+        let document = child.log().load().unwrap();
+        let context = document.context().unwrap();
+        let inherited_estimate =
+            crate::estimate_session_context_tokens(&document.entries, &context.messages);
+        assert_eq!(inherited_estimate.usage_tokens, 0);
+        assert!(
+            crate::current_session_context_tokens(&document.entries, &context.messages).is_none()
+        );
+        let preparation = crate::prepare_compaction(
+            &document.entries,
+            CompactionSettings::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        let compacted_messages = preparation
+            .messages_to_summarize
+            .iter()
+            .chain(&preparation.turn_prefix_messages)
+            .chain(&preparation.retained_tail)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            compacted_messages,
+            context.messages.iter().collect::<Vec<_>>()
+        );
+        let child = prepared
+            .activate(SessionStartEvent {
+                reason: SessionStartReason::Startup,
+                previous_session_file: None,
+            })
+            .await;
+        let outcome = child.prompt("child request").await.unwrap();
+        assert_eq!(outcome.new_messages.len(), 2);
+        assert!(path.exists());
+        let document = crate::SessionLog::open(&path).unwrap().1;
+        assert_eq!(document.context().unwrap().messages.len(), 4);
+        assert_eq!(crate::aggregate_document_usage(&document).total_tokens, 7);
+        assert_eq!(
+            crate::aggregate_document_usage(&parent.log().load().unwrap()).total_tokens,
+            100
+        );
+        child.shutdown().await;
+        parent.shutdown().await;
     }
 
     #[tokio::test]

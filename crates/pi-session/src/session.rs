@@ -297,6 +297,15 @@ pub(crate) fn validate_mutation_payload(value: &SessionMutation) -> Result<(), S
 fn validate_entry_payload(entry: &SessionEntry) -> Result<(), SessionError> {
     match entry {
         SessionEntry::Message(message) => validate_agent_message(&message.message),
+        SessionEntry::Custom(_) if crate::isolated_context::is_seed(entry) => {
+            let seed = crate::isolated_context::read_seed(entry).ok_or_else(|| {
+                SessionError::InvalidPayload("invalid isolated context seed".to_string())
+            })?;
+            for message in &seed.messages {
+                validate_agent_message(message)?;
+            }
+            Ok(())
+        }
         SessionEntry::Compaction(compaction) => {
             for message in &compaction.retained_tail {
                 validate_agent_message(message)?;

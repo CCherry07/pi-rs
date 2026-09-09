@@ -223,6 +223,50 @@ AI commit-message generation runs through a disposable Pi session and removes th
 collecting the response. The desktop has no account-login, hosted-usage, approval, review,
 remote-daemon, or external agent-configuration compatibility layer. Its only application-level
 infrastructure integrations are the app-owned updater/release-notes flow and Sentry.
+Desktop thread snapshots include `command_specs()` from the selected `PiSession::current()`;
+command/skill discovery never constructs a throwaway session. On entering a workspace without a
+selected thread, Desktop prepares one managed in-memory draft via `pi_start_thread(prepareOnly)`.
+`SessionStore` serializes preparation per workspace and reuses that handle for command, skill,
+and model discovery. Preparation returns a snapshot without publishing `thread/started` or
+selecting a visible thread. The first normal `pi_start_thread` claims the prepared handle, so
+completion and execution use the same generation; background prompt sessions remain separate.
+Both the workspace home input and the conversation composer receive its registered commands
+and skills. The existing first-assistant-response persistence rule keeps an unused draft out of
+resume history. Closing/reopening the app rebuilds drafts through the normal runtime factory;
+no new runtime lifecycle or command registry is introduced. The Desktop Adapter retains case-insensitive exact-name priority for its six UI actions
+(`/compact`, `/fast`, `/fork`, `/new`, `/resume`, `/status`) and reserves `/prompts:*` for its
+custom-prompt expansion. Completion and dispatch share that priority, hiding conflicting runtime
+names while the composer displays a visible collision warning. These UI actions are intentional Desktop divergences (notably `/resume` refreshes the
+thread and `/fast` remains a UI-only setting rather than a native provider service tier).
+All other runtime commands pass through `AgentSession.submit` once, including transformation and
+input hooks; Tauri returns the real handled/queued/completed receipt rather than fabricating an
+in-progress turn. Product events continue streaming while the IPC call awaits completion. Handled
+receipts do not require AgentStart/Settled and cannot stall local queue draining. Plugin notices
+are transient severity-bearing Desktop transcript entries, not persisted/provider messages.
+Long-lived Desktop forwarders use the existing `PiSession::subscribe()` latest-value watch.
+After a replacement they subscribe to the latest `AgentSession` and publish `thread/replaced`
+with that subscription's snapshot and the same session's command catalog. The frontend refreshes
+history, status, commands, and selected identity together, including reloads that preserve the
+JSONL ID. Initial create/resume snapshots also carry commands; no separate catalog IPC or
+catalog event listener is needed. This is a deliberate Rust Desktop observation policy, not a Pi
+wire/schema change: intermediate generations may be coalesced, and transient plugin notices sent
+before the new event subscription is installed are not replayed. Displayed notices survive a
+same-ID reload. Failed preparation publishes no change and leaves the old subscription intact.
+There is no generation FIFO, activation observer bookkeeping, or detached replacement commit
+introduced for Desktop. Dropping the managed handle closes its watch and stops the forwarder;
+no liveness polling is needed. Snapshot revisions delimit subsequent events so history captured
+at subscription time is not displayed twice. When subscription starts during an active response,
+the forwarder also refreshes the completed snapshot on settlement so a missed message-start event
+cannot hide that response's final content.
+Desktop submission receipts only reconcile optimistic status while their synchronous status
+revision is still owned; later lifecycle events or submissions win even before React renders.
+Submitted attachments are consumed before awaiting IPC, so a completed turn cannot clear the
+next draft's images. Store/forwarder keys
+identify managed handles separately from replaceable JSONL IDs: an old saved ID can be reopened,
+but is never silently routed to a different current session. Failed replacement publishes no swap
+and keeps the old subscription/catalog. Only native registered commands are supported; Desktop
+keeps JS extension discovery/hosting disabled and does not emulate JS widgets, argument completion
+callbacks, interactive dialogs, or CLI-only frontend commands.
 Desktop image attachments are decoded from data URLs by the Adapter and enter the same
 `SessionInput` Interface as text; submit, steer, and follow-up processing preserve those images
 through input hooks, durable queue records, and provider projection.
@@ -448,7 +492,7 @@ existing releases are not overwritten and publication failures retain their draf
 Scaffolds pin a full SDK Git revision (or use an explicit local checkout), the host's Rust
 toolchain and a seeded dependency lock. Independent crates.io publication remains open because
 the SDK fingerprint currently consumes the complete workspace source/lock layout. The author
-tools preserve ABI 16 and the existing exact-build compatibility policy.
+tools preserve the current ABI and the existing exact-build compatibility policy.
 
 ## End-to-end validation
 
@@ -946,7 +990,7 @@ Each assistant stream owns one mutable assembler state behind a read-only `Assis
 reducer, ordered native hooks, and listeners therefore do not clone cumulative content. Consumers
 that require a full message call `snapshot()` explicitly, while `message_end` and `turn_end` share
 the completed immutable assistant message. These hook fields were introduced in native ABI 7;
-ABI 16 adds detached usage attribution and ephemeral usage/call outcomes. ABI 8 adds UI
+ABI 17 adds fresh/fork isolated-context initialization. ABI 16 adds detached usage attribution and ephemeral usage/call outcomes. ABI 8 adds UI
 confirmation, ABI 9 adds isolated-session control, ABI 10 adds isolated-session
 initial runtime selection, ABI 11 adds direct tool-free completion, ABI 12 adds ephemeral tool loops,
 ABI 13 adds inherited prompt/history, guarded dispatch and invocation observations, and ABI 14 adds
@@ -1443,23 +1487,75 @@ promoting the child to a frontend-owned `PiSession`. Isolated files live below t
 owning session's sibling directory and therefore do not enter the top-level resume listing. Closing
 an owner closes its registered isolated descendants. Completed child logs remain outside top-level
 resume discovery; a frontend may resolve one through its parent link as a read-only snapshot without
-registering or resuming it as a primary session. Fork seeding, detached-run reattachment, and
-background status remain later layers rather than widening this interface.
+registering or resuming it as a primary session. In-process detached receipts and supervisor
+coordination are feature-owned layers over this interface; cross-process reattachment remains
+unimplemented.
 
-`pi-plugin-subagents` is the first policy module over that seam. It registers one parallel-safe
-`subagent` tool with focused `scout`, `worker`, `reviewer`, `oracle`, and `delegate` built-ins. Its
+Isolated prompt tasks have manager-owned, abort-on-drop supervisor handles. A prompt panic becomes
+an explicit retained terminal failure rather than an unobserved task exit. Launch cancellation and
+normal abort keep polling the same prompt to preserve its persistence and settlement cleanup;
+shutdown/close signal all relevant runs before joining any. A cancelled registry-drain future
+retains the handles and tree membership for another drain. Waiters capture only a result channel,
+not the manager or task owner, so waiting cannot prevent owner-drop cancellation. Explicit shutdown
+is the awaited cleanup contract; dropping the manager requests task cancellation only. Cooperative
+cleanup has no new hard deadline, and a non-cooperative hook may still block it. This does not make
+all session lifecycle hooks cancellation-safe or repair an Agent's state after arbitrary native
+plugin panics.
+
+`IsolatedSessionOptions.context` defaults to `Fresh`; `Fork` initializes the child from the
+caller's active branch after its existing compaction/context projection. During a running tool
+batch, the cutoff precedes the requesting assistant message, including the triggering user input
+but excluding the entire active tool batch even when a sibling has already returned. MessageEnd
+persistence is awaited before tool dispatch; the cutoff matches the active assistant against the
+durable/in-memory branch rather than waiting for sibling tools. No pending-tool failures are
+invented for that excluded batch. Histories then evolve independently; cwd/files remain shared.
+
+The host seeds a prepared child before lifecycle activation using a v4 custom entry
+`pi.isolated_context` containing the parent session id and effective `AgentMessage` history.
+This is a deliberate Rust divergence from pi-subagents' branch-file copy: the host snapshots the
+session log instead of copying its file. Both ordinary and isolated forks reject unsaved parents;
+normal tool dispatch follows assistant persistence, so first-turn delegation can still fork.
+Seed messages preserve images, retained compaction summaries and unknown
+wire extensions. They do not replace child model/thinking/tools, contribute ancestor usage to child
+billing, or trigger first-response materialization. Reload/replay projects the seed back into context;
+child compaction expands its messages and treats ancestor usage as an obsolete context checkpoint.
+An estimated seed at or above the child's known context window fails before launch, with instructions
+to compact the parent or choose fresh context; initialization never silently truncates the seed.
+The seed remains separate from child-authored message entries and returned run outcomes. Native ABI
+17 includes the new context-mode field; exact-build plugin compatibility and pinned-library lifetime
+are unchanged.
+
+`pi-plugin-subagents` is the first policy module over that seam. It registers the parallel-safe
+`subagent` tool with focused `scout`, `worker`, `reviewer`, `oracle`, and `delegate` built-ins, plus
+`contact_supervisor`, `subagent_supervisor`, and `bg_wait`. Its
 generation-local agent catalog overlays those built-ins with recursive Markdown discovery from the
 global agent directory's `agents/` subtree and the nearest trusted project `.pi/agents/` subtree;
 project definitions win name collisions. Definition frontmatter owns `name`, `description`,
-`aliases`, `systemPromptMode`, `allowNestedSubagents`, `maxSubagentDepth`, `tools`, `excludeTools`,
-`model`, `thinking`, `inheritSkills`, `skills`, `skillPath`, and `timeoutMs`,
+`aliases`, `systemPromptMode`, `inheritProjectContext`, `allowNestedSubagents`,
+`maxSubagentDepth`, `tools`, `excludeTools`, `model`, `thinking`, `inheritSkills`, `skills`,
+`skillPath`, `defaultContext`, and `timeoutMs`,
 while the Markdown body owns the role system prompt. Omitted selections inherit from the immediate
-parent; an empty `tools` field selects no tools; an explicit list is a strict allowlist under the
-inherited ceiling, and exclusions can only narrow the resolved set. Canonical names beat aliases;
+parent; an empty `tools` field selects no tools; an explicit list selects work tools under the
+inherited ceiling. Skill-loading and coordination additions described below also remain within
+that ceiling, and exclusions can only narrow the resolved set. Canonical names beat aliases;
 alias-to-alias ambiguity fails candidate generation. Bare model ids prefer the current provider and otherwise require a unique
 available catalogue match; thinking levels are checked against the resolved model before launch.
 Reload rescans the catalog transactionally, and untrusted project definitions never enter the
 candidate generation.
+
+The subagent tool accepts optional `context: "fresh" | "fork"`. Selection precedence is explicit
+tool argument, profile `defaultContext`, then fresh. Built-in worker/oracle default to fork;
+scout/reviewer/delegate default to fresh. The plugin's provider-context hook removes inherited
+subagent call/result pairs, parent-only orchestration notices and old private run markers without
+touching other tool pairs, parent storage, or the child's own nested delegation. This policy stays
+outside generic session context initialization. Each child assembles its own role/system prompt.
+
+Child prompt specialization follows pi-subagents' prompt layering: a child/fanout boundary and
+escaped `<active_agent>` identity precede the role body, `replace` drops the ordinary Pi prompt,
+and declared project-context inheritance plus the current working directory remain attached.
+pi-rs keeps a private first-line HTML run marker in the task message to bind the independently
+constructed child generation; that marker is a native execution-protocol divergence rather than
+role guidance.
 
 `SkillsPlugin` exposes a small prompt-projection Interface over its immutable generation catalog.
 Normal sessions use the complete model-visible catalog; the subagent Adapter selects inherited and
@@ -1482,10 +1578,19 @@ The launch record retains the resolved owned profile, so a file change between p
 child binding cannot mix two definition generations. Profile specialization is applied by the plugin's generation hook;
 `pi-core` and `pi-session` never interpret profile names or subagent policy. An authorized child
 receives the same feature plugin and can launch its own isolated child within inherited limits. The
-current tool waits in the foreground and projects the child's final textual response into the parent
-tool result; multiple tool calls emitted in one assistant turn use the existing parallel tool
-scheduler. A positive profile `timeoutMs` bounds that wait, aborts the isolated handle on expiry,
-and returns a terminal timed-out result without widening the generic isolated-session Interface.
+tool normally waits in the foreground and projects the child's final textual response into the
+parent tool result; multiple calls use the existing parallel scheduler. On a blocking supervisor
+request, all foreground subagent waits owned by that parent yield retained `detached` receipts so
+the parent's tool batch can finish. The original child sessions remain alive. The feature-owned
+`ChildRun` monitor, not the original tool invocation, owns completion, cancellation and the profile
+`timeoutMs` deadline. That deadline remains a total run limit including supervisor waiting.
+The monitor acquires its generation-bound wait before returning foreground/detached control, so
+an immediate parent reload cannot retire an as-yet-unused wait handle. Feature-owned monitor handles
+are drained on non-reload session shutdown, retaining the current control handle until cancellation
+finishes. Monitors weakly reference their runtime to avoid owning their own task registry. Unwinding
+or dropping a monitor publishes a terminal failure and releases capacity; ordinary wait cancellation
+still leaves a detached child running. Only terminal completion releases active capacity. Role/skill assignments remain until session
+shutdown so a later nested-child notification cannot promote its supervisor into a root agent.
 A separate session-plugin adapter clears lineage on quit or logical-session replacement
 while retaining cumulative state across a generation reload. The desktop projector recognizes the
 feature-owned `isolatedSessionId` in subagent tool updates, observes that child read-only, and emits
@@ -1493,6 +1598,43 @@ the same semantic thread/item stream used for primary sessions. It projects pare
 collaboration tool items so the existing desktop task hierarchy can render nested execution and
 select a child for inspection. The TUI and other frontends continue to render only their explicitly
 held primary session unless they opt into the observation seam.
+
+Supervisor tools follow `nicobailon/pi-subagents` revision
+`d3308745d2230d5aa94b9d6e643184adef3fd761` (`native-supervisor-channel.ts`, foreground execution,
+and `subagent-wait.ts`). `contact_supervisor` is authorized by the live child assignment, not by
+forked history or a caller-supplied destination. `need_decision` and `interview_request` wait for
+a correlated reply; `progress_update` delivers immediately without requiring one. Interviews
+parse plain or fenced JSON and report parse errors rather than claiming schema validation.
+The reply deadline defaults to ten minutes (`PI_INTERCOM_ASK_TIMEOUT_MS`). Parent
+`subagent_supervisor` supports `list`, `pending`, `status`, and `reply`, including exact `replyTo`
+or unambiguous request-prefix/agent selection via `to`. Owner checks, expiry and one-shot delivery
+reject foreign, stale and repeated replies. Request cancellation withdraws its pending entry.
+
+`bg_wait` supports a run id/prefix, `all`, `timeoutMs` (default thirty minutes), and
+`stopOnAttention`; supervisor requests always interrupt a wait even when the latter is false.
+It snapshots the owned active set when no id is supplied; a named terminal receipt remains
+queryable. Wait timeout or wait cancellation leaves the child running. Requests and detached
+completion notifications use the existing custom-message queue with `trigger_turn: true`, which
+preserves tool-call/result pairing before the next provider request. Replies are journaled as
+`subagent_supervisor_reply` custom entries. Generation reload refreshes the parent delivery/control
+handle while preserving pending requests and live monitors. Closing the owner cancels its runs.
+Detached completion uses first-terminal-wins receipts and a private in-process pending/in-flight
+notification table. Failed adapter delivery, including an unwinding adapter, is retained for the
+next parent binding; a rebind during delivery retries only after failure and never duplicates an
+acknowledged call. Removing a run/owner discards pending delivery and stale acknowledgements cannot
+modify a replacement notification. Acceptance is the existing message adapter's `Ok` boundary, not
+an end-to-end exactly-once guarantee: idle fire-and-forget prompt delivery still lacks a durable
+acceptance handshake with generation replacement. Named terminal receipts remain the query fallback.
+No notification state survives process restart.
+
+The deliberate Rust divergence is an in-process mailbox/watch implementation instead of upstream
+filesystem IPC. There is no standalone detached runner, process-restart reattachment, external
+background-work provider, or non-blocking durable wait subscription; `nonBlocking: true` fails
+explicitly. No native ABI or Pi v4 record shape changes are needed. Coordination guidance is
+run-local and capability-gated. The child launch plan injects coordination tools only within the
+parent's active ceiling; exclusions and explicit `tools: []` keep the bridge off. Leaf children
+receive `contact_supervisor`; nested coordinators may also receive the reply/wait tools. Parent
+coordination calls/results and supervisor notices are removed only from inherited fork history.
 
 Each `PiSession` has one replaceable current `AgentSession`. Its internal `AgentSessionRuntime`
 serializes replacement, dispatches `session_before_switch` or `session_before_fork`, settles the

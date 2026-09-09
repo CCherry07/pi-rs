@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use uuid::Uuid;
 
@@ -16,9 +16,41 @@ pub struct SubagentRuntime {
     inner: Arc<RuntimeInner>,
 }
 
+pub(crate) struct WeakSubagentRuntime(Weak<RuntimeInner>);
+
+impl WeakSubagentRuntime {
+    pub(crate) fn upgrade(&self) -> Option<SubagentRuntime> {
+        self.0.upgrade().map(|inner| SubagentRuntime { inner })
+    }
+}
+
 struct RuntimeInner {
     limits: RuntimeLimits,
     state: Mutex<RuntimeState>,
+    coordination: crate::coordination::Coordination,
+    monitors: Mutex<HashMap<String, (String, Arc<MonitorTask>)>>,
+}
+
+struct MonitorTask {
+    task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    abort: tokio::task::AbortHandle,
+}
+
+impl Drop for MonitorTask {
+    fn drop(&mut self) {
+        self.abort.abort();
+    }
+}
+
+impl MonitorTask {
+    async fn drain(&self) {
+        // Retain ownership across a cancelled shutdown future.
+        let mut task = self.task.lock().await;
+        if let Some(task) = task.as_mut() {
+            let _ = task.await;
+        }
+        task.take();
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -33,6 +65,7 @@ struct RuntimeState {
     lineages: HashMap<String, Lineage>,
     roots: HashMap<String, RootBudget>,
     runs: HashMap<String, RunRecord>,
+    assignments: HashMap<String, (String, SubagentProfile)>,
 }
 
 #[derive(Clone)]
@@ -78,7 +111,6 @@ pub(crate) enum LaunchError {
 #[derive(Debug)]
 pub(crate) struct LaunchTicket {
     run_id: String,
-    profile: SubagentProfile,
     depth: usize,
 }
 
@@ -92,19 +124,13 @@ impl LaunchTicket {
     }
 
     pub(crate) fn child_prompt(&self, task: &str) -> String {
-        format!(
-            "{marker}\nYou are the `{profile}` delegated subagent. Complete the task below and return the result to the parent session.\n\nTask:\n{task}",
-            marker = marker(&self.run_id),
-            profile = self.profile.name,
-        )
+        format!("{}\n{task}", marker(&self.run_id))
     }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ChildAssignment {
     pub(crate) profile: SubagentProfile,
-    pub(crate) depth: usize,
-    pub(crate) max_depth: usize,
 }
 
 impl Default for SubagentRuntime {
@@ -123,12 +149,69 @@ impl SubagentRuntime {
             inner: Arc::new(RuntimeInner {
                 limits,
                 state: Mutex::new(RuntimeState::default()),
+                coordination: crate::coordination::Coordination::default(),
+                monitors: Mutex::new(HashMap::new()),
             }),
+        }
+    }
+
+    pub(crate) fn downgrade(&self) -> WeakSubagentRuntime {
+        WeakSubagentRuntime(Arc::downgrade(&self.inner))
+    }
+
+    pub(crate) fn spawn_monitor(
+        &self,
+        owner: String,
+        run_id: String,
+        monitor: impl Future<Output = ()> + Send + 'static,
+    ) {
+        let mut monitors = self
+            .inner
+            .monitors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Finished task handles do not need to grow with the receipt history.
+        monitors.retain(|_, (_, task)| !task.abort.is_finished());
+        let task = tokio::spawn(monitor);
+        let abort = task.abort_handle();
+        monitors.insert(
+            run_id,
+            (
+                owner,
+                Arc::new(MonitorTask {
+                    task: tokio::sync::Mutex::new(Some(task)),
+                    abort,
+                }),
+            ),
+        );
+    }
+
+    pub(crate) async fn drain_monitors(&self, owner: &str) {
+        let tasks = self
+            .inner
+            .monitors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, (id, _))| id == owner)
+            .map(|(id, (_, task))| (id.clone(), Arc::clone(task)))
+            .collect::<Vec<_>>();
+        for (id, task) in tasks {
+            task.drain().await;
+            self.inner
+                .monitors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id);
         }
     }
 
     pub(crate) fn default_max_depth(&self) -> usize {
         self.inner.limits.max_depth
+    }
+
+    pub(crate) fn coordination(&self) -> &crate::coordination::Coordination {
+        &self.inner.coordination
     }
 
     #[cfg(test)]
@@ -225,11 +308,7 @@ impl SubagentRuntime {
                 warnings: Vec::new(),
             },
         );
-        Ok(LaunchTicket {
-            run_id,
-            profile,
-            depth,
-        })
+        Ok(LaunchTicket { run_id, depth })
     }
 
     pub(crate) fn bind_child(
@@ -258,8 +337,6 @@ impl SubagentRuntime {
         run.child_session_id = Some(child_session_id.to_string());
         let assignment = ChildAssignment {
             profile: run.profile.clone(),
-            depth: run.depth,
-            max_depth: run.max_depth,
         };
         let lineage = Lineage {
             root_session_id: run.root_session_id.clone(),
@@ -269,17 +346,43 @@ impl SubagentRuntime {
             allow_nested_subagents: run.profile.allow_nested_subagents,
         };
         state.lineages.insert(child_session_id.to_string(), lineage);
+        state.assignments.insert(
+            child_session_id.to_string(),
+            (run_id.to_string(), assignment.profile.clone()),
+        );
         Ok(assignment)
     }
 
     pub(crate) fn profile_for_run(&self, run_id: &str) -> Option<SubagentProfile> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .runs
+            .get(run_id)
+            .map(|run| run.profile.clone())
+            .or_else(|| {
+                state
+                    .assignments
+                    .values()
+                    .find(|(id, _)| id == run_id)
+                    .map(|(_, profile)| profile.clone())
+            })
+    }
+
+    pub(crate) fn assignment_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<(String, SubagentProfile)> {
         self.inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .runs
-            .get(run_id)
-            .map(|run| run.profile.clone())
+            .assignments
+            .get(session_id)
+            .cloned()
     }
 
     pub(crate) fn record_warnings(&self, run_id: &str, warnings: Vec<String>) {
@@ -317,6 +420,7 @@ impl SubagentRuntime {
         };
         if let Some(child_session_id) = run.child_session_id {
             state.lineages.remove(&child_session_id);
+            state.assignments.remove(&child_session_id);
             return;
         }
         if let Some(budget) = state.roots.get_mut(&run.root_session_id) {
@@ -330,20 +434,20 @@ impl SubagentRuntime {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(run) = state.runs.remove(run_id)
-            && let Some(child_session_id) = run.child_session_id
-        {
-            state.lineages.remove(&child_session_id);
-        }
+        // Release the active slot, but retain the role until session shutdown.
+        // A later child notification must not promote its supervisor to a root.
+        state.runs.remove(run_id);
     }
 
     pub(crate) fn forget_session(&self, session_id: &str) {
+        self.coordination().close_owner(session_id);
         let mut state = self
             .inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let lineage = state.lineages.remove(session_id);
+        state.assignments.remove(session_id);
         let closing_root = lineage
             .as_ref()
             .is_some_and(|lineage| lineage.root_session_id == session_id && lineage.depth == 0);
@@ -365,13 +469,21 @@ impl SubagentRuntime {
                 && let Some(child_session_id) = run.child_session_id
             {
                 state.lineages.remove(&child_session_id);
+                state.assignments.remove(&child_session_id);
             }
         }
         if closing_root {
             state.roots.remove(session_id);
-            state
+            let descendants = state
                 .lineages
-                .retain(|_, lineage| lineage.root_session_id != session_id);
+                .iter()
+                .filter(|(_, lineage)| lineage.root_session_id == session_id)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            for id in descendants {
+                state.lineages.remove(&id);
+                state.assignments.remove(&id);
+            }
         }
     }
 }
@@ -401,15 +513,44 @@ mod tests {
         })
     }
 
+    fn nested_profile(name: &str) -> SubagentProfile {
+        let mut profile = builtin_profile(name);
+        profile.allow_nested_subagents = true;
+        profile
+    }
+
+    #[test]
+    fn completion_releases_capacity_without_promoting_child_identity() {
+        let runtime = runtime(3, 8, 1);
+        let ticket = runtime
+            .begin_launch("root", builtin_profile("reviewer"))
+            .unwrap();
+        runtime.bind_child(ticket.run_id(), "child").unwrap();
+        runtime.finish(ticket.run_id());
+        assert!(runtime.assignment_for_session("child").is_some());
+        assert!(runtime.profile_for_run(ticket.run_id()).is_some());
+        assert!(matches!(
+            runtime.begin_launch("child", builtin_profile("reviewer")),
+            Err(LaunchError::NestedDelegationDisabled { .. })
+        ));
+        assert!(
+            runtime
+                .begin_launch("root", builtin_profile("reviewer"))
+                .is_ok()
+        );
+        runtime.forget_session("root");
+        assert!(runtime.assignment_for_session("child").is_none());
+    }
+
     #[test]
     fn lineage_allows_bounded_recursive_children() {
         let runtime = runtime(2, 8, 8);
         let first = runtime
-            .begin_launch("root", builtin_profile("delegate"))
+            .begin_launch("root", nested_profile("delegate"))
             .unwrap();
         runtime.bind_child(first.run_id(), "child").unwrap();
         let second = runtime
-            .begin_launch("child", builtin_profile("scout"))
+            .begin_launch("child", nested_profile("scout"))
             .unwrap();
         assert_eq!(second.depth(), 2);
         runtime.bind_child(second.run_id(), "grandchild").unwrap();
@@ -432,7 +573,7 @@ mod tests {
     fn default_runtime_allows_one_child_depth_and_rejects_the_second() {
         let runtime = SubagentRuntime::default();
         let ticket = runtime
-            .begin_launch("root", builtin_profile("delegate"))
+            .begin_launch("root", nested_profile("delegate"))
             .unwrap();
         assert_eq!(ticket.depth(), 1);
         runtime.bind_child(ticket.run_id(), "child").unwrap();
@@ -501,6 +642,10 @@ mod tests {
         let prompt = ticket.child_prompt("Review this change");
         assert_eq!(run_marker(&prompt), Some(ticket.run_id()));
         assert_eq!(
+            prompt,
+            format!("{}\nReview this change", marker(ticket.run_id()))
+        );
+        assert_eq!(
             run_marker(&format!("task\n{}", marker(ticket.run_id()))),
             None
         );
@@ -546,14 +691,13 @@ mod tests {
     #[test]
     fn profile_max_depth_tightens_the_inherited_limit() {
         let runtime = runtime(6, 10, 10);
-        let mut limited = builtin_profile("delegate");
+        let mut limited = nested_profile("delegate");
         limited.max_subagent_depth = Some(2);
         let first = runtime.begin_launch("root", limited).unwrap();
-        let assignment = runtime.bind_child(first.run_id(), "child").unwrap();
-        assert_eq!(assignment.max_depth, 2);
+        runtime.bind_child(first.run_id(), "child").unwrap();
 
         let second = runtime
-            .begin_launch("child", builtin_profile("delegate"))
+            .begin_launch("child", nested_profile("delegate"))
             .unwrap();
         runtime.bind_child(second.run_id(), "grandchild").unwrap();
         assert_eq!(
@@ -570,16 +714,15 @@ mod tests {
     #[test]
     fn profile_cannot_relax_a_stricter_root_limit() {
         let runtime = runtime(6, 10, 10);
-        let mut permissive = builtin_profile("delegate");
+        let mut permissive = nested_profile("delegate");
         permissive.max_subagent_depth = Some(6);
         let first = runtime
             .begin_launch_with_max_depth("root", permissive, 1)
             .unwrap();
-        let assignment = runtime.bind_child(first.run_id(), "child").unwrap();
-        assert_eq!(assignment.max_depth, 1);
+        runtime.bind_child(first.run_id(), "child").unwrap();
         assert_eq!(
             runtime
-                .begin_launch_with_max_depth("child", builtin_profile("delegate"), 6)
+                .begin_launch_with_max_depth("child", nested_profile("delegate"), 6)
                 .unwrap_err(),
             LaunchError::Depth {
                 depth: 1,
@@ -592,18 +735,18 @@ mod tests {
     fn root_configuration_is_re_resolved_without_widening_existing_children() {
         let runtime = runtime(6, 10, 10);
         let first = runtime
-            .begin_launch_with_max_depth("root", builtin_profile("delegate"), 1)
+            .begin_launch_with_max_depth("root", nested_profile("delegate"), 1)
             .unwrap();
         runtime.bind_child(first.run_id(), "child").unwrap();
 
         assert!(
             runtime
-                .begin_launch_with_max_depth("root", builtin_profile("delegate"), 2)
+                .begin_launch_with_max_depth("root", nested_profile("delegate"), 2)
                 .is_ok()
         );
         assert_eq!(
             runtime
-                .begin_launch_with_max_depth("child", builtin_profile("delegate"), 2)
+                .begin_launch_with_max_depth("child", nested_profile("delegate"), 2)
                 .unwrap_err(),
             LaunchError::Depth {
                 depth: 1,

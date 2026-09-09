@@ -1,4 +1,3 @@
-import i18n from "@/i18n";
 import type { ComposerSendIntent, ServiceTier } from "@/types";
 
 export type SendMessageOptions = {
@@ -8,8 +7,6 @@ export type SendMessageOptions = {
   serviceTier?: ServiceTier | null | undefined;
   sendIntent?: ComposerSendIntent;
 };
-
-type FastCommandAction = "toggle" | "on" | "off" | "status" | "invalid";
 
 type ResolveSendMessageOptionsArgs = {
   options?: SendMessageOptions;
@@ -48,23 +45,6 @@ export function isStaleSteerTurnError(message: string): boolean {
     return true;
   }
   return normalized.includes("active turn") && normalized.includes("not found");
-}
-
-export function parseFastCommand(text: string): FastCommandAction {
-  const arg = text.replace(/^\/fast\b/i, "").trim().toLowerCase();
-  if (!arg) {
-    return "toggle";
-  }
-  if (arg === "on") {
-    return "on";
-  }
-  if (arg === "off") {
-    return "off";
-  }
-  if (arg === "status") {
-    return "status";
-  }
-  return "invalid";
 }
 
 export function resolveSendMessageOptions({
@@ -117,35 +97,4 @@ export function buildTurnStartPayload({
     payload.serviceTier = serviceTier;
   }
   return payload;
-}
-
-export function buildStatusLines({
-  model,
-  serviceTier,
-  effort,
-}: {
-  model?: string | null;
-  serviceTier?: ServiceTier | null | undefined;
-  effort?: string | null;
-}): string[] {
-  const defaultLabel = i18n.t("commands.status.default", { ns: "messages" });
-  const lines = [
-    i18n.t("commands.status.title", { ns: "messages" }),
-    i18n.t("commands.status.model", {
-      ns: "messages",
-      value: model ?? defaultLabel,
-    }),
-    i18n.t("commands.status.fastMode", {
-      ns: "messages",
-      value: i18n.t(
-        serviceTier === "fast" ? "commands.status.on" : "commands.status.off",
-        { ns: "messages" },
-      ),
-    }),
-    i18n.t("commands.status.reasoningEffort", {
-      ns: "messages",
-      value: effort ?? defaultLabel,
-    }),
-  ];
-  return lines;
 }

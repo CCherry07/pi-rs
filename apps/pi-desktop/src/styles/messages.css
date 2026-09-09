@@ -230,8 +230,26 @@
   transition: opacity 160ms ease, transform 160ms ease;
 }
 
+.message-fork-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  right: 62px;
+  bottom: -12px;
+  padding: 4px;
+  border-radius: 999px;
+  background: var(--surface-card-strong);
+  border: 1px solid var(--border-strong);
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
 .message:hover .message-copy-button,
-.message:hover .message-quote-button {
+.message:hover .message-quote-button,
+.message:hover .message-fork-button,
+.message-fork-button:focus-visible {
   opacity: 1;
   transform: translateY(0);
 }

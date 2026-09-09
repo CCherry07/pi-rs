@@ -52,7 +52,7 @@ use crate::builtin_providers::BuiltinProviderSet;
 use crate::dynamic_providers::{DynamicProviderCandidate, DynamicProviderOverlay};
 use crate::project_trust::ProjectTrustService;
 
-const BUILTIN_TOOL_NAMES: [&str; 12] = [
+const BUILTIN_TOOL_NAMES: [&str; 15] = [
     "read",
     "grep",
     "find",
@@ -62,6 +62,9 @@ const BUILTIN_TOOL_NAMES: [&str; 12] = [
     "hashline_edit",
     "bash",
     "subagent",
+    "contact_supervisor",
+    "subagent_supervisor",
+    "bg_wait",
     "memory",
     "session_search",
     "schedule",
@@ -1343,7 +1346,18 @@ command = "fixture-command"
             .expect("subagent tool should be registered");
         assert_eq!(
             spec.parameters["properties"]["agent"]["enum"],
-            serde_json::json!(["scout", "worker", "reviewer", "oracle", "delegate"])
+            serde_json::json!([
+                "scout",
+                "worker",
+                "developer",
+                "coder",
+                "implementer",
+                "develop",
+                "reviewer",
+                "oracle",
+                "advisor",
+                "delegate"
+            ])
         );
     }
 

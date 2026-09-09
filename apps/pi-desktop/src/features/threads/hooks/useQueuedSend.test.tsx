@@ -1,38 +1,87 @@
 // @vitest-environment jsdom
 import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { WorkspaceInfo } from "@/types";
 import { useQueuedSend } from "./useQueuedSend";
-
-const workspace: WorkspaceInfo = {
-  id: "workspace-1",
-  name: "CodexMonitor",
-  path: "/tmp/codex",
-  settings: { sidebarCollapsed: false },
-};
 
 const makeOptions = (
   overrides: Partial<Parameters<typeof useQueuedSend>[0]> = {},
-) => ({
+): Parameters<typeof useQueuedSend>[0] => ({
   activeThreadId: "thread-1",
   activeTurnId: "turn-1",
   isProcessing: false,
   steerEnabled: false,
   followUpMessageBehavior: "queue" as const,
-  activeWorkspace: workspace,
-  startThreadForWorkspace: vi.fn().mockResolvedValue("thread-1"),
   sendUserMessage: vi.fn().mockResolvedValue({ status: "sent" }),
-  sendUserMessageToThread: vi.fn().mockResolvedValue(undefined),
-  startFork: vi.fn().mockResolvedValue(undefined),
-  startResume: vi.fn().mockResolvedValue(undefined),
   startCompact: vi.fn().mockResolvedValue(undefined),
-  startFast: vi.fn().mockResolvedValue(undefined),
-  startStatus: vi.fn().mockResolvedValue(undefined),
+  startReload: vi.fn().mockResolvedValue(undefined),
   clearActiveImages: vi.fn(),
   ...overrides,
 });
 
 describe("useQueuedSend", () => {
+  it.each(["message", "command"])("consumes %s attachments before waiting and preserves next draft images", async (kind) => {
+    let resolve!: () => void;
+    const pending = new Promise<void>((done) => { resolve = done; });
+    let draft = ["submitted.png"];
+    const options = makeOptions({
+      sendUserMessage: vi.fn(async () => { await pending; return { status: "completed" as const }; }),
+      startCompact: vi.fn(() => pending),
+      clearActiveImages: vi.fn(() => { draft = []; }),
+    });
+    const { result } = renderHook(() => useQueuedSend(options));
+    let sending!: Promise<void>;
+    act(() => { sending = result.current.handleSend(kind === "command" ? "/compact" : "first", draft); });
+    expect(draft).toEqual([]);
+    draft = ["next-draft.png"];
+    await act(async () => { resolve(); await sending; });
+    expect(draft).toEqual(["next-draft.png"]);
+    expect(options.clearActiveImages).toHaveBeenCalledTimes(1);
+    if (kind === "message") {
+      expect(options.sendUserMessage).toHaveBeenCalledWith("first", ["submitted.png"], { sendIntent: "default" });
+    }
+  });
+
+  it("an old queued receipt cannot release a newer in-flight queue item", async () => {
+    let resolve!: (value: { status: "completed" }) => void;
+    const send = vi.fn().mockImplementationOnce(() => new Promise((done) => { resolve = done; }))
+      .mockImplementation(() => new Promise(() => {}));
+    const options = makeOptions({ sendUserMessage: send });
+    const { result, rerender } = renderHook((props) => useQueuedSend(props), { initialProps: options });
+    await act(async () => {
+      await result.current.queueMessage("A");
+      await result.current.queueMessage("B");
+      await result.current.queueMessage("C");
+    });
+    act(() => rerender({ ...options, isProcessing: true }));
+    act(() => rerender({ ...options, isProcessing: false }));
+    expect(send).toHaveBeenCalledTimes(2);
+    await act(async () => { resolve({ status: "completed" }); });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(result.current.activeQueue.map((item) => item.text)).toEqual(["C"]);
+  });
+  it("does not intercept native commands whose names begin with a Desktop action", async () => {
+    const options = makeOptions();
+    const { result } = renderHook(() => useQueuedSend(options));
+    await act(async () => { await result.current.handleSend("/compact:detail arg"); });
+    expect(options.startCompact).not.toHaveBeenCalled();
+    expect(options.sendUserMessage).toHaveBeenCalledExactlyOnceWith("/compact:detail arg", [], { sendIntent: "default" });
+    await act(async () => { await result.current.handleSend("/COMPACT"); });
+    expect(options.startCompact).toHaveBeenCalledExactlyOnceWith("/COMPACT");
+  });
+
+  it("drains handled commands and completed submissions without waiting for AgentStart", async () => {
+    const options = makeOptions({ sendUserMessage: vi.fn().mockResolvedValue({ status: "handled" }) });
+    const { result } = renderHook(() => useQueuedSend(options));
+    await act(async () => {
+      await result.current.queueMessage("/native first");
+      await result.current.queueMessage("/native second");
+      await result.current.queueMessage("/compact");
+    });
+    expect(options.sendUserMessage).toHaveBeenCalledTimes(2);
+    expect(options.startCompact).toHaveBeenCalledTimes(1);
+    expect(result.current.activeQueue).toEqual([]);
+  });
+
   it("sends queued messages one at a time after processing completes", async () => {
     const options = makeOptions();
     const { result, rerender } = renderHook(
@@ -273,90 +322,6 @@ describe("useQueuedSend", () => {
     expect(options.sendUserMessage).toHaveBeenCalledWith("Thread-1", []);
   });
 
-  it("starts a new thread for /new and sends the remaining text there", async () => {
-    const startThreadForWorkspace = vi.fn().mockResolvedValue("thread-2");
-    const sendUserMessageToThread = vi.fn().mockResolvedValue(undefined);
-    const options = makeOptions({ startThreadForWorkspace, sendUserMessageToThread });
-    const { result } = renderHook((props) => useQueuedSend(props), {
-      initialProps: options,
-    });
-
-    await act(async () => {
-      await result.current.handleSend("/new hello there", ["img-1"]);
-    });
-
-    expect(startThreadForWorkspace).toHaveBeenCalledWith("workspace-1");
-    expect(sendUserMessageToThread).toHaveBeenCalledWith(
-      workspace,
-      "thread-2",
-      "hello there",
-      [],
-    );
-    expect(options.sendUserMessage).not.toHaveBeenCalled();
-  });
-
-  it("starts a new thread for bare /new without sending a message", async () => {
-    const startThreadForWorkspace = vi.fn().mockResolvedValue("thread-3");
-    const sendUserMessageToThread = vi.fn().mockResolvedValue(undefined);
-    const options = makeOptions({ startThreadForWorkspace, sendUserMessageToThread });
-    const { result } = renderHook((props) => useQueuedSend(props), {
-      initialProps: options,
-    });
-
-    await act(async () => {
-      await result.current.handleSend("/new");
-    });
-
-    expect(startThreadForWorkspace).toHaveBeenCalledWith("workspace-1");
-    expect(sendUserMessageToThread).not.toHaveBeenCalled();
-    expect(options.sendUserMessage).not.toHaveBeenCalled();
-  });
-
-  it("routes /status to the local status handler", async () => {
-    const startStatus = vi.fn().mockResolvedValue(undefined);
-    const options = makeOptions({ startStatus });
-    const { result } = renderHook((props) => useQueuedSend(props), {
-      initialProps: options,
-    });
-
-    await act(async () => {
-      await result.current.handleSend("/status now", ["img-1"]);
-    });
-
-    expect(startStatus).toHaveBeenCalledWith("/status now");
-    expect(options.sendUserMessage).not.toHaveBeenCalled();
-  });
-
-  it("routes /fast to the fast-mode handler", async () => {
-    const startFast = vi.fn().mockResolvedValue(undefined);
-    const options = makeOptions({ startFast });
-    const { result } = renderHook((props) => useQueuedSend(props), {
-      initialProps: options,
-    });
-
-    await act(async () => {
-      await result.current.handleSend("/fast on", ["img-1"]);
-    });
-
-    expect(startFast).toHaveBeenCalledWith("/fast on");
-    expect(options.sendUserMessage).not.toHaveBeenCalled();
-  });
-
-  it("routes /resume to the resume handler", async () => {
-    const startResume = vi.fn().mockResolvedValue(undefined);
-    const options = makeOptions({ startResume });
-    const { result } = renderHook((props) => useQueuedSend(props), {
-      initialProps: options,
-    });
-
-    await act(async () => {
-      await result.current.handleSend("/resume now", ["img-1"]);
-    });
-
-    expect(startResume).toHaveBeenCalledWith("/resume now");
-    expect(options.sendUserMessage).not.toHaveBeenCalled();
-  });
-
   it("routes /compact to the compact handler", async () => {
     const startCompact = vi.fn().mockResolvedValue(undefined);
     const options = makeOptions({ startCompact });
@@ -372,18 +337,18 @@ describe("useQueuedSend", () => {
     expect(options.sendUserMessage).not.toHaveBeenCalled();
   });
 
-  it("routes /fork to the fork handler", async () => {
-    const startFork = vi.fn().mockResolvedValue(undefined);
-    const options = makeOptions({ startFork });
+  it("routes /reload to the reload handler", async () => {
+    const startReload = vi.fn().mockResolvedValue(undefined);
+    const options = makeOptions({ startReload });
     const { result } = renderHook((props) => useQueuedSend(props), {
       initialProps: options,
     });
 
     await act(async () => {
-      await result.current.handleSend("/fork branch here", ["img-1"]);
+      await result.current.handleSend("/reload", ["img-1"]);
     });
 
-    expect(startFork).toHaveBeenCalledWith("/fork branch here");
+    expect(startReload).toHaveBeenCalledWith("/reload");
     expect(options.sendUserMessage).not.toHaveBeenCalled();
   });
 

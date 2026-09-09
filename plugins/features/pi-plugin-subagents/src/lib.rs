@@ -1,12 +1,16 @@
 #![forbid(unsafe_code)]
 
 mod catalog;
+mod child_run;
 mod config;
+mod coordination;
+mod fork_context;
 mod launch_plan;
 mod profiles;
 mod runtime;
 mod session;
 mod skills;
+mod supervisor_tools;
 mod tool;
 
 use std::sync::Arc;
@@ -78,7 +82,18 @@ impl AgentPlugin for SubagentsPlugin {
             self.runtime.clone(),
             self.catalog.clone(),
             self.max_depth,
-        )))
+        )))?;
+        for kind in [
+            supervisor_tools::SupervisorToolKind::Contact,
+            supervisor_tools::SupervisorToolKind::Supervisor,
+            supervisor_tools::SupervisorToolKind::Wait,
+        ] {
+            context.register_tool(Arc::new(supervisor_tools::SupervisorTool {
+                runtime: self.runtime.clone(),
+                kind,
+            }))?;
+        }
+        Ok(())
     }
 
     async fn before_agent_start(
@@ -86,26 +101,70 @@ impl AgentPlugin for SubagentsPlugin {
         context: AgentPluginContext,
         event: BeforeAgentStartEvent,
     ) -> Result<BeforeAgentStartPatch, PluginError> {
-        let Some(run_id) = marker_from_messages(&event.input_messages) else {
-            return Ok(BeforeAgentStartPatch::default());
-        };
         let session_id = context.session.id()?;
-        let assignment = self
-            .runtime
-            .bind_child(run_id, &session_id)
-            .map_err(|error| PluginError::Hook {
-                plugin_id: PluginId::new("subagents"),
-                hook: "before_agent_start",
-                message: error.to_string(),
-            })?;
+        let active_tools = context.session.active_tools()?;
+        self.runtime
+            .coordination()
+            .bind_session(session_id.clone(), context.session.handle_for_adapter());
+        let profile = if let Some((_, profile)) = self.runtime.assignment_for_session(&session_id) {
+            profile
+        } else if let Some(run_id) = marker_from_messages(&event.input_messages) {
+            self.runtime
+                .bind_child(run_id, &session_id)
+                .map_err(|error| PluginError::Hook {
+                    plugin_id: PluginId::new("subagents"),
+                    hook: "before_agent_start",
+                    message: error.to_string(),
+                })?
+                .profile
+        } else {
+            if !["subagent_supervisor", "bg_wait"]
+                .iter()
+                .all(|name| active_tools.iter().any(|tool| tool == name))
+            {
+                return Ok(BeforeAgentStartPatch::default());
+            }
+            return Ok(BeforeAgentStartPatch {
+                system_prompt: Some(format!(
+                    "{}\n\n{}",
+                    event.system_prompt,
+                    supervisor_tools::PARENT_GUIDANCE
+                )),
+                messages: Vec::new(),
+            });
+        };
+        let mut prompt = specialized_system_prompt(&event.system_prompt, &profile);
+        if active_tools.iter().any(|name| name == "contact_supervisor") {
+            prompt.push_str("\n\n");
+            prompt.push_str(supervisor_tools::CHILD_GUIDANCE);
+        }
+        if profile.allow_nested_subagents
+            && ["subagent_supervisor", "bg_wait"]
+                .iter()
+                .all(|name| active_tools.iter().any(|tool| tool == name))
+        {
+            prompt.push_str("\n\n");
+            prompt.push_str(supervisor_tools::PARENT_GUIDANCE);
+        }
         Ok(BeforeAgentStartPatch {
-            system_prompt: Some(specialized_system_prompt(
-                &event.system_prompt,
-                &assignment.profile,
-                assignment.depth,
-                assignment.max_depth,
-            )),
+            system_prompt: Some(prompt),
             messages: Vec::new(),
+        })
+    }
+
+    async fn context(
+        &self,
+        context: AgentPluginContext,
+        event: pi_core::ContextEvent,
+    ) -> Result<pi_core::ContextPatch, PluginError> {
+        let Some((run_id, _)) = self.runtime.assignment_for_session(&context.session.id()?) else {
+            return Ok(pi_core::ContextPatch::default());
+        };
+        Ok(pi_core::ContextPatch {
+            messages: Some(fork_context::project_inherited_messages(
+                event.messages,
+                &run_id,
+            )),
         })
     }
 }

@@ -33,6 +33,7 @@ import { ComposerInput } from "./ComposerInput";
 import { ComposerMetaBar } from "./ComposerMetaBar";
 import { ComposerQueue } from "./ComposerQueue";
 import { isMacPlatform } from "../../../utils/platformPaths";
+import { isDesktopCommandName } from "../../../utils/desktopCommands";
 
 type ComposerProps = {
   onSend: (
@@ -53,8 +54,10 @@ type ComposerProps = {
   selectedEffort: string | null;
   onSelectEffort: (effort: string) => void;
   selectedServiceTier: ServiceTier | null;
+  onSelectServiceTier: (tier: ServiceTier | null) => void;
   reasoningSupported: boolean;
   skills: { name: string; description?: string }[];
+  runtimeCommands?: import("../../../utils/desktopCommands").RuntimeCommand[];
   prompts: CustomPromptOption[];
   files: string[];
   tokenUsage?: ThreadTokenUsage | null;
@@ -120,8 +123,10 @@ export const Composer = memo(function Composer({
   selectedEffort,
   onSelectEffort,
   selectedServiceTier,
+  onSelectServiceTier,
   reasoningSupported,
   skills,
+  runtimeCommands,
   prompts,
   files,
   tokenUsage = null,
@@ -221,6 +226,7 @@ export const Composer = memo(function Composer({
     selectionStart,
     disabled,
     skills,
+    runtimeCommands,
     prompts,
     files,
     textareaRef,
@@ -437,8 +443,15 @@ export const Composer = memo(function Composer({
   });
 
 
+  const commandCollisions = (runtimeCommands ?? []).filter((command) => isDesktopCommandName(command.name));
+
   return (
     <footer className={`composer${disabled ? " is-disabled" : ""}`}>
+      {commandCollisions.length > 0 && (
+        <div role="status" className="composer-command-warning">
+          桌面命令优先；以下同名运行时命令不可用：{commandCollisions.map((command) => `/${command.name}`).join("、")}
+        </div>
+      )}
       <ComposerQueue
         queuedMessages={queuedMessages}
         pausedReason={queuePausedReason}
@@ -493,6 +506,7 @@ export const Composer = memo(function Composer({
         selectedEffort={selectedEffort}
         onSelectEffort={onSelectEffort}
         selectedServiceTier={selectedServiceTier}
+        onSelectServiceTier={onSelectServiceTier}
         reasoningSupported={reasoningSupported}
         tokenUsage={tokenUsage}
       />

@@ -35,6 +35,10 @@ struct TestFactory {
     nested: bool,
     agent_paths: Vec<PathBuf>,
     root_agent: String,
+    root_context: Option<pi_core::IsolatedContextMode>,
+    batch_size: usize,
+    supervision: bool,
+    blocked_sibling: bool,
 }
 
 impl TestFactory {
@@ -46,6 +50,10 @@ impl TestFactory {
             nested: false,
             agent_paths: Vec::new(),
             root_agent: "reviewer".to_string(),
+            root_context: None,
+            batch_size: 1,
+            supervision: false,
+            blocked_sibling: false,
         }
     }
 
@@ -76,28 +84,79 @@ impl AgentSessionRuntimeFactory for TestFactory {
         request: AgentSessionRuntimeRequest,
     ) -> Result<PreparedAgentSession, SessionError> {
         let initial_state = request.initial_state;
-        let AgentSessionRuntimeTarget::Create { cwd, path, .. } = request.target else {
-            return Err(SessionError::Runtime(
-                "test factory only creates sessions".to_string(),
-            ));
+        let (cwd, path, restored_log) = match request.target {
+            AgentSessionRuntimeTarget::Create { cwd, path, .. } => (cwd, path, None),
+            AgentSessionRuntimeTarget::Open { path } => {
+                let (log, document) = pi_session::SessionLog::open(&path)?;
+                (document.header.cwd, path, Some(log))
+            }
+            AgentSessionRuntimeTarget::Reuse { log } => {
+                let cwd = log.load()?.header.cwd;
+                (cwd, log.path().to_path_buf(), Some(log))
+            }
         };
         let depth = path
             .components()
             .filter(|component| component.as_os_str() == "isolated")
             .count();
-        let turns = if self.nested {
+        let turns = if self.supervision && depth > 0 {
+            let existing_children = self
+                .providers
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(depth, _)| *depth > 0)
+                .count();
+            if self.blocked_sibling && existing_children > 0 {
+                vec![ScriptedTurn::WaitForAbort]
+            } else {
+                vec![
+                    ScriptedTurn::ToolCalls(vec![ToolCall::new(
+                        "ask-parent",
+                        "contact_supervisor",
+                        json!({"reason":"interview_request","message":"Choose compatibility policy", "interview":{"title":"Compatibility","questions":[]}}),
+                    )]),
+                    ScriptedTurn::Text("child continued with supervisor decision".into()),
+                ]
+            }
+        } else if self.nested {
             nested_turns(depth)
         } else if depth > 0 {
             vec![ScriptedTurn::Text("child review complete".to_string())]
         } else {
-            vec![
-                ScriptedTurn::ToolCalls(vec![ToolCall::new(
-                    ToolCallId::new("delegate-1"),
+            let mut turns = vec![
+                ScriptedTurn::ToolCalls((0..self.batch_size).map(|index| ToolCall::new(
+                    ToolCallId::new(format!("delegate-{index}")),
                     "subagent",
-                    json!({"agent": self.root_agent, "task": "Review the parser"}),
-                )]),
+                    {
+                        let mut args = json!({"agent": self.root_agent, "task": "Review the parser"});
+                        if let Some(mode) = self.root_context {
+                            args["context"] = json!(mode);
+                        }
+                        args
+                    },
+                )).collect()),
                 ScriptedTurn::Text("parent incorporated the review".to_string()),
-            ]
+            ];
+            if self.supervision && !self.blocked_sibling {
+                turns.extend([
+                    ScriptedTurn::ToolCalls(vec![ToolCall::new(
+                        "answer-child",
+                        "subagent_supervisor",
+                        json!({"action":"reply","message":"{\"compatible\":true}"}),
+                    )]),
+                    ScriptedTurn::ToolCalls(vec![ToolCall::new(
+                        "wait-child",
+                        "bg_wait",
+                        json!({"timeoutMs":1000}),
+                    )]),
+                    ScriptedTurn::Text("supervision complete".into()),
+                ]);
+            }
+            if restored_log.is_some() {
+                turns.drain(..2);
+            }
+            turns
         };
         let provider_plugin = ScriptedProviderPlugin::scripted(turns);
         self.providers
@@ -123,9 +182,18 @@ impl AgentSessionRuntimeFactory for TestFactory {
                         ProviderId::new("scripted"),
                         ModelId::new("test"),
                         pi_core::ThinkingLevel::Off,
-                        ["read", "grep", "find", "ls", "subagent"]
-                            .map(str::to_string)
-                            .to_vec(),
+                        [
+                            "read",
+                            "grep",
+                            "find",
+                            "ls",
+                            "subagent",
+                            "contact_supervisor",
+                            "subagent_supervisor",
+                            "bg_wait",
+                        ]
+                        .map(str::to_string)
+                        .to_vec(),
                     )
                 },
                 |state| {
@@ -137,7 +205,9 @@ impl AgentSessionRuntimeFactory for TestFactory {
                     )
                 },
             );
-        let runtime = PiRuntime::builder()
+        let runtime = request
+            .generation_overlay
+            .apply_to(PiRuntime::builder())
             .plugin_context(context_access)
             .provider_plugin(provider_plugin)
             .agent_plugin(subagents)
@@ -158,14 +228,14 @@ impl AgentSessionRuntimeFactory for TestFactory {
                 ..AgentOptions::default()
             })
             .build()?;
-        let prepared = AgentSession::prepare_create_with_options(
-            runtime,
-            path,
-            AgentSessionOptions::default().plugins(
-                SessionPlugins::new().plugin(SubagentsSessionPlugin::new(self.subagents.clone())),
-            ),
-        )
-        .await?;
+        let options = AgentSessionOptions::default().plugins(
+            SessionPlugins::new().plugin(SubagentsSessionPlugin::new(self.subagents.clone())),
+        );
+        let prepared = if let Some(log) = restored_log {
+            AgentSession::prepare_reuse_with_options(runtime, log, options).await?
+        } else {
+            AgentSession::prepare_create_with_options(runtime, path, options).await?
+        };
         plugin_context.bind_generation_session(prepared.session());
         Ok(prepared)
     }
@@ -245,11 +315,416 @@ async fn foreground_tool_runs_a_profiled_child_through_the_shared_session_manage
     assert!(
         requests[0]
             .system_prompt
-            .contains("Delegated subagent role: reviewer")
+            .starts_with("You are a child subagent, not the parent orchestrator.")
     );
-    assert!(requests[0].tools.iter().any(|tool| tool.name == "subagent"));
+    assert!(
+        requests[0]
+            .system_prompt
+            .contains("<active_agent name=\"reviewer\"/>")
+    );
+    assert!(
+        requests[0]
+            .system_prompt
+            .contains("You are a disciplined review subagent.")
+    );
+    assert!(
+        !requests[0]
+            .system_prompt
+            .contains("Delegated subagent role")
+    );
+    assert!(!requests[0].tools.iter().any(|tool| tool.name == "subagent"));
 
     manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn parallel_fork_children_inherit_the_request_but_not_the_launch_batch() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut factory = TestFactory::new();
+    factory.root_context = Some(pi_core::IsolatedContextMode::Fork);
+    factory.batch_size = 2;
+    let providers = Arc::clone(&factory.providers);
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("primary.jsonl"))
+        .await
+        .unwrap();
+    let outcome = root
+        .current()
+        .prompt("inherited request for both children")
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome
+            .new_messages
+            .iter()
+            .filter(|message| matches!(message, Message::ToolResult(result) if !result.is_error))
+            .count(),
+        2
+    );
+    let children = providers
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(depth, _)| *depth == 1)
+        .map(|(_, provider)| provider.requests())
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 2);
+    for requests in &children {
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].messages.len(), 2);
+        assert!(
+            matches!(&requests[0].messages[0], Message::User(user) if user.content.iter().any(|block| matches!(block, pi_core::ContentBlock::Text(text) if text.text == "inherited request for both children")))
+        );
+        assert!(
+            requests[0]
+                .messages
+                .iter()
+                .all(|message| matches!(message, Message::User(_)))
+        );
+    }
+    assert_eq!(children[0][0].messages[0], children[1][0].messages[0]);
+    manager.shutdown().await.unwrap();
+}
+
+fn user_message(text: &str) -> Message {
+    Message::User(UserMessage {
+        content: vec![pi_core::ContentBlock::Text(TextContent::new(text))],
+        timestamp_ms: 0,
+    })
+}
+
+#[tokio::test]
+async fn supervisor_reply_continues_the_same_isolated_session() {
+    supervisor_roundtrip(false).await;
+}
+
+#[tokio::test]
+async fn supervisor_request_survives_parent_generation_reload() {
+    supervisor_roundtrip(true).await;
+}
+
+#[tokio::test]
+async fn replacement_after_reload_aborts_detached_children_before_retiring_control() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut factory = TestFactory::new();
+    factory.supervision = true;
+    factory.blocked_sibling = true;
+    factory.batch_size = 2;
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("root.jsonl"))
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        root.current().prompt(vec![user_message("Delegate")]),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let children = manager
+        .sessions()
+        .into_iter()
+        .filter(|session| session.id() != root.id())
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 2);
+    root.reload().await.unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        root.new_session(directory.path(), directory.path().join("replacement.jsonl")),
+    )
+    .await
+    .expect("replacement must drain children with the current control handle")
+    .unwrap();
+    for child in children {
+        assert!(!child.current().runtime().agent().is_running());
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), manager.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn dropping_manager_with_real_detached_waiters_releases_children() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut factory = TestFactory::new();
+    factory.supervision = true;
+    factory.blocked_sibling = true;
+    factory.batch_size = 2;
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("root.jsonl"))
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        root.current().prompt(vec![user_message("Delegate")]),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let weak_children = manager
+        .sessions()
+        .into_iter()
+        .filter(|session| session.id() != root.id())
+        .map(|session| Arc::downgrade(&session.current()))
+        .collect::<Vec<_>>();
+    assert_eq!(weak_children.len(), 2);
+    drop(manager);
+    drop(root);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while weak_children.iter().any(|child| child.upgrade().is_some()) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("real adapter waiters must not retain their task owners after manager drop");
+}
+
+#[tokio::test]
+async fn shutdown_drains_detached_children_waiting_for_supervisor_reply() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut factory = TestFactory::new();
+    factory.supervision = true;
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("root.jsonl"))
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        root.current().prompt(vec![user_message("Delegate")]),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(outcome.new_messages.iter().any(|message| matches!(message,
+        Message::ToolResult(result) if result.tool_name == "subagent" && result.details.as_ref().is_some_and(|details| details["detached"] == true)
+    )));
+    let children = manager
+        .sessions()
+        .into_iter()
+        .filter(|session| session.id() != root.id())
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 1);
+    tokio::time::timeout(std::time::Duration::from_secs(5), manager.shutdown())
+        .await
+        .expect("shutdown must not require a supervisor reply")
+        .unwrap();
+    assert!(manager.sessions().is_empty());
+    for child in children {
+        assert!(child.current().is_closed());
+        assert!(!child.current().runtime().agent().is_running());
+    }
+}
+
+async fn supervisor_roundtrip(reload: bool) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut factory = TestFactory::new();
+    factory.supervision = true;
+    let providers = factory.providers.clone();
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("root.jsonl"))
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        root.current().prompt(vec![user_message("Delegate")]),
+    )
+    .await
+    .expect("supervisor request must release foreground wait")
+    .unwrap();
+    let detached = first
+        .new_messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) if result.tool_name == "subagent" => result.details.clone(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(detached["detached"], true);
+    assert_eq!(detached["activityState"], "needs_attention");
+    assert_eq!(manager.sessions().len(), 2);
+    let child = providers
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(depth, _)| *depth == 1)
+        .unwrap()
+        .1
+        .clone();
+    assert_eq!(
+        child.requests().len(),
+        1,
+        "child is still waiting inside contact_supervisor"
+    );
+    if reload {
+        root.reload().await.unwrap();
+    }
+    let next = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        root.current()
+            .prompt(vec![user_message("Keep compatibility")]),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        manager.sessions().len(),
+        2,
+        "reply must not launch a replacement session"
+    );
+    let requests = child.requests();
+    assert_eq!(requests.len(), 2);
+    let reply = requests[1]
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) if result.tool_name == "contact_supervisor" => Some(result),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!reply.is_error);
+    assert_eq!(
+        reply.details.as_ref().unwrap()["structuredReply"]["compatible"],
+        true
+    );
+    assert!(next.new_messages.iter().any(|message| matches!(message, Message::ToolResult(result) if result.tool_name == "subagent_supervisor" && !result.is_error)));
+    let parent = providers
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(depth, _)| *depth == 0)
+        .unwrap()
+        .1
+        .clone();
+    for request in parent.requests() {
+        assert_tool_pairs(&request.messages);
+    }
+    assert!(
+        std::fs::read_to_string(root.path())
+            .unwrap()
+            .contains("subagent_supervisor_reply")
+    );
+    manager.shutdown().await.unwrap();
+}
+
+fn assert_tool_pairs(messages: &[Message]) {
+    let mut pending = std::collections::HashSet::new();
+    for message in messages {
+        match message {
+            Message::Assistant(message) => {
+                for call in message.tool_calls() {
+                    assert!(pending.insert(call.id.clone()));
+                }
+            }
+            Message::ToolResult(result) => {
+                assert!(
+                    pending.remove(&result.tool_call_id),
+                    "result must have its call"
+                );
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        pending.is_empty(),
+        "provider request must contain every tool result"
+    );
+}
+
+#[tokio::test]
+async fn one_supervisor_request_releases_parallel_sibling_waits() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut factory = TestFactory::new();
+    factory.supervision = true;
+    factory.blocked_sibling = true;
+    factory.batch_size = 2;
+    let providers = factory.providers.clone();
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("root.jsonl"))
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        root.current()
+            .prompt(vec![user_message("Delegate in parallel")]),
+    )
+    .await
+    .expect("a running sibling must not hold the parent hostage")
+    .unwrap();
+    let results = outcome
+        .new_messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::ToolResult(result) if result.tool_name == "subagent" => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 2);
+    assert!(
+        results
+            .iter()
+            .all(|result| result.details.as_ref().unwrap()["detached"] == true)
+    );
+    let parent = providers
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(depth, _)| *depth == 0)
+        .unwrap()
+        .1
+        .clone();
+    assert_tool_pairs(&parent.requests()[1].messages);
+    tokio::time::timeout(std::time::Duration::from_secs(5), manager.shutdown())
+        .await
+        .expect("closing parent must cancel waiting descendants")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn explicit_fresh_overrides_a_markdown_fork_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let agents = directory.path().join("agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(agents.join("forker.md"), "---\nname: forker\ndescription: fork by default\ndefaultContext: fork\ntools: read\n---\nInspect the task.\n").unwrap();
+    for context in [None, Some(pi_core::IsolatedContextMode::Fresh)] {
+        let mut factory = TestFactory::new().with_root_agent("forker");
+        factory.root_context = context;
+        let providers = Arc::clone(&factory.providers);
+        let manager = MultiSessionManager::new(factory);
+        let root = manager
+            .create_session(
+                directory.path(),
+                directory.path().join(format!("{context:?}.jsonl")),
+            )
+            .await
+            .unwrap();
+        let outcome = root.current().prompt("parent-only request").await.unwrap();
+        assert!(
+            outcome
+                .new_messages
+                .iter()
+                .any(|message| matches!(message, Message::ToolResult(result) if !result.is_error))
+        );
+        let requests = providers
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(depth, _)| *depth == 1)
+            .unwrap()
+            .1
+            .requests();
+        assert_eq!(
+            requests[0].messages.len(),
+            if context.is_none() { 2 } else { 1 }
+        );
+        manager.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -345,11 +820,23 @@ async fn markdown_defined_delegate_recurses_through_six_child_depths() {
                 .unwrap_or_else(|| panic!("provider for child depth {depth} should exist"))
                 .1
                 .requests();
-            assert!(requests[0].system_prompt.contains("role: smoke-delegate"));
+            assert!(requests[0].system_prompt.starts_with(
+                "You are a child subagent with explicit fanout responsibility for this assigned task."
+            ));
             assert!(
                 requests[0]
                     .system_prompt
-                    .contains(&format!("depth {depth} of 6"))
+                    .contains("<active_agent name=\"smoke-delegate\"/>")
+            );
+            assert!(
+                requests[0]
+                    .system_prompt
+                    .contains("You are one level in the six-level recursive pi-rs subagent test.")
+            );
+            assert!(
+                !requests[0]
+                    .system_prompt
+                    .contains("Delegated subagent role")
             );
             assert!(
                 requests[0]
@@ -364,7 +851,16 @@ async fn markdown_defined_delegate_recurses_through_six_child_depths() {
                     .iter()
                     .map(|tool| tool.name.as_str())
                     .collect::<Vec<_>>(),
-                ["read", "grep", "find", "ls", "subagent"]
+                [
+                    "read",
+                    "grep",
+                    "find",
+                    "ls",
+                    "subagent",
+                    "contact_supervisor",
+                    "subagent_supervisor",
+                    "bg_wait"
+                ]
             );
         }
     }
@@ -512,7 +1008,8 @@ async fn child_skill_projection_honors_aliases_private_precedence_and_missing_wa
     let requests = child_provider.requests();
     assert_eq!(requests.len(), 1);
     let prompt = &requests[0].system_prompt;
-    assert!(prompt.contains("Delegated subagent role: skilled"));
+    assert!(prompt.contains("Use only the configured skills."));
+    assert!(!prompt.contains("Delegated subagent role"));
     assert!(prompt.contains("<name>shared</name>"));
     assert!(prompt.contains("agent-local shared"));
     assert!(prompt.contains("<name>private</name>"));
@@ -524,7 +1021,7 @@ async fn child_skill_projection_honors_aliases_private_precedence_and_missing_wa
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["read"]
+        vec!["read", "contact_supervisor"]
     );
 
     manager.shutdown().await.unwrap();

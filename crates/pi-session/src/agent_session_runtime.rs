@@ -361,6 +361,7 @@ impl AgentSessionRuntime {
             initial_target,
             generation_overlay,
             None,
+            None,
         )
         .await
     }
@@ -370,6 +371,7 @@ impl AgentSessionRuntime {
         initial_target: AgentSessionRuntimeTarget,
         generation_overlay: SessionGenerationOverlay,
         initial_state: Option<AgentSessionInitialState>,
+        initial_context: Option<crate::isolated_context::IsolatedContextSeed>,
     ) -> Result<Self, AgentSessionRuntimeError>
     where
         F: AgentSessionRuntimeFactory + 'static,
@@ -387,6 +389,9 @@ impl AgentSessionRuntime {
                 initial_state,
             })
             .await?;
+        if let Some(seed) = initial_context {
+            prepared.session().initialize_isolated_context(seed)?;
+        }
         let session = prepared.activate(start_event).await;
         Ok(Self::from_parts(session, factory, generation_overlay))
     }

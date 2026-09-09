@@ -13,6 +13,24 @@ import {
 
 export function reduceThreadItems(state: ThreadState, action: ThreadAction): ThreadState {
   switch (action.type) {
+    case "addNotice": {
+      const list = state.itemsByThread[action.threadId] ?? [];
+      const notice: ConversationItem = {
+        id: action.itemId,
+        kind: "tool",
+        toolType: "notice",
+        title: `[${action.level}]`,
+        detail: action.text,
+        status: action.level === "error" ? "failed" : "completed",
+      };
+      return {
+        ...state,
+        itemsByThread: {
+          ...state.itemsByThread,
+          [action.threadId]: prepareThreadItems([...list, notice], { maxItemsPerThread: state.maxItemsPerThread }),
+        },
+      };
+    }
     case "addAssistantMessage": {
       const list = state.itemsByThread[action.threadId] ?? [];
       const message: ConversationItem = {

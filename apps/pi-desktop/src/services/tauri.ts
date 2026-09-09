@@ -265,12 +265,25 @@ export async function startThread(workspaceId: string) {
   return invoke<any>("pi_start_thread", { workspaceId });
 }
 
-export async function forkThread(workspaceId: string, threadId: string) {
-  return invoke<any>("pi_fork_thread", { workspaceId, threadId });
+export async function prepareThread(workspaceId: string) {
+  return invoke<{ thread: Record<string, unknown> }>("pi_start_thread", {
+    workspaceId, prepareOnly: true,
+  });
+}
+
+export async function forkThread(workspaceId: string, threadId: string, entryId: string) {
+  return invoke<any>("pi_fork_thread", { workspaceId, threadId, entryId });
 }
 
 export async function compactThread(workspaceId: string, threadId: string) {
   return invoke<any>("pi_compact_thread", { workspaceId, threadId });
+}
+
+export async function reloadThread(workspaceId: string, threadId?: string | null) {
+  return invoke<{ thread: Record<string, unknown> }>("pi_reload_thread", {
+    workspaceId,
+    threadId: threadId ?? null,
+  });
 }
 
 function isInlineImageUrl(image: string) {
@@ -553,8 +566,8 @@ export async function generateRunMetadata(workspaceId: string, prompt: string) {
   });
 }
 
-export async function getSkillsList(workspaceId: string) {
-  return invoke<any>("pi_skills_list", { workspaceId });
+export async function getSkillsList(workspaceId: string, threadId?: string) {
+  return invoke<any>("pi_skills_list", { workspaceId, threadId });
 }
 
 export async function getPromptsList(workspaceId: string) {
