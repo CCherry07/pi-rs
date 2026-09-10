@@ -25,6 +25,8 @@ struct SubagentInput {
     agent: String,
     task: String,
     context: Option<pi_core::IsolatedContextMode>,
+    #[serde(default, rename = "async")]
+    background: bool,
 }
 
 struct RunGuard {
@@ -99,6 +101,10 @@ impl Tool for SubagentTool {
                         "enum": ["fresh", "fork"],
                         "description": "History initialization. Omit to use the role default; fork copies the parent context before this tool batch."
                     },
+                    "async": {
+                        "type": "boolean",
+                        "description": "Start in the background of this process and return a run receipt. Defaults false. Completion and supervisor requests attempt a best-effort notification; status is authoritative and process exit stops work."
+                    },
                     "task": {
                         "type": "string",
                         "minLength": 1,
@@ -152,11 +158,15 @@ impl Tool for SubagentTool {
         }
         let context_mode = options.context;
         let (abort, signal) = pi_core::AbortHandle::new();
-        self.runtime.coordination().reserve(&run_id, crate::coordination::ManagedRun {
-            owner: parent_session_id.clone(),
-            details: json!({"runId":run_id,"agent":profile_name,"depth":depth,"context":context_mode,"state":"running"}),
-            abort: abort.clone(), result: None, detached: false,
-        });
+        self.runtime.coordination().reserve(
+            &run_id,
+            crate::coordination::ManagedRun::new(
+                parent_session_id.clone(),
+                crate::coordination::RunMetadata::new(profile_name.clone(), depth, context_mode),
+                abort.clone(),
+                timeout,
+            ),
+        );
         let request = IsolatedSessionRequest::new(CustomMessageContent::Text(
             ticket.child_prompt(&input.task),
         ))
@@ -184,8 +194,6 @@ impl Tool for SubagentTool {
         });
 
         let mut changed = self.runtime.coordination().subscribe();
-        let (started, readiness) = tokio::sync::oneshot::channel();
-        // Cancellation remains armed while the monitor acquires its live wait.
         let mut foreground = ForegroundGuard(Some(abort));
         self.runtime.spawn_monitor(
             parent_session_id.clone(),
@@ -198,12 +206,17 @@ impl Tool for SubagentTool {
                 signal,
                 timeout,
             }
-            .monitor(started),
+            .monitor(),
         );
         guard.mark_launched();
-        tokio::select! {
-            () = context.signal().wait() => return Err(ToolError::Aborted),
-            _ = readiness => {}
+        if input.background {
+            let result = self
+                .runtime
+                .coordination()
+                .background(&parent_session_id, &run_id)
+                .map_err(ToolError::Execution)?;
+            foreground.0.take();
+            return Ok(result);
         }
         loop {
             let run = self
@@ -265,6 +278,7 @@ fn parse_input(input: Value, catalog: &SubagentCatalog) -> Result<SubagentInput,
         agent: agent.to_string(),
         task: task.to_string(),
         context: parsed.context,
+        background: parsed.background,
     })
 }
 
@@ -620,6 +634,11 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(access.recorded_usage.lock().unwrap().len(), 1);
+        let status = runtime
+            .coordination()
+            .status("root-session", Some(run_id))
+            .unwrap();
+        assert_eq!(status["runs"][0]["usage"], json!(child_usage));
         let update_details = update_receiver.recv().await.unwrap().details.unwrap();
         assert_eq!(update_details["state"], "running");
         assert_eq!(update_details["isolatedSessionId"], "isolated-1");
@@ -854,15 +873,17 @@ mod tests {
             .unwrap();
         runtime.coordination().reserve(
             ticket.run_id(),
-            crate::coordination::ManagedRun {
-                owner: "root-session".into(),
-                details: json!({}),
+            crate::coordination::ManagedRun::new(
+                "root-session".into(),
+                crate::coordination::RunMetadata::new(
+                    "worker".into(),
+                    1,
+                    pi_core::IsolatedContextMode::Fresh,
+                ),
                 abort,
-                result: None,
-                detached: false,
-            },
+                None,
+            ),
         );
-        let (started, _) = tokio::sync::oneshot::channel();
         let monitor = crate::child_run::ChildRun {
             runtime: runtime.downgrade(),
             run_id: ticket.run_id().into(),
@@ -871,7 +892,7 @@ mod tests {
             signal,
             timeout: None,
         }
-        .monitor(started);
+        .monitor();
         let mut changed = runtime.coordination().subscribe();
         drop(monitor);
         tokio::time::timeout(std::time::Duration::from_secs(1), changed.changed())
@@ -920,15 +941,17 @@ mod tests {
             .unwrap();
         runtime.coordination().reserve(
             ticket.run_id(),
-            crate::coordination::ManagedRun {
-                owner: "root-session".into(),
-                details: json!({}),
+            crate::coordination::ManagedRun::new(
+                "root-session".into(),
+                crate::coordination::RunMetadata::new(
+                    "worker".into(),
+                    1,
+                    pi_core::IsolatedContextMode::Fresh,
+                ),
                 abort,
-                result: None,
-                detached: false,
-            },
+                None,
+            ),
         );
-        let (started, ready) = tokio::sync::oneshot::channel();
         runtime.spawn_monitor(
             "root-session".into(),
             ticket.run_id().into(),
@@ -940,9 +963,9 @@ mod tests {
                 signal,
                 timeout: None,
             }
-            .monitor(started),
+            .monitor(),
         );
-        ready.await.unwrap();
+        tokio::task::yield_now().await;
         drop(runtime);
         assert!(
             weak.upgrade().is_none(),

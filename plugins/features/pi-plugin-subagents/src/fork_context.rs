@@ -64,6 +64,7 @@ fn filter_parent_message(
                     | "subagent-slash-result"
                     | "subagent-slash-text-result"
                     | "subagent-notify"
+                    | "subagent-wait-expired"
                     | "subagent_control_notice"
                     | "subagent-control"
                     | "subagent-control-notice"
@@ -206,5 +207,29 @@ mod tests {
             );
             assert_eq!(projected, vec![task, call, reply]);
         }
+    }
+
+    #[test]
+    fn fork_removes_only_inherited_wait_expiry_notices() {
+        let notice = Message::custom(
+            pi_core::CustomMessageInput {
+                custom_type: "subagent-wait-expired".into(),
+                content: pi_core::CustomMessageContent::Text("wait elapsed".into()),
+                display: true,
+                details: Some(json!({"runId":"run"})),
+            }
+            .into_message(0),
+        );
+        let task = Message::User(UserMessage::text(
+            "<!-- pi-rs-subagent-run:current -->\nchild task",
+            3,
+        ));
+        assert_eq!(
+            project_inherited_messages(
+                vec![notice.clone(), task.clone(), notice.clone()],
+                "current",
+            ),
+            vec![task, notice]
+        );
     }
 }

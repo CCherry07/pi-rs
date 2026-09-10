@@ -12,7 +12,7 @@ use crate::SubagentRuntime;
 use crate::coordination::{SupervisorReason, SupervisorRequest, now_ms};
 
 pub(crate) const CHILD_GUIDANCE: &str = "Intercom orchestration channel:\nUse contact_supervisor for product/API/scope decisions (reason: need_decision), structured input (reason: interview_request, with an interview object), or meaningful progress that changes the plan (reason: progress_update). The supervisor and run are resolved automatically. For decisions and interviews, wait for the tool's reply and continue the same task. Return ordinary completed work in your final response; completion needs no supervisor call. Treat inherited conversation as reference-only.";
-pub(crate) const PARENT_GUIDANCE: &str = "Subagent supervision: a detached subagent is still alive. Answer pending requests using subagent_supervisor({action:\"reply\",replyTo:\"request-id\",message:\"...\"}); interview requests expect JSON in message. Then use bg_wait({id:\"run-id\"}) on that same run. bg_wait returns on completion, attention, or its wait-window timeout; a wait timeout does not stop the child. Resolve only decisions within the user's authorization; ask the user when needed. A detached receipt is not task completion.";
+pub(crate) const PARENT_GUIDANCE: &str = "Subagent supervision: background/detached receipts are not task completion. Use subagent_supervisor({action:\"status\",id:\"run-id\"}) for a read-only snapshot. Answer pending requests using subagent_supervisor({action:\"reply\",replyTo:\"request-id\",message:\"...\"}); interview requests expect JSON in message. Continue the same run, not a replacement. Completion and decision requests notify this session on a best-effort basis; subagent_supervisor status is authoritative. Use bg_wait({id:\"run-id\"}) if this turn needs the result. Use bg_wait({id:\"run-id\",nonBlocking:true,timeoutMs:30000}) to watch a detached run and continue working: it adds a one-shot expiry reminder, reuses completion/decision notifications, and repeated registration keeps the original deadline. Wait expiry does not cancel work. Resolve only decisions within the user's authorization; ask the user when needed.";
 
 #[derive(Clone, Copy)]
 pub(crate) enum SupervisorToolKind {
@@ -37,10 +37,20 @@ struct ContactInput {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SupervisorInput {
-    action: String,
+    action: SupervisorAction,
+    id: Option<String>,
     to: Option<String>,
     message: Option<String>,
     reply_to: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SupervisorAction {
+    List,
+    Pending,
+    Status,
+    Reply,
 }
 
 #[derive(Deserialize)]
@@ -49,9 +59,9 @@ struct WaitInput {
     id: Option<String>,
     #[serde(default)]
     all: bool,
-    timeout_ms: Option<u64>,
     #[serde(default)]
     non_blocking: bool,
+    timeout_ms: Option<u64>,
     stop_on_attention: Option<bool>,
 }
 
@@ -70,19 +80,20 @@ impl Tool for SupervisorTool {
             ),
             SupervisorToolKind::Supervisor => (
                 "subagent_supervisor",
-                "Reply to child requests or inspect pending supervisor requests. Reply before waiting for that child again.",
+                "Inspect owned subagent run status (optionally id), list pending supervisor requests, or reply to a request. Reply before waiting for that child again.",
                 json!({
                     "action":{"type":"string","enum":["list","pending","status","reply"]},
+                    "id":{"type":"string","description":"For status only: exact owned run id or unique prefix."},
                     "to":{"type":"string"}, "message":{"type":"string"}, "replyTo":{"type":"string"}
                 }),
                 vec!["action"],
             ),
             SupervisorToolKind::Wait => (
                 "bg_wait",
-                "Wait for an owned detached subagent to finish or need attention. A timeout returns without stopping work. Use id for a specific run; otherwise wait for one active run, or all with all:true.",
+                "Wait for an owned subagent to finish or need attention. nonBlocking:true returns immediately and adds a one-shot expiry reminder for a single detached run. A timeout never stops work. Blocking waits also support the active set or all:true.",
                 json!({
                     "id":{"type":"string"}, "all":{"type":"boolean"}, "timeoutMs":{"type":"integer","minimum":1},
-                    "nonBlocking":{"type":"boolean","description":"Non-blocking subscriptions are not supported by this in-process runtime; use false."},
+                    "nonBlocking":{"type":"boolean","description":"Requires one id and forbids all:true. A detached run is watched in this process until completion, attention or wait expiry. Duplicate registration preserves the original deadline. Notifications are best effort."},
                     "stopOnAttention":{"type":"boolean"}
                 }),
                 vec![],
@@ -168,7 +179,7 @@ impl SupervisorTool {
                 "Supervisor request exceeds 64 KiB.".into(),
             ));
         }
-        let receiver = self
+        let (receiver, delivered) = self
             .runtime
             .coordination()
             .post(request.clone(), Duration::from_millis(timeout))
@@ -199,7 +210,8 @@ impl SupervisorTool {
         details["requestId"] = json!(request.id);
         details["reason"] = json!(input.reason);
         if !expects_reply {
-            details["delivered"] = json!(true);
+            details["queued"] = json!(true);
+            details["delivered"] = json!(delivered);
         }
         Ok(result)
     }
@@ -210,22 +222,34 @@ impl SupervisorTool {
         input: SupervisorInput,
     ) -> Result<ToolResult, ToolError> {
         let owner = context.session.id()?;
+        if input.id.is_some() && input.action != SupervisorAction::Status {
+            return Err(ToolError::InvalidArguments(
+                "id is only supported for status.".into(),
+            ));
+        }
+        if input.action == SupervisorAction::Status {
+            let status = self
+                .runtime
+                .coordination()
+                .status(&owner, input.id.as_deref())
+                .map_err(ToolError::Execution)?;
+            let mut result =
+                ToolResult::text(serde_json::to_string_pretty(&status).expect("status"));
+            result.details = Some(status);
+            return Ok(result);
+        }
         let pending = self.runtime.coordination().pending(&owner);
-        match input.action.as_str() {
-            "status" | "pending" | "list" => {
+        match input.action {
+            SupervisorAction::Pending | SupervisorAction::List => {
                 let mut result = ToolResult::text(if pending.is_empty() {
                     "No pending supervisor requests.".into()
                 } else {
                     serde_json::to_string_pretty(&pending).expect("serializable requests")
                 });
-                result.details = Some(if input.action == "status" {
-                    json!({"active":true,"pending":pending.len()})
-                } else {
-                    json!({"pending":pending})
-                });
+                result.details = Some(json!({"pending":pending}));
                 Ok(result)
             }
-            "reply" => {
+            SupervisorAction::Reply => {
                 let message = input.message.unwrap_or_default();
                 let request = self
                     .runtime
@@ -249,85 +273,66 @@ impl SupervisorTool {
                 }
                 Ok(result)
             }
-            _ => Err(ToolError::InvalidArguments(
-                "Unsupported supervisor action.".into(),
-            )),
+            SupervisorAction::Status => unreachable!("status handled above"),
         }
     }
 
     async fn wait(&self, context: ToolContext, input: WaitInput) -> Result<ToolResult, ToolError> {
-        if input.non_blocking {
-            return Err(ToolError::InvalidArguments("Non-blocking wait subscriptions are not supported by this in-process runtime. Use blocking bg_wait.".into()));
-        }
         if input.timeout_ms == Some(0) {
             return Err(ToolError::InvalidArguments(
                 "timeoutMs must be positive.".into(),
             ));
         }
+        if input.non_blocking
+            && (input.all || input.id.as_deref().is_none_or(|id| id.trim().is_empty()))
+        {
+            return Err(ToolError::InvalidArguments(
+                "nonBlocking requires one id and cannot be combined with all:true.".into(),
+            ));
+        }
         // Supervisor requests always break the wait, including stopOnAttention:false.
         let _ = input.stop_on_attention;
         let owner = context.session.id()?;
-        let mut changed = self.runtime.coordination().subscribe();
         let ids = self
             .runtime
             .coordination()
             .run_ids(&owner, input.id.as_deref())
             .map_err(ToolError::Execution)?;
+        let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(1_800_000));
         let end = tokio::time::Instant::now()
-            .checked_add(Duration::from_millis(input.timeout_ms.unwrap_or(1_800_000)))
+            .checked_add(timeout)
             .ok_or_else(|| ToolError::InvalidArguments("timeoutMs is too large.".into()))?;
+        if input.non_blocking {
+            return self
+                .runtime
+                .coordination()
+                .arm_wait(&owner, &ids[0], timeout)
+                .map_err(ToolError::Execution);
+        }
+        let mut changed = self.runtime.coordination().subscribe();
         let deadline = tokio::time::sleep_until(end);
         tokio::pin!(deadline);
         loop {
-            let runs = ids
-                .iter()
-                .map(|id| self.runtime.coordination().run(&owner, id))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(ToolError::Execution)?;
-            let pending = self.runtime.coordination().pending(&owner);
-            let finished = runs.iter().filter(|run| run.result.is_some()).count();
-            if !pending.is_empty() {
-                let mut result = ToolResult::text(
-                    "Subagent attention required. Reply to pending supervisor requests, then bg_wait on the same run. Do not launch a replacement.",
-                );
-                result.details =
-                    Some(json!({"state":"needs_attention","pending":pending,"runIds":ids}));
-                return Ok(result);
-            }
-            if runs.is_empty()
-                || (input.all && finished == runs.len())
-                || (!input.all && finished > 0)
+            if let crate::waiting::WaitDecision::Ready(result) = self
+                .runtime
+                .coordination()
+                .wait_decision(&owner, &ids, input.all)
+                .map_err(ToolError::Execution)?
             {
-                if runs.len() == 1 {
-                    return runs[0]
-                        .result
-                        .clone()
-                        .expect("terminal run")
-                        .map_err(ToolError::Execution);
-                }
-                let completed = runs
-                    .iter()
-                    .filter_map(|run| run.result.as_ref())
-                    .map(|result| match result {
-                        Ok(result) => json!({"content":result.content,"details":result.details,"isError":result.is_error}),
-                        Err(error) => json!({"error":error}),
-                    })
-                    .collect::<Vec<_>>();
-                let mut result = ToolResult::text(if runs.is_empty() {
-                    "No active subagent runs."
-                } else {
-                    "Subagent wait completed."
-                });
-                result.details =
-                    Some(json!({"state":"completed","results":completed,"runIds":ids}));
-                return Ok(result);
+                return (*result).map_err(ToolError::Execution);
             }
             tokio::select! {
                 () = context.signal().wait() => return Err(ToolError::Aborted),
                 _ = &mut deadline => {
-                    let mut result = ToolResult::text("Wait window elapsed; subagent work keeps going. Call bg_wait again on the same run.");
-                    result.details = Some(json!({"state":"running","timedOut":true,"runIds":ids}));
-                    return Ok(result);
+                    if let crate::waiting::WaitDecision::Ready(result) = self
+                        .runtime
+                        .coordination()
+                        .wait_decision(&owner, &ids, input.all)
+                        .map_err(ToolError::Execution)?
+                    {
+                        return (*result).map_err(ToolError::Execution);
+                    }
+                    return Ok(crate::waiting::window_elapsed(&ids));
                 }
                 _ = changed.changed() => {}
             }
@@ -368,16 +373,18 @@ fn parse_structured_reply(reply: &str) -> Result<Value, serde_json::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coordination::ManagedRun;
+    use crate::coordination::{ManagedRun, RunMetadata};
     use pi_core::{
-        AbortHandle, CustomMessageInput, ModelsContextAccess, PluginContextEpoch,
-        PluginContextResult, SendMessageOptions, SessionContextAccess, UiContextAccess,
+        AbortHandle, CustomMessageInput, IsolatedContextMode, ModelsContextAccess,
+        PluginContextEpoch, PluginContextResult, SendMessageOptions, SessionContextAccess,
+        UiContextAccess,
     };
     use std::sync::{Arc, Mutex};
 
     struct Access {
         id: String,
         messages: Mutex<Vec<CustomMessageInput>>,
+        trigger_turns: Mutex<Vec<Option<bool>>>,
     }
     #[async_trait]
     impl SessionContextAccess for Access {
@@ -389,7 +396,10 @@ mod tests {
             message: CustomMessageInput,
             options: SendMessageOptions,
         ) -> PluginContextResult<()> {
-            assert_eq!(options.trigger_turn, Some(true));
+            self.trigger_turns
+                .lock()
+                .unwrap()
+                .push(options.trigger_turn);
             self.messages.lock().unwrap().push(message);
             Ok(())
         }
@@ -406,6 +416,7 @@ mod tests {
         let access = Arc::new(Access {
             id: id.into(),
             messages: Mutex::new(vec![]),
+            trigger_turns: Mutex::new(vec![]),
         });
         let epoch = PluginContextEpoch::new(access.clone());
         (access, epoch)
@@ -433,13 +444,12 @@ mod tests {
         let (abort, _) = AbortHandle::new();
         runtime.coordination().reserve(
             ticket.run_id(),
-            ManagedRun {
-                owner: "parent".into(),
-                details: json!({"runId":ticket.run_id(),"agent":"reviewer"}),
-                abort: abort.clone(),
-                result: None,
-                detached: false,
-            },
+            ManagedRun::new(
+                "parent".into(),
+                RunMetadata::new("reviewer".into(), 1, IsolatedContextMode::Fresh),
+                abort.clone(),
+                None,
+            ),
         );
         (
             runtime,
@@ -545,6 +555,7 @@ mod tests {
         .unwrap();
         assert_eq!(result.details.unwrap()["delivered"], true);
         assert_eq!(parent.messages.lock().unwrap().len(), 1);
+        assert_eq!(*parent.trigger_turns.lock().unwrap(), vec![Some(false)]);
         assert!(runtime.coordination().pending("parent").is_empty());
     }
 
@@ -609,6 +620,173 @@ mod tests {
             .unwrap();
             assert_eq!(result.content, ToolResult::text("finished").content);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nonblocking_wait_reuses_deadline_expires_once_and_leaves_run_alive() {
+        let (runtime, id, parent, epoch, _, abort) = setup();
+        runtime.coordination().launched(&id, "isolated");
+        runtime.coordination().background("parent", &id).unwrap();
+        let first = call(
+            runtime.clone(),
+            &epoch,
+            SupervisorToolKind::Wait,
+            json!({"id": &id[..8], "nonBlocking":true,"timeoutMs":1000}),
+        )
+        .await
+        .unwrap();
+        let receipt = first.details.unwrap();
+        assert_eq!(receipt["runId"], id);
+        assert_eq!(receipt["armed"], true);
+        assert_eq!(receipt["reused"], false);
+        tokio::time::advance(Duration::from_millis(500)).await;
+        let duplicate = call(
+            runtime.clone(),
+            &epoch,
+            SupervisorToolKind::Wait,
+            json!({"id":id,"nonBlocking":true,"timeoutMs":9000}),
+        )
+        .await
+        .unwrap();
+        let duplicate = duplicate.details.unwrap();
+        assert_eq!(duplicate["reused"], true);
+        assert_eq!(duplicate["deadlineAt"], receipt["deadlineAt"]);
+        let status = call(
+            runtime.clone(),
+            &epoch,
+            SupervisorToolKind::Supervisor,
+            json!({"action":"status","id":id}),
+        )
+        .await
+        .unwrap()
+        .details
+        .unwrap();
+        assert_eq!(
+            status["runs"][0]["nonBlockingWait"]["deadlineAt"],
+            receipt["deadlineAt"]
+        );
+        tokio::time::sleep(Duration::from_millis(501)).await;
+        let messages = parent.messages.lock().unwrap().clone();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].custom_type, "subagent-wait-expired");
+        assert_eq!(messages[0].details.as_ref().unwrap()["runId"], id);
+        assert_eq!(messages[0].details.as_ref().unwrap()["state"], "running");
+        assert_eq!(*parent.trigger_turns.lock().unwrap(), vec![Some(true)]);
+        assert!(!abort.is_aborted());
+        let status = runtime.coordination().status("parent", Some(&id)).unwrap();
+        assert_eq!(status["runs"][0]["state"], "running");
+        assert!(status["runs"][0].get("nonBlockingWait").is_none());
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        assert_eq!(parent.messages.lock().unwrap().len(), 1);
+        runtime
+            .coordination()
+            .complete(&id, Ok(ToolResult::text("done later")));
+        assert_eq!(
+            parent.messages.lock().unwrap()[1].custom_type,
+            "subagent-notify"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nonblocking_wait_completion_and_attention_reuse_existing_notifications() {
+        for attention in [false, true] {
+            let (runtime, id, parent, epoch, child_epoch, _) = setup();
+            runtime.coordination().background("parent", &id).unwrap();
+            call(
+                runtime.clone(),
+                &epoch,
+                SupervisorToolKind::Wait,
+                json!({"id":id,"nonBlocking":true,"timeoutMs":1000}),
+            )
+            .await
+            .unwrap();
+            let request = if attention {
+                let child_runtime = runtime.clone();
+                Some(tokio::spawn(async move {
+                    call(
+                        child_runtime,
+                        &child_epoch,
+                        SupervisorToolKind::Contact,
+                        json!({"reason":"need_decision","message":"Choose"}),
+                    )
+                    .await
+                }))
+            } else {
+                runtime
+                    .coordination()
+                    .complete(&id, Ok(ToolResult::text("done")));
+                None
+            };
+            if attention {
+                pending(&runtime).await;
+            }
+            let ready = call(
+                runtime.clone(),
+                &epoch,
+                SupervisorToolKind::Wait,
+                json!({"id":id,"nonBlocking":true}),
+            )
+            .await
+            .unwrap();
+            if attention {
+                assert_eq!(ready.details.unwrap()["state"], "needs_attention");
+            } else {
+                assert_eq!(ready.content, ToolResult::text("done").content);
+            }
+            let status = runtime.coordination().status("parent", Some(&id)).unwrap();
+            assert!(status["runs"][0].get("nonBlockingWait").is_none());
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let messages = parent.messages.lock().unwrap().clone();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(
+                messages[0].custom_type,
+                if attention {
+                    "subagent_supervisor_request"
+                } else {
+                    "subagent-notify"
+                }
+            );
+            runtime.forget_session("parent");
+            if let Some(request) = request {
+                assert!(request.await.unwrap().is_err());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn nonblocking_wait_rejects_invalid_selection_without_registering() {
+        let (runtime, id, _, epoch, _, _) = setup();
+        for input in [
+            json!({"nonBlocking":true}),
+            json!({"id":" ","nonBlocking":true}),
+            json!({"id":id,"all":true,"nonBlocking":true}),
+            json!({"id":id,"timeoutMs":0,"nonBlocking":true}),
+            json!({"id":"unknown","nonBlocking":true}),
+            json!({"id":id,"nonBlocking":true}), // still foreground
+        ] {
+            assert!(
+                call(runtime.clone(), &epoch, SupervisorToolKind::Wait, input)
+                    .await
+                    .is_err()
+            );
+        }
+        runtime.coordination().background("parent", &id).unwrap();
+        let (_, foreign_epoch) = access("foreign");
+        assert!(
+            call(
+                runtime.clone(),
+                &foreign_epoch,
+                SupervisorToolKind::Wait,
+                json!({"id":id,"nonBlocking":true})
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            runtime.coordination().status("parent", Some(&id)).unwrap()["runs"][0]
+                .get("nonBlockingWait")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -701,7 +879,7 @@ mod tests {
             expires_at: Some(now_ms()),
             interview: None,
         };
-        let receiver = runtime
+        let (receiver, _) = runtime
             .coordination()
             .post(request, Duration::ZERO)
             .unwrap();
@@ -720,13 +898,12 @@ mod tests {
         let (abort, _) = AbortHandle::new();
         runtime.coordination().reserve(
             "second",
-            ManagedRun {
-                owner: "parent".into(),
-                details: json!({"runId":"second"}),
+            ManagedRun::new(
+                "parent".into(),
+                RunMetadata::new("reviewer".into(), 1, IsolatedContextMode::Fresh),
                 abort,
-                result: None,
-                detached: false,
-            },
+                None,
+            ),
         );
         let wait_runtime = runtime.clone();
         let wait = tokio::spawn(async move {

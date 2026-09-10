@@ -109,8 +109,49 @@ terminal result. A `bg_wait` timeout only ends that wait window. For structured 
 `reason: "interview_request"`, an `interview` object and a JSON reply. `progress_update` should
 reach the parent without blocking the child. These checks work with fresh and fork context.
 
-Communication is currently process-local. Restarting the app does not reattach live work, and
-`bg_wait({nonBlocking: true})` is explicitly unsupported.
+Communication is process-local. Restarting, closing, or reloading the owning session cancels live
+work; no notification or task is reattached.
+
+## Background launch and status
+
+Use `subagent({agent:"reviewer", task:"...", async:true})` for explicit in-process background
+launch. The default remains foreground. A fast child may already return a terminal result;
+otherwise the receipt contains `runId`, `isolatedSessionId`, `detached:true` and `background:true`.
+Completion and supervisor requests attempt to notify the owner. `async:true` does not start a
+separate process; exiting the owning session cancels work. In a one-shot frontend, use blocking
+`bg_wait` before ending the request if the child result is required before exit.
+
+- `subagent_supervisor({action:"status"})` returns an owner-scoped, read-only summary and run
+  snapshots. Add `id` for an exact run or unique prefix, including a terminal run.
+  `list`/`pending` continue to list supervisor requests, not tasks.
+- Execution state (`starting`, `running`, `cancelling`, `completed`, `failed`, `cancelled`,
+  `timed_out`) is independent from `activityState` and `waitMode` (`foreground` or `detached`).
+  Status includes elapsed time, child identity, pending request IDs and a bounded result summary.
+  It does not consume results.
+- `bg_wait({id:"...", timeoutMs:30000})` blocks only that tool wait. Timeout returns without
+  cancelling the child. It is not a subscription and does not create later notifications.
+- `bg_wait({id:"...", nonBlocking:true, timeoutMs:30000})` immediately registers a one-shot
+  observation of one detached run. The receipt returns the full `runId`, `armed:true`,
+  `deadlineAt`, and `reused`; status exposes `nonBlockingWait.deadlineAt` while active.
+  A duplicate active registration reuses the original deadline, even with a different timeout.
+  Completion/decision use the existing notifications and clear the observation. If neither
+  happens before expiry, one `subagent-wait-expired` reminder is attempted; the child keeps
+  running and can still notify on completion. An already ready result/decision returns directly.
+  This mode requires `id`, rejects `all:true`, and does not launch or detach a run. It shares
+  the thirty-minute default wait window; it does not keep a one-shot frontend alive.
+
+Manual check: background-launch a read-only child that asks for a decision. Query its status and
+confirm `needs_attention`; reply, then call `bg_wait` while it continues. Verify the completion
+notice arrives during the same owning session and the terminal status remains queryable. Use a
+short wait window to confirm expiry leaves the same child live. Notification delivery is best
+effort, so status is the fallback when no notice arrives.
+
+For non-blocking observation, launch a longer read-only child with `async:true`, then register a
+short window with `nonBlocking:true`. Confirm the parent can continue working immediately. Register
+again before expiry and confirm `reused:true` with the same deadline. Expect one expiry reminder,
+no child cancellation, no active observation in status, and a later ordinary completion notice.
+Repeat with a longer window: completion or a decision should clear the observation without a
+second reminder. Closing the owner clears observations; none are restored after restart or reload.
 
 ## Human checks
 

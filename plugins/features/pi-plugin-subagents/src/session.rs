@@ -1,9 +1,6 @@
 use async_trait::async_trait;
 use pi_core::PluginId;
-use pi_session::{
-    SessionPlugin, SessionPluginContext, SessionPluginError, SessionShutdownEvent,
-    SessionShutdownReason,
-};
+use pi_session::{SessionPlugin, SessionPluginContext, SessionPluginError, SessionShutdownEvent};
 
 use crate::SubagentRuntime;
 
@@ -40,17 +37,13 @@ impl SessionPlugin for SubagentsSessionPlugin {
     async fn session_shutdown(
         &self,
         context: &SessionPluginContext,
-        event: &SessionShutdownEvent,
+        _event: &SessionShutdownEvent,
     ) -> Result<(), SessionPluginError> {
-        if event.reason != SessionShutdownReason::Reload {
-            // Retain the current generation's control handle until monitors
-            // have aborted/drained their children, including after a reload.
-            self.runtime
-                .coordination()
-                .cancel_owner(&context.identity().id);
-            self.runtime.drain_monitors(&context.identity().id).await;
-            self.runtime.forget_session(&context.identity().id);
-        }
+        self.runtime
+            .coordination()
+            .cancel_owner(&context.identity().id);
+        self.runtime.drain_monitors(&context.identity().id).await;
+        self.runtime.forget_session(&context.identity().id);
         Ok(())
     }
 }
@@ -66,7 +59,7 @@ mod tests {
     use crate::runtime::LaunchError;
 
     #[tokio::test]
-    async fn reload_preserves_budget_and_quit_releases_it() {
+    async fn shutdown_releases_the_owner_budget() {
         let runtime = SubagentRuntime::default();
         let plugin = SubagentsSessionPlugin::new(runtime.clone());
         let context = SessionPluginContext::unavailable_for_testing(
@@ -82,18 +75,6 @@ mod tests {
         let run = runtime
             .begin_launch("root", builtin_profile("delegate"))
             .unwrap();
-
-        plugin
-            .session_shutdown(
-                &context,
-                &SessionShutdownEvent {
-                    reason: SessionShutdownReason::Reload,
-                    target_session_file: None,
-                },
-            )
-            .await
-            .unwrap();
-        assert!(runtime.bind_child(run.run_id(), "child").is_ok());
 
         plugin
             .session_shutdown(

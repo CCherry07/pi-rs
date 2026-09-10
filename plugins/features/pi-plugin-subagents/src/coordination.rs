@@ -1,19 +1,20 @@
-//! Session-owned run receipts and request/reply mailboxes. No transport files:
+//! Feature-owned run receipts and request/reply mailboxes. No transport files:
 //! managed children run in this process, but keep upstream tool semantics.
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pi_core::{
-    AbortHandle, CustomMessageContent, CustomMessageInput, PluginContextHandle, SendMessageOptions,
-    ToolResult, Usage,
+    CustomMessageContent, CustomMessageInput, PluginContextHandle, SendMessageOptions, ToolResult,
+    Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{oneshot, watch};
 use tokio::time::Instant;
 
-pub(crate) type RunResult = Result<ToolResult, String>;
+pub(crate) use crate::run_state::{ManagedRun, RunMetadata, RunResult, RunState, TerminalState};
+use crate::waiting::{WaitDeadline, WaitDecision};
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,15 +32,6 @@ impl std::fmt::Display for SupervisorReason {
             Self::ProgressUpdate => "progress_update",
         })
     }
-}
-
-#[derive(Clone)]
-pub(crate) struct ManagedRun {
-    pub owner: String,
-    pub details: Value,
-    pub abort: AbortHandle,
-    pub result: Option<RunResult>,
-    pub detached: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -67,20 +59,18 @@ struct PendingRequest {
     reply: oneshot::Sender<Result<String, String>>,
 }
 
-enum NotificationDelivery {
-    Pending,
-    InFlight {
-        // Identity prevents an old adapter call from acknowledging a replacement
-        // notification after remove/close and reuse of the run id.
-        attempt: Arc<()>,
-        retry_on_failure: bool,
-    },
+/// The record owns its timer; completion, attention and owner cleanup cancel it.
+struct DeadlineWatch {
+    deadline: Instant,
+    snapshot: WaitDeadline,
+    identity: Arc<()>,
+    task: tokio::task::JoinHandle<()>,
 }
 
-struct PendingNotification {
-    owner: String,
-    message: CustomMessageInput,
-    delivery: NotificationDelivery,
+impl Drop for DeadlineWatch {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 #[derive(Default)]
@@ -88,7 +78,7 @@ struct State {
     sessions: HashMap<String, PluginContextHandle>,
     runs: HashMap<String, ManagedRun>,
     pending: HashMap<String, PendingRequest>,
-    notifications: HashMap<String, PendingNotification>,
+    deadline_watches: HashMap<(String, String), DeadlineWatch>,
 }
 
 pub(crate) struct Coordination {
@@ -122,39 +112,56 @@ impl Coordination {
     }
 
     pub fn bind_session(&self, id: String, handle: PluginContextHandle) {
-        let mut state = self.lock();
-        state.sessions.insert(id.clone(), handle);
-        let mut ready = Vec::new();
-        for (run_id, notification) in &mut state.notifications {
-            if notification.owner != id {
-                continue;
-            }
-            match &mut notification.delivery {
-                NotificationDelivery::Pending => ready.push(run_id.clone()),
-                NotificationDelivery::InFlight {
-                    retry_on_failure, ..
-                } => *retry_on_failure = true,
-            }
-        }
-        drop(state);
+        self.lock().sessions.insert(id, handle);
         self.wake();
-        for run_id in ready {
-            self.deliver_completion(&run_id);
-        }
     }
 
-    /// Attributes completed child work to its immediate owner. The current
-    /// generation handle is resolved at commit time so a detached run can
-    /// finish across a parent reload.
-    pub fn record_usage(&self, owner: &str, usage: Usage, details: Value) -> Result<(), String> {
-        let handle = self.lock().sessions.get(owner).cloned().ok_or_else(|| {
-            "Subagent owner is no longer available for usage accounting.".to_string()
-        })?;
+    /// Stores usage on the run snapshot, then attributes it once to the
+    /// immediate parent session. Snapshot reporting does not depend on the
+    /// parent ledger write succeeding.
+    pub fn record_usage(
+        &self,
+        run_id: &str,
+        owner: &str,
+        usage: Usage,
+        details: Value,
+    ) -> Result<(), String> {
+        let handle = {
+            let mut state = self.lock();
+            let run = state
+                .runs
+                .get_mut(run_id)
+                .filter(|run| run.owner == owner)
+                .ok_or_else(|| format!("No owned subagent run found for {run_id:?}."))?;
+            run.set_usage(usage.clone());
+            state.sessions.get(owner).cloned().ok_or_else(|| {
+                "Subagent owner is no longer available for usage accounting.".to_string()
+            })?
+        };
+        self.wake();
         handle
             .access_for_adapter()
             .map_err(|error| error.to_string())?
             .record_usage(usage, Some(details))
             .map_err(|error| error.to_string())
+    }
+
+    pub fn monitor_started(&self, run_id: &str) -> Option<Instant> {
+        let deadline = self
+            .lock()
+            .runs
+            .get_mut(run_id)
+            .filter(|run| run.result.is_none())
+            .and_then(ManagedRun::start_deadline);
+        self.wake();
+        deadline
+    }
+
+    pub fn bind_child_session(&self, run_id: &str, session_id: &str) {
+        if let Some(run) = self.lock().runs.get_mut(run_id) {
+            run.set_session_id(session_id);
+        }
+        self.wake();
     }
 
     pub fn reserve(&self, id: &str, run: ManagedRun) {
@@ -164,7 +171,8 @@ impl Coordination {
 
     pub fn launched(&self, id: &str, isolated_id: &str) {
         if let Some(run) = self.lock().runs.get_mut(id) {
-            run.details["isolatedSessionId"] = json!(isolated_id);
+            run.set_isolated_session_id(isolated_id);
+            run.mark_running();
         }
         self.wake();
     }
@@ -180,6 +188,11 @@ impl Coordination {
 
     pub fn run_ids(&self, owner: &str, prefix: Option<&str>) -> Result<Vec<String>, String> {
         let state = self.lock();
+        if let Some(id) = prefix
+            && state.runs.get(id).is_some_and(|run| run.owner == owner)
+        {
+            return Ok(vec![id.to_string()]);
+        }
         let mut ids = state
             .runs
             .iter()
@@ -196,11 +209,151 @@ impl Coordination {
         Ok(ids)
     }
 
+    pub fn wait_decision(
+        &self,
+        owner: &str,
+        ids: &[String],
+        all: bool,
+    ) -> Result<WaitDecision, String> {
+        let state = self.lock();
+        let runs = ids
+            .iter()
+            .map(|id| {
+                state
+                    .runs
+                    .get(id)
+                    .filter(|run| run.owner == owner)
+                    .ok_or_else(|| format!("No owned subagent run found for {id:?}."))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let pending = state
+            .pending
+            .values()
+            .filter(|request| request.owner == owner && request.deadline > Instant::now())
+            .map(|request| request.request.clone())
+            .collect();
+        Ok(crate::waiting::decide(ids, &runs, pending, all))
+    }
+
+    /// Caller resolves the prefix once. Registration and timer ownership are atomic.
+    pub fn arm_wait(self: &Arc<Self>, owner: &str, id: &str, timeout: Duration) -> RunResult {
+        let key = (owner.to_string(), id.to_string());
+        loop {
+            let mut state = self.lock();
+            let run = state
+                .runs
+                .get(id)
+                .filter(|run| run.owner == owner)
+                .ok_or_else(|| format!("No owned subagent run found for {id:?}."))?;
+            let pending = state
+                .pending
+                .values()
+                .filter(|request| {
+                    request.owner == owner
+                        && request.request.run_id == id
+                        && request.deadline > Instant::now()
+                })
+                .map(|request| request.request.clone())
+                .collect();
+            if let WaitDecision::Ready(result) =
+                crate::waiting::decide(&[id.to_string()], &[run], pending, false)
+            {
+                return *result;
+            }
+            if !run.is_detached() {
+                return Err("nonBlocking requires a detached run. Start background work with subagent async:true.".into());
+            }
+            if let Some(watch) = state.deadline_watches.get(&key) {
+                if watch.deadline > Instant::now() {
+                    return Ok(crate::waiting::armed(id, watch.snapshot, true));
+                }
+                // A due timer may not have been polled yet. Settle it before rearming.
+                let identity = watch.identity.clone();
+                drop(state);
+                self.expire_wait(&key, &identity);
+                continue;
+            }
+            let deadline = Instant::now()
+                .checked_add(timeout)
+                .ok_or_else(|| "timeoutMs is too large.".to_string())?;
+            let snapshot = WaitDeadline {
+                deadline_at: now_ms()
+                    .saturating_add(timeout.as_millis().try_into().unwrap_or(u64::MAX)),
+            };
+            let identity = Arc::new(());
+            let weak = Arc::downgrade(self);
+            let timer_key = key.clone();
+            let timer_identity = identity.clone();
+            let task = tokio::spawn(async move {
+                tokio::time::sleep_until(deadline).await;
+                if let Some(coordination) = weak.upgrade() {
+                    coordination.expire_wait(&timer_key, &timer_identity);
+                }
+            });
+            state.deadline_watches.insert(
+                key,
+                DeadlineWatch {
+                    deadline,
+                    snapshot,
+                    identity,
+                    task,
+                },
+            );
+            drop(state);
+            self.wake();
+            return Ok(crate::waiting::armed(id, snapshot, false));
+        }
+    }
+
+    fn expire_wait(&self, key: &(String, String), identity: &Arc<()>) {
+        let mut state = self.lock();
+        let Some(watch) = state.deadline_watches.get(key) else {
+            return;
+        };
+        // An old timer cannot remove a watch rearmed after attention or expiry.
+        if !Arc::ptr_eq(&watch.identity, identity) || watch.deadline > Instant::now() {
+            return;
+        }
+        let deadline_at = watch.snapshot.deadline_at;
+        state.deadline_watches.remove(key);
+        let (owner, id) = key;
+        let notification = (|| {
+            let run = state
+                .runs
+                .get(id)
+                .filter(|run| run.owner == *owner && run.result.is_none())?;
+            if state.pending.values().any(|request| {
+                request.owner == *owner
+                    && request.request.run_id == *id
+                    && request.deadline > Instant::now()
+            }) {
+                return None;
+            }
+            let handle = state.sessions.get(owner)?.clone();
+            let snapshot = run.snapshot(id, Vec::new());
+            Some((
+                handle,
+                CustomMessageInput {
+                    custom_type: "subagent-wait-expired".into(),
+                    content: CustomMessageContent::Text(format!(
+                        "Wait window for subagent {id} elapsed; work continues. Query subagent_supervisor status or wait on the same run."
+                    )),
+                    display: true,
+                    details: Some(json!({"runId": id, "deadlineAt": deadline_at,
+                        "timedOut": true, "state": snapshot.state})),
+                },
+            ))
+        })();
+        drop(state);
+        self.wake();
+        if let Some((handle, message)) = notification {
+            Self::try_send(&handle, message, true);
+        }
+    }
+
     pub fn pending(&self, owner: &str) -> Vec<SupervisorRequest> {
         let mut state = self.lock();
-        state
-            .pending
-            .retain(|_, pending| pending.deadline > Instant::now());
+        expire_requests(&mut state);
         let mut requests = state
             .pending
             .values()
@@ -212,6 +365,14 @@ impl Coordination {
     }
 
     pub fn detach(&self, owner: &str, id: &str) -> Result<ToolResult, String> {
+        self.detach_for(owner, id, false)
+    }
+
+    pub fn background(&self, owner: &str, id: &str) -> Result<ToolResult, String> {
+        self.detach_for(owner, id, true)
+    }
+
+    fn detach_for(&self, owner: &str, id: &str, background: bool) -> Result<ToolResult, String> {
         let pending = self.pending(owner);
         let mut state = self.lock();
         let run = state
@@ -224,112 +385,83 @@ impl Coordination {
         }
         // Publishing a retained receipt is the ownership handoff. A caller may
         // release its cancellation guard only after this succeeds.
-        run.detached = true;
-        let mut result = ToolResult::text(format!(
-            "Detached for intercom coordination before task completion. Run: {id}. Reply with subagent_supervisor, then bg_wait({{\"id\":\"{id}\"}}). Keep using this run; do not launch a replacement."
-        ));
-        let mut details = run.details.clone();
-        details["state"] = json!("detached");
-        details["detached"] = json!(true);
-        details["detachedReason"] = json!("intercom coordination");
-        details["activityState"] = json!(if pending.iter().any(|p| p.run_id == id) {
-            "needs_attention"
+        run.detach();
+        let mut result = ToolResult::text(if background {
+            format!(
+                "Subagent {id} is running in the background of this process. Continue other work or return control; completion and supervisor requests attempt a best-effort notification. Use subagent_supervisor status to inspect, or bg_wait when the result is needed in this turn. This receipt is not task completion."
+            )
         } else {
-            "running"
+            format!(
+                "Detached for intercom coordination before task completion. Run: {id}. Reply with subagent_supervisor, then bg_wait({{\"id\":\"{id}\"}}). Keep using this run; do not launch a replacement."
+            )
         });
+        let pending_request_ids = pending
+            .iter()
+            .filter(|request| request.run_id == id)
+            .map(|request| request.id.clone())
+            .collect();
+        let mut details = run.details(id, pending_request_ids);
+        details["detachedReason"] = json!(if background {
+            "background launch"
+        } else {
+            "intercom coordination"
+        });
+        details["background"] = json!(background);
         details["pending"] = json!(pending);
         result.details = Some(details);
         Ok(result)
     }
 
+    #[cfg(test)]
     pub fn complete(&self, id: &str, result: RunResult) {
+        let terminal = match &result {
+            Ok(result) if !result.is_error => TerminalState::Completed,
+            _ => TerminalState::Failed,
+        };
+        self.complete_with_state(id, terminal, result);
+    }
+
+    pub fn complete_with_state(&self, id: &str, terminal: TerminalState, result: RunResult) {
         let mut state = self.lock();
         let Some(run) = state.runs.get_mut(id).filter(|run| run.result.is_none()) else {
             return;
         };
-        let notification = run.detached.then(|| {
+        let owner = run.owner.clone();
+        let notify = run.is_detached();
+        let notification = notify.then(|| {
             let details = match &result {
                 Ok(result) => json!({"runId":id,"content":result.content,"details":result.details,"isError":result.is_error}),
                 Err(error) => json!({"runId":id,"error":error}),
             };
-            PendingNotification {
-                owner: run.owner.clone(),
-                message: CustomMessageInput {
-                    custom_type: "subagent-notify".into(),
-                    content: CustomMessageContent::Text(format!("Detached subagent {id} finished. {}", details)),
-                    display: true,
-                    details: Some(details),
-                },
-                delivery: NotificationDelivery::Pending,
+            CustomMessageInput {
+                custom_type: "subagent-notify".into(),
+                content: CustomMessageContent::Text(format!(
+                    "Detached subagent {id} finished. {details}"
+                )),
+                display: true,
+                details: Some(details),
             }
         });
-        run.result = Some(result);
-        if let Some(notification) = notification {
-            state.notifications.insert(id.into(), notification);
+        if !run.finish(terminal, result) {
+            return;
         }
         state
+            .deadline_watches
+            .remove(&(owner.clone(), id.to_string()));
+        let requests = state
             .pending
-            .retain(|_, pending| pending.request.run_id != id);
+            .values()
+            .filter(|request| request.request.run_id == id)
+            .map(|request| request.request.id.clone())
+            .collect::<Vec<_>>();
+        for request_id in requests {
+            state.pending.remove(&request_id);
+        }
+        let handle = state.sessions.get(&owner).cloned();
         drop(state);
         self.wake();
-        self.deliver_completion(id);
-    }
-
-    fn deliver_completion(&self, id: &str) {
-        loop {
-            let mut state = self.lock();
-            let Some(notification) = state.notifications.get(id) else {
-                return;
-            };
-            if !matches!(notification.delivery, NotificationDelivery::Pending) {
-                return;
-            }
-            let Some(handle) = state.sessions.get(&notification.owner).cloned() else {
-                return;
-            };
-            let notification = state
-                .notifications
-                .get_mut(id)
-                .expect("pending notification");
-            let message = notification.message.clone();
-            let attempt = Arc::new(());
-            notification.delivery = NotificationDelivery::InFlight {
-                attempt: Arc::clone(&attempt),
-                retry_on_failure: false,
-            };
-            drop(state);
-
-            // A reentrant rebind must not send a second copy while this adapter
-            // may still accept the first. No mailbox lock crosses this call.
-            let delivery = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Self::send(&handle, message)
-            }))
-            .unwrap_or_else(|_| Err("Completion delivery adapter panicked.".into()));
-            let mut state = self.lock();
-            let Some(notification) = state.notifications.get_mut(id) else {
-                return;
-            };
-            let NotificationDelivery::InFlight {
-                attempt: current,
-                retry_on_failure,
-            } = &notification.delivery
-            else {
-                return;
-            };
-            if !Arc::ptr_eq(current, &attempt) {
-                return;
-            }
-            if delivery.is_ok() {
-                state.notifications.remove(id);
-                return;
-            }
-            let retry = *retry_on_failure;
-            notification.delivery = NotificationDelivery::Pending;
-            if !retry {
-                return;
-            }
-            // A bind raced with the failed attempt. Retry its current handle
-            // now; otherwise retain the notification until a future bind.
+        if let (Some(handle), Some(notification)) = (handle, notification) {
+            Self::try_send(&handle, notification, true);
         }
     }
 
@@ -337,8 +469,8 @@ impl Coordination {
         let mut state = self.lock();
         if let Some(run) = state.runs.remove(id) {
             run.abort.abort();
+            state.deadline_watches.remove(&(run.owner, id.to_string()));
         }
-        state.notifications.remove(id);
         state
             .pending
             .retain(|_, pending| pending.request.run_id != id);
@@ -347,14 +479,91 @@ impl Coordination {
     }
 
     pub fn cancel_owner(&self, owner: &str) {
-        for run in self.lock().runs.values().filter(|run| run.owner == owner) {
+        let mut state = self.lock();
+        state.deadline_watches.retain(|(id, _), _| id != owner);
+        for run in state
+            .runs
+            .values_mut()
+            .filter(|run| run.owner == owner && run.result.is_none())
+        {
+            run.mark_cancelling();
             run.abort.abort();
         }
+        drop(state);
+        self.wake();
+    }
+
+    pub fn cancelling(&self, owner: &str, id: &str) {
+        if let Some(run) = self
+            .lock()
+            .runs
+            .get_mut(id)
+            .filter(|run| run.owner == owner && run.result.is_none())
+        {
+            run.mark_cancelling();
+        }
+        self.wake();
+    }
+
+    pub fn status(&self, owner: &str, prefix: Option<&str>) -> Result<Value, String> {
+        let state = self.lock();
+        let exact = prefix
+            .and_then(|id| state.runs.get(id).filter(|run| run.owner == owner))
+            .is_some();
+        let mut runs = state
+            .runs
+            .iter()
+            .filter(|(id, run)| {
+                run.owner == owner
+                    && prefix.is_none_or(|prefix| {
+                        if exact {
+                            id.as_str() == prefix
+                        } else {
+                            id.starts_with(prefix)
+                        }
+                    })
+            })
+            .map(|(id, run)| {
+                let mut pending = state
+                    .pending
+                    .values()
+                    .filter(|request| {
+                        request.owner == owner
+                            && request.request.run_id == *id
+                            && request.deadline > Instant::now()
+                    })
+                    .map(|request| request.request.id.clone())
+                    .collect::<Vec<_>>();
+                pending.sort();
+                let mut snapshot = run.snapshot(id, pending);
+                snapshot.non_blocking_wait = state
+                    .deadline_watches
+                    .get(&(owner.to_string(), id.clone()))
+                    .filter(|watch| watch.deadline > Instant::now())
+                    .map(|watch| watch.snapshot);
+                snapshot
+            })
+            .collect::<Vec<_>>();
+        if prefix.is_some() && runs.len() != 1 {
+            return Err("Run id must match exactly one run owned by this session.".into());
+        }
+        runs.sort_by(|a, b| a.run_id.cmp(&b.run_id));
+        let mut summary = std::collections::BTreeMap::<RunState, usize>::new();
+        for run in &runs {
+            *summary.entry(run.state).or_default() += 1;
+        }
+        let pending = state
+            .pending
+            .values()
+            .filter(|request| request.owner == owner && request.deadline > Instant::now())
+            .count();
+        Ok(json!({"active":true,"pending":pending,"summary":summary,"runs":runs}))
     }
 
     pub fn close_owner(&self, owner: &str) {
         let mut state = self.lock();
         state.sessions.remove(owner);
+        state.deadline_watches.retain(|(id, _), _| id != owner);
         state.runs.retain(|_, run| {
             if run.owner == owner {
                 run.abort.abort();
@@ -364,9 +573,6 @@ impl Coordination {
             }
         });
         state.pending.retain(|_, pending| pending.owner != owner);
-        state
-            .notifications
-            .retain(|_, notification| notification.owner != owner);
         drop(state);
         self.wake();
     }
@@ -375,7 +581,7 @@ impl Coordination {
         &self,
         request: SupervisorRequest,
         timeout: Duration,
-    ) -> Result<oneshot::Receiver<Result<String, String>>, String> {
+    ) -> Result<(oneshot::Receiver<Result<String, String>>, bool), String> {
         let (sender, receiver) = oneshot::channel();
         let deadline = Instant::now()
             .checked_add(timeout)
@@ -388,6 +594,9 @@ impl Coordination {
             .ok_or_else(|| "Supervisor channel is no longer active.".to_string())?;
         let owner = run.owner.clone();
         if request.expects_reply {
+            state
+                .deadline_watches
+                .remove(&(owner.clone(), request.run_id.clone()));
             state.pending.insert(
                 request.id.clone(),
                 PendingRequest {
@@ -398,32 +607,44 @@ impl Coordination {
                 },
             );
         }
-        drop(state);
-        // Never hold the mailbox lock while calling a session adapter.
-        let delivery = self.deliver(&owner, CustomMessageInput {
+        let message = CustomMessageInput {
             custom_type: "subagent_supervisor_request".into(),
             content: CustomMessageContent::Text(format!(
                 "Subagent {} ({}) requests {}:\n{}\n{}\n{}",
-                request.agent, request.run_id, request.reason, request.message,
-                request.interview.as_ref().map(ToString::to_string).unwrap_or_default(),
-                if request.expects_reply { format!("Reply with subagent_supervisor({{\"action\":\"reply\",\"replyTo\":\"{}\",\"message\":\"...\"}}), then bg_wait on the same run.", request.id) } else { "Progress update; no reply required.".into() }
+                request.agent,
+                request.run_id,
+                request.reason,
+                request.message,
+                request
+                    .interview
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+                if request.expects_reply {
+                    format!(
+                        "Reply with subagent_supervisor({{\"action\":\"reply\",\"replyTo\":\"{}\",\"message\":\"...\"}}), then bg_wait on the same run.",
+                        request.id
+                    )
+                } else {
+                    "Progress update; no reply required.".into()
+                }
             )),
             display: true,
             details: Some(json!(request)),
-        });
-        if let Err(error) = delivery {
-            // Blocking asks remain discoverable through the detach receipt and
-            // pending tool even when a generation is momentarily retiring.
-            if !request.expects_reply {
-                return Err(error);
-            }
-        }
+        };
+        let handle = state.sessions.get(&owner).cloned();
+        drop(state);
         self.wake();
-        Ok(receiver)
+        let delivered = handle
+            .as_ref()
+            .is_some_and(|handle| Self::try_send(handle, message, request.expects_reply));
+        Ok((receiver, delivered))
     }
 
     pub fn withdraw(&self, id: &str) {
-        self.lock().pending.remove(id);
+        let mut state = self.lock();
+        state.pending.remove(id);
+        drop(state);
         self.wake();
     }
 
@@ -454,11 +675,13 @@ impl Coordination {
             return Err("Reply must identify exactly one pending supervisor request owned by this session. Use replyTo.".into());
         }
         let request = candidates.into_iter().next().expect("one candidate");
-        let pending = self
-            .lock()
-            .pending
-            .remove(&request.id)
-            .ok_or_else(|| "Supervisor request was already resolved.".to_string())?;
+        let pending = {
+            let mut state = self.lock();
+            state
+                .pending
+                .remove(&request.id)
+                .ok_or_else(|| "Supervisor request was already resolved.".to_string())?
+        };
         if pending.deadline <= Instant::now() {
             self.wake();
             return Err("Supervisor request has expired.".into());
@@ -471,29 +694,34 @@ impl Coordination {
         Ok(request)
     }
 
-    fn deliver(&self, owner: &str, message: CustomMessageInput) -> Result<(), String> {
-        let handle = self
-            .lock()
-            .sessions
-            .get(owner)
-            .cloned()
-            .ok_or_else(|| "Supervisor session is unavailable.".to_string())?;
-        Self::send(&handle, message)
-    }
-
-    fn send(handle: &PluginContextHandle, message: CustomMessageInput) -> Result<(), String> {
+    fn send(
+        handle: &PluginContextHandle,
+        message: CustomMessageInput,
+        trigger_turn: bool,
+    ) -> Result<(), String> {
         handle
             .access_for_adapter()
             .and_then(|access| {
                 access.send_message(
                     message,
                     SendMessageOptions {
-                        trigger_turn: Some(true),
+                        trigger_turn: Some(trigger_turn),
                         deliver_as: None,
                     },
                 )
             })
             .map_err(|error| error.to_string())
+    }
+
+    fn try_send(
+        handle: &PluginContextHandle,
+        message: CustomMessageInput,
+        trigger_turn: bool,
+    ) -> bool {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Self::send(handle, message, trigger_turn)
+        }))
+        .is_ok_and(|result| result.is_ok())
     }
 
     pub fn abort_isolated(
@@ -511,6 +739,18 @@ impl Coordination {
             .access_for_adapter()
             .and_then(|access| access.abort_isolated_session(handle.scope(), id))
             .map_err(|error| error.to_string())
+    }
+}
+
+fn expire_requests(state: &mut State) {
+    let expired = state
+        .pending
+        .iter()
+        .filter(|(_, request)| request.deadline <= Instant::now())
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    for id in expired {
+        state.pending.remove(&id);
     }
 }
 

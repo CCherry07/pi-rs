@@ -1,32 +1,26 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
-use std::thread;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use pi_core::{
-    AbortHandle, CustomMessageContent, CustomMessageInput, ModelsContextAccess, PluginContextEpoch,
-    PluginContextError, PluginContextHandle, PluginContextResult, PluginContextScope,
-    SendMessageOptions, SessionContextAccess, ToolResult, UiContextAccess,
+    AbortHandle, CustomMessageContent, CustomMessageInput, IsolatedContextMode,
+    ModelsContextAccess, PluginContextEpoch, PluginContextError, PluginContextHandle,
+    PluginContextResult, PluginContextScope, SendMessageOptions, SessionContextAccess, ToolResult,
+    UiContextAccess,
 };
 use serde_json::json;
 
-use super::{Coordination, ManagedRun, RunResult};
-
-type DeliveryAction = Box<dyn FnOnce() -> PluginContextResult<()> + Send>;
+use super::{Coordination, ManagedRun, RunMetadata, RunResult};
 
 #[derive(Default)]
 struct Access {
     attempts: AtomicUsize,
-    accepted: Mutex<Vec<CustomMessageInput>>,
-    next: Mutex<Option<DeliveryAction>>,
+    reject: AtomicBool,
+    accepted: Mutex<Vec<(CustomMessageInput, SendMessageOptions)>>,
 }
 
 impl Access {
-    fn on_next(&self, action: impl FnOnce() -> PluginContextResult<()> + Send + 'static) {
-        *self.next.lock().unwrap() = Some(Box::new(action));
-    }
-
-    fn messages(&self) -> Vec<CustomMessageInput> {
+    fn messages(&self) -> Vec<(CustomMessageInput, SendMessageOptions)> {
         self.accepted.lock().unwrap().clone()
     }
 }
@@ -38,14 +32,12 @@ impl SessionContextAccess for Access {
         message: CustomMessageInput,
         options: SendMessageOptions,
     ) -> PluginContextResult<()> {
-        assert_eq!(options.trigger_turn, Some(true));
         assert_eq!(options.deliver_as, None);
         self.attempts.fetch_add(1, Ordering::SeqCst);
-        let action = self.next.lock().unwrap().take();
-        if let Some(action) = action {
-            action()?;
+        if self.reject.load(Ordering::SeqCst) {
+            return Err(PluginContextError::Unbound);
         }
-        self.accepted.lock().unwrap().push(message);
+        self.accepted.lock().unwrap().push((message, options));
         Ok(())
     }
 }
@@ -65,23 +57,26 @@ fn handle(epoch: &PluginContextEpoch) -> PluginContextHandle {
     epoch.handle(PluginContextScope::Base)
 }
 
-fn reserve(coordination: &Coordination, owner: &str, id: &str) {
+fn reserve(coordination: &Coordination, owner: &str, id: &str) -> AbortHandle {
+    let (abort, _) = AbortHandle::new();
     coordination.reserve(
         id,
-        ManagedRun {
-            owner: owner.into(),
-            details: json!({"runId":id,"agent":"worker"}),
-            abort: AbortHandle::new().0,
-            result: None,
-            detached: false,
-        },
+        ManagedRun::new(
+            owner.into(),
+            RunMetadata::new("worker".into(), 1, IsolatedContextMode::Fresh),
+            abort.clone(),
+            None,
+        ),
     );
+    abort
 }
 
 fn detached(coordination: &Coordination, owner: &str, id: &str) {
     reserve(coordination, owner, id);
     let receipt = coordination.detach(owner, id).unwrap();
-    assert_eq!(receipt.details.unwrap()["detached"], true);
+    let details = receipt.details.unwrap();
+    assert_eq!(details["detached"], true);
+    assert_eq!(details["waitMode"], "detached");
 }
 
 fn assert_notification(message: &CustomMessageInput, id: &str, result: &RunResult) {
@@ -104,7 +99,48 @@ fn assert_notification(message: &CustomMessageInput, id: &str, result: &RunResul
 }
 
 #[test]
-fn detached_completion_preserves_first_success_or_error_and_notifies_once() {
+fn snapshots_are_owner_scoped_and_keep_state_activity_and_wait_mode_separate() {
+    let coordination = Coordination::default();
+    reserve(&coordination, "owner", "run");
+    reserve(&coordination, "owner", "run-longer");
+    reserve(&coordination, "other", "foreign");
+    let starting = coordination.status("owner", Some("run")).unwrap();
+    assert_eq!(starting["runs"][0]["state"], "starting");
+    assert_eq!(starting["runs"][0]["activityState"], "normal");
+    assert_eq!(starting["runs"][0]["waitMode"], "foreground");
+
+    coordination.launched("run", "isolated");
+    coordination.background("owner", "run").unwrap();
+    let status = coordination.status("owner", Some("run")).unwrap();
+    assert_eq!(status["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(status["runs"][0]["state"], "running");
+    assert_eq!(status["runs"][0]["activityState"], "normal");
+    assert_eq!(status["runs"][0]["waitMode"], "detached");
+    assert_eq!(status["runs"][0]["detached"], true);
+    assert_eq!(status["runs"][0]["isolatedSessionId"], "isolated");
+    assert!(coordination.status("owner", Some("foreign")).is_err());
+    assert!(coordination.status("owner", Some("ru")).is_err());
+
+    coordination.cancelling("owner", "run");
+    assert_eq!(
+        coordination.status("owner", Some("run")).unwrap()["runs"][0]["state"],
+        "cancelling"
+    );
+    assert!(coordination.run("owner", "run").unwrap().result.is_none());
+    coordination.complete_with_state(
+        "run",
+        super::TerminalState::Cancelled,
+        Err("cancelled".into()),
+    );
+    let status = coordination.status("owner", Some("run")).unwrap();
+    assert_eq!(status["runs"][0]["state"], "cancelled");
+    assert_eq!(status["runs"][0]["activityState"], "normal");
+    assert!(status["runs"][0]["finishedAt"].is_u64());
+    assert_eq!(status, coordination.status("owner", Some("run")).unwrap());
+}
+
+#[test]
+fn detached_completion_preserves_the_first_terminal_result_and_notifies_once() {
     let mut tool_error = ToolResult::text("tool failed");
     tool_error.is_error = true;
     tool_error.details = Some(json!({"reason":"failure"}));
@@ -121,7 +157,6 @@ fn detached_completion_preserves_first_success_or_error_and_notifies_once() {
         coordination.complete("run", terminal.clone());
         coordination.complete("run", Ok(ToolResult::text("late success")));
         coordination.complete("run", Err("late failure".into()));
-        coordination.bind_session("owner".into(), handle(&epoch));
 
         assert_eq!(
             coordination.run("owner", "run").unwrap().result,
@@ -129,285 +164,257 @@ fn detached_completion_preserves_first_success_or_error_and_notifies_once() {
         );
         assert_eq!(coordination.detach("owner", "run"), terminal);
         assert_eq!(access.attempts.load(Ordering::SeqCst), 1);
-        assert_notification(&access.messages()[0], "run", &terminal);
+        let messages = access.messages();
+        assert_eq!(messages[0].1.trigger_turn, Some(true));
+        assert_notification(&messages[0].0, "run", &terminal);
     }
 }
 
 #[test]
-fn completion_before_detach_returns_terminal_result_without_notification() {
-    for terminal in [Ok(ToolResult::text("done")), Err("failed".into())] {
-        let coordination = Arc::new(Coordination::default());
-        let (access, epoch) = adapter();
-        coordination.bind_session("owner".into(), handle(&epoch));
-        reserve(&coordination, "owner", "run");
-        let (completed, wait) = mpsc::channel();
-        thread::scope(|scope| {
-            scope.spawn(|| {
-                coordination.complete("run", terminal.clone());
-                completed.send(()).unwrap();
-            });
-            wait.recv().unwrap();
-            assert_eq!(coordination.detach("owner", "run"), terminal);
-        });
-        coordination.bind_session("owner".into(), handle(&epoch));
-        assert!(!coordination.run("owner", "run").unwrap().detached);
-        assert!(access.messages().is_empty());
-    }
-}
-
-#[test]
-fn unavailable_and_retired_generations_retain_completion_until_owner_rebind() {
-    for retired in [false, true] {
-        let coordination = Coordination::default();
-        let (old, old_epoch) = adapter();
-        if retired {
-            coordination.bind_session("owner".into(), handle(&old_epoch));
-            old_epoch.retire();
-        }
-        detached(&coordination, "owner", "run");
-        let terminal = Ok(ToolResult::text("retained"));
-        coordination.complete("run", terminal.clone());
-        assert_eq!(
-            coordination.run("owner", "run").unwrap().result,
-            Some(terminal.clone())
-        );
-        assert!(old.messages().is_empty());
-
-        let (other, other_epoch) = adapter();
-        coordination.bind_session("other-owner".into(), handle(&other_epoch));
-        assert!(other.messages().is_empty());
-        let (current, current_epoch) = adapter();
-        coordination.bind_session("owner".into(), handle(&current_epoch));
-        coordination.bind_session("owner".into(), handle(&current_epoch));
-        assert_eq!(current.messages().len(), 1);
-        assert_notification(&current.messages()[0], "run", &terminal);
-    }
-}
-
-#[test]
-fn panicking_delivery_can_be_retried_after_rebind() {
-    let coordination = Coordination::default();
-    let (old, old_epoch) = adapter();
-    old.on_next(|| panic!("delivery adapter panic"));
-    coordination.bind_session("owner".into(), handle(&old_epoch));
-    detached(&coordination, "owner", "run");
-    let terminal = Err("child failed".into());
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        coordination.complete("run", terminal.clone())
-    }));
-    let (current, epoch) = adapter();
-    coordination.bind_session("owner".into(), handle(&epoch));
-    assert_eq!(current.messages().len(), 1);
-    assert_notification(&current.messages()[0], "run", &terminal);
-}
-
-#[test]
-fn rejected_delivery_is_retained_until_same_handle_is_ready_and_rebound() {
+fn completion_before_detach_returns_the_result_without_a_notification() {
     let coordination = Coordination::default();
     let (access, epoch) = adapter();
-    access.on_next(|| Err(PluginContextError::Unbound));
+    coordination.bind_session("owner".into(), handle(&epoch));
+    reserve(&coordination, "owner", "run");
+    let terminal = Ok(ToolResult::text("done"));
+    coordination.complete("run", terminal.clone());
+
+    assert_eq!(coordination.detach("owner", "run"), terminal);
+    assert_eq!(
+        coordination.status("owner", Some("run")).unwrap()["runs"][0]["waitMode"],
+        "foreground"
+    );
+    assert!(access.messages().is_empty());
+}
+
+#[test]
+fn rejected_notification_does_not_lose_the_terminal_status_or_retry_on_rebind() {
+    let coordination = Coordination::default();
+    let (access, epoch) = adapter();
+    access.reject.store(true, Ordering::SeqCst);
     coordination.bind_session("owner".into(), handle(&epoch));
     detached(&coordination, "owner", "run");
-    let terminal = Err("child failed".into());
-    coordination.complete("run", terminal.clone());
-    coordination.complete("run", Ok(ToolResult::text("must not replace failure")));
+    coordination.complete("run", Ok(ToolResult::text("retained")));
+
+    assert_eq!(access.attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        coordination.status("owner", Some("run")).unwrap()["runs"][0]["state"],
+        "completed"
+    );
+    access.reject.store(false, Ordering::SeqCst);
+    coordination.bind_session("owner".into(), handle(&epoch));
     assert_eq!(access.attempts.load(Ordering::SeqCst), 1);
     assert!(access.messages().is_empty());
-
-    coordination.bind_session("owner".into(), handle(&epoch));
-    coordination.bind_session("owner".into(), handle(&epoch));
-    assert_eq!(access.attempts.load(Ordering::SeqCst), 2);
-    assert_eq!(access.messages().len(), 1);
-    assert_notification(&access.messages()[0], "run", &terminal);
-    assert_eq!(
-        coordination.run("owner", "run").unwrap().result,
-        Some(terminal)
-    );
 }
 
 #[test]
-fn reentrant_rebind_waits_for_acceptance_before_deciding_whether_to_retry() {
-    for rejected in [false, true] {
-        let coordination = Arc::new(Coordination::default());
-        let (old, old_epoch) = adapter();
-        let (middle, middle_epoch) = adapter();
-        let (current, current_epoch) = adapter();
-        coordination.bind_session("owner".into(), handle(&old_epoch));
-        detached(&coordination, "owner", "run");
-        let terminal = Ok(ToolResult::text("first terminal"));
-        let expected = terminal.clone();
-        let callback_coordination = Arc::clone(&coordination);
-        let current_handle = handle(&current_epoch);
-        old.on_next(move || {
-            // These calls would deadlock if delivery retained the mailbox lock.
-            assert_eq!(
-                callback_coordination.run("owner", "run").unwrap().result,
-                Some(expected)
-            );
-            callback_coordination.complete("run", Err("duplicate during delivery".into()));
-            callback_coordination.bind_session("owner".into(), handle(&middle_epoch));
-            callback_coordination.bind_session("owner".into(), current_handle);
-            if rejected {
-                Err(PluginContextError::Retired)
-            } else {
-                Ok(())
-            }
-        });
+fn closing_an_owner_aborts_and_removes_only_its_runs() {
+    let coordination = Coordination::default();
+    let owned = reserve(&coordination, "owner", "run");
+    let foreign = reserve(&coordination, "other", "foreign");
 
-        coordination.complete("run", terminal.clone());
-        coordination.bind_session("owner".into(), handle(&current_epoch));
-        assert_eq!(old.attempts.load(Ordering::SeqCst), 1);
-        assert_eq!(middle.attempts.load(Ordering::SeqCst), 0);
-        let accepted = if rejected {
-            current.messages()
-        } else {
-            old.messages()
-        };
-        assert_eq!(accepted.len(), 1);
-        assert_notification(&accepted[0], "run", &terminal);
-        assert_eq!(old.messages().len() + current.messages().len(), 1);
-        assert_eq!(
-            coordination.run("owner", "run").unwrap().result,
-            Some(terminal)
-        );
-    }
+    coordination.close_owner("owner");
+
+    assert!(owned.is_aborted());
+    assert!(!foreign.is_aborted());
+    assert!(coordination.run("owner", "run").is_err());
+    assert!(coordination.run("other", "foreign").is_ok());
 }
 
-#[test]
-fn detach_before_completion_and_concurrent_rebind_do_not_duplicate_inflight_delivery() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_nonblocking_registrations_share_one_timer() {
     let coordination = Arc::new(Coordination::default());
-    let (old, old_epoch) = adapter();
-    let (current, current_epoch) = adapter();
-    coordination.bind_session("owner".into(), handle(&old_epoch));
-    reserve(&coordination, "owner", "run");
-    let (entered, wait_for_delivery) = mpsc::channel();
-    let (release, wait_for_release) = mpsc::channel();
-    old.on_next(move || {
-        entered.send(()).unwrap();
-        wait_for_release.recv().unwrap();
-        Ok(())
-    });
-    let terminal = Ok(ToolResult::text("done"));
-    let receipt = coordination.detach("owner", "run").unwrap();
-    assert_eq!(receipt.details.unwrap()["detached"], true);
-    thread::scope(|scope| {
-        let completion = scope.spawn(|| coordination.complete("run", terminal.clone()));
-        wait_for_delivery.recv().unwrap();
-        assert_eq!(coordination.detach("owner", "run"), terminal);
-        coordination.complete("run", Err("late result".into()));
-        coordination.bind_session("owner".into(), handle(&current_epoch));
-        assert!(current.messages().is_empty());
-        release.send(()).unwrap();
-        completion.join().unwrap();
-    });
-    coordination.bind_session("owner".into(), handle(&current_epoch));
-    assert_eq!(old.messages().len(), 1);
-    assert_notification(&old.messages()[0], "run", &terminal);
-    assert!(current.messages().is_empty());
+    detached(&coordination, "owner", "run");
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut tasks = Vec::new();
+    for _ in 0..2 {
+        let coordination = coordination.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            coordination
+                .arm_wait("owner", "run", std::time::Duration::from_secs(60))
+                .unwrap()
+                .details
+                .unwrap()
+        }));
+    }
+    let first = tasks.remove(0).await.unwrap();
+    let second = tasks.remove(0).await.unwrap();
+    assert_eq!(first["deadlineAt"], second["deadlineAt"]);
+    assert_ne!(first["reused"], second["reused"]);
+    assert_eq!(coordination.lock().deadline_watches.len(), 1);
+    coordination.close_owner("owner");
 }
 
-#[test]
-fn remove_and_close_discard_pending_notifications_without_affecting_other_owners() {
+#[tokio::test(start_paused = true)]
+async fn nonblocking_cleanup_cancels_timers_and_preserves_other_owners() {
     for close in [false, true] {
-        let coordination = Coordination::default();
+        let coordination = Arc::new(Coordination::default());
+        let (access, epoch) = adapter();
+        let (other, other_epoch) = adapter();
+        coordination.bind_session("owner".into(), handle(&epoch));
+        coordination.bind_session("other".into(), handle(&other_epoch));
         detached(&coordination, "owner", "run");
-        detached(&coordination, "other", "other-run");
-        coordination.complete("run", Err("discard me".into()));
-        let retained = Ok(ToolResult::text("keep me"));
-        coordination.complete("other-run", retained.clone());
+        detached(&coordination, "other", "foreign");
+        for (owner, id) in [("owner", "run"), ("other", "foreign")] {
+            coordination
+                .arm_wait(owner, id, std::time::Duration::from_secs(1))
+                .unwrap();
+        }
+        let timer = coordination.lock().deadline_watches[&("owner".into(), "run".into())]
+            .task
+            .abort_handle();
         if close {
             coordination.close_owner("owner");
         } else {
-            coordination.remove("run");
+            coordination.cancel_owner("owner");
         }
-        coordination.complete("run", Ok(ToolResult::text("late completion")));
-        let (access, epoch) = adapter();
-        coordination.bind_session("owner".into(), handle(&epoch));
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert!(timer.is_finished());
         assert!(access.messages().is_empty());
-        assert!(coordination.run("owner", "run").is_err());
-        coordination.bind_session("other".into(), handle(&epoch));
-        assert_eq!(access.messages().len(), 1);
-        assert_notification(&access.messages()[0], "other-run", &retained);
+        assert_eq!(other.messages().len(), 1);
+        assert_eq!(other.messages()[0].0.custom_type, "subagent-wait-expired");
+        assert!(coordination.lock().deadline_watches.is_empty());
     }
 }
 
-#[test]
-fn remove_and_close_during_failed_delivery_do_not_resurrect_notification() {
-    for close in [false, true] {
-        let coordination = Arc::new(Coordination::default());
-        let (old, old_epoch) = adapter();
-        let (current, current_epoch) = adapter();
-        coordination.bind_session("owner".into(), handle(&old_epoch));
-        detached(&coordination, "owner", "run");
-        let callback_coordination = Arc::clone(&coordination);
-        let current_handle = handle(&current_epoch);
-        old.on_next(move || {
-            // Rebind first marks the in-flight failure for retry, but removal
-            // must still cancel that retry when the adapter returns.
-            callback_coordination.bind_session("owner".into(), current_handle);
-            if close {
-                callback_coordination.close_owner("owner");
-            } else {
-                callback_coordination.remove("run");
-            }
-            Err(PluginContextError::Retired)
-        });
-        coordination.complete("run", Ok(ToolResult::text("discard me")));
-        coordination.bind_session("owner".into(), handle(&current_epoch));
-        coordination.complete("run", Err("late completion".into()));
-        assert!(coordination.run("owner", "run").is_err());
-        assert_eq!(old.attempts.load(Ordering::SeqCst), 1);
-        assert_eq!(current.attempts.load(Ordering::SeqCst), 0);
-        assert!(old.messages().is_empty());
-    }
-}
-
-#[test]
-fn old_acknowledgement_cannot_clear_replacement_run_notification() {
+#[tokio::test(start_paused = true)]
+async fn due_nonblocking_registration_rearms_without_a_stale_timer_consuming_it() {
     let coordination = Arc::new(Coordination::default());
-    let (old, old_epoch) = adapter();
-    let (current, current_epoch) = adapter();
-    let (old_entered, wait_for_old) = mpsc::channel();
-    let (release_old, wait_for_old_release) = mpsc::channel();
-    old.on_next(move || {
-        old_entered.send(()).unwrap();
-        wait_for_old_release.recv().unwrap();
-        Ok(())
-    });
-    let (current_entered, wait_for_current) = mpsc::channel();
-    let (release_current, wait_for_current_release) = mpsc::channel();
-    current.on_next(move || {
-        current_entered.send(()).unwrap();
-        wait_for_current_release.recv().unwrap();
-        Err(PluginContextError::Unbound)
-    });
-    coordination.bind_session("owner".into(), handle(&old_epoch));
+    let (access, epoch) = adapter();
+    coordination.bind_session("owner".into(), handle(&epoch));
     detached(&coordination, "owner", "run");
-    let terminal = Ok(ToolResult::text("replacement result"));
-    thread::scope(|scope| {
-        let original = scope.spawn(|| {
-            coordination.complete("run", Ok(ToolResult::text("original result")));
-        });
-        wait_for_old.recv().unwrap();
-        coordination.remove("run");
-        coordination.bind_session("owner".into(), handle(&current_epoch));
-        detached(&coordination, "owner", "run");
-        let replacement = scope.spawn(|| coordination.complete("run", terminal.clone()));
-        wait_for_current.recv().unwrap();
-        // The old attempt returns while the replacement is in flight. Its
-        // acceptance belongs only to the removed run, not to this new receipt.
-        release_old.send(()).unwrap();
-        original.join().unwrap();
-        release_current.send(()).unwrap();
-        replacement.join().unwrap();
-    });
-    assert_eq!(current.attempts.load(Ordering::SeqCst), 1);
-    assert!(current.messages().is_empty());
-    coordination.bind_session("owner".into(), handle(&current_epoch));
-    assert_eq!(current.messages().len(), 1);
-    assert_notification(&current.messages()[0], "run", &terminal);
-    assert_eq!(
-        coordination.run("owner", "run").unwrap().result,
-        Some(terminal)
+    coordination
+        .arm_wait("owner", "run", std::time::Duration::from_secs(1))
+        .unwrap();
+    let key = ("owner".into(), "run".into());
+    let identity = coordination.lock().deadline_watches[&key].identity.clone();
+    // Model a delayed timer at its due deadline, without depending on executor ordering.
+    coordination
+        .lock()
+        .deadline_watches
+        .get_mut(&key)
+        .unwrap()
+        .deadline = tokio::time::Instant::now();
+    let rearmed = coordination
+        .arm_wait("owner", "run", std::time::Duration::from_secs(10))
+        .unwrap()
+        .details
+        .unwrap();
+    assert_eq!(rearmed["reused"], false);
+    assert_eq!(access.messages().len(), 1);
+    coordination.expire_wait(&key, &identity);
+    assert_eq!(coordination.lock().deadline_watches.len(), 1);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(access.messages().len(), 1);
+    tokio::time::sleep(std::time::Duration::from_secs(9)).await;
+    assert_eq!(access.messages().len(), 2);
+    assert!(coordination.run("owner", "run").unwrap().result.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn rejected_nonblocking_reminder_settles_once_and_allows_rearming() {
+    let coordination = Arc::new(Coordination::default());
+    let (access, epoch) = adapter();
+    access.reject.store(true, Ordering::SeqCst);
+    coordination.bind_session("owner".into(), handle(&epoch));
+    detached(&coordination, "owner", "run");
+    coordination
+        .arm_wait("owner", "run", std::time::Duration::from_secs(1))
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(access.attempts.load(Ordering::SeqCst), 1);
+    assert!(
+        coordination.status("owner", Some("run")).unwrap()["runs"][0]
+            .get("nonBlockingWait")
+            .is_none()
     );
+    assert!(coordination.run("owner", "run").unwrap().result.is_none());
+    access.reject.store(false, Ordering::SeqCst);
+    let rearmed = coordination
+        .arm_wait("owner", "run", std::time::Duration::from_secs(1))
+        .unwrap()
+        .details
+        .unwrap();
+    assert_eq!(rearmed["reused"], false);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert_eq!(access.attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(access.messages().len(), 1);
+}
+
+#[tokio::test]
+async fn nonblocking_timer_does_not_retain_its_coordination_owner() {
+    let coordination = Arc::new(Coordination::default());
+    detached(&coordination, "owner", "run");
+    coordination
+        .arm_wait("owner", "run", std::time::Duration::from_secs(60))
+        .unwrap();
+    let weak = Arc::downgrade(&coordination);
+    let timer = coordination.lock().deadline_watches[&("owner".into(), "run".into())]
+        .task
+        .abort_handle();
+    drop(coordination);
+    assert!(weak.upgrade().is_none());
+    tokio::task::yield_now().await;
+    assert!(timer.is_finished());
+}
+
+#[tokio::test(start_paused = true)]
+async fn nonblocking_watch_ignores_sibling_attention_and_rearms_after_its_own_reply() {
+    let coordination = Arc::new(Coordination::default());
+    let (access, epoch) = adapter();
+    coordination.bind_session("owner".into(), handle(&epoch));
+    for id in ["run", "sibling"] {
+        detached(&coordination, "owner", id);
+    }
+    let timeout = std::time::Duration::from_secs(1);
+    coordination.arm_wait("owner", "run", timeout).unwrap();
+    for id in ["sibling", "run"] {
+        let (receiver, _) = coordination
+            .post(
+                super::SupervisorRequest {
+                    id: format!("ask-{id}"),
+                    run_id: id.into(),
+                    agent: "worker".into(),
+                    child_index: 0,
+                    tool_call_id: "ask".into(),
+                    reason: super::SupervisorReason::NeedDecision,
+                    message: "Choose".into(),
+                    expects_reply: true,
+                    created_at: super::now_ms(),
+                    expires_at: None,
+                    interview: None,
+                },
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        let result = coordination
+            .arm_wait("owner", "run", timeout)
+            .unwrap()
+            .details
+            .unwrap();
+        if id == "sibling" {
+            assert_eq!(result["reused"], true);
+        } else {
+            assert_eq!(result["state"], "needs_attention");
+            assert!(coordination.lock().deadline_watches.is_empty());
+        }
+        coordination
+            .reply("owner", Some(&format!("ask-{id}")), None, "continue")
+            .unwrap();
+        assert_eq!(receiver.await.unwrap().unwrap(), "continue");
+    }
+    let rearmed = coordination
+        .arm_wait("owner", "run", timeout)
+        .unwrap()
+        .details
+        .unwrap();
+    assert_eq!(rearmed["reused"], false);
+    coordination.complete("run", Err("failed after decision".into()));
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let messages = access.messages();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[2].0.custom_type, "subagent-notify");
+    assert!(coordination.lock().deadline_watches.is_empty());
 }

@@ -39,6 +39,8 @@ struct TestFactory {
     batch_size: usize,
     supervision: bool,
     blocked_sibling: bool,
+    background: bool,
+    gate: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl TestFactory {
@@ -54,6 +56,8 @@ impl TestFactory {
             batch_size: 1,
             supervision: false,
             blocked_sibling: false,
+            background: false,
+            gate: None,
         }
     }
 
@@ -70,6 +74,25 @@ impl TestFactory {
     fn with_root_agent(mut self, root_agent: &str) -> Self {
         self.root_agent = root_agent.to_string();
         self
+    }
+}
+
+struct ChildGate(Option<Arc<tokio::sync::Notify>>);
+
+#[pi_core::agent_plugin]
+impl pi_core::AgentPlugin for ChildGate {
+    fn id(&self) -> pi_core::PluginId {
+        pi_core::PluginId::new("child-gate")
+    }
+    async fn before_agent_start(
+        &self,
+        context: pi_core::AgentPluginContext,
+        _event: pi_core::BeforeAgentStartEvent,
+    ) -> Result<pi_core::BeforeAgentStartPatch, pi_core::PluginError> {
+        if let Some(gate) = &self.0 {
+            tokio::select! { _ = gate.notified() => {}, _ = context.signal().wait() => {} }
+        }
+        Ok(pi_core::BeforeAgentStartPatch::default())
     }
 }
 
@@ -99,7 +122,23 @@ impl AgentSessionRuntimeFactory for TestFactory {
             .components()
             .filter(|component| component.as_os_str() == "isolated")
             .count();
-        let turns = if self.supervision && depth > 0 {
+        let turns = if self.background && depth > 0 {
+            vec![ScriptedTurn::Text("background child done".into())]
+        } else if self.background && restored_log.is_some() {
+            vec![ScriptedTurn::Text("background result received".into())]
+        } else if self.background {
+            let mut turns = vec![ScriptedTurn::ToolCalls(vec![ToolCall::new(
+                "launch-background",
+                "subagent",
+                json!({"agent":"reviewer","task":"Wait then review","async":true}),
+            )])];
+            turns.extend([
+                ScriptedTurn::Text("parent continues independently".into()),
+                ScriptedTurn::Text("background result received".into()),
+                ScriptedTurn::Text("another background event received".into()),
+            ]);
+            turns
+        } else if self.supervision && depth > 0 {
             let existing_children = self
                 .providers
                 .lock()
@@ -238,6 +277,7 @@ impl AgentSessionRuntimeFactory for TestFactory {
             .plugin_context(context_access)
             .provider_plugin(provider_plugin)
             .agent_plugin(subagents)
+            .agent_plugin(ChildGate(if depth > 0 { self.gate.clone() } else { None }))
             .agent_plugin(SkillsPlugin::load_with_prompt_projector(
                 skill_options,
                 skill_projector,
@@ -431,54 +471,120 @@ fn user_message(text: &str) -> Message {
 
 #[tokio::test]
 async fn supervisor_reply_continues_the_same_isolated_session() {
-    supervisor_roundtrip(false).await;
+    supervisor_roundtrip().await;
 }
 
 #[tokio::test]
-async fn supervisor_request_survives_parent_generation_reload() {
-    supervisor_roundtrip(true).await;
+async fn background_launch_returns_before_child_and_notifies_once() {
+    background_roundtrip(false).await;
 }
 
 #[tokio::test]
-async fn replacement_after_reload_aborts_detached_children_before_retiring_control() {
+async fn nonblocking_wait_reminder_reaches_real_parent_then_child_completes() {
+    background_roundtrip(true).await;
+}
+
+async fn background_roundtrip(non_blocking: bool) {
     let directory = tempfile::tempdir().unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
     let mut factory = TestFactory::new();
-    factory.supervision = true;
-    factory.blocked_sibling = true;
-    factory.batch_size = 2;
+    factory.background = true;
+    factory.gate = Some(gate.clone());
+    let providers = factory.providers.clone();
     let manager = MultiSessionManager::new(factory);
     let root = manager
         .create_session(directory.path(), directory.path().join("root.jsonl"))
         .await
         .unwrap();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        root.current().prompt(vec![user_message("Delegate")]),
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        root.current()
+            .prompt(vec![user_message("Delegate in background")]),
     )
     .await
-    .unwrap()
+    .expect("async launch must not wait for child")
     .unwrap();
-    let children = manager
-        .sessions()
-        .into_iter()
-        .filter(|session| session.id() != root.id())
-        .collect::<Vec<_>>();
-    assert_eq!(children.len(), 2);
-    root.reload().await.unwrap();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        root.new_session(directory.path(), directory.path().join("replacement.jsonl")),
-    )
-    .await
-    .expect("replacement must drain children with the current control handle")
-    .unwrap();
-    for child in children {
-        assert!(!child.current().runtime().agent().is_running());
-    }
-    tokio::time::timeout(std::time::Duration::from_secs(5), manager.shutdown())
-        .await
-        .unwrap()
+    let result = outcome
+        .new_messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) if result.tool_name == "subagent" => Some(result),
+            _ => None,
+        })
         .unwrap();
+    assert_eq!(result.details.as_ref().unwrap()["background"], true);
+    assert_eq!(result.details.as_ref().unwrap()["detached"], true);
+    if non_blocking {
+        // Use the actual registered tool and the generation's PiPluginContext adapter.
+        let session = root.current();
+        let wait = session
+            .runtime()
+            .agent()
+            .runtime()
+            .registries()
+            .tool("bg_wait")
+            .unwrap();
+        let (_, signal) = pi_core::AbortHandle::new();
+        let context = pi_core::ToolContext::with_plugin_context(
+            directory.path().to_path_buf(),
+            signal,
+            session.runtime().context_parts(),
+        );
+        let id = &result.details.as_ref().unwrap()["runId"];
+        let receipt = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            wait.execute(
+                context,
+                ToolCallId::new("observe-background"),
+                json!({"id":id,"nonBlocking":true,"timeoutMs":20}),
+                pi_core::ToolUpdateSink::channel().0,
+            ),
+        )
+        .await
+        .expect("registration must return while the child is gated")
+        .unwrap();
+        assert_eq!(receipt.details.unwrap()["armed"], true);
+        wait_for_parent_notice(&root, "subagent-wait-expired").await;
+        let snapshot = root.current().snapshot();
+        assert!(!snapshot.agent.messages.iter().any(|message|
+            matches!(message, Message::Custom(custom) if custom.custom_type == "subagent-notify")));
+        let providers = providers.lock().unwrap();
+        let parent = &providers.iter().find(|(depth, _)| *depth == 0).unwrap().1;
+        assert_eq!(
+            parent.requests().len(),
+            3,
+            "expiry must trigger a real parent turn"
+        );
+    }
+    gate.notify_one();
+    wait_for_parent_notice(&root, "subagent-notify").await;
+    let snapshot = root.current().snapshot();
+    assert_eq!(snapshot.agent.messages.iter().filter(|message| matches!(message, Message::Custom(custom) if custom.custom_type == "subagent-notify")).count(), 1);
+    assert_eq!(snapshot.agent.messages.iter().filter(|message| matches!(message, Message::Custom(custom) if custom.custom_type == "subagent-wait-expired")).count(), usize::from(non_blocking));
+    for (_, provider) in providers.lock().unwrap().iter() {
+        for request in provider.requests() {
+            assert_tool_pairs(&request.messages);
+        }
+    }
+    manager.shutdown().await.unwrap();
+}
+
+async fn wait_for_parent_notice(root: &pi_session::PiSession, kind: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let session = root.current();
+            let snapshot = session.snapshot();
+            let received = snapshot.agent.messages.iter().any(
+                |message| matches!(message, Message::Custom(custom) if custom.custom_type == kind),
+            );
+            if received && !session.runtime().agent().is_running() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("notice must reach the parent without another user turn");
 }
 
 #[tokio::test]
@@ -555,7 +661,7 @@ async fn shutdown_drains_detached_children_waiting_for_supervisor_reply() {
     }
 }
 
-async fn supervisor_roundtrip(reload: bool) {
+async fn supervisor_roundtrip() {
     let directory = tempfile::tempdir().unwrap();
     let mut factory = TestFactory::new();
     factory.supervision = true;
@@ -596,9 +702,6 @@ async fn supervisor_roundtrip(reload: bool) {
         1,
         "child is still waiting inside contact_supervisor"
     );
-    if reload {
-        root.reload().await.unwrap();
-    }
     let next = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         root.current()

@@ -27,7 +27,7 @@ impl WeakSubagentRuntime {
 struct RuntimeInner {
     limits: RuntimeLimits,
     state: Mutex<RuntimeState>,
-    coordination: crate::coordination::Coordination,
+    coordination: Arc<crate::coordination::Coordination>,
     monitors: Mutex<HashMap<String, (String, Arc<MonitorTask>)>>,
 }
 
@@ -149,7 +149,7 @@ impl SubagentRuntime {
             inner: Arc::new(RuntimeInner {
                 limits,
                 state: Mutex::new(RuntimeState::default()),
-                coordination: crate::coordination::Coordination::default(),
+                coordination: Arc::new(crate::coordination::Coordination::default()),
                 monitors: Mutex::new(HashMap::new()),
             }),
         }
@@ -210,7 +210,7 @@ impl SubagentRuntime {
         self.inner.limits.max_depth
     }
 
-    pub(crate) fn coordination(&self) -> &crate::coordination::Coordination {
+    pub(crate) fn coordination(&self) -> &Arc<crate::coordination::Coordination> {
         &self.inner.coordination
     }
 
@@ -350,6 +350,9 @@ impl SubagentRuntime {
             child_session_id.to_string(),
             (run_id.to_string(), assignment.profile.clone()),
         );
+        drop(state);
+        self.coordination()
+            .bind_child_session(run_id, child_session_id);
         Ok(assignment)
     }
 

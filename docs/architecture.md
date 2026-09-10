@@ -1543,6 +1543,12 @@ available catalogue match; thinking levels are checked against the resolved mode
 Reload rescans the catalog transactionally, and untrusted project definitions never enter the
 candidate generation.
 
+The subagent tool accepts optional `async: true` to return a background receipt after the
+feature-owned monitor is spawned. Default calls still wait in the foreground; fast terminal results return
+directly without a redundant notification. This is detachment from a tool wait, not an independent
+process. Background tasks attempt ordinary best-effort completion/request notifications and are cancelled on
+owner close. One-shot frontends must wait explicitly if a result is required before they exit.
+
 The subagent tool accepts optional `context: "fresh" | "fork"`. Selection precedence is explicit
 tool argument, profile `defaultContext`, then fresh. Built-in worker/oracle default to fork;
 scout/reviewer/delegate default to fresh. The plugin's provider-context hook removes inherited
@@ -1570,8 +1576,8 @@ A shared feature-owned runtime tracks logical lineage across independently rebui
 generations and enforces maximum nesting depth, cumulative spawns per root session, active-run
 capacity, and each parent profile's nested-delegation permission. The global depth comes from
 `PI_SUBAGENT_MAX_DEPTH`, then `<agent-dir>/extensions/subagent/config.json`, then the built-in
-default. A profile's absolute `maxSubagentDepth` can only tighten the inherited lineage ceiling;
-already-launched children retain that ceiling when a root generation reloads. This is the
+default. A profile's absolute `maxSubagentDepth` can only tighten the inherited lineage ceiling.
+This is the
 in-process equivalent of pi-subagents' child environment propagation rather than a child-process
 environment contract. Invalid feature configuration fails candidate generation transactionally.
 The launch record retains the resolved owned profile, so a file change between parent launch and
@@ -1584,10 +1590,8 @@ request, all foreground subagent waits owned by that parent yield retained `deta
 the parent's tool batch can finish. The original child sessions remain alive. The feature-owned
 `ChildRun` monitor, not the original tool invocation, owns completion, cancellation and the profile
 `timeoutMs` deadline. That deadline remains a total run limit including supervisor waiting.
-The monitor acquires its generation-bound wait before returning foreground/detached control, so
-an immediate parent reload cannot retire an as-yet-unused wait handle. Feature-owned monitor handles
-are drained on non-reload session shutdown, retaining the current control handle until cancellation
-finishes. Monitors weakly reference their runtime to avoid owning their own task registry. Unwinding
+Feature-owned monitor handles are drained on session shutdown after cancellation is requested.
+Monitors weakly reference their runtime to avoid owning their own task registry. Unwinding
 or dropping a monitor publishes a terminal failure and releases capacity; ordinary wait cancellation
 still leaves a detached child running. Only terminal completion releases active capacity. Role/skill assignments remain until session
 shutdown so a later nested-child notification cannot promote its supervisor into a root agent.
@@ -1600,8 +1604,9 @@ tool result exposes the same child aggregate under `details.usage` for presentat
 does not set `ToolResult.usage`, which repeated `bg_wait` calls could otherwise count more than once.
 A failure to persist the parent adjustment remains visible as a result warning rather than silently
 claiming complete accounting.
-A separate session-plugin adapter clears lineage on quit or logical-session replacement
-while retaining cumulative state across a generation reload. The desktop projector recognizes the
+A separate session-plugin adapter clears lineage and drains live children whenever the owning
+session shuts down, including reload. Live-run continuity across `/reload` is deliberately outside
+the feature contract. The desktop projector recognizes the
 feature-owned `isolatedSessionId` in subagent tool updates, observes that child read-only, and emits
 the same semantic thread/item stream used for primary sessions. It projects parent-child links as
 collaboration tool items so the existing desktop task hierarchy can render nested execution and
@@ -1617,31 +1622,53 @@ forked history or a caller-supplied destination. `need_decision` and `interview_
 a correlated reply; `progress_update` delivers immediately without requiring one. Interviews
 parse plain or fenced JSON and report parse errors rather than claiming schema validation.
 The reply deadline defaults to ten minutes (`PI_INTERCOM_ASK_TIMEOUT_MS`). Parent
-`subagent_supervisor` supports `list`, `pending`, `status`, and `reply`, including exact `replyTo`
+`subagent_supervisor` supports `list`, `pending`, `status`, and `reply`. Status is an immediate,
+owner-scoped snapshot with optional exact/unique-prefix `id`, execution-state counts, child IDs,
+elapsed/deadline timestamps, pending request IDs and bounded result summaries.
+`list`/`pending` retain request-list semantics. Feature-owned typed execution state is independent
+from attention and detached-wait mode. Starting/running/cancelling are nonterminal; the monitor
+publishes completed/failed/cancelled/timed_out exactly once, without parsing error text. A provider
+error is failed, not a successful response without text. The reported run deadline uses the same
+monitor-start instant as enforcement; launch preparation is not included in that timer. Queries do
+not consume outcomes or trigger model work. Replies include exact `replyTo`
 or unambiguous request-prefix/agent selection via `to`. Owner checks, expiry and one-shot delivery
 reject foreign, stale and repeated replies. Request cancellation withdraws its pending entry.
 
 `bg_wait` supports a run id/prefix, `all`, `timeoutMs` (default thirty minutes), and
 `stopOnAttention`; supervisor requests always interrupt a wait even when the latter is false.
 It snapshots the owned active set when no id is supplied; a named terminal receipt remains
-queryable. Wait timeout or wait cancellation leaves the child running. Requests and detached
-completion notifications use the existing custom-message queue with `trigger_turn: true`, which
-preserves tool-call/result pairing before the next provider request. Replies are journaled as
-`subagent_supervisor_reply` custom entries. Generation reload refreshes the parent delivery/control
-handle while preserving pending requests and live monitors. Closing the owner cancels its runs.
-Detached completion uses first-terminal-wins receipts and a private in-process pending/in-flight
-notification table. Failed adapter delivery, including an unwinding adapter, is retained for the
-next parent binding; a rebind during delivery retries only after failure and never duplicates an
-acknowledged call. Removing a run/owner discards pending delivery and stale acknowledgements cannot
-modify a replacement notification. Acceptance is the existing message adapter's `Ok` boundary, not
-an end-to-end exactly-once guarantee: idle fire-and-forget prompt delivery still lacks a durable
-acceptance handshake with generation replacement. Named terminal receipts remain the query fallback.
-No notification state survives process restart.
+queryable. Wait timeout or wait cancellation leaves the child running.
+
+`bg_wait({id, nonBlocking:true, timeoutMs})` adds a plugin-local, one-shot observation of a
+single detached run. An exact or unique-prefix id is resolved once; an omitted id or `all:true`
+is rejected. A ready result or pending decision returns immediately without arming a timer.
+Otherwise registration returns `armed`, the full `runId`, `deadlineAt`, and `reused`; another
+active registration for the same owner/run reuses the original deadline rather than extending it.
+Status exposes the active `nonBlockingWait.deadlineAt`. Completion or a decision request removes
+the observation and uses the existing notification, with no additional subscription notification.
+On observation expiry, the record is removed and a single best-effort `subagent-wait-expired`
+reminder attempts to trigger the parent; the run state and execution deadline do not change.
+The caller may rearm after expiry or after answering a decision. This mode observes only the named
+run's decisions; ordinary blocking waits still yield for any owned decision to unblock tool batches.
+The coordination Module atomically owns registration and each cancellable Tokio timer; timers
+weakly reference coordination and use private identities to prevent stale expiry from consuming
+a replacement. Completion, attention, run removal and owner cleanup cancel the timer along with
+the record. There is no progress stream, polling loop, durable subscription or reload handoff.
+
+Supervisor decision requests and detached completion notifications use the existing custom-message
+adapter with `trigger_turn: true`; progress updates use `trigger_turn: false`. Delivery is a
+best-effort, single attempt against the currently bound owner session and does not add storage or
+acceptance semantics to `pi-session`. A failed notification never changes the run result or removes
+a pending decision request: `subagent_supervisor status` and `pending` are the authoritative
+fallbacks. Replies are journaled as `subagent_supervisor_reply` custom entries. Closing or reloading
+the owner cancels its runs. Detached completion remains first-terminal-wins, and named terminal
+receipts remain queryable until owner cleanup. The feature does not promise notification replay,
+exactly-once delivery, or live-run handoff across reload.
 
 The deliberate Rust divergence is an in-process mailbox/watch implementation instead of upstream
 filesystem IPC. There is no standalone detached runner, process-restart reattachment, external
-background-work provider, or non-blocking durable wait subscription; `nonBlocking: true` fails
-explicitly. The usage rollup is a deliberate product enhancement over the current upstream
+background-work provider, persistent wait subscription, or live-run continuity across reload.
+Execution and state changes remain explicitly process-local. The usage rollup is a deliberate product enhancement over the current upstream
 pi-subagents example, which reports child usage in result details but does not attribute it to the
 parent session. It requires native ABI 18 but no Pi v4 record-shape change: attribution uses the
 existing usage-adjustment entry. Coordination guidance is
