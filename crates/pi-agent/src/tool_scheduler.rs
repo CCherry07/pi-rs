@@ -437,14 +437,19 @@ impl ToolScheduler {
                 let (updates, mut update_receiver) = ToolUpdateSink::channel();
                 let execution = tool.execute(context, call.id.clone(), args.clone(), updates);
                 tokio::pin!(execution);
+                let mut updates_open = true;
 
                 let result = loop {
                     tokio::select! {
                         biased;
                         () = signal.wait() => break ToolResult::error("Operation aborted"),
-                        update = update_receiver.recv() => {
+                        update = update_receiver.recv(), if updates_open => {
                             if let Some(update) = update {
                                 Self::emit_update(&events, signal, &call, update).await;
+                            } else {
+                                // A tool may move/drop its sink before returning. A closed
+                                // biased branch must not starve the execution future.
+                                updates_open = false;
                             }
                         }
                         executed = &mut execution => {

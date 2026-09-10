@@ -1,15 +1,14 @@
 use async_trait::async_trait;
 use pi_core::{
-    ContentBlock, CustomMessageContent, IsolatedSessionRequest, Message, TextContent, Tool,
-    ToolCallId, ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate,
-    ToolUpdateSink,
+    ContentBlock, Message, Tool, ToolCallId, ToolContext, ToolError, ToolExecutionMode, ToolResult,
+    ToolSpec, ToolUpdateSink,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::catalog::SubagentCatalog;
 use crate::launch_plan::SubagentLaunchPlan;
-use crate::runtime::{LaunchTicket, SubagentRuntime};
+use crate::runtime::SubagentRuntime;
 
 const MAX_TASK_BYTES: usize = 64 * 1024;
 
@@ -27,44 +26,6 @@ struct SubagentInput {
     context: Option<pi_core::IsolatedContextMode>,
     #[serde(default, rename = "async")]
     background: bool,
-}
-
-struct RunGuard {
-    runtime: SubagentRuntime,
-    run_id: String,
-    transferred: bool,
-}
-
-impl RunGuard {
-    fn reserved(runtime: SubagentRuntime, ticket: &LaunchTicket) -> Self {
-        Self {
-            runtime,
-            run_id: ticket.run_id().to_string(),
-            transferred: false,
-        }
-    }
-
-    fn mark_launched(&mut self) {
-        self.transferred = true;
-    }
-}
-
-impl Drop for RunGuard {
-    fn drop(&mut self) {
-        if !self.transferred {
-            self.runtime.coordination().remove(&self.run_id);
-            self.runtime.cancel_unlaunched(&self.run_id);
-        }
-    }
-}
-
-struct ForegroundGuard(Option<pi_core::AbortHandle>);
-impl Drop for ForegroundGuard {
-    fn drop(&mut self) {
-        if let Some(abort) = &self.0 {
-            abort.abort();
-        }
-    }
 }
 
 impl SubagentTool {
@@ -99,7 +60,7 @@ impl Tool for SubagentTool {
                     "context": {
                         "type": "string",
                         "enum": ["fresh", "fork"],
-                        "description": "History initialization. Omit to use the role default; fork copies the parent context before this tool batch."
+                        "description": "History initialization. Omit to use the role default (implicit fork falls back to fresh without a persisted parent branch). Explicit fork requires and pins parent context before this tool batch."
                     },
                     "async": {
                         "type": "boolean",
@@ -138,6 +99,8 @@ impl Tool for SubagentTool {
             .profile(&input.agent)
             .expect("validated profile must exist");
         let launch_plan = SubagentLaunchPlan::resolve(&profile, &context)?;
+        let mut options = launch_plan.into_options();
+        crate::launch_context::LaunchContext::new(&context).apply(&mut options, input.context)?;
         let profile_name = profile.name.clone();
         let timeout = profile.timeout;
         let parent_session_id = context.session.id()?;
@@ -149,106 +112,22 @@ impl Tool for SubagentTool {
             .runtime
             .begin_launch_with_max_depth(&parent_session_id, profile, self.max_depth)
             .map_err(|error| ToolError::Execution(error.to_string()))?;
-        let mut guard = RunGuard::reserved(self.runtime.clone(), &ticket);
-        let run_id = ticket.run_id().to_string();
-        let depth = ticket.depth();
-        let mut options = launch_plan.into_options();
-        if let Some(mode) = input.context {
-            options.context = mode;
-        }
-        let context_mode = options.context;
-        let (abort, signal) = pi_core::AbortHandle::new();
-        self.runtime.coordination().reserve(
-            &run_id,
-            crate::coordination::ManagedRun::new(
-                parent_session_id.clone(),
-                crate::coordination::RunMetadata::new(profile_name.clone(), depth, context_mode),
-                abort.clone(),
+        let (run_id, abort) = crate::execution::launch_child(
+            self.runtime.downgrade(),
+            &context,
+            crate::execution::PreparedChild {
+                ticket,
+                agent: profile_name,
+                options,
+                task: input.task,
                 timeout,
-            ),
-        );
-        let request = IsolatedSessionRequest::new(CustomMessageContent::Text(
-            ticket.child_prompt(&input.task),
-        ))
-        .options(options);
-        let handle = match context.session.launch_isolated_session(request).await {
-            Ok(handle) => handle,
-            Err(error) => return Err(error.into()),
-        };
-        self.runtime
-            .coordination()
-            .launched(&run_id, handle.id().as_str());
-        updates.send(ToolUpdate {
-            content: vec![ContentBlock::Text(TextContent::new(format!(
-                "{} subagent running",
-                profile_name
-            )))],
-            details: Some(json!({
-                "runId": run_id,
-                "isolatedSessionId": handle.id().as_str(),
-                "agent": profile_name,
-                "depth": depth,
-                "context": context_mode,
-                "state": "running"
-            })),
-        });
-
-        let mut changed = self.runtime.coordination().subscribe();
-        let mut foreground = ForegroundGuard(Some(abort));
-        self.runtime.spawn_monitor(
-            parent_session_id.clone(),
-            run_id.clone(),
-            crate::child_run::ChildRun {
-                runtime: self.runtime.downgrade(),
-                run_id: run_id.clone(),
-                owner: parent_session_id.clone(),
-                handle,
-                signal,
-                timeout,
-            }
-            .monitor(),
-        );
-        guard.mark_launched();
-        if input.background {
-            let result = self
-                .runtime
-                .coordination()
-                .background(&parent_session_id, &run_id)
-                .map_err(ToolError::Execution)?;
-            foreground.0.take();
-            return Ok(result);
-        }
-        loop {
-            let run = self
-                .runtime
-                .coordination()
-                .run(&parent_session_id, &run_id)
-                .map_err(ToolError::Execution)?;
-            if let Some(result) = run.result {
-                foreground.0.take();
-                return result.map_err(ToolError::Execution);
-            }
-            // All foreground waits owned by this session must yield together:
-            // a parallel sibling otherwise prevents the parent's next turn.
-            if !self
-                .runtime
-                .coordination()
-                .pending(&parent_session_id)
-                .is_empty()
-            {
-                let result = self
-                    .runtime
-                    .coordination()
-                    .detach(&parent_session_id, &run_id)
-                    .map_err(ToolError::Execution)?;
-                foreground.0.take();
-                return Ok(result);
-            }
-            tokio::select! {
-                () = context.signal().wait() => return Err(ToolError::Aborted),
-                _ = changed.changed() => {}
-            }
-        }
+                workflow_id: None,
+            },
+            &updates,
+        )
+        .await?;
+        crate::execution::wait_foreground(&self.runtime, &context, run_id, abort, input.background)
+            .await
     }
 }
 
@@ -326,10 +205,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use pi_core::{
-        AbortHandle, AssistantMessage, IsolatedSessionId, IsolatedSessionOutcome, ModelId,
-        ModelSpec, ModelsContextAccess, PluginContext, PluginContextEpoch, PluginContextResult,
-        PluginContextScope, ProviderId, SessionContextAccess, StopReason, ThinkingLevel,
-        UiContextAccess, Usage,
+        AbortHandle, AssistantMessage, CustomMessageContent, IsolatedSessionId,
+        IsolatedSessionOutcome, IsolatedSessionRequest, ModelId, ModelSpec, ModelsContextAccess,
+        PluginContext, PluginContextEpoch, PluginContextResult, PluginContextScope, ProviderId,
+        SessionContextAccess, StopReason, TextContent, ThinkingLevel, UiContextAccess, Usage,
     };
 
     use super::*;
@@ -409,6 +288,12 @@ mod tests {
 
     #[async_trait]
     impl SessionContextAccess for FakeAccess {
+        fn isolated_fork_point(&self) -> PluginContextResult<Option<pi_core::IsolatedForkPoint>> {
+            Ok(Some(pi_core::IsolatedForkPoint {
+                parent_session_id: "root-session".into(),
+                parent_entry_id: "parent-request".into(),
+            }))
+        }
         fn session_id(&self) -> PluginContextResult<String> {
             Ok("root-session".to_string())
         }

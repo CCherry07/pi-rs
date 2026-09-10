@@ -4,7 +4,9 @@ mod catalog;
 mod child_run;
 mod config;
 mod coordination;
+mod execution;
 mod fork_context;
+mod launch_context;
 mod launch_plan;
 mod profiles;
 mod run_state;
@@ -14,6 +16,8 @@ mod skills;
 mod supervisor_tools;
 mod tool;
 mod waiting;
+mod workflow;
+mod workflow_plan;
 
 use std::sync::Arc;
 
@@ -81,6 +85,11 @@ impl AgentPlugin for SubagentsPlugin {
 
     fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
         context.register_tool(Arc::new(SubagentTool::new(
+            self.runtime.clone(),
+            self.catalog.clone(),
+            self.max_depth,
+        )))?;
+        context.register_tool(Arc::new(workflow::WorkflowTool::new(
             self.runtime.clone(),
             self.catalog.clone(),
             self.max_depth,

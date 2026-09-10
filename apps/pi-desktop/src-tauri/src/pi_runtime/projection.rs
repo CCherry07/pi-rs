@@ -20,6 +20,34 @@ struct SubagentProjection {
     total_tokens: Option<u64>,
 }
 
+#[derive(Clone)]
+struct WorkflowNodeProjection {
+    run_id: String,
+    key: String,
+    state: String,
+    child: SubagentProjection,
+}
+
+#[derive(Clone, Default)]
+struct WorkflowProjection {
+    nodes: Vec<WorkflowNodeProjection>,
+}
+
+impl WorkflowProjection {
+    fn display_nodes(&self) -> Vec<super::WorkflowDisplayNode> {
+        self.nodes
+            .iter()
+            .map(|node| super::WorkflowDisplayNode {
+                key: node.key.clone(),
+                agent: node.child.agent.clone(),
+                thread_id: node.child.child_thread_id.clone(),
+                state: node.state.clone(),
+                total_tokens: node.child.total_tokens,
+            })
+            .collect()
+    }
+}
+
 struct EventProjectionContext<'a> {
     app: &'a AppHandle,
     workspace_id: &'a str,
@@ -39,6 +67,7 @@ struct ProjectionState {
     tool_names: HashMap<String, String>,
     tool_args: HashMap<String, Value>,
     subagents: HashMap<String, SubagentProjection>,
+    workflows: HashMap<String, WorkflowProjection>,
     compaction_id: Option<String>,
 }
 
@@ -322,6 +351,8 @@ async fn project_event(
                 state.tool_args.insert(item_id.clone(), args.clone());
                 let item = if tool_name == "subagent" {
                     subagent_tool_item(&item_id, thread_id, &args, "inProgress", None, None)
+                } else if tool_name == "subagent_workflow" {
+                    super::workflow_tool_item(&item_id, thread_id, "inProgress", &[], None)
                 } else {
                     tool_item(
                         &item_id,
@@ -381,6 +412,37 @@ async fn project_event(
                             }),
                         );
                     }
+                } else if tool_name == "subagent_workflow" {
+                    let item_id = tool_call_id.to_string();
+                    let previous = state.workflows.remove(&item_id).unwrap_or_default();
+                    let projected = project_workflow(
+                        app,
+                        workspace_id,
+                        thread_id,
+                        store,
+                        forwarders,
+                        &partial_result,
+                        previous,
+                    )
+                    .await;
+                    let nodes = projected.display_nodes();
+                    state.workflows.insert(item_id.clone(), projected);
+                    emit(
+                        app,
+                        workspace_id,
+                        "item/started",
+                        json!({
+                            "threadId": thread_id,
+                            "turnId": state.turn_id,
+                            "item": super::workflow_tool_item(
+                                &item_id,
+                                thread_id,
+                                "inProgress",
+                                &nodes,
+                                Some(tool_result_text(&partial_result)),
+                            )
+                        }),
+                    );
                 } else if tool_name == "bash" {
                     let delta = tool_result_text(&partial_result);
                     if !delta.is_empty() {
@@ -415,6 +477,19 @@ async fn project_event(
                     if let Some(projected) = projected {
                         state.subagents.insert(item_id.clone(), projected);
                     }
+                } else if tool_name == "subagent_workflow" {
+                    let previous = state.workflows.remove(&item_id).unwrap_or_default();
+                    let projected = project_workflow(
+                        app,
+                        workspace_id,
+                        thread_id,
+                        store,
+                        forwarders,
+                        &result,
+                        previous,
+                    )
+                    .await;
+                    state.workflows.insert(item_id.clone(), projected);
                 }
                 let item = if tool_name == "subagent" {
                     subagent_tool_item(
@@ -423,6 +498,19 @@ async fn project_event(
                         &args,
                         if is_error { "failed" } else { "completed" },
                         state.subagents.get(&item_id),
+                        Some(output),
+                    )
+                } else if tool_name == "subagent_workflow" {
+                    let nodes = state
+                        .workflows
+                        .get(&item_id)
+                        .map(WorkflowProjection::display_nodes)
+                        .unwrap_or_default();
+                    super::workflow_tool_item(
+                        &item_id,
+                        thread_id,
+                        if is_error { "failed" } else { "completed" },
+                        &nodes,
                         Some(output),
                     )
                 } else {
@@ -447,6 +535,7 @@ async fn project_event(
                 );
                 state.tool_names.remove(&item_id);
                 state.subagents.remove(&item_id);
+                state.workflows.remove(&item_id);
             }
             AgentEvent::AgentEnd { .. } | AgentEvent::TurnStart | AgentEvent::TurnEnd { .. } => {}
         },
@@ -632,22 +721,107 @@ async fn project_subagent(
         .and_then(Value::as_str)
         .unwrap_or("subagent")
         .to_string();
+    let total_tokens = details
+        .get("usage")
+        .and_then(|usage| usage.get("totalTokens"))
+        .and_then(Value::as_u64);
+    project_isolated_subagent(
+        app,
+        workspace_id,
+        parent_thread_id,
+        store,
+        forwarders,
+        isolated_session_id,
+        &agent,
+        None,
+        total_tokens,
+    )
+    .await
+}
+
+async fn project_workflow(
+    app: &AppHandle,
+    workspace_id: &str,
+    parent_thread_id: &str,
+    store: &SessionStore,
+    forwarders: &ForwarderRegistry,
+    result: &ToolResult,
+    previous: WorkflowProjection,
+) -> WorkflowProjection {
+    let mut previous_by_run = previous
+        .nodes
+        .into_iter()
+        .map(|node| (node.run_id.clone(), node))
+        .collect::<HashMap<_, _>>();
+    let mut nodes = Vec::new();
+    for summary in super::workflow_node_summaries(result.details.as_ref()) {
+        let Some(run_id) = summary.run_id.clone() else {
+            continue;
+        };
+        if let Some(mut node) = previous_by_run.remove(&run_id) {
+            node.key = summary.key;
+            node.state = summary.state;
+            node.child.agent = summary.agent;
+            if summary.total_tokens.is_some() {
+                node.child.total_tokens = summary.total_tokens;
+            }
+            nodes.push(node);
+            continue;
+        }
+        let Some(isolated_session_id) = summary.isolated_session_id.as_deref() else {
+            continue;
+        };
+        let Some(child) = project_isolated_subagent(
+            app,
+            workspace_id,
+            parent_thread_id,
+            store,
+            forwarders,
+            isolated_session_id,
+            &summary.agent,
+            Some(&summary.key),
+            summary.total_tokens,
+        )
+        .await
+        else {
+            continue;
+        };
+        nodes.push(WorkflowNodeProjection {
+            run_id,
+            key: summary.key,
+            state: summary.state,
+            child,
+        });
+    }
+    WorkflowProjection { nodes }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn project_isolated_subagent(
+    app: &AppHandle,
+    workspace_id: &str,
+    parent_thread_id: &str,
+    store: &SessionStore,
+    forwarders: &ForwarderRegistry,
+    isolated_session_id: &str,
+    agent: &str,
+    nickname: Option<&str>,
+    total_tokens: Option<u64>,
+) -> Option<SubagentProjection> {
     let (observation, live) = store
-        .subscribe_isolated(parent_thread_id, isolated_session_id, &agent)
+        .subscribe_isolated(parent_thread_id, isolated_session_id, agent, nickname)
         .ok()?;
     let child_thread_id = observation.session_id();
     let projected = SubagentProjection {
         child_thread_id: child_thread_id.clone(),
-        agent: agent.clone(),
-        total_tokens: details
-            .get("usage")
-            .and_then(|usage| usage.get("totalTokens"))
-            .and_then(Value::as_u64),
+        agent: agent.to_string(),
+        total_tokens,
     };
     let should_start = forwarders.lock().await.insert(child_thread_id.clone());
     if should_start {
         let is_running = observation.snapshot().agent.is_running;
-        let thread = super::thread_from_observation(&observation, parent_thread_id, &agent);
+        let thread =
+            super::thread_from_observation(&observation, parent_thread_id, agent, nickname);
         emit(
             app,
             workspace_id,
@@ -836,5 +1010,49 @@ mod tests {
         assert_eq!(item["prompt"], "Review the parser");
         assert_eq!(item["agentStatuses"][0]["status"], "inProgress");
         assert_eq!(item["agentStatuses"][0]["totalTokens"], 12_400);
+    }
+
+    #[test]
+    fn workflow_tool_items_expose_each_started_child_identity_and_state() {
+        let projection = WorkflowProjection {
+            nodes: vec![
+                WorkflowNodeProjection {
+                    run_id: "run-a".to_string(),
+                    key: "first".to_string(),
+                    state: "completed".to_string(),
+                    child: SubagentProjection {
+                        child_thread_id: "child-a".to_string(),
+                        agent: "researcher".to_string(),
+                        total_tokens: Some(321),
+                    },
+                },
+                WorkflowNodeProjection {
+                    run_id: "run-b".to_string(),
+                    key: "second".to_string(),
+                    state: "running".to_string(),
+                    child: SubagentProjection {
+                        child_thread_id: "child-b".to_string(),
+                        agent: "reviewer".to_string(),
+                        total_tokens: Some(123),
+                    },
+                },
+            ],
+        };
+        let nodes = projection.display_nodes();
+        let item = super::super::workflow_tool_item(
+            "call-1",
+            "parent-session",
+            "inProgress",
+            &nodes,
+            None,
+        );
+
+        assert_eq!(item["type"], "collabToolCall");
+        assert_eq!(item["receiverThreadIds"], json!(["child-a", "child-b"]));
+        assert_eq!(item["receiverAgents"][0]["agentNickname"], "first");
+        assert_eq!(item["receiverAgents"][1]["agentRole"], "reviewer");
+        assert_eq!(item["agentStatuses"][0]["status"], "completed");
+        assert_eq!(item["agentStatuses"][1]["status"], "inProgress");
+        assert_eq!(item["agentStatuses"][1]["totalTokens"], 123);
     }
 }

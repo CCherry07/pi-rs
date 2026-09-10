@@ -64,6 +64,52 @@ describe("ToolRow sub-agent execution tree", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open reviewer progress" }));
     expect(onOpenThreadLink).toHaveBeenCalledWith("child-thread");
   });
+
+  it("shows every workflow child and opens the selected node", () => {
+    const onOpenThreadLink = vi.fn();
+    render(
+      <ToolRow
+        item={{
+          ...item,
+          id: "workflow-call-1",
+          title: "Collab: workflow",
+          collabTask: undefined,
+          collabReceiver: { threadId: "child-a", nickname: "first", role: "researcher" },
+          collabReceivers: [
+            { threadId: "child-a", nickname: "first", role: "researcher" },
+            { threadId: "child-b", nickname: "second", role: "reviewer" },
+          ],
+          collabStatuses: [
+            {
+              threadId: "child-a",
+              nickname: "first",
+              role: "researcher",
+              status: "completed",
+              totalTokens: 321,
+            },
+            {
+              threadId: "child-b",
+              nickname: "second",
+              role: "reviewer",
+              status: "inProgress",
+              totalTokens: 123,
+            },
+          ],
+        }}
+        isExpanded={false}
+        onToggle={vi.fn()}
+        onOpenThreadLink={onOpenThreadLink}
+      />,
+    );
+
+    expect(screen.getByText("first")).toBeTruthy();
+    expect(screen.getByText("second")).toBeTruthy();
+    expect(screen.getByText("completed · 0.3k tokens")).toBeTruthy();
+    expect(screen.getByText("processing · 0.1k tokens")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open second progress" }));
+    expect(onOpenThreadLink).toHaveBeenCalledWith("child-b");
+  });
 });
 
 describe("MessageRow actions", () => {

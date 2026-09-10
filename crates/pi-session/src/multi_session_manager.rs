@@ -365,14 +365,25 @@ impl PiSession {
         }
         let parent = self.current();
         let initial_context = match request.options.context {
-            pi_core::IsolatedContextMode::Fresh => None,
+            pi_core::IsolatedContextMode::Fresh => {
+                if request.options.fork_point.is_some() {
+                    return Err(MultiSessionManagerError::InvalidIsolatedRequest(
+                        "fresh context cannot use an isolated fork point".into(),
+                    ));
+                }
+                None
+            }
             pi_core::IsolatedContextMode::Fork => {
                 if !parent.log().is_materialized() {
                     return Err(MultiSessionManagerError::InvalidIsolatedRequest(
                         "cannot fork an unsaved session; wait for the first assistant response or use fresh context".to_string(),
                     ));
                 }
-                Some(parent.isolated_context_seed().map_err(|error| {
+                let seed = match &request.options.fork_point {
+                    Some(fork_point) => parent.isolated_context_seed_at(fork_point),
+                    None => parent.isolated_context_seed(),
+                };
+                Some(seed.map_err(|error| {
                     MultiSessionManagerError::InvalidIsolatedRequest(error.to_string())
                 })?)
             }
@@ -1033,6 +1044,94 @@ mod tests {
         assert!(error.to_string().contains("cannot fork an unsaved session"));
         assert_eq!(manager.sessions().len(), 1);
         assert!(!owner.path().exists());
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_point_excludes_later_compaction_and_rejects_invalid_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = test_manager_with_turns([ScriptedTurn::Text("answer".into())]);
+        let owner = manager
+            .create_session(directory.path(), directory.path().join("parent.jsonl"))
+            .await
+            .unwrap();
+        assert!(owner.current().isolated_fork_point().unwrap().is_none());
+        owner.current().prompt("original history").await.unwrap();
+        let fork_point = owner.current().isolated_fork_point().unwrap().unwrap();
+        let expected = owner
+            .current()
+            .log()
+            .load()
+            .unwrap()
+            .context()
+            .unwrap()
+            .messages;
+        owner
+            .current()
+            .log()
+            .append_session_record(crate::SessionEntry::Compaction(crate::CompactionEntry {
+                summary: "later context must not leak".into(),
+                retained_tail: vec![],
+                tokens_before: 10000,
+                details: None,
+                usage: None,
+            }))
+            .unwrap();
+        let id = owner
+            .launch_isolated_session(
+                IsolatedSessionRequest::new(CustomMessageContent::Text("child task".into()))
+                    .options(IsolatedSessionOptions {
+                        context: pi_core::IsolatedContextMode::Fork,
+                        fork_point: Some(fork_point.clone()),
+                        ..Default::default()
+                    }),
+            )
+            .await
+            .unwrap();
+        owner.wait_for_isolated_session(&id).await.unwrap();
+        let child = manager
+            .sessions()
+            .into_iter()
+            .find(|session| session.registration_id() == id.as_str())
+            .unwrap();
+        let document = child.current().log().load().unwrap();
+        assert_eq!(
+            serde_json::to_value(&document.context().unwrap().messages[..expected.len()]).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        let before_count = manager.sessions().len();
+        for (mode, source) in [
+            (pi_core::IsolatedContextMode::Fresh, fork_point.clone()),
+            (
+                pi_core::IsolatedContextMode::Fork,
+                pi_core::IsolatedForkPoint {
+                    parent_session_id: "foreign".into(),
+                    ..fork_point.clone()
+                },
+            ),
+            (
+                pi_core::IsolatedContextMode::Fork,
+                pi_core::IsolatedForkPoint {
+                    parent_entry_id: "missing".into(),
+                    ..fork_point
+                },
+            ),
+        ] {
+            assert!(
+                owner
+                    .launch_isolated_session(
+                        IsolatedSessionRequest::new(CustomMessageContent::Text("invalid".into()))
+                            .options(IsolatedSessionOptions {
+                                context: mode,
+                                fork_point: Some(source),
+                                ..Default::default()
+                            })
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(manager.sessions().len(), before_count);
+        }
         manager.shutdown().await.unwrap();
     }
 

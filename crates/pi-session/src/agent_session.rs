@@ -847,9 +847,12 @@ impl AgentSession {
         &self.log
     }
 
-    pub(crate) fn isolated_context_seed(
+    pub(crate) fn isolated_fork_point(
         &self,
-    ) -> Result<crate::isolated_context::IsolatedContextSeed, SessionError> {
+    ) -> Result<Option<pi_core::IsolatedForkPoint>, SessionError> {
+        if !self.log.is_materialized() {
+            return Ok(None);
+        }
         let document = self.log.load()?;
         let entries = document.branch()?.into_iter().cloned().collect::<Vec<_>>();
         let state = self.runtime.agent().state();
@@ -864,9 +867,41 @@ impl AgentSession {
             })
             .flatten();
         let entries = crate::isolated_context::fork_entries(&entries, request);
+        Ok(entries.last().map(|entry| pi_core::IsolatedForkPoint {
+            parent_session_id: document.header.id.clone(),
+            parent_entry_id: entry.id.clone(),
+        }))
+    }
+
+    pub(crate) fn isolated_context_seed(
+        &self,
+    ) -> Result<crate::isolated_context::IsolatedContextSeed, SessionError> {
+        let fork_point = self.isolated_fork_point()?.ok_or_else(|| {
+            SessionError::Runtime(
+                "cannot fork an unsaved or empty session; use fresh context".into(),
+            )
+        })?;
+        self.isolated_context_seed_at(&fork_point)
+    }
+
+    pub(crate) fn isolated_context_seed_at(
+        &self,
+        fork_point: &pi_core::IsolatedForkPoint,
+    ) -> Result<crate::isolated_context::IsolatedContextSeed, SessionError> {
+        let document = self.log.load()?;
+        if fork_point.parent_session_id != document.header.id {
+            return Err(SessionError::Runtime(
+                "isolated fork point belongs to another parent session".into(),
+            ));
+        }
+        let entries = document
+            .branch_at(Some(&fork_point.parent_entry_id))?
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
         Ok(crate::isolated_context::IsolatedContextSeed {
             parent_session_id: document.header.id.clone(),
-            messages: crate::build_session_context(entries, &self.context_options).messages,
+            messages: crate::build_session_context(&entries, &self.context_options).messages,
         })
     }
 

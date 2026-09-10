@@ -186,6 +186,39 @@ impl Coordination {
             .ok_or_else(|| format!("No owned subagent run found for {id:?}."))
     }
 
+    pub fn workflow_progress(
+        &self,
+        id: &str,
+        snapshot: crate::workflow::WorkflowSnapshot,
+        usage: Usage,
+    ) {
+        if let Some(run) = self
+            .lock()
+            .runs
+            .get_mut(id)
+            .filter(|run| run.result.is_none())
+        {
+            run.set_workflow(snapshot, usage);
+        }
+        self.wake();
+    }
+
+    pub fn cancel(&self, owner: &str, id: &str) -> Result<(), String> {
+        let mut state = self.lock();
+        let run = state
+            .runs
+            .get_mut(id)
+            .filter(|run| run.owner == owner)
+            .ok_or_else(|| format!("No owned subagent run found for {id:?}."))?;
+        if run.result.is_none() {
+            run.mark_cancelling();
+            run.abort.abort();
+        }
+        drop(state);
+        self.wake();
+        Ok(())
+    }
+
     pub fn run_ids(&self, owner: &str, prefix: Option<&str>) -> Result<Vec<String>, String> {
         let state = self.lock();
         if let Some(id) = prefix
@@ -198,7 +231,10 @@ impl Coordination {
             .iter()
             .filter(|(id, run)| {
                 run.owner == owner
-                    && prefix.map_or(run.result.is_none(), |prefix| id.starts_with(prefix))
+                    && prefix.map_or(
+                        run.result.is_none() && run.workflow_id().is_none(),
+                        |prefix| id.starts_with(prefix),
+                    )
             })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
@@ -250,7 +286,7 @@ impl Coordination {
                 .values()
                 .filter(|request| {
                     request.owner == owner
-                        && request.request.run_id == id
+                        && request_belongs_to(&state, &request.request.run_id, id)
                         && request.deadline > Instant::now()
                 })
                 .map(|request| request.request.clone())
@@ -324,7 +360,7 @@ impl Coordination {
                 .filter(|run| run.owner == *owner && run.result.is_none())?;
             if state.pending.values().any(|request| {
                 request.owner == *owner
-                    && request.request.run_id == *id
+                    && request_belongs_to(&state, &request.request.run_id, id)
                     && request.deadline > Instant::now()
             }) {
                 return None;
@@ -375,6 +411,11 @@ impl Coordination {
     fn detach_for(&self, owner: &str, id: &str, background: bool) -> Result<ToolResult, String> {
         let pending = self.pending(owner);
         let mut state = self.lock();
+        let pending_request_ids = pending
+            .iter()
+            .filter(|request| request_belongs_to(&state, &request.run_id, id))
+            .map(|request| request.id.clone())
+            .collect();
         let run = state
             .runs
             .get_mut(id)
@@ -395,11 +436,6 @@ impl Coordination {
                 "Detached for intercom coordination before task completion. Run: {id}. Reply with subagent_supervisor, then bg_wait({{\"id\":\"{id}\"}}). Keep using this run; do not launch a replacement."
             )
         });
-        let pending_request_ids = pending
-            .iter()
-            .filter(|request| request.run_id == id)
-            .map(|request| request.id.clone())
-            .collect();
         let mut details = run.details(id, pending_request_ids);
         details["detachedReason"] = json!(if background {
             "background launch"
@@ -427,7 +463,7 @@ impl Coordination {
             return;
         };
         let owner = run.owner.clone();
-        let notify = run.is_detached();
+        let notify = run.is_detached() && run.workflow_id().is_none();
         let notification = notify.then(|| {
             let details = match &result {
                 Ok(result) => json!({"runId":id,"content":result.content,"details":result.details,"isError":result.is_error}),
@@ -515,6 +551,7 @@ impl Coordination {
             .iter()
             .filter(|(id, run)| {
                 run.owner == owner
+                    && (prefix.is_some() || run.workflow_id().is_none())
                     && prefix.is_none_or(|prefix| {
                         if exact {
                             id.as_str() == prefix
@@ -529,7 +566,7 @@ impl Coordination {
                     .values()
                     .filter(|request| {
                         request.owner == owner
-                            && request.request.run_id == *id
+                            && request_belongs_to(&state, &request.request.run_id, id)
                             && request.deadline > Instant::now()
                     })
                     .map(|request| request.request.id.clone())
@@ -593,7 +630,11 @@ impl Coordination {
             .filter(|run| run.result.is_none())
             .ok_or_else(|| "Supervisor channel is no longer active.".to_string())?;
         let owner = run.owner.clone();
+        let workflow_id = run.workflow_id().map(str::to_string);
         if request.expects_reply {
+            if let Some(id) = workflow_id.as_ref() {
+                state.deadline_watches.remove(&(owner.clone(), id.clone()));
+            }
             state
                 .deadline_watches
                 .remove(&(owner.clone(), request.run_id.clone()));
@@ -630,7 +671,13 @@ impl Coordination {
                 }
             )),
             display: true,
-            details: Some(json!(request)),
+            details: Some({
+                let mut details = json!(request);
+                if let Some(id) = workflow_id {
+                    details["workflowId"] = json!(id);
+                }
+                details
+            }),
         };
         let handle = state.sessions.get(&owner).cloned();
         drop(state);
@@ -740,6 +787,10 @@ impl Coordination {
             .and_then(|access| access.abort_isolated_session(handle.scope(), id))
             .map_err(|error| error.to_string())
     }
+}
+
+fn request_belongs_to(state: &State, child: &str, id: &str) -> bool {
+    child == id || state.runs.get(child).and_then(ManagedRun::workflow_id) == Some(id)
 }
 
 fn expire_requests(state: &mut State) {

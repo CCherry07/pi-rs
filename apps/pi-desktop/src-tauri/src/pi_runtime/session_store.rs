@@ -29,12 +29,14 @@ pub(crate) struct ObservedIsolatedSession {
     pub(crate) observation: IsolatedSessionObservation,
     pub(crate) parent_thread_id: String,
     pub(crate) agent: String,
+    pub(crate) nickname: Option<String>,
 }
 
 pub(crate) struct StoredIsolatedSession {
     pub(crate) document: SessionDocument,
     pub(crate) parent_thread_id: String,
     pub(crate) agent: String,
+    pub(crate) nickname: Option<String>,
 }
 
 pub(crate) struct LiveSession {
@@ -428,6 +430,7 @@ impl SessionStore {
         owner_id: &str,
         isolated_id: &str,
         agent: &str,
+        nickname: Option<&str>,
     ) -> Result<(IsolatedSessionObservation, LiveSession), String> {
         let id = IsolatedSessionId::new(isolated_id.to_string());
         let observation = if let Some((_, owner)) = self.handle(owner_id) {
@@ -455,6 +458,7 @@ impl SessionStore {
                     observation: observation.clone(),
                     parent_thread_id: owner_id.to_string(),
                     agent: agent.to_string(),
+                    nickname: nickname.map(str::to_string),
                 },
             );
         let live = LiveSession {
@@ -487,11 +491,13 @@ impl SessionStore {
                 owner_path.display()
             )
         })?;
-        let agent = subagent_role_for_child(&owner, id).unwrap_or_else(|| "subagent".to_string());
+        let (agent, nickname) = subagent_metadata_for_child(&owner, id)
+            .unwrap_or_else(|| ("subagent".to_string(), None));
         Ok(StoredIsolatedSession {
             document,
             parent_thread_id: owner.header.id,
             agent,
+            nickname,
         })
     }
 
@@ -609,46 +615,66 @@ fn isolated_owner_path(path: &Path) -> Option<PathBuf> {
     Some(isolated.parent()?.with_extension("jsonl"))
 }
 
-fn subagent_role_for_child(document: &SessionDocument, child_id: &str) -> Option<String> {
+fn subagent_metadata_for_child(
+    document: &SessionDocument,
+    child_id: &str,
+) -> Option<(String, Option<String>)> {
     let mut pending = HashMap::<String, Value>::new();
     for record in &document.entries {
-        let SessionEntry::Message(entry) = &record.entry else {
-            continue;
-        };
-        let Some(message) = entry.message.as_standard() else {
-            continue;
-        };
-        match message {
-            Message::Assistant(message) => {
-                for block in &message.content {
-                    let ContentBlock::ToolCall(call) = block else {
-                        continue;
-                    };
-                    if call.name == "subagent" {
-                        pending.insert(call.id.to_string(), call.arguments.clone());
+        match &record.entry {
+            SessionEntry::Message(entry) => {
+                let Some(message) = entry.message.as_standard() else {
+                    continue;
+                };
+                match message {
+                    Message::Assistant(message) => {
+                        for block in &message.content {
+                            let ContentBlock::ToolCall(call) = block else {
+                                continue;
+                            };
+                            if call.name == "subagent" {
+                                pending.insert(call.id.to_string(), call.arguments.clone());
+                            }
+                        }
                     }
+                    Message::ToolResult(result) => {
+                        if let Some(node) = super::workflow_node_summaries(result.details.as_ref())
+                            .into_iter()
+                            .find(|node| node.session_id.as_deref() == Some(child_id))
+                        {
+                            return Some((node.agent, Some(node.key)));
+                        }
+                        let matches_child = result
+                            .details
+                            .as_ref()
+                            .and_then(|details| details.get("sessionId"))
+                            .and_then(Value::as_str)
+                            == Some(child_id);
+                        if !matches_child {
+                            continue;
+                        }
+                        return result
+                            .details
+                            .as_ref()
+                            .and_then(|details| details.get("agent"))
+                            .and_then(Value::as_str)
+                            .or_else(|| {
+                                pending
+                                    .get(result.tool_call_id.as_str())
+                                    .and_then(|args| args.get("agent"))
+                                    .and_then(Value::as_str)
+                            })
+                            .map(|agent| (agent.to_string(), None));
+                    }
+                    _ => {}
                 }
             }
-            Message::ToolResult(result) => {
-                let matches_child = result
-                    .details
-                    .as_ref()
-                    .and_then(|details| details.get("sessionId"))
-                    .and_then(Value::as_str)
-                    == Some(child_id);
-                if matches_child {
-                    return result
-                        .details
-                        .as_ref()
-                        .and_then(|details| details.get("agent"))
-                        .and_then(Value::as_str)
-                        .or_else(|| {
-                            pending
-                                .get(result.tool_call_id.as_str())
-                                .and_then(|args| args.get("agent"))
-                                .and_then(Value::as_str)
-                        })
-                        .map(str::to_string);
+            SessionEntry::Custom(custom) if custom.custom_type == "subagent_workflow" => {
+                if let Some(node) = super::workflow_node_summaries(custom.data.as_ref())
+                    .into_iter()
+                    .find(|node| node.session_id.as_deref() == Some(child_id))
+                {
+                    return Some((node.agent, Some(node.key)));
                 }
             }
             _ => {}

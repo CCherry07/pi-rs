@@ -377,6 +377,56 @@ struct LateUpdateTool {
     retained_sink: Arc<Mutex<Option<ToolUpdateSink>>>,
 }
 
+struct ClosedUpdateTool;
+
+#[async_trait]
+impl Tool for ClosedUpdateTool {
+    fn spec(&self) -> ToolSpec {
+        tool_spec("closed-update")
+    }
+    async fn execute(
+        &self,
+        _context: ToolContext,
+        _id: ToolCallId,
+        _input: Value,
+        updates: ToolUpdateSink,
+    ) -> Result<ToolResult, ToolError> {
+        drop(updates);
+        tokio::task::yield_now().await;
+        let mut result = ToolResult::text("settled after closing updates");
+        result.terminate = true;
+        Ok(result)
+    }
+}
+
+#[tokio::test]
+async fn closed_update_channel_cannot_starve_tool_completion() {
+    let (agent, provider) = build_agent(
+        [ScriptedTurn::ToolCalls(vec![ToolCall::new(
+            "closed-1",
+            "closed-update",
+            json!({}),
+        )])],
+        vec![Arc::new(ToolPlugin::one(
+            "closed-update-tool",
+            Arc::new(ClosedUpdateTool),
+        ))],
+        AgentOptions {
+            active_tools: vec!["closed-update".into()],
+            ..AgentOptions::default()
+        },
+    );
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        agent.prompt("Close progress before settling"),
+    )
+    .await
+    .expect("closed updates must not spin")
+    .unwrap();
+    assert_eq!(outcome.stop, AgentLoopStop::TerminatedByTools);
+    assert_eq!(provider.requests().len(), 1);
+}
+
 struct SettledParallelTool {
     retained_sink: Arc<Mutex<Option<ToolUpdateSink>>>,
 }

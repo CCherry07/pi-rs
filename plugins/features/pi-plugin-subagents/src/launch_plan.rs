@@ -39,6 +39,7 @@ impl SubagentLaunchPlan {
                 model,
                 thinking_level: profile.thinking_level,
                 context: profile.default_context,
+                fork_point: None,
             },
         })
     }
@@ -84,13 +85,17 @@ fn resolve_tool_names(
         )));
     }
     if !profile.allow_nested_subagents {
-        if profile.tools.is_some() && selected.iter().any(|tool| tool == "subagent") {
+        if profile.tools.is_some()
+            && selected
+                .iter()
+                .any(|tool| matches!(tool.as_str(), "subagent" | "subagent_workflow"))
+        {
             return Err(ToolError::Execution(format!(
                 "subagent profile {:?} selects the subagent tool but does not authorize nested delegation",
                 profile.name
             )));
         }
-        selected.retain(|tool| tool != "subagent");
+        selected.retain(|tool| !matches!(tool.as_str(), "subagent" | "subagent_workflow"));
     }
     if (profile.inherit_skills || !profile.skills.is_empty())
         && !selected.iter().any(|tool| tool == "read")

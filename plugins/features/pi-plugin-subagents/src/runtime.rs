@@ -16,6 +16,7 @@ pub struct SubagentRuntime {
     inner: Arc<RuntimeInner>,
 }
 
+#[derive(Clone)]
 pub(crate) struct WeakSubagentRuntime(Weak<RuntimeInner>);
 
 impl WeakSubagentRuntime {
@@ -66,6 +67,7 @@ struct RuntimeState {
     roots: HashMap<String, RootBudget>,
     runs: HashMap<String, RunRecord>,
     assignments: HashMap<String, (String, SubagentProfile)>,
+    workflows: HashMap<String, (String, usize)>,
 }
 
 #[derive(Clone)]
@@ -83,6 +85,7 @@ struct RootBudget {
 }
 
 struct RunRecord {
+    workflow_id: Option<String>,
     parent_session_id: String,
     root_session_id: String,
     depth: usize,
@@ -229,6 +232,60 @@ impl SubagentRuntime {
         profile: SubagentProfile,
         configured_max_depth: usize,
     ) -> Result<LaunchTicket, LaunchError> {
+        self.reserve_batch(
+            parent_session_id,
+            vec![profile],
+            configured_max_depth,
+            None,
+            1,
+        )
+        .map(|mut tickets| tickets.remove(0))
+    }
+
+    pub(crate) fn reserve_workflow(
+        &self,
+        parent_session_id: &str,
+        profiles: Vec<SubagentProfile>,
+        configured_max_depth: usize,
+        workflow_id: &str,
+        slots: usize,
+    ) -> Result<Vec<LaunchTicket>, LaunchError> {
+        self.reserve_batch(
+            parent_session_id,
+            profiles,
+            configured_max_depth,
+            Some(workflow_id),
+            slots,
+        )
+    }
+
+    pub(crate) fn finish_workflow(&self, id: &str) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.workflows.remove(id);
+        // Abrupt controller cancellation must not make draining children free slots.
+        for run in state
+            .runs
+            .values_mut()
+            .filter(|run| run.workflow_id.as_deref() == Some(id))
+        {
+            run.workflow_id = None;
+        }
+    }
+
+    // Admission is atomic: reserve the complete spawn budget and a bounded
+    // concurrency pool before any child starts. Queued nodes consume no extra slots.
+    fn reserve_batch(
+        &self,
+        parent_session_id: &str,
+        profiles: Vec<SubagentProfile>,
+        configured_max_depth: usize,
+        workflow_id: Option<&str>,
+        slots: usize,
+    ) -> Result<Vec<LaunchTicket>, LaunchError> {
         let mut state = self
             .inner
             .state
@@ -272,8 +329,17 @@ impl SubagentRuntime {
                 maximum: lineage.max_depth,
             });
         }
-        let active = state.runs.len();
-        if active >= self.inner.limits.max_active_runs {
+        let active = state
+            .runs
+            .values()
+            .filter(|run| run.workflow_id.is_none())
+            .count()
+            + state
+                .workflows
+                .values()
+                .map(|(_, slots)| slots)
+                .sum::<usize>();
+        if slots > self.inner.limits.max_active_runs.saturating_sub(active) {
             return Err(LaunchError::Concurrency {
                 active,
                 maximum: self.inner.limits.max_active_runs,
@@ -283,32 +349,48 @@ impl SubagentRuntime {
             .roots
             .entry(lineage.root_session_id.clone())
             .or_default();
-        if budget.spawns >= self.inner.limits.max_spawns_per_root {
+        if profiles.len()
+            > self
+                .inner
+                .limits
+                .max_spawns_per_root
+                .saturating_sub(budget.spawns)
+        {
             return Err(LaunchError::SpawnBudget {
                 used: budget.spawns,
                 maximum: self.inner.limits.max_spawns_per_root,
             });
         }
-        budget.spawns += 1;
+        budget.spawns += profiles.len();
+        if let Some(id) = workflow_id {
+            state
+                .workflows
+                .insert(id.to_string(), (parent_session_id.to_string(), slots));
+        }
 
-        let run_id = Uuid::now_v7().to_string();
-        let depth = lineage.depth + 1;
-        let max_depth = profile
-            .max_subagent_depth
-            .map_or(lineage.max_depth, |maximum| lineage.max_depth.min(maximum));
-        state.runs.insert(
-            run_id.clone(),
-            RunRecord {
-                parent_session_id: parent_session_id.to_string(),
-                root_session_id: lineage.root_session_id,
-                depth,
-                max_depth,
-                profile: profile.clone(),
-                child_session_id: None,
-                warnings: Vec::new(),
-            },
-        );
-        Ok(LaunchTicket { run_id, depth })
+        let mut tickets = Vec::with_capacity(profiles.len());
+        for profile in profiles {
+            let run_id = Uuid::now_v7().to_string();
+            let depth = lineage.depth + 1;
+            let max_depth = profile
+                .max_subagent_depth
+                .map_or(lineage.max_depth, |maximum| lineage.max_depth.min(maximum));
+            state.runs.insert(
+                run_id.clone(),
+                RunRecord {
+                    workflow_id: workflow_id.map(str::to_string),
+                    parent_session_id: parent_session_id.to_string(),
+                    root_session_id: lineage.root_session_id.clone(),
+                    depth,
+                    max_depth,
+                    profile: profile.clone(),
+                    child_session_id: None,
+                    warnings: Vec::new(),
+                },
+            );
+            tickets.push(LaunchTicket { run_id, depth });
+        }
+        Ok(tickets)
     }
 
     pub(crate) fn bind_child(
@@ -450,6 +532,7 @@ impl SubagentRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let lineage = state.lineages.remove(session_id);
+        state.workflows.retain(|_, (owner, _)| owner != session_id);
         state.assignments.remove(session_id);
         let closing_root = lineage
             .as_ref()
@@ -520,6 +603,65 @@ mod tests {
         let mut profile = builtin_profile(name);
         profile.allow_nested_subagents = true;
         profile
+    }
+
+    #[test]
+    fn workflow_admission_is_atomic_and_reserves_slots_not_queued_nodes() {
+        let runtime = runtime(1, 6, 2);
+        let profiles = vec![builtin_profile("reviewer"); 6];
+        assert!(matches!(
+            runtime.reserve_workflow("root", profiles.clone(), 1, "bad", 3),
+            Err(LaunchError::Concurrency { .. })
+        ));
+        let tickets = runtime
+            .reserve_workflow("root", profiles, 1, "workflow", 2)
+            .unwrap();
+        assert_eq!(tickets.len(), 6);
+        assert!(matches!(
+            runtime.begin_launch("root", builtin_profile("reviewer")),
+            Err(LaunchError::Concurrency { .. })
+        ));
+        for ticket in &tickets {
+            runtime.cancel_unlaunched(ticket.run_id());
+        }
+        runtime.finish_workflow("workflow");
+        let next = runtime
+            .reserve_workflow("root", vec![builtin_profile("reviewer"); 6], 1, "next", 1)
+            .unwrap();
+        assert!(matches!(
+            runtime.begin_launch("root", builtin_profile("reviewer")),
+            Err(LaunchError::SpawnBudget { .. })
+        ));
+        for ticket in &next {
+            runtime.cancel_unlaunched(ticket.run_id());
+        }
+        runtime.finish_workflow("next");
+        assert!(
+            runtime
+                .begin_launch("root", builtin_profile("reviewer"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn interrupted_workflow_keeps_draining_child_slots_occupied() {
+        let runtime = runtime(1, 8, 1);
+        let mut tickets = runtime
+            .reserve_workflow("root", vec![builtin_profile("reviewer")], 1, "workflow", 1)
+            .unwrap();
+        let ticket = tickets.remove(0);
+        runtime.bind_child(ticket.run_id(), "child").unwrap();
+        runtime.finish_workflow("workflow");
+        assert!(matches!(
+            runtime.begin_launch("root", builtin_profile("reviewer")),
+            Err(LaunchError::Concurrency { .. })
+        ));
+        runtime.finish(ticket.run_id());
+        assert!(
+            runtime
+                .begin_launch("root", builtin_profile("reviewer"))
+                .is_ok()
+        );
     }
 
     #[test]

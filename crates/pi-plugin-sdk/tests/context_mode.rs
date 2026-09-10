@@ -1,5 +1,5 @@
 #[test]
-fn isolated_context_mode_is_available_in_each_enabled_author_prelude() {
+fn isolated_context_types_are_available_in_each_enabled_author_prelude() {
     #[cfg(feature = "agent")]
     {
         use pi_plugin_sdk::agent::prelude::*;
@@ -7,6 +7,11 @@ fn isolated_context_mode_is_available_in_each_enabled_author_prelude() {
             IsolatedSessionOptions::default().context,
             IsolatedContextMode::Fresh
         );
+        let point = IsolatedForkPoint {
+            parent_session_id: "parent".into(),
+            parent_entry_id: "entry".into(),
+        };
+        assert_eq!(point.parent_entry_id, "entry");
     }
     #[cfg(feature = "provider")]
     {
@@ -15,6 +20,11 @@ fn isolated_context_mode_is_available_in_each_enabled_author_prelude() {
             IsolatedSessionOptions::default().context,
             IsolatedContextMode::Fresh
         );
+        let point = IsolatedForkPoint {
+            parent_session_id: "parent".into(),
+            parent_entry_id: "entry".into(),
+        };
+        assert_eq!(point.parent_entry_id, "entry");
     }
     #[cfg(feature = "session")]
     {
@@ -23,5 +33,10 @@ fn isolated_context_mode_is_available_in_each_enabled_author_prelude() {
             IsolatedSessionOptions::default().context,
             IsolatedContextMode::Fresh
         );
+        let point = IsolatedForkPoint {
+            parent_session_id: "parent".into(),
+            parent_entry_id: "entry".into(),
+        };
+        assert_eq!(point.parent_entry_id, "entry");
     }
 }

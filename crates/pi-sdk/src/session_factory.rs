@@ -52,7 +52,7 @@ use crate::builtin_providers::BuiltinProviderSet;
 use crate::dynamic_providers::{DynamicProviderCandidate, DynamicProviderOverlay};
 use crate::project_trust::ProjectTrustService;
 
-const BUILTIN_TOOL_NAMES: [&str; 15] = [
+const BUILTIN_TOOL_NAMES: [&str; 16] = [
     "read",
     "grep",
     "find",
@@ -62,6 +62,7 @@ const BUILTIN_TOOL_NAMES: [&str; 15] = [
     "hashline_edit",
     "bash",
     "subagent",
+    "subagent_workflow",
     "contact_supervisor",
     "subagent_supervisor",
     "bg_wait",
@@ -1339,6 +1340,12 @@ command = "fixture-command"
         .unwrap();
 
         assert!(runtime.active_tools().iter().any(|tool| tool == "subagent"));
+        assert!(
+            runtime
+                .active_tools()
+                .iter()
+                .any(|tool| tool == "subagent_workflow")
+        );
         let spec = runtime
             .tool_specs()
             .into_iter()

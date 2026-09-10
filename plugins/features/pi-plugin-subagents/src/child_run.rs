@@ -109,17 +109,21 @@ impl ChildRun {
         });
         runtime
             .and_then(|runtime| {
+                let mut attribution = json!({
+                    "source": "subagent",
+                    "runId": self.run_id,
+                    "childSessionId": outcome.session_id,
+                    "agent": details.get("agent").cloned(),
+                    "depth": details.get("depth").cloned(),
+                });
+                if let Some(workflow_id) = details.get("workflowId") {
+                    attribution["workflowId"] = workflow_id.clone();
+                }
                 runtime.coordination().record_usage(
                     &self.run_id,
                     &self.owner,
                     outcome.usage.clone(),
-                    json!({
-                        "source": "subagent",
-                        "runId": self.run_id,
-                        "childSessionId": outcome.session_id,
-                        "agent": details.get("agent").cloned(),
-                        "depth": details.get("depth").cloned(),
-                    }),
+                    attribution,
                 )
             })
             .err()

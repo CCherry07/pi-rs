@@ -51,6 +51,7 @@ enum SupervisorAction {
     Pending,
     Status,
     Reply,
+    Cancel,
 }
 
 #[derive(Deserialize)]
@@ -80,10 +81,10 @@ impl Tool for SupervisorTool {
             ),
             SupervisorToolKind::Supervisor => (
                 "subagent_supervisor",
-                "Inspect owned subagent run status (optionally id), list pending supervisor requests, or reply to a request. Reply before waiting for that child again.",
+                "Inspect owned subagent/workflow status, cancel one owned run, list pending requests, or reply to a request. Reply before waiting for that child again.",
                 json!({
-                    "action":{"type":"string","enum":["list","pending","status","reply"]},
-                    "id":{"type":"string","description":"For status only: exact owned run id or unique prefix."},
+                    "action":{"type":"string","enum":["list","pending","status","reply","cancel"]},
+                    "id":{"type":"string","description":"For status or cancel: exact owned run id or unique prefix. Required for cancel."},
                     "to":{"type":"string"}, "message":{"type":"string"}, "replyTo":{"type":"string"}
                 }),
                 vec!["action"],
@@ -222,12 +223,38 @@ impl SupervisorTool {
         input: SupervisorInput,
     ) -> Result<ToolResult, ToolError> {
         let owner = context.session.id()?;
-        if input.id.is_some() && input.action != SupervisorAction::Status {
+        if input.id.is_some()
+            && !matches!(
+                input.action,
+                SupervisorAction::Status | SupervisorAction::Cancel
+            )
+        {
             return Err(ToolError::InvalidArguments(
-                "id is only supported for status.".into(),
+                "id is only supported for status or cancel.".into(),
             ));
         }
-        if input.action == SupervisorAction::Status {
+        if input.action == SupervisorAction::Cancel {
+            let prefix = input
+                .id
+                .as_deref()
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| {
+                    ToolError::InvalidArguments("cancel requires one owned run id.".into())
+                })?;
+            let ids = self
+                .runtime
+                .coordination()
+                .run_ids(&owner, Some(prefix))
+                .map_err(ToolError::Execution)?;
+            self.runtime
+                .coordination()
+                .cancel(&owner, &ids[0])
+                .map_err(ToolError::Execution)?;
+        }
+        if matches!(
+            input.action,
+            SupervisorAction::Status | SupervisorAction::Cancel
+        ) {
             let status = self
                 .runtime
                 .coordination()
@@ -273,7 +300,9 @@ impl SupervisorTool {
                 }
                 Ok(result)
             }
-            SupervisorAction::Status => unreachable!("status handled above"),
+            SupervisorAction::Status | SupervisorAction::Cancel => {
+                unreachable!("status/cancel handled above")
+            }
         }
     }
 

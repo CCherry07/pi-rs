@@ -118,6 +118,7 @@ pub(crate) async fn pi_resume_thread(
                 &observed.observation,
                 &observed.parent_thread_id,
                 &observed.agent,
+                observed.nickname.as_deref(),
             )
         }));
     }
@@ -142,6 +143,7 @@ pub(crate) async fn pi_read_thread(
                 &observed.observation,
                 &observed.parent_thread_id,
                 &observed.agent,
+                observed.nickname.as_deref(),
             )
         }));
     }
@@ -785,6 +787,7 @@ fn thread_from_observation(
     observation: &IsolatedSessionObservation,
     parent_thread_id: &str,
     agent: &str,
+    nickname: Option<&str>,
 ) -> Value {
     let snapshot = observation.snapshot();
     let id = observation.session_id();
@@ -805,9 +808,11 @@ fn thread_from_observation(
         json!({
             "subAgent": {
                 "kind": agent,
+                "agentNickname": nickname,
                 "threadSpawn": {
                     "parentThreadId": parent_thread_id,
                     "agentRole": agent,
+                    "agentNickname": nickname,
                 }
             }
         }),
@@ -879,9 +884,11 @@ fn thread_from_stored_isolated(stored: &StoredIsolatedSession) -> Result<Value, 
         json!({
             "subAgent": {
                 "kind": stored.agent,
+                "agentNickname": stored.nickname,
                 "threadSpawn": {
                     "parentThreadId": stored.parent_thread_id,
                     "agentRole": stored.agent,
+                    "agentNickname": stored.nickname,
                 }
             }
         }),
@@ -1119,6 +1126,122 @@ struct HistoricalToolContext<'a> {
     parent_thread_id: &'a str,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WorkflowNodeSummary {
+    run_id: Option<String>,
+    key: String,
+    agent: String,
+    state: String,
+    isolated_session_id: Option<String>,
+    session_id: Option<String>,
+    total_tokens: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WorkflowDisplayNode {
+    key: String,
+    agent: String,
+    thread_id: String,
+    state: String,
+    total_tokens: Option<u64>,
+}
+
+fn workflow_node_summaries(details: Option<&Value>) -> Vec<WorkflowNodeSummary> {
+    details
+        .and_then(|details| details.get("nodes"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|node| {
+            let key = node.get("key")?.as_str()?.to_string();
+            Some(WorkflowNodeSummary {
+                run_id: node
+                    .get("runId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                key,
+                agent: node
+                    .get("agent")
+                    .and_then(Value::as_str)
+                    .unwrap_or("subagent")
+                    .to_string(),
+                state: node
+                    .get("state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("running")
+                    .to_string(),
+                isolated_session_id: node
+                    .get("isolatedSessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                session_id: node
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                total_tokens: node
+                    .get("usage")
+                    .and_then(|usage| usage.get("totalTokens"))
+                    .and_then(Value::as_u64),
+            })
+        })
+        .collect()
+}
+
+fn workflow_node_ui_status(state: &str) -> &'static str {
+    match state {
+        "completed" => "completed",
+        "failed" | "cancelled" | "timed_out" | "skipped" => "failed",
+        _ => "inProgress",
+    }
+}
+
+fn workflow_tool_item(
+    id: &str,
+    parent_thread_id: &str,
+    status: &str,
+    nodes: &[WorkflowDisplayNode],
+    output: Option<String>,
+) -> Value {
+    let receiver_thread_ids = nodes
+        .iter()
+        .map(|node| node.thread_id.as_str())
+        .collect::<Vec<_>>();
+    let receiver_agents = nodes
+        .iter()
+        .map(|node| {
+            json!({
+                "threadId": node.thread_id,
+                "agentNickname": node.key,
+                "agentRole": node.agent,
+            })
+        })
+        .collect::<Vec<_>>();
+    let agent_statuses = nodes
+        .iter()
+        .map(|node| {
+            json!({
+                "threadId": node.thread_id,
+                "agentNickname": node.key,
+                "agentRole": node.agent,
+                "status": workflow_node_ui_status(&node.state),
+                "totalTokens": node.total_tokens,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "id": id,
+        "type": "collabToolCall",
+        "tool": "workflow",
+        "senderThreadId": parent_thread_id,
+        "receiverThreadIds": receiver_thread_ids,
+        "receiverAgents": receiver_agents,
+        "prompt": "",
+        "status": status,
+        "result": output.unwrap_or_default(),
+        "agentStatuses": agent_statuses,
+    })
+}
+
 fn historical_tool_item(
     id: &str,
     name: &str,
@@ -1180,6 +1303,26 @@ fn historical_tool_item(
                 "totalTokens": total_tokens,
             })]).unwrap_or_default(),
         })
+    } else if name == "subagent_workflow" {
+        let nodes = workflow_node_summaries(details)
+            .into_iter()
+            .filter_map(|node| {
+                Some(WorkflowDisplayNode {
+                    key: node.key,
+                    agent: node.agent,
+                    thread_id: node.session_id?,
+                    state: node.state,
+                    total_tokens: node.total_tokens,
+                })
+            })
+            .collect::<Vec<_>>();
+        workflow_tool_item(
+            id,
+            parent_thread_id,
+            status,
+            &nodes,
+            Some(output.to_string()),
+        )
     } else {
         json!({
             "id": id,
@@ -1991,6 +2134,49 @@ mod tests {
     }
 
     #[test]
+    fn historical_workflow_results_project_each_started_child_link() {
+        let item = historical_tool_item(
+            "call-1",
+            "subagent_workflow",
+            json!({"stages": []}),
+            "first: Completed\nsecond: Running",
+            false,
+            Some(&json!({
+                "state": "running",
+                "nodes": [
+                    {
+                        "key": "first",
+                        "agent": "researcher",
+                        "sessionId": "child-a",
+                        "state": "completed",
+                        "usage": { "totalTokens": 321 }
+                    },
+                    {
+                        "key": "second",
+                        "agent": "reviewer",
+                        "sessionId": "child-b",
+                        "state": "running",
+                        "usage": { "totalTokens": 123 }
+                    }
+                ]
+            })),
+            HistoricalToolContext {
+                cwd: Path::new("/workspace"),
+                parent_thread_id: "parent-session",
+            },
+        );
+
+        assert_eq!(item["type"], "collabToolCall");
+        assert_eq!(item["tool"], "workflow");
+        assert_eq!(item["receiverThreadIds"], json!(["child-a", "child-b"]));
+        assert_eq!(item["receiverAgents"][0]["agentNickname"], "first");
+        assert_eq!(item["receiverAgents"][1]["agentRole"], "reviewer");
+        assert_eq!(item["agentStatuses"][0]["status"], "completed");
+        assert_eq!(item["agentStatuses"][1]["status"], "inProgress");
+        assert_eq!(item["agentStatuses"][1]["totalTokens"], 123);
+    }
+
+    #[test]
     fn desktop_thinking_defaults_follow_model_capabilities() {
         let plain = ModelSpec::new("provider", "plain", "Plain", "test");
         let mut reasoning = ModelSpec::new("provider", "reasoning", "Reasoning", "test");
@@ -2163,7 +2349,7 @@ mod tests {
             .await
             .unwrap();
         let (observation, live) = store
-            .subscribe_isolated(&parent_id, child.as_str(), "worker")
+            .subscribe_isolated(&parent_id, child.as_str(), "worker", None)
             .unwrap();
         assert!(live.primary().is_none());
         assert!(live.changes.is_none());
@@ -2202,6 +2388,7 @@ mod tests {
         assert_eq!(stored_child.document.header.id, child_id);
         assert_eq!(stored_child.parent_thread_id, session.log().header().id);
         assert_eq!(stored_child.agent, "subagent");
+        assert_eq!(stored_child.nickname, None);
         let child_thread = thread_from_stored_isolated(&stored_child).unwrap();
         assert_eq!(child_thread["id"], child_id);
         assert_eq!(child_thread["tokenUsage"]["totalTokens"], 0);

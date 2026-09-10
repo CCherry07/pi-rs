@@ -819,6 +819,14 @@ impl SessionContextAccess for PiPluginContext {
             .map_err(context_failed)
     }
 
+    fn isolated_fork_point(
+        &self,
+    ) -> Result<Option<pi_core::IsolatedForkPoint>, PluginContextError> {
+        self.session()?
+            .isolated_fork_point()
+            .map_err(context_failed)
+    }
+
     async fn launch_isolated_session(
         &self,
         _scope: PluginContextScope,

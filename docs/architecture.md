@@ -208,6 +208,14 @@ discovery, and one projection Module translates Pi lifecycle events into the UI'
 `turn/*`, and `item/*` vocabulary. The Adapter emits that vocabulary through its own `pi-event`
 channel; there is no external app-server protocol or child-process boundary. Registered
 workspaces are immediately usable by path; the Adapter has no per-workspace connection lifecycle.
+Direct subagent calls and Rust's native `subagent_workflow` extension project through the same
+multi-receiver collaboration item vocabulary. Workflow progress remains one parent tool item, while
+each node that acquires an `isolatedSessionId` starts one observed child thread keyed by its stable
+`runId`; the workflow node key is presentation metadata and the agent profile remains its role.
+Nested node status and usage update that item without replaying the workflow's deliberately silent
+per-child tool updates. Completed workflow receipts retain child links through their persisted
+`sessionId` values. This is Desktop projection policy for the Rust workflow extension, not a new Pi
+session or provider wire format.
 Desktop session creation delegates path construction to `JsonlSessionRepo`, so its project-scoped
 `<timestamp>_<session-id>.jsonl` filename, v4 header ID, and projected frontend thread ID share one
 identity just as they do in Pi.
@@ -990,7 +998,7 @@ Each assistant stream owns one mutable assembler state behind a read-only `Assis
 reducer, ordered native hooks, and listeners therefore do not clone cumulative content. Consumers
 that require a full message call `snapshot()` explicitly, while `message_end` and `turn_end` share
 the completed immutable assistant message. These hook fields were introduced in native ABI 7;
-ABI 18 adds aggregate managed-isolated-session usage outcomes. ABI 17 adds fresh/fork isolated-context initialization. ABI 16 adds detached usage attribution and ephemeral usage/call outcomes. ABI 8 adds UI
+ABI 19 adds typed fork points for deferred isolated-session forks. ABI 18 adds aggregate managed-isolated-session usage outcomes. ABI 17 adds fresh/fork isolated-context initialization. ABI 16 adds detached usage attribution and ephemeral usage/call outcomes. ABI 8 adds UI
 confirmation, ABI 9 adds isolated-session control, ABI 10 adds isolated-session
 initial runtime selection, ABI 11 adds direct tool-free completion, ABI 12 adds ephemeral tool loops,
 ABI 13 adds inherited prompt/history, guarded dispatch and invocation observations, and ABI 14 adds
@@ -1514,6 +1522,16 @@ persistence is awaited before tool dispatch; the cutoff matches the active assis
 durable/in-memory branch rather than waiting for sibling tools. No pending-tool failures are
 invented for that excluded batch. Histories then evolve independently; cwd/files remain shared.
 
+`SessionContext::isolated_fork_point()` captures the last entry in that safe prefix as an
+`IsolatedForkPoint { parent_session_id, parent_entry_id }`, returning `None` for an unsaved or empty
+parent branch. `IsolatedSessionOptions.fork_point`
+pins later forks to that entry in the calling session's immutable tree. Later parent messages,
+branch navigation and compaction do not change the selected prefix. Foreign session IDs, missing
+entries, and fork points paired with fresh context fail before child preparation. The host owns
+cutoff and projection; plugins carry only typed session/entry identities, not JSONL reconstruction.
+The fork point is not session-resume authority or a new persisted entry type. This native ABI 19
+addition retains existing descriptor checks and process-pinned library lifetime.
+
 The host seeds a prepared child before lifecycle activation using a v4 custom entry
 `pi.isolated_context` containing the parent session id and effective `AgentMessage` history.
 This is a deliberate Rust divergence from pi-subagents' branch-file copy: the host snapshots the
@@ -1559,11 +1577,52 @@ process. Background tasks attempt ordinary best-effort completion/request notifi
 owner close. One-shot frontends must wait explicitly if a result is required before they exit.
 
 The subagent tool accepts optional `context: "fresh" | "fork"`. Selection precedence is explicit
-tool argument, profile `defaultContext`, then fresh. Built-in worker/oracle default to fork;
+tool argument, profile `defaultContext`, then fresh. An implicit fork preference falls back to fresh
+only when no persisted parent branch exists; an explicit fork fails in that case. Other capture,
+projection or launch errors remain errors. Built-in worker/oracle default to fork;
 scout/reviewer/delegate default to fresh. The plugin's provider-context hook removes inherited
 subagent call/result pairs, parent-only orchestration notices and old private run markers without
 touching other tool pairs, parent storage, or the child's own nested delegation. This policy stays
-outside generic session context initialization. Each child assembles its own role/system prompt.
+outside generic session context initialization. Inherited signed/redacted Anthropic thinking is
+also excluded from the child provider projection; the child's own reasoning blocks and requested
+thinking level remain intact. Parent storage and unknown wire extensions are preserved. Each child
+assembles its own role/system prompt. The context policy follows `nicobailon/pi-subagents`
+`aa75b3353836f7868898e3bd58234d21eaff1463` (`src/shared/fork-context.ts`).
+
+`subagent_workflow` is a deliberate Rust product addition over the same child-launch Module.
+It accepts a bounded static JSON DAG: sequential `stages`, each with exactly one `run`, parallel
+`all` nodes, or parallel `lanes` of sequential steps. Keys are `stage`, `stage/node`, or
+`stage/lane/step`. Validation rejects duplicate keys, unavailable profiles, forward/sibling inputs,
+more than 64 nodes, and submissions over 256 KiB before any launch. It resolves all profiles and
+model/thinking selections, then atomically reserves the cumulative spawn budget and a concurrency
+pool (`maxParallelism`, default 3, range 1–20). Queued nodes consume planned spawns, not active slots.
+All executions reuse ordinary isolated sessions, lineage, monitors, supervisor decisions and usage
+attribution. Potential writers execute exclusively within this workflow's shared cwd; there is no
+cross-workflow lock or worktree isolation.
+
+Workflow context priority is explicit workflow `context`, node `context`, then profile default.
+The shared launch-context Module applies the same implicit-fork fallback as a single subagent and
+captures one fork point before the first child launches. Every fork node uses that fork point,
+including later stages of a background workflow. Fresh nodes retain their own role/project prompt
+but no parent transcript. Explicit `inputs: [{from, as}]` independently pass ancestor final text
+as reference data, capped at 32 KiB per source and 64 KiB combined JSON. A truncated source fails
+the consumer explicitly instead of silently passing partial evidence. Neither sequential stages nor
+lanes implicitly inherit earlier child transcripts. Retained child-session resume, global
+`defaultSubagentContext`, `context: "profile"`, and automatic fork pruning are not implemented.
+
+The process-local controller advances ready nodes without a parent model turn. Node failure skips
+descendants while independent lanes continue; startup failure cancels and drains already-started
+siblings. `async: true` returns an owned aggregate receipt; default foreground calls await it, and
+supervisor attention releases the parent wait. `subagent_supervisor status` and `bg_wait` expose the
+group by default, with members queryable by their exact or unique-prefix run IDs. `cancel` aborts
+an owned run or group and drains it; named group decisions include requests from its members.
+Completion notifications are emitted for the group, not each member. Start and terminal snapshots
+use existing Pi v4 `subagent_workflow` custom entries, including per-node context/fork point,
+dependencies, states, session IDs, bounded output summaries and usage. Snapshots are observability
+records, not executable recovery instructions. Parent usage receives each child's aggregate once;
+workflow aggregate usage and node snapshots are display-only, with no additional `ToolResult.usage`.
+Close/reload cancels live work; retries, detached runner processes, restart recovery and retained
+session continuation are outside this contract.
 
 Child prompt specialization follows pi-subagents' prompt layering: a child/fanout boundary and
 escaped `<active_agent>` identity precede the role body, `replace` drops the ordinary Pi prompt,
@@ -1631,7 +1690,7 @@ forked history or a caller-supplied destination. `need_decision` and `interview_
 a correlated reply; `progress_update` delivers immediately without requiring one. Interviews
 parse plain or fenced JSON and report parse errors rather than claiming schema validation.
 The reply deadline defaults to ten minutes (`PI_INTERCOM_ASK_TIMEOUT_MS`). Parent
-`subagent_supervisor` supports `list`, `pending`, `status`, and `reply`. Status is an immediate,
+`subagent_supervisor` supports `list`, `pending`, `status`, `reply`, and `cancel`. Status is an immediate,
 owner-scoped snapshot with optional exact/unique-prefix `id`, execution-state counts, child IDs,
 elapsed/deadline timestamps, pending request IDs and bounded result summaries.
 `list`/`pending` retain request-list semantics. Feature-owned typed execution state is independent

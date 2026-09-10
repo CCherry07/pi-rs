@@ -42,6 +42,9 @@ struct TestFactory {
     blocked_sibling: bool,
     background: bool,
     gate: Option<Arc<tokio::sync::Notify>>,
+    workflow: Option<serde_json::Value>,
+    workflow_children: Vec<Vec<ScriptedTurn>>,
+    fail_child_prepare: Option<usize>,
 }
 
 impl TestFactory {
@@ -60,6 +63,9 @@ impl TestFactory {
             blocked_sibling: false,
             background: false,
             gate: None,
+            workflow: None,
+            workflow_children: Vec::new(),
+            fail_child_prepare: None,
         }
     }
 
@@ -124,7 +130,37 @@ impl AgentSessionRuntimeFactory for TestFactory {
             .components()
             .filter(|component| component.as_os_str() == "isolated")
             .count();
-        let turns = if self.background && depth > 0 {
+        let child_index = self
+            .providers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(depth, _)| *depth > 0)
+            .count();
+        if depth > 0 && self.fail_child_prepare == Some(child_index) {
+            return Err(SessionError::Runtime(
+                "scripted child preparation failure".into(),
+            ));
+        }
+        let turns = if let Some(workflow) = &self.workflow {
+            if depth == 0 {
+                vec![
+                    ScriptedTurn::ToolCalls(vec![ToolCall::new(
+                        "workflow",
+                        "subagent_workflow",
+                        workflow.clone(),
+                    )]),
+                    ScriptedTurn::Text("workflow incorporated".into()),
+                    ScriptedTurn::Text("workflow notification received".into()),
+                    ScriptedTurn::Text("later workflow notification received".into()),
+                ]
+            } else {
+                self.workflow_children
+                    .get(child_index)
+                    .cloned()
+                    .unwrap_or_else(|| vec![workflow_answer("bounded child findings")])
+            }
+        } else if self.background && depth > 0 {
             vec![ScriptedTurn::Text("background child done".into())]
         } else if self.background && restored_log.is_some() {
             vec![ScriptedTurn::Text("background result received".into())]
@@ -256,6 +292,7 @@ impl AgentSessionRuntimeFactory for TestFactory {
                             "find",
                             "ls",
                             "subagent",
+                            "subagent_workflow",
                             "contact_supervisor",
                             "subagent_supervisor",
                             "bg_wait",
@@ -333,6 +370,723 @@ fn nested_turns(depth: usize) -> Vec<ScriptedTurn> {
         )],
         _ => panic!("unexpected isolated depth {depth}"),
     }
+}
+
+fn workflow_answer(text: &str) -> ScriptedTurn {
+    ScriptedTurn::Events(vec![
+        pi_core::StreamEvent::Start {
+            metadata: pi_core::ResponseMetadata::new(
+                ProviderId::new("scripted"),
+                ModelId::new("test"),
+                "scripted",
+                0,
+            ),
+        },
+        pi_core::StreamEvent::TextStart { content_index: 0 },
+        pi_core::StreamEvent::TextDelta {
+            content_index: 0,
+            delta: text.into(),
+        },
+        pi_core::StreamEvent::TextEnd {
+            content_index: 0,
+            text_signature: None,
+        },
+        pi_core::StreamEvent::Done {
+            reason: pi_core::StopReason::Stop,
+            usage: Usage {
+                input: 18,
+                output: 5,
+                total_tokens: 23,
+                ..Usage::default()
+            },
+        },
+    ])
+}
+
+#[tokio::test]
+async fn workflow_advances_parallel_lanes_and_handoffs_without_parent_turns() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut factory = TestFactory::new();
+    factory.workflow = Some(json!({"stages":[
+        {"key":"scan","all":[
+            {"key":"runtime","agent":"reviewer","task":"Inspect runtime"},
+            {"key":"ui","agent":"reviewer","task":"Inspect UI"}
+        ]},
+        {"key":"review","lanes":[
+            {"key":"runtime","steps":[
+                {"key":"first","agent":"reviewer","task":"Review runtime", "inputs":[{"from":"scan/runtime","as":"findings"}]},
+                {"key":"second","agent":"reviewer","task":"Final runtime check"}
+            ]},
+            {"key":"ui","steps":[{"key":"first","agent":"reviewer","task":"Review UI"}]}
+        ]}
+    ],"maxParallelism":2}));
+    let providers = factory.providers.clone();
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        root.current().prompt("Run the workflow"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let result = outcome
+        .new_messages
+        .iter()
+        .find_map(|m| match m {
+            Message::ToolResult(r) if r.tool_name == "subagent_workflow" => Some(r),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!result.is_error, "{result:?}");
+    let details = result.details.as_ref().unwrap();
+    assert_eq!(details["state"], "completed");
+    assert_eq!(details["nodes"].as_array().unwrap().len(), 5);
+    assert_eq!(details["usage"]["totalTokens"], 115);
+    let status = invoke_owned_tool(&root, "subagent_supervisor", json!({"action":"status"})).await;
+    assert_eq!(
+        status.details.as_ref().unwrap()["runs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let member = invoke_owned_tool(
+        &root,
+        "subagent_supervisor",
+        json!({"action":"status","id":details["nodes"][0]["runId"]}),
+    )
+    .await;
+    assert_eq!(
+        member.details.as_ref().unwrap()["runs"][0]["workflowId"],
+        details["runId"]
+    );
+    assert!(
+        details["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|node| node["usage"]["totalTokens"] == 23)
+    );
+    assert_eq!(
+        aggregate_document_usage(&root.current().log().load().unwrap()).total_tokens,
+        115,
+        "workflow display totals must not be charged a second time"
+    );
+    let journal = root.current().log().load().unwrap();
+    let snapshots = journal
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.entry {
+            pi_session::SessionEntry::Custom(custom)
+                if custom.custom_type == "subagent_workflow" =>
+            {
+                custom.data.as_ref()
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[1]["state"], "completed");
+    let providers = providers.lock().unwrap().clone();
+    assert_eq!(providers.iter().filter(|(depth, _)| *depth == 1).count(), 5);
+    assert!(providers.iter().all(|(depth, _)| *depth <= 1));
+    assert_eq!(
+        providers
+            .iter()
+            .find(|(depth, _)| *depth == 0)
+            .unwrap()
+            .1
+            .requests()
+            .len(),
+        2
+    );
+    assert!(
+        providers
+            .iter()
+            .filter(|(depth, _)| *depth == 1)
+            .any(|(_, p)| {
+                let text = format!("{:?}", p.requests()[0].messages);
+                text.contains("findings") && text.contains("bounded child findings")
+            })
+    );
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn workflow_context_defaults_and_overrides_reach_child_provider_requests() {
+    for override_mode in [None, Some("fresh"), Some("fork")] {
+        let directory = tempfile::tempdir().unwrap();
+        let agents = directory.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("forker.md"), "---\nname: forker\ndescription: fork by default\ndefaultContext: fork\ntools: read\n---\nInspect.\n").unwrap();
+        let mut workflow = json!({"stages":[{"key":"inspect","all":[
+            {"key":"default-fork","agent":"forker","task":"Inspect A"},
+            {"key":"default-fresh","agent":"reviewer","task":"Inspect B"},
+            {"key":"explicit-fork","agent":"reviewer","task":"Inspect C","context":"fork"},
+            {"key":"explicit-fresh","agent":"forker","task":"Inspect D","context":"fresh"}
+        ]}]});
+        if let Some(mode) = override_mode {
+            workflow["context"] = json!(mode);
+        }
+        let mut factory = TestFactory::new();
+        factory.workflow = Some(workflow);
+        let providers = factory.providers.clone();
+        let manager = MultiSessionManager::new(factory);
+        let root = manager
+            .create_session(directory.path(), directory.path().join("parent.jsonl"))
+            .await
+            .unwrap();
+        let outcome = root
+            .current()
+            .prompt("Confirmed requirement: preserve compatibility")
+            .await
+            .unwrap();
+        let details = outcome
+            .new_messages
+            .iter()
+            .find_map(|m| match m {
+                Message::ToolResult(r) if r.tool_name == "subagent_workflow" => {
+                    assert!(!r.is_error, "{:?}", r.content);
+                    r.details.as_ref()
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            details.get("context").is_none(),
+            "the group must not claim a single context mode"
+        );
+        for (index, (_, provider)) in providers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(depth, _)| *depth == 1)
+            .enumerate()
+        {
+            let mode = override_mode.unwrap_or(if index % 2 == 0 { "fork" } else { "fresh" });
+            assert_eq!(details["nodes"][index]["context"], mode);
+            let requests = provider.requests();
+            assert_eq!(
+                requests[0].messages.len(),
+                if mode == "fork" { 2 } else { 1 }
+            );
+            assert_eq!(
+                format!("{:?}", requests[0].messages).contains("Confirmed requirement"),
+                mode == "fork"
+            );
+            assert_tool_pairs(&requests[0].messages);
+        }
+        assert_eq!(
+            aggregate_document_usage(&root.current().log().load().unwrap()).total_tokens,
+            92
+        );
+        manager.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn background_workflow_pins_fork_history_before_parent_continues() {
+    let directory = tempfile::tempdir().unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let mut factory = TestFactory::new();
+    factory.gate = Some(gate.clone());
+    factory.workflow = Some(json!({"async":true,"context":"fork","stages":[
+        {"key":"first","run":{"agent":"reviewer","task":"First child"}},
+        {"key":"second","run":{"agent":"reviewer","task":"Second child","inputs":[{"from":"first","as":"findings"}]}}
+    ]}));
+    let providers = factory.providers.clone();
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .await
+        .unwrap();
+    let outcome = root
+        .current()
+        .prompt("Original approved requirements")
+        .await
+        .unwrap();
+    let id = outcome
+        .new_messages
+        .iter()
+        .find_map(|m| match m {
+            Message::ToolResult(r) if r.tool_name == "subagent_workflow" => r
+                .details
+                .as_ref()?
+                .get("runId")?
+                .as_str()
+                .map(str::to_string),
+            _ => None,
+        })
+        .unwrap();
+    wait_workflow_state(&root, &id, &["running", "queued"]).await;
+    root.current()
+        .prompt("Later unrelated parent request")
+        .await
+        .unwrap();
+    gate.notify_one();
+    wait_workflow_state(&root, &id, &["completed", "running"]).await;
+    gate.notify_one();
+    wait_for_parent_notice(&root, "subagent-notify").await;
+    let snapshot = workflow_snapshot(&root, &id).await;
+    assert_eq!(
+        snapshot["nodes"][0]["forkPoint"],
+        snapshot["nodes"][1]["forkPoint"]
+    );
+    for (_, provider) in providers
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(depth, _)| *depth == 1)
+    {
+        let request = &provider.requests()[0];
+        let text = format!("{:?}", request.messages);
+        assert!(text.contains("Original approved requirements"));
+        assert!(!text.contains("Later unrelated parent request"));
+        assert!(!text.contains("workflow incorporated"));
+        assert_eq!(request.messages.len(), 2);
+        assert_tool_pairs(&request.messages);
+    }
+    let requests = providers.lock().unwrap().last().unwrap().1.requests();
+    assert!(format!("{:?}", requests[0].messages).contains("bounded child findings"));
+    assert_eq!(
+        aggregate_document_usage(&root.current().log().load().unwrap()).total_tokens,
+        46
+    );
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn invalid_workflow_launches_no_children() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut factory = TestFactory::new();
+    factory.workflow = Some(json!({"stages":[{"key":"review","all":[
+        {"key":"valid","agent":"reviewer","task":"Review"},
+        {"key":"invalid","agent":"missing","task":"Review"}
+    ]}]}));
+    let providers = factory.providers.clone();
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .await
+        .unwrap();
+    let outcome = root.current().prompt("Run workflow").await.unwrap();
+    assert!(
+        outcome
+            .new_messages
+            .iter()
+            .any(|m| matches!(m, Message::ToolResult(r) if r.is_error))
+    );
+    assert_eq!(providers.lock().unwrap().len(), 1);
+    manager.shutdown().await.unwrap();
+}
+
+async fn invoke_owned_tool(
+    root: &pi_session::PiSession,
+    name: &str,
+    input: serde_json::Value,
+) -> pi_core::ToolResult {
+    let session = root.current();
+    let tool = session
+        .runtime()
+        .agent()
+        .runtime()
+        .registries()
+        .tool(name)
+        .unwrap();
+    let (_, signal) = pi_core::AbortHandle::new();
+    let context = pi_core::ToolContext::with_plugin_context(
+        root.cwd(),
+        signal,
+        session.runtime().context_parts(),
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tool.execute(
+            context,
+            ToolCallId::new("observe-workflow"),
+            input,
+            pi_core::ToolUpdateSink::channel().0,
+        ),
+    )
+    .await
+    .expect("owned tool must settle")
+    .unwrap()
+}
+
+async fn workflow_snapshot(root: &pi_session::PiSession, id: &str) -> serde_json::Value {
+    invoke_owned_tool(
+        root,
+        "subagent_supervisor",
+        json!({"action":"status","id":id}),
+    )
+    .await
+    .details
+    .unwrap()["runs"][0]
+        .clone()
+}
+
+async fn wait_workflow_state(
+    root: &pi_session::PiSession,
+    id: &str,
+    states: &[&str],
+) -> serde_json::Value {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let snapshot = workflow_snapshot(root, id).await;
+            if snapshot["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n["state"].as_str().unwrap())
+                .eq(states.iter().copied())
+            {
+                return snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("workflow must reach expected node states")
+}
+
+#[tokio::test]
+async fn workflow_background_is_bounded_stage_gated_and_notifies_only_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let mut factory = TestFactory::new();
+    factory.gate = Some(gate.clone());
+    factory.workflow = Some(json!({"async":true,"maxParallelism":2,"stages":[
+        {"key":"scan","all":[{"key":"a","agent":"reviewer","task":"A"},{"key":"b","agent":"reviewer","task":"B"}]},
+        {"key":"finish","run":{"agent":"reviewer","task":"Finish"}}
+    ]}));
+    let providers = factory.providers.clone();
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        root.current().prompt("Start workflow"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let receipt = outcome
+        .new_messages
+        .iter()
+        .find_map(|m| match m {
+            Message::ToolResult(r) if r.tool_name == "subagent_workflow" => r.details.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(receipt["background"], true);
+    let id = receipt["runId"].as_str().unwrap();
+    wait_workflow_state(&root, id, &["running", "running", "queued"]).await;
+    assert_eq!(providers.lock().unwrap().len(), 3);
+    gate.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let state = workflow_snapshot(&root, id).await;
+            if state["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|n| n["state"] == "completed")
+                .count()
+                == 1
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        providers.lock().unwrap()[0].1.requests().len(),
+        2,
+        "one completed node must not wake the parent"
+    );
+    assert_eq!(
+        providers.lock().unwrap().len(),
+        3,
+        "next stage must wait for all tails"
+    );
+    gate.notify_one();
+    wait_workflow_state(&root, id, &["completed", "completed", "running"]).await;
+    gate.notify_one();
+    wait_for_parent_notice(&root, "subagent-notify").await;
+    let result = invoke_owned_tool(&root, "bg_wait", json!({"id":id})).await;
+    assert!(!result.is_error);
+    assert_eq!(
+        workflow_snapshot(&root, id).await["usage"]["totalTokens"],
+        69
+    );
+    assert_eq!(
+        aggregate_document_usage(&root.current().log().load().unwrap()).total_tokens,
+        69
+    );
+    let snapshot = root.current().snapshot();
+    assert_eq!(
+        snapshot
+            .agent
+            .messages
+            .iter()
+            .filter(|m| matches!(m, Message::Custom(c) if c.custom_type == "subagent-notify"))
+            .count(),
+        1
+    );
+    assert_eq!(providers.lock().unwrap()[0].1.requests().len(), 3);
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn workflow_supervisor_attention_returns_to_the_parent_and_resumes_the_same_child() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut factory = TestFactory::new();
+    factory.workflow = Some(json!({"stages":[{"key":"review","all":[
+        {"key":"decision","agent":"reviewer","task":"Ask for a decision"},
+        {"key":"independent","agent":"reviewer","task":"Review independently"}
+    ]}]}));
+    factory.workflow_children = vec![vec![
+        ScriptedTurn::ToolCalls(vec![ToolCall::new(
+            "decision",
+            "contact_supervisor",
+            json!({"reason":"need_decision","message":"Which compatibility rule?"}),
+        )]),
+        workflow_answer("decision incorporated"),
+    ]];
+    let providers = factory.providers.clone();
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        root.current().prompt("Review together"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let receipt = outcome
+        .new_messages
+        .iter()
+        .find_map(|m| match m {
+            Message::ToolResult(r) if r.tool_name == "subagent_workflow" => r.details.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    let id = receipt["runId"].as_str().unwrap();
+    let status = workflow_snapshot(&root, id).await;
+    let request_id = status["pendingRequestIds"][0].as_str().unwrap();
+    assert_eq!(status["activityState"], "needs_attention");
+    let child_id = status["nodes"][0]["runId"].clone();
+    let reply = invoke_owned_tool(
+        &root,
+        "subagent_supervisor",
+        json!({"action":"reply","replyTo":request_id,"message":"Preserve existing behavior"}),
+    )
+    .await;
+    assert!(!reply.is_error);
+    let result = invoke_owned_tool(&root, "bg_wait", json!({"id":id})).await;
+    assert!(!result.is_error);
+    let final_status = wait_workflow_state(&root, id, &["completed", "completed"]).await;
+    assert_eq!(final_status["nodes"][0]["runId"], child_id);
+    let children = providers
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(depth, _)| *depth == 1)
+        .map(|(_, p)| p.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0].requests().len(), 2);
+    assert!(
+        format!("{:?}", children[0].requests()[1].messages).contains("Preserve existing behavior")
+    );
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn workflow_failure_skips_descendants_but_finishes_independent_lanes() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut factory = TestFactory::new();
+    factory.workflow_children = vec![vec![ScriptedTurn::Error("scripted failure".into())]];
+    factory.workflow = Some(
+        json!({"maxParallelism":2,"stages":[{"key":"review","lanes":[
+            {"key":"bad","steps":[{"key":"first","agent":"reviewer","task":"Fail"},{"key":"next","agent":"reviewer","task":"Must not run"}]},
+            {"key":"good","steps":[{"key":"first","agent":"reviewer","task":"Succeed"},{"key":"next","agent":"reviewer","task":"Also succeed"}]}
+        ]}]}),
+    );
+    let providers = factory.providers.clone();
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .await
+        .unwrap();
+    let outcome = root
+        .current()
+        .prompt("Run independent lanes")
+        .await
+        .unwrap();
+    let result = outcome
+        .new_messages
+        .iter()
+        .find_map(|m| match m {
+            Message::ToolResult(r) if r.tool_name == "subagent_workflow" => Some(r),
+            _ => None,
+        })
+        .unwrap();
+    assert!(result.is_error);
+    let details = result.details.as_ref().unwrap();
+    assert_eq!(details["state"], "failed");
+    assert_eq!(
+        details["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["state"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["failed", "skipped", "completed", "completed"]
+    );
+    assert_eq!(providers.lock().unwrap().len(), 4);
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn workflow_oversized_handoff_fails_explicitly_without_launching_consumer() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut factory = TestFactory::new();
+    factory.workflow_children = vec![vec![ScriptedTurn::Text("字".repeat(12000))]];
+    factory.workflow = Some(json!({"stages":[
+        {"key":"source","run":{"agent":"reviewer","task":"Produce output"}},
+        {"key":"consumer","run":{"agent":"reviewer","task":"Consume","inputs":[{"from":"source","as":"data"}]}}
+    ]}));
+    let providers = factory.providers.clone();
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .await
+        .unwrap();
+    let outcome = root.current().prompt("Run workflow").await.unwrap();
+    let details = outcome
+        .new_messages
+        .iter()
+        .find_map(|m| match m {
+            Message::ToolResult(r) if r.tool_name == "subagent_workflow" => r.details.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(details["nodes"][0]["outputTruncated"], true);
+    assert_eq!(details["nodes"][1]["state"], "failed");
+    assert!(
+        details["nodes"][1]["resultSummary"]
+            .as_str()
+            .unwrap()
+            .contains("No truncated data")
+    );
+    assert_eq!(providers.lock().unwrap().len(), 2);
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn workflow_partial_startup_failure_drains_already_started_children() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut factory = TestFactory::new();
+    factory.workflow_children = vec![vec![ScriptedTurn::WaitForAbort]];
+    factory.fail_child_prepare = Some(1);
+    factory.workflow = Some(json!({"stages":[{"key":"batch","all":[
+        {"key":"running","agent":"reviewer","task":"Wait"},
+        {"key":"broken","agent":"reviewer","task":"Preparation fails"},
+        {"key":"queued","agent":"reviewer","task":"Do not launch"}
+    ]}]}));
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        root.current().prompt("Start batch"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let details = outcome
+        .new_messages
+        .iter()
+        .find_map(|m| match m {
+            Message::ToolResult(r) if r.tool_name == "subagent_workflow" => r.details.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(details["state"], "failed");
+    assert_eq!(
+        details["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["state"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["cancelled", "failed", "cancelled"]
+    );
+    assert!(
+        manager
+            .sessions()
+            .iter()
+            .all(|session| !session.current().runtime().agent().is_running())
+    );
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn workflow_cancel_drains_active_nodes_and_does_not_launch_queued_nodes() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut factory = TestFactory::new();
+    factory.workflow_children = vec![vec![ScriptedTurn::WaitForAbort]];
+    factory.workflow = Some(
+        json!({"async":true,"maxParallelism":1,"stages":[{"key":"batch","all":[
+            {"key":"active","agent":"reviewer","task":"Wait"},
+            {"key":"queued","agent":"reviewer","task":"Do not launch"}
+        ]}]}),
+    );
+    let providers = factory.providers.clone();
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .await
+        .unwrap();
+    let outcome = root.current().prompt("Start batch").await.unwrap();
+    let details = outcome
+        .new_messages
+        .iter()
+        .find_map(|m| match m {
+            Message::ToolResult(r) if r.tool_name == "subagent_workflow" => r.details.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    let id = details["runId"].as_str().unwrap();
+    wait_workflow_state(&root, id, &["running", "queued"]).await;
+    invoke_owned_tool(
+        &root,
+        "subagent_supervisor",
+        json!({"action":"cancel","id":id}),
+    )
+    .await;
+    let result = invoke_owned_tool(&root, "bg_wait", json!({"id":id})).await;
+    assert!(result.is_error);
+    assert_eq!(workflow_snapshot(&root, id).await["state"], "cancelled");
+    assert_eq!(providers.lock().unwrap().len(), 2);
+    tokio::time::timeout(std::time::Duration::from_secs(3), manager.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

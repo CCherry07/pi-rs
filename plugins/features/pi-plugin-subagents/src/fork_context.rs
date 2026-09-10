@@ -42,9 +42,24 @@ fn filter_parent_message(
     match &mut message {
         Message::Assistant(message) => {
             let message = std::sync::Arc::make_mut(message);
-            message.content.retain(
-                |block| !matches!(block, ContentBlock::ToolCall(call) if is_coordination_tool(&call.name)),
-            );
+            let anthropic = message.provider.as_str().eq_ignore_ascii_case("anthropic")
+                || message.api.eq_ignore_ascii_case("anthropic-messages")
+                || message
+                    .model
+                    .as_str()
+                    .to_ascii_lowercase()
+                    .starts_with("anthropic/");
+            message.content.retain(|block| match block {
+                ContentBlock::ToolCall(call) => !is_coordination_tool(&call.name),
+                ContentBlock::Thinking(thinking) if anthropic => {
+                    thinking.redacted != Some(true)
+                        && thinking
+                            .thinking_signature
+                            .as_ref()
+                            .is_none_or(String::is_empty)
+                }
+                _ => true,
+            });
             if message.content.is_empty() {
                 return None;
             }
@@ -94,7 +109,7 @@ fn filter_parent_message(
 fn is_coordination_tool(name: &str) -> bool {
     matches!(
         name,
-        "subagent" | "contact_supervisor" | "subagent_supervisor" | "bg_wait"
+        "subagent" | "subagent_workflow" | "contact_supervisor" | "subagent_supervisor" | "bg_wait"
     )
 }
 
@@ -183,7 +198,12 @@ mod tests {
 
     #[test]
     fn fork_removes_parent_supervisor_pairs_but_keeps_child_pairs() {
-        for name in ["contact_supervisor", "subagent_supervisor", "bg_wait"] {
+        for name in [
+            "subagent_workflow",
+            "contact_supervisor",
+            "subagent_supervisor",
+            "bg_wait",
+        ] {
             let mut call = assistant();
             if let Message::Assistant(message) = &mut call {
                 std::sync::Arc::make_mut(message).content = vec![ContentBlock::ToolCall(
@@ -230,6 +250,46 @@ mod tests {
                 "current",
             ),
             vec![task, notice]
+        );
+    }
+
+    #[test]
+    fn fork_filters_inherited_signed_anthropic_thinking_only() {
+        let mut inherited = assistant();
+        if let Message::Assistant(message) = &mut inherited {
+            let message = std::sync::Arc::make_mut(message);
+            message.api = "anthropic-messages".into();
+            for (signature, redacted) in [(Some("signed"), None), (None, Some(true)), (None, None)]
+            {
+                message
+                    .content
+                    .push(ContentBlock::Thinking(pi_core::ThinkingContent {
+                        thinking: "reasoning".into(),
+                        thinking_signature: signature.map(str::to_string),
+                        redacted,
+                    }));
+            }
+        }
+        let task = Message::User(UserMessage::text(
+            "<!-- pi-rs-subagent-run:current -->\nchild task",
+            3,
+        ));
+        let projected =
+            project_inherited_messages(vec![inherited.clone(), task, inherited.clone()], "current");
+        let Message::Assistant(parent) = &projected[0] else {
+            panic!("parent prose must survive")
+        };
+        assert_eq!(
+            parent
+                .content
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::Thinking(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            projected[2], inherited,
+            "child-authored thinking must remain intact"
         );
     }
 }

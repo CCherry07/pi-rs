@@ -57,9 +57,14 @@ pub(crate) enum WaitMode {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RunMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<crate::workflow::WorkflowSnapshot>,
     pub agent: String,
     pub depth: usize,
-    pub context: IsolatedContextMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<IsolatedContextMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub isolated_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -71,9 +76,11 @@ pub(crate) struct RunMetadata {
 impl RunMetadata {
     pub fn new(agent: String, depth: usize, context: IsolatedContextMode) -> Self {
         Self {
+            workflow_id: None,
+            workflow: None,
             agent,
             depth,
-            context,
+            context: Some(context),
             isolated_session_id: None,
             session_id: None,
             usage: None,
@@ -121,6 +128,22 @@ pub(crate) struct RunSnapshot {
 }
 
 impl ManagedRun {
+    pub fn in_workflow(mut self, id: Option<String>) -> Self {
+        self.metadata.workflow_id = id;
+        self
+    }
+
+    pub fn workflow_id(&self) -> Option<&str> {
+        self.metadata.workflow_id.as_deref()
+    }
+
+    pub fn set_workflow(&mut self, snapshot: crate::workflow::WorkflowSnapshot, usage: Usage) {
+        self.metadata.context = None;
+        self.metadata.workflow = Some(snapshot);
+        self.metadata.usage = Some(usage);
+        self.mark_running();
+    }
+
     pub fn new(
         owner: String,
         metadata: RunMetadata,

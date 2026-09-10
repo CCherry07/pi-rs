@@ -217,6 +217,15 @@ pub enum IsolatedContextMode {
     Fork,
 }
 
+/// A stable point in the calling session's immutable branch. The host captures
+/// it before the active tool batch; it contains no messages or executable state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsolatedForkPoint {
+    pub parent_session_id: String,
+    pub parent_entry_id: String,
+}
+
 /// Initial runtime selections for an isolated session.
 ///
 /// Omitted model, thinking and tools inherit the calling session's selections.
@@ -226,6 +235,10 @@ pub enum IsolatedContextMode {
 pub struct IsolatedSessionOptions {
     #[serde(default)]
     pub context: IsolatedContextMode,
+    /// Pin a fork to a previously captured point instead of the live branch.
+    /// Only valid with Fork and only for the calling session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_point: Option<IsolatedForkPoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_tools: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -674,6 +687,11 @@ pub trait SessionContextAccess: Send + Sync {
         unbound()
     }
 
+    /// None means the parent has no persisted, forkable branch yet.
+    fn isolated_fork_point(&self) -> PluginContextResult<Option<IsolatedForkPoint>> {
+        unbound()
+    }
+
     async fn launch_isolated_session(
         &self,
         _scope: PluginContextScope,
@@ -920,7 +938,12 @@ macro_rules! impl_session_context {
                     .await
             }
 
-            /// Launches a fresh session without replacing the current one.
+            /// Capture the effective branch cutoff without launching a child.
+            pub fn isolated_fork_point(&self) -> PluginContextResult<Option<IsolatedForkPoint>> {
+                self.handle.access()?.isolated_fork_point()
+            }
+
+            /// Launches an independent session without replacing the current one.
             pub async fn launch_isolated_session(
                 &self,
                 request: IsolatedSessionRequest,

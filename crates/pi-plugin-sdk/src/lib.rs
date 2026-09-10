@@ -22,6 +22,7 @@ pub use pi_session::plugin::SessionPlugin;
 
 /// Version of the trusted Rust-ABI plugin contract.
 ///
+/// ABI 19 adds typed fork points for deferred isolated-session forks.
 /// ABI 18 adds aggregate usage to managed isolated-session outcomes. ABI 17 adds
 /// explicit fresh/fork initialization to isolated-session options.
 /// ABI 16 adds detached provider usage/call accounting and the session usage
@@ -41,7 +42,7 @@ pub use pi_session::plugin::SessionPlugin;
 /// tool argument preparation.
 /// Hosts must reject older artifacts before resolving their Rust-ABI
 /// constructors.
-pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 18;
+pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 19;
 pub const BUILD_FINGERPRINT: &str = env!("PI_PLUGIN_BUILD_FINGERPRINT");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -113,15 +114,15 @@ pub type PluginDescriptorFnV1 = unsafe extern "C" fn() -> *const NativePluginDes
 pub type PluginOptionsSchemaFnV1 = unsafe fn() -> String;
 
 #[cfg(feature = "agent")]
-pub type AgentPluginCreateV18 =
+pub type AgentPluginCreateV19 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn AgentPlugin>, PluginLoadError>;
 
 #[cfg(feature = "provider")]
-pub type ProviderPluginCreateV18 =
+pub type ProviderPluginCreateV19 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn ProviderPlugin>, PluginLoadError>;
 
 #[cfg(feature = "session")]
-pub type SessionPluginCreateV18 =
+pub type SessionPluginCreateV19 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn SessionPlugin>, PluginLoadError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,15 +257,16 @@ pub mod agent {
             ContextPatch, ContextUsage, CustomMessageContent, CustomMessageInput,
             DirectCompletionRequest, EphemeralCompactionOptions, EphemeralSessionOutcome,
             EphemeralSessionRequest, EphemeralSessionStatus, ForkOptions, ForkPosition,
-            InputContext, InputEvent, InputPatch, IsolatedContextMode, IsolatedSessionOptions,
-            IsolatedSessionRequest, MessageDelivery, MessageEndEvent, MessageStartEvent,
-            MessageUpdateEvent, ModelSelection, ModelsContext, NavigateTreeOptions,
-            NewSessionOptions, NoticeLevel, PluginContextError, PluginContextResult, PluginError,
-            PresentationMode, RegisterContext, ReplacedSessionContext, ResponseMetadataPatch,
-            Result, RunId, ScopedModel, SendMessageOptions, SendUserMessageOptions, SessionContext,
-            SessionEntryKind, SessionEntryView, SessionExecutionOrigin, SessionReplacement,
-            SessionSnapshot, StreamEvent, ThinkingLevel, Tool, ToolCallEvent, ToolCallId,
-            ToolCallPatch, ToolContext, ToolError, ToolExecutionEndEvent, ToolExecutionStartEvent,
+            InputContext, InputEvent, InputPatch, IsolatedContextMode, IsolatedForkPoint,
+            IsolatedSessionOptions, IsolatedSessionRequest, MessageDelivery, MessageEndEvent,
+            MessageStartEvent, MessageUpdateEvent, ModelSelection, ModelsContext,
+            NavigateTreeOptions, NewSessionOptions, NoticeLevel, PluginContextError,
+            PluginContextResult, PluginError, PresentationMode, RegisterContext,
+            ReplacedSessionContext, ResponseMetadataPatch, Result, RunId, ScopedModel,
+            SendMessageOptions, SendUserMessageOptions, SessionContext, SessionEntryKind,
+            SessionEntryView, SessionExecutionOrigin, SessionReplacement, SessionSnapshot,
+            StreamEvent, ThinkingLevel, Tool, ToolCallEvent, ToolCallId, ToolCallPatch,
+            ToolContext, ToolError, ToolExecutionEndEvent, ToolExecutionStartEvent,
             ToolExecutionUpdateEvent, ToolResult, ToolResultEvent, ToolResultPatch, ToolSpec,
             ToolUpdateSink, TurnEndEvent, TurnStartEvent, UiContext,
         };
@@ -283,13 +285,13 @@ pub mod provider {
             AbortHandle, AbortSignal, AfterProviderResponseEvent, BeforeProviderHeadersEvent,
             BeforeProviderRequestEvent, DirectCompletionRequest, EphemeralCompactionOptions,
             EphemeralSessionOutcome, EphemeralSessionRequest, EphemeralSessionStatus,
-            IsolatedContextMode, IsolatedSessionOptions, IsolatedSessionRequest, ModelId,
-            ModelSelection, ModelSpec, ModelsContext, PluginContextError, PluginContextResult,
-            PluginError, PluginId, PresentationMode, Provider, ProviderCallContext, ProviderError,
-            ProviderId, ProviderPlugin, ProviderPluginContext, ProviderRegisterContext,
-            ProviderRequest, ProviderStream, Result, SessionContext, SessionEntryKind,
-            SessionEntryView, SessionExecutionOrigin, SessionSnapshot, StreamEvent, ThinkingLevel,
-            UiContext,
+            IsolatedContextMode, IsolatedForkPoint, IsolatedSessionOptions, IsolatedSessionRequest,
+            ModelId, ModelSelection, ModelSpec, ModelsContext, PluginContextError,
+            PluginContextResult, PluginError, PluginId, PresentationMode, Provider,
+            ProviderCallContext, ProviderError, ProviderId, ProviderPlugin, ProviderPluginContext,
+            ProviderRegisterContext, ProviderRequest, ProviderStream, Result, SessionContext,
+            SessionEntryKind, SessionEntryView, SessionExecutionOrigin, SessionSnapshot,
+            StreamEvent, ThinkingLevel, UiContext,
         };
         pub use serde_json::{Value, json};
     }
@@ -305,7 +307,7 @@ pub mod session {
         pub use pi_core::{
             AbortHandle, AbortSignal, CompactOptions, ContextUsage, DirectCompletionRequest,
             EphemeralCompactionOptions, EphemeralSessionOutcome, EphemeralSessionRequest,
-            EphemeralSessionStatus, IsolatedContextMode, IsolatedSessionOptions,
+            EphemeralSessionStatus, IsolatedContextMode, IsolatedForkPoint, IsolatedSessionOptions,
             IsolatedSessionRequest, ModelSelection, ModelsContext, NoticeLevel, PluginContextError,
             PluginContextResult, PresentationMode, ScopedModel, SessionContext, SessionEntryKind,
             SessionEntryView, SessionExecutionOrigin, SessionSnapshot, ThinkingLevel, UiContext,
