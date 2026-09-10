@@ -37,6 +37,7 @@ struct BuiltinProfile {
     definition: &'static str,
     name: &'static str,
     description: &'static str,
+    thinking_level: Option<ThinkingLevel>,
     system_prompt_mode: SystemPromptMode,
     inherit_project_context: bool,
     tools: &'static [&'static str],
@@ -63,7 +64,7 @@ impl BuiltinProfile {
             tools: Some(self.tools.iter().map(|tool| (*tool).to_string()).collect()),
             excluded_tools: Vec::new(),
             model: None,
-            thinking_level: None,
+            thinking_level: self.thinking_level,
             default_context: match self.name {
                 "worker" | "oracle" => IsolatedContextMode::Fork,
                 _ => IsolatedContextMode::Fresh,
@@ -92,6 +93,7 @@ pub(crate) fn builtin_profiles() -> Vec<SubagentProfile> {
             definition: include_str!("../agents/scout.md"),
             name: "scout",
             description: "Fast codebase recon that returns compressed context for handoff",
+            thinking_level: Some(ThinkingLevel::Low),
             system_prompt_mode: SystemPromptMode::Replace,
             inherit_project_context: true,
             // The launch plan adds the supervisor bridge within the caller's ceiling.
@@ -101,6 +103,7 @@ pub(crate) fn builtin_profiles() -> Vec<SubagentProfile> {
             definition: include_str!("../agents/worker.md"),
             name: "worker",
             description: "Implementation agent for normal tasks and approved oracle handoffs",
+            thinking_level: Some(ThinkingLevel::High),
             system_prompt_mode: SystemPromptMode::Replace,
             inherit_project_context: true,
             tools: &["read", "grep", "find", "ls", "bash", "edit", "write"],
@@ -109,6 +112,7 @@ pub(crate) fn builtin_profiles() -> Vec<SubagentProfile> {
             definition: include_str!("../agents/reviewer.md"),
             name: "reviewer",
             description: "Versatile review specialist for code diffs, plans, proposed solutions, codebase health, and PR/issue validation",
+            thinking_level: Some(ThinkingLevel::High),
             system_prompt_mode: SystemPromptMode::Replace,
             inherit_project_context: true,
             tools: &["read", "grep", "find", "ls"],
@@ -117,6 +121,7 @@ pub(crate) fn builtin_profiles() -> Vec<SubagentProfile> {
             definition: include_str!("../agents/oracle.md"),
             name: "oracle",
             description: "High-context decision-consistency oracle that protects inherited state and prevents drift",
+            thinking_level: Some(ThinkingLevel::High),
             system_prompt_mode: SystemPromptMode::Replace,
             inherit_project_context: true,
             tools: &["read", "grep", "find", "ls", "bash"],
@@ -125,6 +130,7 @@ pub(crate) fn builtin_profiles() -> Vec<SubagentProfile> {
             definition: include_str!("../agents/delegate.md"),
             name: "delegate",
             description: "Lightweight subagent that inherits the parent model with no default reads",
+            thinking_level: None,
             system_prompt_mode: SystemPromptMode::Append,
             inherit_project_context: true,
             tools: &["read", "grep", "find", "ls", "bash", "edit", "write"],
@@ -270,8 +276,22 @@ mod tests {
     fn builtin_capabilities_match_upstream_roles_supported_by_pi_rs() {
         let reviewer = builtin_profile("reviewer");
         assert_eq!(reviewer.tools.unwrap(), ["read", "grep", "find", "ls"]);
+        assert_eq!(reviewer.thinking_level, Some(ThinkingLevel::High));
         assert!(!reviewer.allow_nested_subagents);
         assert!(!reviewer.inherit_skills);
+        assert_eq!(
+            builtin_profile("scout").thinking_level,
+            Some(ThinkingLevel::Low)
+        );
+        assert_eq!(
+            builtin_profile("worker").thinking_level,
+            Some(ThinkingLevel::High)
+        );
+        assert_eq!(
+            builtin_profile("oracle").thinking_level,
+            Some(ThinkingLevel::High)
+        );
+        assert_eq!(builtin_profile("delegate").thinking_level, None);
         for name in ["worker", "oracle"] {
             assert_eq!(
                 builtin_profile(name).default_context,

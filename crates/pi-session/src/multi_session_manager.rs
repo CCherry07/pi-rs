@@ -32,7 +32,7 @@ struct MultiSessionManagerInner {
     factory: Arc<dyn AgentSessionRuntimeFactory>,
     sessions: Mutex<HashMap<String, PiSession>>,
     isolated_sessions: IsolatedSessionRegistry,
-    operation_gate: tokio::sync::Mutex<()>,
+    operation_gate: tokio::sync::RwLock<()>,
     closed: AtomicBool,
 }
 
@@ -98,7 +98,7 @@ impl MultiSessionManager {
                 factory: Arc::new(factory),
                 sessions: Mutex::new(HashMap::new()),
                 isolated_sessions: IsolatedSessionRegistry::default(),
-                operation_gate: tokio::sync::Mutex::new(()),
+                operation_gate: tokio::sync::RwLock::new(()),
                 closed: AtomicBool::new(false),
             }),
         }
@@ -185,13 +185,13 @@ impl MultiSessionManager {
     }
 
     pub async fn close_session(&self, session: &PiSession) -> Result<(), MultiSessionManagerError> {
-        let _operation = self.inner.operation_gate.lock().await;
+        let _operation = self.inner.operation_gate.write().await;
         self.inner.ensure_open()?;
         self.inner.close_session_tree_locked(session).await
     }
 
     pub async fn shutdown(&self) -> Result<(), MultiSessionManagerError> {
-        let _operation = self.inner.operation_gate.lock().await;
+        let _operation = self.inner.operation_gate.write().await;
         // Drain on repeated calls too: a previously cancelled shutdown future
         // must leave the registry's task ownership available for the next caller.
         self.inner.closed.store(true, Ordering::Release);
@@ -221,7 +221,7 @@ impl MultiSessionManager {
         existing: ExistingSessionPolicy,
         generation_overlay: SessionGenerationOverlay,
     ) -> Result<PiSession, MultiSessionManagerError> {
-        let _operation = self.inner.operation_gate.lock().await;
+        let _operation = self.inner.operation_gate.write().await;
         self.inner.ensure_open()?;
         self.inner
             .acquire_locked(target, existing, generation_overlay, None, None)
@@ -350,7 +350,10 @@ impl PiSession {
         request: IsolatedSessionRequest,
     ) -> Result<IsolatedSessionId, MultiSessionManagerError> {
         let manager = self.manager()?;
-        let _operation = manager.operation_gate.lock().await;
+        // Isolated paths are UUID-derived, so child preparations may run in
+        // parallel while session replacement, close, and shutdown remain
+        // excluded by the write side of this gate.
+        let _operation = manager.operation_gate.read().await;
         manager.ensure_open()?;
         if !manager
             .sessions
@@ -448,7 +451,7 @@ impl PiSession {
         let cwd = cwd.into();
         let path = path.into();
         let manager = self.manager()?;
-        let _operation = manager.operation_gate.lock().await;
+        let _operation = manager.operation_gate.write().await;
         manager.ensure_open()?;
         manager.ensure_path_available(self, &path)?;
         Ok(self.runtime.new_session(cwd, path).await?)
@@ -463,7 +466,7 @@ impl PiSession {
         let cwd = cwd.into();
         let path = path.into();
         let manager = self.manager()?;
-        let _operation = manager.operation_gate.lock().await;
+        let _operation = manager.operation_gate.write().await;
         manager.ensure_open()?;
         manager.ensure_path_available(self, &path)?;
         Ok(self
@@ -478,7 +481,7 @@ impl PiSession {
     ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
         let path = path.into();
         let manager = self.manager()?;
-        let _operation = manager.operation_gate.lock().await;
+        let _operation = manager.operation_gate.write().await;
         manager.ensure_open()?;
         manager.ensure_path_available(self, &path)?;
         Ok(self.runtime.switch_session(path).await?)
@@ -514,7 +517,7 @@ impl PiSession {
         }
 
         let manager = self.manager()?;
-        let _operation = manager.operation_gate.lock().await;
+        let _operation = manager.operation_gate.write().await;
         manager.ensure_open()?;
         manager.ensure_path_available(self, &destination)?;
         Ok(self.runtime.import_session(source, destination).await?)
@@ -526,14 +529,14 @@ impl PiSession {
         position: ForkPosition,
     ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
         let manager = self.manager()?;
-        let _operation = manager.operation_gate.lock().await;
+        let _operation = manager.operation_gate.write().await;
         manager.ensure_open()?;
         Ok(self.runtime.fork_session(entry_id, position).await?)
     }
 
     pub async fn reload(&self) -> Result<(), MultiSessionManagerError> {
         let manager = self.manager()?;
-        let _operation = manager.operation_gate.lock().await;
+        let _operation = manager.operation_gate.write().await;
         manager.ensure_open()?;
         self.runtime.reload().await?;
         Ok(())

@@ -36,6 +36,7 @@ struct TestFactory {
     agent_paths: Vec<PathBuf>,
     root_agent: String,
     root_context: Option<pi_core::IsolatedContextMode>,
+    root_thinking_level: pi_core::ThinkingLevel,
     batch_size: usize,
     supervision: bool,
     blocked_sibling: bool,
@@ -53,6 +54,7 @@ impl TestFactory {
             agent_paths: Vec::new(),
             root_agent: "reviewer".to_string(),
             root_context: None,
+            root_thinking_level: pi_core::ThinkingLevel::Off,
             batch_size: 1,
             supervision: false,
             blocked_sibling: false,
@@ -247,7 +249,7 @@ impl AgentSessionRuntimeFactory for TestFactory {
                     (
                         ProviderId::new("scripted"),
                         ModelId::new("test"),
-                        pi_core::ThinkingLevel::Off,
+                        self.root_thinking_level,
                         [
                             "read",
                             "grep",
@@ -408,6 +410,38 @@ async fn foreground_tool_runs_a_profiled_child_through_the_shared_session_manage
             .contains("Delegated subagent role")
     );
     assert!(!requests[0].tools.iter().any(|tool| tool.name == "subagent"));
+
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn builtin_reviewer_uses_its_profiled_thinking_level_instead_of_parent_max() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut factory = TestFactory::new().with_root_agent("reviewer");
+    factory.root_thinking_level = pi_core::ThinkingLevel::Max;
+    let providers = Arc::clone(&factory.providers);
+    let manager = MultiSessionManager::new(factory);
+    let root = manager
+        .create_session(directory.path(), directory.path().join("primary.jsonl"))
+        .await
+        .unwrap();
+
+    let outcome = root
+        .current()
+        .prompt("Delegate a quick lookup")
+        .await
+        .unwrap();
+
+    let child_provider = providers
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|(depth, provider)| (*depth == 1).then(|| Arc::clone(provider)))
+        .unwrap_or_else(|| panic!("reviewer provider should be recorded; outcome: {outcome:?}"));
+    assert_eq!(
+        child_provider.requests()[0].thinking_level,
+        pi_core::ThinkingLevel::High
+    );
 
     manager.shutdown().await.unwrap();
 }

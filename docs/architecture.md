@@ -1189,10 +1189,12 @@ not clone the frontend snapshot, and session id/name/label/entry/header reads do
 `SessionDocument`. Coherent multi-entry inspection remains the explicit `SessionSnapshot` path.
 
 `MultiSessionManager` is the multi-session product Module above `AgentSession`. It owns the injected
-`AgentSessionRuntimeFactory`, serializes manager-level acquisition and shutdown, and keeps its
-active-session map private. Opening an already-active path reuses its `PiSession`; creating or
-switching to a path owned by another handle fails before any session lifecycle transition starts.
-Manager shutdown drains and closes every managed handle.
+`AgentSessionRuntimeFactory` and keeps its active-session map private. Ordinary acquisition,
+replacement, close, and shutdown operations remain exclusive. UUID-addressed isolated-session
+preparations share the read side of that lifecycle gate, so parallel tool calls can build children
+concurrently while still excluding replacement, close, and shutdown. Opening an already-active
+path reuses its `PiSession`; creating or switching to a path owned by another handle fails before
+any session lifecycle transition starts. Manager shutdown drains and closes every managed handle.
 
 ## Memory systems
 
@@ -1489,7 +1491,9 @@ an owner closes its registered isolated descendants. Completed child logs remain
 resume discovery; a frontend may resolve one through its parent link as a read-only snapshot without
 registering or resuming it as a primary session. In-process detached receipts and supervisor
 coordination are feature-owned layers over this interface; cross-process reattachment remains
-unimplemented.
+unimplemented. Parallel isolated launches prepare their complete runtime generations concurrently;
+the manager's lifecycle gate prevents an owner replacement, close, or shutdown from racing those
+preparations, and the UUID-derived paths avoid active-path collisions.
 
 Isolated prompt tasks have manager-owned, abort-on-drop supervisor handles. A prompt panic becomes
 an explicit retained terminal failure rather than an unobserved task exit. Launch cancellation and
@@ -1542,6 +1546,11 @@ alias-to-alias ambiguity fails candidate generation. Bare model ids prefer the c
 available catalogue match; thinking levels are checked against the resolved model before launch.
 Reload rescans the catalog transactionally, and untrusted project definitions never enter the
 candidate generation.
+
+Built-in role metadata preserves the vendored profiles' reasoning policy: scout uses `low`,
+worker/reviewer/oracle use `high`, and delegate inherits the immediate parent's level. This keeps
+the fast reconnaissance role from accidentally inheriting an expensive `xhigh` or `max` parent
+configuration while retaining explicit profile validation against the selected model.
 
 The subagent tool accepts optional `async: true` to return a background receipt after the
 feature-owned monitor is spawned. Default calls still wait in the foreground; fast terminal results return

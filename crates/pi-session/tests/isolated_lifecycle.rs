@@ -37,6 +37,13 @@ impl Drop for NotifyOnDrop {
     }
 }
 
+#[derive(Clone)]
+struct PrepareGate {
+    started: Arc<AtomicUsize>,
+    both_started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
 #[pi_core::agent_plugin]
 impl AgentPlugin for LifecycleProbe {
     fn id(&self) -> PluginId {
@@ -68,12 +75,30 @@ impl AgentPlugin for LifecycleProbe {
 }
 
 fn manager(probe: LifecycleProbe) -> MultiSessionManager {
+    manager_with_prepare_gate(probe, None)
+}
+
+fn manager_with_prepare_gate(
+    probe: LifecycleProbe,
+    prepare_gate: Option<PrepareGate>,
+) -> MultiSessionManager {
     MultiSessionManager::new(move |request: AgentSessionRuntimeRequest| {
         let probe = probe.clone();
+        let prepare_gate = prepare_gate.clone();
         async move {
             let AgentSessionRuntimeTarget::Create { cwd, path, .. } = request.target else {
                 panic!("lifecycle tests only create sessions");
             };
+            if path
+                .components()
+                .any(|component| component.as_os_str() == "isolated")
+                && let Some(gate) = prepare_gate
+            {
+                if gate.started.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                    gate.both_started.notify_one();
+                }
+                gate.release.notified().await;
+            }
             let runtime = request
                 .generation_overlay
                 .apply_to(PiRuntime::builder())
@@ -111,6 +136,58 @@ async fn owner(manager: &MultiSessionManager, directory: &tempfile::TempDir) -> 
         .create_session(directory.path(), directory.path().join("owner.jsonl"))
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn parallel_isolated_launches_prepare_concurrently() {
+    let directory = tempfile::tempdir().unwrap();
+    let gate = PrepareGate {
+        started: Arc::new(AtomicUsize::new(0)),
+        both_started: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+    };
+    let probe = LifecycleProbe::default();
+    let manager = manager_with_prepare_gate(probe.clone(), Some(gate.clone()));
+    let owner = owner(&manager, &directory).await;
+    let first = tokio::spawn({
+        let owner = owner.clone();
+        async move { owner.launch_isolated_session(request()).await }
+    });
+    let second = tokio::spawn({
+        let owner = owner.clone();
+        async move { owner.launch_isolated_session(request()).await }
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), gate.both_started.notified())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "parallel prepares did not overlap; started={}",
+                gate.started.load(Ordering::SeqCst)
+            )
+        });
+    gate.release.notify_waiters();
+    let first = bounded(first).await.unwrap().unwrap();
+    let second = bounded(second).await.unwrap().unwrap();
+    for id in [&first, &second] {
+        owner.abort_isolated_session(id).unwrap();
+    }
+    bounded(async {
+        while probe.settled_count.load(Ordering::SeqCst) != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    probe.release_settled.notify_waiters();
+    for id in [&first, &second] {
+        assert!(
+            bounded(owner.wait_for_isolated_session(id))
+                .await
+                .unwrap()
+                .aborted
+        );
+    }
+    bounded(manager.shutdown()).await.unwrap();
 }
 
 #[tokio::test]
