@@ -8,6 +8,41 @@ const replacement: Extract<ThreadAction, { type: "replaceThread" }> = {
   isProcessing: false, turnId: null, timestamp: 100,
 };
 
+describe("thread naming", () => {
+  it("replaces the untitled placeholder with the first user message", () => {
+    const state = threadReducer(
+      {
+        ...initialState,
+        threadsByWorkspace: {
+          workspace: [
+            {
+              id: "thread-1",
+              name: "Untitled session",
+              updatedAt: 0,
+            },
+          ],
+        },
+      },
+      {
+        type: "upsertItem",
+        workspaceId: "workspace",
+        threadId: "thread-1",
+        item: {
+          id: "message-1",
+          kind: "message",
+          role: "user",
+          text: "Fix the desktop session title",
+        },
+        hasCustomName: false,
+      },
+    );
+
+    expect(state.threadsByWorkspace.workspace[0]?.name).toBe(
+      "Fix the desktop session title",
+    );
+  });
+});
+
 describe("replacement and notice reduction", () => {
   it("updates selected identity, history, status and commands together", () => {
     const state = threadReducer({

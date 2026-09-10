@@ -1258,11 +1258,38 @@ most two seconds for acknowledgment. `/refine [focus]` starts the same review ex
 bypasses `reviewEnabled`, interval counters, and deferred scheduling. A focus string is appended to
 the private request as the user's priority; an empty conversation or already-running review does
 not start another fork.
+
+`agent_settled` remains the Pi-compatible notification that session orchestration is idle; it is
+only an asynchronous review scheduling point, not a memory commit barrier. The hook returns after
+the review has been admitted. No memory-specific completion fields or assistant-message lifecycle
+events are added to the Pi contract.
+
 Managed children have `SessionExecutionOrigin::Subagent`, preserved across reload and nested
-delegation. Hermes skips their review counters, autonomous reviews, and opt-in lifecycle flushes,
-equivalent to the upstream `skip_background_review` behavior. They still receive the memory
-snapshot and can explicitly use the normal memory/skill tools. This gate belongs to the memory
-plugin; generic session orchestration only supplies provenance.
+delegation. They receive the configured frozen memory snapshot as inherited reference context and
+may use read-only search surfaces such as `memory_search`, but they cannot mutate durable memory.
+The subagent launch policy removes `memory` from inherited and explicit child tool sets; the Hermes
+tool-call hook independently blocks it for any managed child that reaches the registry through a
+custom or stale generation. Hermes also skips child review counters, autonomous reviews, startup
+backfill, and opt-in lifecycle flushes. The parent session is the sole owner of ordinary durable
+memory writes. This policy belongs to the two feature plugins; generic session orchestration only
+supplies provenance.
+
+Hermes background-review Agents are not ordinary managed children. They are bounded private
+ephemeral forks with a freshly constructed `HermesReviewPlugin`, a parent-owned mutation allowlist,
+and no session/review-scheduling hooks, so they may commit reviewed memory receipts without gaining
+delegation authority or recursively scheduling another review.
+
+Live transcript indexing and startup backfill are derived, cancellable background jobs owned by
+the memory provider instance. A new foreground run cancels both before model work starts;
+compaction and shutdown cancel and boundedly join them before final indexing/checkpoint work.
+Managed children retain live transcript indexing but never launch startup backfill. Blocking index
+work receives the originating run/provider cancellation signal and checks it before database work,
+between backfill files, within message insertion loops, and before transaction commit, so dropping
+an interrupted transaction rolls it back. All provider instances targeting the same canonical
+SQLite path share an in-process write coordinator. Schema setup, memory mirroring, session writes,
+metadata updates, and checkpoints therefore serialize instead of racing into `database is locked`;
+transactions remain scoped to one mirror sync or one session replacement rather than the complete
+backfill scan.
 
 Hermes remains one package with two internal responsibilities. `HermesMemoryPlugin` owns tools,
 commands, prompt injection, foreground invocation budgets, review scheduling and cancellation.
@@ -1559,9 +1586,12 @@ project definitions win name collisions. Definition frontmatter owns `name`, `de
 while the Markdown body owns the role system prompt. Omitted selections inherit from the immediate
 parent; an empty `tools` field selects no tools; an explicit list selects work tools under the
 inherited ceiling. Skill-loading and coordination additions described below also remain within
-that ceiling, and exclusions can only narrow the resolved set. Canonical names beat aliases;
-alias-to-alias ambiguity fails candidate generation. Bare model ids prefer the current provider and otherwise require a unique
-available catalogue match; thinking levels are checked against the resolved model before launch.
+that ceiling, and exclusions can only narrow the resolved set. The mutating `memory` tool is always
+removed for ordinary managed children even when a custom profile requests or inherits it;
+`memory_search` remains available when selected within the parent ceiling. Canonical names beat
+aliases; alias-to-alias ambiguity fails candidate generation. Bare model ids prefer the current
+provider and otherwise require a unique available catalogue match; thinking levels are checked
+against the resolved model before launch.
 Reload rescans the catalog transactionally, and untrusted project definitions never enter the
 candidate generation.
 

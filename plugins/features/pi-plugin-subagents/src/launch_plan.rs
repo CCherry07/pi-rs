@@ -97,6 +97,11 @@ fn resolve_tool_names(
         }
         selected.retain(|tool| !matches!(tool.as_str(), "subagent" | "subagent_workflow"));
     }
+    // Ordinary managed children inherit the parent's memory context, but the
+    // parent remains the sole owner of durable memory mutation. Keep the
+    // read-only search surface available when it is inside the capability
+    // ceiling and remove the mutating tool even from inherited/custom sets.
+    selected.retain(|tool| tool != "memory");
     if (profile.inherit_skills || !profile.skills.is_empty())
         && !selected.iter().any(|tool| tool == "read")
     {
@@ -312,6 +317,33 @@ mod tests {
             )
             .unwrap(),
             vec!["read".to_string()]
+        );
+    }
+
+    #[test]
+    fn managed_children_never_receive_the_memory_mutation_tool() {
+        let mut inherited = builtin_profile("scout");
+        inherited.tools = None;
+        assert_eq!(
+            resolve_tool_names(
+                &inherited,
+                ["read", "memory", "memory_search"]
+                    .map(str::to_string)
+                    .to_vec(),
+            )
+            .unwrap(),
+            ["read", "memory_search"].map(str::to_string).to_vec()
+        );
+
+        let mut explicit = builtin_profile("scout");
+        explicit.tools = Some(["memory", "memory_search"].map(str::to_string).to_vec());
+        assert_eq!(
+            resolve_tool_names(
+                &explicit,
+                ["memory", "memory_search"].map(str::to_string).to_vec(),
+            )
+            .unwrap(),
+            vec!["memory_search".to_string()]
         );
     }
 

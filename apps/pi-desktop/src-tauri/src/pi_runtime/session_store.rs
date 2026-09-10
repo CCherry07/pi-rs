@@ -584,7 +584,7 @@ fn session_summary(path: &Path) -> Result<SessionSummary, String> {
             let SessionEntry::Message(entry) = &record.entry else {
                 return None;
             };
-            entry.message.as_standard()
+            entry.message.as_standard().map(|_| &entry.message)
         })
         .collect::<Vec<_>>();
     let title = document.name.unwrap_or_else(|| first_user_title(&messages));
@@ -764,11 +764,16 @@ fn collect_session_files(root: &Path, include_isolated: bool) -> Result<Vec<Path
     Ok(files)
 }
 
-fn first_user_title(messages: &[&Message]) -> String {
+fn first_user_title(messages: &[&pi_session::AgentMessage]) -> String {
     let text = messages
         .iter()
-        .find_map(|message| match message {
-            Message::User(message) => Some(content_text(&message.content)),
+        .find_map(|message| match message.as_standard() {
+            Some(Message::User(user)) => Some(
+                message
+                    .display_text()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| content_text(&user.content)),
+            ),
             _ => None,
         })
         .unwrap_or_default();

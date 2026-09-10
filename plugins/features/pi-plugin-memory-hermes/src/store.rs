@@ -42,6 +42,8 @@ const CONFLICT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub(crate) enum StoreError {
+    #[error("memory operation aborted")]
+    Aborted,
     #[error("invalid memory target {0}; use memory, user, project, or failure")]
     InvalidTarget(String),
     #[error("Project memory is not available (no project detected).")]
@@ -777,11 +779,29 @@ impl HermesMemoryStore {
         self.database.index_snapshot(snapshot)
     }
 
+    pub(crate) fn index_snapshot_cancellable(
+        &self,
+        snapshot: &pi_core::SessionSnapshot,
+        cancellation: &[pi_core::AbortSignal],
+    ) -> Result<usize, StoreError> {
+        self.database
+            .index_snapshot_cancellable(snapshot, cancellation)
+    }
+
     pub(crate) fn backfill_sessions(
         &self,
         max_files: Option<usize>,
     ) -> Result<BulkIndexResult, StoreError> {
         self.database.backfill_sessions(max_files)
+    }
+
+    pub(crate) fn backfill_sessions_cancellable(
+        &self,
+        max_files: Option<usize>,
+        cancellation: &[pi_core::AbortSignal],
+    ) -> Result<BulkIndexResult, StoreError> {
+        self.database
+            .backfill_sessions_cancellable(max_files, cancellation)
     }
 
     pub(crate) fn session_file_inventory(&self) -> (usize, usize) {
@@ -792,8 +812,11 @@ impl HermesMemoryStore {
         self.database.session_stats()
     }
 
-    pub(crate) fn needs_session_backfill(&self) -> Result<bool, StoreError> {
-        self.database.needs_backfill()
+    pub(crate) fn needs_session_backfill_cancellable(
+        &self,
+        cancellation: &[pi_core::AbortSignal],
+    ) -> Result<bool, StoreError> {
+        self.database.needs_backfill_cancellable(cancellation)
     }
 
     pub(crate) fn checkpoint(&self) -> Result<(), StoreError> {

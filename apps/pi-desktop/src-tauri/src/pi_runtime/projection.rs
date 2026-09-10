@@ -613,7 +613,10 @@ async fn project_event(
                     "id": item_id,
                     "type": "userMessage",
                     "entryId": entry.id,
-                    "content": user_item_content(&message.content)
+                    "content": user_item_content_with_display(
+                        &message.content,
+                        message_entry.message.display_text(),
+                    )
                 }),
                 Message::Assistant(message) => json!({
                     "id": item_id,
@@ -921,6 +924,24 @@ fn tool_result_text(result: &ToolResult) -> String {
     content_text(&result.content)
 }
 
+fn user_item_content_with_display(
+    content: &[ContentBlock],
+    display_text: Option<&str>,
+) -> Vec<Value> {
+    if let Some(display_text) = display_text {
+        let mut projected = vec![json!({ "type": "text", "text": display_text })];
+        projected.extend(content.iter().filter_map(|block| match block {
+            ContentBlock::Image(image) => Some(json!({
+                "type": "image",
+                "url": format!("data:{};base64,{}", image.mime_type, image.data)
+            })),
+            _ => None,
+        }));
+        return projected;
+    }
+    user_item_content(content)
+}
+
 fn user_item_content(content: &[ContentBlock]) -> Vec<Value> {
     content
         .iter()
@@ -986,6 +1007,23 @@ mod tests {
         assert_eq!(params["level"], "warning");
         assert_eq!(params["message"], "Native command output");
         assert!(params.get("turnId").is_none());
+    }
+
+    #[test]
+    fn persisted_user_item_prefers_display_text_and_keeps_images() {
+        let content = vec![
+            ContentBlock::Text(pi_core::TextContent::new("expanded skill body")),
+            ContentBlock::Image(pi_core::ImageContent {
+                data: "abc".to_string(),
+                mime_type: "image/png".to_string(),
+            }),
+        ];
+
+        let projected = user_item_content_with_display(&content, Some("/skill:review"));
+
+        assert_eq!(projected[0]["text"], "/skill:review");
+        assert_eq!(projected[1]["type"], "image");
+        assert!(!json!(projected).to_string().contains("expanded skill body"));
     }
 
     #[test]

@@ -333,6 +333,22 @@ describe("Markdown file-like href behavior", () => {
     expect(container.textContent).toContain("/workspace/settings#L12");
   });
 
+  it("does not render slash commands as file paths", () => {
+    const { container } = render(
+      <Markdown
+        value="/skill:performance-analysis 分析这周卡顿率"
+        className="markdown"
+        workspacePath="/Users/cherry/Documents/bytedance/workspace"
+      />,
+    );
+
+    expect(container.querySelector(".message-file-link")).toBeNull();
+    expect(container.textContent).toContain(
+      "/skill:performance-analysis 分析这周卡顿率",
+    );
+    expect(container.textContent).not.toContain("../../../../");
+  });
+
   it("does not linkify Windows file paths embedded in custom URIs", () => {
     const { container } = render(
       <Markdown

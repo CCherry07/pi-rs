@@ -14,7 +14,8 @@ use pi_core::{
 use pi_sdk::{Pi, ProductConfig};
 use pi_session::{
     AgentSession, AgentSessionSnapshot, BranchQuery, EntryOrder, EntryQuery,
-    IsolatedSessionObservation, QueueSnapshot, SessionEntry, SessionInput, SubmitOutcome,
+    IsolatedSessionObservation, QueueSnapshot, SessionEntry, SessionInput, SessionRecord,
+    SubmitOutcome,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -826,6 +827,7 @@ fn thread_from_stored_isolated(stored: &StoredIsolatedSession) -> Result<Value, 
         .document
         .branch()
         .map_err(|error| error.to_string())?;
+    let message_entry_ids = collect_message_entry_ids(branch.iter().copied());
     let messages = branch
         .iter()
         .filter_map(|record| match &record.entry {
@@ -893,11 +895,17 @@ fn thread_from_stored_isolated(stored: &StoredIsolatedSession) -> Result<Value, 
             }
         }),
         Some(&stored.agent),
-        HashMap::new(),
+        message_entry_ids,
     ))
 }
 
-type MessageEntryIds = HashMap<bool, VecDeque<(i64, String)>>;
+#[derive(Clone)]
+struct MessageEntryProjection {
+    id: String,
+    display_text: Option<String>,
+}
+
+type MessageEntryIds = HashMap<bool, VecDeque<(i64, MessageEntryProjection)>>;
 
 fn message_key(message: &Message) -> Option<(bool, i64)> {
     match message {
@@ -918,6 +926,12 @@ fn message_entry_ids(session: &AgentSession) -> MessageEntryIds {
     let Ok(records) = session.log().find_entries_on_branch(&query) else {
         return HashMap::new();
     };
+    collect_message_entry_ids(records.iter())
+}
+
+fn collect_message_entry_ids<'a>(
+    records: impl IntoIterator<Item = &'a SessionRecord>,
+) -> MessageEntryIds {
     let mut ids = MessageEntryIds::new();
     for record in records {
         let SessionEntry::Message(entry) = &record.entry else {
@@ -929,12 +943,21 @@ fn message_entry_ids(session: &AgentSession) -> MessageEntryIds {
         let Some(key) = message_key(message) else {
             continue;
         };
-        ids.entry(key.0).or_default().push_back((key.1, record.id));
+        ids.entry(key.0).or_default().push_back((
+            key.1,
+            MessageEntryProjection {
+                id: record.id.clone(),
+                display_text: entry.message.display_text().map(str::to_string),
+            },
+        ));
     }
     ids
 }
 
-fn take_message_entry_id(ids: &mut MessageEntryIds, message: &Message) -> Option<String> {
+fn take_message_entry(
+    ids: &mut MessageEntryIds,
+    message: &Message,
+) -> Option<MessageEntryProjection> {
     const MAX_TIMESTAMP_DRIFT_MS: u64 = 1_000;
 
     let (is_user, timestamp_ms) = message_key(message)?;
@@ -954,7 +977,7 @@ fn take_message_entry_id(ids: &mut MessageEntryIds, message: &Message) -> Option
                 })
                 .map(|(index, _)| index)
         })?;
-    candidates.remove(index).map(|(_, id)| id)
+    candidates.remove(index).map(|(_, entry)| entry)
 }
 
 fn thread_from_snapshot(
@@ -996,7 +1019,8 @@ fn thread_from_snapshot(
     };
 
     for message in messages {
-        let entry_id = take_message_entry_id(&mut message_entry_ids, message);
+        let entry = take_message_entry(&mut message_entry_ids, message);
+        let entry_id = entry.as_ref().map(|entry| entry.id.clone());
         let timestamp = message_timestamp(message);
         if created_at == 0 {
             created_at = timestamp;
@@ -1007,7 +1031,12 @@ fn thread_from_snapshot(
                 flush(&mut turns, &mut items, turn_started_at, turn_index, false);
                 turn_index += 1;
                 turn_started_at = message.timestamp_ms;
-                let content = user_content(&message.content);
+                let content = user_content_with_display(
+                    &message.content,
+                    entry
+                        .as_ref()
+                        .and_then(|entry| entry.display_text.as_deref()),
+                );
                 if preview.is_empty() {
                     preview = content
                         .iter()
@@ -1334,6 +1363,21 @@ fn historical_tool_item(
             "result": output
         })
     }
+}
+
+fn user_content_with_display(blocks: &[ContentBlock], display_text: Option<&str>) -> Vec<Value> {
+    if let Some(display_text) = display_text {
+        let mut content = vec![json!({ "type": "text", "text": display_text })];
+        content.extend(blocks.iter().filter_map(|block| match block {
+            ContentBlock::Image(image) => Some(json!({
+                "type": "image",
+                "url": format!("data:{};base64,{}", image.mime_type, image.data)
+            })),
+            _ => None,
+        }));
+        return content;
+    }
+    user_content(blocks)
 }
 
 fn user_content(blocks: &[ContentBlock]) -> Vec<Value> {
@@ -2304,6 +2348,28 @@ mod tests {
         let summaries = store.list(directory.path()).unwrap();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].title, "hello desktop");
+    }
+
+    #[tokio::test]
+    async fn transformed_command_projects_original_display_text_after_persistence() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = scripted_store(directory.path().join("agent"));
+        let session = store.create(directory.path()).await.unwrap();
+        let mut subscription = session.subscribe();
+
+        session.submit("/native transform").await.unwrap();
+        wait_for_standard_message_entries(&mut subscription, 2).await;
+
+        let thread = thread_from_session(&session);
+        assert_eq!(thread["preview"], "/native transform");
+        assert_eq!(
+            thread["turns"][0]["items"][0]["content"][0]["text"],
+            "/native transform"
+        );
+        assert!(!thread.to_string().contains("expanded"));
+
+        let summaries = store.list(directory.path()).unwrap();
+        assert_eq!(summaries[0].title, "/native transform");
     }
 
     #[tokio::test]

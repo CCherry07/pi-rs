@@ -459,7 +459,7 @@ async fn consolidation_failure_cap_spans_tool_iterations_and_resets_for_a_new_re
 }
 
 #[tokio::test]
-async fn subagents_keep_memory_tools_and_injection_without_autonomous_reviews() {
+async fn subagents_receive_read_only_memory_context_without_autonomous_reviews() {
     let root = tempfile::tempdir().unwrap();
     let plugin = plugin(
         root.path(),
@@ -492,6 +492,10 @@ async fn subagents_keep_memory_tools_and_injection_without_autonomous_reviews() 
         None,
     )
     .await;
+    assert!(
+        plugin.backfill.lock().unwrap().is_none(),
+        "managed children must not start the parent-owned session backfill"
+    );
     for _ in 0..6 {
         session
             .prompt("Complete the delegated task.")
@@ -509,9 +513,33 @@ async fn subagents_keep_memory_tools_and_injection_without_autonomous_reviews() 
             .system_prompt
             .contains("Prefer verified results.")
     );
-    assert_eq!(
-        plugin.store.entries(MemoryTarget::Memory).unwrap(),
-        vec!["The workspace uses Cargo."]
+    assert!(
+        provider.requests()[0]
+            .system_prompt
+            .contains("This inherited memory context is read-only in this subagent")
+    );
+    assert!(
+        plugin
+            .store
+            .entries(MemoryTarget::Memory)
+            .unwrap()
+            .is_empty()
+    );
+    let requests = provider.requests();
+    let blocked = requests[1]
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) if result.tool_name == "memory" => Some(result),
+            _ => None,
+        })
+        .expect("the attempted child memory mutation must be recorded as a tool result");
+    assert!(blocked.is_error);
+    assert!(
+        blocked
+            .content
+            .iter()
+            .any(|block| matches!(block, pi_core::ContentBlock::Text(text) if text.text.contains("must be performed by the parent session")))
     );
     session.shutdown().await;
     assert_eq!(

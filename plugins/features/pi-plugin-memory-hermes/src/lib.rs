@@ -31,7 +31,8 @@ use async_trait::async_trait;
 use pi_core::{
     AbortHandle, AgentEndEvent, AgentPlugin, AgentPluginContext, AgentSettledEvent,
     AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch, MessageEndEvent,
-    MessageEndPatch, NoticeLevel, PluginError, PluginId, RegisterContext, RunId, TurnEndEvent,
+    MessageEndPatch, NoticeLevel, PluginError, PluginId, RegisterContext, RunId, ToolCallBlock,
+    ToolCallEvent, ToolCallPatch, TurnEndEvent,
 };
 use pi_memory_loader::{
     MemoryProviderConfig, MemoryProviderFactory, MemoryProviderInitializeContext,
@@ -92,8 +93,8 @@ pub struct HermesMemoryPlugin {
     runs: Arc<HermesRuns>,
     foreground_runs: Mutex<HashMap<RunId, ForegroundRun>>,
     activity: Arc<Mutex<HashMap<String, SessionActivity>>>,
-    live_index: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    backfill: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    live_index: Mutex<Option<BackgroundTask>>,
+    backfill: Mutex<Option<BackgroundTask>>,
     config_warning_emitted: AtomicBool,
     curator_worker: Mutex<Option<curator::Worker>>,
 }
@@ -117,6 +118,11 @@ struct SessionActivity {
 struct ReviewRun {
     abort: AbortHandle,
     finished: pi_core::AbortSignal,
+}
+
+struct BackgroundTask {
+    abort: AbortHandle,
+    task: tokio::task::JoinHandle<()>,
 }
 
 struct ReviewCompletion(AbortHandle);
@@ -240,6 +246,15 @@ impl AgentPlugin for HermesMemoryPlugin {
         context: AgentPluginContext,
         event: BeforeAgentStartEvent,
     ) -> Result<BeforeAgentStartPatch, PluginError> {
+        // Foreground work has priority over derived indexing/backfill. Both
+        // jobs are resumable from the next snapshot/startup, so cancellation
+        // cannot lose canonical memory or transcript data.
+        let session_id = context.session.id()?;
+        tokio::join!(
+            stop_background_task(&self.live_index, Duration::from_secs(2)),
+            stop_background_task(&self.backfill, Duration::from_secs(2)),
+            self.cancel_review(&session_id),
+        );
         if let Some(worker) = self
             .curator_worker
             .lock()
@@ -254,8 +269,14 @@ impl AgentPlugin for HermesMemoryPlugin {
         self.store
             .bind_project(context.cwd())
             .map_err(|error| hook_error(self, "before_agent_start", error))?;
-        self.cancel_review(&context.session.id()?).await;
-        let addition = self.store.legacy_global_context();
+        let mut addition = self.store.legacy_global_context();
+        if !addition.is_empty()
+            && context.session.execution_origin()? == pi_core::SessionExecutionOrigin::Subagent
+        {
+            addition.push_str(
+                "\n\nThis inherited memory context is read-only in this subagent. Durable memory changes belong to the parent session.",
+            );
+        }
         Ok(if addition.is_empty() {
             BeforeAgentStartPatch::default()
         } else {
@@ -264,6 +285,25 @@ impl AgentPlugin for HermesMemoryPlugin {
                 messages: Vec::new(),
             }
         })
+    }
+
+    async fn tool_call(
+        &self,
+        context: AgentPluginContext,
+        event: ToolCallEvent,
+    ) -> Result<ToolCallPatch, PluginError> {
+        if event.tool_call.name == "memory"
+            && context.session.execution_origin()? == pi_core::SessionExecutionOrigin::Subagent
+        {
+            return Ok(ToolCallPatch {
+                arguments: None,
+                block: Some(ToolCallBlock {
+                    reason: "Subagents inherit memory as read-only context; durable memory changes must be performed by the parent session.".into(),
+                    terminate: false,
+                }),
+            });
+        }
+        Ok(ToolCallPatch::default())
     }
 
     async fn tool_result(
@@ -437,21 +477,120 @@ impl HermesMemoryPlugin {
             .live_index
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if task.as_ref().is_some_and(|task| !task.is_finished()) {
+        if task.as_ref().is_some_and(|task| !task.task.is_finished()) {
             return;
         }
+        let (abort, signal) = AbortHandle::new();
+        let run_signal = context.signal().clone();
         let store = Arc::clone(&self.store);
-        *task = Some(tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            match context.session.snapshot() {
-                Ok(snapshot) => {
-                    if let Err(error) = store.index_snapshot(&snapshot) {
-                        context.report_hook_error("live_session_index", error.to_string());
-                    }
-                }
-                Err(error) => context.report_hook_error("live_session_index", error.to_string()),
+        let spawned = tokio::spawn(async move {
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                () = signal.wait() => return,
+                () = run_signal.wait() => return,
             }
-        }));
+            let snapshot = match context.session.snapshot() {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    context.report_hook_error("live_session_index", error.to_string());
+                    return;
+                }
+            };
+            let cancellation = [signal, run_signal];
+            let result = tokio::task::spawn_blocking(move || {
+                store.index_snapshot_cancellable(&snapshot, &cancellation)
+            })
+            .await;
+            match result {
+                Ok(Ok(_)) | Ok(Err(crate::store::StoreError::Aborted)) => {}
+                Ok(Err(error)) => {
+                    context.report_hook_error("live_session_index", error.to_string());
+                }
+                Err(error) => {
+                    context.report_hook_error("live_session_index", error.to_string());
+                }
+            }
+        });
+        *task = Some(BackgroundTask {
+            abort,
+            task: spawned,
+        });
+    }
+
+    fn schedule_backfill(&self, context: &SessionPluginContext) {
+        let mut slot = self
+            .backfill
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.as_ref().is_some_and(|task| !task.task.is_finished()) {
+            return;
+        }
+        let (abort, signal) = AbortHandle::new();
+        let store = Arc::clone(&self.store);
+        let ui = context.ui.clone();
+        let spawned = tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                signal
+                    .check()
+                    .map_err(|_| crate::store::StoreError::Aborted)?;
+                if !store.needs_session_backfill_cancellable(std::slice::from_ref(&signal))? {
+                    return Ok(None);
+                }
+                store
+                    .backfill_sessions_cancellable(Some(50), &[signal])
+                    .map(Some)
+            })
+            .await;
+            match result {
+                Ok(Ok(None)) | Ok(Err(crate::store::StoreError::Aborted)) => {}
+                Ok(Ok(Some(result))) => {
+                    let level = if result.errors.is_empty() && !result.reached_limit {
+                        NoticeLevel::Info
+                    } else {
+                        NoticeLevel::Warning
+                    };
+                    let error_suffix = if result.errors.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            " ({} file error{})",
+                            result.errors.len(),
+                            if result.errors.len() == 1 { "" } else { "s" }
+                        )
+                    };
+                    let limit_suffix = if result.reached_limit {
+                        " (startup limit reached)"
+                    } else {
+                        ""
+                    };
+                    let _ = ui.notify(
+                        level,
+                        format!(
+                            "🧠 Session backfill complete: {} indexed, {} skipped, {} messages{error_suffix}{limit_suffix}.",
+                            result.sessions_indexed,
+                            result.sessions_skipped,
+                            result.messages_indexed,
+                        ),
+                    );
+                }
+                Ok(Err(error)) => {
+                    let _ = ui.notify(
+                        NoticeLevel::Warning,
+                        format!("⚠️ Session backfill failed: {error}"),
+                    );
+                }
+                Err(error) => {
+                    let _ = ui.notify(
+                        NoticeLevel::Warning,
+                        format!("⚠️ Session backfill failed: {error}"),
+                    );
+                }
+            }
+        });
+        *slot = Some(BackgroundTask {
+            abort,
+            task: spawned,
+        });
     }
 }
 
@@ -536,75 +675,8 @@ impl SessionPlugin for HermesMemoryPlugin {
                     ..SessionActivity::default()
                 },
             );
-        let needs_backfill = match self.store.needs_session_backfill() {
-            Ok(needs_backfill) => needs_backfill,
-            Err(error) => {
-                let _ = context.ui.notify(
-                    NoticeLevel::Warning,
-                    format!("⚠️ Session backfill check failed: {error}"),
-                );
-                false
-            }
-        };
-        let mut task = self
-            .backfill
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if needs_backfill
-            && task
-                .as_ref()
-                .is_none_or(tokio::task::JoinHandle::is_finished)
-        {
-            let store = Arc::clone(&self.store);
-            let ui = context.ui.clone();
-            *task = Some(tokio::spawn(async move {
-                let result =
-                    tokio::task::spawn_blocking(move || store.backfill_sessions(Some(50))).await;
-                match result {
-                    Ok(Ok(result)) => {
-                        let level = if result.errors.is_empty() && !result.reached_limit {
-                            NoticeLevel::Info
-                        } else {
-                            NoticeLevel::Warning
-                        };
-                        let error_suffix = if result.errors.is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                " ({} file error{})",
-                                result.errors.len(),
-                                if result.errors.len() == 1 { "" } else { "s" }
-                            )
-                        };
-                        let limit_suffix = if result.reached_limit {
-                            " (startup limit reached)"
-                        } else {
-                            ""
-                        };
-                        let _ = ui.notify(
-                            level,
-                            format!(
-                                "🧠 Session backfill complete: {} indexed, {} skipped, {} messages{error_suffix}{limit_suffix}.",
-                                result.sessions_indexed,
-                                result.sessions_skipped,
-                                result.messages_indexed,
-                            ),
-                        );
-                    }
-                    Ok(Err(error)) => {
-                        let _ = ui.notify(
-                            NoticeLevel::Warning,
-                            format!("⚠️ Session backfill failed: {error}"),
-                        );
-                    }
-                    Err(error) => {
-                        let _ = ui.notify(
-                            NoticeLevel::Warning,
-                            format!("⚠️ Session backfill failed: {error}"),
-                        );
-                    }
-                }
-            }));
+        if context.session.execution_origin()? == pi_core::SessionExecutionOrigin::User {
+            self.schedule_backfill(context);
         }
         Ok(())
     }
@@ -622,7 +694,11 @@ impl SessionPlugin for HermesMemoryPlugin {
         {
             worker.cancel_run();
         }
-        self.cancel_review(&context.identity().id).await;
+        tokio::join!(
+            self.cancel_review(&context.identity().id),
+            stop_background_task(&self.live_index, Duration::from_secs(5)),
+            stop_background_task(&self.backfill, Duration::from_secs(5)),
+        );
         if self.config.flush_on_compact
             && context.session.execution_origin().map_err(session_error)?
                 == pi_core::SessionExecutionOrigin::User
@@ -657,7 +733,11 @@ impl SessionPlugin for HermesMemoryPlugin {
         if let Some(worker) = worker {
             worker.shutdown().await;
         }
-        self.cancel_review(&context.identity().id).await;
+        tokio::join!(
+            self.cancel_review(&context.identity().id),
+            stop_background_task(&self.live_index, Duration::from_secs(5)),
+            stop_background_task(&self.backfill, Duration::from_secs(5)),
+        );
         if self.config.flush_on_shutdown
             && event.reason != SessionShutdownReason::Reload
             && context.session.execution_origin().map_err(session_error)?
@@ -680,8 +760,6 @@ impl SessionPlugin for HermesMemoryPlugin {
         if let Ok(snapshot) = context.session.snapshot() {
             let _ = self.store.index_snapshot(&snapshot);
         }
-        wait_task(&self.live_index).await;
-        wait_task(&self.backfill).await;
         let _ = self.store.checkpoint();
         self.activity
             .lock()
@@ -705,13 +783,17 @@ impl HermesMemoryPlugin {
     }
 }
 
-async fn wait_task(slot: &Mutex<Option<tokio::task::JoinHandle<()>>>) {
+async fn stop_background_task(slot: &Mutex<Option<BackgroundTask>>, timeout: Duration) {
     let task = slot
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
     if let Some(task) = task {
-        let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+        task.abort.abort();
+        let mut handle = task.task;
+        if tokio::time::timeout(timeout, &mut handle).await.is_err() {
+            handle.abort();
+        }
     }
 }
 

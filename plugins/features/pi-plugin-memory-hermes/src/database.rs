@@ -3,10 +3,11 @@
 use std::fs;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
-use pi_core::{ContentBlock, Message, SessionEntryKind, SessionSnapshot};
+use pi_core::{AbortSignal, ContentBlock, Message, SessionEntryKind, SessionSnapshot};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -125,6 +126,31 @@ pub(crate) struct SessionStats {
 pub(crate) struct Database {
     path: PathBuf,
     session_roots: Vec<PathBuf>,
+    write_gate: Arc<Mutex<()>>,
+}
+
+fn shared_write_gate(path: &Path) -> Arc<Mutex<()>> {
+    static GATES: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<Mutex<()>>>>> =
+        OnceLock::new();
+    let gates = GATES.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut gates = gates
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(gate) = gates.get(path).and_then(Weak::upgrade) {
+        return gate;
+    }
+    gates.retain(|_, gate| gate.strong_count() > 0);
+    let gate = Arc::new(Mutex::new(()));
+    gates.insert(path.to_path_buf(), Arc::downgrade(&gate));
+    gate
+}
+
+fn check_cancelled(signals: &[AbortSignal]) -> Result<(), StoreError> {
+    if signals.iter().any(AbortSignal::is_aborted) {
+        Err(StoreError::Aborted)
+    } else {
+        Ok(())
+    }
 }
 
 impl Database {
@@ -134,8 +160,10 @@ impl Database {
         _projects_dir: String,
         session_roots: Vec<PathBuf>,
     ) -> Result<Self, StoreError> {
+        let path = crate::store::canonical_storage_path(&path)?;
         let database = Self {
-            path: crate::store::canonical_storage_path(&path)?,
+            write_gate: shared_write_gate(&path),
+            path,
             session_roots,
         };
         database.open()?;
@@ -147,6 +175,11 @@ impl Database {
     }
 
     fn open(&self) -> Result<Connection, StoreError> {
+        let _write = self.lock_writes();
+        self.open_uncoordinated()
+    }
+
+    fn open_uncoordinated(&self) -> Result<Connection, StoreError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -158,6 +191,12 @@ impl Database {
             }
             Err(error) => Err(StoreError::Database(error)),
         }
+    }
+
+    fn lock_writes(&self) -> MutexGuard<'_, ()> {
+        self.write_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn open_once(&self) -> Result<Connection, rusqlite::Error> {
@@ -509,7 +548,8 @@ impl Database {
         &self,
         records: &[MemoryIndexRecord],
     ) -> Result<MemoryMirrorSync, StoreError> {
-        let mut connection = self.open()?;
+        let _write = self.lock_writes();
+        let mut connection = self.open_uncoordinated()?;
         let transaction = connection.transaction()?;
         let mirrored_projects = {
             let mut statement = transaction.prepare(
@@ -689,6 +729,15 @@ impl Database {
     }
 
     pub(crate) fn index_snapshot(&self, snapshot: &SessionSnapshot) -> Result<usize, StoreError> {
+        self.index_snapshot_cancellable(snapshot, &[])
+    }
+
+    pub(crate) fn index_snapshot_cancellable(
+        &self,
+        snapshot: &SessionSnapshot,
+        cancellation: &[AbortSignal],
+    ) -> Result<usize, StoreError> {
+        check_cancelled(cancellation)?;
         let Some(file) = snapshot.file() else {
             return Ok(0);
         };
@@ -714,18 +763,23 @@ impl Database {
                 )
             })
             .collect::<Vec<_>>();
+        let started_at = snapshot
+            .raw_header()
+            .get("createdAt")
+            .and_then(timestamp_value)
+            .unwrap_or_else(|| iso(0));
         let result = self.replace_session(
-            snapshot.id(),
-            &project,
-            snapshot.cwd(),
-            snapshot
-                .raw_header()
-                .get("createdAt")
-                .and_then(timestamp_value)
-                .unwrap_or_else(|| iso(0)),
-            None,
-            &rows,
+            SessionIndexInput {
+                session_id: snapshot.id(),
+                project: &project,
+                cwd: snapshot.cwd(),
+                started_at: &started_at,
+                ended_at: None,
+                messages: &rows,
+            },
+            cancellation,
         )?;
+        check_cancelled(cancellation)?;
         let metadata = fs::metadata(file)?;
         let modified_ms = metadata
             .modified()
@@ -733,7 +787,13 @@ impl Database {
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
             .and_then(|duration| i64::try_from(duration.as_millis()).ok())
             .unwrap_or(0);
-        self.upsert_session_file(file, snapshot.id(), metadata.len(), modified_ms)?;
+        self.upsert_session_file(
+            file,
+            snapshot.id(),
+            metadata.len(),
+            modified_ms,
+            cancellation,
+        )?;
         Ok(result.0)
     }
 
@@ -741,10 +801,20 @@ impl Database {
         &self,
         max_files_to_index: Option<usize>,
     ) -> Result<BulkIndexResult, StoreError> {
+        self.backfill_sessions_cancellable(max_files_to_index, &[])
+    }
+
+    pub(crate) fn backfill_sessions_cancellable(
+        &self,
+        max_files_to_index: Option<usize>,
+        cancellation: &[AbortSignal],
+    ) -> Result<BulkIndexResult, StoreError> {
+        check_cancelled(cancellation)?;
         let mut result = BulkIndexResult::default();
         let connection = self.open()?;
         let mut changed = Vec::new();
         for root in &self.session_roots {
+            check_cancelled(cancellation)?;
             if !root.exists() {
                 continue;
             }
@@ -758,6 +828,7 @@ impl Database {
                     entry.path().extension().and_then(|value| value.to_str()) == Some("jsonl")
                 })
             {
+                check_cancelled(cancellation)?;
                 let path = entry.path();
                 let metadata = match fs::metadata(path) {
                     Ok(metadata) => metadata,
@@ -787,6 +858,7 @@ impl Database {
         }
         changed.sort_by_key(|item| std::cmp::Reverse(item.2));
         for (path, size, modified_ms) in changed {
+            check_cancelled(cancellation)?;
             if max_files_to_index.is_some_and(|limit| result.sessions_processed >= limit) {
                 result.reached_limit = true;
                 break;
@@ -794,7 +866,7 @@ impl Database {
             result.sessions_processed += 1;
             match parse_session_file(&path) {
                 Ok(Some(document)) => {
-                    match self.index_document(&path, &document, size, modified_ms) {
+                    match self.index_document(&path, &document, size, modified_ms, cancellation) {
                         Ok((count, skipped)) => {
                             if skipped {
                                 result.sessions_skipped += 1;
@@ -813,12 +885,16 @@ impl Database {
             }
         }
         if !result.reached_limit {
-            self.touch_backfill_timestamp()?;
+            self.touch_backfill_timestamp(cancellation)?;
         }
         Ok(result)
     }
 
-    pub(crate) fn needs_backfill(&self) -> Result<bool, StoreError> {
+    pub(crate) fn needs_backfill_cancellable(
+        &self,
+        cancellation: &[AbortSignal],
+    ) -> Result<bool, StoreError> {
+        check_cancelled(cancellation)?;
         let connection = self.open()?;
         let indexed: usize = connection
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| {
@@ -828,27 +904,29 @@ impl Database {
             .unwrap_or(usize::MAX);
         let mut files = Vec::new();
         for root in &self.session_roots {
+            check_cancelled(cancellation)?;
             if !root.exists() {
                 continue;
             }
-            files.extend(
-                WalkDir::new(root)
-                    .max_depth(2)
-                    .follow_links(false)
-                    .into_iter()
-                    .filter_map(Result::ok)
-                    .filter(|entry| {
-                        entry.file_type().is_file()
-                            && entry.path().extension().and_then(|value| value.to_str())
-                                == Some("jsonl")
-                    })
-                    .map(|entry| entry.into_path()),
-            );
+            for entry in WalkDir::new(root)
+                .max_depth(2)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                check_cancelled(cancellation)?;
+                if entry.file_type().is_file()
+                    && entry.path().extension().and_then(|value| value.to_str()) == Some("jsonl")
+                {
+                    files.push(entry.into_path());
+                }
+            }
         }
         if files.len() > indexed {
             return Ok(true);
         }
         for path in files {
+            check_cancelled(cancellation)?;
             let metadata = match fs::metadata(&path) {
                 Ok(metadata) => metadata,
                 Err(_) => return Ok(true),
@@ -875,6 +953,7 @@ impl Database {
                 return Ok(true);
             }
         }
+        check_cancelled(cancellation)?;
         let timestamp = connection
             .query_row(
                 "SELECT value FROM extension_metadata WHERE key='last_session_backfill'",
@@ -890,8 +969,11 @@ impl Database {
             }))
     }
 
-    fn touch_backfill_timestamp(&self) -> Result<(), StoreError> {
-        self.open()?.execute(
+    fn touch_backfill_timestamp(&self, cancellation: &[AbortSignal]) -> Result<(), StoreError> {
+        check_cancelled(cancellation)?;
+        let _write = self.lock_writes();
+        check_cancelled(cancellation)?;
+        self.open_uncoordinated()?.execute(
             "INSERT INTO extension_metadata(key,value) VALUES('last_session_backfill',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             params![Utc::now().to_rfc3339()],
         )?;
@@ -904,17 +986,22 @@ impl Database {
         document: &ParsedSession,
         size: u64,
         modified_ms: i64,
+        cancellation: &[AbortSignal],
     ) -> Result<(usize, bool), StoreError> {
+        check_cancelled(cancellation)?;
         let project = project_from_cwd(&document.cwd);
         let count = self.replace_session(
-            &document.id,
-            &project,
-            &document.cwd,
-            document.started_at.clone(),
-            document.ended_at.clone(),
-            &document.messages,
+            SessionIndexInput {
+                session_id: &document.id,
+                project: &project,
+                cwd: &document.cwd,
+                started_at: &document.started_at,
+                ended_at: document.ended_at.as_deref(),
+                messages: &document.messages,
+            },
+            cancellation,
         )?;
-        self.upsert_session_file(path, &document.id, size, modified_ms)?;
+        self.upsert_session_file(path, &document.id, size, modified_ms, cancellation)?;
         Ok(count)
     }
 
@@ -924,8 +1011,12 @@ impl Database {
         session_id: &str,
         size: u64,
         modified_ms: i64,
+        cancellation: &[AbortSignal],
     ) -> Result<(), StoreError> {
-        self.open()?.execute(
+        check_cancelled(cancellation)?;
+        let _write = self.lock_writes();
+        check_cancelled(cancellation)?;
+        self.open_uncoordinated()?.execute(
             "INSERT INTO session_files(path,session_id,size,mtime_ms,indexed_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(path) DO UPDATE SET session_id=excluded.session_id,size=excluded.size,mtime_ms=excluded.mtime_ms,indexed_at=excluded.indexed_at",
             params![path.to_string_lossy(), session_id, i64::try_from(size).unwrap_or(i64::MAX), modified_ms, Utc::now().to_rfc3339()],
         )?;
@@ -934,14 +1025,21 @@ impl Database {
 
     fn replace_session(
         &self,
-        session_id: &str,
-        project: &str,
-        cwd: &Path,
-        started_at: String,
-        ended_at: Option<String>,
-        messages: &[IndexedMessage],
+        input: SessionIndexInput<'_>,
+        cancellation: &[AbortSignal],
     ) -> Result<(usize, bool), StoreError> {
-        let mut connection = self.open()?;
+        let SessionIndexInput {
+            session_id,
+            project,
+            cwd,
+            started_at,
+            ended_at,
+            messages,
+        } = input;
+        check_cancelled(cancellation)?;
+        let _write = self.lock_writes();
+        check_cancelled(cancellation)?;
+        let mut connection = self.open_uncoordinated()?;
         let transaction = connection.transaction()?;
         let existing = transaction
             .query_row(
@@ -965,6 +1063,7 @@ impl Database {
                 "INSERT OR IGNORE INTO messages(id,session_id,role,content,timestamp,tool_calls) VALUES(?1,?2,?3,?4,?5,?6)",
             )?;
             for message in messages {
+                check_cancelled(cancellation)?;
                 insert.execute(params![
                     message.id,
                     session_id,
@@ -987,6 +1086,7 @@ impl Database {
             params![session_id],
             |row| row.get(0),
         )?;
+        check_cancelled(cancellation)?;
         transaction.commit()?;
         let indexed = usize::try_from(after.saturating_sub(before)).unwrap_or_default();
         Ok((indexed, existing && indexed == 0))
@@ -1130,7 +1230,8 @@ impl Database {
     }
 
     pub(crate) fn checkpoint(&self) -> Result<(), StoreError> {
-        self.open()?
+        let _write = self.lock_writes();
+        self.open_uncoordinated()?
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
@@ -1143,6 +1244,15 @@ struct ParsedSession {
     started_at: String,
     ended_at: Option<String>,
     messages: Vec<IndexedMessage>,
+}
+
+struct SessionIndexInput<'a> {
+    session_id: &'a str,
+    project: &'a str,
+    cwd: &'a Path,
+    started_at: &'a str,
+    ended_at: Option<&'a str>,
+    messages: &'a [IndexedMessage],
 }
 
 fn copy_readable_rows(
@@ -1954,6 +2064,41 @@ mod tests {
         Database::new(path, PathBuf::new(), "projects".to_string(), Vec::new())
     }
 
+    #[test]
+    fn database_instances_for_the_same_index_serialize_writes() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let path = directory.path().join("sessions.db");
+        let first = database_at(path.clone()).expect("first database");
+        let second = database_at(path).expect("second database");
+
+        assert!(Arc::ptr_eq(&first.write_gate, &second.write_gate));
+    }
+
+    #[test]
+    fn cancelled_session_index_stops_before_opening_a_transaction() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let database = database_at(directory.path().join("sessions.db")).expect("database");
+        let (abort, signal) = pi_core::AbortHandle::new();
+        abort.abort();
+
+        let error = database
+            .replace_session(
+                SessionIndexInput {
+                    session_id: "cancelled",
+                    project: "project",
+                    cwd: Path::new("/project"),
+                    started_at: "2026-09-10T00:00:00Z",
+                    ended_at: None,
+                    messages: &[],
+                },
+                &[signal],
+            )
+            .expect_err("cancelled write must not commit");
+
+        assert!(matches!(error, StoreError::Aborted));
+        assert_eq!(database.session_stats().expect("stats").total_sessions, 0);
+    }
+
     fn insert_recovery_fixture(path: &Path) {
         let connection = Connection::open(path).expect("open recovery fixture");
         connection
@@ -2200,6 +2345,7 @@ mod tests {
         let database = Database {
             path: directory.path().join("sessions.db"),
             session_roots: Vec::new(),
+            write_gate: Arc::new(Mutex::new(())),
         };
         let state_path = database.recovery_circuit_path();
         fs::write(&state_path, r#"{"attempts":99}"#).expect("write legacy state");

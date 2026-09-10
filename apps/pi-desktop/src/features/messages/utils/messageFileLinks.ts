@@ -46,6 +46,7 @@ const TRAILING_PUNCTUATION = new Set([".", ",", ";", ":", "!", "?", ")", "]", "}
 const LETTER_OR_NUMBER_PATTERN = /[\p{L}\p{N}.]/u;
 const URL_SCHEME_PREFIX_PATTERN = /[a-zA-Z][a-zA-Z0-9+.-]*:\/\/\/?$/;
 const EMBEDDED_URL_SCHEME_PATTERN = /[a-zA-Z][a-zA-Z0-9+.-]*:\/\/\S*$/;
+const SLASH_COMMAND_PATH_PATTERN = /^\/[A-Za-z][A-Za-z0-9_-]*(?::[A-Za-z0-9][A-Za-z0-9_-]*)?$/;
 const PATH_CANDIDATE_PREFIX_BOUNDARY_PATTERN = /[\s<>"'()`[\]{}]/u;
 const LIKELY_LOCAL_ABSOLUTE_PATH_PREFIXES = [
   "/Users/",
@@ -356,7 +357,11 @@ function isLikelyFileHref(
 
 export function parseInlineFileTarget(value: string): ParsedFileLocation | null {
   const normalizedPath = normalizeFileLinkPath(value).trim();
-  if (!normalizedPath || isKnownLocalWorkspaceRoutePath(normalizedPath)) {
+  if (
+    !normalizedPath ||
+    isKnownLocalWorkspaceRoutePath(normalizedPath) ||
+    SLASH_COMMAND_PATH_PATTERN.test(normalizedPath)
+  ) {
     return null;
   }
   if (!FILE_PATH_MATCH.test(normalizedPath)) {
