@@ -38,6 +38,14 @@ pub struct MemoryLoader {
 }
 
 impl MemoryLoader {
+    /// Reads selection without initializing a provider or creating its stores.
+    pub fn selected_provider(
+        agent_dir: &std::path::Path,
+    ) -> Result<Option<String>, MemoryConfigError> {
+        let (_, document) = read_document(agent_dir)?;
+        Ok(document.enabled().then(|| document.provider().to_string()))
+    }
+
     pub fn new(options: MemoryLoaderOptions) -> Self {
         Self {
             options,

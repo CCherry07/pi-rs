@@ -4,6 +4,8 @@ export const SETTINGS_SECTION_IDS = [
   "projects",
   "archived",
   "environments",
+  "skills",
+  "mcp",
   "display",
   "about",
   "composer",

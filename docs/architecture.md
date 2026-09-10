@@ -292,7 +292,8 @@ stable-v1 schema and maps ACP connection/session capability negotiation onto
 `MultiSessionManager`/`PiSession`. Its multi-session ownership, asynchronous prompt responders,
 cancel notifications, transcript replay, and model/thinking configuration stay independent of Pi
 RPC commands and wire types. `pi-mcp` is deeper and protocol-neutral: it owns stdio MCP process
-lifetime, discovery, qualified tool names, invocation, result projection, and cancellation. ACP
+lifetime, Streamable HTTP (JSON/SSE responses), discovery, qualified tool names, invocation,
+result projection, and cancellation. ACP
 converts per-session `mcpServers` into `pi-mcp` configuration and injects the resulting plugin by a
 `SessionGenerationOverlay`. The overlay also carries typed `SessionExecutionOrigin` provenance
 (`User` or `Subagent`). Both are carried across live new/resume/fork/reload generation replacement
@@ -888,7 +889,7 @@ wins, and writes are locked and key-sorted. Resolution order is an explicit
 decision cache, the persisted nearest-ancestor decision, global `defaultProjectTrust`, then the
 interactive selector. Non-interactive `ask` resolves to untrusted.
 
-Trust-requiring resources are the current cwd's `.pi/settings.json`, `extensions`, `plugins`,
+Trust-requiring resources are the current cwd's `.pi/settings.json`, `mcp.json`, `extensions`, `plugins`,
 `plugins.json`, `plugins.lock`, `skills`, `prompts`, `themes`, `SYSTEM.md`, and
 `APPEND_SYSTEM.md`, plus `.agents/skills` found from cwd toward
 the repository root and `.hermes/skills` at
@@ -927,6 +928,57 @@ provenance; parses frontmatter; applies deterministic first-name-wins collision 
 registers one slash command per template. Its argument parser and expansion own Pi's quoted tokens,
 `$N`, `$@`, `$ARGUMENTS`, `${@:N}`, and `${@:N:L}` forms. The CLI only supplies trusted roots and
 registers the plugin factory in each generation.
+
+## MCP configuration and generation ownership
+
+MCP is a deliberate Rust product extension: `legacy/pi/packages/coding-agent/README.md`
+explicitly excludes built-in MCP. `pi-sdk::mcp::McpLibrary` owns independent
+`<agent-dir>/mcp.json` and `<cwd>/.pi/mcp.json` files; MCP does not live in `settings.json`.
+Documents contain `version: 1` and `mcpServers`, keyed by server name. Each entry has
+`type: "stdio"` (command, args, env, cwd) or `type: "http"` (url, headers), and optional
+`enabled` (default true). Missing type is inferred from command/url for common MCP configs.
+Unknown fields survive management edits. Project entries replace a complete global entry by
+name, never accidentally inheriting credentials. `{ "enabled": false }` can disable an inherited
+server. Untrusted project files are neither read nor changed; `mcp.json` itself triggers trust.
+
+Disk reads and saves do not initialize sessions or connect. Saves validate the document, compare
+a content revision while holding an advisory lock, and atomically replace a private (0600 on Unix)
+file. Invalid JSON remains readable/editable. Authentication values should use `${VAR}`,
+`${env:VAR}` or whole-value `$VAR`; no shell evaluation occurs. Expansion happens only when a
+server connects, not when configuration is listed or saved. Relative explicit stdio cwd resolves
+from its configuration directory; omitted cwd uses the active session cwd. Transport debug/error
+surfaces omit header, argument and URL values. HTTP redirects are disabled by the SDK.
+Child stderr is discarded rather than written outside the frontend renderer.
+
+`ProductSessionFactory` reloads files after trust resolution and prepares a fresh connected pool
+for every candidate product generation. The immutable MCP plugin owns discovered tools plus the
+registered `/mcp` command. Connection, discovery, registration or configuration failure rejects
+the candidate without swapping the current generation. Pool ownership is reference-counted;
+retiring the last generation owner cancels its transports and child processes. Each server has
+30-second connection and discovery bounds. Request cancellation uses the SDK's negotiated
+notification/stream-close semantics. Server-returned tool content retains normal tool semantics.
+
+The pinned official Rust SDK handles Streamable HTTP negotiation, JSON and SSE framing,
+legacy-initialize compatibility, session headers and reconnects. Standalone 2024 HTTP+SSE is
+explicitly rejected; OAuth browser/discovery flows are not implemented (static/environment-backed
+headers are supported). `pi-acp` advertises HTTP but not legacy SSE and converts client-supplied
+headers without local environment expansion. The CLI ACP host sets `load_mcp_config = false`,
+including for empty client server lists; embedded ACP hosts must do the same. ACP overlays remain
+transient and never enter Pi v4 storage.
+Some deployed legacy servers return an uncorrelated error to the modern `server/discover` probe
+(DeepWiki uses the fixed id `server-error`). If automatic lifecycle negotiation fails, `pi-mcp`
+opens one fresh transport and attempts the stable `initialize` lifecycle. It never retries on the
+same ambiguous transport, and startup remains bounded by the existing connection timeout.
+This integration exposes MCP tools; resource/prompt browsers, sampling and elicitation UI remain
+outside the current product surface.
+
+Desktop Settings exposes global/project scope, compact server forms and enable switches, a direct
+JSON editor for advanced fields, revision-safe saves, and explicit connection tests of saved
+configuration. No test runs automatically and no runtime registry is mutated by a save.
+`/mcp status` describes the generation snapshot; `/mcp paths` identifies configuration files;
+`/mcp test <name>` probes current saved configuration; `/mcp reload` rebuilds the whole managed
+session through the existing replacement transaction. These registered commands work in Desktop
+and TUI without transport policy in either frontend.
 
 ## Core contracts
 
@@ -1524,7 +1576,11 @@ promoting the child to a frontend-owned `PiSession`. Isolated files live below t
 owning session's sibling directory and therefore do not enter the top-level resume listing. Closing
 an owner closes its registered isolated descendants. Completed child logs remain outside top-level
 resume discovery; a frontend may resolve one through its parent link as a read-only snapshot without
-registering or resuming it as a primary session. In-process detached receipts and supervisor
+registering or resuming it as a primary session. For an explicit Desktop stop action, the Adapter
+uses its observed child-to-parent metadata to resolve the directly owning managed `PiSession` and
+invoke that owner's isolated-session abort; the observation capability itself remains read-only,
+and the child is not promoted into frontend ownership. This also preserves immediate ownership for
+nested children instead of routing every cancellation through the root. In-process detached receipts and supervisor
 coordination are feature-owned layers over this interface; cross-process reattachment remains
 unimplemented. Parallel isolated launches prepare their complete runtime generations concurrently;
 the manager's lifecycle gate prevents an owner replacement, close, or shutdown from racing those
@@ -1875,3 +1931,40 @@ The workspace includes an end-to-end test where two delay tools complete in reve
    native package manager.
 3. Continue current-Pi conformance at product seams with deterministic regressions before
    adding broader provider and terminal compatibility coverage.
+
+## Desktop skill-file management
+
+Settings → Skills is a deliberate Desktop management addition, not a Pi terminal UI
+compatibility claim. `pi-sdk::skills::desktop_skill_library` prepares a disk catalog
+without creating a session or initializing memory/provider/native plugin code. It shares
+`runtime_skill_options` with generation construction, uses the existing project trust
+service and scoped settings, and reads only already-installed package skill resources
+through `pi-js-package-manager::installed_skill_paths` (no install scripts or network).
+The global view excludes project resources; an untrusted project view keeps them hidden
+and cannot create/import project skills. The effective agent directory and Hermes roots
+come from their existing owners. A trust-store read may acquire its existing lock.
+
+`pi-plugin-skills::management::SkillLibrary` owns file discovery, validation and mutation
+beside the existing skill parser/collision policy. Diagnostics remain visible as editable
+file rows. The Tauri Adapter exposes fresh list/read and create/import/save/trash operations,
+serializes management requests off the async executor, and does not reuse the command-only
+`pi_skills_list` completion response. React owns only presentation and transient drafts.
+Browsing does not invoke activity observers or update Curator metadata.
+
+Editing preserves the complete source (including unknown frontmatter), checks a SHA-256
+revision before atomic replacement, and preserves file permissions. These optimistic
+checks detect normal editor conflicts; they are not a filesystem sandbox or a guarantee
+against an adversarial process racing filesystem operations. New/imported packages never
+replace an existing destination. Import copies either a complete skill directory or one
+Markdown document, rejects symlinks and special files, and is bounded to 2048 entries /
+32 MiB (documents 2 MiB). Management refuses mutations through symlink paths; such skills
+remain viewable/copyable. Package deletion moves the package to the OS Trash, while a
+standalone Markdown or configured library-root document moves only that file. It never
+silently falls back to permanent deletion. Curator provenance is not rewritten to disguise
+manual changes; Hermes' existing external-change protection remains authoritative.
+
+Save/create/import/delete update disk and the settings list only, never mutate an active
+runtime generation. The settings UI warns that existing sessions are not refreshed and
+recommends restart/new conversation. A general Desktop generation reload UI remains separate.
+The panel uses the existing Settings shell, theme tokens, list/button styles and i18n;
+leaving settings, switching sections or discarding a dirty draft requires confirmation.

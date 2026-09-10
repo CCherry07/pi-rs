@@ -13,6 +13,10 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9.34"
 
+sha2 = "0.10"
+tempfile = "3.21.0"
+trash = "5.2"
+
 [dev-dependencies]
 pi-test-support.workspace = true
 pi-runtime.workspace = true

@@ -1,11 +1,25 @@
 {
+  "mcp": {
+    "title": "MCP", "subtitle": "通过 stdio 或 Streamable HTTP 连接本地工具与远程服务。",
+    "scope": "配置范围", "global": "全局", "refresh": "重新读取文件", "save": "保存", "view": "视图", "servers": "服务器", "add": "添加服务器",
+    "reloadHint": "保存只更新磁盘文件。在已有会话中运行 /mcp reload 使更改生效，或重启应用。项目配置按服务器名称覆盖全局配置。",
+    "saved": "已保存。在会话中运行 /mcp reload 使更改生效。", "discard": "放弃未保存的设置更改？",
+    "environmentHint": "在 headers、env 或 URL 中使用 ${ENV_VAR} 引用环境变量，仅在连接时解析。不支持旧版 HTTP+SSE。",
+    "working": "处理中…", "enabled": "已启用", "disabled": "已禁用", "toggle": "启用 {{name}}", "test": "测试连接", "testSuccess": "连接成功 · 发现 {{count}} 个工具",
+    "saveBeforeTest": "请先保存更改再测试连接", "empty": "此文件尚未配置服务器。添加服务器，或在 mcp.json 中粘贴配置。",
+    "name": "名称", "nameConflict": "请输入非空且不重复的服务器名称。", "transport": "传输方式", "command": "命令", "args": "参数（每行一个）",
+    "advancedHint": "headers、env、cwd 等高级字段可在 mcp.json 标签页中直接编辑；已有字段会保留。",
+    "remove": "移除服务器", "removeConfirm": "从此配置移除 {{name}}？保存后才会写入文件。", "inherited": "继承自全局配置"
+  },
   "shell": {
+    "discard": "放弃未保存的设置更改？",
     "title": "设置",
     "close": "关闭设置",
     "back": "返回设置分类",
     "sections": "设置分类"
   },
   "sections": {
+    "mcp": "MCP",
     "projects": "项目",
     "archived": "归档任务",
     "environments": "环境",
@@ -14,6 +28,7 @@
     "dictation": "语音输入",
     "shortcuts": "快捷键",
     "openApps": "打开方式",
+    "skills": "技能",
     "git": "Git",
     "about": "关于"
   },
@@ -450,5 +465,44 @@
       "checking": "正在检查...",
       "check": "检查更新"
     }
+  },
+  "skills": {
+    "title": "技能",
+    "subtitle": "查看和管理全局及项目技能。",
+    "scope": "查看范围 / 添加位置",
+    "global": "全局技能",
+    "projectView": "项目视图包含该项目可发现的全局与项目技能。",
+    "untrusted": "项目尚未受信任；未读取项目技能，也不能向项目添加技能。请通过现有项目信任流程授权。",
+    "destination": "添加位置：{{path}}",
+    "refresh": "刷新",
+    "add": "新建技能",
+    "import": "导入",
+    "importDirectory": "导入目录",
+    "importFile": "导入 Markdown",
+    "search": "搜索技能名称、描述或路径",
+    "loading": "正在加载…",
+    "empty": "没有找到技能。可新建或从本地导入。",
+    "manual": "仅手动调用（未向模型展示）",
+    "readOnly": "只读：文件不可写或路径包含符号链接。",
+    "copy": "复制技能路径",
+    "copied": "已复制技能路径",
+    "copyFailed": "复制失败：{{error}}",
+    "delete": "删除技能",
+    "trash": "移到废纸篓",
+    "deleteConfirm": "将技能「{{name}}」移到废纸篓？\n\n删除位置：{{path}}\n\n目录内的配套文件也会一起移动。此操作会影响其他使用该路径的项目或应用；已有对话记录不受影响。",
+    "deleted": "已移到废纸篓。已有会话可能仍保留旧技能信息。",
+    "saved": "技能已保存，列表已更新。",
+    "back": "返回列表",
+    "directoryName": "目录名称",
+    "nameHelp": "使用 1–64 个小写字母、数字或单连字符。正文中的 name、description 必须有效。",
+    "preview": "预览",
+    "source": "原文",
+    "content": "SKILL.md 内容",
+    "cancel": "取消",
+    "discardChanges": "放弃修改",
+    "save": "保存",
+    "saving": "保存中…",
+    "discard": "有未保存的技能修改，是否放弃？",
+    "missingDocument": "无法读取技能文件"
   }
 }

@@ -213,6 +213,32 @@ impl PackageManager {
         }
     }
 
+    /// Reads skill resources from already installed configured packages only.
+    /// Settings browsing must not install packages or execute lifecycle scripts.
+    pub fn installed_skill_paths(&self) -> Vec<PathBuf> {
+        let sources = self.configured_packages();
+        let mut resources = ResolvedPackageResources::default();
+        let mut extensions = Vec::new();
+        for entry in &sources {
+            let base = self.find_delta_base(entry, &sources);
+            let (source, scope) = base
+                .as_ref()
+                .map_or((entry.package.source(), entry.scope), |base| {
+                    (base.source.as_str(), base.scope)
+                });
+            if let Some(path) = self.installed_path(source, scope) {
+                collect_package_contents(
+                    &path,
+                    &mut extensions,
+                    &mut resources,
+                    entry.package.filter(),
+                    ExtensionMetadata::package(entry.package.source(), entry.scope),
+                );
+            }
+        }
+        dedupe_paths(resources.skills)
+    }
+
     /// Resolves explicit CLI sources first, then all configured sources in Pi precedence.
     pub async fn resolve(&self) -> Result<Resolution, PackageManagerError> {
         let (explicit, mut explicit_resources) =
@@ -2707,6 +2733,35 @@ fn format_command(program: &str, arguments: &[String]) -> String {
 #[cfg(test)]
 mod path_tests {
     use super::normalize_windows_shell_path;
+
+    #[test]
+    fn installed_skill_paths_use_package_filters_without_installing_missing_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        let package = dir.path().join("package");
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::create_dir_all(package.join("skills/example")).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"pi":{"skills":["skills"]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("skills/example/SKILL.md"),
+            "---\nname: example\ndescription: Example\n---",
+        )
+        .unwrap();
+        std::fs::write(agent.join("settings.json"), serde_json::json!({"packages":[package.to_string_lossy(),"npm:nonexistent-offline-skill-fixture"]}).to_string()).unwrap();
+        let manager = super::PackageManager::new(super::ResolveRequest {
+            cwd: dir.path().into(),
+            agent_dir: agent.clone(),
+            project_trusted: false,
+            explicit_sources: Vec::new(),
+            discover_extensions: false,
+        });
+        assert!(!manager.installed_skill_paths().is_empty());
+        assert!(!agent.join("npm").exists());
+    }
 
     #[test]
     fn windows_shell_paths_cover_msys_cygwin_and_wsl_shapes() {

@@ -7,7 +7,7 @@
 //! configuration into [`McpServerConfig`] and inject [`McpToolSet::plugin`]
 //! through their own generation seam.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,15 +17,20 @@ use pi_core::{
     AgentPlugin, ContentBlock, ImageContent, PluginId, RegisterContext, TextContent, Tool,
     ToolCallId, ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdateSink,
 };
-use rmcp::model::{CallToolRequestParams, ContentBlock as McpContentBlock, Tool as McpToolSpec};
-use rmcp::service::RunningService;
-use rmcp::transport::TokioChildProcess;
-use rmcp::{Peer, RoleClient, ServiceExt};
+use rmcp::model::{
+    CallToolRequest, CallToolRequestParams, ClientRequest, ContentBlock as McpContentBlock,
+    ServerResult, Tool as McpToolSpec,
+};
+use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RunningService};
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
+use rmcp::{Peer, RoleClient};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +40,27 @@ pub struct McpServerConfig {
 }
 
 impl McpServerConfig {
+    pub fn http(name: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            transport: McpTransport::Http {
+                url: url.into(),
+                headers: BTreeMap::new(),
+            },
+        }
+    }
+
+    pub fn headers(mut self, headers: BTreeMap<String, String>) -> Self {
+        if let McpTransport::Http {
+            headers: configured,
+            ..
+        } = &mut self.transport
+        {
+            *configured = headers;
+        }
+        self
+    }
+
     pub fn stdio(name: impl Into<String>, command: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -48,33 +74,44 @@ impl McpServerConfig {
     }
 
     pub fn args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        let McpTransport::Stdio {
+        if let McpTransport::Stdio {
             args: configured, ..
-        } = &mut self.transport;
-        *configured = args.into_iter().map(Into::into).collect();
+        } = &mut self.transport
+        {
+            *configured = args.into_iter().map(Into::into).collect();
+        }
         self
     }
 
     pub fn env(mut self, env: BTreeMap<String, String>) -> Self {
-        let McpTransport::Stdio {
+        if let McpTransport::Stdio {
             env: configured, ..
-        } = &mut self.transport;
-        *configured = env;
+        } = &mut self.transport
+        {
+            *configured = env;
+        }
         self
     }
 
     pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
-        let McpTransport::Stdio {
+        if let McpTransport::Stdio {
             cwd: configured, ..
-        } = &mut self.transport;
-        *configured = Some(cwd.into());
+        } = &mut self.transport
+        {
+            *configured = Some(cwd.into());
+        }
         self
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum McpTransport {
+    Http {
+        url: String,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+    },
     Stdio {
         command: String,
         #[serde(default)]
@@ -84,6 +121,16 @@ pub enum McpTransport {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<PathBuf>,
     },
+}
+
+// Transport configuration can contain credentials, including arguments and URLs.
+impl std::fmt::Debug for McpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Stdio { .. } => "Stdio { .. }",
+            Self::Http { .. } => "Http { .. }",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -104,6 +151,13 @@ pub enum McpError {
     DuplicateServerName(String),
     #[error("MCP stdio command for server {0} must not be empty")]
     EmptyCommand(String),
+    #[error("invalid MCP HTTP configuration for server {server}: {message}")]
+    InvalidHttp {
+        server: String,
+        message: &'static str,
+    },
+    #[error("MCP connection or tool discovery timed out for server {0}")]
+    Timeout(String),
     #[error("failed to start MCP server {server}: {message}")]
     Start { server: String, message: String },
     #[error("failed to initialize MCP server {server}: {message}")]
@@ -156,16 +210,17 @@ impl McpToolSet {
         let mut names = HashSet::new();
 
         for config in configs {
-            let server = connect_stdio(config).await?;
-            let remote_tools =
-                server
-                    .peer
-                    .list_all_tools()
-                    .await
-                    .map_err(|error| McpError::ListTools {
-                        server: server.name.clone(),
-                        message: error.to_string(),
-                    })?;
+            let name = config.name.clone();
+            let server = tokio::time::timeout(CONNECT_TIMEOUT, connect_server(config))
+                .await
+                .map_err(|_| McpError::Timeout(name.clone()))??;
+            let remote_tools = tokio::time::timeout(CONNECT_TIMEOUT, server.peer.list_all_tools())
+                .await
+                .map_err(|_| McpError::Timeout(name))?
+                .map_err(|_| McpError::ListTools {
+                    server: server.name.clone(),
+                    message: "server rejected discovery or the connection closed".into(),
+                })?;
             for remote in remote_tools {
                 let tool = Arc::new(McpTool::new(Arc::clone(&server), remote));
                 if !names.insert(tool.descriptor.name.clone()) {
@@ -196,7 +251,7 @@ impl McpToolSet {
             .collect()
     }
 
-    /// Closes all child transports and waits for process cleanup.
+    /// Closes all transports and waits for child-process cleanup.
     pub async fn shutdown(&self) -> Result<(), McpError> {
         let mut first_error = None;
         for server in &self.inner.servers {
@@ -223,31 +278,70 @@ impl McpToolSet {
     }
 }
 
-async fn connect_stdio(config: McpServerConfig) -> Result<Arc<ConnectedServer>, McpError> {
+async fn connect_server(config: McpServerConfig) -> Result<Arc<ConnectedServer>, McpError> {
     let McpServerConfig { name, transport } = config;
-    let McpTransport::Stdio {
-        command,
-        args,
-        env,
-        cwd,
-    } = transport;
-    let mut process = tokio::process::Command::new(command);
-    process.args(args).envs(env);
-    if let Some(cwd) = cwd {
-        process.current_dir(cwd);
-    }
-    let transport = TokioChildProcess::new(process).map_err(|error| McpError::Start {
-        server: name.clone(),
-        message: error.to_string(),
-    })?;
-    let service =
-        ().serve(transport)
-            .await
-            .map_err(|error| McpError::Initialize {
-                server: name.clone(),
-                message: error.to_string(),
-            })?;
+    let auto = ClientLifecycleMode::Auto {
+        preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
+        legacy_version: Some(rmcp::model::ProtocolVersion::LATEST),
+    };
+    let service = match connect_once(&name, &transport, auto).await {
+        Ok(service) => service,
+        // Some deployed legacy servers return an uncorrelated JSON-RPC error
+        // to server/discover. A fresh transport can still complete the stable
+        // initialize handshake; retrying cannot reuse ambiguous transport state.
+        Err(McpError::Initialize { .. }) => {
+            connect_once(&name, &transport, ClientLifecycleMode::Initialize).await?
+        }
+        Err(error) => return Err(error),
+    };
     Ok(connected_server(name, service))
+}
+
+async fn connect_once(
+    name: &str,
+    config: &McpTransport,
+    lifecycle: ClientLifecycleMode,
+) -> Result<RunningService<RoleClient, ()>, McpError> {
+    match config {
+        McpTransport::Http { url, headers } => {
+            // reqwest 0.13's no-provider feature requires an explicit default.
+            // Respect an embedding host's choice, otherwise match Pi's ring backend.
+            if rustls::crypto::CryptoProvider::get_default().is_none() {
+                let _ = rustls::crypto::ring::default_provider().install_default();
+            }
+            let headers = http_headers(name, headers)?;
+            let transport = StreamableHttpClientTransport::from_config(
+                StreamableHttpClientTransportConfig::with_uri(url.clone()).custom_headers(headers),
+            );
+            ().serve_with_lifecycle(transport, lifecycle).await
+        }
+        McpTransport::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } => {
+            let mut process = tokio::process::Command::new(command);
+            process.args(args).envs(env);
+            if let Some(cwd) = cwd {
+                process.current_dir(cwd);
+            }
+            // Child logs must not corrupt the TUI / protocol channel or expose
+            // credentials. Protocol failures are surfaced through typed errors.
+            let (transport, _) = TokioChildProcess::builder(process)
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|error| McpError::Start {
+                    server: name.to_string(),
+                    message: error.to_string(),
+                })?;
+            ().serve_with_lifecycle(transport, lifecycle).await
+        }
+    }
+    .map_err(|_| McpError::Initialize {
+        server: name.to_string(),
+        message: "handshake failed; check endpoint, credentials and server availability".into(),
+    })
 }
 
 fn connected_server(name: String, service: RunningService<RoleClient, ()>) -> Arc<ConnectedServer> {
@@ -258,7 +352,7 @@ fn connected_server(name: String, service: RunningService<RoleClient, ()>) -> Ar
     })
 }
 
-fn validate_configs(configs: &[McpServerConfig]) -> Result<(), McpError> {
+pub fn validate_configs(configs: &[McpServerConfig]) -> Result<(), McpError> {
     let mut names = HashSet::new();
     for config in configs {
         let name = config.name.trim();
@@ -268,12 +362,66 @@ fn validate_configs(configs: &[McpServerConfig]) -> Result<(), McpError> {
         if !names.insert(name.to_string()) {
             return Err(McpError::DuplicateServerName(name.to_string()));
         }
-        let McpTransport::Stdio { command, .. } = &config.transport;
-        if command.trim().is_empty() {
-            return Err(McpError::EmptyCommand(name.to_string()));
+        match &config.transport {
+            McpTransport::Stdio { command, .. } if command.trim().is_empty() => {
+                return Err(McpError::EmptyCommand(name.to_string()));
+            }
+            McpTransport::Http { url, headers } => {
+                let parsed = url::Url::parse(url).map_err(|_| McpError::InvalidHttp {
+                    server: name.into(),
+                    message: "expected an absolute http(s) URL",
+                })?;
+                if !matches!(parsed.scheme(), "http" | "https")
+                    || parsed.host_str().is_none()
+                    || !parsed.username().is_empty()
+                    || parsed.password().is_some()
+                    || parsed.fragment().is_some()
+                {
+                    return Err(McpError::InvalidHttp {
+                        server: name.into(),
+                        message: "use http(s), no URL userinfo or fragment; put authentication in headers",
+                    });
+                }
+                http_headers(name, headers)?;
+            }
+            _ => {}
         }
     }
     Ok(())
+}
+
+fn http_headers(
+    name: &str,
+    headers: &BTreeMap<String, String>,
+) -> Result<HashMap<http::HeaderName, http::HeaderValue>, McpError> {
+    let invalid = || McpError::InvalidHttp {
+        server: name.into(),
+        message: "invalid, duplicate or protocol-owned header",
+    };
+    let mut result = HashMap::new();
+    for (key, value) in headers {
+        let key: http::HeaderName = key.parse().map_err(|_| invalid())?;
+        if matches!(
+            key.as_str(),
+            "host"
+                | "content-length"
+                | "content-type"
+                | "accept"
+                | "connection"
+                | "transfer-encoding"
+                | "mcp-session-id"
+                | "mcp-protocol-version"
+                | "last-event-id"
+        ) {
+            return Err(invalid());
+        }
+        let mut value: http::HeaderValue = value.parse().map_err(|_| invalid())?;
+        value.set_sensitive(true);
+        if result.insert(key, value).is_some() {
+            return Err(invalid());
+        }
+    }
+    Ok(result)
 }
 
 struct McpToolPlugin {
@@ -359,13 +507,35 @@ impl Tool for McpTool {
                 "arguments must be a JSON object".to_string(),
             ));
         };
-        let request = self.server.peer.call_tool(
-            CallToolRequestParams::new(self.remote_name.clone()).with_arguments(arguments),
-        );
-        tokio::pin!(request);
-        let result = tokio::select! {
-            result = &mut request => result.map_err(|error| ToolError::Execution(error.to_string()))?,
-            () = context.signal().wait() => return Err(ToolError::Aborted),
+        context.signal().check().map_err(|_| ToolError::Aborted)?;
+        let failure = || {
+            ToolError::Execution(format!(
+                "MCP request failed for server {}",
+                self.server.name
+            ))
+        };
+        let mut request = self
+            .server
+            .peer
+            .send_cancellable_request(
+                ClientRequest::CallToolRequest(CallToolRequest::new(
+                    CallToolRequestParams::new(self.remote_name.clone()).with_arguments(arguments),
+                )),
+                Default::default(),
+            )
+            .await
+            .map_err(|_| failure())?;
+        let response = tokio::select! {
+            result = &mut request.rx => result.map_err(|_| failure())?.map_err(|_| failure())?,
+            () = context.signal().wait() => {
+                // The SDK sends a legacy cancellation notification or closes the
+                // modern request stream, depending on the negotiated lifecycle.
+                let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, request.cancel(Some("cancelled by user".into()))).await;
+                return Err(ToolError::Aborted);
+            },
+        };
+        let ServerResult::CallToolResult(result) = response else {
+            return Err(failure());
         };
         let details = serde_json::to_value(&result).ok();
         let is_error = result.is_error.unwrap_or(false);
@@ -420,6 +590,7 @@ fn identifier_component(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use rmcp::ServiceExt;
     use rmcp::{
         ServerHandler,
         handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -516,5 +687,232 @@ mod tests {
             ]),
             Err(McpError::DuplicateServerName(name)) if name == "one"
         ));
+    }
+
+    #[tokio::test]
+    async fn streamable_http_discovers_and_calls_over_json_and_sse() {
+        use rmcp::transport::streamable_http_server::{
+            StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        };
+        for json_response in [true, false] {
+            let config = StreamableHttpServerConfig::default()
+                .with_legacy_session_mode(false)
+                .with_json_response(json_response);
+            let cancellation = config.cancellation_token.clone();
+            let service: StreamableHttpService<EchoServer, LocalSessionManager> =
+                StreamableHttpService::new(|| Ok(EchoServer::new()), Default::default(), config);
+            let router =
+                axum::Router::new()
+                    .nest_service("/mcp", service)
+                    .layer(axum::middleware::from_fn(
+                        |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                            if request
+                                .headers()
+                                .get("authorization")
+                                .and_then(|v| v.to_str().ok())
+                                != Some("Bearer fixture-token")
+                            {
+                                return axum::response::IntoResponse::into_response(
+                                    http::StatusCode::UNAUTHORIZED,
+                                );
+                            }
+                            next.run(request).await
+                        },
+                    ));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            let config = McpServerConfig::http("remote", &url).headers(BTreeMap::from([(
+                "Authorization".into(),
+                "Bearer fixture-token".into(),
+            )]));
+            let pool = McpToolSet::connect(vec![config]).await.unwrap();
+            assert_eq!(pool.tools()[0].name, "mcp__remote__echo");
+            let (_, signal) = pi_core::AbortHandle::new();
+            let (updates, _) = ToolUpdateSink::channel();
+            let result = pool.inner.tools[0]
+                .execute(
+                    ToolContext::standalone(PathBuf::from("/tmp"), signal),
+                    "call".into(),
+                    serde_json::json!({"text":"http echo"}),
+                    updates,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                result.content,
+                vec![ContentBlock::Text(TextContent::new("http echo"))]
+            );
+            pool.shutdown().await.unwrap();
+            let error = McpToolSet::connect(vec![McpServerConfig::http(
+                "remote",
+                format!("{url}?secret=do-not-log"),
+            )])
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(!error.contains("do-not-log"));
+            assert!(error.contains("handshake failed"));
+            cancellation.cancel();
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
+    #[test]
+    fn http_validation_and_debug_do_not_expose_secrets() {
+        for url in [
+            "file:///tmp/mcp",
+            "https://user:secret@example.com/mcp",
+            "not a url",
+        ] {
+            assert!(validate_configs(&[McpServerConfig::http("test", url)]).is_err());
+        }
+        let config = McpServerConfig::http("test", "https://example.com/mcp?token=secret").headers(
+            BTreeMap::from([("Authorization".into(), "Bearer secret".into())]),
+        );
+        assert!(validate_configs(std::slice::from_ref(&config)).is_ok());
+        assert!(!format!("{config:?}").contains("secret"));
+        for key in ["Host", "Accept", "Mcp-Session-Id", "bad header"] {
+            assert!(
+                validate_configs(&[config
+                    .clone()
+                    .headers(BTreeMap::from([(key.into(), "secret".into())]))])
+                .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_legacy_initialize_over_streamable_http() {
+        use axum::response::IntoResponse;
+        use serde_json::json;
+        let router = axum::Router::new().route("/mcp", axum::routing::post(|axum::Json(request): axum::Json<Value>| async move {
+            let id = &request["id"];
+            if id.is_null() { return http::StatusCode::ACCEPTED.into_response(); }
+            let result = match request["method"].as_str().unwrap() {
+                "server/discover" => return axum::Json(json!({"jsonrpc":"2.0", "id":"server-error", "error":{"code":-32602,"message":"Invalid request parameters"}})).into_response(),
+                "initialize" => json!({"protocolVersion":"2025-03-26", "capabilities":{"tools":{}}, "serverInfo":{"name":"legacy","version":"1"}}),
+                "tools/list" => json!({"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}),
+                "tools/call" => json!({"content":[{"type":"text","text":"legacy response"}]}),
+                method => panic!("unexpected method {method}"),
+            };
+            axum::Json(json!({"jsonrpc":"2.0","id":id,"result":result})).into_response()
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = McpServerConfig::http(
+            "legacy",
+            format!("http://{}/mcp", listener.local_addr().unwrap()),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let pool = McpToolSet::connect(vec![config]).await.unwrap();
+        let (_, signal) = pi_core::AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let result = pool.inner.tools[0]
+            .execute(
+                ToolContext::standalone(PathBuf::from("/tmp"), signal),
+                "call".into(),
+                json!({}),
+                updates,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.content,
+            vec![ContentBlock::Text(TextContent::new("legacy response"))]
+        );
+        pool.shutdown().await.unwrap();
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn abort_closes_the_remote_stream_not_only_the_local_wait() {
+        use rmcp::transport::streamable_http_server::{
+            StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        };
+        #[derive(Clone)]
+        struct Probe {
+            started: Arc<tokio::sync::Notify>,
+            cancelled: Arc<tokio::sync::Notify>,
+        }
+        impl ServerHandler for Probe {
+            fn get_info(&self) -> ServerInfo {
+                ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            }
+            async fn call_tool(
+                &self,
+                _: CallToolRequestParams,
+                context: rmcp::service::RequestContext<rmcp::RoleServer>,
+            ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+                self.started.notify_one();
+                context.ct.cancelled().await;
+                self.cancelled.notify_one();
+                Ok(rmcp::model::CallToolResult::success(vec![]).into())
+            }
+        }
+        let probe = Probe {
+            started: Arc::new(tokio::sync::Notify::new()),
+            cancelled: Arc::new(tokio::sync::Notify::new()),
+        };
+        let server_probe = probe.clone();
+        let config = StreamableHttpServerConfig::default()
+            .with_legacy_session_mode(false)
+            .with_sse_keep_alive(Some(Duration::from_millis(20)));
+        let ct = config.cancellation_token.clone();
+        let service: StreamableHttpService<Probe, LocalSessionManager> = StreamableHttpService::new(
+            move || Ok(server_probe.clone()),
+            Default::default(),
+            config,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = McpServerConfig::http(
+            "probe",
+            format!("http://{}/mcp", listener.local_addr().unwrap()),
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().nest_service("/mcp", service))
+                .await
+                .unwrap();
+        });
+        let server = connect_server(config).await.unwrap();
+        let tool = McpTool::new(
+            server.clone(),
+            McpToolSpec::new(
+                "wait",
+                "Wait",
+                Arc::new(serde_json::Map::from_iter([(
+                    "type".into(),
+                    Value::String("object".into()),
+                )])),
+            ),
+        );
+        let (abort, signal) = pi_core::AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let call = tokio::spawn(async move {
+            tool.execute(
+                ToolContext::standalone(PathBuf::from("/tmp"), signal),
+                "call".into(),
+                serde_json::json!({}),
+                updates,
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), probe.started.notified())
+            .await
+            .unwrap();
+        abort.abort();
+        assert!(matches!(call.await.unwrap(), Err(ToolError::Aborted)));
+        tokio::time::timeout(Duration::from_secs(3), probe.cancelled.notified())
+            .await
+            .unwrap();
+        drop(server);
+        ct.cancel();
+        task.abort();
+        let _ = task.await;
     }
 }

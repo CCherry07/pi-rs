@@ -145,9 +145,10 @@ unsolicited `extension_ui_response` messages are currently ignored.
 
 `--acp` serves the official ACP stable-v1 JSON-RPC protocol over stdin/stdout. It supports new,
 prompt, cancel, load, resume, list, and close, streams text/thought/tool updates, exposes model and
-thinking selectors, and accepts per-session stdio MCP servers. ACP sessions use the normal Pi v4
+thinking selectors, and accepts per-session stdio and Streamable HTTP MCP servers. ACP sessions use the normal Pi v4
 store, while client-provided MCP configuration is transient and must be provided again on
-load/resume. ACP mode currently requires `--no-extensions` when JavaScript/TypeScript extensions
+load/resume. Local `mcp.json` files are not loaded in ACP mode, even for an empty client server list.
+Legacy HTTP+SSE servers are not supported. ACP mode currently requires `--no-extensions` when JavaScript/TypeScript extensions
 would otherwise be active; native Rust plugins continue to work.
 
 Shell shorthand works in interactive and one-shot frontends and does not require provider
@@ -653,6 +654,54 @@ run-local override.
 Like current Pi, `HERMES.md`, `AGENTS.md`, and `CLAUDE.md` context discovery is independent of
 project trust. Trusted repositories may provide `.hermes/skills` and `.agents/skills`; skills
 under `~/.agents/skills` are also supported.
+
+## MCP servers
+
+Configure MCP separately from settings in `~/.pi/agent/mcp.json` (or `$PI_AGENT_DIR/mcp.json`)
+and trusted `<project>/.pi/mcp.json`:
+
+```json
+{
+  "version": 1,
+  "mcpServers": {
+    "remote": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer ${MCP_TOKEN}" }
+    },
+    "local": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/absolute/path/to/server.js"],
+      "env": { "API_KEY": "${LOCAL_API_KEY}" },
+      "enabled": false
+    }
+  }
+}
+```
+
+Project entries replace global servers by name; use `{ "enabled": false }` to disable a global
+server in one project. Project files require the normal `/trust` decision. Missing `type` is
+inferred from `command` or `url`. Environment references resolve only when connecting; missing
+variables fail visibly, and shell expressions are never executed. Explicit relative `cwd` is
+relative to the configuration directory; omitted `cwd` uses the session's working directory.
+
+`http` means Streamable HTTP, including both JSON and SSE responses. The old standalone HTTP+SSE
+transport is not supported. Static/environment-backed authentication headers are supported;
+interactive OAuth is not yet implemented. HTTP redirects are disabled to protect credentials.
+
+```text
+/mcp                  # generation-local servers and discovered tool counts
+/mcp paths            # configuration locations
+/mcp test remote      # explicitly connect to a saved configuration and list tools
+/mcp reload           # atomically rebuild the current session
+```
+
+Every enabled server must connect and finish discovery for a candidate generation to activate.
+Connection and discovery each have a 30-second per-server timeout. Invalid configuration or an
+unavailable server leaves an existing session unchanged on reload. Fix the file (or disable that
+server) before creating a new session. MCP tools are named `mcp__<server>__<tool>`; names must remain
+unique after normalization. Configurations and credentials are not stored in session logs.
 
 ## Plugins and extensions
 

@@ -182,7 +182,8 @@
     }
   },
   "notices": {
-    "sessionStopped": "会话已停止。"
+    "sessionStopped": "会话已停止。",
+    "sessionStopFailed": "终止会话失败：{{error}}"
   },
   "transcript": {
     "user": "用户",

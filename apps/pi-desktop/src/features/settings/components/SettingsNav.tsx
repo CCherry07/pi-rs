@@ -7,6 +7,8 @@ import GitBranch from "lucide-react/dist/esm/icons/git-branch";
 import FileText from "lucide-react/dist/esm/icons/file-text";
 import ExternalLink from "lucide-react/dist/esm/icons/external-link";
 import Layers from "lucide-react/dist/esm/icons/layers";
+import BookOpen from "lucide-react/dist/esm/icons/book-open";
+import Plug from "lucide-react/dist/esm/icons/plug";
 import Info from "lucide-react/dist/esm/icons/info";
 import { useTranslation } from "react-i18next";
 import { PanelNavItem, PanelNavList } from "@/features/design-system/components/panel/PanelPrimitives";
@@ -54,6 +56,12 @@ export function SettingsNav({
           onClick={() => onSelectSection("environments")}
         >
           {t(SETTINGS_SECTION_LABEL_KEYS.environments)}
+        </PanelNavItem>
+        <PanelNavItem className="settings-nav" icon={<BookOpen aria-hidden />} active={activeSection === "skills"} showDisclosure={showDisclosure} onClick={() => onSelectSection("skills")}>
+          {t(SETTINGS_SECTION_LABEL_KEYS.skills)}
+        </PanelNavItem>
+        <PanelNavItem className="settings-nav" icon={<Plug aria-hidden />} active={activeSection === "mcp"} showDisclosure={showDisclosure} onClick={() => onSelectSection("mcp")}>
+          {t(SETTINGS_SECTION_LABEL_KEYS.mcp)}
         </PanelNavItem>
         <PanelNavItem
           className="settings-nav"

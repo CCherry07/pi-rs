@@ -8,11 +8,17 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 pi-core.workspace = true
-rmcp = { version = "3.1.4", default-features = false, features = ["client", "transport-child-process"] }
+# 3.3's concurrent HTTP worker can cancel a POST before response headers arrive.
+rmcp = { version = "=3.3.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
+# Match the existing provider transports; do not enable two competing rustls defaults.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+http = "1"
+url = "2"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "process"] }
 
 [dev-dependencies]
-rmcp = { version = "3.1.4", default-features = false, features = ["client", "macros", "server", "transport-child-process"] }
+rmcp = { version = "=3.3.0", default-features = false, features = ["client", "macros", "server", "transport-child-process", "transport-streamable-http-server"] }
+axum = "0.8"

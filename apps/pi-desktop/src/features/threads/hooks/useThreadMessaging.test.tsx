@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { sendUserMessage as sendService, steerTurn } from "@services/tauri";
+import { interruptTurn, sendUserMessage as sendService, steerTurn } from "@services/tauri";
 import { useThreadMessaging } from "./useThreadMessaging";
 import { useThreadStatus } from "./useThreadStatus";
 
@@ -91,5 +91,77 @@ describe("native submit receipts", () => {
     await act(async () => expect(await result.current.sendUserMessage("/native notice", [], { sendIntent: "steer" })).toEqual({ status: "handled" }));
     expect(opts.markProcessing).not.toHaveBeenCalledWith("thread", false);
     expect(sendService).not.toHaveBeenCalled();
+  });
+});
+
+describe("turn interruption", () => {
+  it("does not report a stopped session until the backend accepts the interrupt", async () => {
+    let resolve!: (value: Record<string, unknown>) => void;
+    vi.mocked(interruptTurn).mockImplementationOnce(() => new Promise((yes) => { resolve = yes; }));
+    const opts = options();
+    opts.activeTurnIdByThread = { thread: "turn" };
+    const { result } = renderHook(() => useThreadMessaging(opts));
+
+    let pending!: Promise<void>;
+    await act(async () => { pending = result.current.interruptTurn(); });
+    expect(opts.markProcessing).not.toHaveBeenCalled();
+    expect(opts.setActiveTurnId).not.toHaveBeenCalled();
+    expect(opts.dispatch).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: "addAssistantMessage",
+    }));
+
+    await act(async () => {
+      resolve({ ok: true });
+      await pending;
+    });
+    expect(opts.markProcessing).toHaveBeenCalledWith("thread", false);
+    expect(opts.setActiveTurnId).toHaveBeenCalledWith("thread", null);
+    expect(opts.dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      type: "addAssistantMessage",
+      threadId: "thread",
+    }));
+  });
+
+  it("keeps the run active and reports an interrupt error when the backend rejects it", async () => {
+    vi.mocked(interruptTurn).mockRejectedValueOnce(new Error("unknown isolated session"));
+    const opts = options();
+    opts.activeTurnIdByThread = { thread: "turn" };
+    const { result } = renderHook(() => useThreadMessaging(opts));
+
+    await act(async () => { await result.current.interruptTurn(); });
+
+    expect(opts.markProcessing).not.toHaveBeenCalled();
+    expect(opts.setActiveTurnId).not.toHaveBeenCalled();
+    expect(opts.dispatch).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: "addAssistantMessage",
+    }));
+    expect(opts.pushThreadErrorMessage).toHaveBeenCalledWith(
+      "thread",
+      expect.stringContaining("unknown isolated session"),
+    );
+  });
+
+  it("does not let a late interrupt receipt clear a newer lifecycle state", async () => {
+    let resolve!: (value: Record<string, unknown>) => void;
+    let revision = 0;
+    vi.mocked(interruptTurn).mockImplementationOnce(() => new Promise((yes) => { resolve = yes; }));
+    const opts = options();
+    opts.activeTurnIdByThread = { thread: "turn" };
+    opts.getStatusRevision = () => revision;
+    const { result } = renderHook(() => useThreadMessaging(opts));
+
+    let pending!: Promise<void>;
+    await act(async () => { pending = result.current.interruptTurn(); });
+    revision += 1;
+    await act(async () => {
+      resolve({ ok: true });
+      await pending;
+    });
+
+    expect(opts.markProcessing).not.toHaveBeenCalled();
+    expect(opts.setActiveTurnId).not.toHaveBeenCalled();
+    expect(opts.dispatch).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: "addAssistantMessage",
+    }));
   });
 });

@@ -27,7 +27,7 @@ use pi_plugin_prompts::{PromptTemplateLoaderOptions, PromptTemplatesPlugin};
 use pi_plugin_read::ConfiguredReadPlugin;
 use pi_plugin_schedule::{ScheduleOptions, SchedulePlugin, ScheduleSessionPlugin};
 use pi_plugin_session_transfer::SessionTransferPlugin;
-use pi_plugin_skills::{SkillLoaderOptions, SkillsPlugin};
+use pi_plugin_skills::SkillsPlugin;
 use pi_plugin_subagents::{
     SubagentLoaderOptions, SubagentRuntime, SubagentSkillPromptProjector, SubagentsPlugin,
     SubagentsSessionPlugin,
@@ -195,6 +195,16 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             &settings.project().prompts,
             &config.cwd.join(".pi"),
         );
+        let local_mcp = if config.load_mcp_config {
+            Some(
+                crate::mcp::McpLibrary::new(&config.agent_dir, Some(&config.cwd), project_trusted)
+                    .prepare()
+                    .await
+                    .map_err(SessionError::Runtime)?,
+            )
+        } else {
+            None
+        };
         let memory = build_memory_provider(&config, Some(&path), project_trusted)
             .await
             .map_err(SessionError::Runtime)?;
@@ -284,6 +294,7 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             js_generation.as_ref(),
             dynamic_provider_candidate.as_ref(),
             RuntimeBuildExtras {
+                local_mcp,
                 generation_overlay: &generation_overlay,
                 codex_credentials: None,
                 plugin_context: Some(Arc::clone(&context_access)),
@@ -560,6 +571,7 @@ fn build_runtime_with_codex_credentials(
         js_generation,
         dynamic_providers,
         RuntimeBuildExtras {
+            local_mcp: None,
             generation_overlay: &SessionGenerationOverlay::default(),
             codex_credentials,
             plugin_context: None,
@@ -584,6 +596,7 @@ async fn build_runtime_with_first_party_memory(
         None,
         None,
         RuntimeBuildExtras {
+            local_mcp: None,
             generation_overlay: &generation_overlay,
             codex_credentials: Some(pi_plugin_openai::CodexCredentials::default()),
             plugin_context: None,
@@ -594,6 +607,7 @@ async fn build_runtime_with_first_party_memory(
 }
 
 struct RuntimeBuildExtras<'a> {
+    local_mcp: Option<Arc<dyn pi_core::AgentPlugin>>,
     generation_overlay: &'a SessionGenerationOverlay,
     codex_credentials: Option<pi_plugin_openai::CodexCredentials>,
     plugin_context: Option<Arc<dyn PluginContext>>,
@@ -620,18 +634,12 @@ fn build_runtime_inner(
     let codex_transport_options = codex_transport_options(config);
     let builtin_providers = BuiltinProviderSet::load(config, extras.codex_credentials.clone())?;
     let effective_api_key = builtin_providers.effective_api_key().map(str::to_string);
-    let mut skill_options = SkillLoaderOptions::new(&config.cwd, &config.agent_dir);
-    skill_options.project_trusted = project_trusted;
-    skill_options.enable_commands = config.runtime_settings.enable_skill_commands;
-    skill_options
-        .additional_paths
-        .extend(config.settings_skill_paths.iter().cloned());
+    let skill_options =
+        crate::skills::runtime_skill_options(config, project_trusted, memory_is_hermes);
     if memory_is_hermes {
-        let roots = managed_skill_roots(&config.agent_dir, &config.cwd, project_trusted);
         skill_activity_observer = Some(pi_plugin_memory_hermes::curator::activity_observer(
-            roots.clone(),
+            managed_skill_roots(&config.agent_dir, &config.cwd, project_trusted),
         ));
-        skill_options.additional_paths.extend(roots);
     }
     let mut prompt_template_options =
         PromptTemplateLoaderOptions::new(&config.cwd, &config.agent_dir);
@@ -641,11 +649,6 @@ fn build_runtime_inner(
         .extend(config.settings_prompt_paths.iter().cloned());
     let mut subagent_options = SubagentLoaderOptions::new(&config.cwd, &config.agent_dir);
     subagent_options.project_trusted = project_trusted;
-    if let Some(home) = std::env::var_os("HOME") {
-        skill_options
-            .additional_paths
-            .push(std::path::PathBuf::from(home).join(".agents/skills"));
-    }
     let mut model_options = ModelsPluginOptions::for_agent_dir(&config.agent_dir);
     if let Some(api_key) = &effective_api_key {
         model_options = model_options.runtime_api_key(config.provider.clone(), api_key.clone());
@@ -735,6 +738,10 @@ fn build_runtime_inner(
         .agent_plugin_factory(|| HashlineEditPlugin)
         .agent_plugin_factory(move || ConfiguredBashPlugin::new(bash_options.clone()));
     let mut builder = native_plugins.apply_runtime(builder);
+    if let Some(plugin) = extras.local_mcp {
+        builder =
+            builder.try_agent_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)));
+    }
     if let Some(js_generation) = js_generation {
         for plugin in js_generation.agent_plugins() {
             builder = builder.try_agent_plugin_arc_factory({
@@ -960,7 +967,7 @@ fn session_compaction_settings(config: &ProductConfig) -> SessionCompactionSetti
     }
 }
 
-fn scoped_setting_paths(
+pub(crate) fn scoped_setting_paths(
     global: &[String],
     global_base: &std::path::Path,
     project: &[String],
@@ -1188,6 +1195,7 @@ command = "fixture-command"
             native_plugins: Vec::new(),
             extensions: Vec::new(),
             discover_extensions: true,
+            load_mcp_config: true,
             extension_flag_values: std::collections::BTreeMap::new(),
             runtime_settings: pi_settings::SettingsValues::default(),
             settings_skill_paths: Vec::new(),

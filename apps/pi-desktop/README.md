@@ -23,7 +23,8 @@ Currently wired:
 
 - workspace persistence;
 - list, create, resume, fork, rename, archive, and compact Pi sessions;
-- text and image submission, steering, interruption, and live streaming;
+- text and image submission, steering, interruption (including observed subagent runs), and live
+  streaming;
 - reasoning, generic tool, shell output, error, usage, and native plugin notice events;
 - live-session native command and skill slash completion, with argument hints;
 - single-pass runtime command submission, including handled commands, transformed prompts,
@@ -85,6 +86,20 @@ export OPENAI_MODEL=gpt-4o-mini
 endpoint can omit `OPENAI_API_KEY`. Set `PI_AGENT_DIR` to override the default
 `~/.pi/agent` session/resources directory.
 
+## MCP settings
+
+Settings → MCP manages independent global and trusted-project `mcp.json` files without creating
+a session. Add/select a server for basic fields, toggle enabled state, or use the `mcp.json` tab
+to edit headers, env, cwd and unknown/advanced fields directly. New servers start disabled.
+Save writes atomically with external-change detection; Test connects only to saved, enabled
+configuration and reports discovered tools. Saving does not alter an existing runtime:
+run `/mcp reload` in that conversation (or restart the app). `/mcp` and `/mcp paths` also work
+through the normal registered-command path. Project entries replace global entries by name.
+
+Supported transports are stdio and Streamable HTTP (JSON/SSE responses). Legacy HTTP+SSE and
+interactive OAuth are not implemented. Use environment references such as `Bearer ${MCP_TOKEN}`
+in headers. See the [CLI MCP configuration guide](../pi-cli/README.md#mcp-servers).
+
 ## Development
 
 ```bash
@@ -107,3 +122,14 @@ cargo check
 - Agent runtime: pi-rs.
 
 See `LICENSE` and `THIRD_PARTY_NOTICES.md`.
+
+## Skill management
+
+Settings → Skills supports global/project catalog browsing, Markdown/source preview,
+new skills, local folder or Markdown import, editing, copying absolute document paths,
+and moving skills to the OS Trash. The list includes parser/collision diagnostics and
+uses actual file paths independently of slash-command availability. Existing sessions
+are not reloaded when files change; restart the application and start a new conversation
+to refresh their generation. Project writes require the existing project trust decision.
+Symlink paths remain read-only; imports reject links/special files. Failed Trash operations
+never fall back to permanent deletion. Viewing skills does not count as Agent usage.

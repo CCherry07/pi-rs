@@ -10,6 +10,7 @@ use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
 const TRUST_REQUIRING_PI_RESOURCES: &[&str] = &[
+    "mcp.json",
     "settings.json",
     "extensions",
     "plugins",
@@ -495,11 +496,13 @@ mod tests {
 
     #[test]
     fn bare_pi_directory_does_not_require_trust() {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join(".pi")).unwrap();
-        assert!(!has_trust_requiring_project_resources(root.path()).unwrap());
-        fs::write(root.path().join(".pi/settings.json"), "{}").unwrap();
-        assert!(has_trust_requiring_project_resources(root.path()).unwrap());
+        for resource in ["settings.json", "mcp.json"] {
+            let root = tempfile::tempdir().unwrap();
+            fs::create_dir_all(root.path().join(".pi")).unwrap();
+            assert!(!has_trust_requiring_project_resources(root.path()).unwrap());
+            fs::write(root.path().join(".pi").join(resource), "{}").unwrap();
+            assert!(has_trust_requiring_project_resources(root.path()).unwrap());
+        }
     }
 
     #[test]

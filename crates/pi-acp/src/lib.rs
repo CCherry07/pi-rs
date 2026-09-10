@@ -201,8 +201,8 @@ impl AcpState {
                     .image(true)
                     .embedded_context(true),
             )
-            // Stdio MCP is ACP baseline behavior; HTTP and SSE remain false.
-            .mcp_capabilities(acp::McpCapabilities::new())
+            // HTTP means Streamable HTTP (JSON and SSE responses), not legacy SSE.
+            .mcp_capabilities(acp::McpCapabilities::new().http(true))
             .session_capabilities(
                 acp::SessionCapabilities::new()
                     .list(acp::SessionListCapabilities::new())
@@ -594,6 +594,17 @@ async fn generation_overlay(
     if servers.is_empty() {
         return Ok((SessionGenerationOverlay::new(), None));
     }
+    let configs = mcp_configs(servers, cwd)?;
+    let tools = McpToolSet::connect(configs).await.map_err(internal_error)?;
+    let overlay_tools = tools.clone();
+    let overlay = SessionGenerationOverlay::new().with_agent_plugin(move || overlay_tools.plugin());
+    Ok((overlay, Some(tools)))
+}
+
+fn mcp_configs(
+    servers: Vec<acp::McpServer>,
+    cwd: &Path,
+) -> agent_client_protocol::Result<Vec<McpServerConfig>> {
     let mut configs = Vec::with_capacity(servers.len());
     for server in servers {
         match server {
@@ -616,18 +627,23 @@ async fn generation_overlay(
                         .cwd(cwd),
                 );
             }
-            acp::McpServer::Http(_) | acp::McpServer::Sse(_) => {
+            acp::McpServer::Http(server) => {
+                let headers = server
+                    .headers
+                    .into_iter()
+                    .map(|header| (header.name, header.value))
+                    .collect();
+                configs.push(McpServerConfig::http(server.name, server.url).headers(headers));
+            }
+            acp::McpServer::Sse(_) => {
                 return Err(invalid_params(
-                    "this ACP endpoint supports stdio MCP servers only",
+                    "legacy HTTP+SSE is not supported; use a Streamable HTTP MCP endpoint",
                 ));
             }
             _ => return Err(invalid_params("unsupported MCP transport")),
         }
     }
-    let tools = McpToolSet::connect(configs).await.map_err(internal_error)?;
-    let overlay_tools = tools.clone();
-    let overlay = SessionGenerationOverlay::new().with_agent_plugin(move || overlay_tools.plugin());
-    Ok((overlay, Some(tools)))
+    Ok(configs)
 }
 
 fn reject_additional_directories(paths: &[PathBuf]) -> agent_client_protocol::Result<()> {
@@ -1035,6 +1051,28 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn maps_http_headers_verbatim_and_rejects_legacy_sse() {
+        let servers = vec![acp::McpServer::Http(
+            acp::McpServerHttp::new("remote", "https://example.com/mcp").headers(vec![
+                acp::HttpHeader::new("Authorization", "Bearer ${LITERAL}"),
+            ]),
+        )];
+        let configs = mcp_configs(servers, Path::new("/tmp")).unwrap();
+        assert_eq!(
+            configs,
+            vec![
+                McpServerConfig::http("remote", "https://example.com/mcp").headers(BTreeMap::from(
+                    [("Authorization".into(), "Bearer ${LITERAL}".into())]
+                ))
+            ]
+        );
+        let old = vec![acp::McpServer::Sse(acp::McpServerSse::new(
+            "old",
+            "https://example.com/sse",
+        ))];
+        assert!(mcp_configs(old, Path::new("/tmp")).is_err());
+    }
     use std::sync::Mutex as StdMutex;
 
     use agent_client_protocol::{ByteStreams, Client};
@@ -1145,6 +1183,8 @@ mod tests {
                     .await?;
                 assert_eq!(initialized.protocol_version, ProtocolVersion::V1);
                 assert!(initialized.agent_capabilities.load_session);
+                assert!(initialized.agent_capabilities.mcp_capabilities.http);
+                assert!(!initialized.agent_capabilities.mcp_capabilities.sse);
                 assert!(
                     initialized
                         .agent_capabilities

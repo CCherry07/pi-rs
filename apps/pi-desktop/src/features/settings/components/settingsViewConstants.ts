@@ -76,6 +76,8 @@ export const SETTINGS_SECTION_LABEL_KEYS = {
   projects: "sections.projects",
   archived: "sections.archived",
   environments: "sections.environments",
+  skills: "sections.skills",
+  mcp: "sections.mcp",
   display: "sections.display",
   about: "sections.about",
   composer: "sections.composer",

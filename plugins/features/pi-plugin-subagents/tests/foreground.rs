@@ -887,10 +887,17 @@ async fn workflow_supervisor_attention_returns_to_the_parent_and_resumes_the_sam
     let request_id = status["pendingRequestIds"][0].as_str().unwrap();
     assert_eq!(status["activityState"], "needs_attention");
     let child_id = status["nodes"][0]["runId"].clone();
+    // Providers may include unused optional string fields as empty values.
     let reply = invoke_owned_tool(
         &root,
         "subagent_supervisor",
-        json!({"action":"reply","replyTo":request_id,"message":"Preserve existing behavior"}),
+        json!({
+            "action":"reply",
+            "id":"",
+            "to":"",
+            "replyTo":request_id,
+            "message":"Preserve existing behavior"
+        }),
     )
     .await;
     assert!(!reply.is_error);

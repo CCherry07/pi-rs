@@ -12,6 +12,8 @@ use pi_core::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod management;
+
 const CONFIG_DIR_NAME: &str = ".pi";
 const AGENTS_DIR_NAME: &str = ".agents";
 const HERMES_DIR_NAME: &str = ".hermes";
@@ -459,6 +461,22 @@ fn load_skills(
     defaults: bool,
     project_trusted: bool,
 ) -> (Vec<SkillInfo>, Vec<SkillDiagnostic>) {
+    load_skill_roots(skill_roots(
+        cwd,
+        agent_dir,
+        extra,
+        defaults,
+        project_trusted,
+    ))
+}
+
+fn skill_roots(
+    cwd: &Path,
+    agent_dir: &Path,
+    extra: &[PathBuf],
+    defaults: bool,
+    project_trusted: bool,
+) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if defaults {
         if project_trusted {
@@ -478,7 +496,7 @@ fn load_skills(
         }
     }));
 
-    load_skill_roots(roots)
+    roots
 }
 
 fn load_skill_roots(
@@ -572,7 +590,17 @@ fn project_root(cwd: &Path) -> Option<&Path> {
 }
 
 fn discover_skill_files(root: &Path, include_root_md: bool) -> Vec<PathBuf> {
-    if !root.is_dir() {
+    discover_skill_files_inner(root, include_root_md, &mut HashSet::new())
+}
+
+fn discover_skill_files_inner(
+    root: &Path,
+    include_root_md: bool,
+    visited: &mut HashSet<PathBuf>,
+) -> Vec<PathBuf> {
+    if !root.is_dir()
+        || !visited.insert(std::fs::canonicalize(root).unwrap_or_else(|_| absolute(root)))
+    {
         return Vec::new();
     }
     let declared = root.join("SKILL.md");
@@ -595,7 +623,7 @@ fn discover_skill_files(root: &Path, include_root_md: bool) -> Vec<PathBuf> {
         }
         let path = entry.path();
         if path.is_dir() {
-            files.extend(discover_skill_files(&path, false));
+            files.extend(discover_skill_files_inner(&path, false, visited));
         } else if include_root_md && path.extension().is_some_and(|ext| ext == "md") {
             files.push(path);
         }
@@ -613,7 +641,15 @@ struct Frontmatter {
 
 fn load_skill(path: &Path, declared: bool) -> Result<Option<SkillInfo>, String> {
     let content = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let frontmatter = match parse_frontmatter(&content) {
+    parse_skill_document(path, &content, declared)
+}
+
+fn parse_skill_document(
+    path: &Path,
+    content: &str,
+    declared: bool,
+) -> Result<Option<SkillInfo>, String> {
+    let frontmatter = match parse_frontmatter(content) {
         Ok(frontmatter) => frontmatter,
         Err(_) if !declared => return Ok(None),
         Err(error) => return Err(error),
@@ -639,7 +675,7 @@ fn load_skill(path: &Path, declared: bool) -> Result<Option<SkillInfo>, String> 
         name,
         description,
         file_path: absolute(path),
-        content: strip_frontmatter(&content).trim().to_string(),
+        content: strip_frontmatter(content).trim().to_string(),
         disable_model_invocation: frontmatter.disable_model_invocation.unwrap_or(false),
     }))
 }

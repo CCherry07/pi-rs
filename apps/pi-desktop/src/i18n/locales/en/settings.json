@@ -1,11 +1,25 @@
 {
+  "mcp": {
+    "title": "MCP", "subtitle": "Connect local tools and remote services with stdio or Streamable HTTP.",
+    "scope": "Configuration scope", "global": "Global", "refresh": "Reload file", "save": "Save", "view": "View", "servers": "Servers", "add": "Add server",
+    "reloadHint": "Saving updates disk only. Run /mcp reload in an existing conversation to apply changes, or restart the app. Project entries replace global entries by name.",
+    "saved": "Saved. Run /mcp reload in the conversation to apply changes.", "discard": "Discard unsaved settings changes?",
+    "environmentHint": "Use ${ENV_VAR} in headers, environment variables or URLs. Values resolve only when connecting. Legacy HTTP+SSE is not supported.",
+    "working": "Working…", "enabled": "Enabled", "disabled": "Disabled", "toggle": "Enable {{name}}", "test": "Test", "testSuccess": "Connected · {{count}} tools discovered",
+    "saveBeforeTest": "Save changes before testing", "empty": "No servers in this file. Add a server or paste your configuration into mcp.json.",
+    "name": "Name", "nameConflict": "Choose a non-empty, unique server name.", "transport": "Transport", "command": "Command", "args": "Arguments (one per line)",
+    "advancedHint": "Edit headers, env, cwd and other advanced fields in the mcp.json tab. Existing fields are preserved.",
+    "remove": "Remove server", "removeConfirm": "Remove {{name}} from this configuration? Save to apply the removal.", "inherited": "Inherited from global configuration"
+  },
   "shell": {
+    "discard": "Discard unsaved settings changes?",
     "title": "Settings",
     "close": "Close settings",
     "back": "Back to settings sections",
     "sections": "Sections"
   },
   "sections": {
+    "mcp": "MCP",
     "projects": "Projects",
     "archived": "Archived Tasks",
     "environments": "Environments",
@@ -14,6 +28,7 @@
     "dictation": "Dictation",
     "shortcuts": "Shortcuts",
     "openApps": "Open in",
+    "skills": "Skills",
     "git": "Git",
     "about": "About"
   },
@@ -450,5 +465,44 @@
       "checking": "Checking...",
       "check": "Check for updates"
     }
+  },
+  "skills": {
+    "title": "Skills",
+    "subtitle": "View and manage global and project skills.",
+    "scope": "View scope / add destination",
+    "global": "Global skills",
+    "projectView": "Project view includes global and project skills discoverable in this project.",
+    "untrusted": "Project is not trusted. Project skills are not read and cannot be added. Use the existing project trust flow to authorize it.",
+    "destination": "Add destination: {{path}}",
+    "refresh": "Refresh",
+    "add": "New skill",
+    "import": "Import",
+    "importDirectory": "Import folder",
+    "importFile": "Import Markdown",
+    "search": "Search skill name, description or path",
+    "loading": "Loading...",
+    "empty": "No skills found. Create one or import a local skill.",
+    "manual": "Manual invocation only (not advertised to the model)",
+    "readOnly": "Read-only: file is not writable or its path contains a symlink.",
+    "copy": "Copy skill path",
+    "copied": "Skill path copied",
+    "copyFailed": "Copy failed: {{error}}",
+    "delete": "Delete skill",
+    "trash": "Move to Trash",
+    "deleteConfirm": "Move “{{name}}” to Trash?\n\nTarget: {{path}}\n\nCompanion files inside this directory will also be moved. Other projects or apps using this path are affected; existing conversation history is preserved.",
+    "deleted": "Moved to Trash. Existing sessions may retain the old skill information.",
+    "saved": "Skill saved; library updated.",
+    "back": "Back to list",
+    "directoryName": "Directory name",
+    "nameHelp": "Use 1–64 lowercase letters, digits or single hyphens. The document must contain valid name and description metadata.",
+    "preview": "Preview",
+    "source": "Source",
+    "content": "SKILL.md content",
+    "cancel": "Cancel",
+    "discardChanges": "Discard changes",
+    "save": "Save",
+    "saving": "Saving...",
+    "discard": "Discard unsaved skill changes?",
+    "missingDocument": "Could not read skill document"
   }
 }

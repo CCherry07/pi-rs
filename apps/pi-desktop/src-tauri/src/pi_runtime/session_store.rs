@@ -287,6 +287,28 @@ impl SessionStore {
         Ok(current)
     }
 
+    pub(crate) async fn abort(&self, id: &str) -> Result<(), String> {
+        if let Some(observed) = self.observed_isolated(id) {
+            let owner = self
+                .manager
+                .sessions()
+                .into_iter()
+                .find(|session| session.id() == observed.parent_thread_id)
+                .ok_or_else(|| {
+                    format!(
+                        "cannot stop isolated Pi session {id}: owner {} is no longer active",
+                        observed.parent_thread_id
+                    )
+                })?;
+            owner
+                .abort_isolated_session(observed.observation.isolated_id())
+                .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+        self.open(id).await?.abort();
+        Ok(())
+    }
+
     pub(crate) async fn fork(
         &self,
         id: &str,

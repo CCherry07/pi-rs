@@ -1,4 +1,20 @@
 import { invoke } from "@tauri-apps/api/core";
+
+export type McpScope = "global" | "project";
+export type McpDocument = {
+  path: string; content: string; revision: string; writable: boolean;
+  projectTrusted: boolean; diagnostic: string | null;
+  servers: { name: string; scope: McpScope; transport: string; enabled: boolean }[];
+};
+export function readMcpConfig(workspaceId: string | null, scope: McpScope): Promise<McpDocument> {
+  return invoke("pi_mcp_read", { workspaceId, scope });
+}
+export function saveMcpConfig(workspaceId: string | null, scope: McpScope, revision: string, content: string): Promise<McpDocument> {
+  return invoke("pi_mcp_save", { workspaceId, scope, revision, content });
+}
+export function testMcpConnection(workspaceId: string | null, name: string): Promise<string[]> {
+  return invoke("pi_mcp_test", { workspaceId, name });
+}
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type { Options as NotificationOptions } from "@tauri-apps/plugin-notification";
 import i18n from "../i18n";

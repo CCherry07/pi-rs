@@ -368,13 +368,7 @@ export function useThreadMessaging({
     }
     const activeTurnId = activeTurnIdByThread[activeThreadId] ?? null;
     const turnId = activeTurnId ?? "pending";
-    markProcessing(activeThreadId, false);
-    setActiveTurnId(activeThreadId, null);
-    dispatch({
-      type: "addAssistantMessage",
-      threadId: activeThreadId,
-      text: i18n.t("notices.sessionStopped", { ns: "messages" }),
-    });
+    const interruptRevision = getStatusRevision(activeThreadId);
     if (!activeTurnId) {
       pendingInterruptsRef.current.add(activeThreadId);
     }
@@ -403,7 +397,17 @@ export function useThreadMessaging({
         label: "turn/interrupt response",
         payload: response,
       });
+      if (getStatusRevision(activeThreadId) === interruptRevision) {
+        markProcessing(activeThreadId, false);
+        setActiveTurnId(activeThreadId, null);
+        dispatch({
+          type: "addAssistantMessage",
+          threadId: activeThreadId,
+          text: i18n.t("notices.sessionStopped", { ns: "messages" }),
+        });
+      }
     } catch (error) {
+      pendingInterruptsRef.current.delete(activeThreadId);
       onDebug?.({
         id: `${Date.now()}-client-turn-interrupt-error`,
         timestamp: Date.now(),
@@ -411,15 +415,24 @@ export function useThreadMessaging({
         label: "turn/interrupt error",
         payload: error instanceof Error ? error.message : String(error),
       });
+      pushThreadErrorMessage(
+        activeThreadId,
+        i18n.t("notices.sessionStopFailed", {
+          ns: "messages",
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
     }
   }, [
     activeThreadId,
     activeTurnIdByThread,
     activeWorkspace,
     dispatch,
+    getStatusRevision,
     markProcessing,
     onDebug,
     pendingInterruptsRef,
+    pushThreadErrorMessage,
     setActiveTurnId,
   ]);
 

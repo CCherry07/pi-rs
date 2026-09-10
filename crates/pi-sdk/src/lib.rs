@@ -4,8 +4,10 @@ mod builtin_providers;
 mod credentials;
 mod dynamic_providers;
 mod host;
+pub mod mcp;
 mod project_trust;
 mod session_factory;
+pub mod skills;
 
 pub use credentials::{StoredCredential, read_credentials, read_stored_credential};
 pub use host::{Pi, PiBuilder};
@@ -40,6 +42,8 @@ pub struct ProductConfig {
     pub native_plugins: Vec<PathBuf>,
     pub extensions: Vec<String>,
     pub discover_extensions: bool,
+    /// ACP clients supply their own transient MCP servers instead of local files.
+    pub load_mcp_config: bool,
     pub extension_flag_values: BTreeMap<String, serde_json::Value>,
     pub runtime_settings: pi_settings::SettingsValues,
     pub settings_skill_paths: Vec<PathBuf>,
@@ -79,6 +83,7 @@ impl ProductConfig {
             native_plugins: Vec::new(),
             extensions: Vec::new(),
             discover_extensions: true,
+            load_mcp_config: true,
             extension_flag_values: BTreeMap::new(),
             runtime_settings: pi_settings::SettingsValues::default(),
             settings_skill_paths: Vec::new(),

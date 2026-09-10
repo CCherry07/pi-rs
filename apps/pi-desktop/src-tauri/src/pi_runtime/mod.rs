@@ -1,5 +1,7 @@
+pub(crate) mod mcp;
 mod projection;
 mod session_store;
+pub(crate) mod skills;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -34,6 +36,8 @@ pub(crate) struct PiRuntimeState {
     store: SessionStore,
     info: PiDesktopInfo,
     forwarders: projection::ForwarderRegistry,
+    project_trust: pi_sdk::ProjectTrustService,
+    skill_mutation_gate: skills::SkillMutationGate,
 }
 
 #[derive(Clone, Serialize)]
@@ -70,6 +74,8 @@ pub(crate) fn create_state() -> Result<PiRuntimeState, String> {
         .presentation_mode(PresentationMode::Rpc)
         .build()?;
     Ok(PiRuntimeState {
+        project_trust: sdk.project_trust().clone(),
+        skill_mutation_gate: Arc::new(std::sync::Mutex::new(())),
         store: SessionStore::new(sdk.session_manager(), agent_dir),
         info,
         forwarders: Arc::new(Mutex::new(HashSet::new())),
@@ -450,7 +456,7 @@ pub(crate) async fn pi_turn_interrupt(
     _turn_id: String,
     pi: State<'_, PiRuntimeState>,
 ) -> Result<Value, String> {
-    pi.store.open(&thread_id).await?.abort();
+    pi.store.abort(&thread_id).await?;
     Ok(json!({ "ok": true }))
 }
 
@@ -2376,6 +2382,15 @@ mod tests {
     async fn background_prompt_returns_text_without_leaving_a_session() {
         let directory = tempfile::tempdir().unwrap();
         let pi = PiRuntimeState {
+            project_trust: Pi::builder(ProductConfig::new(
+                directory.path().to_path_buf(),
+                directory.path().join("agent"),
+            ))
+            .build()
+            .unwrap()
+            .project_trust()
+            .clone(),
+            skill_mutation_gate: Arc::new(std::sync::Mutex::new(())),
             store: scripted_store(directory.path().join("agent")),
             info: PiDesktopInfo {
                 agent_dir: directory.path().join("agent"),
@@ -2423,6 +2438,97 @@ mod tests {
         handle.wait_for_isolated_session(&child).await.unwrap();
         assert_eq!(live.token_usage().total_tokens, Some(0));
         assert!(live.token_usage().context_tokens.is_some());
+    }
+
+    #[tokio::test]
+    async fn desktop_abort_routes_observed_thread_to_the_running_isolated_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Arc::new(CommandFixture {
+            wait_for_abort: true,
+            ..CommandFixture::default()
+        });
+        let store = scripted_store_with_fixture(directory.path().join("agent"), fixture);
+        let parent = store.create(directory.path()).await.unwrap();
+        let parent_id = parent.log().header().id;
+        let (_, handle) = store.handle(&parent_id).unwrap();
+        let child = handle
+            .launch_isolated_session(pi_core::IsolatedSessionRequest::new(
+                pi_core::CustomMessageContent::Text("child".into()),
+            ))
+            .await
+            .unwrap();
+        let (observation, _) = store
+            .subscribe_isolated(&parent_id, child.as_str(), "worker", None)
+            .unwrap();
+
+        store.abort(&observation.session_id()).await.unwrap();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle.wait_for_isolated_session(&child),
+        )
+        .await
+        .expect("desktop abort must settle the isolated run")
+        .unwrap();
+        assert!(outcome.aborted);
+    }
+
+    #[tokio::test]
+    async fn desktop_abort_preserves_immediate_ownership_for_nested_isolated_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Arc::new(CommandFixture {
+            wait_for_abort: true,
+            ..CommandFixture::default()
+        });
+        let manager = MultiSessionManager::new(ScriptedFactory(fixture));
+        let store = SessionStore::new(manager.clone(), directory.path().join("agent"));
+        let parent = store.create(directory.path()).await.unwrap();
+        let parent_id = parent.log().header().id;
+        let (_, parent_handle) = store.handle(&parent_id).unwrap();
+        let child = parent_handle
+            .launch_isolated_session(pi_core::IsolatedSessionRequest::new(
+                pi_core::CustomMessageContent::Text("child".into()),
+            ))
+            .await
+            .unwrap();
+        let (child_observation, _) = store
+            .subscribe_isolated(&parent_id, child.as_str(), "worker", None)
+            .unwrap();
+        let child_thread_id = child_observation.session_id();
+        let child_handle = manager
+            .sessions()
+            .into_iter()
+            .find(|session| session.id() == child_thread_id)
+            .unwrap();
+        let grandchild = child_handle
+            .launch_isolated_session(pi_core::IsolatedSessionRequest::new(
+                pi_core::CustomMessageContent::Text("grandchild".into()),
+            ))
+            .await
+            .unwrap();
+        let (grandchild_observation, _) = store
+            .subscribe_isolated(&child_thread_id, grandchild.as_str(), "nested-worker", None)
+            .unwrap();
+
+        store
+            .abort(&grandchild_observation.session_id())
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            child_handle.wait_for_isolated_session(&grandchild),
+        )
+        .await
+        .expect("desktop abort must settle the nested isolated run")
+        .unwrap();
+        assert!(outcome.aborted);
+
+        parent_handle.abort_isolated_session(&child).unwrap();
+        parent_handle
+            .wait_for_isolated_session(&child)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

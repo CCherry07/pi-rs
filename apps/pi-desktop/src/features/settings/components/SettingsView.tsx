@@ -1,3 +1,5 @@
+import { useCallback, useRef } from "react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import ChevronLeft from "lucide-react/dist/esm/icons/chevron-left";
 import X from "lucide-react/dist/esm/icons/x";
 import { useTranslation } from "react-i18next";
@@ -124,7 +126,21 @@ export function SettingsView({
     onRemoveDictationModel,
   });
 
-  useSettingsViewCloseShortcuts(onClose);
+  const resourceDirty = useRef(false);
+  const confirming = useRef(false);
+  const onResourceDirtyChange = useCallback((dirty: boolean) => { resourceDirty.current = dirty; }, []);
+  const leaveResource = useCallback(async (next: () => void) => {
+    if (confirming.current) return;
+    confirming.current = true;
+    try {
+      if (!resourceDirty.current || await ask(t("shell.discard"), { title: t("shell.title"), kind: "warning" })) {
+        resourceDirty.current = false;
+        next();
+      }
+    } finally { confirming.current = false; }
+  }, [t]);
+  const closeSettings = useCallback(() => { void leaveResource(onClose); }, [leaveResource, onClose]);
+  useSettingsViewCloseShortcuts(closeSettings);
 
   const activeSectionLabel = t(SETTINGS_SECTION_LABEL_KEYS[activeSection]);
   const settingsBodyClassName = `settings-body${
@@ -135,7 +151,7 @@ export function SettingsView({
     <ModalShell
       className="settings-overlay"
       cardClassName="settings-window"
-      onBackdropClick={onClose}
+      onBackdropClick={closeSettings}
       ariaLabelledBy="settings-modal-title"
     >
       <div className="settings-titlebar">
@@ -145,7 +161,7 @@ export function SettingsView({
         <button
           type="button"
           className="ghost icon-button settings-close"
-          onClick={onClose}
+          onClick={closeSettings}
           aria-label={t("shell.close")}
         >
           <X aria-hidden />
@@ -156,7 +172,7 @@ export function SettingsView({
           <div className="settings-master">
             <SettingsNav
               activeSection={activeSection}
-              onSelectSection={handleSelectSection}
+              onSelectSection={(section) => { if (section !== activeSection) void leaveResource(() => handleSelectSection(section)); }}
               showDisclosure={useMobileMasterDetail}
             />
           </div>
@@ -168,7 +184,7 @@ export function SettingsView({
                 <button
                   type="button"
                   className="settings-mobile-back"
-                  onClick={() => setShowMobileDetail(false)}
+                  onClick={() => { void leaveResource(() => setShowMobileDetail(false)); }}
                   aria-label={t("shell.back")}
                 >
                   <ChevronLeft aria-hidden />
@@ -181,6 +197,7 @@ export function SettingsView({
               <SettingsSectionContainers
                 activeSection={activeSection}
                 orchestration={orchestration}
+                onResourceDirtyChange={onResourceDirtyChange}
               />
             </div>
           </div>

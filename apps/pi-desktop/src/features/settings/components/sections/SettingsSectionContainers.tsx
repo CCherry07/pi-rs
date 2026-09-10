@@ -1,3 +1,5 @@
+import { SettingsSkillsSection } from "./SettingsSkillsSection";
+import { SettingsMcpSection } from "./SettingsMcpSection";
 import { SettingsComposerSection } from "./SettingsComposerSection";
 import { SettingsDictationSection } from "./SettingsDictationSection";
 import { SettingsDisplaySection } from "./SettingsDisplaySection";
@@ -14,12 +16,20 @@ import type { SettingsViewOrchestration } from "@settings/hooks/useSettingsViewO
 type SettingsSectionContainersProps = {
   activeSection: SettingsSection;
   orchestration: SettingsViewOrchestration;
+  onResourceDirtyChange: (dirty: boolean) => void;
 };
 
 export function SettingsSectionContainers({
   activeSection,
   orchestration,
+  onResourceDirtyChange,
 }: SettingsSectionContainersProps) {
+  if (activeSection === "mcp") {
+    return <SettingsMcpSection projects={orchestration.projectsSectionProps.projects} onDirtyChange={onResourceDirtyChange} />;
+  }
+  if (activeSection === "skills") {
+    return <SettingsSkillsSection projects={orchestration.projectsSectionProps.projects} onDirtyChange={onResourceDirtyChange} />;
+  }
   if (activeSection === "projects") {
     return <SettingsProjectsSection {...orchestration.projectsSectionProps} />;
   }

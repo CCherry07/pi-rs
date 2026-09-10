@@ -222,25 +222,26 @@ impl SupervisorTool {
         context: ToolContext,
         input: SupervisorInput,
     ) -> Result<ToolResult, ToolError> {
+        let SupervisorInput {
+            action,
+            id,
+            to,
+            message,
+            reply_to,
+        } = input;
+        let id = non_empty_trimmed(id.as_deref());
+        let to = non_empty_trimmed(to.as_deref());
+        let reply_to = non_empty_trimmed(reply_to.as_deref());
         let owner = context.session.id()?;
-        if input.id.is_some()
-            && !matches!(
-                input.action,
-                SupervisorAction::Status | SupervisorAction::Cancel
-            )
-        {
+        if id.is_some() && !matches!(action, SupervisorAction::Status | SupervisorAction::Cancel) {
             return Err(ToolError::InvalidArguments(
                 "id is only supported for status or cancel.".into(),
             ));
         }
-        if input.action == SupervisorAction::Cancel {
-            let prefix = input
-                .id
-                .as_deref()
-                .filter(|id| !id.trim().is_empty())
-                .ok_or_else(|| {
-                    ToolError::InvalidArguments("cancel requires one owned run id.".into())
-                })?;
+        if action == SupervisorAction::Cancel {
+            let prefix = id.ok_or_else(|| {
+                ToolError::InvalidArguments("cancel requires one owned run id.".into())
+            })?;
             let ids = self
                 .runtime
                 .coordination()
@@ -251,14 +252,11 @@ impl SupervisorTool {
                 .cancel(&owner, &ids[0])
                 .map_err(ToolError::Execution)?;
         }
-        if matches!(
-            input.action,
-            SupervisorAction::Status | SupervisorAction::Cancel
-        ) {
+        if matches!(action, SupervisorAction::Status | SupervisorAction::Cancel) {
             let status = self
                 .runtime
                 .coordination()
-                .status(&owner, input.id.as_deref())
+                .status(&owner, id)
                 .map_err(ToolError::Execution)?;
             let mut result =
                 ToolResult::text(serde_json::to_string_pretty(&status).expect("status"));
@@ -266,7 +264,7 @@ impl SupervisorTool {
             return Ok(result);
         }
         let pending = self.runtime.coordination().pending(&owner);
-        match input.action {
+        match action {
             SupervisorAction::Pending | SupervisorAction::List => {
                 let mut result = ToolResult::text(if pending.is_empty() {
                     "No pending supervisor requests.".into()
@@ -277,16 +275,11 @@ impl SupervisorTool {
                 Ok(result)
             }
             SupervisorAction::Reply => {
-                let message = input.message.unwrap_or_default();
+                let message = message.unwrap_or_default();
                 let request = self
                     .runtime
                     .coordination()
-                    .reply(
-                        &owner,
-                        input.reply_to.as_deref(),
-                        input.to.as_deref(),
-                        &message,
-                    )
+                    .reply(&owner, reply_to, to, &message)
                     .map_err(ToolError::Execution)?;
                 // Delivery is authoritative, just as upstream's reply file is.
                 let journal = context.session.append_entry("subagent_supervisor_reply", Some(json!({"requestId":request.id,"reason":request.reason,"runId":request.run_id,"agent":request.agent,"childIndex":request.child_index,"message":message.trim(),"createdAt":now_ms()})));
@@ -367,6 +360,10 @@ impl SupervisorTool {
             }
         }
     }
+}
+
+fn non_empty_trimmed(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 struct RequestGuard {

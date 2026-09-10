@@ -182,7 +182,8 @@
     }
   },
   "notices": {
-    "sessionStopped": "Session stopped."
+    "sessionStopped": "Session stopped.",
+    "sessionStopFailed": "Failed to stop session: {{error}}"
   },
   "transcript": {
     "user": "User",

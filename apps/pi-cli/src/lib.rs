@@ -287,6 +287,8 @@ async fn run(
     let agent_dir = config.agent_dir.clone();
     let session_path = config.session_path.clone();
     let plugin_context_binding = PluginContextBinding::new();
+    // ACP owns transient per-session MCP configuration, even when its list is empty.
+    config.load_mcp_config = !matches!(cli_mode, CLIMode::Acp);
     let (
         plugin_ui,
         plugin_confirmation_requests,
