@@ -17,3 +17,6 @@ dist/
 !.pi/agents/
 !.pi/agents/*.md
 !.pi/agents/**/*.md
+
+# Local Hermes state and skills
+.hermes/
