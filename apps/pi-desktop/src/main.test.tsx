@@ -9,7 +9,9 @@ const createRootMock = vi.fn(() => ({
 }));
 
 vi.mock("@sentry/react", () => ({
+  globalHandlersIntegration: vi.fn(() => ({ name: "GlobalHandlers" })),
   init: sentryInitMock,
+  makeFetchTransport: vi.fn(),
   metrics: {
     count: sentryMetricsCountMock,
   },

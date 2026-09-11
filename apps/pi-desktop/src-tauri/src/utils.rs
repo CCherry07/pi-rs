@@ -146,12 +146,12 @@ mod tests {
     #[test]
     fn normalize_windows_namespace_path_strips_drive_prefix() {
         assert_eq!(
-            normalize_windows_namespace_path(r"\\?\I:\gpt-projects\json-composer"),
-            r"I:\gpt-projects\json-composer"
+            normalize_windows_namespace_path(r"\\?\I:\projects\sample-project"),
+            r"I:\projects\sample-project"
         );
         assert_eq!(
-            normalize_windows_namespace_path("//?/I:/gpt-projects/json-composer"),
-            "I:/gpt-projects/json-composer"
+            normalize_windows_namespace_path("//?/I:/projects/sample-project"),
+            "I:/projects/sample-project"
         );
     }
 

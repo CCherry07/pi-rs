@@ -327,7 +327,7 @@ describe("useWorkspaces.addWorkspacesFromPaths", () => {
       {
         ...workspaceOne,
         id: "existing-win",
-        path: "I:\\gpt-projects\\CodexMonitor",
+        path: "I:\\projects\\sample-project",
       },
     ]);
     isWorkspacePathDirMock.mockResolvedValue(true);
@@ -341,16 +341,16 @@ describe("useWorkspaces.addWorkspacesFromPaths", () => {
     let addResult: Awaited<ReturnType<typeof result.current.addWorkspacesFromPaths>>;
     await act(async () => {
       addResult = await result.current.addWorkspacesFromPaths([
-        "\\\\?\\I:\\gpt-projects\\CodexMonitor",
+        "\\\\?\\I:\\projects\\sample-project",
       ]);
     });
 
     expect(isWorkspacePathDirMock).toHaveBeenCalledWith(
-      "\\\\?\\I:\\gpt-projects\\CodexMonitor",
+      "\\\\?\\I:\\projects\\sample-project",
     );
     expect(addWorkspaceMock).not.toHaveBeenCalled();
     expect(addResult!.added).toHaveLength(0);
-    expect(addResult!.skippedExisting).toEqual(["\\\\?\\I:\\gpt-projects\\CodexMonitor"]);
+    expect(addResult!.skippedExisting).toEqual(["\\\\?\\I:\\projects\\sample-project"]);
     expect(addResult!.skippedInvalid).toHaveLength(0);
     expect(addResult!.failures).toHaveLength(0);
   });
@@ -403,14 +403,14 @@ describe("useWorkspaces.addWorkspacesFromPaths", () => {
       {
         ...workspaceOne,
         id: "existing",
-        path: "/Users/vlad/dev/existing",
+        path: "/Users/example/dev/existing",
       },
     ]);
     isWorkspacePathDirMock.mockImplementation(async (path: string) => path === "~/dev/personal");
     addWorkspaceMock.mockResolvedValue({
       ...workspaceTwo,
       id: "added-home",
-      path: "/Users/vlad/dev/personal",
+      path: "/Users/example/dev/personal",
     });
 
     const { result } = renderHook(() => useWorkspaces());
@@ -425,9 +425,9 @@ describe("useWorkspaces.addWorkspacesFromPaths", () => {
     });
 
     expect(isWorkspacePathDirMock).toHaveBeenCalledWith("~/dev/personal");
-    expect(isWorkspacePathDirMock).not.toHaveBeenCalledWith("/Users/vlad/dev/personal");
+    expect(isWorkspacePathDirMock).not.toHaveBeenCalledWith("/Users/example/dev/personal");
     expect(addWorkspaceMock).toHaveBeenCalledWith("~/dev/personal");
-    expect(addWorkspaceMock).not.toHaveBeenCalledWith("/Users/vlad/dev/personal");
+    expect(addWorkspaceMock).not.toHaveBeenCalledWith("/Users/example/dev/personal");
     expect(addResult!.added).toHaveLength(1);
     expect(addResult!.skippedInvalid).toHaveLength(0);
     expect(addResult!.failures).toHaveLength(0);
@@ -442,7 +442,7 @@ describe("useWorkspaces.addWorkspacesFromPaths", () => {
       {
         ...workspaceOne,
         id: "existing-home",
-        path: "/Users/vlad/dev/personal",
+        path: "/Users/example/dev/personal",
       },
     ]);
     isWorkspacePathDirMock.mockImplementation(async (path: string) => path === "~/dev/personal");
@@ -459,7 +459,7 @@ describe("useWorkspaces.addWorkspacesFromPaths", () => {
     });
 
     expect(isWorkspacePathDirMock).toHaveBeenCalledWith("~/dev/personal");
-    expect(isWorkspacePathDirMock).toHaveBeenCalledWith("/Users/vlad/dev/personal");
+    expect(isWorkspacePathDirMock).toHaveBeenCalledWith("/Users/example/dev/personal");
     expect(addWorkspaceMock).not.toHaveBeenCalled();
     expect(addResult!.added).toHaveLength(0);
     expect(addResult!.skippedExisting).toEqual(["~/dev/personal"]);
@@ -476,14 +476,14 @@ describe("useWorkspaces.addWorkspacesFromPaths", () => {
       {
         ...workspaceOne,
         id: "existing",
-        path: "/Users/vlad/dev/existing",
+        path: "/Users/example/dev/existing",
       },
     ]);
-    isWorkspacePathDirMock.mockImplementation(async (path: string) => path === "/Users/vlad/dev/personal");
+    isWorkspacePathDirMock.mockImplementation(async (path: string) => path === "/Users/example/dev/personal");
     addWorkspaceMock.mockResolvedValue({
       ...workspaceTwo,
       id: "added-home",
-      path: "/Users/vlad/dev/personal",
+      path: "/Users/example/dev/personal",
     });
 
     const { result } = renderHook(() => useWorkspaces());
@@ -498,8 +498,8 @@ describe("useWorkspaces.addWorkspacesFromPaths", () => {
     });
 
     expect(isWorkspacePathDirMock).toHaveBeenNthCalledWith(1, "~/dev/personal");
-    expect(isWorkspacePathDirMock).toHaveBeenNthCalledWith(2, "/Users/vlad/dev/personal");
-    expect(addWorkspaceMock).toHaveBeenCalledWith("/Users/vlad/dev/personal");
+    expect(isWorkspacePathDirMock).toHaveBeenNthCalledWith(2, "/Users/example/dev/personal");
+    expect(addWorkspaceMock).toHaveBeenCalledWith("/Users/example/dev/personal");
     expect(addResult!.added).toHaveLength(1);
     expect(addResult!.skippedInvalid).toHaveLength(0);
     expect(addResult!.failures).toHaveLength(0);
@@ -519,7 +519,7 @@ describe("useWorkspaces.addWorkspacesFromPaths", () => {
       {
         ...workspaceTwo,
         id: "existing-home",
-        path: "/Users/vlad/dev/existing",
+        path: "/Users/example/dev/existing",
       },
     ]);
     isWorkspacePathDirMock.mockImplementation(async (path: string) => {
@@ -529,12 +529,12 @@ describe("useWorkspaces.addWorkspacesFromPaths", () => {
       if (path === "/srv/codex-monitor/project") {
         return true;
       }
-      return path === "/Users/vlad/project";
+      return path === "/Users/example/project";
     });
     addWorkspaceMock.mockResolvedValue({
       ...workspaceOne,
       id: "added-home",
-      path: "/Users/vlad/project",
+      path: "/Users/example/project",
     });
 
     const { result } = renderHook(() => useWorkspaces());
@@ -550,8 +550,8 @@ describe("useWorkspaces.addWorkspacesFromPaths", () => {
 
     expect(isWorkspacePathDirMock).toHaveBeenNthCalledWith(1, "~/project");
     expect(isWorkspacePathDirMock).toHaveBeenNthCalledWith(2, "/srv/codex-monitor/project");
-    expect(isWorkspacePathDirMock).toHaveBeenNthCalledWith(3, "/Users/vlad/project");
-    expect(addWorkspaceMock).toHaveBeenCalledWith("/Users/vlad/project");
+    expect(isWorkspacePathDirMock).toHaveBeenNthCalledWith(3, "/Users/example/project");
+    expect(addWorkspaceMock).toHaveBeenCalledWith("/Users/example/project");
     expect(addResult!.added).toHaveLength(1);
     expect(addResult!.skippedExisting).toHaveLength(0);
     expect(addResult!.skippedInvalid).toHaveLength(0);

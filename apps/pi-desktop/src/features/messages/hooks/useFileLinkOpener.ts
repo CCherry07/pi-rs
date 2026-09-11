@@ -5,13 +5,12 @@ import { Menu, MenuItem, PredefinedMenuItem } from "@tauri-apps/api/menu";
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import * as Sentry from "@sentry/react";
+import { reportOpenFailure } from "../../../services/sentryPrivacy";
 import { openWorkspaceIn } from "../../../services/tauri";
 import { pushErrorToast } from "../../../services/toasts";
 import type { OpenAppTarget } from "../../../types";
 import {
   type ParsedFileLocation,
-  formatFileLocation,
   toFileUrl,
 } from "../../../utils/fileLinks";
 import {
@@ -84,11 +83,6 @@ function resolveFileLinkContext(
 ) {
   return {
     fileLocation,
-    rawPathLabel: formatFileLocation(
-      fileLocation.path,
-      fileLocation.line,
-      fileLocation.column,
-    ),
     resolvedPath: resolveFilePath(fileLocation.path, workspacePath),
   };
 }
@@ -100,22 +94,13 @@ export function useFileLinkOpener(
 ) {
   const { t } = useTranslation("messages");
   const reportOpenError = useCallback(
-    (error: unknown, context: Record<string, string | null>) => {
+    (error: unknown, kind: OpenTarget["kind"]) => {
       const message = error instanceof Error ? error.message : String(error);
-      Sentry.captureException(
-        error instanceof Error ? error : new Error(message),
-        {
-          tags: {
-            feature: "file-link-open",
-          },
-          extra: context,
-        },
-      );
+      reportOpenFailure("file-link-open", kind);
       pushErrorToast({
         title: t("errors.openFile"),
         message,
       });
-      console.warn("Failed to open file link", { message, ...context });
     },
     [t],
   );
@@ -123,7 +108,7 @@ export function useFileLinkOpener(
   const openFileLink = useCallback(
     async (targetLocation: ParsedFileLocation) => {
       const target = resolveOpenTarget(openTargets, selectedOpenAppId);
-      const { fileLocation, rawPathLabel, resolvedPath } = resolveFileLinkContext(
+      const { fileLocation, resolvedPath } = resolveFileLinkContext(
         targetLocation,
         workspacePath,
       );
@@ -164,15 +149,7 @@ export function useFileLinkOpener(
           ...openLocation,
         });
       } catch (error) {
-        reportOpenError(error, {
-          rawPath: rawPathLabel,
-          resolvedPath,
-          workspacePath,
-          targetId: target.id,
-          targetKind: target.kind,
-          targetAppName: target.appName ?? null,
-          targetCommand: target.command ?? null,
-        });
+        reportOpenError(error, target.kind);
       }
     },
     [openTargets, reportOpenError, selectedOpenAppId, workspacePath],
@@ -183,7 +160,7 @@ export function useFileLinkOpener(
       event.preventDefault();
       event.stopPropagation();
       const target = resolveOpenTarget(openTargets, selectedOpenAppId);
-      const { fileLocation, rawPathLabel, resolvedPath } = resolveFileLinkContext(
+      const { fileLocation, resolvedPath } = resolveFileLinkContext(
         targetLocation,
         workspacePath,
       );
@@ -217,15 +194,7 @@ export function useFileLinkOpener(
                   try {
                     await revealItemInDir(resolvedPath);
                   } catch (error) {
-                    reportOpenError(error, {
-                      rawPath: rawPathLabel,
-                      resolvedPath,
-                      workspacePath,
-                      targetId: target.id,
-                      targetKind: "finder",
-                      targetAppName: null,
-                      targetCommand: null,
-                    });
+                    reportOpenError(error, "finder");
                   }
                 },
               }),

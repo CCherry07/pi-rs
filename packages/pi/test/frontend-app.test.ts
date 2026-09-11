@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { ExtensionHost } from "../src/extension-host.js";
@@ -10,11 +11,37 @@ import {
   parseJson,
 } from "../src/extension-protocol.js";
 
-const testDirectory = dirname(fileURLToPath(import.meta.url));
-const workspaceDirectory = resolve(testDirectory, "../../..");
-const projectDirectory = join(workspaceDirectory, "e2e/projects/frontend-app");
-
-test("discovers the frontend-app TypeScript extension and invokes its callbacks", async () => {
+test("discovers a project TypeScript extension and invokes its callbacks", async (t) => {
+  const projectDirectory = await mkdtemp(join(tmpdir(), "pi-project-extension-"));
+  t.after(() => rm(projectDirectory, { recursive: true, force: true }));
+  const extensionDirectory = join(projectDirectory, ".pi/extensions");
+  await mkdir(extensionDirectory, { recursive: true });
+  await writeFile(join(extensionDirectory, "frontend-napi.ts"), `
+    import { defineTool } from "@earendil-works/pi-coding-agent";
+    export default function (pi) {
+      pi.registerTool(defineTool({
+        name: "frontend_project_checks",
+        label: "Frontend project checks",
+        description: "Return fixture verification commands",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        async execute() {
+          return { content: [{ type: "text", text: "npm run lint\\nnpm run build" }] };
+        },
+      }));
+      pi.registerCommand("frontend-napi-smoke", {
+        description: "Inspect fixture verification commands",
+        async handler() {
+          return {
+            action: "transform",
+            text: "Use frontend_project_checks to inspect this project's required verification workflow, then summarize it.",
+          };
+        },
+      });
+      pi.on("before_agent_start", (event) => ({ systemPrompt: event.systemPrompt }));
+      pi.on("before_provider_request", () => undefined);
+      pi.on("session_start", () => undefined);
+    }
+  `);
   const host = new ExtensionHost();
   const manifest = parseGenerationManifest(
     await host.dispatch(
@@ -29,6 +56,9 @@ test("discovers the frontend-app TypeScript extension and invokes its callbacks"
     ),
   );
 
+  t.after(() => host.dispatch(
+    JSON.stringify({ type: "retireGeneration", generationId: manifest.generationId }),
+  ));
   const plugin = manifest.agentPlugins.find((candidate) =>
     candidate.commands.some((command) => command.name === "frontend-napi-smoke"),
   );
@@ -93,7 +123,4 @@ test("discovers the frontend-app TypeScript extension and invokes its callbacks"
   assert.match(text, /npm run lint/);
   assert.match(text, /npm run build/);
 
-  await host.dispatch(
-    JSON.stringify({ type: "retireGeneration", generationId: manifest.generationId }),
-  );
 });

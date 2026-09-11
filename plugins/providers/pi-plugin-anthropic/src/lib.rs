@@ -806,7 +806,7 @@ mod tests {
         let transport = Arc::new(CapturingTransport::default());
         let provider = AnthropicCompatibleProvider::with_transport(
             AnthropicCompatibleConfig::new("https://example.test/v1", "configured-key")
-                .provider_id("byteintl")
+                .provider_id("custom-provider")
                 .header("X-Provider", "provider"),
             transport.clone(),
         )
@@ -829,7 +829,7 @@ mod tests {
         };
         let context = ProviderCallContext::without_plugins(
             "/project",
-            ProviderId::new("byteintl"),
+            ProviderId::new("custom-provider"),
             ModelId::new("custom-claude"),
         );
         let (_, signal) = AbortHandle::new();

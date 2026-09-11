@@ -174,8 +174,8 @@ mod tests {
     #[test]
     fn workspace_path_to_string_strips_windows_namespace_prefixes() {
         assert_eq!(
-            workspace_path_to_string(&PathBuf::from(r"\\?\I:\gpt-projects\PiMonitor")),
-            r"I:\gpt-projects\PiMonitor"
+            workspace_path_to_string(&PathBuf::from(r"\\?\I:\projects\sample-project")),
+            r"I:\projects\sample-project"
         );
     }
 }

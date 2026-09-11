@@ -215,7 +215,7 @@ fn update_workspace_settings_persists_sort_and_group() {
         git_root: Some("/tmp".to_string()),
         launch_script: Some("npm run dev".to_string()),
         worktree_setup_script: Some("pnpm install".to_string()),
-        worktrees_folder: Some(r"\\?\I:\gpt-projects\worktrees".to_string()),
+        worktrees_folder: Some(r"\\?\I:\projects\worktrees".to_string()),
         ..WorkspaceSettings::default()
     };
 
@@ -235,7 +235,7 @@ fn update_workspace_settings_persists_sort_and_group() {
     );
     assert_eq!(
         updated.settings.worktrees_folder.as_deref(),
-        Some(r"\\?\I:\gpt-projects\worktrees"),
+        Some(r"\\?\I:\projects\worktrees"),
     );
 
     let temp_dir = std::env::temp_dir().join(format!("pi-monitor-test-{}", Uuid::new_v4()));
@@ -260,7 +260,7 @@ fn update_workspace_settings_persists_sort_and_group() {
     );
     assert_eq!(
         stored.settings.worktrees_folder.as_deref(),
-        Some(r"I:\gpt-projects\worktrees"),
+        Some(r"I:\projects\worktrees"),
     );
 }
 
@@ -495,7 +495,7 @@ fn update_workspace_settings_core_sanitizes_namespace_worktrees_folder() {
         };
         let workspaces = Mutex::new(HashMap::from([(id.clone(), entry)]));
         let mut settings = WorkspaceSettings::default();
-        settings.worktrees_folder = Some(r"\\?\I:\gpt-projects\worktrees".to_string());
+        settings.worktrees_folder = Some(r"\\?\I:\projects\worktrees".to_string());
 
         let updated = update_workspace_settings_core(
             id.clone(),
@@ -509,7 +509,7 @@ fn update_workspace_settings_core_sanitizes_namespace_worktrees_folder() {
 
         assert_eq!(
             updated.settings.worktrees_folder.as_deref(),
-            Some(r"I:\gpt-projects\worktrees")
+            Some(r"I:\projects\worktrees")
         );
     });
 }

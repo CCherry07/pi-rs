@@ -247,7 +247,7 @@ mod tests {
         let entry = WorkspaceEntry {
             id: "w1".to_string(),
             name: "Workspace".to_string(),
-            path: r"\\?\I:\gpt-projects\json-composer".to_string(),
+            path: r"\\?\I:\projects\sample-project".to_string(),
             kind: WorkspaceKind::Main,
             parent_id: None,
             worktree: None,
@@ -258,7 +258,7 @@ mod tests {
 
         let read = read_workspaces(&path).expect("read workspaces");
         let stored = read.get("w1").expect("stored workspace");
-        assert_eq!(stored.path, r"I:\gpt-projects\json-composer");
+        assert_eq!(stored.path, r"I:\projects\sample-project");
     }
 
     #[test]
@@ -273,7 +273,7 @@ mod tests {
   {
     "id": "w1",
     "name": "Workspace",
-    "path": "\\\\?\\I:\\gpt-projects\\json-composer",
+    "path": "\\\\?\\I:\\projects\\sample-project",
     "kind": "main",
     "parentId": null,
     "worktree": null,
@@ -285,7 +285,7 @@ mod tests {
 
         let read = read_workspaces(&path).expect("read workspaces");
         let stored = read.get("w1").expect("stored workspace");
-        assert_eq!(stored.path, r"I:\gpt-projects\json-composer");
+        assert_eq!(stored.path, r"I:\projects\sample-project");
 
         let persisted = std::fs::read_to_string(&path).expect("read persisted workspaces");
         let persisted_entries: Vec<WorkspaceEntry> =
@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(persisted_entries.len(), 1);
         assert_eq!(
             persisted_entries[0].path,
-            r"\\?\I:\gpt-projects\json-composer"
+            r"\\?\I:\projects\sample-project"
         );
     }
 
@@ -364,7 +364,7 @@ mod tests {
         let path = temp_dir.join("settings.json");
 
         let settings = AppSettings {
-            global_worktrees_folder: Some(r"\\?\I:\gpt-projects\worktrees".to_string()),
+            global_worktrees_folder: Some(r"\\?\I:\projects\worktrees".to_string()),
             ..AppSettings::default()
         };
 
@@ -372,7 +372,7 @@ mod tests {
         let read = read_settings(&path).expect("read settings");
         assert_eq!(
             read.global_worktrees_folder.as_deref(),
-            Some(r"I:\gpt-projects\worktrees")
+            Some(r"I:\projects\worktrees")
         );
     }
 
@@ -385,7 +385,7 @@ mod tests {
         std::fs::write(
             &path,
             r#"{
-  "globalWorktreesFolder": "\\\\?\\I:\\gpt-projects\\worktrees",
+  "globalWorktreesFolder": "\\\\?\\I:\\projects\\worktrees",
   "theme": "dark"
 }"#,
         )
@@ -394,7 +394,7 @@ mod tests {
         let settings = read_settings(&path).expect("read settings");
         assert_eq!(
             settings.global_worktrees_folder.as_deref(),
-            Some(r"I:\gpt-projects\worktrees")
+            Some(r"I:\projects\worktrees")
         );
 
         let rewritten = std::fs::read_to_string(&path).expect("read rewritten settings");
@@ -402,7 +402,7 @@ mod tests {
             serde_json::from_str(&rewritten).expect("deserialize rewritten settings");
         assert_eq!(
             rewritten_settings.global_worktrees_folder.as_deref(),
-            Some(r"I:\gpt-projects\worktrees")
+            Some(r"I:\projects\worktrees")
         );
     }
 

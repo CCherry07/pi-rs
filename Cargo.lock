@@ -3050,24 +3050,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pi-e2e"
-version = "0.1.0"
-dependencies = [
- "pi-agent",
- "pi-core",
- "pi-plugin-read",
- "pi-plugin-skills",
- "pi-plugin-write",
- "pi-resources",
- "pi-runtime",
- "pi-session",
- "pi-test-support",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "pi-js-package-manager"
 version = "0.7.0"
 dependencies = [

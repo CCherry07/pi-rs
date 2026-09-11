@@ -622,7 +622,7 @@ mod tests {
     #[tokio::test]
     async fn routing_dispatches_anthropic_messages_with_models_json_auth_and_headers() {
         let mut spec = ModelSpec::new(
-            "byteintl",
+            "custom-provider",
             "custom-claude",
             "Custom Claude",
             ANTHROPIC_MESSAGES_API,
@@ -630,7 +630,7 @@ mod tests {
         spec.reasoning = true;
         spec.compat = Some(json!({"forceAdaptiveThinking": true}));
         let configured = PreparedProvider {
-            id: ProviderId::new("byteintl"),
+            id: ProviderId::new("custom-provider"),
             name: None,
             api: Some(ANTHROPIC_MESSAGES_API.to_string()),
             base_url: Some("https://gateway.example/v1".to_string()),
@@ -658,7 +658,7 @@ mod tests {
         let (_, signal) = AbortHandle::new();
         let call_context = ProviderCallContext::without_plugins(
             "/project",
-            ProviderId::new("byteintl"),
+            ProviderId::new("custom-provider"),
             ModelId::new("custom-claude"),
         );
 

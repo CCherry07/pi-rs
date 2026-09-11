@@ -66,7 +66,7 @@ impl JsCallbackDispatcher for RecordingDispatcher {
         let kind = invocation.kind;
         self.invocations.lock().unwrap().push(invocation);
         if kind == JsInvocationKind::ToolPrepareArguments {
-            return Ok(json!({"name": "CHERRY"}));
+            return Ok(json!({"name": "ALICE"}));
         }
         Ok(json!({
             "content": [{"type": "text", "text": "Hello from JavaScript"}],
@@ -136,10 +136,10 @@ async fn manifest_tool_registers_and_dispatches_through_the_public_tool_interfac
     let (updates, mut update_receiver) = ToolUpdateSink::channel();
     let tool_context = ToolContext::standalone("/workspace".into(), abort_signal);
     let prepared = tool
-        .prepare_arguments(&tool_context, json!({"name": "Cherry"}))
+        .prepare_arguments(&tool_context, json!({"name": "Alice"}))
         .await
         .unwrap();
-    assert_eq!(prepared, json!({"name": "CHERRY"}));
+    assert_eq!(prepared, json!({"name": "ALICE"}));
     let result = tool
         .execute(tool_context, ToolCallId::new("call-1"), prepared, updates)
         .await
@@ -163,7 +163,7 @@ async fn manifest_tool_registers_and_dispatches_through_the_public_tool_interfac
     let invocations = dispatcher.invocations.lock().unwrap();
     assert_eq!(invocations.len(), 2);
     assert_eq!(invocations[0].kind, JsInvocationKind::ToolPrepareArguments);
-    assert_eq!(invocations[0].payload, json!({"input": {"name": "Cherry"}}));
+    assert_eq!(invocations[0].payload, json!({"input": {"name": "Alice"}}));
     assert_eq!(invocations[1].generation_id, "js-7");
     assert_eq!(invocations[1].callback_id, "example:tool:greet");
     assert_eq!(invocations[1].kind, JsInvocationKind::Tool);
@@ -171,7 +171,7 @@ async fn manifest_tool_registers_and_dispatches_through_the_public_tool_interfac
         invocations[1].payload,
         json!({
             "context": {"cwd": "/workspace", "toolCallId": "call-1"},
-            "input": {"name": "CHERRY"}
+            "input": {"name": "ALICE"}
         })
     );
 }

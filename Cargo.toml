@@ -26,7 +26,6 @@ members = [
     "crates/pi-acp",
     "crates/pi-mcp",
     "bindings/pi-napi",
-    "e2e",
     "plugins/features/pi-plugin-prompts",
     "plugins/features/pi-plugin-skills",
     "plugins/features/pi-plugin-session-transfer",

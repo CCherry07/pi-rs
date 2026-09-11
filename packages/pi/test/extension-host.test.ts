@@ -668,7 +668,7 @@ test('loads a TypeScript Pi tool and retires its callback generation', async () 
     kind: 'tool',
     payload: {
       context: { cwd: root, toolCallId: 'call-1' },
-      input: { name: 'Cherry' },
+      input: { name: 'Alice' },
     },
   }
 
@@ -679,7 +679,7 @@ test('loads a TypeScript Pi tool and retires its callback generation', async () 
   assert.ok(Array.isArray(content))
   assert.ok(isRecord(content[0]))
   assert.ok(isRecord(details))
-  assert.equal(content[0].text, 'Hello Cherry')
+  assert.equal(content[0].text, 'Hello Alice')
   assert.equal(details.mode, 'tui')
   assert.equal(details.projectTrusted, true)
   assert.equal(details.hasSignal, true)

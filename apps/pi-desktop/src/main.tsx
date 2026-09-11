@@ -2,16 +2,13 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import * as Sentry from "@sentry/react";
 import App from "./App";
+import { desktopSentryOptions } from "./services/sentryPrivacy";
 import { isMobilePlatform } from "./utils/platformPaths";
 import "./i18n";
 
 const sentryDsn = import.meta.env.VITE_SENTRY_DSN;
 
-Sentry.init({
-  dsn: sentryDsn,
-  enabled: Boolean(sentryDsn),
-  release: __APP_VERSION__,
-});
+Sentry.init(desktopSentryOptions(sentryDsn));
 
 if (sentryDsn) {
   Sentry.metrics.count("app_open", 1, {

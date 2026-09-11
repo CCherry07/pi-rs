@@ -438,7 +438,7 @@ mod tests {
     #[test]
     fn builds_goto_args_with_windows_namespace_path_sanitized() {
         let args = build_launch_args(
-            r"\\?\I:\gpt-projects\json-composer\src\App.tsx",
+            r"\\?\I:\projects\sample-project\src\App.tsx",
             &["--reuse-window".to_string()],
             Some(33),
             Some(7),
@@ -450,7 +450,7 @@ mod tests {
             vec![
                 "--reuse-window".to_string(),
                 "--goto".to_string(),
-                r"I:\gpt-projects\json-composer\src\App.tsx:33:7".to_string(),
+                r"I:\projects\sample-project\src\App.tsx:33:7".to_string(),
             ]
         );
     }
