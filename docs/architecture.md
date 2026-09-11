@@ -481,6 +481,44 @@ integrity but not publisher identity. Publisher signatures, Git repository and O
 package update/rollback commands, and store garbage collection remain explicit package-manager
 milestones.
 
+## Desktop native-plugin management
+
+Settings → Plugins is a deliberate Rust/Desktop management extension, not a port of Pi's
+npm/git extension settings. `pi-sdk::plugins::PluginLibrary` owns scoped package access and
+project-trust policy; the Tauri Adapter delegates package inspection and explicit
+install/sync/remove operations to it. `pi-plugin-manager` remains the sole owner of
+`plugins.json`, `plugins.lock`, package resolution and activation. Browsing never reconciles,
+downloads, constructs a session, loads a dynamic library, or grants trust. Package snapshots
+preserve configured-but-not-installed rows and report malformed or busy state as diagnostics
+rather than silently presenting an empty successful installation.
+
+Plugin-resource management uses `ProjectTrustService::evaluate_resource_access`, a read-only
+policy query that does not treat an empty project's lack of resources as permission to install
+its first executable resource. It retains the existing override, remembered decision,
+nearest-ancestor store and default-policy precedence. It never prompts, remembers a decision,
+or creates a trust lock/file. A resource-free startup's implicit allowance is not cached as
+resource authorization, while explicit session-only trust remains authoritative.
+Trust writers retain their shared sibling lock and publish through
+atomic replacement, allowing this query to read a complete document without writing. Project
+operations check this policy on the backend rather than trusting a disabled UI control.
+
+Installation and active-generation state are intentionally different. The package snapshot
+reports configured intent and installed lock metadata; a separate read-only query observes an
+explicit existing workspace/thread. The generation inventory currently identifies only configured
+native plugin IDs, not their loaded scope, artifact hash, options or version. The Desktop therefore
+shows those IDs separately and does not label an installed row/version as loaded by joining its ID
+to that inventory. It does not claim a complete inventory of built-ins, explicit-path plugins or
+JavaScript extensions. Missing or mismatched session context is an observation error, not permission
+to open or create a session.
+
+Management changes disk state only. Explicit sync retains satisfying locked versions rather than
+acting as update. A user-requested session reload uses the existing replacement transaction and
+frontend catalog/event refresh path; failure keeps the current generation intact. Successful
+package installation is not native ABI validation, and a later failed reload does not imply that
+the earlier explicit package operation was undone. There is no enable switch, settings-form schema,
+permission sandbox or publisher-authentication claim. Native code remains trusted in-process code;
+SHA-256 establishes content integrity, not publisher identity.
+
 ## Native plugin authoring
 
 Native plugin authoring is an outer Module at pi-plugin-tools, exposed through the CLI's

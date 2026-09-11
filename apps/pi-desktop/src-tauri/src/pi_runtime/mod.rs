@@ -1,4 +1,5 @@
 pub(crate) mod mcp;
+pub(crate) mod plugins;
 mod projection;
 mod session_store;
 pub(crate) mod skills;
@@ -1477,6 +1478,7 @@ mod tests {
         binding: pi_session::PluginContextBinding,
         wait_for_abort: bool,
         skill_paths: Vec<PathBuf>,
+        native_inventory: Vec<pi_core::PluginId>,
     }
 
     struct FixturePlugin(Arc<CommandFixture>, usize);
@@ -1579,6 +1581,9 @@ mod tests {
             let mut skills = pi_plugin_skills::SkillLoaderOptions::new(&cwd, cwd.join("agent"));
             skills.include_defaults = false;
             skills.additional_paths = fixture.skill_paths.clone();
+            let options = AgentSessionOptions::default().runtime_inventory(
+                pi_session::SessionRuntimeInventory::new([], fixture.native_inventory.clone()),
+            );
             let runtime = PiRuntime::builder()
                 .plugin_context(context.clone())
                 .agent_plugin(pi_plugin_skills::SkillsPlugin::new(skills))
@@ -1601,27 +1606,17 @@ mod tests {
                     AgentSession::prepare_create_with_options(
                         runtime,
                         path,
-                        AgentSessionOptions::default()
+                        options
                             .parent_session_path(parent_session)
                             .session_id(session_id),
                     )
                     .await
                 }
                 AgentSessionRuntimeTarget::Open { path } => {
-                    AgentSession::prepare_open_with_options(
-                        runtime,
-                        path,
-                        AgentSessionOptions::default(),
-                    )
-                    .await
+                    AgentSession::prepare_open_with_options(runtime, path, options).await
                 }
                 AgentSessionRuntimeTarget::Reuse { log } => {
-                    AgentSession::prepare_reuse_with_options(
-                        runtime,
-                        log,
-                        AgentSessionOptions::default(),
-                    )
-                    .await
+                    AgentSession::prepare_reuse_with_options(runtime, log, options).await
                 }
             }?;
             context.bind_generation_session(prepared.session());
@@ -1729,6 +1724,49 @@ mod tests {
         let next = store.start_thread(directory.path()).await.unwrap();
         assert_ne!(next.log().header().id, started.log().header().id);
         assert_eq!(fixture.builds.load(SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn plugin_inventory_inspects_only_existing_selected_workspace_thread() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let directory = tempfile::tempdir().unwrap();
+        let other = directory.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        let fixture = Arc::new(CommandFixture {
+            native_inventory: vec![pi_core::PluginId::new("configured-native")],
+            ..Default::default()
+        });
+        let store =
+            scripted_store_with_fixture(directory.path().join("agent"), Arc::clone(&fixture));
+        assert!(store
+            .existing_native_plugin_ids(directory.path(), "missing")
+            .unwrap_err()
+            .contains("not open"));
+        assert_eq!(fixture.builds.load(SeqCst), 0);
+        let first = store.prepare_thread(directory.path()).await.unwrap();
+        let id = first.log().header().id;
+        assert_eq!(
+            store
+                .existing_native_plugin_ids(directory.path(), &id)
+                .unwrap(),
+            vec!["configured-native"]
+        );
+        assert!(store
+            .existing_native_plugin_ids(&other, &id)
+            .unwrap_err()
+            .contains("does not belong"));
+        assert_eq!(fixture.builds.load(SeqCst), 1);
+        assert!(!first.log().path().exists());
+        fixture.fail_reload.store(true, SeqCst);
+        assert!(store.reload(&id).await.is_err());
+        assert_eq!(
+            store
+                .existing_native_plugin_ids(directory.path(), &id)
+                .unwrap(),
+            vec!["configured-native"]
+        );
+        assert_eq!(fixture.builds.load(SeqCst), 1);
+        assert!(!first.log().path().exists());
     }
 
     #[tokio::test]

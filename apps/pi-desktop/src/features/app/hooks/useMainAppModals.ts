@@ -84,6 +84,7 @@ type UseMainAppModalsArgs = {
     >;
   };
   settings: {
+    pluginSession?: SettingsViewProps["pluginSession"];
     handleMoveWorkspace: (id: string, direction: "up" | "down") => void;
     removeWorkspace: (workspaceId: string) => Promise<void>;
     createWorkspaceGroup: (name: string) => Promise<WorkspaceGroup | null>;
@@ -149,6 +150,7 @@ function buildSettingsViewProps({
     workspaceGroups,
     groupedWorkspaces,
     ungroupedLabel,
+    pluginSession: settings.pluginSession,
     onMoveWorkspace: settings.handleMoveWorkspace,
     onDeleteWorkspace: (workspaceId) => {
       void settings.removeWorkspace(workspaceId);

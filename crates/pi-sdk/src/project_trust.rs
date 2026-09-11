@@ -101,9 +101,29 @@ impl ProjectTrustService {
     }
 
     pub fn evaluate(&self, cwd: &Path) -> Result<ProjectTrustEvaluation, ProjectTrustError> {
+        self.evaluate_inner(cwd, false)
+            .map(|(evaluation, _)| evaluation)
+    }
+
+    /// Inspect authorization for reading or adding project resources without granting trust,
+    /// prompting, or creating a trust store/lock. An empty project is not implicit permission
+    /// to install executable resources. Atomic store writes make this lock-free read coherent.
+    pub fn evaluate_resource_access(
+        &self,
+        cwd: &Path,
+    ) -> Result<ProjectTrustEvaluation, ProjectTrustError> {
+        self.evaluate_inner(cwd, true)
+            .map(|(evaluation, _)| evaluation)
+    }
+
+    fn evaluate_inner(
+        &self,
+        cwd: &Path,
+        resource_access: bool,
+    ) -> Result<(ProjectTrustEvaluation, bool), ProjectTrustError> {
         let cwd = normalize_path(cwd)?;
         if let Some(decision) = self.trust_override {
-            return Ok(ProjectTrustEvaluation::Known(decision));
+            return Ok((ProjectTrustEvaluation::Known(decision), true));
         }
         if let Some(decision) = self
             .decisions
@@ -111,24 +131,29 @@ impl ProjectTrustService {
             .expect("trust decisions poisoned")
             .get(&cwd)
         {
-            return Ok(ProjectTrustEvaluation::Known(*decision));
+            return Ok((ProjectTrustEvaluation::Known(*decision), true));
         }
-        if !has_trust_requiring_project_resources(&cwd)? {
-            return Ok(ProjectTrustEvaluation::Known(true));
+        if !resource_access && !has_trust_requiring_project_resources(&cwd)? {
+            // No resources means no authorization is needed, not permission to add resources.
+            return Ok((ProjectTrustEvaluation::Known(true), false));
         }
-        if let Some(entry) = self.store.get_entry(&cwd)? {
-            return Ok(ProjectTrustEvaluation::Known(entry.decision));
+        let entry = if resource_access {
+            self.store.get_entry_read_only(&cwd)?
+        } else {
+            self.store.get_entry(&cwd)?
+        };
+        if let Some(entry) = entry {
+            return Ok((ProjectTrustEvaluation::Known(entry.decision), true));
         }
-        match self.default_trust {
-            DefaultProjectTrust::Always => Ok(ProjectTrustEvaluation::Known(true)),
-            DefaultProjectTrust::Never => Ok(ProjectTrustEvaluation::Known(false)),
-            DefaultProjectTrust::Ask if !self.interactive => {
-                Ok(ProjectTrustEvaluation::Known(false))
+        let evaluation = match self.default_trust {
+            DefaultProjectTrust::Always => ProjectTrustEvaluation::Known(true),
+            DefaultProjectTrust::Never => ProjectTrustEvaluation::Known(false),
+            DefaultProjectTrust::Ask if !self.interactive => ProjectTrustEvaluation::Known(false),
+            DefaultProjectTrust::Ask => {
+                ProjectTrustEvaluation::Ask(project_trust_options(&cwd, true)?)
             }
-            DefaultProjectTrust::Ask => Ok(ProjectTrustEvaluation::Ask(project_trust_options(
-                &cwd, true,
-            )?)),
-        }
+        };
+        Ok((evaluation, true))
     }
 
     pub fn remember(&self, cwd: &Path, trusted: bool) -> Result<(), ProjectTrustError> {
@@ -157,9 +182,12 @@ impl ProjectTrustService {
     }
 
     pub async fn resolve(&self, cwd: &Path) -> Result<bool, ProjectTrustError> {
-        match self.evaluate(cwd)? {
+        let (evaluation, cacheable) = self.evaluate_inner(cwd, false)?;
+        match evaluation {
             ProjectTrustEvaluation::Known(trusted) => {
-                self.remember(cwd, trusted)?;
+                if cacheable {
+                    self.remember(cwd, trusted)?;
+                }
                 Ok(trusted)
             }
             ProjectTrustEvaluation::Ask(options) => {
@@ -204,21 +232,26 @@ impl ProjectTrustStore {
     }
 
     fn get_entry(&self, cwd: &Path) -> Result<Option<ProjectTrustStoreEntry>, ProjectTrustError> {
-        self.with_lock(|| {
-            let data = read_trust_file(&self.path)?;
-            let mut current = normalize_path(cwd)?;
-            loop {
-                if let Some(Some(decision)) = data.get(&current.to_string_lossy().to_string()) {
-                    return Ok(Some(ProjectTrustStoreEntry {
-                        path: current,
-                        decision: *decision,
-                    }));
-                }
-                if !current.pop() {
-                    return Ok(None);
-                }
+        self.with_lock(|| self.get_entry_read_only(cwd))
+    }
+
+    fn get_entry_read_only(
+        &self,
+        cwd: &Path,
+    ) -> Result<Option<ProjectTrustStoreEntry>, ProjectTrustError> {
+        let data = read_trust_file(&self.path)?;
+        let mut current = normalize_path(cwd)?;
+        loop {
+            if let Some(Some(decision)) = data.get(&current.to_string_lossy().to_string()) {
+                return Ok(Some(ProjectTrustStoreEntry {
+                    path: current,
+                    decision: *decision,
+                }));
             }
-        })
+            if !current.pop() {
+                return Ok(None);
+            }
+        }
     }
 
     fn set_many(&self, updates: &[ProjectTrustUpdate]) -> Result<(), ProjectTrustError> {
@@ -306,21 +339,24 @@ fn read_trust_file(path: &Path) -> Result<BTreeMap<String, Option<bool>>, Projec
 }
 
 fn write_trust_file(path: &Path, json: &str) -> Result<(), ProjectTrustError> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .map_err(|source| ProjectTrustError::Io {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut file =
+        tempfile::NamedTempFile::new_in(parent).map_err(|source| ProjectTrustError::Io {
             path: path.to_path_buf(),
             source,
         })?;
     file.write_all(json.as_bytes())
         .and_then(|_| file.write_all(b"\n"))
-        .and_then(|_| file.sync_all())
+        .and_then(|_| file.as_file().sync_all())
         .map_err(|source| ProjectTrustError::Io {
             path: path.to_path_buf(),
             source,
+        })?;
+    file.persist(path)
+        .map(|_| ())
+        .map_err(|error| ProjectTrustError::Io {
+            path: path.to_path_buf(),
+            source: error.error,
         })
 }
 

@@ -6,6 +6,7 @@ export const SETTINGS_SECTION_IDS = [
   "environments",
   "skills",
   "mcp",
+  "plugins",
   "display",
   "about",
   "composer",

@@ -1,3 +1,4 @@
+import Puzzle from "lucide-react/dist/esm/icons/puzzle";
 import LayoutGrid from "lucide-react/dist/esm/icons/layout-grid";
 import Archive from "lucide-react/dist/esm/icons/archive";
 import SlidersHorizontal from "lucide-react/dist/esm/icons/sliders-horizontal";
@@ -62,6 +63,9 @@ export function SettingsNav({
         </PanelNavItem>
         <PanelNavItem className="settings-nav" icon={<Plug aria-hidden />} active={activeSection === "mcp"} showDisclosure={showDisclosure} onClick={() => onSelectSection("mcp")}>
           {t(SETTINGS_SECTION_LABEL_KEYS.mcp)}
+        </PanelNavItem>
+        <PanelNavItem className="settings-nav" icon={<Puzzle aria-hidden />} active={activeSection === "plugins"} showDisclosure={showDisclosure} onClick={() => onSelectSection("plugins")}>
+          {t(SETTINGS_SECTION_LABEL_KEYS.plugins)}
         </PanelNavItem>
         <PanelNavItem
           className="settings-nav"

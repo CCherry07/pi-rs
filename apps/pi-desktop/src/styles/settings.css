@@ -1404,3 +1404,26 @@
     padding: 14px;
   }
 }
+
+.settings-plugins { min-width: 0; }
+.settings-plugins-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 16px 0 10px; }
+.settings-plugins .settings-button-compact { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; }
+.settings-plugins .settings-button-compact svg { width: 16px; height: 16px; flex: 0 0 16px; }
+.settings-plugins-path { display: block; overflow-wrap: anywhere; color: var(--text-muted); font-size: 12px; }
+.settings-plugins-runtime { padding: 14px; margin: 18px 0; border: 1px solid var(--border-subtle); border-radius: 10px; background: var(--surface-card); }
+.settings-plugins-runtime ul { padding-left: 20px; font-size: 12px; overflow-wrap: anywhere; }
+.settings-plugins-diagnostics { white-space: pre-wrap; overflow-wrap: anywhere; }
+.settings-plugins-diagnostics button { display: flex; margin-top: 8px; }
+.settings-plugins-notice { border-left: 2px solid var(--border-strong); padding: 10px 12px; font-size: 12px; background: var(--surface-card); }
+.settings-plugins-search { flex: 1; min-width: 120px; }
+.settings-plugins-form, .settings-plugins-detail { display: flex; flex-direction: column; align-items: stretch; gap: 14px; margin-top: 20px; }
+.settings-plugins-form label, .settings-plugins-advanced label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.settings-plugins-form > button, .settings-plugins-detail > button { align-self: flex-start; }
+.settings-plugins-form .settings-plugins-consent { flex-direction: row; align-items: flex-start; }
+.settings-plugins-form .settings-input, .settings-plugins-advanced .settings-input { box-sizing: border-box; min-width: 0; width: 100%; }
+.settings-plugins-metadata { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 3fr); gap: 14px; font-size: 12px; }
+.settings-plugins-metadata dt { color: var(--text-muted); }
+.settings-plugins-metadata dd { margin: 0; overflow-wrap: anywhere; }
+.settings-plugins-advanced { margin-top: 20px; }
+.settings-plugins-advanced summary { color: var(--text-muted); font-size: 12px; cursor: pointer; margin-bottom: 12px; }
+@media (max-width: 720px) { .settings-plugins-metadata { grid-template-columns: minmax(0, 1fr); gap: 8px; } .settings-plugins-metadata dd { margin-bottom: 8px; } }

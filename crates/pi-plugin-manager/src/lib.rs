@@ -160,7 +160,7 @@ pub enum ReconcileStatus {
     Updated,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InstalledPlugin {
     pub id: String,
     pub version: String,
@@ -181,6 +181,28 @@ impl From<&LockedPlugin> for InstalledPlugin {
             sha256: plugin.sha256.clone(),
         }
     }
+}
+
+/// Read-only package state. Installation does not imply ABI validation or runtime loading.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPackageSnapshot {
+    pub path: PathBuf,
+    pub lock_path: PathBuf,
+    pub target: String,
+    pub plugins: Vec<PluginPackageRow>,
+    pub intent_current: Option<bool>,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPackageRow {
+    pub id: String,
+    pub source: String,
+    pub requested_version: Option<String>,
+    pub configured: bool,
+    pub installed: Option<InstalledPlugin>,
 }
 
 #[derive(Clone)]
@@ -249,6 +271,8 @@ impl PluginManager {
         let client = reqwest::Client::builder()
             .user_agent(concat!("pi-rs/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::limited(5))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(120))
             .build()
             .map_err(|error| PluginManagerError::InvalidData {
                 location: "HTTP client".to_string(),
@@ -268,7 +292,7 @@ impl PluginManager {
         let source = canonical_local_source(&source, &self.options.cwd)?;
         let paths = self.scope_paths(scope);
         reject_discovered_source(&source, &paths.active)?;
-        let _guard = StateGuard::acquire(&paths.guard)?;
+        let _guard = StateGuard::acquire_async(paths.guard.clone()).await?;
         let mut intent = read_intent(&paths.intent)?;
         let previous_intent = intent.clone();
         let previous_lock = read_lock(&paths.lock, &self.options.target)?;
@@ -314,6 +338,92 @@ impl PluginManager {
         let lock = read_lock(&paths.lock, &self.options.target)?;
         validate_lock_target(&lock, &self.options.target, &paths.lock)?;
         Ok(lock.plugins.iter().map(InstalledPlugin::from).collect())
+    }
+
+    /// Inspect intent and lock only: no reconciliation, artifact reads, or directory creation.
+    /// A concurrent writer returns a diagnostic instead of exposing its uncommitted lock.
+    pub fn snapshot(&self, scope: InstallScope) -> PluginPackageSnapshot {
+        let paths = self.scope_paths(scope);
+        let mut snapshot = PluginPackageSnapshot {
+            path: paths.intent.clone(),
+            lock_path: paths.lock.clone(),
+            target: self.options.target.clone(),
+            plugins: Vec::new(),
+            intent_current: None,
+            diagnostics: Vec::new(),
+        };
+        let guard = match StateGuard::read_existing(&paths.guard) {
+            Ok(guard) => guard,
+            Err(error) => {
+                snapshot.diagnostics.push(error.to_string());
+                return snapshot;
+            }
+        };
+        let intent = read_intent(&paths.intent);
+        let lock = read_lock(&paths.lock, &self.options.target).and_then(|lock| {
+            validate_lock_target(&lock, &self.options.target, &paths.lock)?;
+            Ok(lock)
+        });
+        // A first-ever writer may have created its guard after our initial probe.
+        // Do not publish a potentially mixed intent/lock snapshot in that case.
+        if guard.is_none() {
+            match StateGuard::read_existing(&paths.guard) {
+                Ok(None) => {}
+                _ => {
+                    snapshot.diagnostics.push(
+                        "Plugin package state changed during inspection; refresh to retry".into(),
+                    );
+                    return snapshot;
+                }
+            }
+        }
+        if let (Ok(intent), Ok(lock)) = (&intent, &lock) {
+            match intent_digest(intent) {
+                Ok(digest) => {
+                    snapshot.intent_current = Some(
+                        lock.intent_sha256.as_deref() == Some(&digest)
+                            || (!paths.intent.exists() && !paths.lock.exists()),
+                    )
+                }
+                Err(error) => snapshot.diagnostics.push(error.to_string()),
+            }
+        }
+        match intent {
+            Ok(intent) => {
+                snapshot.plugins = intent
+                    .plugins
+                    .into_iter()
+                    .map(|plugin| PluginPackageRow {
+                        id: plugin.id,
+                        source: plugin.source,
+                        requested_version: Some(plugin.version),
+                        configured: true,
+                        installed: None,
+                    })
+                    .collect();
+            }
+            Err(error) => snapshot.diagnostics.push(error.to_string()),
+        }
+        match lock {
+            Ok(lock) => {
+                for plugin in lock.plugins {
+                    let installed = InstalledPlugin::from(&plugin);
+                    if let Some(row) = snapshot.plugins.iter_mut().find(|row| row.id == plugin.id) {
+                        row.installed = Some(installed);
+                    } else {
+                        snapshot.plugins.push(PluginPackageRow {
+                            id: plugin.id,
+                            source: plugin.source,
+                            requested_version: None,
+                            configured: false,
+                            installed: Some(installed),
+                        });
+                    }
+                }
+            }
+            Err(error) => snapshot.diagnostics.push(error.to_string()),
+        }
+        snapshot
     }
 
     pub async fn sync(
@@ -393,7 +503,7 @@ impl PluginManager {
                 _guard: None,
             });
         }
-        let guard = StateGuard::acquire(&paths.guard)?;
+        let guard = StateGuard::acquire_async(paths.guard.clone()).await?;
         let intent = read_intent(&paths.intent)?;
         let previous_lock_existed = paths.lock.exists();
         let previous_lock = read_lock(&paths.lock, &self.options.target)?;
@@ -887,6 +997,30 @@ struct StateGuard {
 }
 
 impl StateGuard {
+    async fn acquire_async(path: PathBuf) -> Result<Self, PluginManagerError> {
+        tokio::task::spawn_blocking(move || Self::acquire(&path))
+            .await
+            .map_err(|error| invalid_data("plugin state lock", error.to_string()))?
+    }
+
+    fn read_existing(path: &Path) -> Result<Option<Self>, PluginManagerError> {
+        let file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(PluginManagerError::Io {
+                    path: path.into(),
+                    source,
+                });
+            }
+        };
+        FileExt::try_lock_shared(&file).map_err(|source| PluginManagerError::Io {
+            path: path.into(),
+            source,
+        })?;
+        Ok(Some(Self { file }))
+    }
+
     fn acquire(path: &Path) -> Result<Self, PluginManagerError> {
         if let Some(parent) = path.parent() {
             create_dir_all(parent)?;
@@ -1739,6 +1873,73 @@ artifact = "plugin.dylib"
         )
         .unwrap();
         package
+    }
+
+    #[test]
+    fn snapshot_does_not_create_state_or_resolve_configured_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let agent = root.path().join("agent");
+        let manager = PluginManager::new(PluginManagerOptions::new(root.path(), &agent)).unwrap();
+        let empty = manager.snapshot(InstallScope::Global);
+        assert_eq!(empty.intent_current, Some(true));
+        assert!(empty.plugins.is_empty());
+        assert!(!agent.exists());
+        fs::create_dir(&agent).unwrap();
+        fs::write(agent.join("plugins.json"), r#"{"schema":1,"plugins":[{"id":"remote","source":"https://invalid.example/release.json"}]}"#).unwrap();
+        let view = manager.snapshot(InstallScope::Global);
+        assert_eq!(view.plugins.len(), 1);
+        assert!(view.plugins[0].configured);
+        assert!(view.plugins[0].installed.is_none());
+        assert_eq!(view.intent_current, Some(false));
+        assert_eq!(fs::read_dir(&agent).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn snapshot_separates_broken_intent_from_installation_and_hides_uncommitted_state() {
+        let root = tempfile::tempdir().unwrap();
+        let package = write_local_package(root.path(), "fixture", b"not loadable");
+        let agent = root.path().join("agent");
+        let manager = PluginManager::new(PluginManagerOptions::new(root.path(), &agent)).unwrap();
+        manager
+            .install(package.to_string_lossy(), None, InstallScope::Global)
+            .await
+            .unwrap();
+        let installed = manager.snapshot(InstallScope::Global);
+        assert_eq!(installed.intent_current, Some(true));
+        let guard = StateGuard::acquire(&agent.join("plugins.lock.guard")).unwrap();
+        let busy = manager.snapshot(InstallScope::Global);
+        assert!(busy.plugins.is_empty());
+        assert!(!busy.diagnostics.is_empty());
+        drop(guard);
+        fs::write(agent.join("plugins.json"), "broken").unwrap();
+        let broken = manager.snapshot(InstallScope::Global);
+        assert_eq!(broken.plugins[0].id, "fixture");
+        assert!(broken.plugins[0].installed.is_some());
+        assert!(!broken.plugins[0].configured);
+        assert_eq!(broken.intent_current, None);
+        assert_eq!(broken.diagnostics.len(), 1);
+        assert_eq!(
+            fs::read_to_string(agent.join("plugins.json")).unwrap(),
+            "broken"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn contended_async_package_lock_leaves_tokio_worker_available() {
+        let root = tempfile::tempdir().unwrap();
+        let agent = root.path().join("agent");
+        let guard = StateGuard::acquire(&agent.join("plugins.lock.guard")).unwrap();
+        fs::write(agent.join("plugins.json"), r#"{"schema":1,"plugins":[]}"#).unwrap();
+        let manager = PluginManager::new(PluginManagerOptions::new(root.path(), &agent)).unwrap();
+        let task = tokio::spawn(async move { manager.sync(InstallScope::Global).await });
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(!task.is_finished());
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

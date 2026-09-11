@@ -19,7 +19,10 @@ import type { SettingsSection } from "./settingsTypes";
 import { SETTINGS_SECTION_LABEL_KEYS } from "./settingsViewConstants";
 import { SettingsSectionContainers } from "./sections/SettingsSectionContainers";
 
+import type { PluginSessionContext } from "./sections/SettingsPluginsSection";
+
 export type SettingsViewProps = {
+  pluginSession?: PluginSessionContext;
   workspaceGroups: WorkspaceGroup[];
   groupedWorkspaces: Array<{
     id: string | null;
@@ -87,6 +90,7 @@ export function SettingsView({
   onCancelDictationDownload,
   onRemoveDictationModel,
   initialSection,
+  pluginSession,
 }: SettingsViewProps) {
   const { t } = useTranslation("settings");
   const {
@@ -127,10 +131,12 @@ export function SettingsView({
   });
 
   const resourceDirty = useRef(false);
+  const resourceBusy = useRef(false);
+  const onResourceBusyChange = useCallback((busy: boolean) => { resourceBusy.current = busy; }, []);
   const confirming = useRef(false);
   const onResourceDirtyChange = useCallback((dirty: boolean) => { resourceDirty.current = dirty; }, []);
   const leaveResource = useCallback(async (next: () => void) => {
-    if (confirming.current) return;
+    if (confirming.current || resourceBusy.current) return;
     confirming.current = true;
     try {
       if (!resourceDirty.current || await ask(t("shell.discard"), { title: t("shell.title"), kind: "warning" })) {
@@ -195,9 +201,11 @@ export function SettingsView({
             )}
             <div className="settings-content">
               <SettingsSectionContainers
+                pluginSession={pluginSession}
                 activeSection={activeSection}
                 orchestration={orchestration}
                 onResourceDirtyChange={onResourceDirtyChange}
+                onResourceBusyChange={onResourceBusyChange}
               />
             </div>
           </div>

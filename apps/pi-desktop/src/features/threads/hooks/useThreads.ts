@@ -1,3 +1,4 @@
+import i18n from "@/i18n";
 import { commandsFromThread } from "@utils/desktopCommands";
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import * as Sentry from "@sentry/react";
@@ -158,35 +159,45 @@ export function useThreads({
     }
   }, [onMessageActivity]);
 
-  const startReload = useCallback(async () => {
-    if (!activeWorkspaceId) {
-      return;
+  const reloadInFlight = useRef(false);
+  const reloadSelection = useRef({ workspaceId: activeWorkspaceId, threadId: activeThreadId, processing: false });
+  reloadSelection.current = {
+    workspaceId: activeWorkspaceId,
+    threadId: activeThreadId,
+    processing: Boolean(activeThreadId && state.threadStatusById[activeThreadId]?.isProcessing),
+  };
+  // Settings needs a rejection on failure; composer keeps its existing transcript error path.
+  const reloadCurrentSession = useCallback(async () => {
+    if (!activeWorkspaceId || reloadInFlight.current || reloadSelection.current.processing ||
+        reloadSelection.current.workspaceId !== activeWorkspaceId || reloadSelection.current.threadId !== activeThreadId) {
+      throw new Error(i18n.t("settings:plugins.reloadUnavailable"));
     }
-    if (!activeThreadId) {
-      await reloadWorkspaceDraft();
-      return;
-    }
-    if (state.threadStatusById[activeThreadId]?.isProcessing) {
-      return;
-    }
+    reloadInFlight.current = true;
     try {
-      await reloadThreadService(activeWorkspaceId, activeThreadId);
-    } catch (error) {
-      pushThreadErrorMessage(
-        activeThreadId,
-        error instanceof Error ? error.message : String(error),
-      );
+      if (activeThreadId) {
+        await reloadThreadService(activeWorkspaceId, activeThreadId);
+      } else {
+        await reloadWorkspaceDraft();
+      }
     } finally {
+      reloadInFlight.current = false;
       safeMessageActivity();
     }
-  }, [
-    activeThreadId,
-    activeWorkspaceId,
-    pushThreadErrorMessage,
-    reloadWorkspaceDraft,
-    safeMessageActivity,
-    state.threadStatusById,
-  ]);
+  }, [activeThreadId, activeWorkspaceId, reloadWorkspaceDraft, safeMessageActivity]);
+
+  const startReload = useCallback(async () => {
+    if (!activeWorkspaceId || reloadInFlight.current ||
+        (activeThreadId && state.threadStatusById[activeThreadId]?.isProcessing)) return;
+    try {
+      await reloadCurrentSession();
+    } catch (error) {
+      if (activeThreadId) {
+        pushThreadErrorMessage(activeThreadId, error instanceof Error ? error.message : String(error));
+      } else {
+        throw error;
+      }
+    }
+  }, [activeThreadId, activeWorkspaceId, pushThreadErrorMessage, reloadCurrentSession, state.threadStatusById]);
 
   const setThreadLoaded = useCallback((threadId: string, isLoaded: boolean) => {
     loadedThreadsRef.current[threadId] = isLoaded;
@@ -747,6 +758,7 @@ export function useThreads({
     sendUserMessageToThread,
     startCompact,
     startReload,
+    reloadCurrentSession,
     forkMessage,
   };
 }

@@ -63,6 +63,33 @@ describe("workspace draft", () => {
     expect(result.current.commands).toEqual([]);
   });
 
+  it("keeps the initial catalog when an overlapping reload fails", async () => {
+    let finishPrepare!: (value: Awaited<ReturnType<typeof prepareThread>>) => void;
+    let failReload!: (reason: Error) => void;
+    vi.mocked(prepareThread).mockImplementationOnce(() => new Promise(resolve => { finishPrepare = resolve; }));
+    vi.mocked(reloadThread).mockImplementationOnce(() => new Promise((_, reject) => { failReload = reject; }));
+    const { result } = renderHook(() => useWorkspaceDraft("workspace", null));
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.reload(); });
+    await act(async () => { finishPrepare({ thread: { id: "draft", commands } }); });
+    await act(async () => {
+      failReload(new Error("reload failed"));
+      await expect(pending).rejects.toThrow("reload failed");
+    });
+    expect(result.current.commands).toEqual(commands);
+  });
+
+  it("does not let a late initial catalog overwrite a successful reload", async () => {
+    let finishPrepare!: (value: Awaited<ReturnType<typeof prepareThread>>) => void;
+    vi.mocked(prepareThread).mockImplementationOnce(() => new Promise(resolve => { finishPrepare = resolve; }));
+    const reloaded = [{ name: "fresh", description: "New generation" }];
+    vi.mocked(reloadThread).mockResolvedValueOnce({ thread: { id: "draft", commands: reloaded } });
+    const { result } = renderHook(() => useWorkspaceDraft("workspace", null));
+    await act(async () => { await result.current.reload(); });
+    await act(async () => { finishPrepare({ thread: { id: "draft", commands } }); });
+    expect(result.current.commands).toEqual(reloaded);
+  });
+
   it("reloads the prepared generation and replaces its command catalog", async () => {
     const reloaded = [{ name: "native", description: "Reloaded plugin action" }];
     vi.mocked(reloadThread).mockResolvedValueOnce({
@@ -78,4 +105,20 @@ describe("workspace draft", () => {
     expect(reloadThread).toHaveBeenCalledWith("workspace");
     expect(result.current.commands).toEqual(reloaded);
   });
+});
+
+it("does not overwrite a new workspace's draft when an old reload completes late", async () => {
+  let finish!: (value: Awaited<ReturnType<typeof reloadThread>>) => void;
+  vi.mocked(reloadThread).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const { result, rerender } = renderHook(({ id }) => useWorkspaceDraft(id, null), { initialProps: { id: "old" } });
+  await waitFor(() => expect(result.current.commands).toEqual(commands));
+  let pending!: Promise<void>;
+  act(() => { pending = result.current.reload(); });
+  rerender({ id: "new" });
+  await waitFor(() => expect(result.current.commands).toEqual(commands));
+  await act(async () => {
+    finish({ thread: { id: "old-draft", commands: [{ name: "old", description: "Old generation" }] } });
+    await pending;
+  });
+  expect(result.current.commands).toEqual(commands);
 });

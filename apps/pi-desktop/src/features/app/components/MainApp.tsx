@@ -372,6 +372,7 @@ export default function MainApp() {
     forkMessage,
     startCompact,
     startReload,
+    reloadCurrentSession,
     runtimeCommands,
   } = useThreads({
     activeWorkspace,
@@ -831,6 +832,13 @@ export default function MainApp() {
       },
     },
     settings: {
+      pluginSession: activeWorkspace ? {
+        workspaceId: activeWorkspace.id,
+        workspaceName: activeWorkspace.name,
+        threadId: activeThreadId,
+        isProcessing: Boolean(activeThreadId && threadStatusById[activeThreadId]?.isProcessing),
+        reload: reloadCurrentSession,
+      } : undefined,
       handleMoveWorkspace,
       removeWorkspace,
       createWorkspaceGroup,

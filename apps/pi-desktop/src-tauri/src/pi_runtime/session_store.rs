@@ -250,6 +250,33 @@ impl SessionStore {
             .map(|(key, session)| (key.clone(), session.clone()))
     }
 
+    /// Read an existing handle only; unlike open(), never resumes or constructs a session.
+    pub(crate) fn existing_native_plugin_ids(
+        &self,
+        cwd: &Path,
+        id: &str,
+    ) -> Result<Vec<String>, String> {
+        let (_, handle) = self
+            .handle(id)
+            .ok_or_else(|| format!("Pi session is not open: {id}"))?;
+        let current = handle.current();
+        if current.log().header().id != id {
+            return Err(format!("Pi session was replaced: {id}"));
+        }
+        let cwd = std::fs::canonicalize(cwd).map_err(|error| error.to_string())?;
+        let session_cwd =
+            std::fs::canonicalize(current.runtime().cwd()).map_err(|error| error.to_string())?;
+        if cwd != session_cwd {
+            return Err("Selected thread does not belong to the selected workspace".into());
+        }
+        Ok(current
+            .runtime_inventory()
+            .configured_native_plugins()
+            .iter()
+            .map(ToString::to_string)
+            .collect())
+    }
+
     pub(crate) fn forwarder_key(&self, id: &str) -> Result<String, String> {
         self.handle(id)
             .map(|(key, _)| key)

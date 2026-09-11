@@ -5,6 +5,7 @@ mod credentials;
 mod dynamic_providers;
 mod host;
 pub mod mcp;
+pub mod plugins;
 mod project_trust;
 mod session_factory;
 pub mod skills;

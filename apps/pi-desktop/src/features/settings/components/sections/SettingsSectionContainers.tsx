@@ -1,3 +1,4 @@
+import { SettingsPluginsSection, type PluginSessionContext } from "./SettingsPluginsSection";
 import { SettingsSkillsSection } from "./SettingsSkillsSection";
 import { SettingsMcpSection } from "./SettingsMcpSection";
 import { SettingsComposerSection } from "./SettingsComposerSection";
@@ -14,16 +15,23 @@ import type { SettingsSection } from "@settings/components/settingsTypes";
 import type { SettingsViewOrchestration } from "@settings/hooks/useSettingsViewOrchestration";
 
 type SettingsSectionContainersProps = {
+  pluginSession?: PluginSessionContext;
   activeSection: SettingsSection;
   orchestration: SettingsViewOrchestration;
   onResourceDirtyChange: (dirty: boolean) => void;
+  onResourceBusyChange?: (busy: boolean) => void;
 };
 
 export function SettingsSectionContainers({
   activeSection,
+  pluginSession,
   orchestration,
   onResourceDirtyChange,
+  onResourceBusyChange,
 }: SettingsSectionContainersProps) {
+  if (activeSection === "plugins") {
+    return <SettingsPluginsSection projects={orchestration.projectsSectionProps.projects} onDirtyChange={onResourceDirtyChange} onBusyChange={onResourceBusyChange} session={pluginSession} />;
+  }
   if (activeSection === "mcp") {
     return <SettingsMcpSection projects={orchestration.projectsSectionProps.projects} onDirtyChange={onResourceDirtyChange} />;
   }

@@ -100,6 +100,30 @@ Supported transports are stdio and Streamable HTTP (JSON/SSE responses). Legacy 
 interactive OAuth are not implemented. Use environment references such as `Bearer ${MCP_TOKEN}`
 in headers. See the [CLI MCP configuration guide](../pi-cli/README.md#mcp-servers).
 
+## Native plugin settings
+
+Settings → Plugins manages global `<agent-dir>/plugins.json` and trusted-project
+`<project>/.pi/plugins.json` package state. Browse or search installed/configured Native plugins,
+inspect source/version/type/target/checksum, install from a local package directory, HTTP release
+manifest, GitHub Release reference or static registry, explicitly sync, and remove packages.
+A registry source needs a registry URL (or `PI_PLUGIN_REGISTRY`). Sync preserves satisfying locked
+versions; it is not an update command. Relative global sources resolve from the agent directory;
+use the folder picker or an absolute path when installing local packages.
+
+Browsing is read-only: it does not download, reconcile, load native code, create a session, or
+approve a project. Project access uses the existing trust policy and is checked again on the
+backend for every operation. Installation does not prove native ABI compatibility. Native plugins
+are trusted in-process code, not sandboxed extensions; SHA-256 checks content integrity, not
+publisher identity.
+
+The page shows package records separately from the configured Native plugin IDs observed in an
+explicit current session. That runtime inventory does not include built-ins or explicit-path
+plugins and cannot identify a loaded package's version, hash or installation scope. Package
+operations change disk state only. Explicitly reload the current conversation to apply changes;
+other conversations are not reloaded. A failed reload retains the previous runtime generation.
+This page does not provide enable switches, plugin-specific settings forms, JavaScript extension
+hosting, or a marketplace.
+
 ## Development
 
 ```bash
