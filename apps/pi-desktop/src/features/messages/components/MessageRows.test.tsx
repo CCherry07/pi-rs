@@ -4,119 +4,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationItem } from "../../../types";
 import { MessageRow, ToolRow } from "./MessageRows";
 
-const item: Extract<ConversationItem, { kind: "tool" }> = {
-  id: "subagent-call-1",
-  kind: "tool",
-  toolType: "collabToolCall",
-  title: "Collab: spawn",
-  detail: "→ child-thread",
-  status: "inProgress",
-  output: "Review the parser\n\nreviewer: inProgress",
-  collabTask: "Review the parser",
-  collabReceiver: {
-    threadId: "child-thread",
-    role: "reviewer",
-  },
-  collabReceivers: [
-    {
-      threadId: "child-thread",
-      role: "reviewer",
-    },
-  ],
-  collabStatuses: [
-    {
-      threadId: "child-thread",
-      role: "reviewer",
-      status: "inProgress",
-      totalTokens: 12_400,
-    },
-  ],
-};
+afterEach(cleanup);
 
-describe("ToolRow sub-agent execution tree", () => {
-  afterEach(() => {
-    cleanup();
-  });
-
+describe("ToolRow notices", () => {
   it("renders notices without assistant attribution or collapsed tool controls", () => {
     render(<ToolRow item={{ id: "notice", kind: "tool", toolType: "notice", title: "[warning]", detail: "Plugin warning", status: "completed" }} isExpanded={false} onToggle={vi.fn()} />);
     expect(screen.getByRole("status").textContent).toContain("[warning]");
     expect(screen.getByText("Plugin warning")).toBeTruthy();
     expect(screen.queryByRole("button")).toBeNull();
   });
-
-  it("shows live child status and opens the selected child thread", () => {
-    const onOpenThreadLink = vi.fn();
-    render(
-      <ToolRow
-        item={item}
-        isExpanded={false}
-        onToggle={vi.fn()}
-        onOpenThreadLink={onOpenThreadLink}
-      />,
-    );
-
-    expect(screen.getByLabelText("Sub-agent execution tree")).toBeTruthy();
-    expect(screen.getByText("reviewer")).toBeTruthy();
-    expect(screen.getByText("Review the parser")).toBeTruthy();
-    expect(screen.getByText("processing · 12k tokens")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "Open reviewer progress" }));
-    expect(onOpenThreadLink).toHaveBeenCalledWith("child-thread");
-  });
-
-  it("shows every workflow child and opens the selected node", () => {
-    const onOpenThreadLink = vi.fn();
-    render(
-      <ToolRow
-        item={{
-          ...item,
-          id: "workflow-call-1",
-          title: "Collab: workflow",
-          collabTask: undefined,
-          collabReceiver: { threadId: "child-a", nickname: "first", role: "researcher" },
-          collabReceivers: [
-            { threadId: "child-a", nickname: "first", role: "researcher" },
-            { threadId: "child-b", nickname: "second", role: "reviewer" },
-          ],
-          collabStatuses: [
-            {
-              threadId: "child-a",
-              nickname: "first",
-              role: "researcher",
-              status: "completed",
-              totalTokens: 321,
-            },
-            {
-              threadId: "child-b",
-              nickname: "second",
-              role: "reviewer",
-              status: "inProgress",
-              totalTokens: 123,
-            },
-          ],
-        }}
-        isExpanded={false}
-        onToggle={vi.fn()}
-        onOpenThreadLink={onOpenThreadLink}
-      />,
-    );
-
-    expect(screen.getByText("first")).toBeTruthy();
-    expect(screen.getByText("second")).toBeTruthy();
-    expect(screen.getByText("completed · 0.3k tokens")).toBeTruthy();
-    expect(screen.getByText("processing · 0.1k tokens")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "Open second progress" }));
-    expect(onOpenThreadLink).toHaveBeenCalledWith("child-b");
-  });
 });
 
 describe("MessageRow actions", () => {
-  afterEach(() => {
-    cleanup();
-  });
-
   it("forks from the selected persisted message", () => {
     const message: Extract<ConversationItem, { kind: "message" }> = {
       id: "message-1",

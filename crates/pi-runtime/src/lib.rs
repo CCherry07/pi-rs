@@ -115,6 +115,17 @@ pub struct PreparedRuntimePrompt {
     images: Vec<ImageContent>,
 }
 
+/// A structured prompt prepared under one generation lease.
+///
+/// Session orchestration installs its durable operation record before calling
+/// [`Self::run`], so live steering cannot race ahead of that record.
+pub struct PreparedRuntimeMessages {
+    runtime: PiRuntime,
+    _reload_guard: tokio::sync::OwnedMutexGuard<()>,
+    generation: u64,
+    messages: Vec<Message>,
+}
+
 impl PreparedRuntimePrompt {
     pub fn generation(&self) -> u64 {
         self.generation
@@ -144,6 +155,22 @@ impl PreparedRuntimePrompt {
                 )]))
                 .await
         }
+    }
+}
+
+impl PreparedRuntimeMessages {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    pub async fn run(self) -> Result<RuntimePromptOutcome, RuntimeError> {
+        self.runtime
+            .prompt_recorded_locked(PromptInput::Messages(self.messages))
+            .await
     }
 }
 
@@ -1007,6 +1034,23 @@ impl PiRuntime {
         let runtime = self.agent.runtime();
         self.prepare_submission_locked(reload_guard, runtime, display_text, text, images)
             .await
+    }
+
+    /// Pins the current generation for an already-structured message batch.
+    /// Structured callers deliberately bypass slash-command and input-hook
+    /// preprocessing, matching [`Self::prompt_recorded`].
+    pub async fn prepare_message_submission(
+        &self,
+        messages: Vec<Message>,
+    ) -> PreparedRuntimeMessages {
+        let reload_guard = Arc::clone(&self.reload_lock).lock_owned().await;
+        let runtime = self.agent.runtime();
+        PreparedRuntimeMessages {
+            runtime: self.clone(),
+            _reload_guard: reload_guard,
+            generation: runtime.generation(),
+            messages,
+        }
     }
 
     async fn prepare_submission_locked(

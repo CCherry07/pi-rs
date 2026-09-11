@@ -8,18 +8,33 @@ function ruleBody(stylesheet: string, selector: string) {
   return stylesheet.slice(bodyStart, bodyEnd);
 }
 
-describe("Markdown table layout", () => {
-  it("keeps arbitrary table columns content-driven within the message width", async () => {
+describe("Chat overflow layout", () => {
+  it("lets wide tables scroll without squeezing arbitrary columns", async () => {
     const { readFileSync } = await vi.importActual<{
       readFileSync(path: URL, encoding: "utf8"): string;
     }>("node:fs");
     const stylesheet = readFileSync(new URL("./messages.css", import.meta.url), "utf8");
     const tableRule = ruleBody(stylesheet, ".markdown .markdown-table");
 
-    expect(tableRule).toMatch(/width:\s*100%\s*;/);
+    expect(tableRule).toMatch(/(?:^|;)\s*width:\s*max-content\s*;/);
+    expect(tableRule).toMatch(/min-width:\s*100%\s*;/);
     expect(tableRule).toMatch(/table-layout:\s*auto\s*;/);
+    expect(ruleBody(stylesheet, ".markdown .markdown-table-wrap")).toMatch(/overflow-x:\s*auto\s*;/);
     expect(stylesheet).not.toMatch(
       /\.message \.markdown \.markdown-table (?:th|td):(?:first-child|last-child|nth-child\()/,
     );
+  });
+
+  it("contains the embedded chat viewport without inheriting the main composer overlay", async () => {
+    const { readFileSync } = await vi.importActual<{
+      readFileSync(path: URL, encoding: "utf8"): string;
+    }>("node:fs");
+    const stylesheet = readFileSync(new URL("./messages.css", import.meta.url), "utf8");
+    const embedded = ruleBody(stylesheet, ".messages.messages-embedded");
+    expect(embedded).toMatch(/max-height:\s*min\(/);
+    expect(embedded).toMatch(/overflow:\s*auto\s*;/);
+    expect(embedded).toMatch(/overscroll-behavior:\s*contain\s*;/);
+    expect(embedded).toMatch(/--composer-overlay-height:\s*0px\s*;/);
+    expect(embedded).toMatch(/flex:\s*none\s*;/);
   });
 });

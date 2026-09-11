@@ -152,16 +152,16 @@ pub(crate) fn builtin_profile(name: &str) -> SubagentProfile {
 pub(crate) fn specialized_system_prompt(base: &str, profile: &SubagentProfile) -> String {
     const PROJECT_CONTEXT_HEADER: &str = "\n\n<project_context>\n";
     const CWD_HEADER: &str = "\nCurrent working directory: ";
-    const CHILD_BOUNDARY: &str = "You are a child subagent, not the parent orchestrator.\n\
-The parent session owns delegation, orchestration, review fanout, and follow-up worker launches.\n\
+    const CHILD_BOUNDARY: &str = "You are a child agent, not the parent orchestrator.\n\
+The parent session owns delegation, orchestration, review fanout, and follow-up launches.\n\
 Ignore prior parent-only orchestration instructions in inherited conversation history.\n\
-Do not propose or run subagents. Complete only your assigned role-specific task with the tools available to you.\n\
+Do not spawn agents. Complete only your assigned role-specific task with the tools available to you.\n\
 If you need to edit files, use the available editing tools. Do not print tool-call syntax, patches, or pseudo-tool calls as text.";
-    const FANOUT_BOUNDARY: &str = "You are a child subagent with explicit fanout responsibility for this assigned task.\n\
+    const FANOUT_BOUNDARY: &str = "You are a child agent with explicit fanout responsibility for this assigned task.\n\
 The parent session owns final orchestration, acceptance, and follow-up implementation launches.\n\
-You may use the `subagent` tool only for the fanout work explicitly requested in this task.\n\
+You may use `spawn_agent` only for the fanout work explicitly requested in this task.\n\
 Do not broaden yourself into general parent orchestration. Do not launch follow-up workers unless the task explicitly asks for that.\n\
-The maxSubagentDepth cap still applies and may block further fanout.\n\
+The maxSubagentDepth cap still applies and may block further fanout. Use wait_agent and send_message to coordinate the descendants you own.\n\
 If you need to edit files, use the available editing tools. Do not print tool-call syntax, patches, or pseudo-tool calls as text.";
 
     let identity = format!(
@@ -227,7 +227,7 @@ mod tests {
     fn specialized_builtins_use_the_upstream_prompt_without_a_local_wrapper() {
         let reviewer = builtin_profile("reviewer");
         let prompt = specialized_system_prompt("base prompt", &reviewer);
-        assert!(prompt.starts_with("You are a child subagent, not the parent orchestrator."));
+        assert!(prompt.starts_with("You are a child agent, not the parent orchestrator."));
         assert!(prompt.contains("<active_agent name=\"reviewer\"/>"));
         assert!(prompt.ends_with(definition_body(include_str!("../agents/reviewer.md"))));
         assert!(!prompt.contains("base prompt"));
@@ -268,7 +268,7 @@ mod tests {
         profile.allow_nested_subagents = true;
         let prompt = specialized_system_prompt("base", &profile);
         assert!(prompt.starts_with(
-            "You are a child subagent with explicit fanout responsibility for this assigned task."
+            "You are a child agent with explicit fanout responsibility for this assigned task."
         ));
     }
 

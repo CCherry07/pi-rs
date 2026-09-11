@@ -137,6 +137,18 @@ export type ConversationItem =
       collabTask?: string;
     };
 
+export type SubagentContextOrigin = {
+  mode: "fresh" | "fork";
+  parentThreadId: string;
+  parentEntryId: string | null;
+  snapshotEntryId: string | null;
+};
+
+export type ThreadContextInheritance = {
+  origin: SubagentContextOrigin;
+  inheritedItems: ConversationItem[] | null;
+};
+
 export type ThreadSummary = {
   id: string;
   name: string;

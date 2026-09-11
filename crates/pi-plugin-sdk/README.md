@@ -251,7 +251,8 @@ unchanged content reuses one pinned handle, while a rebuilt artifact gets a new 
 The SDK also pins the `serde_json::Value` map representation used by constructor options, so feature
 unification in a host workspace cannot silently change that Rust-ABI type's layout.
 
-The current contract is native ABI **19**. ABI 19 adds
+The current contract is native ABI **20**. ABI 20 adds persistent managed-isolated-session turns,
+non-starting message delivery, queued follow-ups, and turn-specific wait/abort handles. ABI 19 adds
 `SessionContext::isolated_fork_point()` and `IsolatedSessionOptions.fork_point`.
 An `IsolatedForkPoint { parent_session_id, parent_entry_id }` identifies the persisted caller's
 branch before its active tool batch and lets deferred
@@ -322,8 +323,8 @@ ABI 5 added the generation-bound Pi product context shared by agent, tool prepar
 command, provider, and session callbacks. ABI 4 added provider header/response hooks,
 ABI 3 added macro-derived agent hook interests, and ABI 2 added the shared `AgentContext` /
 `added_tool_names` surface. Older artifacts are rejected before any Rust-ABI constructor is
-resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 19 constructors use the
-`pi_{agent,provider,session}_plugin_create_v19` symbols. Rebuild every native plugin against the
+resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 20 constructors use the
+`pi_{agent,provider,session}_plugin_create_v20` symbols. Rebuild every native plugin against the
 current SDK after upgrading the host.
 
 Every factory call creates a fresh instance. Runtime and session reload continue to use the existing

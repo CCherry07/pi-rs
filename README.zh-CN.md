@@ -43,7 +43,7 @@ Pi 清晰的产品理念、克制的核心设计与 extension-first 架构，正
 - **凭据管理**：`/login`、`/logout` 与 `pi auth` 管理 Pi 兼容的 API key 和 OAuth 凭据，
   不会在 TUI 中回显 secret。
 - **内置工具**：`read`、`write`、`edit`、`hashline_edit`、`bash`、`grep`、`find`、`ls`，
-  以及通过隔离子会话运行、支持 Markdown 角色定义的有界 `subagent` 委派。
+  以及基于可复用隔离会话、支持 Markdown 角色定义的动态 agent tree 协作。
 - **图片输入**：TUI、print、JSON 模式启动时支持 `@file` 图片附件，TUI 支持 `Ctrl+V`
   粘贴本机剪贴板图片；图片校验、缩放和格式转换由共享模块处理。
 - **Skills 与 prompt templates**：自动发现全局和项目 Skills、注册 `/skill:<name>`，并从

@@ -1,4 +1,4 @@
-The bundled subagent role definitions in agents/ are derived verbatim from
+The bundled agent role definitions in agents/ were originally derived from and are now adapted beyond
 pi-subagents at commit 52ece5ad2c07988a67551acc53f8dc92160908b1:
 https://github.com/nicobailon/pi-subagents
 

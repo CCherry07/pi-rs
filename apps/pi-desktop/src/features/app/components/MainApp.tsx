@@ -3,6 +3,7 @@ import successSoundUrl from "@/assets/success-notification.mp3";
 import errorSoundUrl from "@/assets/error-notification.mp3";
 import { MainAppShell } from "@app/components/MainAppShell";
 import { useThreads } from "@threads/hooks/useThreads";
+import { ThreadConversationsContext } from "@threads/contexts/ThreadConversations";
 import { usePullRequestComposer } from "@/features/git/hooks/usePullRequestComposer";
 import { useAutoExitEmptyDiff } from "@/features/git/hooks/useAutoExitEmptyDiff";
 import { isMissingRepo } from "@/features/git/utils/repoErrors";
@@ -341,6 +342,7 @@ export default function MainApp() {
     setActiveThreadId,
     activeThreadId,
     activeItems,
+    conversationSource,
     threadsByWorkspace,
     threadParentById,
     isSubagentThread,
@@ -1488,7 +1490,11 @@ export default function MainApp() {
     compactGitBackNode,
   } = useMainAppLayoutNodes(layoutSurfaces);
 
-  const mainMessagesNode = showWorkspaceHome ? workspaceHomeNode : messagesNode;
+  const mainMessagesNode = showWorkspaceHome ? workspaceHomeNode : (
+    <ThreadConversationsContext.Provider value={conversationSource}>
+      {messagesNode}
+    </ThreadConversationsContext.Provider>
+  );
   const mainAppShellProps = useMainAppShellProps({
     shell: {
       appClassName,

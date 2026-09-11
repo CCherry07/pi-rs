@@ -53,6 +53,16 @@ export function buildConversationItem(
   if (type === "agentMessage") {
     return null;
   }
+  if (type === "notice") {
+    return {
+      id,
+      kind: "tool",
+      toolType: "notice",
+      title: asString(item.title) || i18n.t("messages:errors.provider"),
+      detail: asString(item.detail),
+      status: asString(item.status),
+    };
+  }
   if (type === "userMessage") {
     const content = Array.isArray(item.content) ? item.content : [];
     const { text, images } = parseUserInputs(content as Array<Record<string, unknown>>);

@@ -208,14 +208,15 @@ discovery, and one projection Module translates Pi lifecycle events into the UI'
 `turn/*`, and `item/*` vocabulary. The Adapter emits that vocabulary through its own `pi-event`
 channel; there is no external app-server protocol or child-process boundary. Registered
 workspaces are immediately usable by path; the Adapter has no per-workspace connection lifecycle.
-Direct subagent calls and Rust's native `subagent_workflow` extension project through the same
-multi-receiver collaboration item vocabulary. Workflow progress remains one parent tool item, while
-each node that acquires an `isolatedSessionId` starts one observed child thread keyed by its stable
-`runId`; the workflow node key is presentation metadata and the agent profile remains its role.
-Nested node status and usage update that item without replaying the workflow's deliberately silent
-per-child tool updates. Completed workflow receipts retain child links through their persisted
-`sessionId` values. This is Desktop projection policy for the Rust workflow extension, not a new Pi
-session or provider wire format.
+`spawn_agent` updates containing an `isolatedSessionId` start one observed child task and project a
+parent-child collaboration item outside generic tool groups. The item is a collapsible, read-only
+chat panel in the parent transcript: expanding it lazily reads the child snapshot into the shared
+thread state and renders the same message, reasoning, tool and Markdown views in an independently
+scrollable viewport. It does not select the child, create a session or attach a second composer;
+collapsing only unmounts presentation and never interrupts the child. Loading failures remain
+visible with a retry action, and ancestor identities cannot recursively embed themselves.
+Messaging, follow-up, wait, interrupt, and list calls remain ordinary tool items. The Desktop does
+not interpret a workflow graph or reconstruct live agent-tree control after process restart.
 Desktop session creation delegates path construction to `JsonlSessionRepo`, so its project-scoped
 `<timestamp>_<session-id>.jsonl` filename, v4 header ID, and projected frontend thread ID share one
 identity just as they do in Pi.
@@ -1088,7 +1089,10 @@ Each assistant stream owns one mutable assembler state behind a read-only `Assis
 reducer, ordered native hooks, and listeners therefore do not clone cumulative content. Consumers
 that require a full message call `snapshot()` explicitly, while `message_end` and `turn_end` share
 the completed immutable assistant message. These hook fields were introduced in native ABI 7;
-ABI 19 adds typed fork points for deferred isolated-session forks. ABI 18 adds aggregate managed-isolated-session usage outcomes. ABI 17 adds fresh/fork isolated-context initialization. ABI 16 adds detached usage attribution and ephemeral usage/call outcomes. ABI 8 adds UI
+ABI 20 adds persistent isolated-session turns, messages and follow-ups. ABI 19 adds typed fork
+points for deferred isolated-session forks. ABI 18 adds aggregate managed-isolated-session usage
+outcomes. ABI 17 adds fresh/fork isolated-context initialization. ABI 16 adds detached usage
+attribution and ephemeral usage/call outcomes. ABI 8 adds UI
 confirmation, ABI 9 adds isolated-session control, ABI 10 adds isolated-session
 initial runtime selection, ABI 11 adds direct tool-free completion, ABI 12 adds ephemeral tool loops,
 ABI 13 adds inherited prompt/history, guarded dispatch and invocation observations, and ABI 14 adds
@@ -1618,20 +1622,23 @@ registering or resuming it as a primary session. For an explicit Desktop stop ac
 uses its observed child-to-parent metadata to resolve the directly owning managed `PiSession` and
 invoke that owner's isolated-session abort; the observation capability itself remains read-only,
 and the child is not promoted into frontend ownership. This also preserves immediate ownership for
-nested children instead of routing every cancellation through the root. In-process detached receipts and supervisor
-coordination are feature-owned layers over this interface; cross-process reattachment remains
-unimplemented. Parallel isolated launches prepare their complete runtime generations concurrently;
+nested children instead of routing every cancellation through the root. Persistent turn handles,
+agent-tree ownership and message routing are feature-owned layers over this interface;
+cross-process reattachment remains unimplemented. Parallel isolated launches prepare their complete runtime generations concurrently;
 the manager's lifecycle gate prevents an owner replacement, close, or shutdown from racing those
 preparations, and the UUID-derived paths avoid active-path collisions.
 
-Isolated prompt tasks have manager-owned, abort-on-drop supervisor handles. A prompt panic becomes
+Isolated turn tasks have manager-owned, abort-on-drop supervisor handles. A prompt panic becomes
 an explicit retained terminal failure rather than an unobserved task exit. Launch cancellation and
 normal abort keep polling the same prompt to preserve its persistence and settlement cleanup;
-shutdown/close signal all relevant runs before joining any. A cancelled registry-drain future
+shutdown/close signal all relevant turns before joining any. A cancelled registry-drain future
 retains the handles and tree membership for another drain. Waiters capture only a result channel,
 not the manager or task owner, so waiting cannot prevent owner-drop cancellation. Explicit shutdown
 is the awaited cleanup contract; dropping the manager requests task cancellation only. Cooperative
-cleanup has no new hard deadline, and a non-cooperative hook may still block it. This does not make
+cleanup has no new hard deadline, and a non-cooperative hook may still block it. A completed child
+session remains registered and may accept another follow-up turn. Idle messages stay in its
+manager-owned mailbox until that next turn; active messages use the durable session queue. Each
+turn outcome reports a usage delta rather than the child's lifetime aggregate. This does not make
 all session lifecycle hooks cancellation-safe or repair an Agent's state after arbitrary native
 plugin panics.
 
@@ -1668,207 +1675,118 @@ The seed remains separate from child-authored message entries and returned run o
 17 includes the context-mode field; ABI 18 adds aggregate usage to managed isolated-session
 outcomes. Exact-build plugin compatibility and pinned-library lifetime are otherwise unchanged.
 
-`pi-plugin-subagents` is the first policy module over that seam. It registers the parallel-safe
-`subagent` tool with focused `scout`, `worker`, `reviewer`, `oracle`, and `delegate` built-ins, plus
-`contact_supervisor`, `subagent_supervisor`, and `bg_wait`. Its
-generation-local agent catalog overlays those built-ins with recursive Markdown discovery from the
-global agent directory's `agents/` subtree and the nearest trusted project `.pi/agents/` subtree;
-project definitions win name collisions. Definition frontmatter owns `name`, `description`,
+`pi-plugin-subagents` is the first policy module over that seam. This is a deliberate
+Rust product design, not a compatibility port of legacy Pi or `nicobailon/pi-subagents`. It exposes
+six parallel-safe tools: `spawn_agent`, `send_message`, `followup_task`, `wait_agent`,
+`interrupt_agent`, and `list_agents`. The old `subagent` direct/workflow shape, static DAG
+schema, supervisor RPC tools, background receipts, and workflow persistence entries are not
+registered or interpreted.
+
+The model is the dynamic orchestrator. Conditions and loops are ordinary model decisions after a
+tool result; parallelism is multiple `spawn_agent` calls in one assistant tool batch;
+`wait_agent({ mode: "any" })` is the equivalent of `Promise.race`, and `mode: "all"` is a
+barrier. A wait timeout is a normal snapshot and never cancels work. This keeps the runtime
+language small and prevents JSON workflow structure from becoming a second, less capable
+programming language.
+
+An agent identity names one reusable managed isolated session. A turn identity names one active or
+completed prompt within that session. `spawn_agent` always returns asynchronously with an exact
+agent id and initial turn id. `followup_task` starts a new turn when the child is idle and joins
+the active turn's durable follow-up queue when it is running. `send_message` never starts a turn:
+an active child receives durable steering, an idle child retains the message in its next-turn
+mailbox, and a child may address its immediate parent as `parent`. `interrupt_agent` cancels only
+the current turn, leaving the agent session available for another follow-up. `list_agents`
+returns a read-only descendant-tree snapshot.
+
+Control operations require exact ids and direct ownership; prefixes and model-supplied arbitrary
+session ids are rejected. The runtime maps child session ids to launch records before the first
+provider request, so nested permissions come from host state rather than inherited prompt text.
+A caller may control its direct children and inspect its descendant tree. While a caller is inside
+`wait_agent`, child-to-parent messages use the feature mailbox and wake the wait; otherwise they
+enter the parent's semantic message stream. This state is protected by one feature-owned Module
+that also owns admission, turn monitors, inboxes, snapshots, and shutdown cleanup. The six tool
+Adapters only validate arguments and call that Module.
+
+The generation-local agent catalog provides `scout`, `worker`, `reviewer`, `oracle`, and
+`delegate`, overlaid by Markdown definitions from the global `agents/` subtree and the nearest
+trusted project `.pi/agents/` subtree. Definition frontmatter owns `name`, `description`,
 `aliases`, `systemPromptMode`, `inheritProjectContext`, `allowNestedSubagents`,
-`maxSubagentDepth`, `tools`, `excludeTools`, `model`, `thinking`, `inheritSkills`, `skills`,
-`skillPath`, `defaultContext`, and `timeoutMs`,
-while the Markdown body owns the role system prompt. Omitted selections inherit from the immediate
-parent; an empty `tools` field selects no tools; an explicit list selects work tools under the
-inherited ceiling. Skill-loading and coordination additions described below also remain within
-that ceiling, and exclusions can only narrow the resolved set. The mutating `memory` tool is always
-removed for ordinary managed children even when a custom profile requests or inherits it;
-`memory_search` remains available when selected within the parent ceiling. Canonical names beat
-aliases; alias-to-alias ambiguity fails candidate generation. Bare model ids prefer the current
-provider and otherwise require a unique available catalogue match; thinking levels are checked
-against the resolved model before launch.
-Reload rescans the catalog transactionally, and untrusted project definitions never enter the
-candidate generation.
+`maxSubagentDepth`, `tools`, `excludeTools`, `model`, `thinking`, `inheritSkills`,
+`skills`, `skillPath`, `defaultContext`, and `timeoutMs`; the body owns role instructions.
+Omitted runtime selections inherit from the immediate parent and all child tool sets remain below
+the parent's active-tool ceiling. The mutating `memory` tool is removed from managed children.
+Canonical names beat aliases, ambiguous aliases fail generation construction, and model/thinking
+compatibility is validated before launch.
 
-Built-in role metadata preserves the vendored profiles' reasoning policy: scout uses `low`,
-worker/reviewer/oracle use `high`, and delegate inherits the immediate parent's level. This keeps
-the fast reconnaissance role from accidentally inheriting an expensive `xhigh` or `max` parent
-configuration while retaining explicit profile validation against the selected model.
+Child prompt specialization adds an ordinary-child or explicitly authorized fanout boundary and an
+escaped active-agent identity. Non-fanout profiles do not receive `spawn_agent`; authorized
+profiles receive the collaboration tools only when those tools are within the parent's capability
+ceiling. Skills use the existing generation-local projection Interface. The launch record retains
+the resolved profile, so a reload cannot mix a pre-reload launch with a post-reload definition.
 
-The subagent tool accepts optional `async: true` to return a background receipt after the
-feature-owned monitor is spawned. Default calls still wait in the foreground; fast terminal results return
-directly without a redundant notification. This is detachment from a tool wait, not an independent
-process. Background tasks attempt ordinary best-effort completion/request notifications and are cancelled on
-owner close. One-shot frontends must wait explicitly if a result is required before they exit.
+`spawn_agent` accepts `context: "fresh" | "fork"`; otherwise the profile default applies.
+Implicit fork preference falls back to fresh only when the caller has no persisted branch, while an
+explicit fork fails. The provider-context hook removes inherited parent collaboration calls,
+results, and collaboration notices but retains ordinary tool pairs and the child's own later
+collaboration history. The private first-line launch marker is stripped before provider use.
 
-The subagent tool accepts optional `context: "fresh" | "fork"`. Selection precedence is explicit
-tool argument, profile `defaultContext`, then fresh. An implicit fork preference falls back to fresh
-only when no persisted parent branch exists; an explicit fork fails in that case. Other capture,
-projection or launch errors remain errors. Built-in worker/oracle default to fork;
-scout/reviewer/delegate default to fresh. The plugin's provider-context hook removes inherited
-subagent call/result pairs, parent-only orchestration notices and old private run markers without
-touching other tool pairs, parent storage, or the child's own nested delegation. This policy stays
-outside generic session context initialization. Inherited signed/redacted Anthropic thinking is
-also excluded from the child provider projection; the child's own reasoning blocks and requested
-thinking level remain intact. Parent storage and unknown wire extensions are preserved. Each child
-assembles its own role/system prompt. The context policy follows `nicobailon/pi-subagents`
-`aa75b3353836f7868898e3bd58234d21eaff1463` (`src/shared/fork-context.ts`).
+The shared runtime enforces an inherited maximum depth, 64 cumulative spawns per root session, and
+8 simultaneously active agents. The default maximum depth is 4; `PI_SUBAGENT_MAX_DEPTH`, then
+`<agent-dir>/extensions/subagent/config.json`, may override it, and a profile may only tighten the
+inherited ceiling. Profile `timeoutMs` bounds each turn. Invalid configuration fails candidate
+generation transactionally.
 
-`subagent_workflow` is a deliberate Rust product addition over the same child-launch Module.
-It accepts a bounded static JSON DAG: sequential `stages`, each with exactly one `run`, parallel
-`all` nodes, or parallel `lanes` of sequential steps. Keys are `stage`, `stage/node`, or
-`stage/lane/step`. Validation rejects duplicate keys, unavailable profiles, forward/sibling inputs,
-more than 64 nodes, and submissions over 256 KiB before any launch. It resolves all profiles and
-model/thinking selections, then atomically reserves the cumulative spawn budget and a concurrency
-pool (`maxParallelism`, default 3, range 1–20). Queued nodes consume planned spawns, not active slots.
-All executions reuse ordinary isolated sessions, lineage, monitors, supervisor decisions and usage
-attribution. Potential writers execute exclusively within this workflow's shared cwd; there is no
-cross-workflow lock or worktree isolation.
+Every turn monitor records only that turn's usage delta to its immediate parent. Nested usage
+therefore rolls upward once per turn without double-counting earlier turns in the same child
+session. Agent snapshots retain cumulative child usage plus the last turn result. Monitor tasks are
+owned and drained by the session plugin; owner close or reload interrupts the live tree and removes
+its feature state. Live trees, inboxes, and wait registrations are intentionally process-local and
+generation-bound; process-restart reattachment and executable workflow recovery are not part of
+this design.
 
-Workflow context priority is explicit workflow `context`, node `context`, then profile default.
-The shared launch-context Module applies the same implicit-fork fallback as a single subagent and
-captures one fork point before the first child launches. Every fork node uses that fork point,
-including later stages of a background workflow. Fresh nodes retain their own role/project prompt
-but no parent transcript. Explicit `inputs: [{from, as}]` independently pass ancestor final text
-as reference data, capped at 32 KiB per source and 64 KiB combined JSON. A truncated source fails
-the consumer explicitly instead of silently passing partial evidence. Neither sequential stages nor
-lanes implicitly inherit earlier child transcripts. Retained child-session resume, global
-`defaultSubagentContext`, `context: "profile"`, and automatic fork pruning are not implemented.
+The generic isolated-session capability now owns a persistent child session with multiple typed
+turn handles. It supports non-starting message delivery, idle mailbox retention, queued follow-ups,
+turn-specific wait, and turn-specific abort while keeping concrete `AgentSession` values hidden
+from plugins. These additions are native ABI 20. They add no Pi v4 record variant: messages, queue
+records, assistant/tool pairs, and usage adjustments continue through the existing session schema.
 
-The process-local controller advances ready nodes without a parent model turn. Node failure skips
-descendants while independent lanes continue; startup failure cancels and drains already-started
-siblings. `async: true` returns an owned aggregate receipt; default foreground calls await it, and
-supervisor attention releases the parent wait. `subagent_supervisor status` and `bg_wait` expose the
-group by default, with members queryable by their exact or unique-prefix run IDs. `cancel` aborts
-an owned run or group and drains it; named group decisions include requests from its members.
-Completion notifications are emitted for the group, not each member. Start and terminal snapshots
-use existing Pi v4 `subagent_workflow` custom entries, including per-node context/fork point,
-dependencies, states, session IDs, bounded output summaries and usage. Snapshots are observability
-records, not executable recovery instructions. Parent usage receives each child's aggregate once;
-workflow aggregate usage and node snapshots are display-only, with no additional `ToolResult.usage`.
-Close/reload cancels live work; retries, detached runner processes, restart recovery and retained
-session continuation are outside this contract.
-
-Child prompt specialization follows pi-subagents' prompt layering: a child/fanout boundary and
-escaped `<active_agent>` identity precede the role body, `replace` drops the ordinary Pi prompt,
-and declared project-context inheritance plus the current working directory remain attached.
-pi-rs keeps a private first-line HTML run marker in the task message to bind the independently
-constructed child generation; that marker is a native execution-protocol divergence rather than
-role guidance.
-
-`SkillsPlugin` exposes a small prompt-projection Interface over its immutable generation catalog.
-Normal sessions use the complete model-visible catalog; the subagent Adapter selects inherited and
-explicit skills from the feature-owned launch record. Invocation-private `skillPath` roots are
-resolved relative to the defining Markdown file, remain outside the parent catalog, and take
-precedence only for explicitly selected names. The subagent hook runs before the skills hook so
-`systemPromptMode: replace` replaces the base prompt without discarding the projected child skill
-catalog. Skill-enabled profiles receive `read` only within the caller's existing capability ceiling;
-missing names remain non-fatal result warnings.
-
-A shared feature-owned runtime tracks logical lineage across independently rebuilt child
-generations and enforces maximum nesting depth, cumulative spawns per root session, active-run
-capacity, and each parent profile's nested-delegation permission. The global depth comes from
-`PI_SUBAGENT_MAX_DEPTH`, then `<agent-dir>/extensions/subagent/config.json`, then the built-in
-default. A profile's absolute `maxSubagentDepth` can only tighten the inherited lineage ceiling.
-This is the
-in-process equivalent of pi-subagents' child environment propagation rather than a child-process
-environment contract. Invalid feature configuration fails candidate generation transactionally.
-The launch record retains the resolved owned profile, so a file change between parent launch and
-child binding cannot mix two definition generations. Profile specialization is applied by the plugin's generation hook;
-`pi-core` and `pi-session` never interpret profile names or subagent policy. An authorized child
-receives the same feature plugin and can launch its own isolated child within inherited limits. The
-tool normally waits in the foreground and projects the child's final textual response into the
-parent tool result; multiple calls use the existing parallel scheduler. On a blocking supervisor
-request, all foreground subagent waits owned by that parent yield retained `detached` receipts so
-the parent's tool batch can finish. The original child sessions remain alive. The feature-owned
-`ChildRun` monitor, not the original tool invocation, owns completion, cancellation and the profile
-`timeoutMs` deadline. That deadline remains a total run limit including supervisor waiting.
-Feature-owned monitor handles are drained on session shutdown after cancellation is requested.
-Monitors weakly reference their runtime to avoid owning their own task registry. Unwinding
-or dropping a monitor publishes a terminal failure and releases capacity; ordinary wait cancellation
-still leaves a detached child running. Only terminal completion releases active capacity. Role/skill assignments remain until session
-shutdown so a later nested-child notification cannot promote its supervisor into a root agent.
-A terminal child outcome includes aggregate billed usage from its independent session document.
-The monitor records that usage exactly once as an immediate-parent usage adjustment, including
-timeout and abort settlements; repeated terminal-receipt reads never re-attribute it. Nested child
-adjustments therefore roll into their owning child's aggregate before that aggregate reaches the
-next parent, making each session total subtree-inclusive without charging fork-seed history. The
-tool result exposes the same child aggregate under `details.usage` for presentation, but deliberately
-does not set `ToolResult.usage`, which repeated `bg_wait` calls could otherwise count more than once.
-A failure to persist the parent adjustment remains visible as a result warning rather than silently
-claiming complete accounting.
-A separate session-plugin adapter clears lineage and drains live children whenever the owning
-session shuts down, including reload. Live-run continuity across `/reload` is deliberately outside
-the feature contract. The desktop projector recognizes the
-feature-owned `isolatedSessionId` in subagent tool updates, observes that child read-only, and emits
-the same semantic thread/item stream used for primary sessions. It projects parent-child links as
-collaboration tool items so the existing desktop task hierarchy can render nested execution and
-select a child for inspection. Parent token updates include attributed child usage, while each
-collaboration node and isolated child thread exposes that child's aggregate total independently.
-The TUI and other frontends continue to render only their explicitly
-held primary session unless they opt into the observation seam.
-
-Supervisor tools follow `nicobailon/pi-subagents` revision
-`d3308745d2230d5aa94b9d6e643184adef3fd761` (`native-supervisor-channel.ts`, foreground execution,
-and `subagent-wait.ts`). `contact_supervisor` is authorized by the live child assignment, not by
-forked history or a caller-supplied destination. `need_decision` and `interview_request` wait for
-a correlated reply; `progress_update` delivers immediately without requiring one. Interviews
-parse plain or fenced JSON and report parse errors rather than claiming schema validation.
-The reply deadline defaults to ten minutes (`PI_INTERCOM_ASK_TIMEOUT_MS`). Parent
-`subagent_supervisor` supports `list`, `pending`, `status`, `reply`, and `cancel`. Status is an immediate,
-owner-scoped snapshot with optional exact/unique-prefix `id`, execution-state counts, child IDs,
-elapsed/deadline timestamps, pending request IDs and bounded result summaries.
-`list`/`pending` retain request-list semantics. Feature-owned typed execution state is independent
-from attention and detached-wait mode. Starting/running/cancelling are nonterminal; the monitor
-publishes completed/failed/cancelled/timed_out exactly once, without parsing error text. A provider
-error is failed, not a successful response without text. The reported run deadline uses the same
-monitor-start instant as enforcement; launch preparation is not included in that timer. Queries do
-not consume outcomes or trigger model work. Replies include exact `replyTo`
-or unambiguous request-prefix/agent selection via `to`. Owner checks, expiry and one-shot delivery
-reject foreign, stale and repeated replies. Request cancellation withdraws its pending entry.
-
-`bg_wait` supports a run id/prefix, `all`, `timeoutMs` (default thirty minutes), and
-`stopOnAttention`; supervisor requests always interrupt a wait even when the latter is false.
-It snapshots the owned active set when no id is supplied; a named terminal receipt remains
-queryable. Wait timeout or wait cancellation leaves the child running.
-
-`bg_wait({id, nonBlocking:true, timeoutMs})` adds a plugin-local, one-shot observation of a
-single detached run. An exact or unique-prefix id is resolved once; an omitted id or `all:true`
-is rejected. A ready result or pending decision returns immediately without arming a timer.
-Otherwise registration returns `armed`, the full `runId`, `deadlineAt`, and `reused`; another
-active registration for the same owner/run reuses the original deadline rather than extending it.
-Status exposes the active `nonBlockingWait.deadlineAt`. Completion or a decision request removes
-the observation and uses the existing notification, with no additional subscription notification.
-On observation expiry, the record is removed and a single best-effort `subagent-wait-expired`
-reminder attempts to trigger the parent; the run state and execution deadline do not change.
-The caller may rearm after expiry or after answering a decision. This mode observes only the named
-run's decisions; ordinary blocking waits still yield for any owned decision to unblock tool batches.
-The coordination Module atomically owns registration and each cancellable Tokio timer; timers
-weakly reference coordination and use private identities to prevent stale expiry from consuming
-a replacement. Completion, attention, run removal and owner cleanup cancel the timer along with
-the record. There is no progress stream, polling loop, durable subscription or reload handoff.
-
-Supervisor decision requests and detached completion notifications use the existing custom-message
-adapter with `trigger_turn: true`; progress updates use `trigger_turn: false`. Delivery is a
-best-effort, single attempt against the currently bound owner session and does not add storage or
-acceptance semantics to `pi-session`. A failed notification never changes the run result or removes
-a pending decision request: `subagent_supervisor status` and `pending` are the authoritative
-fallbacks. Replies are journaled as `subagent_supervisor_reply` custom entries. Closing or reloading
-the owner cancels its runs. Detached completion remains first-terminal-wins, and named terminal
-receipts remain queryable until owner cleanup. The feature does not promise notification replay,
-exactly-once delivery, or live-run handoff across reload.
-
-The deliberate Rust divergence is an in-process mailbox/watch implementation instead of upstream
-filesystem IPC. There is no standalone detached runner, process-restart reattachment, external
-background-work provider, persistent wait subscription, or live-run continuity across reload.
-Execution and state changes remain explicitly process-local. The usage rollup is a deliberate product enhancement over the current upstream
-pi-subagents example, which reports child usage in result details but does not attribute it to the
-parent session. It requires native ABI 18 but no Pi v4 record-shape change: attribution uses the
-existing usage-adjustment entry. Coordination guidance is
-run-local and capability-gated. The child launch plan injects coordination tools only within the
-parent's active ceiling; exclusions and explicit `tools: []` keep the bridge off. Leaf children
-receive `contact_supervisor`; nested coordinators may also receive the reply/wait tools. Parent
-coordination calls/results and supervisor notices are removed only from inherited fork history.
-
+The desktop Adapter recognizes `spawn_agent` updates containing `isolatedSessionId`, observes
+the child read-only, and projects a collapsible child conversation in the parent transcript. This
+is a deliberate Desktop presentation, not Pi's example-extension tool-result renderer. All panels
+consume the existing shared thread reducer and automatic child event forwarders; read-only
+hydration neither selects a thread nor changes the parent composer. Snapshot reads merge at the
+reducer seam without overwriting newer live items, activity or usage; context replacement invalidates
+pending reads. The Desktop projection uses current-context message ordinals and block indices for
+both snapshot and live item IDs, including invisible messages in the ordinal count. Stream updates
+carry cumulative block text so a snapshot ahead of queued events cannot duplicate text. Prompt
+boundaries, compaction and missed-event recovery reset projection state from an authoritative
+subscription snapshot rather than merging ordinals across different contexts. Snapshot refresh
+retains the event receiver: covered message/tool updates are skipped while queued lifecycle,
+error, usage and notice events still run. Recovery reinstalls child observers from completed spawn
+metadata without executing tools again, and snapshot errors remain distinct notice items. Actual
+generation replacement retains its existing latest-generation subscription swap. These are
+frontend projection identities, not
+persisted Pi entry IDs or a change to the Pi v4 wire schema. Child presentation separates context
+provenance from conversation items. Both live and stored isolated snapshots expose `contextOrigin`
+(mode, parent thread, nullable parent entry and child seed entry IDs), with the immutable
+`pi.isolated_context` history projected separately as `inheritedContext`. The default child timeline
+excludes inherited history, while retaining the original message ordinals for live reconciliation.
+Projection tracks retained inherited messages across compaction instead of blindly dropping a fixed
+prefix or matching message text. The seed's optional parent entry ID records the safe creation
+boundary; older seeds remain readable with an unknown boundary. Fresh children store only their
+parent identity in a non-message `pi.isolated_origin` custom entry, preserving lazy materialization
+and keeping ancestry observable even when an unsaved parent has no JSONL file. Both metadata
+entries use the existing v4 custom-entry extension seam, with no native plugin ABI change.
+Provider context, billing and fork/fresh execution semantics are unchanged.
+Desktop keeps this snapshot outside the shared live item array and exposes it through a collapsed,
+read-only provenance banner. It reads the child's captured seed, never the current parent thread;
+later parent updates cannot alter it. Inherited collaboration records use static tool disclosures
+rather than loading live descendant conversations. The existing parent card still expands the
+child's independent chat, without selecting a thread or creating a composer. This is a deliberate
+Rust Desktop presentation design, not parity with Pi's subprocess-based example extension.
+The other five tools use ordinary tool presentation. There is no
+workflow-item or legacy-tool projection. Isolated child files remain outside top-level resume
+discovery; live control remains with the owning session.
 Each `PiSession` has one replaceable current `AgentSession`. Its internal `AgentSessionRuntime`
 serializes replacement, dispatches `session_before_switch` or `session_before_fork`, settles the
 active agent, prepares the complete next session, emits old `session_shutdown`, emits new

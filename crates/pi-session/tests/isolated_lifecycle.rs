@@ -208,9 +208,7 @@ async fn isolated_prompt_panic_publishes_a_repeatable_terminal_failure() {
         .await
         .unwrap_err();
     assert!(
-        first
-            .to_string()
-            .contains("isolated session prompt panicked"),
+        first.to_string().contains("isolated session turn panicked"),
         "{first}"
     );
     assert!(first.to_string().contains("isolated prompt panic fixture"));

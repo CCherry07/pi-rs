@@ -123,6 +123,7 @@ export function reduceThreadLifecycle(
           : state.activeThreadIdByWorkspace[action.workspaceId] ?? null;
       const { [action.threadId]: _, ...restItems } = state.itemsByThread;
       const { [action.threadId]: _commands, ...restCommands } = state.commandsByThread;
+      const { [action.threadId]: _inheritance, ...restInheritance } = state.contextInheritanceByThread;
       const { [action.threadId]: __, ...restStatus } = state.threadStatusById;
       const { [action.threadId]: ___, ...restTurns } = state.activeTurnIdByThread;
       const { [action.threadId]: ____, ...restDiffs } = state.turnDiffByThread;
@@ -135,6 +136,7 @@ export function reduceThreadLifecycle(
           [action.workspaceId]: filtered,
         },
         itemsByThread: restItems,
+        contextInheritanceByThread: restInheritance,
         commandsByThread: restCommands,
         threadStatusById: restStatus,
         activeTurnIdByThread: restTurns,

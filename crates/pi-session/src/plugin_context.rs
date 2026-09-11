@@ -6,11 +6,12 @@ use async_trait::async_trait;
 use pi_core::{
     AbortSignal, AssistantMessage, CompactOptions, ContentBlock, CustomMessage,
     CustomMessageContent, CustomMessageInput, DirectCompletionRequest, ForkOptions,
-    IsolatedSessionId, IsolatedSessionOutcome, IsolatedSessionRequest, Message, MessageDelivery,
-    ModelId, ModelsContextAccess, NavigateTreeOptions, NewSessionOptions, NoticeLevel,
-    PluginContextError, PluginContextReplacement, PluginContextScope, PresentationMode, ProviderId,
-    SendMessageOptions, SendUserMessageOptions, SessionContextAccess, SessionEntryKind,
-    SessionEntryView, SessionSnapshot, ThinkingLevel, UiContextAccess, Usage, UserMessage,
+    IsolatedFollowUpReceipt, IsolatedMessageReceipt, IsolatedSessionId, IsolatedSessionOutcome,
+    IsolatedSessionRequest, IsolatedSessionTurnId, Message, MessageDelivery, ModelId,
+    ModelsContextAccess, NavigateTreeOptions, NewSessionOptions, NoticeLevel, PluginContextError,
+    PluginContextReplacement, PluginContextScope, PresentationMode, ProviderId, SendMessageOptions,
+    SendUserMessageOptions, SessionContextAccess, SessionEntryKind, SessionEntryView,
+    SessionSnapshot, ThinkingLevel, UiContextAccess, Usage, UserMessage,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -847,6 +848,48 @@ impl SessionContextAccess for PiPluginContext {
         // PiSession here would keep its plugin runtime (and monitor owner) alive.
         let waiting = self.pi_session()?.isolated_session_waiter(&id)?;
         waiting.await
+    }
+
+    async fn wait_for_isolated_session_turn(
+        &self,
+        _scope: PluginContextScope,
+        id: IsolatedSessionId,
+        turn_id: IsolatedSessionTurnId,
+    ) -> Result<IsolatedSessionOutcome, PluginContextError> {
+        let waiting = self
+            .pi_session()?
+            .isolated_session_turn_waiter(&id, &turn_id)?;
+        waiting.await
+    }
+
+    fn send_to_isolated_session(
+        &self,
+        _scope: PluginContextScope,
+        id: IsolatedSessionId,
+        content: CustomMessageContent,
+    ) -> Result<IsolatedMessageReceipt, PluginContextError> {
+        self.pi_session()?.send_to_isolated_session(&id, content)
+    }
+
+    async fn follow_up_isolated_session(
+        &self,
+        _scope: PluginContextScope,
+        id: IsolatedSessionId,
+        content: CustomMessageContent,
+    ) -> Result<IsolatedFollowUpReceipt, PluginContextError> {
+        self.pi_session()?
+            .follow_up_isolated_session(&id, content)
+            .await
+    }
+
+    fn abort_isolated_session_turn(
+        &self,
+        _scope: PluginContextScope,
+        id: IsolatedSessionId,
+        turn_id: IsolatedSessionTurnId,
+    ) -> Result<(), PluginContextError> {
+        self.pi_session()?
+            .abort_isolated_session_turn(&id, &turn_id)
     }
 
     fn abort_isolated_session(

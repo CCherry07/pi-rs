@@ -1,3 +1,4 @@
+mod isolated_projection;
 pub(crate) mod mcp;
 pub(crate) mod plugins;
 mod projection;
@@ -762,11 +763,7 @@ fn thread_from_subscription(live: &session_store::LiveSession) -> Value {
         &live.subscription.snapshot,
         &session.log().header().id,
         session.runtime().cwd(),
-        SessionTokenUsage {
-            total_tokens: None,
-            context_tokens: None,
-            model_context_window: session.active_context_window(),
-        },
+        token_usage(session),
         json!("pi-rs"),
         None,
         message_entry_ids(session),
@@ -797,7 +794,22 @@ fn thread_from_observation(
     agent: &str,
     nickname: Option<&str>,
 ) -> Value {
-    let snapshot = observation.snapshot();
+    thread_from_isolated_snapshot(
+        &observation.snapshot(),
+        observation,
+        parent_thread_id,
+        agent,
+        nickname,
+    )
+}
+
+fn thread_from_isolated_snapshot(
+    snapshot: &AgentSessionSnapshot,
+    observation: &IsolatedSessionObservation,
+    parent_thread_id: &str,
+    agent: &str,
+    nickname: Option<&str>,
+) -> Value {
     let id = observation.session_id();
     let cwd = observation.cwd();
     let token_usage = observation
@@ -808,8 +820,17 @@ fn thread_from_observation(
             model_context_window: snapshot.model_context_window,
         })
         .unwrap_or_default();
-    thread_from_snapshot(
-        &snapshot,
+    let document = observation.document().ok();
+    let own_snapshot = document
+        .as_ref()
+        .map(|document| isolated_projection::separate_inherited_context(snapshot, document));
+    let entry_ids = document
+        .as_ref()
+        .and_then(|document| document.branch().ok())
+        .map(|branch| collect_message_entry_ids(branch.iter().copied()))
+        .unwrap_or_default();
+    let mut thread = thread_from_snapshot(
+        own_snapshot.as_ref().unwrap_or(snapshot),
         &id,
         &cwd,
         token_usage,
@@ -825,8 +846,17 @@ fn thread_from_observation(
             }
         }),
         Some(agent),
-        HashMap::new(),
-    )
+        entry_ids,
+    );
+    if let Some(document) = &document {
+        isolated_projection::attach_context_origin(
+            &mut thread,
+            snapshot,
+            document,
+            parent_thread_id,
+        );
+    }
+    thread
 }
 
 fn thread_from_stored_isolated(stored: &StoredIsolatedSession) -> Result<Value, String> {
@@ -835,14 +865,11 @@ fn thread_from_stored_isolated(stored: &StoredIsolatedSession) -> Result<Value, 
         .branch()
         .map_err(|error| error.to_string())?;
     let message_entry_ids = collect_message_entry_ids(branch.iter().copied());
-    let messages = branch
-        .iter()
-        .filter_map(|record| match &record.entry {
-            SessionEntry::Message(entry) => entry.message.as_standard().cloned(),
-            SessionEntry::CustomMessage(entry) => Some(entry.to_message(record.timestamp_ms)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let messages = stored
+        .document
+        .context()
+        .map_err(|error| error.to_string())?
+        .runtime_messages();
     let model_selection = branch.iter().rev().find_map(|record| match &record.entry {
         SessionEntry::ModelChange(change) => {
             Some((change.provider.clone(), change.model_id.clone()))
@@ -885,8 +912,9 @@ fn thread_from_stored_isolated(stored: &StoredIsolatedSession) -> Result<Value, 
         bash: None,
         name: stored.document.name.clone(),
     };
-    Ok(thread_from_snapshot(
-        &snapshot,
+    let own_snapshot = isolated_projection::separate_inherited_context(&snapshot, &stored.document);
+    let mut thread = thread_from_snapshot(
+        &own_snapshot,
         &stored.document.header.id,
         &stored.document.header.cwd,
         document_token_usage(&stored.document, None),
@@ -903,7 +931,14 @@ fn thread_from_stored_isolated(stored: &StoredIsolatedSession) -> Result<Value, 
         }),
         Some(&stored.agent),
         message_entry_ids,
-    ))
+    );
+    isolated_projection::attach_context_origin(
+        &mut thread,
+        &snapshot,
+        &stored.document,
+        &stored.parent_thread_id,
+    );
+    Ok(thread)
 }
 
 #[derive(Clone)]
@@ -987,6 +1022,69 @@ fn take_message_entry(
     candidates.remove(index).map(|(_, entry)| entry)
 }
 
+// Frontend-only identity: every message (including hidden custom/tool results) occupies
+// one slot. Provider timestamps and metadata may change while a response streams.
+fn message_item_id(kind: &str, message_index: usize, content_index: usize) -> String {
+    format!("{kind}-{message_index}-{content_index}")
+}
+
+fn message_items(
+    message: &Message,
+    message_index: usize,
+    entry_id: Option<&str>,
+    display_text: Option<&str>,
+) -> Vec<Value> {
+    match message {
+        Message::User(message) => vec![json!({
+            "id": message_item_id("user", message_index, 0),
+            "type": "userMessage",
+            "entryId": entry_id,
+            "content": user_content_with_display(&message.content, display_text),
+        })],
+        Message::Assistant(message) => message
+            .content
+            .iter()
+            .enumerate()
+            .filter_map(|(content_index, block)| match block {
+                ContentBlock::Text(text) if !text.text.is_empty() => Some(json!({
+                    "id": message_item_id("agent", message_index, content_index),
+                    "type": "agentMessage",
+                    "entryId": entry_id,
+                    "text": text.text,
+                })),
+                ContentBlock::Thinking(thinking) if !thinking.thinking.is_empty() => Some(json!({
+                    "id": message_item_id("reasoning", message_index, content_index),
+                    "type": "reasoning",
+                    "summary": [],
+                    "content": [thinking.thinking],
+                })),
+                _ => None,
+            })
+            .chain(
+                message
+                    .error_message
+                    .as_ref()
+                    .filter(|error| !error.is_empty())
+                    .map(|error| {
+                        json!({
+                            "id": message_item_id("error", message_index, 0),
+                            "type": "notice",
+                            "title": "",
+                            "detail": error,
+                            "status": "failed",
+                        })
+                    }),
+            )
+            .collect(),
+        Message::Custom(custom) if custom.display => vec![json!({
+            "id": message_item_id("custom", message_index, 0),
+            "type": "userMessage",
+            "content": [{ "type": "text", "text": content_text(&custom.content.to_blocks()) }],
+        })],
+        _ => Vec::new(),
+    }
+}
+
 fn thread_from_snapshot(
     snapshot: &AgentSessionSnapshot,
     id: &str,
@@ -996,7 +1094,15 @@ fn thread_from_snapshot(
     display_name: Option<&str>,
     mut message_entry_ids: MessageEntryIds,
 ) -> Value {
-    let messages = &snapshot.agent.messages;
+    // The stream handle is cumulative and may have advanced beyond snapshot.revision.
+    // It still belongs to the next message slot, even if MessageEnd is already queued.
+    let streaming = snapshot
+        .agent
+        .streaming_message
+        .as_ref()
+        .and_then(|stream| stream.snapshot())
+        .map(Message::assistant);
+    let messages = snapshot.agent.messages.iter().chain(streaming.iter());
     let mut turns = Vec::<Value>::new();
     let mut items = Vec::<Value>::new();
     let mut turn_started_at = 0_i64;
@@ -1025,7 +1131,7 @@ fn thread_from_snapshot(
         }
     };
 
-    for message in messages {
+    for (message_index, message) in messages.enumerate() {
         let entry = take_message_entry(&mut message_entry_ids, message);
         let entry_id = entry.as_ref().map(|entry| entry.id.clone());
         let timestamp = message_timestamp(message);
@@ -1052,36 +1158,25 @@ fn thread_from_snapshot(
                         .join(" ");
                 }
                 items.push(json!({
-                    "id": format!("user-{turn_index}-{}", message.timestamp_ms),
+                    "id": message_item_id("user", message_index, 0),
                     "type": "userMessage",
                     "entryId": entry_id,
                     "content": content
                 }));
             }
-            Message::Assistant(message) => {
-                for (content_index, block) in message.content.iter().enumerate() {
-                    match block {
-                        ContentBlock::Text(text) if !text.text.is_empty() => items.push(json!({
-                            "id": format!("agent-{turn_index}-{}-{content_index}", message.timestamp_ms),
-                            "type": "agentMessage",
-                            "entryId": entry_id,
-                            "text": text.text
-                        })),
-                        ContentBlock::Thinking(thinking) if !thinking.thinking.is_empty() => {
-                            items.push(json!({
-                                "id": format!("reasoning-{turn_index}-{}-{content_index}", message.timestamp_ms),
-                                "type": "reasoning",
-                                "summary": [],
-                                "content": [thinking.thinking]
-                            }));
-                        }
-                        ContentBlock::ToolCall(call) => {
-                            pending_tools.insert(
-                                call.id.to_string(),
-                                (call.name.clone(), call.arguments.clone()),
-                            );
-                        }
-                        _ => {}
+            Message::Assistant(assistant) => {
+                items.extend(message_items(
+                    message,
+                    message_index,
+                    entry_id.as_deref(),
+                    None,
+                ));
+                for block in &assistant.content {
+                    if let ContentBlock::ToolCall(call) = block {
+                        pending_tools.insert(
+                            call.id.to_string(),
+                            (call.name.clone(), call.arguments.clone()),
+                        );
                     }
                 }
             }
@@ -1099,14 +1194,9 @@ fn thread_from_snapshot(
                     historical_context,
                 ));
             }
-            Message::Custom(custom) if custom.display => {
-                items.push(json!({
-                    "id": format!("custom-{turn_index}-{}", custom.timestamp_ms),
-                    "type": "userMessage",
-                    "content": [{ "type": "text", "text": content_text(&custom.content.to_blocks()) }]
-                }));
+            Message::Custom(_) => {
+                items.extend(message_items(message, message_index, None, None));
             }
-            Message::Custom(_) => {}
         }
     }
     for (tool_id, (name, arguments)) in pending_tools {
@@ -1127,14 +1217,7 @@ fn thread_from_snapshot(
         turn_index,
         snapshot.agent.is_running,
     );
-    let active_turn_id = snapshot.agent.is_running.then(|| {
-        turns
-            .last()
-            .and_then(|turn| turn.get("id"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    });
+    let active_turn_id = snapshot.agent.is_running.then(|| format!("pi-turn-{id}"));
     let now = chrono::Utc::now().timestamp_millis();
     json!({
         "id": id,
@@ -1160,122 +1243,6 @@ fn thread_from_snapshot(
 struct HistoricalToolContext<'a> {
     cwd: &'a Path,
     parent_thread_id: &'a str,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct WorkflowNodeSummary {
-    run_id: Option<String>,
-    key: String,
-    agent: String,
-    state: String,
-    isolated_session_id: Option<String>,
-    session_id: Option<String>,
-    total_tokens: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct WorkflowDisplayNode {
-    key: String,
-    agent: String,
-    thread_id: String,
-    state: String,
-    total_tokens: Option<u64>,
-}
-
-fn workflow_node_summaries(details: Option<&Value>) -> Vec<WorkflowNodeSummary> {
-    details
-        .and_then(|details| details.get("nodes"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|node| {
-            let key = node.get("key")?.as_str()?.to_string();
-            Some(WorkflowNodeSummary {
-                run_id: node
-                    .get("runId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                key,
-                agent: node
-                    .get("agent")
-                    .and_then(Value::as_str)
-                    .unwrap_or("subagent")
-                    .to_string(),
-                state: node
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .unwrap_or("running")
-                    .to_string(),
-                isolated_session_id: node
-                    .get("isolatedSessionId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                session_id: node
-                    .get("sessionId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                total_tokens: node
-                    .get("usage")
-                    .and_then(|usage| usage.get("totalTokens"))
-                    .and_then(Value::as_u64),
-            })
-        })
-        .collect()
-}
-
-fn workflow_node_ui_status(state: &str) -> &'static str {
-    match state {
-        "completed" => "completed",
-        "failed" | "cancelled" | "timed_out" | "skipped" => "failed",
-        _ => "inProgress",
-    }
-}
-
-fn workflow_tool_item(
-    id: &str,
-    parent_thread_id: &str,
-    status: &str,
-    nodes: &[WorkflowDisplayNode],
-    output: Option<String>,
-) -> Value {
-    let receiver_thread_ids = nodes
-        .iter()
-        .map(|node| node.thread_id.as_str())
-        .collect::<Vec<_>>();
-    let receiver_agents = nodes
-        .iter()
-        .map(|node| {
-            json!({
-                "threadId": node.thread_id,
-                "agentNickname": node.key,
-                "agentRole": node.agent,
-            })
-        })
-        .collect::<Vec<_>>();
-    let agent_statuses = nodes
-        .iter()
-        .map(|node| {
-            json!({
-                "threadId": node.thread_id,
-                "agentNickname": node.key,
-                "agentRole": node.agent,
-                "status": workflow_node_ui_status(&node.state),
-                "totalTokens": node.total_tokens,
-            })
-        })
-        .collect::<Vec<_>>();
-    json!({
-        "id": id,
-        "type": "collabToolCall",
-        "tool": "workflow",
-        "senderThreadId": parent_thread_id,
-        "receiverThreadIds": receiver_thread_ids,
-        "receiverAgents": receiver_agents,
-        "prompt": "",
-        "status": status,
-        "result": output.unwrap_or_default(),
-        "agentStatuses": agent_statuses,
-    })
 }
 
 fn historical_tool_item(
@@ -1305,12 +1272,12 @@ fn historical_tool_item(
             "status": status,
             "aggregatedOutput": output
         })
-    } else if name == "subagent" {
+    } else if name == "spawn_agent" {
         let agent = details
             .and_then(|value| value.get("agent"))
             .and_then(Value::as_str)
             .or_else(|| arguments.get("agent").and_then(Value::as_str))
-            .unwrap_or("subagent");
+            .unwrap_or("agent");
         let child_thread_id = details
             .and_then(|value| value.get("sessionId"))
             .and_then(Value::as_str);
@@ -1339,26 +1306,6 @@ fn historical_tool_item(
                 "totalTokens": total_tokens,
             })]).unwrap_or_default(),
         })
-    } else if name == "subagent_workflow" {
-        let nodes = workflow_node_summaries(details)
-            .into_iter()
-            .filter_map(|node| {
-                Some(WorkflowDisplayNode {
-                    key: node.key,
-                    agent: node.agent,
-                    thread_id: node.session_id?,
-                    state: node.state,
-                    total_tokens: node.total_tokens,
-                })
-            })
-            .collect::<Vec<_>>();
-        workflow_tool_item(
-            id,
-            parent_thread_id,
-            status,
-            &nodes,
-            Some(output.to_string()),
-        )
     } else {
         json!({
             "id": id,
@@ -1524,7 +1471,7 @@ mod tests {
                     .await?;
                 }
                 "transform" => {
-                    return Ok(pi_core::CommandOutcome::TransformInput("expanded".into()))
+                    return Ok(pi_core::CommandOutcome::TransformInput("expanded".into()));
                 }
                 "error" => return Err(pi_core::CommandError::Execution("fixture error".into())),
                 _ => context
@@ -2197,7 +2144,7 @@ mod tests {
     fn historical_subagent_results_project_a_selectable_child_link() {
         let item = historical_tool_item(
             "call-1",
-            "subagent",
+            "spawn_agent",
             json!({"agent": "reviewer", "task": "Review the parser"}),
             "review complete",
             false,
@@ -2219,49 +2166,6 @@ mod tests {
         assert_eq!(item["newAgentRole"], "reviewer");
         assert_eq!(item["agentStatuses"][0]["status"], "completed");
         assert_eq!(item["agentStatuses"][0]["totalTokens"], 321);
-    }
-
-    #[test]
-    fn historical_workflow_results_project_each_started_child_link() {
-        let item = historical_tool_item(
-            "call-1",
-            "subagent_workflow",
-            json!({"stages": []}),
-            "first: Completed\nsecond: Running",
-            false,
-            Some(&json!({
-                "state": "running",
-                "nodes": [
-                    {
-                        "key": "first",
-                        "agent": "researcher",
-                        "sessionId": "child-a",
-                        "state": "completed",
-                        "usage": { "totalTokens": 321 }
-                    },
-                    {
-                        "key": "second",
-                        "agent": "reviewer",
-                        "sessionId": "child-b",
-                        "state": "running",
-                        "usage": { "totalTokens": 123 }
-                    }
-                ]
-            })),
-            HistoricalToolContext {
-                cwd: Path::new("/workspace"),
-                parent_thread_id: "parent-session",
-            },
-        );
-
-        assert_eq!(item["type"], "collabToolCall");
-        assert_eq!(item["tool"], "workflow");
-        assert_eq!(item["receiverThreadIds"], json!(["child-a", "child-b"]));
-        assert_eq!(item["receiverAgents"][0]["agentNickname"], "first");
-        assert_eq!(item["receiverAgents"][1]["agentRole"], "reviewer");
-        assert_eq!(item["agentStatuses"][0]["status"], "completed");
-        assert_eq!(item["agentStatuses"][1]["status"], "inProgress");
-        assert_eq!(item["agentStatuses"][1]["totalTokens"], 123);
     }
 
     #[test]
@@ -2467,7 +2371,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let (observation, live) = store
+        let (observation, mut live) = store
             .subscribe_isolated(&parent_id, child.as_str(), "worker", None)
             .unwrap();
         assert!(live.primary().is_none());
@@ -2476,6 +2380,179 @@ mod tests {
         handle.wait_for_isolated_session(&child).await.unwrap();
         assert_eq!(live.token_usage().total_tokens, Some(0));
         assert!(live.token_usage().context_tokens.is_some());
+        live.refresh_subscription();
+        let recovered = thread_from_isolated_snapshot(
+            &live.subscription.snapshot,
+            &observation,
+            &parent_id,
+            "worker",
+            None,
+        );
+        assert_eq!(recovered["status"]["type"], "idle");
+        assert_eq!(
+            recovered,
+            thread_from_observation(&observation, &parent_id, "worker", None)
+        );
+        assert!(recovered.to_string().contains("hello from pi-rs"));
+        assert_eq!(recovered["contextOrigin"]["mode"], "fresh");
+        assert_eq!(recovered["contextOrigin"]["parentThreadId"], parent_id);
+        assert!(recovered["contextOrigin"]["parentEntryId"].is_null());
+        assert!(recovered["contextOrigin"]["snapshotEntryId"].is_null());
+        assert!(recovered["inheritedContext"].is_null());
+        assert!(!parent.log().path().exists());
+        let saved =
+            thread_from_stored_isolated(&store.read_isolated(&observation.session_id()).unwrap())
+                .unwrap();
+        assert_eq!(saved["contextOrigin"], recovered["contextOrigin"]);
+        assert_eq!(saved["turns"], recovered["turns"]);
+    }
+
+    fn projected_items(thread: &Value) -> Vec<Value> {
+        thread["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|turn| turn["items"].as_array().unwrap().clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn isolated_fork_separates_live_saved_context_and_survives_compaction() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager =
+            MultiSessionManager::new(ScriptedFactory(Arc::new(CommandFixture::default())));
+        let store = SessionStore::new(manager.clone(), directory.path().join("agent"));
+        let parent = store.create(directory.path()).await.unwrap();
+        parent.submit("parent history").await.unwrap();
+        let parent_id = parent.log().header().id;
+        let parent_entry = parent
+            .log()
+            .load()
+            .unwrap()
+            .branch()
+            .unwrap()
+            .last()
+            .unwrap()
+            .id
+            .clone();
+        let (_, handle) = store.handle(&parent_id).unwrap();
+        let isolated_id = handle
+            .launch_isolated_session(
+                pi_core::IsolatedSessionRequest::new(pi_core::CustomMessageContent::Text(
+                    "child task".into(),
+                ))
+                .options(pi_core::IsolatedSessionOptions {
+                    context: pi_core::IsolatedContextMode::Fork,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        handle
+            .wait_for_isolated_session(&isolated_id)
+            .await
+            .unwrap();
+        let (observation, mut live) = store
+            .subscribe_isolated(&parent_id, isolated_id.as_str(), "worker", None)
+            .unwrap();
+        let child_id = observation.session_id();
+        let child = manager
+            .sessions()
+            .into_iter()
+            .find(|session| session.id() == child_id)
+            .unwrap();
+        let original = thread_from_observation(&observation, &parent_id, "worker", None);
+        assert_eq!(original["contextOrigin"]["mode"], "fork");
+        assert_eq!(original["contextOrigin"]["parentThreadId"], parent_id);
+        assert_eq!(original["contextOrigin"]["parentEntryId"], parent_entry);
+        assert!(original["contextOrigin"]["snapshotEntryId"]
+            .as_str()
+            .is_some());
+        assert!(!original["turns"].to_string().contains("parent history"));
+        assert!(original["inheritedContext"]["turns"]
+            .to_string()
+            .contains("parent history"));
+        assert!(!original["inheritedContext"]
+            .to_string()
+            .contains("child task"));
+        let items = projected_items(&original);
+        assert_eq!(items[0]["id"], "user-2-0");
+        assert_eq!(items[1]["id"], "agent-3-0");
+        let stored = thread_from_stored_isolated(&store.read_isolated(&child_id).unwrap()).unwrap();
+        assert_eq!(stored["turns"], original["turns"]);
+        assert_eq!(stored["inheritedContext"], original["inheritedContext"]);
+        // Parent evolution and explicit child messages never alter the captured seed.
+        parent
+            .append_custom_message(pi_core::CustomMessage {
+                custom_type: "later".into(),
+                content: pi_core::CustomMessageContent::Text("later parent history".into()),
+                display: true,
+                details: None,
+                timestamp_ms: 77,
+            })
+            .unwrap();
+        handle
+            .send_to_isolated_session(
+                &isolated_id,
+                pi_core::CustomMessageContent::Text("explicit child message".into()),
+            )
+            .unwrap();
+        handle
+            .follow_up_isolated_session(
+                &isolated_id,
+                pi_core::CustomMessageContent::Text("child followup".into()),
+            )
+            .await
+            .unwrap();
+        handle
+            .wait_for_isolated_session(&isolated_id)
+            .await
+            .unwrap();
+        let after = thread_from_observation(&observation, &parent_id, "worker", None);
+        assert_eq!(after["inheritedContext"], original["inheritedContext"]);
+        assert!(after["turns"]
+            .to_string()
+            .contains("explicit child message"));
+        assert!(!after["turns"].to_string().contains("later parent history"));
+        // Retain one inherited response followed by child-owned messages, then
+        // compact again without any inherited messages. Ordinals remain runtime-owned.
+        for retain_parent in [true, false] {
+            let current = child.current();
+            let messages = current.log().load().unwrap().context().unwrap().messages;
+            let tail = if retain_parent {
+                messages[1..].to_vec()
+            } else {
+                messages.into_iter().skip(2).collect()
+            };
+            current
+                .append_compaction(pi_session::CompactionEntry {
+                    summary: "mixed parent and child summary".into(),
+                    retained_tail: tail,
+                    tokens_before: 100,
+                    details: None,
+                    usage: None,
+                })
+                .await
+                .unwrap();
+            child.reload().await.unwrap();
+            live.refresh_subscription();
+            let compacted = thread_from_observation(&observation, &parent_id, "worker", None);
+            let saved =
+                thread_from_stored_isolated(&store.read_isolated(&child_id).unwrap()).unwrap();
+            assert_eq!(compacted["turns"], saved["turns"]);
+            assert_eq!(compacted["inheritedContext"], original["inheritedContext"]);
+            assert!(!compacted["turns"].to_string().contains("mixed parent"));
+            assert!(compacted["turns"].to_string().contains("child task"));
+            let own = live.presentation_snapshot();
+            let child_index = own.agent.messages.iter().position(|message| {
+                matches!(message, Message::User(user) if content_text(&user.content) == "child task")
+            }).unwrap();
+            assert_eq!(
+                projected_items(&compacted)[0]["id"],
+                format!("user-{child_index}-0")
+            );
+        }
+        manager.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -2597,7 +2674,7 @@ mod tests {
         let stored_child = store.read_isolated(child_id).unwrap();
         assert_eq!(stored_child.document.header.id, child_id);
         assert_eq!(stored_child.parent_thread_id, session.log().header().id);
-        assert_eq!(stored_child.agent, "subagent");
+        assert_eq!(stored_child.agent, "agent");
         assert_eq!(stored_child.nickname, None);
         let child_thread = thread_from_stored_isolated(&stored_child).unwrap();
         assert_eq!(child_thread["id"], child_id);

@@ -1,88 +1,195 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use pi_core::{
-    ContentBlock, Message, Tool, ToolCallId, ToolContext, ToolError, ToolExecutionMode, ToolResult,
-    ToolSpec, ToolUpdateSink,
+    CustomMessageContent, IsolatedContextMode, IsolatedSessionRequest, Tool, ToolCallId,
+    ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate, ToolUpdateSink,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::catalog::SubagentCatalog;
+use crate::launch_context::LaunchContext;
 use crate::launch_plan::SubagentLaunchPlan;
-use crate::runtime::SubagentRuntime;
+use crate::runtime::{SubagentRuntime, WaitEvaluation, WaitMode, result_with_details};
 
-const MAX_TASK_BYTES: usize = 64 * 1024;
+#[derive(Clone, Copy)]
+pub(crate) enum AgentToolKind {
+    Spawn,
+    SendMessage,
+    FollowUp,
+    Wait,
+    Interrupt,
+    List,
+}
 
-pub(crate) struct SubagentTool {
+pub(crate) struct AgentTool {
     runtime: SubagentRuntime,
     catalog: SubagentCatalog,
     max_depth: usize,
+    kind: AgentToolKind,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SubagentInput {
-    agent: String,
-    task: String,
-    context: Option<pi_core::IsolatedContextMode>,
-    #[serde(default, rename = "async")]
-    background: bool,
-}
-
-impl SubagentTool {
+impl AgentTool {
     pub(crate) fn new(
         runtime: SubagentRuntime,
         catalog: SubagentCatalog,
         max_depth: usize,
+        kind: AgentToolKind,
     ) -> Self {
         Self {
             runtime,
             catalog,
             max_depth,
+            kind,
         }
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SpawnInput {
+    agent: String,
+    task: String,
+    context: Option<IsolatedContextMode>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendMessageInput {
+    target: String,
+    message: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FollowUpInput {
+    target: String,
+    task: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WaitInput {
+    targets: Vec<String>,
+    #[serde(default)]
+    mode: WaitInputMode,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum WaitInputMode {
+    #[default]
+    Any,
+    All,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetInput {
+    target: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyInput {}
+
 #[async_trait]
-impl Tool for SubagentTool {
+impl Tool for AgentTool {
     fn spec(&self) -> ToolSpec {
+        let profiles = self.catalog.profile_names();
+        let (name, label, description, properties, required, guidelines) = match self.kind {
+            AgentToolKind::Spawn => (
+                "spawn_agent",
+                "Spawn agent",
+                "Start one configured child agent asynchronously. The returned agent id names a reusable child session; call wait_agent for results and followup_task for later turns.",
+                json!({
+                    "agent":{"type":"string","enum":profiles},
+                    "task":{"type":"string","minLength":1},
+                    "context":{"type":"string","enum":["fresh","fork"]}
+                }),
+                vec!["agent", "task"],
+                vec!["Use multiple spawn_agent calls in the same assistant response for independent parallel work. Spawn returns before the child finishes.".to_string()],
+            ),
+            AgentToolKind::SendMessage => (
+                "send_message",
+                "Message agent",
+                "Send information without starting a new child turn. Use an exact direct-child agent id, or target parent from inside an assigned child.",
+                json!({
+                    "target":{"type":"string","minLength":1},
+                    "message":{"type":"string","minLength":1}
+                }),
+                vec!["target", "message"],
+                vec![],
+            ),
+            AgentToolKind::FollowUp => (
+                "followup_task",
+                "Follow up agent",
+                "Give an existing direct child more work. An idle child starts a new turn in the same session; a running child receives a durable follow-up in its current turn.",
+                json!({
+                    "target":{"type":"string","minLength":1},
+                    "task":{"type":"string","minLength":1}
+                }),
+                vec!["target", "task"],
+                vec![],
+            ),
+            AgentToolKind::Wait => (
+                "wait_agent",
+                "Wait for agents",
+                "Wait until any or all exact direct-child agent ids settle or send a message. Assigned children may wait on parent for a parent message. A timeout returns a normal running snapshot and never interrupts work.",
+                json!({
+                    "targets":{"type":"array","minItems":1,"maxItems":8,"uniqueItems":true,"items":{"type":"string","minLength":1,"description":"Exact direct-child agent id, or parent inside an assigned child."}},
+                    "mode":{"type":"string","enum":["any","all"],"default":"any"},
+                    "timeoutMs":{"type":"integer","minimum":0,"maximum":3600000,"default":120000}
+                }),
+                vec!["targets"],
+                vec!["mode:any is the collaboration equivalent of Promise.race. Re-evaluate the plan after each returned result or message.".to_string()],
+            ),
+            AgentToolKind::Interrupt => (
+                "interrupt_agent",
+                "Interrupt agent",
+                "Request cancellation of one direct child's active turn while preserving the child session for future follow-ups.",
+                json!({"target":{"type":"string","minLength":1}}),
+                vec!["target"],
+                vec![],
+            ),
+            AgentToolKind::List => (
+                "list_agents",
+                "List agents",
+                "Return a read-only snapshot of the caller's descendant agent tree.",
+                json!({}),
+                vec![],
+                vec![],
+            ),
+        };
         ToolSpec {
-            name: "subagent".to_string(),
-            label: "Delegate task".to_string(),
-            description: "Delegate to configured subagents.".to_string(),
+            name: name.to_string(),
+            label: label.to_string(),
+            description: description.to_string(),
             parameters: json!({
-                "type": "object",
-                "properties": {
-                    "agent": {
-                        "type": "string",
-                        "enum": self.catalog.profile_names(),
-                        "description": "Focused child role"
-                    },
-                    "context": {
-                        "type": "string",
-                        "enum": ["fresh", "fork"],
-                        "description": "History initialization. Omit to use the role default (implicit fork falls back to fresh without a persisted parent branch). Explicit fork requires and pins parent context before this tool batch."
-                    },
-                    "async": {
-                        "type": "boolean",
-                        "description": "Start in the background of this process and return a run receipt. Defaults false. Completion and supervisor requests attempt a best-effort notification; status is authoritative and process exit stops work."
-                    },
-                    "task": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Self-contained task for the child session"
-                    }
-                },
-                "required": ["agent", "task"],
-                "additionalProperties": false
+                "type":"object",
+                "properties":properties,
+                "required":required,
+                "additionalProperties":false
             }),
             execution_mode: ToolExecutionMode::Parallel,
             prompt_snippet: None,
-            prompt_guidelines: Vec::new(),
+            prompt_guidelines: guidelines,
         }
     }
 
     fn validate_arguments(&self, input: &Value) -> Result<(), ToolError> {
-        parse_input(input.clone(), &self.catalog).map(|_| ())
+        match self.kind {
+            AgentToolKind::Spawn => parse::<SpawnInput>(input.clone()).map(|_| ()),
+            AgentToolKind::SendMessage => parse::<SendMessageInput>(input.clone()).map(|_| ()),
+            AgentToolKind::FollowUp => parse::<FollowUpInput>(input.clone()).map(|_| ()),
+            AgentToolKind::Wait => {
+                parse::<WaitInput>(input.clone()).and_then(|input| validate_wait(&input))
+            }
+            AgentToolKind::Interrupt => parse::<TargetInput>(input.clone()).map(|_| ()),
+            AgentToolKind::List => parse::<EmptyInput>(input.clone()).map(|_| ()),
+        }
     }
 
     async fn execute(
@@ -93,781 +200,308 @@ impl Tool for SubagentTool {
         updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
         context.signal().check().map_err(|_| ToolError::Aborted)?;
-        let input = parse_input(input, &self.catalog)?;
-        let profile = self
-            .catalog
-            .profile(&input.agent)
-            .expect("validated profile must exist");
-        let launch_plan = SubagentLaunchPlan::resolve(&profile, &context)?;
-        let mut options = launch_plan.into_options();
-        crate::launch_context::LaunchContext::new(&context).apply(&mut options, input.context)?;
-        let profile_name = profile.name.clone();
-        let timeout = profile.timeout;
-        let parent_session_id = context.session.id()?;
-        self.runtime.coordination().bind_session(
-            parent_session_id.clone(),
-            context.session.handle_for_adapter(),
-        );
+        match self.kind {
+            AgentToolKind::Spawn => self.spawn(context, parse(input)?, updates).await,
+            AgentToolKind::SendMessage => self.send(context, parse(input)?),
+            AgentToolKind::FollowUp => self.follow_up(context, parse(input)?).await,
+            AgentToolKind::Wait => self.wait(context, parse(input)?).await,
+            AgentToolKind::Interrupt => self.interrupt(context, parse(input)?),
+            AgentToolKind::List => self.list(context, parse(input)?),
+        }
+    }
+}
+
+impl AgentTool {
+    async fn spawn(
+        &self,
+        context: ToolContext,
+        input: SpawnInput,
+        updates: ToolUpdateSink,
+    ) -> Result<ToolResult, ToolError> {
+        let agent_name = non_empty(&input.agent, "agent")?;
+        let task = non_empty(&input.task, "task")?;
+        let profile = self.catalog.profile(agent_name).ok_or_else(|| {
+            ToolError::InvalidArguments(format!("unknown agent profile {agent_name:?}"))
+        })?;
+        let mut options = SubagentLaunchPlan::resolve(&profile, &context)?.into_options();
+        LaunchContext::new(&context).apply(&mut options, input.context)?;
+        let owner = context.session.id()?;
+        self.runtime
+            .bind_session(owner.clone(), context.session.handle_for_adapter());
         let ticket = self
             .runtime
-            .begin_launch_with_max_depth(&parent_session_id, profile, self.max_depth)
+            .begin_launch(&owner, profile.clone(), self.max_depth)
             .map_err(|error| ToolError::Execution(error.to_string()))?;
-        let (run_id, abort) = crate::execution::launch_child(
-            self.runtime.downgrade(),
-            &context,
-            crate::execution::PreparedChild {
-                ticket,
-                agent: profile_name,
-                options,
-                task: input.task,
-                timeout,
-                workflow_id: None,
-            },
-            &updates,
-        )
-        .await?;
-        crate::execution::wait_foreground(&self.runtime, &context, run_id, abort, input.background)
+        let mut guard = SpawnGuard {
+            runtime: self.runtime.clone(),
+            id: ticket.id().to_string(),
+            committed: false,
+        };
+        let request =
+            IsolatedSessionRequest::new(CustomMessageContent::Text(ticket.child_prompt(task)))
+                .options(options);
+        let handle = context.session.launch_isolated_session(request).await?;
+        let turn = self
+            .runtime
+            .attach_handle(&owner, ticket.id(), handle.clone())
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
+        let child_session_id = self
+            .runtime
+            .child_session_id(&owner, ticket.id())
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
+        self.runtime.spawn_monitor(
+            owner.clone(),
+            ticket.id().to_string(),
+            turn.clone(),
+            profile.timeout,
+        );
+        guard.committed = true;
+        updates.send(ToolUpdate {
+            content: vec![pi_core::ContentBlock::Text(pi_core::TextContent::new(
+                format!("{} agent started", profile.name),
+            ))],
+            details: Some(json!({
+                "agentId":ticket.id(),
+                "agent":profile.name,
+                "state":"running",
+                "turnId":turn.id().as_str(),
+                "sessionId":child_session_id
+            })),
+        });
+        Ok(result_with_details(
+            format!(
+                "Agent {} started asynchronously. Use wait_agent with the exact id {} when you need its result.",
+                profile.name,
+                ticket.id()
+            ),
+            json!({
+                "agentId":ticket.id(),
+                "isolatedSessionId":handle.id().as_str(),
+                "sessionId":child_session_id,
+                "agent":profile.name,
+                "depth":ticket.depth(),
+                "state":"running",
+                "turnId":turn.id().as_str()
+            }),
+        ))
+    }
+
+    fn send(&self, context: ToolContext, input: SendMessageInput) -> Result<ToolResult, ToolError> {
+        let target = non_empty(&input.target, "target")?;
+        let message = non_empty(&input.message, "message")?;
+        let details = self
+            .runtime
+            .send_message(&context.session.id()?, target, message.to_string())
+            .map_err(ToolError::Execution)?;
+        Ok(result_with_details("Message accepted.", details))
+    }
+
+    async fn follow_up(
+        &self,
+        context: ToolContext,
+        input: FollowUpInput,
+    ) -> Result<ToolResult, ToolError> {
+        let target = non_empty(&input.target, "target")?;
+        let task = non_empty(&input.task, "task")?;
+        let (started, turn_id) = self
+            .runtime
+            .follow_up(&context.session.id()?, target, task.to_string())
             .await
+            .map_err(ToolError::Execution)?;
+        Ok(result_with_details(
+            if started {
+                "Follow-up started a new turn in the existing agent session."
+            } else {
+                "Follow-up joined the agent's active turn."
+            },
+            json!({"agentId":target,"turnId":turn_id,"started":started}),
+        ))
+    }
+
+    async fn wait(&self, context: ToolContext, input: WaitInput) -> Result<ToolResult, ToolError> {
+        validate_wait(&input)?;
+        let owner = context.session.id()?;
+        self.runtime
+            .validate_targets(&owner, &input.targets)
+            .map_err(ToolError::Execution)?;
+        let mode = match input.mode {
+            WaitInputMode::Any => WaitMode::Any,
+            WaitInputMode::All => WaitMode::All,
+        };
+        let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(120_000));
+        let (_registration, mut changed) = self.runtime.register_wait(&owner);
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        loop {
+            match self
+                .runtime
+                .evaluate_wait(&owner, &input.targets, mode)
+                .map_err(ToolError::Execution)?
+            {
+                WaitEvaluation::Ready { agents, messages } => {
+                    return Ok(result_with_details(
+                        if messages.is_empty() {
+                            "Agent wait condition satisfied."
+                        } else {
+                            "Agent message requires attention."
+                        },
+                        json!({"state":"ready","mode":match mode { WaitMode::Any => "any", WaitMode::All => "all" },"agents":agents,"messages":messages}),
+                    ));
+                }
+                WaitEvaluation::Pending if timeout.is_zero() => {
+                    return Ok(result_with_details(
+                        "Agent work is still running.",
+                        json!({"state":"running","timedOut":true,"agents":self.runtime.list(&owner)}),
+                    ));
+                }
+                WaitEvaluation::Pending => {}
+            }
+            tokio::select! {
+                biased;
+                () = context.signal().wait() => return Err(ToolError::Aborted),
+                () = &mut deadline => {
+                    return Ok(result_with_details(
+                        "Wait window elapsed; agent work continues.",
+                        json!({"state":"running","timedOut":true,"agents":self.runtime.list(&owner)}),
+                    ));
+                }
+                changed_result = changed.changed() => {
+                    if changed_result.is_err() {
+                        return Err(ToolError::Execution("agent runtime closed while waiting".into()));
+                    }
+                }
+            }
+        }
+    }
+
+    fn interrupt(&self, context: ToolContext, input: TargetInput) -> Result<ToolResult, ToolError> {
+        let target = non_empty(&input.target, "target")?;
+        let snapshot = self
+            .runtime
+            .interrupt(&context.session.id()?, target)
+            .map_err(ToolError::Execution)?;
+        Ok(result_with_details(
+            "Interrupt request accepted; the agent session remains reusable.",
+            json!({"agent":snapshot}),
+        ))
+    }
+
+    fn list(&self, context: ToolContext, _input: EmptyInput) -> Result<ToolResult, ToolError> {
+        let agents = self.runtime.list(&context.session.id()?);
+        Ok(result_with_details(
+            if agents.is_empty() {
+                "No descendant agents."
+            } else {
+                "Agent tree snapshot."
+            },
+            json!({"agents":agents}),
+        ))
     }
 }
 
-fn parse_input(input: Value, catalog: &SubagentCatalog) -> Result<SubagentInput, ToolError> {
-    let parsed: SubagentInput = serde_json::from_value(input)
-        .map_err(|error| ToolError::InvalidArguments(error.to_string()))?;
-    let agent = parsed.agent.trim();
-    if catalog.profile(agent).is_none() {
-        return Err(ToolError::InvalidArguments(format!(
-            "unknown subagent profile '{}'; expected one of: {}",
-            parsed.agent,
-            catalog.profile_names().join(", ")
-        )));
+struct SpawnGuard {
+    runtime: SubagentRuntime,
+    id: String,
+    committed: bool,
+}
+
+impl Drop for SpawnGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.runtime.cancel_launch(&self.id);
+        }
     }
-    let task = parsed.task.trim();
-    if task.is_empty() {
+}
+
+fn parse<T: serde::de::DeserializeOwned>(input: Value) -> Result<T, ToolError> {
+    serde_json::from_value(input).map_err(|error| ToolError::InvalidArguments(error.to_string()))
+}
+
+fn non_empty<'a>(value: &'a str, field: &str) -> Result<&'a str, ToolError> {
+    let value = value.trim();
+    if value.is_empty() {
+        Err(ToolError::InvalidArguments(format!(
+            "{field} must not be empty"
+        )))
+    } else {
+        Ok(value)
+    }
+}
+
+fn validate_wait(input: &WaitInput) -> Result<(), ToolError> {
+    if input.targets.is_empty() || input.targets.len() > 8 {
         return Err(ToolError::InvalidArguments(
-            "task must not be empty".to_string(),
+            "targets must contain between 1 and 8 exact agent ids".into(),
         ));
     }
-    if task.len() > MAX_TASK_BYTES {
-        return Err(ToolError::InvalidArguments(format!(
-            "task exceeds the {MAX_TASK_BYTES}-byte limit"
-        )));
+    if input.targets.iter().any(|target| target.trim().is_empty()) {
+        return Err(ToolError::InvalidArguments(
+            "targets must not contain empty ids".into(),
+        ));
     }
-    Ok(SubagentInput {
-        agent: agent.to_string(),
-        task: task.to_string(),
-        context: parsed.context,
-        background: parsed.background,
-    })
-}
-
-pub(crate) fn final_text(messages: &[Message]) -> String {
-    messages
+    let unique = input
+        .targets
         .iter()
-        .rev()
-        .filter_map(|message| match message {
-            Message::Assistant(message) => Some(message),
-            _ => None,
-        })
-        .find_map(|message| {
-            let text = message
-                .content
-                .iter()
-                .filter_map(|content| match content {
-                    ContentBlock::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            (!text.trim().is_empty()).then_some(text)
-        })
-        .unwrap_or_else(|| "Subagent completed without a textual response.".to_string())
-}
-
-pub(crate) fn with_warnings(mut text: String, warnings: &[String]) -> String {
-    if warnings.is_empty() {
-        return text;
+        .collect::<std::collections::HashSet<_>>();
+    if unique.len() != input.targets.len() {
+        return Err(ToolError::InvalidArguments(
+            "targets must contain unique exact agent ids".into(),
+        ));
     }
-    text.push_str("\n\nSubagent warnings:\n");
-    for warning in warnings {
-        text.push_str("- ");
-        text.push_str(warning);
-        text.push('\n');
+    if input.timeout_ms.is_some_and(|timeout| timeout > 3_600_000) {
+        return Err(ToolError::InvalidArguments(
+            "timeoutMs must be at most 3600000".into(),
+        ));
     }
-    text.pop();
-    text
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
-
-    use pi_core::{
-        AbortHandle, AssistantMessage, CustomMessageContent, IsolatedSessionId,
-        IsolatedSessionOutcome, IsolatedSessionRequest, ModelId, ModelSpec, ModelsContextAccess,
-        PluginContext, PluginContextEpoch, PluginContextResult, PluginContextScope, ProviderId,
-        SessionContextAccess, StopReason, TextContent, ThinkingLevel, UiContextAccess, Usage,
-    };
-
     use super::*;
-    use crate::runtime::run_marker;
-    use tokio::sync::Notify;
 
     #[test]
-    fn input_is_strict_and_normalized() {
+    fn six_tools_have_distinct_strict_schemas() {
+        let runtime = SubagentRuntime::default();
         let catalog = SubagentCatalog::builtins();
-        let parsed = parse_input(
-            json!({"agent": " reviewer ", "task": " inspect "}),
-            &catalog,
-        )
-        .unwrap();
-        assert_eq!(parsed.agent, "reviewer");
-        assert_eq!(parsed.task, "inspect");
-        assert_eq!(parsed.context, None);
-        let fork = parse_input(
-            json!({"agent": "worker", "task": "inspect", "context": "fork"}),
-            &catalog,
-        )
-        .unwrap();
-        assert_eq!(fork.context, Some(pi_core::IsolatedContextMode::Fork));
-        assert!(
-            parse_input(
-                json!({"agent": "worker", "task": "inspect", "context": "invalid"}),
-                &catalog
-            )
-            .is_err()
-        );
-        assert!(parse_input(json!({"agent": "unknown", "task": "inspect"}), &catalog).is_err());
-        assert!(
-            parse_input(
-                json!({"agent": "scout", "task": "", "extra": true}),
-                &catalog
-            )
-            .is_err()
+        let kinds = [
+            AgentToolKind::Spawn,
+            AgentToolKind::SendMessage,
+            AgentToolKind::FollowUp,
+            AgentToolKind::Wait,
+            AgentToolKind::Interrupt,
+            AgentToolKind::List,
+        ];
+        let names = kinds
+            .into_iter()
+            .map(|kind| {
+                AgentTool::new(runtime.clone(), catalog.clone(), 4, kind)
+                    .spec()
+                    .name
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "spawn_agent",
+                "send_message",
+                "followup_task",
+                "wait_agent",
+                "interrupt_agent",
+                "list_agents"
+            ]
         );
     }
 
     #[test]
-    fn result_projection_uses_the_last_textual_assistant_message() {
-        let assistant = |text: &str| {
-            Message::Assistant(Arc::new(AssistantMessage {
-                content: vec![ContentBlock::Text(TextContent::new(text))],
-                api: "test".to_string(),
-                provider: ProviderId::new("test"),
-                model: ModelId::new("test"),
-                response_model: None,
-                response_id: None,
-                diagnostics: None,
-                usage: Usage::default(),
-                stop_reason: StopReason::Stop,
-                error_message: None,
-                deferred: None,
-                raw_stop_reason: None,
-                end_turn: None,
-                timestamp_ms: 0,
-            }))
-        };
-        assert_eq!(
-            final_text(&[assistant("first"), assistant("final")]),
-            "final"
-        );
-        assert_eq!(
-            final_text(&[]),
-            "Subagent completed without a textual response."
-        );
-    }
-
-    struct FakeAccess {
-        requests: Mutex<Vec<IsolatedSessionRequest>>,
-        recorded_usage: Mutex<Vec<(Usage, Option<Value>)>>,
-        outcome: IsolatedSessionOutcome,
-        panic_on_wait: bool,
-    }
-
-    #[async_trait]
-    impl SessionContextAccess for FakeAccess {
-        fn isolated_fork_point(&self) -> PluginContextResult<Option<pi_core::IsolatedForkPoint>> {
-            Ok(Some(pi_core::IsolatedForkPoint {
-                parent_session_id: "root-session".into(),
-                parent_entry_id: "parent-request".into(),
-            }))
-        }
-        fn session_id(&self) -> PluginContextResult<String> {
-            Ok("root-session".to_string())
-        }
-
-        fn active_tools(&self) -> PluginContextResult<Vec<String>> {
-            Ok(["read", "grep", "find", "ls", "subagent"]
-                .map(str::to_string)
-                .to_vec())
-        }
-
-        async fn launch_isolated_session(
-            &self,
-            _scope: PluginContextScope,
-            request: IsolatedSessionRequest,
-        ) -> PluginContextResult<IsolatedSessionId> {
-            self.requests.lock().unwrap().push(request);
-            Ok(IsolatedSessionId::new("isolated-1"))
-        }
-
-        async fn wait_for_isolated_session(
-            &self,
-            _scope: PluginContextScope,
-            _id: IsolatedSessionId,
-        ) -> PluginContextResult<IsolatedSessionOutcome> {
-            assert!(!self.panic_on_wait, "injected child wait panic");
-            Ok(self.outcome.clone())
-        }
-
-        fn record_usage(&self, usage: Usage, details: Option<Value>) -> PluginContextResult<()> {
-            self.recorded_usage.lock().unwrap().push((usage, details));
-            Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl ModelsContextAccess for FakeAccess {
-        fn model_selection(&self) -> PluginContextResult<Option<pi_core::ModelSelection>> {
-            Ok(Some(pi_core::ModelSelection::new("scripted", "parent")))
-        }
-
-        fn model(&self) -> PluginContextResult<Option<ModelSpec>> {
-            Ok(Some(reasoning_model("parent")))
-        }
-
-        fn available_models(&self) -> PluginContextResult<Vec<ModelSpec>> {
-            Ok(vec![reasoning_model("parent"), reasoning_model("child")])
-        }
-    }
-
-    #[async_trait]
-    impl UiContextAccess for FakeAccess {}
-
-    struct TimeoutAccess {
-        requests: Mutex<Vec<IsolatedSessionRequest>>,
-        recorded_usage: Mutex<Vec<(Usage, Option<Value>)>>,
-        aborted: AtomicBool,
-        wake: Notify,
-    }
-
-    #[async_trait]
-    impl SessionContextAccess for TimeoutAccess {
-        fn session_id(&self) -> PluginContextResult<String> {
-            Ok("root-session".to_string())
-        }
-
-        fn active_tools(&self) -> PluginContextResult<Vec<String>> {
-            Ok(["read", "subagent"].map(str::to_string).to_vec())
-        }
-
-        async fn launch_isolated_session(
-            &self,
-            _scope: PluginContextScope,
-            request: IsolatedSessionRequest,
-        ) -> PluginContextResult<IsolatedSessionId> {
-            self.requests.lock().unwrap().push(request);
-            Ok(IsolatedSessionId::new("isolated-timeout"))
-        }
-
-        async fn wait_for_isolated_session(
-            &self,
-            _scope: PluginContextScope,
-            _id: IsolatedSessionId,
-        ) -> PluginContextResult<IsolatedSessionOutcome> {
-            if !self.aborted.load(Ordering::SeqCst) {
-                self.wake.notified().await;
-            }
-            Ok(IsolatedSessionOutcome {
-                session_id: "timed-out-child".to_string(),
-                messages: Vec::new(),
-                aborted: true,
-                usage: Usage {
-                    input: 11,
-                    output: 3,
-                    total_tokens: 14,
-                    ..Usage::default()
-                },
+    fn wait_input_is_bounded_and_exact() {
+        assert!(validate_wait(&WaitInput::default()).is_err());
+        assert!(
+            validate_wait(&WaitInput {
+                targets: vec!["same".into(), "same".into()],
+                ..WaitInput::default()
             })
-        }
-
-        fn record_usage(&self, usage: Usage, details: Option<Value>) -> PluginContextResult<()> {
-            self.recorded_usage.lock().unwrap().push((usage, details));
-            Ok(())
-        }
-
-        fn abort_isolated_session(
-            &self,
-            _scope: PluginContextScope,
-            _id: IsolatedSessionId,
-        ) -> PluginContextResult<()> {
-            self.aborted.store(true, Ordering::SeqCst);
-            self.wake.notify_waiters();
-            Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl ModelsContextAccess for TimeoutAccess {
-        fn model_selection(&self) -> PluginContextResult<Option<pi_core::ModelSelection>> {
-            Ok(Some(pi_core::ModelSelection::new("scripted", "parent")))
-        }
-
-        fn model(&self) -> PluginContextResult<Option<ModelSpec>> {
-            Ok(Some(reasoning_model("parent")))
-        }
-
-        fn available_models(&self) -> PluginContextResult<Vec<ModelSpec>> {
-            Ok(vec![reasoning_model("parent")])
-        }
-    }
-
-    #[async_trait]
-    impl UiContextAccess for TimeoutAccess {}
-
-    #[tokio::test]
-    async fn tool_launches_a_fresh_child_and_projects_its_final_answer() {
-        let child_usage = Usage {
-            input: 120,
-            output: 30,
-            cache_read: 50,
-            total_tokens: 200,
-            ..Usage::default()
-        };
-        let outcome = IsolatedSessionOutcome {
-            session_id: "child-session".to_string(),
-            messages: vec![Message::Assistant(Arc::new(AssistantMessage {
-                content: vec![ContentBlock::Text(TextContent::new("review complete"))],
-                api: "test".to_string(),
-                provider: ProviderId::new("test"),
-                model: ModelId::new("test"),
-                response_model: None,
-                response_id: None,
-                diagnostics: None,
-                usage: Usage::default(),
-                stop_reason: StopReason::Stop,
-                error_message: None,
-                deferred: None,
-                raw_stop_reason: None,
-                end_turn: None,
-                timestamp_ms: 0,
-            }))],
-            aborted: false,
-            usage: child_usage.clone(),
-        };
-        let access = Arc::new(FakeAccess {
-            requests: Mutex::new(Vec::new()),
-            recorded_usage: Mutex::new(Vec::new()),
-            outcome,
-            panic_on_wait: false,
-        });
-        let plugin_access: Arc<dyn PluginContext> = access.clone();
-        let epoch = PluginContextEpoch::new(plugin_access);
-        let (_abort, signal) = AbortHandle::new();
-        let context =
-            ToolContext::with_plugin_context(PathBuf::from("/workspace"), signal, epoch.context());
-        let (updates, mut update_receiver) = ToolUpdateSink::channel();
-
-        let runtime = SubagentRuntime::default();
-        let result = SubagentTool::new(
-            runtime.clone(),
-            SubagentCatalog::builtins(),
-            crate::runtime::DEFAULT_MAX_DEPTH,
-        )
-        .execute(
-            context,
-            ToolCallId::new("call-1"),
-            json!({"agent": "reviewer", "task": "Review the parser"}),
-            updates,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            result.content,
-            vec![ContentBlock::Text(TextContent::new("review complete"))]
+            .is_err()
         );
-        assert_eq!(result.details.as_ref().unwrap()["agent"], "reviewer");
-        assert_eq!(result.details.as_ref().unwrap()["depth"], 1);
-        assert_eq!(
-            result.details.as_ref().unwrap()["usage"],
-            json!(child_usage)
-        );
-        {
-            let recorded = access.recorded_usage.lock().unwrap();
-            assert_eq!(recorded.len(), 1);
-            assert_eq!(recorded[0].0, child_usage);
-            assert_eq!(recorded[0].1.as_ref().unwrap()["source"], "subagent");
-            assert_eq!(
-                recorded[0].1.as_ref().unwrap()["childSessionId"],
-                "child-session"
-            );
-        }
-        let run_id = result.details.as_ref().unwrap()["runId"].as_str().unwrap();
-        assert!(
-            runtime
-                .coordination()
-                .detach("root-session", run_id)
-                .is_ok()
-        );
-        assert!(
-            runtime
-                .coordination()
-                .detach("root-session", run_id)
-                .is_ok()
-        );
-        assert_eq!(access.recorded_usage.lock().unwrap().len(), 1);
-        let status = runtime
-            .coordination()
-            .status("root-session", Some(run_id))
-            .unwrap();
-        assert_eq!(status["runs"][0]["usage"], json!(child_usage));
-        let update_details = update_receiver.recv().await.unwrap().details.unwrap();
-        assert_eq!(update_details["state"], "running");
-        assert_eq!(update_details["isolatedSessionId"], "isolated-1");
-        let requests = access.requests.lock().unwrap();
-        let CustomMessageContent::Text(prompt) = &requests[0].input else {
-            panic!("expected text child prompt");
-        };
-        let run_id = run_marker(prompt).expect("child prompt must retain runtime metadata");
-        assert_eq!(
-            prompt.as_str(),
-            format!("<!-- pi-rs-subagent-run:{run_id} -->\nReview the parser")
-        );
-        assert_eq!(
-            requests[0].options.active_tools,
-            Some(["read", "grep", "find", "ls"].map(str::to_string).to_vec())
-        );
-    }
-
-    #[tokio::test]
-    async fn configured_zero_depth_blocks_before_creating_a_child_session() {
-        let access = Arc::new(FakeAccess {
-            requests: Mutex::new(Vec::new()),
-            recorded_usage: Mutex::new(Vec::new()),
-            outcome: IsolatedSessionOutcome {
-                session_id: "unused-child".to_string(),
-                messages: Vec::new(),
-                aborted: false,
-                usage: Usage::default(),
-            },
-            panic_on_wait: false,
-        });
-        let plugin_access: Arc<dyn PluginContext> = access.clone();
-        let epoch = PluginContextEpoch::new(plugin_access);
-        let (_abort, signal) = AbortHandle::new();
-        let context =
-            ToolContext::with_plugin_context(PathBuf::from("/workspace"), signal, epoch.context());
-        let (updates, _receiver) = ToolUpdateSink::channel();
-
-        let error = SubagentTool::new(SubagentRuntime::default(), SubagentCatalog::builtins(), 0)
-            .execute(
-                context,
-                ToolCallId::new("call-blocked"),
-                json!({"agent": "reviewer", "task": "Review the parser"}),
-                updates,
-            )
-            .await
-            .unwrap_err();
-
-        assert!(error.to_string().contains("nesting limit reached"));
-        assert!(access.requests.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn markdown_runtime_selection_is_resolved_into_the_isolated_request() {
-        let directory = tempfile::tempdir().unwrap();
-        let definitions = directory.path().join("agents");
-        std::fs::create_dir_all(&definitions).unwrap();
-        std::fs::write(
-            definitions.join("configured.md"),
-            "---\nname: configured\ndescription: Configured child\ntools: read, grep\nmodel: child\nthinking: high\nallowNestedSubagents: false\n---\nInspect the task.",
-        )
-        .unwrap();
-        let mut loader =
-            crate::catalog::SubagentLoaderOptions::new(directory.path(), directory.path());
-        loader.additional_paths.push(definitions);
-        let catalog = SubagentCatalog::load(&loader).unwrap();
-        let access = Arc::new(FakeAccess {
-            requests: Mutex::new(Vec::new()),
-            recorded_usage: Mutex::new(Vec::new()),
-            outcome: IsolatedSessionOutcome {
-                session_id: "child-session".to_string(),
-                messages: Vec::new(),
-                aborted: false,
-                usage: Usage::default(),
-            },
-            panic_on_wait: false,
-        });
-        let plugin_access: Arc<dyn PluginContext> = access.clone();
-        let epoch = PluginContextEpoch::new(plugin_access);
-        let (_abort, signal) = AbortHandle::new();
-        let context =
-            ToolContext::with_plugin_context(PathBuf::from("/workspace"), signal, epoch.context());
-        let (updates, _receiver) = ToolUpdateSink::channel();
-
-        SubagentTool::new(
-            SubagentRuntime::default(),
-            catalog,
-            crate::runtime::DEFAULT_MAX_DEPTH,
-        )
-        .execute(
-            context,
-            ToolCallId::new("call-configured"),
-            json!({"agent": "configured", "task": "Inspect"}),
-            updates,
-        )
-        .await
-        .unwrap();
-
-        let requests = access.requests.lock().unwrap();
-        assert_eq!(
-            requests[0].options.active_tools,
-            Some(vec!["read".to_string(), "grep".to_string()])
-        );
-        assert_eq!(
-            requests[0].options.model,
-            Some(pi_core::ModelSelection::new("scripted", "child"))
-        );
-        assert_eq!(
-            requests[0].options.thinking_level,
-            Some(ThinkingLevel::High)
-        );
-    }
-
-    #[tokio::test]
-    async fn configured_timeout_aborts_the_child_and_returns_a_terminal_tool_result() {
-        let directory = tempfile::tempdir().unwrap();
-        let definitions = directory.path().join("agents");
-        std::fs::create_dir_all(&definitions).unwrap();
-        std::fs::write(
-            definitions.join("timed.md"),
-            "---\nname: timed\ndescription: Timed child\ntimeoutMs: 5\n---\nWait.",
-        )
-        .unwrap();
-        let mut loader =
-            crate::catalog::SubagentLoaderOptions::new(directory.path(), directory.path());
-        loader.additional_paths.push(definitions);
-        let catalog = SubagentCatalog::load(&loader).unwrap();
-        let access = Arc::new(TimeoutAccess {
-            requests: Mutex::new(Vec::new()),
-            recorded_usage: Mutex::new(Vec::new()),
-            aborted: AtomicBool::new(false),
-            wake: Notify::new(),
-        });
-        let plugin_access: Arc<dyn PluginContext> = access.clone();
-        let epoch = PluginContextEpoch::new(plugin_access);
-        let (_abort, signal) = AbortHandle::new();
-        let context =
-            ToolContext::with_plugin_context(PathBuf::from("/workspace"), signal, epoch.context());
-        let (updates, _receiver) = ToolUpdateSink::channel();
-
-        let result = SubagentTool::new(
-            SubagentRuntime::default(),
-            catalog,
-            crate::runtime::DEFAULT_MAX_DEPTH,
-        )
-        .execute(
-            context,
-            ToolCallId::new("call-timeout"),
-            json!({"agent": "timed", "task": "Wait forever"}),
-            updates,
-        )
-        .await
-        .unwrap();
-
-        assert!(result.is_error);
-        assert_eq!(result.details.as_ref().unwrap()["state"], "timed_out");
-        assert_eq!(result.details.as_ref().unwrap()["timeoutMs"], 5);
-        assert_eq!(result.details.as_ref().unwrap()["usage"]["totalTokens"], 14);
-        assert_eq!(access.recorded_usage.lock().unwrap().len(), 1);
-        assert!(access.aborted.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn panicking_child_wait_returns_a_terminal_failure_and_releases_capacity() {
-        let access = Arc::new(FakeAccess {
-            requests: Mutex::new(Vec::new()),
-            recorded_usage: Mutex::new(Vec::new()),
-            outcome: IsolatedSessionOutcome {
-                session_id: "unused".into(),
-                messages: Vec::new(),
-                aborted: false,
-                usage: Usage::default(),
-            },
-            panic_on_wait: true,
-        });
-        let epoch = PluginContextEpoch::new(access);
-        let runtime = SubagentRuntime::default();
-        let tool = SubagentTool::new(runtime.clone(), SubagentCatalog::builtins(), 1);
-        // More sequential failures than the active-run limit must still launch.
-        for _ in 0..21 {
-            let (_, signal) = AbortHandle::new();
-            let context = ToolContext::with_plugin_context(".".into(), signal, epoch.context());
-            let error = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                tool.execute(
-                    context,
-                    ToolCallId::new("panic"),
-                    json!({"agent":"reviewer","task":"Inspect"}),
-                    ToolUpdateSink::channel().0,
-                ),
-            )
-            .await
-            .expect("monitor panic must wake the foreground waiter")
-            .unwrap_err();
-            assert!(error.to_string().contains("panicked"), "{error}");
-        }
-        assert!(
-            runtime
-                .coordination()
-                .run_ids("root-session", None)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn dropping_an_unpolled_monitor_publishes_failure_and_wakes_waiters() {
-        let access = Arc::new(FakeAccess {
-            requests: Mutex::new(Vec::new()),
-            recorded_usage: Mutex::new(Vec::new()),
-            outcome: IsolatedSessionOutcome {
-                session_id: "unused".into(),
-                messages: vec![],
-                aborted: false,
-                usage: Usage::default(),
-            },
-            panic_on_wait: false,
-        });
-        let epoch = PluginContextEpoch::new(access);
-        let runtime = SubagentRuntime::default();
-        let ticket = runtime
-            .begin_launch("root-session", crate::profiles::builtin_profile("reviewer"))
-            .unwrap();
-        let (abort, signal) = AbortHandle::new();
-        let context = ToolContext::with_plugin_context(".".into(), signal.clone(), epoch.context());
-        let handle = context
-            .session
-            .launch_isolated_session(IsolatedSessionRequest::new(CustomMessageContent::Text(
-                "Inspect".into(),
-            )))
-            .await
-            .unwrap();
-        runtime.coordination().reserve(
-            ticket.run_id(),
-            crate::coordination::ManagedRun::new(
-                "root-session".into(),
-                crate::coordination::RunMetadata::new(
-                    "worker".into(),
-                    1,
-                    pi_core::IsolatedContextMode::Fresh,
-                ),
-                abort,
-                None,
-            ),
-        );
-        let monitor = crate::child_run::ChildRun {
-            runtime: runtime.downgrade(),
-            run_id: ticket.run_id().into(),
-            owner: "root-session".into(),
-            handle,
-            signal,
-            timeout: None,
-        }
-        .monitor();
-        let mut changed = runtime.coordination().subscribe();
-        drop(monitor);
-        tokio::time::timeout(std::time::Duration::from_secs(1), changed.changed())
-            .await
-            .unwrap()
-            .unwrap();
-        let error = runtime
-            .coordination()
-            .run("root-session", ticket.run_id())
-            .unwrap()
-            .result
-            .unwrap()
-            .unwrap_err();
-        assert!(error.contains("cancelled"));
-        assert!(
-            runtime
-                .coordination()
-                .run_ids("root-session", None)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn dropping_runtime_cancels_monitor_without_a_task_owner_cycle() {
-        let access = Arc::new(TimeoutAccess {
-            requests: Mutex::new(Vec::new()),
-            recorded_usage: Mutex::new(Vec::new()),
-            aborted: AtomicBool::new(false),
-            wake: Notify::new(),
-        });
-        let epoch = PluginContextEpoch::new(access.clone());
-        let runtime = SubagentRuntime::default();
-        let weak = runtime.downgrade();
-        let ticket = runtime
-            .begin_launch("root-session", crate::profiles::builtin_profile("reviewer"))
-            .unwrap();
-        let (abort, signal) = AbortHandle::new();
-        let context = ToolContext::with_plugin_context(".".into(), signal.clone(), epoch.context());
-        let handle = context
-            .session
-            .launch_isolated_session(IsolatedSessionRequest::new(CustomMessageContent::Text(
-                "Wait".into(),
-            )))
-            .await
-            .unwrap();
-        runtime.coordination().reserve(
-            ticket.run_id(),
-            crate::coordination::ManagedRun::new(
-                "root-session".into(),
-                crate::coordination::RunMetadata::new(
-                    "worker".into(),
-                    1,
-                    pi_core::IsolatedContextMode::Fresh,
-                ),
-                abort,
-                None,
-            ),
-        );
-        runtime.spawn_monitor(
-            "root-session".into(),
-            ticket.run_id().into(),
-            crate::child_run::ChildRun {
-                runtime: runtime.downgrade(),
-                run_id: ticket.run_id().into(),
-                owner: "root-session".into(),
-                handle,
-                signal,
-                timeout: None,
-            }
-            .monitor(),
-        );
-        tokio::task::yield_now().await;
-        drop(runtime);
-        assert!(
-            weak.upgrade().is_none(),
-            "monitor must not keep its own runtime alive"
-        );
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while !access.aborted.load(Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    fn reasoning_model(id: &str) -> ModelSpec {
-        let mut model = ModelSpec::new("scripted", id, id, "scripted");
-        model.reasoning = true;
-        model
     }
 }

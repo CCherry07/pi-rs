@@ -163,13 +163,12 @@ export function buildResumeHydrationPlan({
     items.length > 0 &&
     localItems.length > 0 &&
     items.some((item) => localItems.some((local) => local.id === item.id));
-  const mergedItems =
-    items.length > 0
-      ? replaceLocal
-        ? items
-        : localItems.length > 0 && !hasOverlap
-          ? localItems
-          : mergeThreadItems(items, localItems)
+  const mergedItems = replaceLocal
+    ? items
+    : items.length > 0
+      ? localItems.length > 0 && !hasOverlap
+        ? localItems
+        : mergeThreadItems(items, localItems)
       : localItems;
   const preview = asString(thread.preview ?? "");
   const customName = getCustomName(workspaceId, threadId);

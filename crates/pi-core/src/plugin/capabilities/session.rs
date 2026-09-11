@@ -36,6 +36,51 @@ impl IsolatedSessionId {
     }
 }
 
+/// Stable identity for one turn inside a managed isolated session.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct IsolatedSessionTurnId(String);
+
+impl IsolatedSessionTurnId {
+    #[doc(hidden)]
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Where a message was accepted by a managed isolated session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolatedMessageDelivery {
+    /// The message was queued for the active turn's next safe steering point.
+    Steer,
+    /// The session was idle, so the message was retained for its next turn.
+    Mailbox,
+}
+
+/// Receipt for a message sent to a managed isolated session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsolatedMessageReceipt {
+    pub accepted_as: IsolatedMessageDelivery,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<IsolatedSessionTurnId>,
+}
+
+/// Host receipt for a follow-up submitted to a managed isolated session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsolatedFollowUpReceipt {
+    pub turn_id: IsolatedSessionTurnId,
+    /// True when the target was idle and the follow-up started a new turn.
+    /// False means it joined the active turn's durable follow-up queue.
+    pub started: bool,
+}
+
 /// Input for a session that runs independently of the caller's current
 /// [`crate::SessionContext`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -300,10 +345,104 @@ impl IsolatedSessionHandle {
             .await
     }
 
+    /// Returns a handle for the initial turn started with this session.
+    pub fn initial_turn(&self) -> IsolatedSessionTurnHandle {
+        IsolatedSessionTurnHandle::new(
+            self.id.clone(),
+            IsolatedSessionTurnId::new(self.id.as_str()),
+            self.context.clone(),
+        )
+    }
+
+    /// Delivers information without starting a model turn.
+    ///
+    /// Active sessions receive a durable steering message; idle sessions retain
+    /// it in their next-turn mailbox.
+    pub fn send_message(
+        &self,
+        content: CustomMessageContent,
+    ) -> PluginContextResult<IsolatedMessageReceipt> {
+        self.context.access()?.send_to_isolated_session(
+            self.context.scope(),
+            self.id.clone(),
+            content,
+        )
+    }
+
+    /// Adds work to the active turn or starts a new turn when the session is idle.
+    pub async fn follow_up(
+        &self,
+        content: CustomMessageContent,
+    ) -> PluginContextResult<IsolatedFollowUp> {
+        let receipt = self
+            .context
+            .access()?
+            .follow_up_isolated_session(self.context.scope(), self.id.clone(), content)
+            .await?;
+        let turn = IsolatedSessionTurnHandle::new(
+            self.id.clone(),
+            receipt.turn_id.clone(),
+            self.context.clone(),
+        );
+        Ok(IsolatedFollowUp { receipt, turn })
+    }
+
     pub fn abort(&self) -> PluginContextResult<()> {
         self.context
             .access()?
             .abort_isolated_session(self.context.scope(), self.id.clone())
+    }
+}
+
+/// One accepted follow-up plus the turn that owns its eventual outcome.
+#[derive(Clone)]
+pub struct IsolatedFollowUp {
+    pub receipt: IsolatedFollowUpReceipt,
+    pub turn: IsolatedSessionTurnHandle,
+}
+
+/// Generation-bound control handle for one turn in an isolated session.
+#[derive(Clone)]
+pub struct IsolatedSessionTurnHandle {
+    session_id: IsolatedSessionId,
+    id: IsolatedSessionTurnId,
+    context: PluginContextHandle,
+}
+
+impl IsolatedSessionTurnHandle {
+    fn new(
+        session_id: IsolatedSessionId,
+        id: IsolatedSessionTurnId,
+        context: PluginContextHandle,
+    ) -> Self {
+        Self {
+            session_id,
+            id,
+            context,
+        }
+    }
+
+    pub fn id(&self) -> &IsolatedSessionTurnId {
+        &self.id
+    }
+
+    pub async fn wait(&self) -> PluginContextResult<IsolatedSessionOutcome> {
+        let access = self.context.access()?;
+        access
+            .wait_for_isolated_session_turn(
+                self.context.scope(),
+                self.session_id.clone(),
+                self.id.clone(),
+            )
+            .await
+    }
+
+    pub fn abort(&self) -> PluginContextResult<()> {
+        self.context.access()?.abort_isolated_session_turn(
+            self.context.scope(),
+            self.session_id.clone(),
+            self.id.clone(),
+        )
     }
 }
 
@@ -705,6 +844,42 @@ pub trait SessionContextAccess: Send + Sync {
         _scope: PluginContextScope,
         _id: IsolatedSessionId,
     ) -> PluginContextResult<IsolatedSessionOutcome> {
+        unbound()
+    }
+
+    async fn wait_for_isolated_session_turn(
+        &self,
+        _scope: PluginContextScope,
+        _id: IsolatedSessionId,
+        _turn_id: IsolatedSessionTurnId,
+    ) -> PluginContextResult<IsolatedSessionOutcome> {
+        unbound()
+    }
+
+    fn send_to_isolated_session(
+        &self,
+        _scope: PluginContextScope,
+        _id: IsolatedSessionId,
+        _content: CustomMessageContent,
+    ) -> PluginContextResult<IsolatedMessageReceipt> {
+        unbound()
+    }
+
+    async fn follow_up_isolated_session(
+        &self,
+        _scope: PluginContextScope,
+        _id: IsolatedSessionId,
+        _content: CustomMessageContent,
+    ) -> PluginContextResult<IsolatedFollowUpReceipt> {
+        unbound()
+    }
+
+    fn abort_isolated_session_turn(
+        &self,
+        _scope: PluginContextScope,
+        _id: IsolatedSessionId,
+        _turn_id: IsolatedSessionTurnId,
+    ) -> PluginContextResult<()> {
         unbound()
     }
 

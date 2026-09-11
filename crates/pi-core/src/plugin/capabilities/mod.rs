@@ -18,10 +18,12 @@ pub use models::{CommandModelsContext, ModelsContext, ModelsContextAccess};
 pub use session::{
     CommandSessionContext, DirectCompletionRequest, EphemeralCompactionOptions,
     EphemeralSessionOutcome, EphemeralSessionRequest, EphemeralSessionStatus, IsolatedContextMode,
-    IsolatedForkPoint, IsolatedSessionHandle, IsolatedSessionId, IsolatedSessionOptions,
-    IsolatedSessionOutcome, IsolatedSessionRequest, ReplacedSessionContext, SessionContext,
-    SessionContextAccess, SessionEntryKind, SessionEntryView, SessionExecutionOrigin,
-    SessionReplacement, SessionSnapshot,
+    IsolatedFollowUp, IsolatedFollowUpReceipt, IsolatedForkPoint, IsolatedMessageDelivery,
+    IsolatedMessageReceipt, IsolatedSessionHandle, IsolatedSessionId, IsolatedSessionOptions,
+    IsolatedSessionOutcome, IsolatedSessionRequest, IsolatedSessionTurnHandle,
+    IsolatedSessionTurnId, ReplacedSessionContext, SessionContext, SessionContextAccess,
+    SessionEntryKind, SessionEntryView, SessionExecutionOrigin, SessionReplacement,
+    SessionSnapshot,
 };
 pub use types::{
     CompactOptions, ContextUsage, ForkOptions, ForkPosition, MessageDelivery, NavigateTreeOptions,

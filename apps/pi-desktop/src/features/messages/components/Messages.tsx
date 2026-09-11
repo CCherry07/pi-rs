@@ -1,4 +1,4 @@
-import { memo, useCallback } from "react";
+import { memo, useCallback, useContext, useId } from "react";
 import { useTranslation } from "react-i18next";
 import ChevronDown from "lucide-react/dist/esm/icons/chevron-down";
 import ListTree from "lucide-react/dist/esm/icons/list-tree";
@@ -16,6 +16,9 @@ import {
   WorkingIndicator,
 } from "./MessageRows";
 import { useMessagesViewState } from "./useMessagesViewState";
+import { SubagentChatPanel } from "./SubagentChatPanel";
+import { ThreadConversationsContext } from "@threads/contexts/ThreadConversations";
+import { ThreadContextBanner } from "./ThreadContextBanner";
 
 type MessagesProps = {
   items: ConversationItem[];
@@ -37,6 +40,10 @@ type MessagesProps = {
   onOpenThreadLink?: (threadId: string, workspaceId?: string | null) => void;
   onQuoteMessage?: (text: string) => void;
   onForkMessage?: (entryId: string) => void;
+  embedded?: boolean;
+  /** Frozen inherited history must never expand into live child conversations. */
+  snapshot?: boolean;
+  ancestorThreadIds?: readonly string[];
 };
 
 export const Messages = memo(function Messages({
@@ -59,8 +66,16 @@ export const Messages = memo(function Messages({
   onOpenThreadLink,
   onQuoteMessage,
   onForkMessage,
+  embedded = false,
+  snapshot = false,
+  ancestorThreadIds = [],
 }: MessagesProps) {
   const { t } = useTranslation("messages");
+  const messageScopeId = useId();
+  const conversations = useContext(ThreadConversationsContext);
+  const inheritance = !snapshot && threadId
+    ? conversations?.contextInheritanceByThread?.[threadId] : null;
+  const contextDisclosureId = `inherited-context:${inheritance?.origin.snapshotEntryId ?? threadId}`;
   const { openFileLink, showFileLinkMenu } = useFileLinkOpener(
     workspacePath,
     openTargets,
@@ -180,6 +195,33 @@ export const Messages = memo(function Messages({
     }
     if (item.kind === "tool") {
       const isExpanded = expandedItems.has(item.id);
+      if (item.toolType === "collabToolCall" && !snapshot) {
+        const threadPath = threadId ? [...ancestorThreadIds, threadId] : ancestorThreadIds;
+        return (
+          <SubagentChatPanel
+            key={item.id}
+            item={item}
+            workspaceId={workspaceId}
+            ancestorThreadIds={threadPath}
+            isExpanded={isExpanded}
+            onToggle={toggleExpanded}
+            renderConversation={(conversation) => (
+              <Messages
+                {...conversation}
+                embedded
+                ancestorThreadIds={threadPath}
+                workspaceId={workspaceId}
+                workspacePath={workspacePath}
+                openTargets={openTargets}
+                selectedOpenAppId={selectedOpenAppId}
+                codeBlockCopyUseModifier={codeBlockCopyUseModifier}
+                showMessageFilePath={showMessageFilePath}
+                onOpenThreadLink={onOpenThreadLink}
+              />
+            )}
+          />
+        );
+      }
       return (
         <ToolRow
           key={item.id}
@@ -203,11 +245,34 @@ export const Messages = memo(function Messages({
 
   return (
     <div
-      className="messages messages-full"
+      className={`messages ${embedded ? "messages-embedded" : "messages-full"}`}
       ref={containerRef}
+      tabIndex={embedded ? 0 : undefined}
       onScroll={updateAutoScroll}
     >
       <div className="messages-inner">
+        {inheritance && (
+          <ThreadContextBanner
+            inheritance={inheritance}
+            isExpanded={expandedItems.has(contextDisclosureId)}
+            onToggle={() => toggleExpanded(contextDisclosureId)}
+            renderSnapshot={(inheritedItems) => (
+              <Messages
+                items={inheritedItems}
+                threadId={threadId}
+                snapshot
+                embedded
+                isThinking={false}
+                workspaceId={workspaceId}
+                workspacePath={workspacePath}
+                openTargets={openTargets}
+                selectedOpenAppId={selectedOpenAppId}
+                codeBlockCopyUseModifier={codeBlockCopyUseModifier}
+                showMessageFilePath={showMessageFilePath}
+              />
+            )}
+          />
+        )}
         {groupedItems.map((entry) => {
           if (entry.kind === "toolGroup") {
             const { group } = entry;
@@ -220,7 +285,7 @@ export const Messages = memo(function Messages({
                     messages: t("toolGroup.messages", { count: group.messageCount }),
                   })
                 : toolCalls;
-            const groupBodyId = `tool-group-${group.id}`;
+            const groupBodyId = `tool-group-${messageScopeId}-${group.id}`;
             return (
               <div
                 key={`tool-group-${group.id}`}
@@ -271,7 +336,7 @@ export const Messages = memo(function Messages({
         />
         {!items.length && !isThinking && !isLoadingMessages && (
           <div className="empty messages-empty">
-            {threadId ? t("empty.existingThread") : t("empty.newThread")}
+            {snapshot ? t("subagents.snapshotEmpty") : embedded ? t("subagents.empty") : threadId ? t("empty.existingThread") : t("empty.newThread")}
           </div>
         )}
         {!items.length && !isThinking && isLoadingMessages && (

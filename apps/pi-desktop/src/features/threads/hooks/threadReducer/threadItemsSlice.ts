@@ -13,6 +13,31 @@ import {
 
 export function reduceThreadItems(state: ThreadState, action: ThreadAction): ThreadState {
   switch (action.type) {
+    case "hydrateThreadItems": {
+      const current = state.itemsByThread[action.threadId] ?? [];
+      const currentById = new Map(current.map((item) => [item.id, item]));
+      const requestedById = new Map(action.itemsAtRequest.map((item) => [item.id, item]));
+      const merged = new Map<string, ConversationItem>();
+      for (const item of action.items) {
+        const local = currentById.get(item.id);
+        const requested = requestedById.get(item.id);
+        // Normalization may clone untouched siblings, so only actual content changes
+        // take precedence over the snapshot read. Newly arrived live items win too.
+        const changed = local && local !== requested &&
+          (!requested || JSON.stringify(local) !== JSON.stringify(requested));
+        merged.set(item.id, changed ? local : item);
+      }
+      for (const item of current) {
+        if (!merged.has(item.id)) merged.set(item.id, item);
+      }
+      return {
+        ...state,
+        itemsByThread: {
+          ...state.itemsByThread,
+          [action.threadId]: prepareThreadItems([...merged.values()], { maxItemsPerThread: state.maxItemsPerThread }),
+        },
+      };
+    }
     case "addNotice": {
       const list = state.itemsByThread[action.threadId] ?? [];
       const notice: ConversationItem = {
@@ -172,6 +197,10 @@ export function reduceThreadItems(state: ThreadState, action: ThreadAction): Thr
     case "setThreadItems":
       return {
         ...state,
+        contextInheritanceByThread: {
+          ...state.contextInheritanceByThread,
+          [action.threadId]: action.contextInheritance ?? null,
+        },
         itemsByThread: {
           ...state.itemsByThread,
           [action.threadId]: prepareThreadItems(action.items, { maxItemsPerThread: state.maxItemsPerThread }),

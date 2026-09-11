@@ -8,9 +8,9 @@ use pi_core::{
 };
 use pi_session::{
     aggregate_document_usage, current_session_context_tokens, AgentSession,
-    AgentSessionReplacement, AgentSessionSnapshot, AgentSessionSubscription,
-    ExactSessionIdResolution, ForkPosition, IsolatedSessionObservation, JsonlSessionRepo,
-    MultiSessionManager, PiSession, SessionDocument, SessionEntry, SessionLog,
+    AgentSessionReplacement, AgentSessionSubscription, ExactSessionIdResolution, ForkPosition,
+    IsolatedSessionObservation, JsonlSessionRepo, MultiSessionManager, PiSession, SessionDocument,
+    SessionEntry, SessionLog,
 };
 use serde_json::Value;
 
@@ -56,6 +56,15 @@ impl LiveSession {
         self.source = LiveSessionSource::Primary(session);
     }
 
+    pub(crate) fn refresh_subscription(&mut self) {
+        // Keep the existing receiver: snapshot replacement covers message data,
+        // but queued lifecycle/error/notice events still need to be delivered.
+        self.subscription.snapshot = match &self.source {
+            LiveSessionSource::Primary(session) => session.subscribe().snapshot,
+            LiveSessionSource::Isolated(observation) => observation.subscribe().snapshot,
+        };
+    }
+
     pub(crate) fn primary(&self) -> Option<&Arc<AgentSession>> {
         match &self.source {
             LiveSessionSource::Primary(session) => Some(session),
@@ -63,10 +72,17 @@ impl LiveSession {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> AgentSessionSnapshot {
+    pub(crate) fn presentation_snapshot(&self) -> pi_session::AgentSessionSnapshot {
+        let snapshot = &self.subscription.snapshot;
         match &self.source {
-            LiveSessionSource::Primary(session) => session.snapshot(),
-            LiveSessionSource::Isolated(observation) => observation.snapshot(),
+            LiveSessionSource::Isolated(observation) => observation
+                .document()
+                .ok()
+                .map(|document| {
+                    super::isolated_projection::separate_inherited_context(snapshot, &document)
+                })
+                .unwrap_or_else(|| snapshot.clone()),
+            LiveSessionSource::Primary(_) => snapshot.clone(),
         }
     }
 
@@ -534,17 +550,24 @@ impl SessionStore {
         let document = SessionLog::read(&path).map_err(|error| error.to_string())?;
         let owner_path = isolated_owner_path(&path)
             .ok_or_else(|| format!("invalid isolated session path: {}", path.display()))?;
-        let owner = SessionLog::read(&owner_path).map_err(|error| {
-            format!(
-                "cannot read isolated session owner {}: {error}",
-                owner_path.display()
-            )
-        })?;
-        let (agent, nickname) = subagent_metadata_for_child(&owner, id)
-            .unwrap_or_else(|| ("subagent".to_string(), None));
+        let owner = SessionLog::read(&owner_path).ok();
+        let parent_thread_id = document
+            .isolated_parent_session_id()
+            .map_err(|error| error.to_string())?
+            .or_else(|| owner.as_ref().map(|owner| owner.header.id.clone()))
+            .ok_or_else(|| {
+                format!(
+                    "cannot resolve isolated session owner {}",
+                    owner_path.display()
+                )
+            })?;
+        let (agent, nickname) = owner
+            .as_ref()
+            .and_then(|owner| subagent_metadata_for_child(owner, id))
+            .unwrap_or_else(|| ("agent".to_string(), None));
         Ok(StoredIsolatedSession {
             document,
-            parent_thread_id: owner.header.id,
+            parent_thread_id,
             agent,
             nickname,
         })
@@ -670,61 +693,45 @@ fn subagent_metadata_for_child(
 ) -> Option<(String, Option<String>)> {
     let mut pending = HashMap::<String, Value>::new();
     for record in &document.entries {
-        match &record.entry {
-            SessionEntry::Message(entry) => {
-                let Some(message) = entry.message.as_standard() else {
-                    continue;
-                };
-                match message {
-                    Message::Assistant(message) => {
-                        for block in &message.content {
-                            let ContentBlock::ToolCall(call) = block else {
-                                continue;
-                            };
-                            if call.name == "subagent" {
-                                pending.insert(call.id.to_string(), call.arguments.clone());
-                            }
-                        }
+        let SessionEntry::Message(entry) = &record.entry else {
+            continue;
+        };
+        let Some(message) = entry.message.as_standard() else {
+            continue;
+        };
+        match message {
+            Message::Assistant(message) => {
+                for block in &message.content {
+                    let ContentBlock::ToolCall(call) = block else {
+                        continue;
+                    };
+                    if call.name == "spawn_agent" {
+                        pending.insert(call.id.to_string(), call.arguments.clone());
                     }
-                    Message::ToolResult(result) => {
-                        if let Some(node) = super::workflow_node_summaries(result.details.as_ref())
-                            .into_iter()
-                            .find(|node| node.session_id.as_deref() == Some(child_id))
-                        {
-                            return Some((node.agent, Some(node.key)));
-                        }
-                        let matches_child = result
-                            .details
-                            .as_ref()
-                            .and_then(|details| details.get("sessionId"))
-                            .and_then(Value::as_str)
-                            == Some(child_id);
-                        if !matches_child {
-                            continue;
-                        }
-                        return result
-                            .details
-                            .as_ref()
-                            .and_then(|details| details.get("agent"))
-                            .and_then(Value::as_str)
-                            .or_else(|| {
-                                pending
-                                    .get(result.tool_call_id.as_str())
-                                    .and_then(|args| args.get("agent"))
-                                    .and_then(Value::as_str)
-                            })
-                            .map(|agent| (agent.to_string(), None));
-                    }
-                    _ => {}
                 }
             }
-            SessionEntry::Custom(custom) if custom.custom_type == "subagent_workflow" => {
-                if let Some(node) = super::workflow_node_summaries(custom.data.as_ref())
-                    .into_iter()
-                    .find(|node| node.session_id.as_deref() == Some(child_id))
-                {
-                    return Some((node.agent, Some(node.key)));
+            Message::ToolResult(result) => {
+                let matches_child = result
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("sessionId"))
+                    .and_then(Value::as_str)
+                    == Some(child_id);
+                if !matches_child {
+                    continue;
                 }
+                return result
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("agent"))
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        pending
+                            .get(result.tool_call_id.as_str())
+                            .and_then(|args| args.get("agent"))
+                            .and_then(Value::as_str)
+                    })
+                    .map(|agent| (agent.to_string(), None));
             }
             _ => {}
         }

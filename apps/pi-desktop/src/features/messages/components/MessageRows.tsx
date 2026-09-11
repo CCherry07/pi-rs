@@ -20,7 +20,6 @@ import { exportMarkdownFile } from "@services/tauri";
 import { pushErrorToast } from "@services/toasts";
 import type { ConversationItem } from "../../../types";
 import type { ParsedFileLocation } from "../../../utils/fileLinks";
-import { formatTokens } from "../../../utils/tokenUsage";
 import { PierreDiffBlock } from "../../git/components/PierreDiffBlock";
 import {
   MAX_COMMAND_OUTPUT_LINES,
@@ -30,7 +29,6 @@ import {
   formatDurationMs,
   formatToolStatusLabel,
   normalizeMessageImageSrc,
-  statusToneFromText,
   toolNameFromTitle,
   toolStatusTone,
   type MessageImage,
@@ -669,77 +667,6 @@ export const UserInputRow = memo(function UserInputRow({
   );
 });
 
-const SubagentExecutionTree = memo(function SubagentExecutionTree({
-  item,
-  onOpenThreadLink,
-}: {
-  item: Extract<ConversationItem, { kind: "tool" }>;
-  onOpenThreadLink?: (threadId: string) => void;
-}) {
-  const { t } = useTranslation("messages");
-  const agents =
-    item.collabReceivers && item.collabReceivers.length > 0
-      ? item.collabReceivers
-      : item.collabReceiver
-        ? [item.collabReceiver]
-        : [];
-  if (agents.length === 0) {
-    return null;
-  }
-  const statuses = new Map(
-    (item.collabStatuses ?? []).map((status) => [status.threadId, status]),
-  );
-
-  return (
-    <div className="subagent-execution-tree" aria-label={t("subagents.executionTree")}>
-      {agents.map((agent) => {
-        const agentStatus = statuses.get(agent.threadId);
-        const status = agentStatus?.status ?? item.status ?? "";
-        const tone = statusToneFromText(status);
-        const label = agent.nickname?.trim() || agent.role?.trim() || agent.threadId;
-        const role = agent.nickname?.trim() ? agent.role?.trim() : "";
-        const task = item.collabTask?.trim() || role || "";
-        const statusLabel =
-          tone === "processing"
-            ? t("toolStatus.processing")
-            : tone === "failed"
-              ? t("toolStatus.failed")
-              : t("toolStatus.completed");
-        const activityLabel =
-          agentStatus?.totalTokens === undefined
-            ? statusLabel
-            : `${statusLabel} · ${t("subagents.tokens", {
-                tokens: formatTokens(agentStatus.totalTokens),
-              })}`;
-        return (
-          <button
-            key={agent.threadId}
-            type="button"
-            className="subagent-execution-node"
-            onClick={() => onOpenThreadLink?.(agent.threadId)}
-            aria-label={t("subagents.open", { agent: label })}
-          >
-            <span className="subagent-execution-branch" aria-hidden>
-              └
-            </span>
-            <span className={`subagent-execution-status ${tone}`} aria-hidden />
-            <span className="subagent-execution-name">{label}</span>
-            {task && (
-              <span className="subagent-execution-task" title={task}>
-                {task}
-              </span>
-            )}
-            <span className="subagent-execution-activity">{activityLabel}</span>
-            <span className="subagent-execution-open" aria-hidden>
-              ›
-            </span>
-          </button>
-        );
-      })}
-    </div>
-  );
-});
-
 export const ToolRow = memo(function ToolRow({
   item,
   isExpanded,
@@ -891,12 +818,6 @@ export const ToolRow = memo(function ToolRow({
             <span className="tool-inline-status">{inlineStatus}</span>
           )}
         </button>
-        {item.toolType === "collabToolCall" && (
-          <SubagentExecutionTree
-            item={item}
-            onOpenThreadLink={onOpenThreadLink}
-          />
-        )}
         {isExpanded && summary.detail && !isFileChange && (
           <div className="tool-inline-detail">{summary.detail}</div>
         )}

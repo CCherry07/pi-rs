@@ -19,6 +19,7 @@ import {
   getThreadTimestamp,
 } from "@utils/threadItems";
 import { extractThreadRunMetadata } from "@threads/utils/threadRunMetadata";
+import { contextInheritanceFromThread } from "@threads/utils/threadContextInheritance";
 import {
   buildThreadSummaryFromThread,
   extractThreadFromResponse,
@@ -65,6 +66,7 @@ type UseThreadActionsOptions = {
   threadListCursorByWorkspace: ThreadState["threadListCursorByWorkspace"];
   threadStatusById: ThreadState["threadStatusById"];
   threadSortKey: ThreadListSortKey;
+  getReplacementRevision?: (threadId: string) => number;
   onDebug?: (entry: DebugEntry) => void;
   getCustomName: (workspaceId: string, threadId: string) => string | undefined;
   renameThread: (workspaceId: string, threadId: string, name: string) => void;
@@ -95,6 +97,7 @@ export function useThreadActions({
   threadListCursorByWorkspace,
   threadStatusById,
   threadSortKey,
+  getReplacementRevision,
   onDebug,
   getCustomName,
   renameThread,
@@ -180,7 +183,10 @@ export function useThreadActions({
         const threadId = extractThreadId(response);
         if (threadId) {
           const thread = extractThreadFromResponse(response);
-          if (thread) dispatch({ type: "setThreadCommands", threadId, commands: commandsFromThread(thread) });
+          if (thread) {
+            dispatch({ type: "setThreadCommands", threadId, commands: commandsFromThread(thread) });
+            dispatch({ type: "setThreadContextInheritance", threadId, contextInheritance: contextInheritanceFromThread(thread) });
+          }
           dispatch({ type: "ensureThread", workspaceId, threadId });
           if (shouldActivate) {
             dispatch({ type: "setActiveThreadId", workspaceId, threadId });
@@ -240,11 +246,13 @@ export function useThreadActions({
       if (inFlightCount === 1) {
         dispatch({ type: "setThreadResumeLoading", threadId, isLoading: true });
       }
+      const replacementRevision = getReplacementRevision?.(threadId);
       try {
         const response =
           (await resumeThreadService(workspaceId, threadId)) as
             | Record<string, unknown>
             | null;
+        if (getReplacementRevision?.(threadId) !== replacementRevision) return threadId;
         onDebug?.({
           id: `${Date.now()}-server-thread-resume`,
           timestamp: Date.now(),
@@ -254,6 +262,8 @@ export function useThreadActions({
         });
         const thread = extractThreadFromResponse(response);
         if (thread) {
+          const contextInheritance = contextInheritanceFromThread(thread);
+          dispatch({ type: "setThreadContextInheritance", threadId, contextInheritance });
           dispatch({ type: "setThreadCommands", threadId, commands: commandsFromThread(thread) });
           dispatch({ type: "ensureThread", workspaceId, threadId });
           const tokenUsage = thread.tokenUsage ?? thread.token_usage;
@@ -308,13 +318,12 @@ export function useThreadActions({
             threadId,
             turnId: hydrationPlan.resumedActiveTurnId,
           });
-          if (hydrationPlan.mergedItems.length > 0) {
-            dispatch({
-              type: "setThreadItems",
-              threadId,
-              items: hydrationPlan.mergedItems,
-            });
-          }
+          dispatch({
+            type: "setThreadItems",
+            threadId,
+            items: hydrationPlan.mergedItems,
+            contextInheritance,
+          });
           if (hydrationPlan.threadName) {
             dispatch({
               type: "setThreadName",
@@ -364,6 +373,7 @@ export function useThreadActions({
       dispatchPreviewMessage,
       dispatch,
       getCustomName,
+      getReplacementRevision,
       itemsByThread,
       loadedThreadsRef,
       onDebug,

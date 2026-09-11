@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
 use pi_core::{
-    IsolatedSessionId, IsolatedSessionOptions, IsolatedSessionOutcome, IsolatedSessionRequest,
+    CustomMessageContent, IsolatedFollowUpReceipt, IsolatedMessageReceipt, IsolatedSessionId,
+    IsolatedSessionOptions, IsolatedSessionOutcome, IsolatedSessionRequest, IsolatedSessionTurnId,
     ModelSelection, PluginContextError,
 };
 use tokio::sync::watch;
@@ -388,6 +389,7 @@ impl PiSession {
                 })?)
             }
         };
+        let fresh_context = initial_context.is_none();
         let initial_state = resolve_isolated_initial_state(&parent, request.options)?;
         let path = isolated_session_path(&self.path());
         let child = manager
@@ -400,6 +402,18 @@ impl PiSession {
                 initial_context,
             )
             .await?;
+        if fresh_context {
+            let origin = crate::SessionEntry::Custom(crate::CustomEntry {
+                custom_type: crate::isolated_context::ORIGIN_CUSTOM_TYPE.into(),
+                data: Some(serde_json::json!({ "parentSessionId": parent.log().header().id })),
+            });
+            if let Err(error) = child.current().log().append_session_record(origin) {
+                manager.close_session_tree_locked(&child).await?;
+                return Err(MultiSessionManagerError::InvalidIsolatedRequest(
+                    error.to_string(),
+                ));
+            }
+        }
         Ok(manager
             .isolated_sessions
             .launch(self.registration_id().to_owned(), child, request.input)
@@ -429,6 +443,62 @@ impl PiSession {
             .isolated_sessions
             .wait(self.registration_id(), id);
         Ok(async move { waiting.await.map_err(PluginContextError::Failed) })
+    }
+
+    pub(crate) fn isolated_session_turn_waiter(
+        &self,
+        id: &IsolatedSessionId,
+        turn_id: &IsolatedSessionTurnId,
+    ) -> Result<
+        impl Future<Output = Result<IsolatedSessionOutcome, PluginContextError>>
+        + Send
+        + 'static
+        + use<>,
+        PluginContextError,
+    > {
+        let waiting = self
+            .manager()
+            .map_err(|error| PluginContextError::Failed(error.to_string()))?
+            .isolated_sessions
+            .wait_turn(self.registration_id(), id, turn_id);
+        Ok(async move { waiting.await.map_err(PluginContextError::Failed) })
+    }
+
+    pub fn send_to_isolated_session(
+        &self,
+        id: &IsolatedSessionId,
+        content: CustomMessageContent,
+    ) -> Result<IsolatedMessageReceipt, PluginContextError> {
+        self.manager()
+            .map_err(|error| PluginContextError::Failed(error.to_string()))?
+            .isolated_sessions
+            .send_message(self.registration_id(), id, content)
+            .map_err(PluginContextError::Failed)
+    }
+
+    pub async fn follow_up_isolated_session(
+        &self,
+        id: &IsolatedSessionId,
+        content: CustomMessageContent,
+    ) -> Result<IsolatedFollowUpReceipt, PluginContextError> {
+        self.manager()
+            .map_err(|error| PluginContextError::Failed(error.to_string()))?
+            .isolated_sessions
+            .follow_up(self.registration_id(), id, content)
+            .await
+            .map_err(PluginContextError::Failed)
+    }
+
+    pub fn abort_isolated_session_turn(
+        &self,
+        id: &IsolatedSessionId,
+        turn_id: &IsolatedSessionTurnId,
+    ) -> Result<(), PluginContextError> {
+        self.manager()
+            .map_err(|error| PluginContextError::Failed(error.to_string()))?
+            .isolated_sessions
+            .abort_turn(self.registration_id(), id, turn_id)
+            .map_err(PluginContextError::Failed)
     }
 
     pub fn abort_isolated_session(&self, id: &IsolatedSessionId) -> Result<(), PluginContextError> {
@@ -972,6 +1042,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn isolated_session_reuses_identity_across_turns_and_reports_usage_deltas() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = test_manager_with_turns([
+            text_turn_with_usage("first answer", 11),
+            text_turn_with_usage("follow-up answer", 7),
+        ]);
+        let owner = manager
+            .create_session(directory.path(), directory.path().join("primary.jsonl"))
+            .await
+            .unwrap();
+        let id = owner
+            .launch_isolated_session(IsolatedSessionRequest::new(CustomMessageContent::Text(
+                "first task".into(),
+            )))
+            .await
+            .unwrap();
+        let first = owner.wait_for_isolated_session(&id).await.unwrap();
+        assert_eq!(first.usage.total_tokens, 11);
+
+        let message = owner
+            .send_to_isolated_session(&id, CustomMessageContent::Text("mailbox context".into()))
+            .unwrap();
+        assert_eq!(
+            message.accepted_as,
+            pi_core::IsolatedMessageDelivery::Mailbox
+        );
+        let follow_up = owner
+            .follow_up_isolated_session(
+                &id,
+                CustomMessageContent::Text("continue in the same session".into()),
+            )
+            .await
+            .unwrap();
+        assert!(follow_up.started);
+        assert_ne!(follow_up.turn_id.as_str(), id.as_str());
+        let second = owner
+            .isolated_session_turn_waiter(&id, &follow_up.turn_id)
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(second.session_id, first.session_id);
+        assert_eq!(second.usage.total_tokens, 7);
+        assert!(second.messages.iter().any(|message| {
+            matches!(message, Message::Assistant(assistant)
+            if assistant.content.iter().any(|content| {
+                matches!(content, ContentBlock::Text(text) if text.text == "follow-up answer")
+            }))
+        }));
+        let child = manager
+            .sessions()
+            .into_iter()
+            .find(|session| session.registration_id() == id.as_str())
+            .unwrap();
+        let document = child.current().log().load().unwrap();
+        let context = document.context().unwrap();
+        assert!(format!("{:?}", context.messages).contains("mailbox context"));
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn isolated_initial_state_is_applied_without_mutating_the_owner() {
         let directory = tempfile::tempdir().unwrap();
         let manager = test_manager_with_turns([ScriptedTurn::WaitForAbort]);
@@ -1095,6 +1225,19 @@ mod tests {
             .find(|session| session.registration_id() == id.as_str())
             .unwrap();
         let document = child.current().log().load().unwrap();
+        let inherited = document.inherited_context().unwrap().unwrap();
+        assert_eq!(inherited.parent_session_id, owner.id());
+        assert_eq!(
+            inherited.parent_entry_id.as_deref(),
+            Some(fork_point.parent_entry_id.as_str())
+        );
+        assert_eq!(inherited.messages, expected);
+        assert!(
+            document
+                .entries
+                .iter()
+                .any(|record| record.id == inherited.snapshot_entry_id)
+        );
         assert_eq!(
             serde_json::to_value(&document.context().unwrap().messages[..expected.len()]).unwrap(),
             serde_json::to_value(&expected).unwrap()

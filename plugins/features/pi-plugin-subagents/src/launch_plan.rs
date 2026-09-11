@@ -85,17 +85,13 @@ fn resolve_tool_names(
         )));
     }
     if !profile.allow_nested_subagents {
-        if profile.tools.is_some()
-            && selected
-                .iter()
-                .any(|tool| matches!(tool.as_str(), "subagent" | "subagent_workflow"))
-        {
+        if profile.tools.is_some() && selected.iter().any(|tool| tool == "spawn_agent") {
             return Err(ToolError::Execution(format!(
-                "subagent profile {:?} selects the subagent tool but does not authorize nested delegation",
+                "agent profile {:?} selects spawn_agent but does not authorize nested delegation",
                 profile.name
             )));
         }
-        selected.retain(|tool| !matches!(tool.as_str(), "subagent" | "subagent_workflow"));
+        selected.retain(|tool| tool != "spawn_agent");
     }
     // Ordinary managed children inherit the parent's memory context, but the
     // parent remains the sole owner of durable memory mutation. Keep the
@@ -121,16 +117,16 @@ fn resolve_tool_names(
     }
     // Coordination remains within the parent's capability ceiling. Explicit
     // exclusions and tools: [] disable the child bridge as well.
-    let parent_can_supervise = ["subagent_supervisor", "bg_wait"]
-        .iter()
-        .all(|tool| ceiling.contains(*tool));
-    if selected.iter().any(|name| name == "contact_supervisor") && !parent_can_supervise {
-        return Err(ToolError::Execution("contact_supervisor requires subagent_supervisor and bg_wait in the parent capability ceiling.".into()));
-    }
     if !selected.is_empty() && profile.tools.as_ref().is_none_or(|tools| !tools.is_empty()) {
-        for tool in ["contact_supervisor", "subagent_supervisor", "bg_wait"] {
-            if (tool == "contact_supervisor" || profile.allow_nested_subagents)
-                && (tool != "contact_supervisor" || parent_can_supervise)
+        for tool in [
+            "send_message",
+            "followup_task",
+            "wait_agent",
+            "interrupt_agent",
+            "list_agents",
+            "spawn_agent",
+        ] {
+            if (tool != "spawn_agent" || profile.allow_nested_subagents)
                 && ceiling.contains(tool)
                 && !excluded.contains(tool)
                 && !selected.iter().any(|name| name == tool)
@@ -140,7 +136,7 @@ fn resolve_tool_names(
         }
     }
     if !profile.allow_nested_subagents {
-        selected.retain(|name| name != "subagent_supervisor" && name != "bg_wait");
+        selected.retain(|name| name != "spawn_agent");
     }
     Ok(selected)
 }
@@ -299,12 +295,12 @@ mod tests {
         assert_eq!(
             resolve_tool_names(
                 &inherited,
-                ["read", "bash", "grep", "subagent"]
+                ["read", "bash", "grep", "spawn_agent"]
                     .map(str::to_string)
                     .to_vec(),
             )
             .unwrap(),
-            ["read", "grep", "subagent"].map(str::to_string).to_vec()
+            ["read", "grep", "spawn_agent"].map(str::to_string).to_vec()
         );
 
         let mut explicit = builtin_profile("scout");

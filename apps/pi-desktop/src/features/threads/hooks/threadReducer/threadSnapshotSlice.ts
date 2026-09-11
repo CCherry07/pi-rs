@@ -5,6 +5,14 @@ export function reduceThreadSnapshots(
   action: ThreadAction,
 ): ThreadState {
   switch (action.type) {
+    case "setThreadContextInheritance":
+      return {
+        ...state,
+        contextInheritanceByThread: {
+          ...state.contextInheritanceByThread,
+          [action.threadId]: action.contextInheritance,
+        },
+      };
     case "setThreadCommands":
       return {
         ...state,

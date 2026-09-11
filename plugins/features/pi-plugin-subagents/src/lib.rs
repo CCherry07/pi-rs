@@ -1,23 +1,15 @@
 #![forbid(unsafe_code)]
 
 mod catalog;
-mod child_run;
 mod config;
-mod coordination;
-mod execution;
 mod fork_context;
 mod launch_context;
 mod launch_plan;
 mod profiles;
-mod run_state;
 mod runtime;
 mod session;
 mod skills;
-mod supervisor_tools;
 mod tool;
-mod waiting;
-mod workflow;
-mod workflow_plan;
 
 use std::sync::Arc;
 
@@ -30,7 +22,7 @@ use crate::catalog::SubagentCatalog;
 use crate::config::load_max_depth;
 use crate::profiles::specialized_system_prompt;
 use crate::runtime::run_marker;
-use crate::tool::SubagentTool;
+use crate::tool::{AgentTool, AgentToolKind};
 
 pub use crate::catalog::{SubagentCatalogError, SubagentLoaderOptions};
 pub use crate::runtime::SubagentRuntime;
@@ -84,25 +76,20 @@ impl AgentPlugin for SubagentsPlugin {
     }
 
     fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
-        context.register_tool(Arc::new(SubagentTool::new(
-            self.runtime.clone(),
-            self.catalog.clone(),
-            self.max_depth,
-        )))?;
-        context.register_tool(Arc::new(workflow::WorkflowTool::new(
-            self.runtime.clone(),
-            self.catalog.clone(),
-            self.max_depth,
-        )))?;
         for kind in [
-            supervisor_tools::SupervisorToolKind::Contact,
-            supervisor_tools::SupervisorToolKind::Supervisor,
-            supervisor_tools::SupervisorToolKind::Wait,
+            AgentToolKind::Spawn,
+            AgentToolKind::SendMessage,
+            AgentToolKind::FollowUp,
+            AgentToolKind::Wait,
+            AgentToolKind::Interrupt,
+            AgentToolKind::List,
         ] {
-            context.register_tool(Arc::new(supervisor_tools::SupervisorTool {
-                runtime: self.runtime.clone(),
+            context.register_tool(Arc::new(AgentTool::new(
+                self.runtime.clone(),
+                self.catalog.clone(),
+                self.max_depth,
                 kind,
-            }))?;
+            )))?;
         }
         Ok(())
     }
@@ -115,47 +102,38 @@ impl AgentPlugin for SubagentsPlugin {
         let session_id = context.session.id()?;
         let active_tools = context.session.active_tools()?;
         self.runtime
-            .coordination()
             .bind_session(session_id.clone(), context.session.handle_for_adapter());
-        let profile = if let Some((_, profile)) = self.runtime.assignment_for_session(&session_id) {
-            profile
-        } else if let Some(run_id) = marker_from_messages(&event.input_messages) {
-            self.runtime
-                .bind_child(run_id, &session_id)
-                .map_err(|error| PluginError::Hook {
-                    plugin_id: PluginId::new("subagents"),
-                    hook: "before_agent_start",
-                    message: error.to_string(),
-                })?
-                .profile
-        } else {
-            if !["subagent_supervisor", "bg_wait"]
-                .iter()
-                .all(|name| active_tools.iter().any(|tool| tool == name))
-            {
-                return Ok(BeforeAgentStartPatch::default());
-            }
-            return Ok(BeforeAgentStartPatch {
-                system_prompt: Some(format!(
-                    "{}\n\n{}",
-                    event.system_prompt,
-                    supervisor_tools::PARENT_GUIDANCE
-                )),
-                messages: Vec::new(),
-            });
-        };
+        let assignment =
+            if let Some((agent_id, profile)) = self.runtime.assignment_for_session(&session_id) {
+                Some((agent_id, profile))
+            } else if let Some(run_id) = marker_from_messages(&event.input_messages) {
+                let profile = self
+                    .runtime
+                    .bind_child(run_id, &session_id)
+                    .map_err(|error| PluginError::Hook {
+                        plugin_id: PluginId::new("subagents"),
+                        hook: "before_agent_start",
+                        message: error.to_string(),
+                    })?;
+                Some((run_id.to_string(), profile))
+            } else {
+                if !active_tools.iter().any(|tool| tool == "spawn_agent") {
+                    return Ok(BeforeAgentStartPatch::default());
+                }
+                return Ok(BeforeAgentStartPatch {
+                    system_prompt: Some(format!("{}\n\n{}", event.system_prompt, PARENT_GUIDANCE)),
+                    messages: Vec::new(),
+                });
+            };
+        let (agent_id, profile) = assignment.expect("assigned child");
         let mut prompt = specialized_system_prompt(&event.system_prompt, &profile);
-        if active_tools.iter().any(|name| name == "contact_supervisor") {
+        prompt.push_str("\n\n");
+        prompt.push_str(&format!(
+            "Collaboration identity: your exact agent id is {agent_id}. Use send_message with target \"parent\" to report information without ending your task. Use wait_agent only when your task genuinely depends on another agent or a parent message."
+        ));
+        if profile.allow_nested_subagents && active_tools.iter().any(|tool| tool == "spawn_agent") {
             prompt.push_str("\n\n");
-            prompt.push_str(supervisor_tools::CHILD_GUIDANCE);
-        }
-        if profile.allow_nested_subagents
-            && ["subagent_supervisor", "bg_wait"]
-                .iter()
-                .all(|name| active_tools.iter().any(|tool| tool == name))
-        {
-            prompt.push_str("\n\n");
-            prompt.push_str(supervisor_tools::PARENT_GUIDANCE);
+            prompt.push_str(PARENT_GUIDANCE);
         }
         Ok(BeforeAgentStartPatch {
             system_prompt: Some(prompt),
@@ -179,6 +157,8 @@ impl AgentPlugin for SubagentsPlugin {
         })
     }
 }
+
+const PARENT_GUIDANCE: &str = "Agent collaboration: spawn_agent always starts one child asynchronously and returns a stable exact agent id. Launch independent children in the same response for parallel work. Use wait_agent mode:any as a race, or mode:all as a barrier; timeout only yields a snapshot and never cancels work. Re-plan after every result or message. Use send_message for information, followup_task to reuse a child's session, interrupt_agent to stop only its active turn, and list_agents for the current tree. Conditions and loops remain your decisions; there is no workflow or graph language.";
 
 fn marker_from_messages(messages: &[Message]) -> Option<&str> {
     messages.iter().find_map(|message| {

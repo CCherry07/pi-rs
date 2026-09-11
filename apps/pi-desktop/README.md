@@ -25,6 +25,12 @@ Currently wired:
 - list, create, resume, fork, rename, archive, and compact Pi sessions;
 - text and image submission, steering, interruption (including observed subagent runs), and live
   streaming;
+- collapsible child-agent chat panels embedded in the parent conversation, with lazy history
+  loading, live messages/reasoning/tools, independent scrolling and retryable read errors;
+- independent child timelines: `fork` parent history stays in a collapsed, read-only creation
+  snapshot rather than appearing as child messages; `fresh` explicitly reports no inherited
+  history. The source session and available snapshot boundary are shown above the child chat,
+  and later parent messages are never pulled into the snapshot automatically;
 - reasoning, generic tool, shell output, error, usage, and native plugin notice events;
 - live-session native command and skill slash completion, with argument hints;
 - single-pass runtime command submission, including handled commands, transformed prompts,

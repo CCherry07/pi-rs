@@ -27,7 +27,7 @@ impl SessionPlugin for SubagentsSessionPlugin {
         context: &SessionPluginContext,
         _event: &pi_session::SessionStartEvent,
     ) -> Result<(), SessionPluginError> {
-        self.runtime.coordination().bind_session(
+        self.runtime.bind_session(
             context.identity().id.clone(),
             context.plugin_context_handle(),
         );
@@ -39,9 +39,7 @@ impl SessionPlugin for SubagentsSessionPlugin {
         context: &SessionPluginContext,
         _event: &SessionShutdownEvent,
     ) -> Result<(), SessionPluginError> {
-        self.runtime
-            .coordination()
-            .cancel_owner(&context.identity().id);
+        self.runtime.close_owner(&context.identity().id);
         self.runtime.drain_monitors(&context.identity().id).await;
         self.runtime.forget_session(&context.identity().id);
         Ok(())
@@ -73,7 +71,7 @@ mod tests {
             },
         );
         let run = runtime
-            .begin_launch("root", builtin_profile("delegate"))
+            .begin_launch("root", builtin_profile("delegate"), 4)
             .unwrap();
 
         plugin
@@ -87,8 +85,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            runtime.bind_child(run.run_id(), "other").unwrap_err(),
-            LaunchError::UnknownRun(run.run_id().to_string())
+            runtime.bind_child(run.id(), "other").unwrap_err(),
+            LaunchError::UnknownAgent(run.id().to_string())
         );
     }
 }

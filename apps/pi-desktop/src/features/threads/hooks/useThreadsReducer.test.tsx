@@ -8,6 +8,45 @@ const replacement: Extract<ThreadAction, { type: "replaceThread" }> = {
   isProcessing: false, turnId: null, timestamp: 100,
 };
 
+describe("context inheritance reduction", () => {
+  const inheritance = {
+    origin: { mode: "fork" as const, parentThreadId: "parent", parentEntryId: "cutoff", snapshotEntryId: "seed" },
+    inheritedItems: [{ id: "inherited", kind: "message" as const, role: "assistant" as const, text: "Parent snapshot" }],
+  };
+
+  it("replaces provenance atomically with own history and keeps inherited content out of normal items", () => {
+    const state = threadReducer(initialState, { ...replacement, contextInheritance: inheritance });
+    expect(state.contextInheritanceByThread.new).toBe(inheritance);
+    expect(state.itemsByThread.new).toEqual(replacement.items);
+    expect(state.lastAgentMessageByThread).toEqual({});
+  });
+
+  it("clears inherited metadata on empty replacement and plain snapshot reset", () => {
+    const seeded = threadReducer(initialState, { ...replacement, contextInheritance: inheritance });
+    const replaced = threadReducer(seeded, { ...replacement, previousThreadId: "new", items: [] });
+    expect(replaced.contextInheritanceByThread.new).toBeNull();
+    expect(replaced.itemsByThread.new).toEqual([]);
+    const cleared = threadReducer(seeded, { type: "setThreadItems", threadId: "new", items: [] });
+    expect(cleared.contextInheritanceByThread.new).toBeNull();
+  });
+
+  it("removes inherited snapshots together with the thread", () => {
+    const seeded = threadReducer(initialState, { ...replacement, contextInheritance: inheritance });
+    const removed = threadReducer(seeded, { type: "removeThread", workspaceId: "workspace", threadId: "new" });
+    expect(removed.contextInheritanceByThread.new).toBeUndefined();
+  });
+
+  it("does not revive inherited metadata after a replacement from a stale hydration action", () => {
+    const seeded = threadReducer(initialState, { ...replacement, contextInheritance: inheritance });
+    const cleared = threadReducer(seeded, { ...replacement, previousThreadId: "new", items: [] });
+    const hydrated = threadReducer(cleared, {
+      type: "hydrateThreadItems", threadId: "new", items: [], itemsAtRequest: [],
+      contextInheritance: { atRequest: inheritance, value: inheritance },
+    });
+    expect(hydrated.contextInheritanceByThread.new).toBeNull();
+  });
+});
+
 describe("thread naming", () => {
   it("replaces the untitled placeholder with the first user message", () => {
     const state = threadReducer(
@@ -61,6 +100,23 @@ describe("replacement and notice reduction", () => {
     }, replacement);
     expect(state.activeThreadIdByWorkspace.workspace).toBe("unrelated");
     expect(state.commandsByThread.new).toEqual(replacement.commands);
+  });
+
+  it("keeps one stable provider error notice across repeated replacements", () => {
+    const errorNotice = {
+      id: "error-2-0", kind: "tool" as const, toolType: "notice",
+      title: "[error]", detail: "Provider unavailable", status: "failed",
+    };
+    let state = threadReducer(initialState, {
+      type: "addNotice", threadId: "old", itemId: "transient-notice", text: "Plugin warning", level: "warning",
+    });
+    const snapshot = { ...replacement, threadId: "old", items: [...replacement.items, errorNotice] };
+    state = threadReducer(state, snapshot);
+    state = threadReducer(state, snapshot);
+    state = threadReducer(state, snapshot);
+    expect(state.itemsByThread.old.filter((item) => item.id === "error-2-0")).toEqual([errorNotice]);
+    expect(state.itemsByThread.old.filter((item) => item.id === "transient-notice")).toHaveLength(1);
+    expect(state.itemsByThread.old).toHaveLength(3);
   });
 
   it("reloads the same identity from snapshot while preserving displayed notices", () => {

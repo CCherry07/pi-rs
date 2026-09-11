@@ -1,187 +1,77 @@
-# Subagent smoke test
+# Agent collaboration smoke test
 
-Use this playbook to verify the first-party `subagent` feature with a real tool-capable model. The
-scenario is read-only: every delegated task inspects the repository and leaves the workspace
-unchanged.
+Use this read-only playbook with a real tool-capable model to verify the first-party dynamic agent
+tree. The feature intentionally has no `subagent` compatibility tool or static workflow language.
 
-The built-in `scout`, `worker`, `reviewer`, `oracle`, and `delegate` role prompts are vendored
-verbatim from `nicobailon/pi-subagents` at the commit recorded in
-`plugins/features/pi-plugin-subagents/NOTICE`. pi-rs keeps its own native execution protocol and
-hidden run marker; it does not add a second pi-rs-specific role/depth wrapper around those prompts.
-Like upstream, each child receives an active-agent identity, an ordinary-child or explicit-fanout
-boundary, and the project context selected by its profile. The supervisor bridge adds
-`contact_supervisor` within the parent's active-tool ceiling; explicit exclusions can disable it.
+## Start
 
-`subagent` accepts optional `context: "fresh" | "fork"`, overriding the profile's `defaultContext`.
-Worker/oracle default to fork; scout/reviewer/delegate and unspecified custom profiles use fresh.
-Fork inherits history through the user request before the launching assistant/tool batch, not a
-workspace snapshot. To check it manually, put a unique fact in an earlier parent message and ask
-two parallel reviewer children with `context: "fork"` to recall it without repeating it in their
-tasks. A reviewer with `context: "fresh"` should not have that fact. Child persistence and usage
-should contain only its own responses plus a separate inherited-context seed.
-
-The scenario uses two real project agent definitions rather than hardcoded test roles:
-
-- `.pi/agents/smoke-scout.md` is a leaf agent with the `smoke-explorer` alias, a `bash` exclusion,
-  inherited skills, a total child-run timeout, and `allowNestedSubagents: false`.
-- `.pi/agents/smoke-delegate.md` adds `subagent` to that tool allowlist and recursively launches the
-  same profile through child depth 6. Its `maxSubagentDepth: 6` declaration may preserve or tighten
-  the inherited limit, but cannot widen a stricter global limit.
-
-## Run the scenario
-
-Start the interactive frontend from the repository root:
+From the repository root:
 
 ```bash
-PI_SUBAGENT_MAX_DEPTH=6 cargo run -p pi-cli --
+PI_SUBAGENT_MAX_DEPTH=4 cargo run -p pi-cli --
 ```
 
-Accept the project-trust prompt if this checkout has not been trusted yet. Project `.pi/agents`
-definitions are intentionally trust-gated.
+Accept project trust when prompted, then record the primary path with `/session`.
 
-Run `/session` and record the primary JSONL path. Then send this prompt:
+## Procedure
+
+Ask the model to perform these steps:
+
+1. In one assistant response, call `spawn_agent` twice:
+   - a `scout` to read `plugins/features/pi-plugin-subagents/src/runtime.rs` and report the default
+     depth, cumulative spawn limit, and active-agent limit;
+   - a `reviewer` to inspect `plugins/features/pi-plugin-subagents/src/tool.rs` and list the six
+     registered tool names.
+2. Call `wait_agent` with both exact ids and `mode: "any"`. Verify it returns after at least one
+   child settles without cancelling the other.
+3. Call `wait_agent` again with both ids and `mode: "all"`. Expected limits are depth `4`, spawns
+   `64`, and active agents `8`; expected tools are `spawn_agent`, `send_message`, `followup_task`,
+   `wait_agent`, `interrupt_agent`, and `list_agents`.
+4. Send the reviewer one non-starting message with `send_message`, then call `followup_task` on the
+   same exact id and ask it to confirm the message. Wait for that id and verify `childSessionId`
+   did not change.
+5. Spawn a longer read-only scout, immediately call `interrupt_agent`, wait until its state is
+   `interrupted`, then reuse it with `followup_task`. Verify the new turn can settle as `idle`.
+6. Call `list_agents` and verify it returns the descendant tree with exact ids, parent ids, current
+   state, last turn result, and cumulative usage.
+
+Ask for this final report:
 
 ```text
-Read docs/subagents-smoke-test.md and execute the Agent procedure exactly. Use the subagent tool for
-every delegated step. Return the required final report after all steps finish.
-```
-
-One-shot mode can exercise the same flow, although the interactive frontend makes concurrent tool
-activity and primary-session ownership easier to observe:
-
-```bash
-PI_SUBAGENT_MAX_DEPTH=6 cargo run -p pi-cli -- --print \
-  'Read docs/subagents-smoke-test.md and execute the Agent procedure exactly. Use the subagent tool for every delegated step. Return the required final report after all steps finish.'
-```
-
-## Agent procedure
-
-Complete the following steps in order. Treat a step as passed only when its subagent result contains
-all expected evidence.
-
-1. Launch exactly one `smoke-explorer` subagent by that alias. Ask it to inspect
-   `plugins/features/pi-plugin-subagents/src/runtime.rs` and report the default maximum depth,
-   cumulative children per root session, and active children. The expected values are `1`, `64`,
-   and `20`; its result must end with `SMOKE_SCOUT_OK`.
-2. Launch exactly one `smoke-delegate` subagent. Its task must require each delegate at depths 1
-   through 5 to launch exactly one further `smoke-delegate`. The depth-6 delegate must inspect
-   `isolated_session_path` in `crates/pi-session/src/multi_session_manager.rs` directly and report
-   the path shape for a child of `/work/primary.jsonl`:
-   `/work/primary/isolated/<uuid>.jsonl`. The depth-1 result must preserve all six markers from
-   `SMOKE_DELEGATE_DEPTH_6_OK` through `SMOKE_DELEGATE_DEPTH_1_OK`.
-3. In one assistant turn, launch these two independent subagents so the normal parallel tool
-   scheduler can run them together:
-   - A `smoke-scout` that reports the supported frontmatter field names from `AgentFrontmatter` in
-     `plugins/features/pi-plugin-subagents/src/catalog.rs`.
-   - A `smoke-scout` that reports the registered tool name and its required input fields from
-     `plugins/features/pi-plugin-subagents/src/tool.rs`.
-4. Check the returned evidence. The frontmatter fields must be `name`, `description`, `aliases`,
-   `tools`, `excludeTools`, `model`, `thinking`, `systemPromptMode`, `inheritSkills`, `skills`,
-   `skillPath`, `timeoutMs`, `inheritProjectContext`, `defaultContext`, `allowNestedSubagents`, and `maxSubagentDepth`. The tool
-   must be named `subagent`, with required `agent` and `task` fields. Both parallel results must end
-   with `SMOKE_SCOUT_OK`.
-5. Return exactly this report shape, replacing each result with `PASS` or `FAIL` and adding one short
-   evidence line:
-
-```text
-SUBAGENTS_SMOKE_TEST
-direct: PASS|FAIL - <evidence>
-recursive: PASS|FAIL - <evidence>
-parallel: PASS|FAIL - <evidence>
+AGENT_COLLABORATION_SMOKE_TEST
+parallel_race: PASS|FAIL - <evidence>
+barrier: PASS|FAIL - <evidence>
+message_followup_reuse: PASS|FAIL - <evidence>
+interrupt_reuse: PASS|FAIL - <evidence>
+tree_snapshot: PASS|FAIL - <evidence>
 workspace: unchanged
 ```
 
-## Supervisor roundtrip
+## Nested message check
 
-Run this separately from the fixed-report procedure above:
+Create a trusted project agent definition with `allowNestedSubagents: true` and an explicit tool
+set containing the six collaboration tools. Ask it to spawn a leaf, wait for it, and use
+`send_message { target: "parent", ... }` for one meaningful progress update. Verify the parent
+receives the message and the child continues in the same turn.
 
-```text
-Launch one reviewer with this read-only task: call contact_supervisor with reason need_decision
-and message "Should this review cover tests too?". After the reply, report its exact decision
-and finish with SUPERVISOR_ROUNDTRIP_OK. When the child asks, answer "Yes, include tests" using
-subagent_supervisor, then use bg_wait on the same run until it finishes. Keep the original child
-session; do not launch a replacement. Leave workspace files unchanged.
-```
-
-Pass criteria: the initial tool returns a detached receipt; the request reaches the parent; the
-reply appears as the original child's `contact_supervisor` result; `bg_wait` reports that run's
-terminal result. A `bg_wait` timeout only ends that wait window. For structured input, repeat with
-`reason: "interview_request"`, an `interview` object and a JSON reply. `progress_update` should
-reach the parent without blocking the child. These checks work with fresh and fork context.
-
-Communication is process-local. Restarting, closing, or reloading the owning session cancels live
-work; no notification or task is reattached.
-
-## Background launch and status
-
-Use `subagent({agent:"reviewer", task:"...", async:true})` for explicit in-process background
-launch. The default remains foreground. A fast child may already return a terminal result;
-otherwise the receipt contains `runId`, `isolatedSessionId`, `detached:true` and `background:true`.
-Completion and supervisor requests attempt to notify the owner. `async:true` does not start a
-separate process; exiting the owning session cancels work. In a one-shot frontend, use blocking
-`bg_wait` before ending the request if the child result is required before exit.
-
-- `subagent_supervisor({action:"status"})` returns an owner-scoped, read-only summary and run
-  snapshots. Add `id` for an exact run or unique prefix, including a terminal run.
-  `list`/`pending` continue to list supervisor requests, not tasks.
-- Execution state (`starting`, `running`, `cancelling`, `completed`, `failed`, `cancelled`,
-  `timed_out`) is independent from `activityState` and `waitMode` (`foreground` or `detached`).
-  Status includes elapsed time, child identity, pending request IDs and a bounded result summary.
-  It does not consume results.
-- `bg_wait({id:"...", timeoutMs:30000})` blocks only that tool wait. Timeout returns without
-  cancelling the child. It is not a subscription and does not create later notifications.
-- `bg_wait({id:"...", nonBlocking:true, timeoutMs:30000})` immediately registers a one-shot
-  observation of one detached run. The receipt returns the full `runId`, `armed:true`,
-  `deadlineAt`, and `reused`; status exposes `nonBlockingWait.deadlineAt` while active.
-  A duplicate active registration reuses the original deadline, even with a different timeout.
-  Completion/decision use the existing notifications and clear the observation. If neither
-  happens before expiry, one `subagent-wait-expired` reminder is attempted; the child keeps
-  running and can still notify on completion. An already ready result/decision returns directly.
-  This mode requires `id`, rejects `all:true`, and does not launch or detach a run. It shares
-  the thirty-minute default wait window; it does not keep a one-shot frontend alive.
-
-Manual check: background-launch a read-only child that asks for a decision. Query its status and
-confirm `needs_attention`; reply, then call `bg_wait` while it continues. Verify the completion
-notice arrives during the same owning session and the terminal status remains queryable. Use a
-short wait window to confirm expiry leaves the same child live. Notification delivery is best
-effort, so status is the fallback when no notice arrives.
-
-For non-blocking observation, launch a longer read-only child with `async:true`, then register a
-short window with `nonBlocking:true`. Confirm the parent can continue working immediately. Register
-again before expiry and confirm `reused:true` with the same deadline. Expect one expiry reminder,
-no child cancellation, no active observation in status, and a later ordinary completion notice.
-Repeat with a longer window: completion or a decision should clear the observation without a
-second reminder. Closing the owner clears observations; none are restored after restart or reload.
+Exact ownership is intentional: a parent controls direct children by full id; prefixes and foreign
+ids fail. `wait_agent` timeout is a normal snapshot, not cancellation. Live trees and mailboxes are
+process-local; closing or reloading the owner interrupts them, and restarting does not reattach
+them.
 
 ## Human checks
 
-After the report returns:
+1. `/session` still reports the original primary path.
+2. Desktop shows each `spawn_agent` as a selectable child task; the other tools appear as ordinary
+   tool calls.
+3. Isolated child JSONL files are below `<parent-stem>/isolated/<uuid>.jsonl` and absent from the
+   top-level `/resume` list.
+4. No `subagent`, `subagent_workflow`, `contact_supervisor`, `subagent_supervisor`, or `bg_wait`
+   tool is registered.
 
-1. Run `/session` again. Its path must equal the primary path recorded before the scenario.
-2. Confirm the UI showed the canonical `smoke-scout` name for the direct alias launch, one outer
-   `smoke-delegate`, and two independent
-   `smoke-scout` tool calls in the parallel step. The five descendant delegates belong to isolated
-   sessions, so the primary frontend does not need to render them as primary tool calls.
-3. Inspect the session directory if persistence needs verification. For a primary file
-   `/work/primary.jsonl`, the first child is stored under
-   `/work/primary/isolated/<uuid>.jsonl`; each further depth repeats the
-   `<parent-stem>/isolated/<uuid>.jsonl` nesting until depth 6.
-4. Open `/resume` and confirm isolated child files are absent from the top-level resume listing.
-
-The live scenario verifies model-facing wiring and presentation ownership. Model compliance can
-vary, so deterministic runtime and limit behavior remains owned by the automated tests:
+Deterministic coverage:
 
 ```bash
 cargo test -p pi-plugin-subagents
-cargo test -p pi-cli product_runtime_registers_the_first_party_subagent_tool
-cargo test -p pi-cli trusted_project_markdown_agents_extend_the_subagent_catalog
-```
-
-For a release gate, also run:
-
-```bash
-cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-git diff --check
+cargo test -p pi-session isolated_session_reuses_identity_across_turns_and_reports_usage_deltas
 ```

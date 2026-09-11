@@ -46,8 +46,8 @@ behavior, and being explicit whenever the Rust product diverges.
   request parameters, headers, credentials, and model metadata.
 - **Authentication**: `/login`, `/logout`, and `pi auth` manage Pi-compatible API-key and OAuth
   credentials without exposing secrets in the TUI.
-- **Production tools**: `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`, `find`, `ls`, and
-  bounded `subagent` delegation through isolated child sessions with Markdown-defined roles.
+- **Production tools**: `read`, `write`, `edit`, `hashline_edit`, `bash`, `grep`, `find`, `ls`, plus
+  dynamic agent-tree collaboration through reusable isolated sessions and Markdown-defined roles.
 - **Image input**: attach images with startup `@file` in TUI, print, or JSON mode; paste local
   clipboard images with `Ctrl+V`. Shared image handling validates, resizes, and converts formats.
 - **Skills and prompt templates**: global and project discovery, `/skill:<name>` commands, Markdown

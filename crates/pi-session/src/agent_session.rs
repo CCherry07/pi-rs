@@ -901,6 +901,7 @@ impl AgentSession {
             .collect::<Vec<_>>();
         Ok(crate::isolated_context::IsolatedContextSeed {
             parent_session_id: document.header.id.clone(),
+            parent_entry_id: Some(fork_point.parent_entry_id.clone()),
             messages: crate::build_session_context(&entries, &self.context_options).messages,
         })
     }
@@ -957,6 +958,16 @@ impl AgentSession {
     /// Returns product-level idleness without cloning the frontend snapshot.
     pub fn is_idle(&self) -> bool {
         !self.runtime.agent().is_running() && !self.events.has_active_operation()
+    }
+
+    /// Returns whether a model turn has installed the durable run record that
+    /// live steer and follow-up messages must target.
+    pub(crate) fn accepts_live_messages(&self) -> bool {
+        self.activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_run
+            .is_some()
     }
 
     /// Returns whether either product message queue contains pending input.
@@ -1535,6 +1546,69 @@ impl AgentSession {
         Ok(run_id)
     }
 
+    fn begin_message_run(
+        &self,
+        generation: u64,
+        messages: &[Message],
+    ) -> Result<String, SessionError> {
+        if messages.is_empty() {
+            return Err(SessionError::InvalidPayload(
+                "structured session prompt must contain at least one message".to_string(),
+            ));
+        }
+        let original_prompt = messages
+            .iter()
+            .cloned()
+            .map(AgentMessage::from)
+            .collect::<Vec<_>>();
+        let initial_messages = original_prompt
+            .iter()
+            .cloned()
+            .map(|message| ProvisionedEntry {
+                id: next_unique_id("entry"),
+                entry: SessionEntry::message(message),
+            })
+            .collect::<Vec<_>>();
+        let run_id = next_unique_id("run");
+        let mut activity = self
+            .activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if activity.active_run.is_some() {
+            return Err(SessionError::Busy);
+        }
+        self.log.append_record(NewLaneRecord {
+            id: run_id.clone(),
+            lane: MAIN_LANE.to_string(),
+            record: LaneRecordEntry::OperationStarted {
+                source_leaf_id: self.log.leaf_id(),
+                intent: OperationIntent::Run {
+                    original_prompt,
+                    initial_messages: initial_messages.clone(),
+                    system_prompt_override: None,
+                    resume_data: None,
+                },
+            },
+        })?;
+        activity.active_run = Some(ActiveSessionRun {
+            id: run_id.clone(),
+            generation,
+            pending: messages
+                .iter()
+                .cloned()
+                .zip(initial_messages)
+                .map(|(message, target)| PendingSessionMessage {
+                    kind: None,
+                    run_id: Some(run_id.clone()),
+                    display_text: message_display_text(&message),
+                    message,
+                    target,
+                })
+                .collect(),
+        });
+        Ok(run_id)
+    }
+
     async fn queue_input(
         &self,
         input: SessionInput,
@@ -1724,11 +1798,26 @@ impl AgentSession {
                     prepared.run().await.map_err(SessionError::from)
                 }
             },
-            messages => self
-                .runtime
-                .prompt_recorded(messages)
-                .await
-                .map_err(SessionError::from),
+            PromptInput::Messages(messages) => {
+                let prepared = self.runtime.prepare_message_submission(messages).await;
+                let run_id = self.begin_message_run(prepared.generation(), prepared.messages())?;
+                let mut result = match prepared.run().await {
+                    Ok(recorded) => self.finish_prompt_locked(recorded).await,
+                    Err(error) => Err(SessionError::from(error)),
+                };
+                if let Err(error) = self.reconcile_in_run_compaction()
+                    && result.is_ok()
+                {
+                    result = Err(error);
+                }
+                let finish_result = self.finish_run(&run_id, &result);
+                self.emit_agent_settled().await;
+                return match (result, finish_result) {
+                    (Ok(outcome), Ok(())) => Ok(outcome),
+                    (Err(error), _) => Err(error),
+                    (Ok(_), Err(error)) => Err(error),
+                };
+            }
         };
         let mut result = match recorded {
             Ok(recorded) => self.finish_prompt_locked(recorded).await,

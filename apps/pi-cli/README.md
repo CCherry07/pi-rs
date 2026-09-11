@@ -387,83 +387,79 @@ creates a non-public Gist, and prints both the viewer and Gist URLs. Set `PI_SHA
 override the default `https://pi.dev/session/` viewer. Review the transcript before sharing because
 tool output can contain source code, local paths, or credentials.
 
-## Delegated child sessions
+## Agent collaboration
 
-The built-in `subagent` tool delegates one task to a fresh isolated Pi session and returns the
-child's final response to the parent. It provides `scout`, `worker`, `reviewer`, `oracle`, and
-`delegate` role prompts. Independent calls emitted in the same assistant turn run through the
-normal parallel tool scheduler. Authorized children receive the same tool and may delegate
-recursively, with feature-owned limits of default depth 1, 64 cumulative children per root session,
-and 20 active children.
-The current implementation is foreground-only: the parent tool call remains open until the child
-finishes or is aborted. The frontend continues to render its original primary session.
+The built-in collaboration feature exposes six tools:
 
-Set the global nesting limit in `<agent-dir>/extensions/subagent/config.json`; the default agent
-directory therefore uses `~/.pi/agent/extensions/subagent/config.json`:
+- `spawn_agent { agent, task, context? }` starts one child asynchronously and returns its exact
+  agent and turn ids.
+- `send_message { target, message }` sends information without starting a turn. Assigned children
+  may use `target: "parent"`.
+- `followup_task { target, task }` reuses the same child session, starting a new turn when idle or
+  joining the current turn's follow-up queue.
+- `wait_agent { targets, mode?, timeoutMs? }` waits for `any` (race) or `all` (barrier).
+  Timeout returns a running snapshot and does not cancel work.
+- `interrupt_agent { target }` cancels only the active turn.
+- `list_agents {}` returns a read-only descendant-tree snapshot.
+
+There is no workflow script, static DAG schema, or compatibility `subagent` tool. The main model
+owns conditions, loops, fanout, races, and replanning. To run independent work concurrently, emit
+multiple `spawn_agent` calls in one assistant response, then wait on their returned exact ids.
+
+An agent id names a reusable child session; a turn id names one prompt inside it. Live trees and
+mailboxes are process-local and generation-bound. Closing or reloading the owner interrupts its
+live descendants; process restart does not reattach them. The desktop can observe a spawned child
+as a nested task, while the TUI continues to render its explicitly held primary session.
+
+The default limits are depth 4, 64 cumulative spawns per root session, and 8 simultaneously active
+agents. Set the global nesting limit in
+`<agent-dir>/extensions/subagent/config.json`:
 
 ```json
 { "maxSubagentDepth": 6 }
 ```
 
-`PI_SUBAGENT_MAX_DEPTH` overrides that value for the current process when it contains a
-non-negative integer. Invalid environment values are ignored. A value of `0` disables subagent
-launches at the primary session. When neither source is set, the default is `1`. The effective limit
-is captured in each child lineage, so a running child keeps its inherited ceiling across reloads.
+`PI_SUBAGENT_MAX_DEPTH` overrides that value when it is a non-negative integer. A value of `0`
+disables spawning from the primary session. The effective ceiling is inherited, and an agent
+profile's `maxSubagentDepth` can only tighten it.
 
-The generation-local subagent catalog overlays the built-ins with recursively discovered Markdown
-agent definitions from `<agent-dir>/agents/` and, when project trust permits it, the nearest
-`.pi/agents/` directory. Project definitions have higher precedence and reload atomically with the
-runtime generation. Each file has a YAML frontmatter block followed by its role system prompt:
+The generation-local catalog overlays the `scout`, `worker`, `reviewer`, `oracle`, and
+`delegate` built-ins with Markdown definitions from `<agent-dir>/agents/` and, when project
+trust permits, the nearest `.pi/agents/` directory:
 
 ```markdown
 ---
 name: project-scout
 description: Inspect this project and return exact code evidence
 aliases: project-explorer
-tools: read, grep, find, ls, bash
-excludeTools: bash
+tools: read, grep, find, ls
 model: inherit
-thinking: off
-systemPromptMode: append
+thinking: low
+systemPromptMode: replace
 inheritSkills: false
-skills: review-checklist
-skillPath: ./private-skills
 timeoutMs: 900000
 allowNestedSubagents: false
 maxSubagentDepth: 2
+defaultContext: fresh
 ---
 
 Inspect the assigned paths and return a concise, evidence-backed result.
 ```
 
-Supported fields are `name`, `description`, `aliases`, `systemPromptMode` (`append` or `replace`),
-`allowNestedSubagents`, `maxSubagentDepth`, `tools`, `excludeTools`, `model`, `thinking`,
-`inheritSkills`, `skills`, `skillPath`, and `timeoutMs`. Custom definitions default to `replace`,
-do not inherit the normal skill catalog, and cannot delegate recursively unless they opt in. An agent-level
-`maxSubagentDepth` is an absolute, non-negative child-lineage ceiling and can only tighten the
-inherited global or parent limit. Omitted runtime fields inherit the immediate parent. `tools` is a
-strict allowlist, while an explicitly empty value selects no tools; it can never exceed the
-parent's active-tool ceiling. `excludeTools` removes exact names after inherited or explicit tool
-selection; unknown names have no effect. Aliases are accepted anywhere an agent name is selected,
-while prompts, events, and results retain the canonical name. Exact canonical names beat aliases,
-and ambiguous alias-to-alias collisions fail candidate generation.
+Supported fields are `name`, `description`, `aliases`, `systemPromptMode`,
+`inheritProjectContext`, `allowNestedSubagents`, `maxSubagentDepth`, `tools`,
+`excludeTools`, `model`, `thinking`, `inheritSkills`, `skills`, `skillPath`,
+`defaultContext`, and `timeoutMs`. Omitted selections inherit from the immediate parent.
+Explicit tools remain below the parent's active-tool ceiling; `memory` is removed from managed
+children. A profile with `allowNestedSubagents: false` never receives `spawn_agent`.
 
-`inheritSkills: true` projects the normal generation-local skill catalog into the child. `skills`
-adds explicitly named skills regardless of inheritance. `skillPath` supplies invocation-private
-skill files or directories, resolved relative to the agent Markdown file; local matches beat the
-normal catalog and never enter the parent catalog. Missing selected skills produce non-fatal
-warnings in the subagent result. A skill-enabled explicit tool selection receives `read`
-automatically only when `read` remains inside the parent's capability ceiling and is not excluded.
+`context` is `fresh` or `fork`. Explicit fork requires a persisted parent branch; an implicit
+profile fork preference falls back to fresh before the first parent response. Worker and oracle
+default to fork. Each `timeoutMs` bounds one turn. Child usage is attributed to the immediate
+parent once per turn, so follow-ups do not recount earlier turns.
 
-`timeoutMs` must be a positive integer. It bounds the foreground child execution wait after launch;
-expiration aborts the isolated session and returns a terminal `timed_out` tool result. `model` accepts `inherit`, an exact
-`provider/model`, or a bare available id that prefers the current provider. `thinking` accepts
-`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `false` for off. Invalid, ambiguous,
-unavailable, or model-incompatible selections fail before the child session is created.
-
-For copy-paste real-model verification of direct delegation, recursive children, parallel calls,
-and primary-session ownership, follow the [subagent smoke test](../../docs/subagents-smoke-test.md).
-
+For copy-paste real-model verification, follow the
+[agent collaboration smoke test](../../docs/subagents-smoke-test.md).
 ## Memory
 
 The default provider follows the memory/self-improvement flow of

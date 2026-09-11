@@ -12,6 +12,15 @@ import {
 } from "./threadItems";
 
 describe("threadItems", () => {
+  it("keeps snapshot provider errors as visible notices rather than assistant text", () => {
+    const item = buildConversationItemFromThreadItem({
+      id: "error-1-0", type: "notice", title: "", detail: "Provider unavailable", status: "failed",
+    });
+    expect(item).toEqual({
+      id: "error-1-0", kind: "tool", toolType: "notice", title: "Provider error", detail: "Provider unavailable", status: "failed",
+    });
+  });
+
   it("truncates long message text in normalizeItem", () => {
     const text = "a".repeat(21000);
     const item: ConversationItem = {

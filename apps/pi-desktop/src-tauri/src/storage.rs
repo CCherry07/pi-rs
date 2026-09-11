@@ -291,10 +291,7 @@ mod tests {
         let persisted_entries: Vec<WorkspaceEntry> =
             serde_json::from_str(&persisted).expect("deserialize persisted workspaces");
         assert_eq!(persisted_entries.len(), 1);
-        assert_eq!(
-            persisted_entries[0].path,
-            r"\\?\I:\projects\sample-project"
-        );
+        assert_eq!(persisted_entries[0].path, r"\\?\I:\projects\sample-project");
     }
 
     #[test]

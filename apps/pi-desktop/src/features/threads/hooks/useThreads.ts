@@ -21,6 +21,8 @@ import { useThreadActions } from "./useThreadActions";
 import { useThreadMessaging } from "./useThreadMessaging";
 import { useThreadSelectors } from "./useThreadSelectors";
 import { useThreadStatus } from "./useThreadStatus";
+import { useThreadConversationLoader } from "./useThreadConversationLoader";
+import type { ThreadConversationsSource } from "../contexts/ThreadConversations";
 import { useWorkspaceDraft } from "./useWorkspaceDraft";
 import { useThreadTitleAutogeneration } from "./useThreadTitleAutogeneration";
 import {
@@ -34,6 +36,8 @@ import {
   saveCustomName,
 } from "@threads/utils/threadStorage";
 import { getParentThreadIdFromThread } from "@threads/utils/threadRpc";
+import { normalizeTokenUsage } from "@threads/utils/threadNormalize";
+import { contextInheritanceFromThread } from "@threads/utils/threadContextInheritance";
 import {
   buildThreadSummaryFromThread,
   extractThreadFromResponse,
@@ -136,6 +140,15 @@ export function useThreads({
   const { markProcessing, setActiveTurnId, getStatusRevision } = useThreadStatus({
     dispatch,
   });
+
+  const { loadThread, invalidateThread: invalidateConversation, getReplacementRevision } = useThreadConversationLoader({ state, dispatch, getStatusRevision });
+  const conversationSource = useMemo<ThreadConversationsSource>(() => ({
+    itemsByThread: state.itemsByThread,
+    contextInheritanceByThread: state.contextInheritanceByThread,
+    threadStatusById: state.threadStatusById,
+    tokenUsageByThread: state.tokenUsageByThread,
+    loadThread,
+  }), [state.itemsByThread, state.contextInheritanceByThread, state.threadStatusById, state.tokenUsageByThread, loadThread]);
 
   const pushThreadErrorMessage = useCallback(
     (threadId: string, message: string) => {
@@ -409,6 +422,7 @@ export function useThreads({
       if (!threadId) {
         return;
       }
+      dispatch({ type: "setThreadContextInheritance", threadId, contextInheritance: contextInheritanceFromThread(thread) });
       const parentThreadId = getParentThreadIdFromThread(thread);
       if (!parentThreadId) {
         return;
@@ -511,6 +525,8 @@ export function useThreads({
       },
       onThreadReplaced: (workspaceId: string, previousThreadId: string, thread: Record<string, unknown>) => {
         const threadId = String(thread.id);
+        invalidateConversation(previousThreadId);
+        if (threadId !== previousThreadId) invalidateConversation(threadId);
         markProcessing(previousThreadId, false);
         setActiveTurnId(previousThreadId, null);
         handleThreadStarted(workspaceId, thread);
@@ -522,10 +538,18 @@ export function useThreads({
         dispatch({
           type: "replaceThread", workspaceId, previousThreadId, threadId,
           items: buildItemsFromThread(thread), commands: commandsFromThread(thread),
+          contextInheritance: contextInheritanceFromThread(thread),
           isProcessing: (status as { type?: string } | undefined)?.type === "active",
           turnId: typeof thread.activeTurnId === "string" ? thread.activeTurnId : null,
           timestamp: Date.now(),
         });
+        const tokenUsage = thread.tokenUsage ?? thread.token_usage;
+        if (tokenUsage && typeof tokenUsage === "object" && !Array.isArray(tokenUsage)) {
+          dispatch({
+            type: "setThreadTokenUsage", threadId,
+            tokenUsage: normalizeTokenUsage(tokenUsage as Record<string, unknown>),
+          });
+        }
         onThreadRunMetadataDetected?.(workspaceId, threadId, {
           modelId: thread.modelProvider && thread.model ? `${thread.modelProvider}/${thread.model}` : null,
           effort: typeof thread.effort === "string" ? thread.effort : null,
@@ -540,6 +564,7 @@ export function useThreads({
       handleThreadStarted,
       handleThreadArchived,
       handleThreadUnarchived,
+      invalidateConversation,
       markProcessing,
       setActiveTurnId,
       onThreadRunMetadataDetected,
@@ -568,6 +593,7 @@ export function useThreads({
     threadListCursorByWorkspace: state.threadListCursorByWorkspace,
     threadStatusById: state.threadStatusById,
     threadSortKey,
+    getReplacementRevision,
     onDebug,
     getCustomName,
     renameThread,
@@ -712,11 +738,12 @@ export function useThreads({
 
   const removeThread = useCallback(
     (workspaceId: string, threadId: string) => {
+      invalidateConversation(threadId);
       unpinThread(workspaceId, threadId);
       dispatch({ type: "removeThread", workspaceId, threadId });
       void archiveThread(workspaceId, threadId);
     },
-    [archiveThread, unpinThread],
+    [archiveThread, invalidateConversation, unpinThread],
   );
 
   return {
@@ -724,6 +751,7 @@ export function useThreads({
     setActiveThreadId,
     hasLocalThreadSnapshot,
     activeItems,
+    conversationSource,
     runtimeCommands: activeThreadId ? state.commandsByThread[activeThreadId] ?? [] : draftCommands,
     threadsByWorkspace: state.threadsByWorkspace,
     threadParentById: state.threadParentById,

@@ -52,7 +52,7 @@ use crate::builtin_providers::BuiltinProviderSet;
 use crate::dynamic_providers::{DynamicProviderCandidate, DynamicProviderOverlay};
 use crate::project_trust::ProjectTrustService;
 
-const BUILTIN_TOOL_NAMES: [&str; 16] = [
+const BUILTIN_TOOL_NAMES: [&str; 17] = [
     "read",
     "grep",
     "find",
@@ -61,11 +61,12 @@ const BUILTIN_TOOL_NAMES: [&str; 16] = [
     "edit",
     "hashline_edit",
     "bash",
-    "subagent",
-    "subagent_workflow",
-    "contact_supervisor",
-    "subagent_supervisor",
-    "bg_wait",
+    "spawn_agent",
+    "send_message",
+    "followup_task",
+    "wait_agent",
+    "interrupt_agent",
+    "list_agents",
     "memory",
     "session_search",
     "schedule",
@@ -1334,7 +1335,7 @@ command = "fixture-command"
     }
 
     #[test]
-    fn product_runtime_registers_the_first_party_subagent_tool() {
+    fn product_runtime_registers_the_agent_collaboration_tools() {
         let directory = tempfile::tempdir().unwrap();
         let config = app_config(directory.path(), None);
         let runtime = build_runtime_with_codex_credentials(
@@ -1347,18 +1348,22 @@ command = "fixture-command"
         )
         .unwrap();
 
-        assert!(runtime.active_tools().iter().any(|tool| tool == "subagent"));
-        assert!(
-            runtime
-                .active_tools()
-                .iter()
-                .any(|tool| tool == "subagent_workflow")
-        );
+        for name in [
+            "spawn_agent",
+            "send_message",
+            "followup_task",
+            "wait_agent",
+            "interrupt_agent",
+            "list_agents",
+        ] {
+            assert!(runtime.active_tools().iter().any(|tool| tool == name));
+        }
+        assert!(!runtime.active_tools().iter().any(|tool| tool == "subagent"));
         let spec = runtime
             .tool_specs()
             .into_iter()
-            .find(|spec| spec.name == "subagent")
-            .expect("subagent tool should be registered");
+            .find(|spec| spec.name == "spawn_agent")
+            .expect("spawn_agent should be registered");
         assert_eq!(
             spec.parameters["properties"]["agent"]["enum"],
             serde_json::json!([
@@ -1374,6 +1379,8 @@ command = "fixture-command"
                 "delegate"
             ])
         );
+        assert!(spec.parameters.get("oneOf").is_none());
+        assert!(spec.parameters["properties"].get("stages").is_none());
     }
 
     #[tokio::test]
@@ -1502,7 +1509,7 @@ command = "fixture-command"
         let trusted_spec = trusted
             .tool_specs()
             .into_iter()
-            .find(|spec| spec.name == "subagent")
+            .find(|spec| spec.name == "spawn_agent")
             .unwrap();
         assert!(
             trusted_spec.parameters["properties"]["agent"]["enum"]
@@ -1515,7 +1522,7 @@ command = "fixture-command"
         let untrusted_spec = untrusted
             .tool_specs()
             .into_iter()
-            .find(|spec| spec.name == "subagent")
+            .find(|spec| spec.name == "spawn_agent")
             .unwrap();
         assert!(
             !untrusted_spec.parameters["properties"]["agent"]["enum"]
