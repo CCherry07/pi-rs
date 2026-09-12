@@ -13,20 +13,11 @@ use super::session_store::{content_text, LiveSession, SessionStore};
 
 pub(crate) type ForwarderRegistry = Arc<Mutex<HashSet<String>>>;
 
-#[derive(Clone)]
-struct SubagentProjection {
-    child_thread_id: String,
-    agent: String,
-    total_tokens: Option<u64>,
-}
-
 struct EventProjectionContext<'a> {
     app: &'a AppHandle,
     workspace_id: &'a str,
     thread_id: &'a str,
     live: &'a LiveSession,
-    store: &'a SessionStore,
-    forwarders: &'a ForwarderRegistry,
 }
 
 #[derive(Default)]
@@ -35,7 +26,6 @@ struct ProjectionState {
     messages: MessageProjection,
     tool_names: HashMap<String, String>,
     tool_args: HashMap<String, Value>,
-    subagents: HashMap<String, SubagentProjection>,
     compaction_id: Option<String>,
 }
 
@@ -287,10 +277,8 @@ async fn forward_session_events(
                 state = ProjectionState::from_snapshot(&live.presentation_snapshot(), &thread_id);
                 emit(&app, &workspace_id, "thread/replaced", json!({
                     "previousThreadId": previous_id,
-                    "thread": recover_snapshot_children(
-                        &app, &workspace_id, &thread_id, &live, &store, &forwarders,
-                        super::thread_from_subscription(&live),
-                    ).await,
+                    "generationChanged": true,
+                    "thread": super::thread_from_subscription(&live),
                 }));
                 continue;
             }
@@ -312,23 +300,14 @@ async fn forward_session_events(
                         workspace_id: &workspace_id,
                         thread_id: &thread_id,
                         live: &live,
-                        store: &store,
-                        forwarders: &forwarders,
                     },
                     &mut state,
                     event,
                 )
                 .await;
                 if should_refresh {
-                    if let Some(thread) = refresh_thread_snapshot(
-                        &app,
-                        &workspace_id,
-                        &mut live,
-                        &store,
-                        &forwarders,
-                        &thread_id,
-                    )
-                    .await
+                    if let Some(thread) =
+                        refresh_thread_snapshot(&mut live, &store, &thread_id).await
                     {
                         state = ProjectionState::from_snapshot(
                             &live.presentation_snapshot(),
@@ -346,16 +325,7 @@ async fn forward_session_events(
                 }
             }
             Err(broadcast::error::RecvError::Lagged(_)) => {
-                if let Some(thread) = refresh_thread_snapshot(
-                    &app,
-                    &workspace_id,
-                    &mut live,
-                    &store,
-                    &forwarders,
-                    &thread_id,
-                )
-                .await
-                {
+                if let Some(thread) = refresh_thread_snapshot(&mut live, &store, &thread_id).await {
                     state =
                         ProjectionState::from_snapshot(&live.presentation_snapshot(), &thread_id);
                     emit(
@@ -384,8 +354,6 @@ async fn project_event(
         workspace_id,
         thread_id,
         live,
-        store,
-        forwarders,
     } = context;
     match event.event {
         AgentSessionEvent::Agent(agent_event) => match *agent_event {
@@ -435,18 +403,14 @@ async fn project_event(
                 let item_id = tool_call_id.to_string();
                 state.tool_names.insert(item_id.clone(), tool_name.clone());
                 state.tool_args.insert(item_id.clone(), args.clone());
-                let item = if tool_name == "spawn_agent" {
-                    subagent_tool_item(&item_id, thread_id, &args, "inProgress", None, None)
-                } else {
-                    tool_item(
-                        &item_id,
-                        &tool_name,
-                        args,
-                        "inProgress",
-                        None,
-                        live.cwd().to_string_lossy().as_ref(),
-                    )
-                };
+                let item = tool_item(
+                    &item_id,
+                    &tool_name,
+                    args,
+                    "inProgress",
+                    None,
+                    live.cwd().to_string_lossy().as_ref(),
+                );
                 emit(
                     app,
                     workspace_id,
@@ -465,53 +429,21 @@ async fn project_event(
                 ..
             } => {
                 let item_id = tool_call_id.to_string();
-                if tool_name == "spawn_agent" {
-                    if let Some(projected) = project_subagent(
-                        app,
-                        workspace_id,
-                        thread_id,
-                        store,
-                        forwarders,
-                        &partial_result,
-                    )
-                    .await
-                    {
-                        state.subagents.insert(item_id.clone(), projected.clone());
-                        let args = state.tool_args.get(&item_id).cloned().unwrap_or_default();
-                        emit(
-                            app,
-                            workspace_id,
-                            "item/started",
-                            json!({
-                                "threadId": thread_id,
-                                "turnId": state.turn_id,
-                                "item": subagent_tool_item(
-                                    &item_id,
-                                    thread_id,
-                                    &args,
-                                    "inProgress",
-                                    Some(&projected),
-                                    Some(tool_result_text(&partial_result)),
-                                )
-                            }),
-                        );
-                    }
-                } else if tool_name == "bash" {
-                    let delta = tool_result_text(&partial_result);
-                    if !delta.is_empty() {
-                        emit(
-                            app,
-                            workspace_id,
-                            "item/commandExecution/outputDelta",
-                            json!({
-                                "threadId": thread_id,
-                                "turnId": state.turn_id,
-                                "itemId": tool_call_id.to_string(),
-                                "delta": delta
-                            }),
-                        );
-                    }
-                }
+                let args = state.tool_args.get(&item_id).cloned().unwrap_or_default();
+                let item = tool_result_item(
+                    &item_id,
+                    &tool_name,
+                    args,
+                    "inProgress",
+                    &partial_result,
+                    live.cwd().to_string_lossy().as_ref(),
+                );
+                emit(
+                    app,
+                    workspace_id,
+                    "item/started",
+                    json!({ "threadId": thread_id, "turnId": state.turn_id, "item": item }),
+                );
             }
             AgentEvent::ToolExecutionEnd {
                 tool_call_id,
@@ -520,36 +452,15 @@ async fn project_event(
                 is_error,
             } => {
                 let item_id = tool_call_id.to_string();
-                let output = tool_result_text(&result);
                 let args = state.tool_args.remove(&item_id).unwrap_or_default();
-                if tool_name == "spawn_agent" {
-                    let projected =
-                        project_subagent(app, workspace_id, thread_id, store, forwarders, &result)
-                            .await
-                            .or_else(|| state.subagents.get(&item_id).cloned());
-                    if let Some(projected) = projected {
-                        state.subagents.insert(item_id.clone(), projected);
-                    }
-                }
-                let item = if tool_name == "spawn_agent" {
-                    subagent_tool_item(
-                        &item_id,
-                        thread_id,
-                        &args,
-                        if is_error { "failed" } else { "completed" },
-                        state.subagents.get(&item_id),
-                        Some(output),
-                    )
-                } else {
-                    tool_item(
-                        &item_id,
-                        &tool_name,
-                        args,
-                        if is_error { "failed" } else { "completed" },
-                        Some(output),
-                        live.cwd().to_string_lossy().as_ref(),
-                    )
-                };
+                let item = tool_result_item(
+                    &item_id,
+                    &tool_name,
+                    args,
+                    if is_error { "failed" } else { "completed" },
+                    &result,
+                    live.cwd().to_string_lossy().as_ref(),
+                );
                 emit(
                     app,
                     workspace_id,
@@ -561,7 +472,6 @@ async fn project_event(
                     }),
                 );
                 state.tool_names.remove(&item_id);
-                state.subagents.remove(&item_id);
             }
             AgentEvent::AgentEnd { .. } | AgentEvent::TurnStart | AgentEvent::TurnEnd { .. } => {}
         },
@@ -610,6 +520,17 @@ async fn project_event(
             }),
         ),
         AgentSessionEvent::EntryAppended { entry } => {
+            if let Some((key, value)) = super::desktop_views::widget_update(&entry) {
+                emit(
+                    app,
+                    workspace_id,
+                    "thread/widgetUpdated",
+                    json!({
+                        "threadId": thread_id, "key": key, "value": value,
+                        "version": entry.seq,
+                    }),
+                );
+            }
             for item in state.messages.entry(&entry) {
                 emit(
                     app,
@@ -690,126 +611,6 @@ async fn project_event(
     }
 }
 
-async fn project_subagent(
-    app: &AppHandle,
-    workspace_id: &str,
-    parent_thread_id: &str,
-    store: &SessionStore,
-    forwarders: &ForwarderRegistry,
-    result: &ToolResult,
-) -> Option<SubagentProjection> {
-    let details = result.details.as_ref()?.as_object()?;
-    let isolated_session_id = details.get("isolatedSessionId")?.as_str()?;
-    let agent = details
-        .get("agent")
-        .and_then(Value::as_str)
-        .unwrap_or("agent")
-        .to_string();
-    let total_tokens = details
-        .get("usage")
-        .and_then(|usage| usage.get("totalTokens"))
-        .and_then(Value::as_u64);
-    project_isolated_subagent(
-        app,
-        workspace_id,
-        parent_thread_id,
-        store,
-        forwarders,
-        isolated_session_id,
-        &agent,
-        None,
-        total_tokens,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn project_isolated_subagent(
-    app: &AppHandle,
-    workspace_id: &str,
-    parent_thread_id: &str,
-    store: &SessionStore,
-    forwarders: &ForwarderRegistry,
-    isolated_session_id: &str,
-    agent: &str,
-    nickname: Option<&str>,
-    total_tokens: Option<u64>,
-) -> Option<SubagentProjection> {
-    let (observation, live) = store
-        .subscribe_isolated(parent_thread_id, isolated_session_id, agent, nickname)
-        .ok()?;
-    let child_thread_id = observation.session_id();
-    let projected = SubagentProjection {
-        child_thread_id: child_thread_id.clone(),
-        agent: agent.to_string(),
-        total_tokens,
-    };
-    let should_start = forwarders.lock().await.insert(child_thread_id.clone());
-    if should_start {
-        let is_running = observation.snapshot().agent.is_running;
-        let thread =
-            super::thread_from_observation(&observation, parent_thread_id, agent, nickname);
-        emit(
-            app,
-            workspace_id,
-            "thread/started",
-            json!({ "thread": thread }),
-        );
-        emit_status(
-            app,
-            workspace_id,
-            &child_thread_id,
-            if is_running { "active" } else { "idle" },
-        );
-        spawn_session_forwarder(
-            app.clone(),
-            workspace_id.to_string(),
-            child_thread_id.clone(),
-            child_thread_id,
-            live,
-            store.clone(),
-            Arc::clone(forwarders),
-        );
-    }
-    Some(projected)
-}
-
-fn subagent_tool_item(
-    id: &str,
-    parent_thread_id: &str,
-    arguments: &Value,
-    status: &str,
-    projection: Option<&SubagentProjection>,
-    output: Option<String>,
-) -> Value {
-    let agent = projection
-        .map(|projection| projection.agent.as_str())
-        .or_else(|| arguments.get("agent").and_then(Value::as_str))
-        .unwrap_or("agent");
-    let prompt = arguments
-        .get("task")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let child_thread_id = projection.map(|projection| projection.child_thread_id.as_str());
-    json!({
-        "id": id,
-        "type": "collabToolCall",
-        "tool": "spawn",
-        "senderThreadId": parent_thread_id,
-        "newThreadId": child_thread_id,
-        "newAgentRole": agent,
-        "prompt": prompt,
-        "status": status,
-        "result": output.unwrap_or_default(),
-        "agentStatuses": child_thread_id.map(|thread_id| vec![json!({
-            "threadId": thread_id,
-            "agentRole": agent,
-            "status": status,
-            "totalTokens": projection.and_then(|projection| projection.total_tokens),
-        })]).unwrap_or_default(),
-    })
-}
-
 fn tool_item(
     id: &str,
     name: &str,
@@ -826,6 +627,8 @@ fn tool_item(
         json!({
             "id": id,
             "type": "commandExecution",
+            "toolName": name,
+            "arguments": arguments,
             "command": command,
             "cwd": cwd,
             "status": status,
@@ -835,6 +638,7 @@ fn tool_item(
         json!({
             "id": id,
             "type": "mcpToolCall",
+            "toolName": name,
             "server": "pi",
             "tool": name,
             "arguments": arguments,
@@ -842,6 +646,26 @@ fn tool_item(
             "result": output.unwrap_or_default()
         })
     }
+}
+
+fn tool_result_item(
+    id: &str,
+    name: &str,
+    arguments: Value,
+    status: &str,
+    result: &ToolResult,
+    cwd: &str,
+) -> Value {
+    let mut item = tool_item(
+        id,
+        name,
+        arguments,
+        status,
+        Some(tool_result_text(result)),
+        cwd,
+    );
+    item["details"] = json!(result.details);
+    item
 }
 
 fn tool_result_text(result: &ToolResult) -> String {
@@ -853,15 +677,12 @@ fn notice_params(thread_id: &str, message: &str, level: pi_core::NoticeLevel) ->
 }
 
 async fn refresh_thread_snapshot(
-    app: &AppHandle,
-    workspace_id: &str,
     live: &mut LiveSession,
     store: &SessionStore,
-    forwarders: &ForwarderRegistry,
     thread_id: &str,
 ) -> Option<Value> {
     live.refresh_subscription();
-    let thread = if live.primary().is_some() {
+    Some(if live.primary().is_some() {
         super::thread_from_subscription(live)
     } else {
         let observed = store.observed_isolated(thread_id)?;
@@ -872,88 +693,7 @@ async fn refresh_thread_snapshot(
             &observed.agent,
             observed.nickname.as_deref(),
         )
-    };
-    Some(
-        recover_snapshot_children(
-            app,
-            workspace_id,
-            thread_id,
-            live,
-            store,
-            forwarders,
-            thread,
-        )
-        .await,
-    )
-}
-
-// Resubscribing may skip queued ToolExecutionEnd events. Reinstall observation
-// from their durable result metadata only; never replay the tools themselves.
-async fn recover_snapshot_children(
-    app: &AppHandle,
-    workspace_id: &str,
-    thread_id: &str,
-    live: &LiveSession,
-    store: &SessionStore,
-    forwarders: &ForwarderRegistry,
-    mut thread: Value,
-) -> Value {
-    let mut children = HashMap::new();
-    for message in &live.presentation_snapshot().agent.messages {
-        let Message::ToolResult(result) = message else {
-            continue;
-        };
-        if result.tool_name != "spawn_agent" {
-            continue;
-        }
-        let result_value = ToolResult {
-            content: result.content.clone(),
-            details: result.details.clone(),
-            usage: result.usage.clone(),
-            added_tool_names: result.added_tool_names.clone(),
-            is_error: result.is_error,
-            terminate: false,
-        };
-        if let Some(child) = project_subagent(
-            app,
-            workspace_id,
-            thread_id,
-            store,
-            forwarders,
-            &result_value,
-        )
-        .await
-        {
-            children.insert(result.tool_call_id.to_string(), child);
-        }
-    }
-    restore_snapshot_child_links(&mut thread, &children);
-    thread
-}
-
-fn restore_snapshot_child_links(
-    thread: &mut Value,
-    children: &HashMap<String, SubagentProjection>,
-) {
-    let Some(turns) = thread["turns"].as_array_mut() else {
-        return;
-    };
-    for turn in turns {
-        let Some(items) = turn["items"].as_array_mut() else {
-            continue;
-        };
-        for item in items {
-            let Some(child) = item["id"].as_str().and_then(|id| children.get(id)) else {
-                continue;
-            };
-            item["newThreadId"] = json!(child.child_thread_id);
-            item["newAgentRole"] = json!(child.agent);
-            item["agentStatuses"] = json!([{
-                "threadId": child.child_thread_id, "agentRole": child.agent,
-                "status": item["status"], "totalTokens": child.total_tokens,
-            }]);
-        }
-    }
+    })
 }
 
 fn emit_status(app: &AppHandle, workspace_id: &str, thread_id: &str, status: &str) {
@@ -1621,20 +1361,20 @@ mod tests {
     }
 
     #[test]
-    fn refreshed_spawn_snapshot_restores_child_reference_without_replaying_a_tool() {
+    fn refreshed_tool_snapshot_preserves_plugin_details_without_decoding_business_fields() {
+        let details =
+            json!({ "session": { "opaque": "control", "saved": null }, "pluginStatus": "queued" });
         let result = Message::tool_result(pi_core::ToolResultMessage {
-            tool_call_id: pi_core::ToolCallId::new("spawn-call"),
-            tool_name: "spawn_agent".into(),
+            tool_call_id: pi_core::ToolCallId::new("plugin-call"),
+            tool_name: "custom_task".into(),
             content: vec![block_text("started")],
-            details: Some(json!({
-                "isolatedSessionId": "isolated-control", "sessionId": null, "agent": "worker",
-            })),
+            details: Some(details.clone()),
             usage: None,
             added_tool_names: None,
             is_error: false,
             timestamp_ms: 1,
         });
-        let mut thread = super::super::thread_from_snapshot(
+        let thread = super::super::thread_from_snapshot(
             &snapshot(vec![result]),
             "parent",
             std::path::Path::new("/project"),
@@ -1643,23 +1383,12 @@ mod tests {
             None,
             Default::default(),
         );
-        assert!(thread["turns"][0]["items"][0]["newThreadId"].is_null());
-        restore_snapshot_child_links(
-            &mut thread,
-            &HashMap::from([(
-                "spawn-call".into(),
-                SubagentProjection {
-                    child_thread_id: "child-session".into(),
-                    agent: "worker".into(),
-                    total_tokens: Some(23),
-                },
-            )]),
-        );
         let item = &thread["turns"][0]["items"][0];
-        assert_eq!(item["newThreadId"], "child-session");
-        assert_eq!(item["agentStatuses"][0]["threadId"], "child-session");
-        assert_eq!(item["agentStatuses"][0]["totalTokens"], 23);
+        assert_eq!(item["type"], "mcpToolCall");
+        assert_eq!(item["toolName"], "custom_task");
+        assert_eq!(item["details"], details);
         assert_eq!(item["result"], "started");
+        assert!(item.get("newThreadId").is_none());
     }
 
     #[tokio::test]
@@ -1833,26 +1562,51 @@ mod tests {
     }
 
     #[test]
-    fn subagent_tool_items_expose_child_identity_and_live_status() {
-        let projection = SubagentProjection {
-            child_thread_id: "child-session".to_string(),
-            agent: "reviewer".to_string(),
-            total_tokens: Some(12_400),
-        };
-        let item = subagent_tool_item(
-            "call-1",
-            "parent-session",
-            &json!({"agent": "reviewer", "task": "Review the parser"}),
-            "inProgress",
-            Some(&projection),
-            None,
-        );
+    fn partial_and_final_results_preserve_plugin_data_including_errors() {
+        for name in ["custom_task", "bash"] {
+            for status in ["inProgress", "completed", "failed"] {
+                let mut result = ToolResult::text("latest cumulative output");
+                result.details = Some(json!({ "custom": [1, "state"], "reference": null }));
+                let item = tool_result_item(
+                    "call",
+                    name,
+                    json!({ "command": "pwd" }),
+                    status,
+                    &result,
+                    "/project",
+                );
+                assert_eq!(item["details"], result.details.unwrap());
+                assert_eq!(item["toolName"], name);
+                assert_eq!(item["arguments"], json!({ "command": "pwd" }));
+                assert_eq!(item["status"], status);
+                assert_eq!(
+                    item[if name == "bash" {
+                        "aggregatedOutput"
+                    } else {
+                        "result"
+                    }],
+                    "latest cumulative output"
+                );
+            }
+        }
+    }
 
-        assert_eq!(item["type"], "collabToolCall");
-        assert_eq!(item["senderThreadId"], "parent-session");
-        assert_eq!(item["newThreadId"], "child-session");
-        assert_eq!(item["prompt"], "Review the parser");
-        assert_eq!(item["agentStatuses"][0]["status"], "inProgress");
-        assert_eq!(item["agentStatuses"][0]["totalTokens"], 12_400);
+    #[test]
+    fn all_tool_presentations_preserve_canonical_identity_and_arguments() {
+        for name in ["bash", "custom_task", "spawn_agent"] {
+            let arguments = json!({ "command": "pwd", "data": { "value": 2 } });
+            let item = tool_item(
+                "call-1",
+                name,
+                arguments.clone(),
+                "inProgress",
+                None,
+                "/project",
+            );
+            assert_eq!(item["toolName"], name);
+            assert_eq!(item["arguments"], arguments);
+            assert_eq!(item["status"], "inProgress");
+            assert!(item.get("newThreadId").is_none());
+        }
     }
 }

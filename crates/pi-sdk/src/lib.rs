@@ -2,6 +2,7 @@
 
 mod builtin_providers;
 mod credentials;
+pub mod desktop_extensions;
 mod dynamic_providers;
 mod host;
 pub mod mcp;

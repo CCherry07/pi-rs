@@ -102,4 +102,41 @@ describe("events subscriptions", () => {
 
     cleanup();
   });
+
+  it("notifies every active subscriber only after the shared native listener is ready", async () => {
+    let resolveListener!: (handler: UnlistenFn) => void;
+    const unlisten = vi.fn();
+    vi.mocked(listen).mockImplementationOnce(() => new Promise<UnlistenFn>((resolve) => { resolveListener = resolve; }));
+    const removedReady = vi.fn();
+    const firstReady = vi.fn();
+    const secondReady = vi.fn();
+    const removed = subscribePiEvents(() => {}, { onReady: removedReady });
+    const first = subscribePiEvents(() => {}, { onReady: firstReady });
+    const second = subscribePiEvents(() => {}, { onReady: secondReady });
+    expect(listen).toHaveBeenCalledOnce();
+    expect(firstReady).not.toHaveBeenCalled();
+    expect(secondReady).not.toHaveBeenCalled();
+    removed();
+    resolveListener(unlisten);
+    await Promise.resolve();
+    expect(removedReady).not.toHaveBeenCalled();
+    expect(firstReady).toHaveBeenCalledOnce();
+    expect(secondReady).toHaveBeenCalledOnce();
+    const alreadyReady = vi.fn();
+    const third = subscribePiEvents(() => {}, { onReady: alreadyReady });
+    expect(alreadyReady).toHaveBeenCalledOnce();
+    expect(listen).toHaveBeenCalledOnce();
+    first(); second(); third();
+    expect(unlisten).toHaveBeenCalledOnce();
+  });
+
+  it("does not report readiness for a failed listener", async () => {
+    vi.mocked(listen).mockRejectedValueOnce(new Error("listener unavailable"));
+    const onReady = vi.fn();
+    const cleanup = subscribePiEvents(() => {}, { onReady });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onReady).not.toHaveBeenCalled();
+    cleanup();
+  });
 });

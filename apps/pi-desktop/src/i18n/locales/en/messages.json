@@ -110,18 +110,14 @@
     "completed": "completed",
     "failed": "failed"
   },
-  "subagents": {
-    "chat": "{{agent}} chat panel",
-    "conversation": "{{agent}} conversation",
-    "expandDetails": "Expand child-agent chat",
-    "collapseDetails": "Collapse child-agent chat",
-    "waiting": "Waiting for the child conversation…",
-    "unavailable": "Child conversation is unavailable.",
-    "empty": "No child-agent messages yet.",
-    "idle": "idle",
-    "loadFailed": "Could not load child conversation.",
-    "retry": "Retry",
-    "tokens": "{{tokens}} tokens",
+  "sessionView": {
+    "waiting": "Loading conversation…",
+    "unavailable": "Conversation is unavailable.",
+    "loadFailed": "Could not load conversation.",
+    "retry": "Retry"
+  },
+  "relatedSession": {
+    "empty": "No messages in this related session yet.",
     "contextOrigin": "Context origin",
     "forkContext": "Inherited the parent context at creation",
     "freshContext": "Task-only context; no parent history inherited",

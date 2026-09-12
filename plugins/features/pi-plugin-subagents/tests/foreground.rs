@@ -194,6 +194,132 @@ async fn root(
     (manager, root)
 }
 
+fn desktop_widget(root: &pi_session::PiSession) -> Value {
+    root.current()
+        .log()
+        .load()
+        .unwrap()
+        .entries
+        .iter()
+        .rev()
+        .find_map(|entry| {
+            let value = serde_json::to_value(entry).unwrap();
+            (value["customType"] == "pi.ui.widget" && value["data"]["key"] == "subagents.tasks")
+                .then(|| value["data"]["value"].clone())
+        })
+        .expect("subagent widget snapshot")
+}
+
+#[tokio::test]
+async fn desktop_commands_publish_final_state_without_reusing_tool_call_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let (manager, root) = root(
+        TestFactory::new([
+            ScriptedTurn::WaitForAbort,
+            ScriptedTurn::Text("follow-up result".into()),
+        ]),
+        &directory,
+    )
+    .await;
+    let spawn = invoke(
+        &root,
+        "spawn_agent",
+        json!({"agent":"reviewer","task":"review task"}),
+    )
+    .await;
+    let id = spawn.details.as_ref().unwrap()["agentId"].as_str().unwrap();
+    let started = desktop_widget(&root);
+    assert_eq!(started["agents"][id]["state"], "running");
+    assert_eq!(started["agents"][id]["task"], "review task");
+    assert_eq!(
+        started["agents"][id]["session"]["sessionId"],
+        spawn.details.as_ref().unwrap()["sessionId"]
+    );
+    assert_eq!(started["liveAgentIds"], json!([id]));
+
+    let stopped = root
+        .current()
+        .submit(pi_session::SessionInput::new(format!(
+            "/subagents:interrupt {}",
+            json!({"target":id}),
+        )))
+        .await
+        .unwrap();
+    assert!(matches!(stopped, pi_session::SubmitOutcome::Handled));
+    invoke(
+        &root,
+        "wait_agent",
+        json!({"targets":[id],"timeoutMs":2000}),
+    )
+    .await;
+    assert_eq!(desktop_widget(&root)["agents"][id]["state"], "interrupted");
+
+    root.current()
+        .submit(pi_session::SessionInput::new(format!(
+            "/subagents:followup {}",
+            json!({"target":id,"task":"continue"}),
+        )))
+        .await
+        .unwrap();
+    invoke(
+        &root,
+        "wait_agent",
+        json!({"targets":[id],"timeoutMs":2000}),
+    )
+    .await;
+    let completed = desktop_widget(&root);
+    assert_eq!(completed["agents"][id]["state"], "idle");
+    assert_eq!(completed["liveAgentIds"], json!([id]));
+    assert!(
+        completed["agents"][id].get("lastResult").is_none(),
+        "widgets never duplicate child transcripts"
+    );
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn desktop_commands_reject_foreign_agents_and_native_reload_clears_live_ownership() {
+    let directory = tempfile::tempdir().unwrap();
+    let (manager, root) = root(TestFactory::new([ScriptedTurn::WaitForAbort]), &directory).await;
+    let spawn = invoke(
+        &root,
+        "spawn_agent",
+        json!({"agent":"reviewer","task":"wait"}),
+    )
+    .await;
+    let id = spawn.details.as_ref().unwrap()["agentId"].as_str().unwrap();
+    let other = manager
+        .create_session(directory.path(), directory.path().join("other.jsonl"))
+        .await
+        .unwrap();
+    let error = other
+        .current()
+        .submit(pi_session::SessionInput::new(format!(
+            "/subagents:interrupt {}",
+            json!({"target":id}),
+        )))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not a direct child"));
+    root.reload().await.unwrap();
+    let restored = desktop_widget(&root);
+    assert!(
+        restored["agents"].get(id).is_some(),
+        "historical display data survives"
+    );
+    assert_eq!(restored["liveAgentIds"], json!([]));
+    let error = root
+        .current()
+        .submit(pi_session::SessionInput::new(format!(
+            "/subagents:followup {}",
+            json!({"target":id,"task":"continue"}),
+        )))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("unknown agent"));
+    manager.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn spawn_wait_message_and_followup_reuse_one_agent_session() {
     let directory = tempfile::tempdir().unwrap();

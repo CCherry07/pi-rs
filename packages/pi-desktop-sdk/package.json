@@ -1,0 +1,14 @@
+{
+  "name": "@pi-rs/desktop-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs"
+    }
+  },
+  "peerDependencies": {
+    "react": "^19.2.0"
+  }
+}

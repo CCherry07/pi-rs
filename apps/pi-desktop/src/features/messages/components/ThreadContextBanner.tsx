@@ -22,16 +22,16 @@ export function ThreadContextBanner({
   const { origin, inheritedItems } = inheritance;
   const isFork = origin.mode === "fork";
   return (
-    <section className="thread-context-banner" aria-label={t("subagents.contextOrigin")}>
+    <section className="thread-context-banner" aria-label={t("relatedSession.contextOrigin")}>
       <div className="thread-context-heading">
         <span className="thread-context-mode">{origin.mode}</span>
-        <span>{t(isFork ? "subagents.forkContext" : "subagents.freshContext")}</span>
+        <span>{t(isFork ? "relatedSession.forkContext" : "relatedSession.freshContext")}</span>
       </div>
       <div className="thread-context-source">
-        {t("subagents.parentSession")} <code>{origin.parentThreadId}</code>
-        {origin.parentEntryId && <span title={origin.parentEntryId}> · {t("subagents.forkPoint")} <code>{origin.parentEntryId}</code></span>}
+        {t("relatedSession.parentSession")} <code>{origin.parentThreadId}</code>
+        {origin.parentEntryId && <span title={origin.parentEntryId}> · {t("relatedSession.forkPoint")} <code>{origin.parentEntryId}</code></span>}
       </div>
-      <p className="thread-context-hint">{t("subagents.explicitSyncOnly")}</p>
+      <p className="thread-context-hint">{t("relatedSession.explicitSyncOnly")}</p>
       {isFork && (
         <>
           <button
@@ -42,14 +42,14 @@ export function ThreadContextBanner({
             aria-controls={bodyId}
           >
             <ChevronDown size={14} aria-hidden />
-            {t(isExpanded ? "subagents.hideInheritedContext" : "subagents.viewInheritedContext")}
+            {t(isExpanded ? "relatedSession.hideInheritedContext" : "relatedSession.viewInheritedContext")}
           </button>
           <div id={bodyId} hidden={!isExpanded}>
             {isExpanded && (
-              <section className="thread-context-snapshot" aria-label={t("subagents.inheritedSnapshot")}>
-                <p className="thread-context-hint">{t("subagents.snapshotReadOnly")}</p>
+              <section className="thread-context-snapshot" aria-label={t("relatedSession.inheritedSnapshot")}>
+                <p className="thread-context-hint">{t("relatedSession.snapshotReadOnly")}</p>
                 {inheritedItems === null
-                  ? <div className="subagent-chat-notice" role="status">{t("subagents.snapshotUnavailable")}</div>
+                  ? <div className="thread-context-hint" role="status">{t("relatedSession.snapshotUnavailable")}</div>
                   : renderSnapshot(inheritedItems)}
               </section>
             )}

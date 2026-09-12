@@ -31,6 +31,8 @@ describe("threadItems", () => {
       detail: "**Plugin note**\n\n    indented code\n",
       images: ["data:image/png;base64,aGVsbG8="],
       status: "completed",
+      toolName: undefined,
+      data: custom,
     };
     expect(buildConversationItem(custom)).toEqual(expected);
     expect(buildConversationItemFromThreadItem(custom)).toEqual(expected);
@@ -48,12 +50,35 @@ describe("threadItems", () => {
   });
 
   it("keeps snapshot provider errors as visible notices rather than assistant text", () => {
-    const item = buildConversationItemFromThreadItem({
+    const original = {
       id: "error-1-0", type: "notice", title: "", detail: "Provider unavailable", status: "failed",
-    });
+    };
+    const item = buildConversationItemFromThreadItem(original);
     expect(item).toEqual({
       id: "error-1-0", kind: "tool", toolType: "notice", title: "Provider error", detail: "Provider unavailable", status: "failed",
+      toolName: undefined, data: original,
     });
+  });
+
+  it("preserves opaque plugin arguments and partial/final details through live and history conversion", () => {
+    const call = {
+      id: "check-call", type: "mcpToolCall", toolName: "example_check", server: "pi", tool: "example_check",
+      arguments: { paths: ["src/parser.rs"], mode: "strict" },
+      details: { pluginVersion: 2, progress: { checked: 1, total: 3 } },
+      status: "inProgress", result: { content: [{ type: "text", text: "Checking parser" }] },
+    };
+    const partial = buildConversationItem(call);
+    expect(partial?.kind).toBe("tool");
+    if (partial?.kind !== "tool") throw new Error("Expected tool projection");
+    expect(partial.toolName).toBe("example_check");
+    expect(partial.data).toEqual(call);
+    const final = { ...call, status: "completed", details: { pluginVersion: 2, progress: { checked: 3, total: 3 } } };
+    const saved = buildConversationItemFromThreadItem(final);
+    expect(saved).toEqual(buildConversationItem(final));
+    if (saved?.kind !== "tool") throw new Error("Expected saved tool projection");
+    expect(saved.toolName).toBe("example_check");
+    expect(saved.data).toEqual(final);
+    expect(partial.data?.details).toEqual({ pluginVersion: 2, progress: { checked: 1, total: 3 } });
   });
 
   it("truncates long message text in normalizeItem", () => {

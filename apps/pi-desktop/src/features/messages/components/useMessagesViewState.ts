@@ -29,6 +29,7 @@ function toMarkdownQuote(text: string): string {
 }
 
 type UseMessagesViewStateArgs = {
+  standaloneItem?: (item: ConversationItem) => boolean;
   items: ConversationItem[];
   threadId: string | null;
   isThinking: boolean;
@@ -40,6 +41,7 @@ type UseMessagesViewStateArgs = {
 };
 
 export function useMessagesViewState({
+  standaloneItem,
   items,
   threadId,
   isThinking,
@@ -245,7 +247,7 @@ export function useMessagesViewState({
     }
   }, [visibleItems]);
 
-  const groupedItems = useMemo(() => buildToolGroups(visibleItems), [visibleItems]);
+  const groupedItems = useMemo(() => buildToolGroups(visibleItems, standaloneItem), [visibleItems, standaloneItem]);
 
   const planFollowup = useMemo(() => {
     if (!onPlanAccept || !onPlanSubmitChanges) {

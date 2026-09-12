@@ -61,6 +61,7 @@ export default defineConfig(async () => ({
   plugins: [react()],
   resolve: {
     alias: {
+      '@pi-rs/desktop-sdk': fileURLToPath(new URL('../../packages/pi-desktop-sdk/index.mjs', import.meta.url)),
       '@': fileURLToPath(new URL('./src', import.meta.url)),
       '@app': fileURLToPath(new URL('./src/features/app', import.meta.url)),
       '@settings': fileURLToPath(new URL('./src/features/settings', import.meta.url)),
@@ -68,6 +69,7 @@ export default defineConfig(async () => ({
       '@services': fileURLToPath(new URL('./src/services', import.meta.url)),
       '@utils': fileURLToPath(new URL('./src/utils', import.meta.url)),
     },
+    dedupe: ['react', 'react-dom'],
   },
   worker: {
     format: 'es',

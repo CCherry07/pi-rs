@@ -1,4 +1,47 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { DesktopSessionRef } from "@pi-rs/desktop-sdk";
+import type { DesktopExtensionCatalog } from "../features/extensions/types";
+
+export async function getDesktopExtensions(workspaceId: string): Promise<DesktopExtensionCatalog> {
+  const catalog = await invoke<Omit<DesktopExtensionCatalog, "extensions"> & {
+    extensions: (DesktopExtensionCatalog["extensions"][number] & { project?: boolean })[];
+  }>("pi_desktop_extensions", { workspaceId });
+  return {
+    ...catalog,
+    extensions: catalog.extensions.map(source => ({
+      ...source,
+      scope: source.project ? "project" : "global",
+    })),
+  };
+}
+
+export type DesktopWidgetSnapshot = {
+  widgets: Record<string, unknown>;
+  versions: Record<string, number>;
+  scopeToken?: string | null;
+};
+
+export function getDesktopWidgets(workspaceId: string, threadId: string): Promise<DesktopWidgetSnapshot> {
+  return invoke("pi_get_desktop_widgets", { workspaceId, threadId });
+}
+
+export function observeDesktopSession(
+  workspaceId: string,
+  threadId: string,
+  reference: DesktopSessionRef,
+): Promise<{ thread: { id: string } }> {
+  return invoke("pi_observe_desktop_session", { workspaceId, threadId, reference });
+}
+
+export async function runDesktopCommand(
+  workspaceId: string,
+  threadId: string,
+  name: string,
+  args: string,
+  scopeToken: string,
+): Promise<void> {
+  await invoke("pi_desktop_command", { workspaceId, threadId, name, args, scopeToken });
+}
 
 export type McpScope = "global" | "project";
 export type McpDocument = {

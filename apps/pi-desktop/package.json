@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "build:extension": "node scripts/build-desktop-extension.mjs",
     "sync:material-icons": "node scripts/sync-material-icons.mjs",
     "postinstall": "npm run sync:material-icons",
     "predev": "npm run sync:material-icons",

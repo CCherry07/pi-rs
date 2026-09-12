@@ -9,6 +9,9 @@
     /* Bundler mode */
     "moduleResolution": "bundler",
     "paths": {
+      "react": ["./node_modules/@types/react"],
+      "react/jsx-runtime": ["./node_modules/@types/react/jsx-runtime.d.ts"],
+      "@pi-rs/desktop-sdk": ["../../packages/pi-desktop-sdk/index.d.ts"],
       "@/*": ["./src/*"],
       "@app/*": ["./src/features/app/*"],
       "@settings/*": ["./src/features/settings/*"],

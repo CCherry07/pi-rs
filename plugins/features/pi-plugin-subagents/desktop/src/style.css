@@ -1,0 +1,13 @@
+.pi-subagents-card { --pi-subagents-border: var(--border-subtle, #80808030); }
+.pi-subagents-status { display: inline-flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.pi-subagents-tokens { opacity: 0.65; font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+.pi-subagents-child + .pi-subagents-child { border-top: 1px solid var(--pi-subagents-border); margin-top: 1rem; padding-top: 1rem; }
+.pi-subagents-child > header { display: flex; justify-content: space-between; gap: 1rem; margin-bottom: 0.75rem; }
+.pi-subagents-task { opacity: 0.8; padding: 0.5rem 0; }
+.pi-subagents-session { max-height: 32rem; overflow: auto; overscroll-behavior: contain; }
+.pi-subagents-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.75rem; }
+.pi-subagents-actions > button { font: inherit; color: inherit; border: 1px solid var(--pi-subagents-border); border-radius: 0.4rem; background: transparent; padding: 0.4rem 0.6rem; }
+.pi-subagents-actions button { cursor: pointer; white-space: nowrap; }
+.pi-subagents-actions button:disabled { opacity: 0.45; cursor: default; }
+.pi-subagents-actions :focus-visible { outline: 2px solid var(--text-accent, #6f88e8); outline-offset: 2px; }
+.pi-subagents-error { flex-basis: 100%; color: var(--text-error, #d86464); margin: 0; }

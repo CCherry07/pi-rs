@@ -1,3 +1,6 @@
+pub(crate) mod desktop_commands;
+pub(crate) mod desktop_extensions;
+pub(crate) mod desktop_views;
 mod isolated_projection;
 pub(crate) mod mcp;
 pub(crate) mod plugins;
@@ -40,6 +43,7 @@ pub(crate) struct PiRuntimeState {
     forwarders: projection::ForwarderRegistry,
     project_trust: pi_sdk::ProjectTrustService,
     skill_mutation_gate: skills::SkillMutationGate,
+    desktop_command_scopes: desktop_commands::DesktopCommandScopes,
 }
 
 #[derive(Clone, Serialize)]
@@ -78,6 +82,7 @@ pub(crate) fn create_state() -> Result<PiRuntimeState, String> {
     Ok(PiRuntimeState {
         project_trust: sdk.project_trust().clone(),
         skill_mutation_gate: Arc::new(std::sync::Mutex::new(())),
+        desktop_command_scopes: desktop_commands::DesktopCommandScopes::default(),
         store: SessionStore::new(sdk.session_manager(), agent_dir),
         info,
         forwarders: Arc::new(Mutex::new(HashSet::new())),
@@ -1081,6 +1086,7 @@ fn message_items(
             "id": message_item_id("custom", message_index, 0),
             "type": "customMessage",
             "customType": custom.custom_type,
+            "details": custom.details,
             "content": user_content(&custom.content.to_blocks()),
         })],
         _ => Vec::new(),
@@ -1113,10 +1119,7 @@ fn thread_from_snapshot(
     let mut created_at = 0_i64;
     let mut updated_at = 0_i64;
     let mut pending_tools = HashMap::<String, (String, Value)>::new();
-    let historical_context = HistoricalToolContext {
-        cwd,
-        parent_thread_id: id,
-    };
+    let historical_context = HistoricalToolContext { cwd };
 
     let flush = |turns: &mut Vec<Value>,
                  items: &mut Vec<Value>,
@@ -1244,7 +1247,6 @@ fn thread_from_snapshot(
 #[derive(Clone, Copy)]
 struct HistoricalToolContext<'a> {
     cwd: &'a Path,
-    parent_thread_id: &'a str,
 }
 
 fn historical_tool_item(
@@ -1256,10 +1258,7 @@ fn historical_tool_item(
     details: Option<&Value>,
     context: HistoricalToolContext<'_>,
 ) -> Value {
-    let HistoricalToolContext {
-        cwd,
-        parent_thread_id,
-    } = context;
+    let HistoricalToolContext { cwd } = context;
     let status = if is_error { "failed" } else { "completed" };
     if name == "bash" {
         let command = arguments
@@ -1269,54 +1268,25 @@ fn historical_tool_item(
         json!({
             "id": id,
             "type": "commandExecution",
+            "toolName": name,
+            "arguments": arguments,
+            "details": details,
             "command": command,
             "cwd": cwd,
             "status": status,
             "aggregatedOutput": output
         })
-    } else if name == "spawn_agent" {
-        let agent = details
-            .and_then(|value| value.get("agent"))
-            .and_then(Value::as_str)
-            .or_else(|| arguments.get("agent").and_then(Value::as_str))
-            .unwrap_or("agent");
-        let child_thread_id = details
-            .and_then(|value| value.get("sessionId"))
-            .and_then(Value::as_str);
-        let total_tokens = details
-            .and_then(|value| value.get("usage"))
-            .and_then(|usage| usage.get("totalTokens"))
-            .and_then(Value::as_u64);
-        let prompt = arguments
-            .get("task")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        json!({
-            "id": id,
-            "type": "collabToolCall",
-            "tool": "spawn",
-            "senderThreadId": parent_thread_id,
-            "newThreadId": child_thread_id,
-            "newAgentRole": agent,
-            "prompt": prompt,
-            "status": status,
-            "result": output,
-            "agentStatuses": child_thread_id.map(|thread_id| vec![json!({
-                "threadId": thread_id,
-                "agentRole": agent,
-                "status": status,
-                "totalTokens": total_tokens,
-            })]).unwrap_or_default(),
-        })
     } else {
         json!({
             "id": id,
             "type": "mcpToolCall",
+            "toolName": name,
             "server": "pi",
             "tool": name,
             "arguments": arguments,
             "status": status,
-            "result": output
+            "result": output,
+            "details": details
         })
     }
 }
@@ -1503,7 +1473,7 @@ mod tests {
         }
     }
 
-    fn scripted_store(agent_dir: PathBuf) -> SessionStore {
+    pub(super) fn scripted_store(agent_dir: PathBuf) -> SessionStore {
         scripted_store_with_fixture(agent_dir, Arc::new(CommandFixture::default()))
     }
 
@@ -2205,7 +2175,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_subagent_results_project_a_selectable_child_link() {
+    fn historical_tool_results_preserve_plugin_payload_without_business_projection() {
         let item = historical_tool_item(
             "call-1",
             "spawn_agent",
@@ -2220,16 +2190,14 @@ mod tests {
             })),
             HistoricalToolContext {
                 cwd: Path::new("/workspace"),
-                parent_thread_id: "parent-session",
             },
         );
 
-        assert_eq!(item["type"], "collabToolCall");
-        assert_eq!(item["senderThreadId"], "parent-session");
-        assert_eq!(item["newThreadId"], "child-session");
-        assert_eq!(item["newAgentRole"], "reviewer");
-        assert_eq!(item["agentStatuses"][0]["status"], "completed");
-        assert_eq!(item["agentStatuses"][0]["totalTokens"], 321);
+        assert_eq!(item["type"], "mcpToolCall");
+        assert_eq!(item["toolName"], "spawn_agent");
+        assert_eq!(item["arguments"]["task"], "Review the parser");
+        assert_eq!(item["details"]["sessionId"], "child-session");
+        assert_eq!(item["details"]["usage"]["totalTokens"], 321);
     }
 
     #[test]
@@ -2397,6 +2365,7 @@ mod tests {
             .project_trust()
             .clone(),
             skill_mutation_gate: Arc::new(std::sync::Mutex::new(())),
+            desktop_command_scopes: desktop_commands::DesktopCommandScopes::default(),
             store: scripted_store(directory.path().join("agent")),
             info: PiDesktopInfo {
                 agent_dir: directory.path().join("agent"),

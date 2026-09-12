@@ -74,11 +74,12 @@ transient notices emitted before the new subscription is installed (including `s
 notices) are not replayed. The composer visibly warns when Desktop action names hide runtime commands.
 
 Only commands registered by the Rust runtime (including built-in feature plugins and loaded
-native plugins) are exposed. The Desktop does **not** host JavaScript/TypeScript extensions or
-extension widgets, argument-completion callbacks, or interactive extension dialogs. CLI-only
+native plugins) are exposed. The Desktop does not host legacy Pi JavaScript runtime extensions,
+TUI widgets, argument-completion callbacks, or interactive extension dialogs. The separate React
+presentation extension interface is described below. CLI-only
 frontend commands such as `/reload` are not implicitly registered here; a native command may
 use the runtime reload/navigation capabilities. Project native plugins still use shared Pi
-project trust. No new plugin loader or execution sandbox is introduced.
+project trust; desktop presentation packages consume that same decision.
 
 ## Configuration
 
@@ -163,3 +164,58 @@ are not reloaded when files change; restart the application and start a new conv
 to refresh their generation. Project writes require the existing project trust decision.
 Symlink paths remain read-only; imports reject links/special files. Failed Trash operations
 never fall back to permanent deletion. Viewing skills does not count as Agent usage.
+
+
+## React plugin views
+
+Plugins can write React, Hooks and CSS and optionally compose the shared `ToolCard`, `StatusBadge`,
+`Markdown`, `SessionView` and `InlineCommandForm` modules from `@pi-rs/desktop-sdk`. Typed
+`defineWidgetChannel` / `useWidget` and `usePluginCommand` adapters keep decoding and command names
+inside the plugin. The host passes raw tool arguments,
+result `details`, partial results and custom-message data. Domain-specific interpretation belongs to
+the plugin. The subagent UI is the bundled example, including task state and stop/follow-up controls:
+[`plugins/features/pi-plugin-subagents/desktop`](../../plugins/features/pi-plugin-subagents/desktop).
+
+Build a local extension from the desktop directory:
+
+```sh
+npm run build:extension -- ../../plugins/features/pi-plugin-subagents/desktop
+```
+
+A source package contains `src/index.tsx`, CSS and `pi-desktop.json`:
+
+```json
+{"schemaVersion":1,"id":"example.checks","name":"Checks","entry":"dist/index.js","styles":["dist/style.css"]}
+```
+
+Install the **contents** of its built `dist` directory under
+`~/.pi/agent/desktop-extensions/<package>/` or `<workspace>/.pi/desktop-extensions/<package>/`.
+Project packages require the existing project trust decision. Click **Reload desktop extensions**
+in the conversation after rebuilding/installing. A matching installed ID replaces the bundled
+extension without rebuilding the desktop. Native package installation remains separate.
+
+For a provider-free preview of the dynamically loaded subagent bundle, build it as above, run
+`npm run dev`, and open `/examples/preview.html`. The preview supplies simulated tasks and commands;
+it verifies actual bundle loading and React interactions without launching model work.
+
+The SDK guide in [`packages/pi-desktop-sdk`](../../packages/pi-desktop-sdk/README.md) documents exact
+interfaces and lifetime rules. Extensions execute as trusted webview code using the host React
+instance. Missing/crashing renderers have normal transcript fallbacks. UI-only reload does not stop
+background agents; native session reload retains its existing child-shutdown behavior.
+
+Backend plugins publish later status changes with the native author helper:
+
+```rust
+use pi_plugin_sdk::desktop::WidgetPublisher;
+
+let mut progress = WidgetPublisher::new("example.progress")?;
+progress.publish(&context.session, &serde_json::json!({
+    "completed": 3, "total": 5
+}))?;
+```
+
+The host retains the latest value on the current branch and forwards updates using durable record
+sequence numbers. Use null to remove a key, keep values below 256 KiB, and coalesce unchanged
+snapshots. `WidgetPublisher` hides the entry envelope, size validation, tombstones and duplicate
+suppression. These records are hidden from the model. Plugins own their payload validation,
+historical state and command implementations. No general plugin RPC server is required.

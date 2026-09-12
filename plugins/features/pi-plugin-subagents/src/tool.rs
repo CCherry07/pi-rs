@@ -227,7 +227,7 @@ impl AgentTool {
         LaunchContext::new(&context).apply(&mut options, input.context)?;
         let owner = context.session.id()?;
         self.runtime
-            .bind_session(owner.clone(), context.session.handle_for_adapter());
+            .bind_session(owner.clone(), context.session.clone());
         let ticket = self
             .runtime
             .begin_launch(&owner, profile.clone(), self.max_depth)
@@ -237,6 +237,7 @@ impl AgentTool {
             id: ticket.id().to_string(),
             committed: false,
         };
+        self.runtime.set_task(ticket.id(), task);
         let request =
             IsolatedSessionRequest::new(CustomMessageContent::Text(ticket.child_prompt(task)))
                 .options(options);

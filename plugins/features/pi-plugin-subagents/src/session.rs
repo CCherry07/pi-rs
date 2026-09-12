@@ -27,10 +27,8 @@ impl SessionPlugin for SubagentsSessionPlugin {
         context: &SessionPluginContext,
         _event: &pi_session::SessionStartEvent,
     ) -> Result<(), SessionPluginError> {
-        self.runtime.bind_session(
-            context.identity().id.clone(),
-            context.plugin_context_handle(),
-        );
+        self.runtime
+            .bind_session(context.identity().id.clone(), context.session.clone());
         Ok(())
     }
 
@@ -39,6 +37,7 @@ impl SessionPlugin for SubagentsSessionPlugin {
         context: &SessionPluginContext,
         _event: &SessionShutdownEvent,
     ) -> Result<(), SessionPluginError> {
+        self.runtime.suspend_desktop(&context.identity().id);
         self.runtime.close_owner(&context.identity().id);
         self.runtime.drain_monitors(&context.identity().id).await;
         self.runtime.forget_session(&context.identity().id);

@@ -4531,6 +4531,7 @@ dependencies = [
  "async-trait",
  "futures",
  "pi-core",
+ "pi-plugin-sdk",
  "pi-plugin-skills",
  "pi-session",
  "serde",

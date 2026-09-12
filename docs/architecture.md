@@ -208,15 +208,16 @@ discovery, and one projection Module translates Pi lifecycle events into the UI'
 `turn/*`, and `item/*` vocabulary. The Adapter emits that vocabulary through its own `pi-event`
 channel; there is no external app-server protocol or child-process boundary. Registered
 workspaces are immediately usable by path; the Adapter has no per-workspace connection lifecycle.
-`spawn_agent` updates containing an `isolatedSessionId` start one observed child task and project a
-parent-child collaboration item outside generic tool groups. The item is a collapsible, read-only
-chat panel in the parent transcript: expanding it lazily reads the child snapshot into the shared
-thread state and renders the same message, reasoning, tool and Markdown views in an independently
-scrollable viewport. It does not select the child, create a session or attach a second composer;
-collapsing only unmounts presentation and never interrupts the child. Loading failures remain
-visible with a retry action, and ancestor identities cannot recursively embed themselves.
-Messaging, follow-up, wait, interrupt, and list calls remain ordinary tool items. The Desktop does
-not interpret a workflow graph or reconstruct live agent-tree control after process restart.
+Tool projections preserve canonical tool identity, arguments, structured result details and
+cumulative partial results. Desktop does not parse subagent result schemas. Plugin-owned React
+renderers use common ToolCard, StatusBadge, Markdown and SessionView interfaces. The subagent
+renderer lives in `plugins/features/pi-plugin-subagents/desktop`, including translations, styles,
+legacy payload compatibility and controls; it is bundled as an overridable default extension.
+SessionView explicitly observes a referenced related session through the generic session capability,
+loads a read-only transcript into shared thread state, and protects against recursive ancestor
+embedding. It does not create a primary session or attach a second composer. Collapsing only
+unmounts presentation, and failed snapshot loads expose retry. Business state and agent-to-session
+mapping remain in the plugin. Desktop does not reconstruct live agent-tree control after restart.
 Desktop session creation delegates path construction to `JsonlSessionRepo`, so its project-scoped
 `<timestamp>_<session-id>.jsonl` filename, v4 header ID, and projected frontend thread ID share one
 identity just as they do in Pi.
@@ -285,11 +286,61 @@ next draft's images. Store/forwarder keys
 identify managed handles separately from replaceable JSONL IDs: an old saved ID can be reopened,
 but is never silently routed to a different current session. Failed replacement publishes no swap
 and keeps the old subscription/catalog. Only native registered commands are supported; Desktop
-keeps JS extension discovery/hosting disabled and does not emulate JS widgets, argument completion
-callbacks, interactive dialogs, or CLI-only frontend commands.
+keeps legacy Pi JavaScript runtime extension discovery/hosting disabled and does not emulate TUI
+widgets, argument completion callbacks, interactive dialogs, or CLI-only frontend commands. Its
+separate React presentation extension interface is described below.
 Desktop image attachments are decoded from data URLs by the Adapter and enter the same
 `SessionInput` Interface as text; submit, steer, and follow-up processing preserve those images
 through input hooks, durable queue records, and provider projection.
+
+### Desktop React extensions and shared presentation
+
+This is a deliberate Rust/Desktop product design borrowing legacy Pi's tool renderer and common
+component approach, not binary compatibility with Pi's TUI component factories. The author interface
+in `packages/pi-desktop-sdk` supports tool-result/custom-message renderers and workspace panels.
+A plugin writes React and CSS directly and can optionally use ToolCard, StatusBadge, Markdown,
+SessionView and InlineCommandForm. Headless `defineWidgetChannel` / `useWidget` and
+`usePluginCommand` modules own decoding and asynchronous interaction mechanics while accepting
+plugin-defined adapters. The host registry matches exact tool/custom-message identities without business-name
+switches; renderer failures and missing packages fall back to ordinary transcript items. Frozen
+inherited snapshots do not execute plugin renderers. Generic registered renderers are displayed
+outside collapsed tool groups.
+
+Read-only discovery in `pi-sdk::desktop_extensions` reads bundled ESM/CSS packages from the agent
+`desktop-extensions` directory and trusted project `.pi/desktop-extensions`, consuming the shared
+project-trust decision. It does not grant trust or prepare a session. Native manifests, dynamic-library
+ABI and installation are unchanged; combined native/desktop packaging is future work. The local
+builder bundles dependencies while binding React/ReactDOM/JSX imports to the desktop's exact React
+instance. Third-party packages can replace a complete bundled definition with the same identity.
+Duplicate package IDs or renderer targets reject the complete candidate.
+
+The presentation registry is immutable after publication. Complete candidates load and validate before
+swap; failures preserve the working generation, while trust revocation removes project code even if
+another package is broken. A UI-only reload remounts views and retires their cancellation signals
+without replacing native runtime state. Native replacement requests a presentation reload and fresh
+widget snapshots, and retains native lifecycle behavior (including child shutdown). Trusted React code
+shares the webview; this is not a sandbox and module-global side effects cannot be rolled back.
+
+Asynchronous UI state reuses the existing session custom-entry seam: `pi.ui.widget` entries contain
+`{key,value}`, where keys are namespaced and null removes a key. Values are opaque JSON, capped at
+256 KiB. No new Pi v4 record variant or provider message is added. The active branch supplies the
+latest state; durable record sequence numbers order snapshot/live merges and tombstones. The host
+forwards generic `thread/widgetUpdated` events. Plugins own schemas, coalescing, historical migration
+and business interpretation; executable React and transient component state are never persisted.
+The Rust author interface `pi_plugin_sdk::desktop::WidgetPublisher` owns key/size validation,
+duplicate suppression, tombstones and the entry envelope; a plugin-owned projection Module still
+decides what to publish and how restored history relates to current executable ownership.
+Subagents publish bounded task snapshots independently of the already-completed spawn tool. On
+native reload/resume, they preserve history and republish actual current ownership, avoiding a false
+claim that persisted task identities are still controllable.
+
+Desktop controls invoke exact registered plugin commands through `AgentSession::invoke_command`.
+The interface validates registration/lifecycle then follows the existing submit pipeline once,
+including active-run command processing, transforms and input hooks. Unknown names never become
+model prompts. The subagent plugin registers its own interrupt/follow-up commands and validates
+direct-child ownership. UI callbacks are bound to their view lifetime; IPC also checks an opaque
+scope token tied to the exact managed AgentSession instance, so a late old-generation request cannot
+act on a replacement with the same stored session ID. Generic session previews remain read-only.
 
 `pi-rpc` is one external protocol-adapter Module above this session Interface. Its Pi JSON
 projector is the single erasure seam for both `--json` and Pi RPC: it emits the coding-agent v3
@@ -1782,20 +1833,18 @@ turn-specific wait, and turn-specific abort while keeping concrete `AgentSession
 from plugins. These additions are native ABI 20. They add no Pi v4 record variant: messages, queue
 records, assistant/tool pairs, and usage adjustments continue through the existing session schema.
 
-The desktop Adapter recognizes `spawn_agent` updates containing `isolatedSessionId`, observes
-the child read-only, and projects a collapsible child conversation in the parent transcript. This
-is a deliberate Desktop presentation, not Pi's example-extension tool-result renderer. All panels
-consume the existing shared thread reducer and automatic child event forwarders; read-only
-hydration neither selects a thread nor changes the parent composer. Snapshot reads merge at the
-reducer seam without overwriting newer live items, activity or usage; context replacement invalidates
-pending reads. The Desktop projection uses current-context message ordinals and block indices for
+The desktop's plugin-owned subagent renderer supplies generic related-session references to
+SessionView. It observes the child read-only and embeds a collapsible conversation in the parent
+transcript. Views consume shared thread state and generic event forwarders; hydration does not select
+a thread or change the parent composer. Snapshot reads merge without overwriting newer live items,
+activity or usage; replacement invalidates pending reads. The Desktop projection uses current-context message ordinals and block indices for
 both snapshot and live item IDs, including invisible messages in the ordinal count. Stream updates
 carry cumulative block text so a snapshot ahead of queued events cannot duplicate text. Prompt
 boundaries, compaction and missed-event recovery reset projection state from an authoritative
 subscription snapshot rather than merging ordinals across different contexts. Snapshot refresh
 retains the event receiver: covered message/tool updates are skipped while queued lifecycle,
-error, usage and notice events still run. Recovery reinstalls child observers from completed spawn
-metadata without executing tools again, and snapshot errors remain distinct notice items. Actual
+error, usage and notice events still run. SessionView reinstalls observers from generic references without executing tools again, and
+snapshot errors remain distinct notice items. Actual
 generation replacement retains its existing latest-generation subscription swap. These are
 frontend projection identities, not
 persisted Pi entry IDs or a change to the Pi v4 wire schema. Child presentation separates context

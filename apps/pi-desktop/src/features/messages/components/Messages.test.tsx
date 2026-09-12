@@ -1,20 +1,41 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConversationItem } from "@/types";
 import { ThreadConversationsContext, type ThreadConversationsSource } from "@threads/contexts/ThreadConversations";
 import { Messages } from "./Messages";
+import { DesktopExtensionsProvider } from "../../extensions/ExtensionHost";
+import { bundledDesktopExtensions } from "../../extensions/builtins";
+import { getDesktopWidgets, observeDesktopSession, runDesktopCommand, type DesktopWidgetSnapshot } from "@services/tauri";
+import { subscribePiEvents } from "@services/events";
+
+vi.mock("@services/tauri", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@services/tauri")>(),
+  getDesktopWidgets: vi.fn().mockResolvedValue({ widgets: {}, versions: {} }),
+  observeDesktopSession: vi.fn(async (_workspace, _parent, reference) => ({ thread: { id: reference.sessionId ?? reference.isolatedSessionId } })),
+  runDesktopCommand: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@services/events", () => ({ subscribePiEvents: vi.fn((_listener, options) => { options?.onReady?.(); return vi.fn(); }) }));
 
 vi.mock("../hooks/useFileLinkOpener", () => ({
   useFileLinkOpener: () => ({ openFileLink: vi.fn(), showFileLinkMenu: vi.fn() }),
 }));
 
-const spawn: ConversationItem = {
-  id: "spawn-call", kind: "tool", toolType: "collabToolCall", title: "Collab: spawn",
-  detail: "", status: "completed", collabTask: "Review the parser",
-  collabReceiver: { threadId: "child", role: "reviewer" },
-  collabStatuses: [{ threadId: "child", role: "reviewer", status: "completed", totalTokens: 321 }],
+const spawn: Extract<ConversationItem, { kind: "tool" }> = {
+  id: "spawn-call", kind: "tool", toolType: "mcpToolCall", toolName: "spawn_agent", title: "spawn_agent",
+  detail: "", status: "completed",
+  data: {
+    arguments: { task: "Review the parser", agent: "reviewer" },
+    newThreadId: "child", newAgentRole: "reviewer",
+    agentStatuses: { child: { status: "completed", totalTokens: 321 } },
+  },
 };
+function relatedSpawn(threadId: string, role: string): Extract<ConversationItem, { kind: "tool" }> {
+  return { ...spawn, data: { ...spawn.data, arguments: { task: "Review the parser", agent: role },
+    newThreadId: threadId, newAgentRole: role,
+    agentStatuses: { [threadId]: { status: "completed", totalTokens: 321 } },
+  } };
+}
 const childItems: ConversationItem[] = [
   { id: "request", kind: "message", role: "user", text: "Check parser edge cases" },
   { id: "thought", kind: "reasoning", summary: "Checking syntax", content: "Inspecting parser branches" },
@@ -37,20 +58,26 @@ function source(overrides: Partial<ThreadConversationsSource> = {}): ThreadConve
 }
 function chat(value: ThreadConversationsSource, items = rootItems, onOpenThreadLink = vi.fn(), onForkMessage = vi.fn()) {
   return (
+    <DesktopExtensionsProvider workspaceKey="workspace" builtins={bundledDesktopExtensions}>
     <ThreadConversationsContext.Provider value={value}>
       <Messages items={items} threadId="parent" workspaceId="workspace" workspacePath="/project" isThinking={false}
         openTargets={[]} selectedOpenAppId="" onOpenThreadLink={onOpenThreadLink} onForkMessage={onForkMessage} />
     </ThreadConversationsContext.Provider>
+    </DesktopExtensionsProvider>
   );
 }
 
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(getDesktopWidgets).mockResolvedValue({ widgets: {}, versions: {} });
+});
 afterEach(cleanup);
 
 describe("embedded child-agent conversations", () => {
   it("keeps inherited history separate and opens a frozen, read-only snapshot", async () => {
     const inheritedItems: ConversationItem[] = [
       { id: "seed-user", kind: "message", role: "user", text: "Parent context at creation" },
-      { ...spawn, id: "seed-spawn", collabReceiver: { threadId: "old-agent", role: "scout" } },
+      { ...relatedSpawn("old-agent", "scout"), id: "seed-spawn" },
     ];
     const value = source({ contextInheritanceByThread: { child: {
       origin: { mode: "fork", parentThreadId: "parent", parentEntryId: "entry-before-spawn", snapshotEntryId: "seed-entry" },
@@ -121,6 +148,7 @@ describe("embedded child-agent conversations", () => {
     const fork = vi.fn();
     render(chat(value, rootItems, navigate, fork));
     expect(value.loadThread).not.toHaveBeenCalled();
+    expect(observeDesktopSession).not.toHaveBeenCalled();
     expect(screen.queryByText("Parser review complete")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Expand child-agent chat" }));
     await waitFor(() => expect(value.loadThread).toHaveBeenCalledExactlyOnceWith("workspace", "child"));
@@ -170,25 +198,26 @@ describe("embedded child-agent conversations", () => {
       .mockResolvedValue(undefined);
     render(chat(source({ itemsByThread: {}, loadThread })));
     fireEvent.click(screen.getByRole("button", { name: "Expand child-agent chat" }));
-    expect(screen.getByText("Loading…")).toBeTruthy();
+    expect(screen.getByText("Loading conversation…")).toBeTruthy();
+    expect(await screen.findByText("Loading…")).toBeTruthy();
     await act(async () => { rejectLoad(new Error("Cannot read child session")); });
     expect(screen.getByRole("alert").textContent).toContain("Cannot read child session");
-    expect(screen.queryByText("No child-agent messages yet.")).toBeNull();
+    expect(screen.queryByText("No messages in this related session yet.")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(loadThread).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
-    expect(screen.getByText("No child-agent messages yet.")).toBeTruthy();
+    expect(screen.getByText("No messages in this related session yet.")).toBeTruthy();
   });
 
   it("renders nested child panels and guards ancestor cycles without duplicate disclosure IDs", async () => {
     const value = source({ itemsByThread: {
       child: [
         ...childItems,
-        { ...spawn, id: "nested-spawn", collabReceiver: { threadId: "grandchild", role: "scout" } },
+        { ...relatedSpawn("grandchild", "scout"), id: "nested-spawn" },
       ],
       grandchild: [
         { id: "grandchild-answer", kind: "message", role: "assistant", text: "Grandchild findings" },
-        { ...spawn, id: "cycle-spawn", collabReceiver: { threadId: "parent", role: "parent" } },
+        { ...relatedSpawn("parent", "parent"), id: "cycle-spawn" },
       ],
     } });
     render(chat(value));
@@ -198,7 +227,7 @@ describe("embedded child-agent conversations", () => {
     await waitFor(() => expect(value.loadThread).toHaveBeenCalledWith("workspace", "grandchild"));
     expect(screen.getByText("Grandchild findings").closest(".messages-embedded")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Expand child-agent chat" }));
-    expect(screen.getByText("Child conversation is unavailable.")).toBeTruthy();
+    expect(screen.getByText("Conversation is unavailable.")).toBeTruthy();
     expect(value.loadThread).toHaveBeenCalledTimes(2);
     const controlIds = Array.from(document.querySelectorAll("[aria-controls]"), (node) => node.getAttribute("aria-controls"));
     expect(new Set(controlIds).size).toBe(controlIds.length);
@@ -209,9 +238,10 @@ describe("embedded child-agent conversations", () => {
       child: childItems,
       sibling: [{ id: "sibling-answer", kind: "message", role: "assistant", text: "Sibling findings" }],
     } });
-    render(chat(value, [{ ...spawn, collabReceivers: [
-      { threadId: "child", role: "reviewer" }, { threadId: "sibling", role: "scout" },
-    ] }]));
+    render(chat(value, [{ ...spawn, data: { ...spawn.data, receiverThreadIds: ["child", "sibling"], agentStatuses: {
+      child: { agentRole: "reviewer", status: "completed", totalTokens: 321 },
+      sibling: { agentRole: "scout", status: "completed" },
+    } } }]));
     fireEvent.click(screen.getByRole("button", { name: "Expand child-agent chat" }));
     await waitFor(() => expect(value.loadThread).toHaveBeenCalledTimes(2));
     expect(within(screen.getByRole("region", { name: "reviewer conversation" })).getByText("Parser review complete")).toBeTruthy();
@@ -220,9 +250,9 @@ describe("embedded child-agent conversations", () => {
 
   it("does not load an ancestor as its own child", async () => {
     const value = source();
-    render(chat(value, [{ ...spawn, collabReceiver: { threadId: "parent", role: "reviewer" } }]));
+    render(chat(value, [relatedSpawn("parent", "reviewer")]));
     fireEvent.click(screen.getByRole("button", { name: "Expand child-agent chat" }));
-    expect(screen.getByText("Child conversation is unavailable.")).toBeTruthy();
+    expect(screen.getByText("Conversation is unavailable.")).toBeTruthy();
     expect(value.loadThread).not.toHaveBeenCalled();
   });
 
@@ -239,8 +269,110 @@ describe("embedded child-agent conversations", () => {
   });
 
   it("keeps a failed launch with no child identity visible", () => {
-    render(chat(source(), [{ ...spawn, collabReceiver: undefined, status: "failed", output: "Agent profile was not found" }]));
+    render(chat(source(), [{ ...spawn, data: { arguments: { agent: "reviewer" } }, status: "failed", output: "Agent profile was not found" }]));
     fireEvent.click(screen.getByRole("button", { name: "Expand child-agent chat" }));
     expect(screen.getByRole("alert").textContent).toContain("Agent profile was not found");
+  });
+
+  it("uses plugin-owned live data to invoke existing commands with the host session scope", async () => {
+    const liveTask = {
+      agentId: "agent-1", agent: "reviewer", task: "Review the parser", state: "running",
+      session: { sessionId: "child", ownerSessionId: "parent" }, totalTokens: 321,
+    };
+    vi.mocked(getDesktopWidgets).mockResolvedValueOnce({
+      widgets: { "subagents.tasks": { version: 1, ownerSessionId: "parent", liveAgentIds: ["agent-1"], agents: { "agent-1": liveTask } } },
+      versions: { "subagents.tasks": 4 }, scopeToken: "scope-parent",
+    });
+    const activeSpawn = { ...spawn, data: { arguments: { agent: "reviewer", task: "Review the parser" },
+      details: { agentId: "agent-1", agent: "reviewer", isolatedSessionId: "isolated-child", state: "running" },
+    } };
+    render(chat(source(), [activeSpawn]));
+    fireEvent.click(screen.getByRole("button", { name: "Expand child-agent chat" }));
+    const stop = await screen.findByRole("button", { name: "Stop task" });
+    fireEvent.click(stop);
+    await waitFor(() => expect(runDesktopCommand).toHaveBeenCalledWith("workspace", "parent", "subagents:interrupt", JSON.stringify({ target: "agent-1" }), "scope-parent"));
+    const draft = screen.getByRole("textbox", { name: "Follow up" });
+    await waitFor(() => expect(draft.hasAttribute("disabled")).toBe(false));
+    fireEvent.change(draft, { target: { value: "Check the errors too" } });
+    vi.mocked(runDesktopCommand).mockRejectedValueOnce(new Error("Task is no longer active"));
+    fireEvent.click(screen.getByRole("button", { name: "Follow up" }));
+    await waitFor(() => expect(runDesktopCommand).toHaveBeenCalledWith("workspace", "parent", "subagents:followup", JSON.stringify({ target: "agent-1", task: "Check the errors too" }), "scope-parent"));
+    expect(await screen.findByText("Task is no longer active")).toBeTruthy();
+    expect((draft as HTMLInputElement).value).toBe("Check the errors too");
+  });
+
+  it("preserves a real plugin draft during ordinary widget refresh and blocks commands until rehydrated", async () => {
+    const task = { agentId: "agent-1", agent: "reviewer", task: "Review the parser", state: "running",
+      session: { sessionId: "child", ownerSessionId: "parent" } };
+    const snapshot: DesktopWidgetSnapshot = {
+      widgets: { "subagents.tasks": { version: 1, ownerSessionId: "parent", liveAgentIds: ["agent-1"], agents: { "agent-1": task } } },
+      versions: { "subagents.tasks": 4 }, scopeToken: "old-scope",
+    };
+    let rejectRefresh!: (error: Error) => void;
+    let resolveRetry!: (value: DesktopWidgetSnapshot) => void;
+    let rejectGeneration!: (error: Error) => void;
+    const pendingRefresh = new Promise<DesktopWidgetSnapshot>((_, reject) => { rejectRefresh = reject; });
+    const pendingRetry = new Promise<DesktopWidgetSnapshot>((resolve) => { resolveRetry = resolve; });
+    const pendingGeneration = new Promise<DesktopWidgetSnapshot>((_, reject) => { rejectGeneration = reject; });
+    const reads = [Promise.resolve(snapshot), pendingRefresh, pendingRetry, pendingGeneration];
+    vi.mocked(getDesktopWidgets).mockImplementation(async (_workspace, thread) => thread === "parent"
+      ? await reads.shift()! : { widgets: {}, versions: {} });
+    const value = source();
+    render(chat(value, [{ ...spawn, data: { details: { agentId: "agent-1" } } }]));
+    fireEvent.click(screen.getByRole("button", { name: "Expand child-agent chat" }));
+    const draft = await screen.findByRole("textbox", { name: "Follow up" });
+    fireEvent.change(draft, { target: { value: "Keep this draft through refresh" } });
+    const replace = (generationChanged = false) => {
+      for (const [listener] of vi.mocked(subscribePiEvents).mock.calls) {
+        listener({ workspace_id: "workspace", message: { method: "thread/replaced", params: { thread: { id: "parent" }, generationChanged } } });
+      }
+    };
+    act(() => replace());
+    expect(screen.getByRole("textbox", { name: "Follow up" })).toBe(draft);
+    expect((draft as HTMLInputElement).value).toBe("Keep this draft through refresh");
+    fireEvent.click(screen.getByRole("button", { name: "Follow up" }));
+    expect(await screen.findByText("This session is not ready for commands")).toBeTruthy();
+    expect(runDesktopCommand).not.toHaveBeenCalled();
+    await act(async () => rejectRefresh(new Error("temporary read failure")));
+    expect(screen.getByRole("textbox", { name: "Follow up" })).toBe(draft);
+    expect((draft as HTMLInputElement).value).toBe("Keep this draft through refresh");
+    fireEvent.click(screen.getByRole("button", { name: "Follow up" }));
+    await act(async () => {});
+    expect(runDesktopCommand).not.toHaveBeenCalled();
+    act(() => replace());
+    await act(async () => resolveRetry({ ...snapshot, scopeToken: "new-scope" }));
+    expect(screen.getByRole("textbox", { name: "Follow up" })).toBe(draft);
+    expect((draft as HTMLInputElement).value).toBe("Keep this draft through refresh");
+    fireEvent.click(screen.getByRole("button", { name: "Follow up" }));
+    await waitFor(() => expect(runDesktopCommand).toHaveBeenCalledExactlyOnceWith("workspace", "parent", "subagents:followup",
+      JSON.stringify({ target: "agent-1", task: "Keep this draft through refresh" }), "new-scope"));
+    act(() => replace(true));
+    expect(screen.queryByRole("textbox", { name: "Follow up" })).toBeNull();
+    await act(async () => rejectGeneration(new Error("new generation unavailable")));
+    expect(screen.queryByRole("textbox", { name: "Follow up" })).toBeNull();
+  });
+
+  it("renders live nested plugin views as read-only previews without hiding their running status", async () => {
+    const task = { agentId: "nested-agent", agent: "scout", state: "running",
+      session: { sessionId: "grandchild", ownerSessionId: "child" } };
+    vi.mocked(getDesktopWidgets).mockResolvedValueOnce({
+      widgets: { "subagents.tasks": { version: 1, ownerSessionId: "child", liveAgentIds: ["nested-agent"], agents: { "nested-agent": task } } },
+      versions: { "subagents.tasks": 3 }, scopeToken: "child-preview-scope",
+    });
+    const value = source({ itemsByThread: { grandchild: [{ id: "answer", kind: "message", role: "assistant", text: "Live nested findings" }] } });
+    render(
+      <DesktopExtensionsProvider workspaceKey="workspace" builtins={bundledDesktopExtensions}>
+        <ThreadConversationsContext.Provider value={value}>
+          <Messages items={[{ ...spawn, data: { details: { agentId: "nested-agent" } } }]} threadId="child" workspaceId="workspace" embedded
+            isThinking={false} openTargets={[]} selectedOpenAppId="" />
+        </ThreadConversationsContext.Provider>
+      </DesktopExtensionsProvider>,
+    );
+    expect(await screen.findByText("processing")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Expand child-agent chat" }));
+    expect(await screen.findByText("Live nested findings")).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "Follow up" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop task" })).toBeNull();
+    expect(runDesktopCommand).not.toHaveBeenCalled();
   });
 });

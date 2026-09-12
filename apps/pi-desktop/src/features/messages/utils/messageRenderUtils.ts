@@ -291,7 +291,7 @@ function mergeConsecutiveExploreRuns(items: ToolGroupItem[]): ToolGroupItem[] {
   return result;
 }
 
-export function buildToolGroups(items: ConversationItem[]): MessageListEntry[] {
+export function buildToolGroups(items: ConversationItem[], standaloneItem?: (item: ConversationItem) => boolean): MessageListEntry[] {
   const entries: MessageListEntry[] = [];
   let buffer: ToolGroupItem[] = [];
 
@@ -329,7 +329,7 @@ export function buildToolGroups(items: ConversationItem[]): MessageListEntry[] {
   };
 
   items.forEach((item) => {
-    if (item.kind === "tool" && item.toolType === "collabToolCall") {
+    if (standaloneItem?.(item) || (item.kind === "tool" && item.toolType === "collabToolCall")) {
       flush();
       entries.push({ kind: "item", item });
       return;

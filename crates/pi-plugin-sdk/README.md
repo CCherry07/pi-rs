@@ -146,6 +146,25 @@ match context.session.create(NewSessionOptions::default()).await? {
 }
 ```
 
+## Desktop presentation state / 桌面展示状态
+
+Backend plugins can publish a bounded, durable JSON value for a separately packaged React view.
+`WidgetPublisher` owns the `pi.ui.widget` entry envelope, namespaced-key and 256 KiB checks,
+successful-write duplicate suppression, and null tombstones. The plugin owns the value schema and
+any history/current-runtime merge policy:
+
+```rust
+use pi_plugin_sdk::desktop::WidgetPublisher;
+
+let mut progress = WidgetPublisher::new("example.progress")?;
+progress.publish(&context.session, &serde_json::json!({"completed": 3, "total": 5}))?;
+progress.remove(&context.session)?;
+```
+
+Keep one publisher per key and session. A publisher intentionally does not recover business state
+or authorize commands; React packages decode values through `@pi-rs/desktop-sdk`, and registered
+native commands remain the executable interface.
+
 Contexts are generation-bound capabilities. A context retained after its runtime generation is
 replaced returns `PluginContextError::Retired`; it never follows a stale native plugin into a
 new generation. A successful `new_session`, `fork`, or `switch_session` carries a

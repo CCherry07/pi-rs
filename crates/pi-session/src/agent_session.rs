@@ -1134,6 +1134,40 @@ impl AgentSession {
         Ok(transition)
     }
 
+    /// Invokes an exact registered command from a product control.
+    ///
+    /// Unknown names are errors, never model input. The existing submission
+    /// pipeline executes handled commands immediately even during an active
+    /// run; transformed input passes through input hooks and the normal queue
+    /// exactly once. This does not manufacture a tool call or result.
+    pub async fn invoke_command(
+        &self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<SubmitOutcome, SessionError> {
+        self.ensure_open()?;
+        if name.is_empty()
+            || name
+                .chars()
+                .any(|character| character.is_whitespace() || character == '/')
+            || !self
+                .runtime
+                .command_specs()
+                .iter()
+                .any(|command| command.name == name)
+        {
+            return Err(SessionError::Runtime(format!(
+                "registered command is unavailable: {name}"
+            )));
+        }
+        self.submit(if arguments.is_empty() {
+            format!("/{name}")
+        } else {
+            format!("/{name} {arguments}")
+        })
+        .await
+    }
+
     pub async fn submit(
         &self,
         input: impl Into<SessionInput>,
@@ -4223,6 +4257,149 @@ mod tests {
     }
 
     struct ExpandingCommand;
+
+    struct ExplicitCommandPlugin(Arc<AtomicUsize>);
+    struct ExplicitCommand(Arc<AtomicUsize>);
+
+    #[pi_core::agent_plugin]
+    impl AgentPlugin for ExplicitCommandPlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("explicit-command")
+        }
+
+        fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+            context.register_command(Arc::new(ExplicitCommand(Arc::clone(&self.0))))
+        }
+    }
+
+    #[async_trait]
+    impl Command for ExplicitCommand {
+        fn spec(&self) -> CommandSpec {
+            CommandSpec {
+                name: "ui-action".into(),
+                description: "Execute a plugin action".into(),
+                argument_hint: None,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _context: CommandContext,
+            arguments: String,
+        ) -> Result<CommandOutcome, CommandError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(if arguments == "transform" {
+                CommandOutcome::TransformInput("/ui-action literal model input".into())
+            } else {
+                CommandOutcome::Handled
+            })
+        }
+    }
+
+    fn explicit_command_runtime(calls: Arc<AtomicUsize>, turn: ScriptedTurn) -> PiRuntime {
+        PiRuntime::builder()
+            .agent_plugin(ExplicitCommandPlugin(calls))
+            .provider_plugin(ScriptedProviderPlugin::scripted([turn]))
+            .agent_options(AgentOptions {
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("test"),
+                ..AgentOptions::default()
+            })
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn explicit_commands_run_immediately_during_active_turn_without_queuing_or_prompting() {
+        let directory = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let session = AgentSession::create(
+            explicit_command_runtime(Arc::clone(&calls), ScriptedTurn::WaitForAbort),
+            directory.path().join("session.jsonl"),
+        )
+        .await
+        .unwrap();
+        let running = {
+            let session = Arc::clone(&session);
+            tokio::spawn(async move { session.submit("parent working").await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !session.snapshot().agent.is_running {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            session.invoke_command("ui-action", "stop child"),
+        )
+        .await
+        .expect("a control must not wait for the parent turn")
+        .unwrap();
+        assert!(matches!(outcome, SubmitOutcome::Handled));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(session.snapshot().queue.steering.is_empty());
+        assert!(
+            session
+                .invoke_command("missing", "never prompt this")
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(session.snapshot().agent.messages.len(), 1);
+
+        let outcome = session
+            .invoke_command("ui-action", "transform")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, SubmitOutcome::Queued { .. }));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(session.snapshot().queue.steering, ["/ui-action transform"]);
+        session.abort();
+        running.await.unwrap().unwrap();
+        session.shutdown().await;
+        assert!(matches!(
+            session.invoke_command("ui-action", "stop child").await,
+            Err(SessionError::Closed)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn explicit_command_transform_runs_once_and_unknown_idle_command_is_not_model_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let session = AgentSession::create(
+            explicit_command_runtime(Arc::clone(&calls), ScriptedTurn::Text("done".into())),
+            directory.path().join("session.jsonl"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            session
+                .invoke_command("missing", "never prompt this")
+                .await
+                .is_err()
+        );
+        assert!(session.snapshot().agent.messages.is_empty());
+        assert!(!session.log().path().exists());
+        session
+            .invoke_command("ui-action", "transform")
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let document = session.log().load().unwrap();
+        let user = document
+            .messages()
+            .into_iter()
+            .find(|message| message.role() == "user")
+            .unwrap();
+        assert_eq!(user.display_text(), Some("/ui-action transform"));
+        assert!(matches!(user.as_standard(), Some(Message::User(message))
+            if matches!(&message.content[0], ContentBlock::Text(text) if text.text == "/ui-action literal model input")));
+        session.shutdown().await;
+    }
 
     #[async_trait]
     impl Command for ExpandingCommand {

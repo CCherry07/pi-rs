@@ -13,6 +13,7 @@ const TRUST_REQUIRING_PI_RESOURCES: &[&str] = &[
     "mcp.json",
     "settings.json",
     "extensions",
+    "desktop-extensions",
     "plugins",
     "plugins.json",
     "plugins.lock",

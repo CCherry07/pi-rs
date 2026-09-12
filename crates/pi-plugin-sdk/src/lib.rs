@@ -13,6 +13,8 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 pub use serde_json::Value as PluginOptionsValue;
 
+pub mod desktop;
+
 #[cfg(feature = "provider")]
 pub use pi_core::ProviderPlugin;
 #[cfg(feature = "agent")]

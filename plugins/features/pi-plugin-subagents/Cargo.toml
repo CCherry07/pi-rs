@@ -10,6 +10,7 @@ publish = false
 async-trait.workspace = true
 futures.workspace = true
 pi-core.workspace = true
+pi-plugin-sdk.workspace = true
 pi-plugin-skills.workspace = true
 pi-session.workspace = true
 serde.workspace = true

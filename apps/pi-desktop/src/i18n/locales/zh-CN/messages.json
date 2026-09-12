@@ -110,18 +110,14 @@
     "completed": "已完成",
     "failed": "失败"
   },
-  "subagents": {
-    "chat": "{{agent}} 聊天面板",
-    "conversation": "{{agent}} 的会话",
-    "expandDetails": "展开子 Agent 聊天",
-    "collapseDetails": "收起子 Agent 聊天",
-    "waiting": "正在等待子会话…",
-    "unavailable": "暂时无法展示子会话。",
-    "empty": "子 Agent 暂无消息。",
-    "idle": "空闲",
-    "loadFailed": "子会话加载失败。",
-    "retry": "重试",
-    "tokens": "{{tokens}} token",
+  "sessionView": {
+    "waiting": "正在加载会话…",
+    "unavailable": "暂时无法展示会话。",
+    "loadFailed": "会话加载失败。",
+    "retry": "重试"
+  },
+  "relatedSession": {
+    "empty": "关联会话暂无消息。",
     "contextOrigin": "上下文来源",
     "forkContext": "已继承创建时的父会话上下文",
     "freshContext": "仅接收显式任务，未继承父会话历史",

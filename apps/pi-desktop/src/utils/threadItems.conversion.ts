@@ -42,7 +42,13 @@ function parseUserInputs(inputs: Array<Record<string, unknown>>) {
   return { text: textParts.join(" ").trim(), images };
 }
 
-export function buildConversationItem(
+export function buildConversationItem(item: Record<string, unknown>): ConversationItem | null {
+  const result = convertConversationItem(item);
+  if (result?.kind !== "tool") return result;
+  return { ...result, toolName: typeof item.toolName === "string" ? item.toolName : undefined, data: item };
+}
+
+function convertConversationItem(
   item: Record<string, unknown>,
 ): ConversationItem | null {
   const type = asString(item.type);

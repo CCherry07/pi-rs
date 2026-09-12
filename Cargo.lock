@@ -3574,6 +3574,7 @@ dependencies = [
  "pi-plugin-grep",
  "pi-plugin-ls",
  "pi-plugin-read",
+ "pi-plugin-sdk",
  "pi-plugin-skills",
  "pi-runtime",
  "pi-session",

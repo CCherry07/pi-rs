@@ -222,6 +222,7 @@ module.exports = [
     ignores: [
       "node_modules/**",
       "dist/**",
+      "**/dist/**",
       "release-artifacts/**",
       "src-tauri/**",
       "eslint.config.cjs",

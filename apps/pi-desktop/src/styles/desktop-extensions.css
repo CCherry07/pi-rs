@@ -1,0 +1,77 @@
+.pi-tool-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-card);
+  overflow: hidden;
+  min-width: 0;
+}
+
+.pi-tool-card-header, .pi-tool-card-toggle, .pi-tool-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pi-tool-card-toggle {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-strong);
+  padding: 10px 12px;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.pi-tool-card-toggle:focus-visible, .pi-extension-panel > summary:focus-visible {
+  outline: 2px solid var(--border-accent);
+  outline-offset: -2px;
+}
+
+.pi-tool-card-heading {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.pi-tool-card-title { font-weight: 600; overflow-wrap: anywhere; }
+.pi-tool-card-summary { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.pi-tool-card-actions { padding-right: 12px; }
+.pi-tool-card-chevron { font-size: 20px; line-height: 1; transition: transform 120ms ease; }
+.pi-tool-card.is-expanded > .pi-tool-card-header .pi-tool-card-chevron { transform: rotate(90deg); }
+.pi-tool-card-body { padding: 12px; border-top: 1px solid var(--border-subtle); }
+.pi-tool-card-status { flex-shrink: 0; }
+
+.pi-status-badge { display: inline-flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 12px; }
+.pi-status-badge-dot { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: currentColor; }
+.pi-status-processing { color: var(--status-warning); }
+.pi-status-completed { color: var(--status-success); }
+.pi-status-failed { color: var(--status-error); }
+.pi-status-warning, .pi-status-interrupted { color: var(--status-warning); }
+
+.pi-extension-panels { display: grid; gap: 8px; margin: 8px 0; }
+.pi-extension-panel { border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+.pi-extension-panel > summary { cursor: pointer; color: var(--text-strong); font-size: 13px; }
+.pi-extension-panel[open] > summary { margin-bottom: 12px; }
+
+.pi-inline-command { flex: 1 1 15rem; min-width: 0; }
+.pi-inline-command-form { display: flex; gap: 0.5rem; }
+.pi-inline-command-form input { min-width: 0; width: 100%; flex: 1; }
+.pi-inline-command-form input, .pi-inline-command-form button {
+  font: inherit;
+  color: inherit;
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.4rem;
+  background: transparent;
+  padding: 0.4rem 0.6rem;
+}
+.pi-inline-command-form button { cursor: pointer; white-space: nowrap; }
+.pi-inline-command-form button:disabled { opacity: 0.45; cursor: default; }
+.pi-inline-command-form :focus-visible { outline: 2px solid var(--text-accent); outline-offset: 2px; }
+.pi-inline-command-error { color: var(--text-error); margin: 0.5rem 0 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pi-tool-card-chevron { transition: none; }
+}

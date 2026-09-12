@@ -12,7 +12,6 @@ use pi_session::{
     IsolatedSessionObservation, JsonlSessionRepo, MultiSessionManager, PiSession, SessionDocument,
     SessionEntry, SessionLog,
 };
-use serde_json::Value;
 
 #[derive(Clone)]
 pub(crate) struct SessionStore {
@@ -583,16 +582,58 @@ impl SessionStore {
                     owner_path.display()
                 )
             })?;
-        let (agent, nickname) = owner
-            .as_ref()
-            .and_then(|owner| subagent_metadata_for_child(owner, id))
-            .unwrap_or_else(|| ("agent".to_string(), None));
         Ok(StoredIsolatedSession {
             document,
             parent_thread_id,
-            agent,
-            nickname,
+            agent: "agent".to_string(),
+            nickname: None,
         })
+    }
+
+    /// Read the current branch without creating or promoting a managed session.
+    pub(crate) fn document(&self, id: &str) -> Result<SessionDocument, String> {
+        if let Some(observed) = self.observed_isolated(id) {
+            return observed
+                .observation
+                .document()
+                .map_err(|error| error.to_string());
+        }
+        if let Some((_, session)) = self.handle(id) {
+            return session
+                .current()
+                .log()
+                .load()
+                .map_err(|error| error.to_string());
+        }
+        if let Ok(stored) = self.read_isolated(id) {
+            return Ok(stored.document);
+        }
+        SessionLog::read(self.find_path(id)?).map_err(|error| error.to_string())
+    }
+
+    /// Validate a view's explicit owner hint against durable ancestry or live
+    /// host observations. Business payloads cannot manufacture a parent link.
+    pub(crate) fn validate_observation_owner(
+        &self,
+        scope: &str,
+        owner: &str,
+    ) -> Result<(), String> {
+        let mut current = owner.to_string();
+        let mut visited = std::collections::HashSet::new();
+        for _ in 0..64 {
+            if current == scope {
+                return Ok(());
+            }
+            if !visited.insert(current.clone()) {
+                break;
+            }
+            current = if let Some(observed) = self.observed_isolated(&current) {
+                observed.parent_thread_id
+            } else {
+                self.read_isolated(&current)?.parent_thread_id
+            };
+        }
+        Err("Related session owner is outside the current session tree".into())
     }
 
     pub(crate) fn list(&self, cwd: &Path) -> Result<Vec<SessionSummary>, String> {
@@ -707,58 +748,6 @@ fn isolated_owner_path(path: &Path) -> Option<PathBuf> {
         return None;
     }
     Some(isolated.parent()?.with_extension("jsonl"))
-}
-
-fn subagent_metadata_for_child(
-    document: &SessionDocument,
-    child_id: &str,
-) -> Option<(String, Option<String>)> {
-    let mut pending = HashMap::<String, Value>::new();
-    for record in &document.entries {
-        let SessionEntry::Message(entry) = &record.entry else {
-            continue;
-        };
-        let Some(message) = entry.message.as_standard() else {
-            continue;
-        };
-        match message {
-            Message::Assistant(message) => {
-                for block in &message.content {
-                    let ContentBlock::ToolCall(call) = block else {
-                        continue;
-                    };
-                    if call.name == "spawn_agent" {
-                        pending.insert(call.id.to_string(), call.arguments.clone());
-                    }
-                }
-            }
-            Message::ToolResult(result) => {
-                let matches_child = result
-                    .details
-                    .as_ref()
-                    .and_then(|details| details.get("sessionId"))
-                    .and_then(Value::as_str)
-                    == Some(child_id);
-                if !matches_child {
-                    continue;
-                }
-                return result
-                    .details
-                    .as_ref()
-                    .and_then(|details| details.get("agent"))
-                    .and_then(Value::as_str)
-                    .or_else(|| {
-                        pending
-                            .get(result.tool_call_id.as_str())
-                            .and_then(|args| args.get("agent"))
-                            .and_then(Value::as_str)
-                    })
-                    .map(|agent| (agent.to_string(), None));
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 fn move_session_with_companion(

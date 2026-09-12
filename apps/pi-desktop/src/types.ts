@@ -123,6 +123,8 @@ export type ConversationItem =
   | {
       id: string;
       kind: "tool";
+      toolName?: string;
+      data?: Readonly<Record<string, unknown>>;
       toolType: string;
       title: string;
       detail: string;

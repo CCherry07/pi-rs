@@ -2,6 +2,7 @@
 
 mod catalog;
 mod config;
+mod desktop;
 mod fork_context;
 mod launch_context;
 mod launch_plan;
@@ -91,6 +92,7 @@ impl AgentPlugin for SubagentsPlugin {
                 kind,
             )))?;
         }
+        desktop::register_commands(context, &self.runtime)?;
         Ok(())
     }
 
@@ -102,7 +104,7 @@ impl AgentPlugin for SubagentsPlugin {
         let session_id = context.session.id()?;
         let active_tools = context.session.active_tools()?;
         self.runtime
-            .bind_session(session_id.clone(), context.session.handle_for_adapter());
+            .bind_session(session_id.clone(), context.session.clone());
         let assignment =
             if let Some((agent_id, profile)) = self.runtime.assignment_for_session(&session_id) {
                 Some((agent_id, profile))

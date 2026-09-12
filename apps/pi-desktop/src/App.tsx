@@ -13,6 +13,7 @@ import "./styles/home.css";
 import "./styles/workspace-home.css";
 import "./styles/main.css";
 import "./styles/messages.css";
+import "./styles/desktop-extensions.css";
 import "./styles/error-toasts.css";
 import "./styles/update-toasts.css";
 import "./styles/composer.css";

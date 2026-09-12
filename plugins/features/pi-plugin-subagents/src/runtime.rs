@@ -7,7 +7,7 @@ use futures::FutureExt;
 use pi_core::{
     ContentBlock, CustomMessageContent, CustomMessageInput, IsolatedMessageDelivery,
     IsolatedSessionHandle, IsolatedSessionOutcome, IsolatedSessionTurnHandle, PluginContextHandle,
-    SendMessageOptions, ToolResult, Usage,
+    SendMessageOptions, SessionContext, ToolResult, Usage,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -37,10 +37,12 @@ impl WeakSubagentRuntime {
 }
 
 struct RuntimeInner {
+    runtime_id: String,
     limits: RuntimeLimits,
     state: Mutex<RuntimeState>,
     changed: watch::Sender<u64>,
     monitors: Mutex<HashMap<String, (String, Arc<MonitorTask>)>>,
+    desktop: Mutex<crate::desktop::DesktopState>,
 }
 
 struct MonitorTask {
@@ -73,12 +75,17 @@ struct RuntimeLimits {
 
 #[derive(Default)]
 struct RuntimeState {
-    sessions: HashMap<String, PluginContextHandle>,
+    sessions: HashMap<String, OwnerSession>,
     agents: HashMap<String, AgentRecord>,
     assignments: HashMap<String, String>,
     roots: HashMap<String, RootBudget>,
     inboxes: HashMap<String, Vec<AgentMessage>>,
     waiters: HashMap<String, usize>,
+}
+
+#[derive(Clone)]
+struct OwnerSession {
+    session: SessionContext,
 }
 
 #[derive(Default)]
@@ -95,6 +102,7 @@ struct AgentRecord {
     depth: usize,
     max_depth: usize,
     profile: SubagentProfile,
+    task: Option<String>,
     handle: Option<IsolatedSessionHandle>,
     current_turn: Option<IsolatedSessionTurnHandle>,
     state: AgentState,
@@ -251,10 +259,12 @@ impl SubagentRuntime {
     fn with_limits(limits: RuntimeLimits) -> Self {
         Self {
             inner: Arc::new(RuntimeInner {
+                runtime_id: Uuid::now_v7().to_string(),
                 limits,
                 state: Mutex::new(RuntimeState::default()),
                 changed: watch::channel(0).0,
                 monitors: Mutex::new(HashMap::new()),
+                desktop: Mutex::new(crate::desktop::DesktopState::default()),
             }),
         }
     }
@@ -267,6 +277,7 @@ impl SubagentRuntime {
     }
 
     fn wake(&self) {
+        self.publish_desktop();
         self.inner
             .changed
             .send_modify(|revision| *revision = revision.wrapping_add(1));
@@ -280,9 +291,77 @@ impl SubagentRuntime {
         self.inner.limits.max_depth
     }
 
-    pub(crate) fn bind_session(&self, id: String, handle: PluginContextHandle) {
-        self.lock().sessions.insert(id, handle);
+    pub(crate) fn bind_session(&self, id: String, session: SessionContext) {
+        let needs_history = self
+            .inner
+            .desktop
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .needs_restore(&id);
+        let history = if needs_history {
+            session
+                .snapshot()
+                .map(|snapshot| {
+                    snapshot
+                        .branch()
+                        .iter()
+                        .map(|entry| entry.raw().clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.inner
+            .desktop
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .restore(&id, history);
+        self.lock().sessions.insert(id, OwnerSession { session });
         self.wake();
+    }
+
+    pub(crate) fn suspend_desktop(&self, id: &str) {
+        // Serializes with publication so shutdown cannot race a captured old context.
+        self.inner
+            .desktop
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .suspend(id);
+    }
+
+    pub(crate) fn set_task(&self, id: &str, task: &str) {
+        if let Some(agent) = self.lock().agents.get_mut(id) {
+            agent.task = Some(task.to_string());
+        }
+        self.wake();
+    }
+
+    fn publish_desktop(&self) {
+        let mut desktop = self
+            .inner
+            .desktop
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let owners = {
+            let state = self.lock();
+            state.sessions.iter().map(|(owner, registered)| {
+                let agents = state.agents.values().filter(|agent| agent.parent_session_id == *owner)
+                    .map(|agent| (agent.id.clone(), json!({
+                        "agentId":agent.id,"agent":agent.profile.name,"task":agent.task,
+                        "state":agent.state,"updatedAt":agent.updated_at,
+                        "session":{"sessionId":agent.child_session_id,
+                            "isolatedSessionId":agent.handle.as_ref().map(|handle| handle.id().as_str()),
+                            "ownerSessionId":owner},
+                        "totalTokens":agent.usage.total_tokens
+                    }))).collect();
+                (owner.clone(), registered.session.clone(), agents)
+            }).collect::<Vec<_>>()
+        };
+        // append_entry can acquire the session journal lock; never keep the runtime lock here.
+        for (owner, session, agents) in owners {
+            desktop.publish(&self.inner.runtime_id, &owner, &session, agents);
+        }
     }
 
     pub(crate) fn begin_launch(
@@ -357,6 +436,7 @@ impl SubagentRuntime {
                 depth,
                 max_depth,
                 profile,
+                task: None,
                 handle: None,
                 current_turn: None,
                 state: AgentState::Starting,
@@ -654,7 +734,10 @@ impl SubagentRuntime {
             (
                 agent.id.clone(),
                 agent.parent_session_id.clone(),
-                state.sessions.get(&agent.parent_session_id).cloned(),
+                state
+                    .sessions
+                    .get(&agent.parent_session_id)
+                    .map(|registered| registered.session.handle_for_adapter()),
                 state
                     .waiters
                     .get(&agent.parent_session_id)
@@ -874,6 +957,11 @@ impl SubagentRuntime {
             state.roots.remove(session_id);
         }
         drop(state);
+        self.inner
+            .desktop
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .forget(session_id);
         self.wake();
     }
 
@@ -915,18 +1003,22 @@ impl SubagentRuntime {
                 usage: usage.clone(),
             });
             let owner = agent.parent_session_id.clone();
-            (state.sessions.get(&owner).cloned(), usage)
+            (
+                state
+                    .sessions
+                    .get(&owner)
+                    .map(|registered| registered.session.clone()),
+                usage,
+            )
         };
         self.wake();
         if usage != Usage::default()
-            && let Some(handle) = parent_handle.as_ref()
+            && let Some(session) = parent_handle.as_ref()
         {
-            let _ = handle.access_for_adapter().and_then(|access| {
-                access.record_usage(
-                    usage,
-                    Some(json!({"source":"agent","agentId":id,"turnId":turn_id})),
-                )
-            });
+            let _ = session.record_usage(
+                usage,
+                Some(json!({"source":"agent","agentId":id,"turnId":turn_id})),
+            );
         }
     }
 }

@@ -21,6 +21,8 @@ export type TerminalExitEvent = {
 
 type SubscriptionOptions = {
   onError?: (error: unknown) => void;
+  /** Called after the native listener is installed, before a consumer hydrates. */
+  onReady?: () => void;
 };
 
 type Listener<T> = (payload: T) => void;
@@ -75,6 +77,9 @@ function createEventHub<T>(eventName: string) {
   ): Unsubscribe => {
     listeners.add(onEvent);
     start(options);
+    const ready = () => { if (listeners.has(onEvent)) options?.onReady?.(); };
+    if (unlisten) ready();
+    else if (listenPromise) void listenPromise.then(ready).catch(() => {});
     return () => {
       listeners.delete(onEvent);
       if (listeners.size === 0) {

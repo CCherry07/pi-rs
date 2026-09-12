@@ -118,6 +118,10 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
+            pi_runtime::desktop_extensions::pi_desktop_extensions,
+            pi_runtime::desktop_commands::pi_desktop_command,
+            pi_runtime::desktop_views::pi_observe_desktop_session,
+            pi_runtime::desktop_views::pi_get_desktop_widgets,
             settings::get_app_settings,
             settings::update_app_settings,
             files::file_read,
