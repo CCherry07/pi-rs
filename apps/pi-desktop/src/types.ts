@@ -126,6 +126,7 @@ export type ConversationItem =
       toolType: string;
       title: string;
       detail: string;
+      images?: string[];
       status?: string;
       output?: string;
       durationMs?: number | null;

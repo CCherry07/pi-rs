@@ -299,8 +299,30 @@ impl SessionStore {
             .ok_or_else(|| format!("unknown Pi session: {id}"))
     }
 
-    pub(crate) async fn model_catalog(&self, cwd: &Path) -> Result<SessionModelCatalog, String> {
-        let session = self.prepare_thread(cwd).await?;
+    pub(crate) async fn model_catalog(
+        &self,
+        cwd: &Path,
+        thread_id: Option<&str>,
+    ) -> Result<SessionModelCatalog, String> {
+        let session = match thread_id {
+            Some(id) => {
+                // Wait for an already requested resume, without opening a session
+                // merely to populate a model selector.
+                let _open = self.open_gate.lock().await;
+                let (_, handle) = self
+                    .handle(id)
+                    .ok_or_else(|| format!("Pi session is not open: {id}"))?;
+                let session = handle.current();
+                let cwd = std::fs::canonicalize(cwd).map_err(|error| error.to_string())?;
+                let session_cwd = std::fs::canonicalize(session.runtime().cwd())
+                    .map_err(|error| error.to_string())?;
+                if session.log().header().id != id || session_cwd != cwd {
+                    return Err("Selected thread does not belong to the selected workspace".into());
+                }
+                session
+            }
+            None => self.prepare_thread(cwd).await?,
+        };
         let state = session.runtime().agent().state();
         let catalog = SessionModelCatalog {
             models: session.runtime().available_models(),

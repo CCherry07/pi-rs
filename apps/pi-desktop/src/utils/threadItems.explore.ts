@@ -64,7 +64,9 @@ export function normalizeItem(item: ConversationItem): ConversationItem {
     return {
       ...item,
       title: truncateText(item.title, 200),
-      detail: truncateText(item.detail, 2000),
+      detail: item.toolType === "customMessage"
+        ? truncateText(item.detail)
+        : truncateText(item.detail, 2000),
       output: item.output
         ? truncateToolText(item.toolType, item.output)
         : item.output,

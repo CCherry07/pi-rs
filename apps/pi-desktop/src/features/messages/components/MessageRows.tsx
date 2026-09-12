@@ -667,6 +667,46 @@ export const UserInputRow = memo(function UserInputRow({
   );
 });
 
+function CustomMessageRow({
+  item,
+  showMessageFilePath,
+  workspacePath,
+  onOpenFileLink,
+  onOpenFileLinkMenu,
+  onOpenThreadLink,
+}: Pick<ToolRowProps, "item"> & MarkdownFileLinkProps) {
+  const { t } = useTranslation("messages");
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const images = (item.images ?? []).flatMap((image, index) => {
+    const src = normalizeMessageImageSrc(image);
+    return src ? [{ src, label: t("images.imageNumber", { number: index + 1 }) }] : [];
+  });
+  return (
+    <div className="tool-inline tool-inline-row" role="status">
+      <div className="tool-inline-content">
+        <span className="tool-inline-label">{item.title}</span>
+        {images.length > 0 && (
+          <MessageImageGrid images={images} onOpen={setLightboxIndex} hasText={Boolean(item.detail)} />
+        )}
+        {item.detail && (
+          <Markdown
+            value={item.detail}
+            className="tool-inline-output markdown"
+            showFilePath={showMessageFilePath}
+            workspacePath={workspacePath}
+            onOpenFileLink={onOpenFileLink}
+            onOpenFileLinkMenu={onOpenFileLinkMenu}
+            onOpenThreadLink={onOpenThreadLink}
+          />
+        )}
+        {lightboxIndex !== null && images.length > 0 && (
+          <ImageLightbox images={images} activeIndex={lightboxIndex} onClose={() => setLightboxIndex(null)} />
+        )}
+      </div>
+    </div>
+  );
+}
+
 export const ToolRow = memo(function ToolRow({
   item,
   isExpanded,
@@ -761,6 +801,19 @@ export const ToolRow = memo(function ToolRow({
     },
     [item.id, summary.output, t],
   );
+
+  if (item.toolType === "customMessage") {
+    return (
+      <CustomMessageRow
+        item={item}
+        showMessageFilePath={showMessageFilePath}
+        workspacePath={workspacePath}
+        onOpenFileLink={onOpenFileLink}
+        onOpenFileLinkMenu={onOpenFileLinkMenu}
+        onOpenThreadLink={onOpenThreadLink}
+      />
+    );
+  }
 
   if (item.toolType === "notice") {
     return (

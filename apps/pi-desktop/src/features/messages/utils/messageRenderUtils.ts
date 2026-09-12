@@ -241,7 +241,7 @@ export function normalizeMessageImageSrc(path: string) {
 
 function isToolGroupItem(item: ConversationItem): item is ToolGroupItem {
   return (
-    item.kind === "tool" ||
+    (item.kind === "tool" && item.toolType !== "customMessage") ||
     item.kind === "reasoning" ||
     item.kind === "explore" ||
     item.kind === "userInput"

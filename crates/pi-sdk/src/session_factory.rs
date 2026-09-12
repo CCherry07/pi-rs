@@ -137,6 +137,8 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
     ) -> Result<PreparedAgentSession, SessionError> {
         let generation_overlay = request.generation_overlay;
         let initial_state = request.initial_state;
+        let reloading = request.start_event.reason == pi_session::SessionStartReason::Reload;
+        let mut reload_model = None;
         let (path, create, cwd, reused_log, parent_session, session_id) = match request.target {
             AgentSessionRuntimeTarget::Create {
                 cwd,
@@ -146,10 +148,16 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
             } => (path, true, cwd, None, parent_session, session_id),
             AgentSessionRuntimeTarget::Open { path } => {
                 let (_, document) = pi_session::SessionLog::open(&path)?;
+                if reloading {
+                    reload_model = document.context()?.model;
+                }
                 (path, false, document.header.cwd, None, None, None)
             }
             AgentSessionRuntimeTarget::Reuse { log } => {
                 let document = log.load()?;
+                if reloading {
+                    reload_model = document.context()?.model;
+                }
                 (
                     log.path().to_path_buf(),
                     false,
@@ -163,6 +171,15 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
         let mut dynamic_provider_preparation = self.dynamic_providers.begin_preparation();
         let mut config = self.config.clone();
         config.cwd = cwd;
+        if reloading {
+            // Startup CLI selections must not overwrite later model changes.
+            // Treat the settled live selection as explicit during reload so
+            // intentionally unlisted provider models remain selectable too.
+            config.requested_provider = reload_model
+                .as_ref()
+                .map(|model| model.provider.to_string());
+            config.model = reload_model.map(|model| model.model_id.to_string());
+        }
         let project_trusted = self
             .project_trust
             .resolve(&config.cwd)
@@ -357,6 +374,16 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
                 base_delay_ms: config.runtime_settings.retry.base_delay_ms,
             })
             .initial_model(initial_model_request(&config))
+            .additional_active_tools(
+                runtime
+                    .active_tools()
+                    .into_iter()
+                    .filter(|name| {
+                        runtime.execution_origin() == pi_core::SessionExecutionOrigin::User
+                            && !BUILTIN_TOOL_NAMES.contains(&name.as_str())
+                    })
+                    .collect(),
+            )
             .runtime_inventory(SessionRuntimeInventory::new(
                 js_extensions,
                 configured_native_plugins,

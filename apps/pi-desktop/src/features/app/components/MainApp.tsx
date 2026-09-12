@@ -70,7 +70,7 @@ import {
 } from "@app/orchestration/useWorkspaceOrchestration";
 import { useAppShellOrchestration } from "@app/orchestration/useLayoutOrchestration";
 import { subscribeTrayOpenThread } from "@services/events";
-import { configureThread } from "@services/tauri";
+import { useThreadModelConfiguration } from "@app/hooks/useThreadModelConfiguration";
 
 const SettingsView = lazy(() =>
   import("@settings/components/SettingsView").then((module) => ({
@@ -248,9 +248,11 @@ export default function MainApp() {
     reasoningSupported,
     reasoningOptions,
     selectedEffort,
-    setSelectedEffort
+    setSelectedEffort,
+    refreshModels,
+    selectCatalog,
+    isCatalogCurrent,
   } = useModels({
-    activeWorkspace,
     onDebug: addDebugEntry,
     preferredModelId,
     preferredEffort,
@@ -389,36 +391,32 @@ export default function MainApp() {
       : appSettings.chatHistoryScrollbackItems,
     customPrompts: prompts,
     onMessageActivity: handleThreadMessageActivity,
+    onDraftReloaded: refreshModels,
     threadSortKey: threadListSortKey,
     onThreadRunMetadataDetected: handleThreadRunMetadataDetected,
   });
+  const modelSessionLoading = Boolean(
+    activeThreadId && threadResumeLoadingById[activeThreadId],
+  );
+  useEffect(() => {
+    selectCatalog(
+      modelSessionLoading ? null : activeWorkspace?.id ?? null,
+      activeThreadId,
+    );
+  }, [activeWorkspace?.id, activeThreadId, modelSessionLoading, selectCatalog]);
+
   const skills = runtimeCommands.filter((command) => command.name.startsWith("skill:"))
     .map((command) => ({ name: command.name.slice(6), description: command.description, path: "" }));
 
-  useEffect(() => {
-    const workspaceId = activeWorkspace?.id ?? null;
-    if (!workspaceId || !activeThreadId || (!resolvedModel && !resolvedEffort)) {
-      return;
-    }
-    void configureThread(workspaceId, activeThreadId, {
-      model: resolvedModel,
-      effort: resolvedEffort,
-    }).catch((error) => {
-      addDebugEntry({
-        id: `${Date.now()}-pi-thread-configuration-error`,
-        timestamp: Date.now(),
-        source: "error",
-        label: "pi/thread configuration error",
-        payload: error instanceof Error ? error.message : String(error),
-      });
-    });
-  }, [
-    activeThreadId,
-    activeWorkspace?.id,
-    addDebugEntry,
-    resolvedEffort,
-    resolvedModel,
-  ]);
+  useThreadModelConfiguration({
+    workspaceId: activeWorkspace?.id ?? null,
+    threadId: activeThreadId,
+    model: resolvedModel,
+    effort: resolvedEffort,
+    isCatalogCurrent,
+    isSessionLoading: modelSessionLoading,
+    onDebug: addDebugEntry,
+  });
   const { mobileThreadRefreshLoading, handleMobileThreadRefresh } =
     useMainAppMobileThreadRefresh({
       activeWorkspace,

@@ -60,7 +60,10 @@ it("Settings reload rejects failure without falsely replacing the active catalog
 });
 
 it("Settings reload updates the existing prepared draft catalog without creating a visible thread", async () => {
-  const { result } = renderHook(() => useThreads({ activeWorkspace: workspace }));
+  const onDraftReloaded = vi.fn();
+  const { result } = renderHook(() =>
+    useThreads({ activeWorkspace: workspace, onDraftReloaded }),
+  );
   await waitFor(() => expect(result.current.runtimeCommands).toEqual([command]));
   const commands = [{ name: "reloaded", description: "Updated draft" }];
   vi.mocked(reloadThread).mockResolvedValue({ thread: { id: "draft", commands } });
@@ -69,6 +72,7 @@ it("Settings reload updates the existing prepared draft catalog without creating
   expect(result.current.runtimeCommands).toEqual(commands);
   expect(result.current.activeThreadId).toBeNull();
   expect(startThread).not.toHaveBeenCalled();
+  expect(onDraftReloaded).toHaveBeenCalledExactlyOnceWith(workspace.id, null);
 });
 
 it("rejects a retained Settings reload callback after the selected workspace changes", async () => {

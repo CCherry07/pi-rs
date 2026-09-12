@@ -25,7 +25,7 @@ describe("Chat overflow layout", () => {
     );
   });
 
-  it("contains the embedded chat viewport without inheriting the main composer overlay", async () => {
+  it("lets an embedded chat hand vertical scrolling back to its parent at the boundary", async () => {
     const { readFileSync } = await vi.importActual<{
       readFileSync(path: URL, encoding: "utf8"): string;
     }>("node:fs");
@@ -33,7 +33,8 @@ describe("Chat overflow layout", () => {
     const embedded = ruleBody(stylesheet, ".messages.messages-embedded");
     expect(embedded).toMatch(/max-height:\s*min\(/);
     expect(embedded).toMatch(/overflow:\s*auto\s*;/);
-    expect(embedded).toMatch(/overscroll-behavior:\s*contain\s*;/);
+    expect(embedded).toMatch(/overscroll-behavior-y:\s*auto\s*;/);
+    expect(embedded).not.toMatch(/overscroll-behavior:\s*contain\s*;/);
     expect(embedded).toMatch(/--composer-overlay-height:\s*0px\s*;/);
     expect(embedded).toMatch(/flex:\s*none\s*;/);
   });

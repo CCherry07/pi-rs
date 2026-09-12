@@ -505,10 +505,15 @@ impl AgentSessionRuntime {
         }
 
         let previous_session_file = current.log().path().to_path_buf();
+        let target = if comparable_path(&previous_session_file) == comparable_path(&path) {
+            AgentSessionRuntimeTarget::reuse_log(current.log().clone())
+        } else {
+            AgentSessionRuntimeTarget::open(&path)
+        };
         self.replace_current(
             current,
             AgentSessionRuntimeRequest {
-                target: AgentSessionRuntimeTarget::open(&path),
+                target,
                 start_event: SessionStartEvent {
                     reason: SessionStartReason::Resume,
                     previous_session_file: Some(previous_session_file),
@@ -651,12 +656,10 @@ impl AgentSessionRuntime {
         let _transition = self.transition_gate.lock().await;
         self.ensure_open()?;
         let current = self.session();
-        let path = current.log().path().to_path_buf();
-        let target = if current.log().is_materialized() {
-            AgentSessionRuntimeTarget::open(&path)
-        } else {
-            AgentSessionRuntimeTarget::reuse_log(current.log().clone())
-        };
+        // Both generations refer to the same conversation. Sharing its journal
+        // includes final shutdown-hook writes and preserves one mutation sequence,
+        // including when the file has already materialized.
+        let target = AgentSessionRuntimeTarget::reuse_log(current.log().clone());
         self.replace_current(
             current,
             AgentSessionRuntimeRequest {

@@ -55,6 +55,7 @@ type UseThreadsOptions = {
   chatHistoryScrollbackItems?: number | null;
   customPrompts?: CustomPromptOption[];
   onMessageActivity?: () => void;
+  onDraftReloaded?: (workspaceId: string, threadId: null) => void;
   threadSortKey?: ThreadListSortKey;
   onThreadRunMetadataDetected?: (
     workspaceId: string,
@@ -80,6 +81,7 @@ export function useThreads({
   chatHistoryScrollbackItems,
   customPrompts = [],
   onMessageActivity,
+  onDraftReloaded,
   threadSortKey = "updated_at",
   onThreadRunMetadataDetected,
 }: UseThreadsOptions) {
@@ -191,12 +193,19 @@ export function useThreads({
         await reloadThreadService(activeWorkspaceId, activeThreadId);
       } else {
         await reloadWorkspaceDraft();
+        onDraftReloaded?.(activeWorkspaceId, null);
       }
     } finally {
       reloadInFlight.current = false;
       safeMessageActivity();
     }
-  }, [activeThreadId, activeWorkspaceId, reloadWorkspaceDraft, safeMessageActivity]);
+  }, [
+    activeThreadId,
+    activeWorkspaceId,
+    onDraftReloaded,
+    reloadWorkspaceDraft,
+    safeMessageActivity,
+  ]);
 
   const startReload = useCallback(async () => {
     if (!activeWorkspaceId || reloadInFlight.current ||

@@ -261,6 +261,17 @@ catalog event listener is needed. This is a deliberate Rust Desktop observation 
 wire/schema change: intermediate generations may be coalesced, and transient plugin notices sent
 before the new event subscription is installed are not replayed. Displayed notices survive a
 same-ID reload. Failed preparation publishes no change and leaves the old subscription intact.
+Historical tool calls/results use their persisted names, arguments and result metadata even when the
+original plugin is unavailable. Displayed custom plugin messages retain their type label and use a
+generic Markdown/image presentation independent of plugin availability; hidden custom messages stay
+hidden. These records are never treated as newly submitted user messages or re-executed tools.
+The model selector reads the explicitly selected thread's existing generation, or the managed
+workspace draft when no thread is selected. It refreshes after `thread/replaced` and explicit draft
+reloads; request/context checks discard stale responses after selection or generation changes.
+Catalog reads wait for an already requested resume without opening another session.
+Model configuration writes require a successfully loaded catalog for the selected workspace and
+thread. Selected-session refresh treats the native current model as authoritative, so a previous
+thread's preferences or a stale response cannot undo reload's preserved model selection.
 There is no generation FIFO, activation observer bookkeeping, or detached replacement commit
 introduced for Desktop. Dropping the managed handle closes its watch and stops the forwarder;
 no liveness polling is needed. Snapshot revisions delimit subsequent events so history captured
@@ -343,6 +354,18 @@ configuration files or plugin ID conventions.
 `reload()` prepares the complete next generation off to the side, validates it against the current provider and active-tool selection, waits for the active run to settle, and then swaps one `Arc<AgentRuntime>`. A failed factory, duplicate registration, or incompatible provider/tool selection leaves the prior generation untouched. Each agent run captures one generation before invoking hooks or resolving providers and tools, so a run cannot observe a mixture of old and new plugin state. Hook-interest routes are rebuilt with the candidate generation and never mutated after publication.
 
 Use `agent_plugin_factory` / `try_agent_plugin_factory` for reloadable agent plugins and `provider_plugin_factory` / `try_provider_plugin_factory` for providers, catalogs, routing overlays, and request hooks. Their pinned `agent_plugin` / `provider_plugin` and `*_arc` forms intentionally reuse an instance, primarily for stateless plugins and externally observed fixtures. `pi-plugin-loader` adapts version-locked dynamic libraries through the existing type-erased fallible factory seams and never mutates live registries in place.
+
+Whole-session product reload preserves the current selected model, including explicitly selected
+models absent from the catalog, instead of reapplying startup CLI model arguments. Restored tool
+selections are intersected with the candidate registry. `pi-sdk` supplies non-built-in tools to
+activate for user sessions through `AgentSessionOptions::additional_active_tools`; `pi-session`
+only merges and deduplicates these names. Managed subagents receive no such additions, preserving
+their active-tool ceiling. This follows current Pi's reload extension-tool activation while keeping
+native and MCP registration behind the same generic seam. Disabled built-in choices remain intact.
+After all loaded-session initialization checks pass, resolved model/thinking overrides and tool
+changes are appended together using existing v4 configuration entries. This Rust persistence
+adaptation keeps subsequent reload and context replay consistent without materializing an unsaved
+session. Ordinary resume still gives an explicit model request priority over the saved model.
 
 Product wiring installs agent, provider, and session plugins through their three independent factory
 seams. Each `PiSession` uses `AgentSessionRuntime` for cross-system atomicity: its factory prepares
@@ -1204,6 +1227,11 @@ Startup followed by quit, interruption before that event, and shell-only use the
 empty session in the resume list. Existing/opened logs remain immediately durable, and an unsaved
 log cannot be forked. Whole-session reload reuses the in-memory log so reloading plugins and
 resources does not accidentally create or discard an unsaved session.
+The same shared `SessionLog` is reused for already-materialized sessions: candidate preparation and
+old-plugin shutdown must share one mutation sequence. Final shutdown checkpoints and usage records
+therefore remain visible to the next generation instead of being overwritten by an independently
+opened journal with an older sequence. Resuming the already-active file, including a canonical path
+alias, follows the same ownership rule.
 
 Command and input-hook transformations preserve two text views. The effective text remains the
 standard user-message content used by Agent, provider projection, replay, and recovery. When it
@@ -1284,6 +1312,10 @@ plugin-registration surface. `AgentSessionOptions` independently combines it wit
 generation is prepared before the old generation receives `session_shutdown(reload)`; a load
 failure therefore leaves the old generation running. A successful reload commits the new
 generation and emits `session_start(reload)`.
+During shutdown, ordinary session mutations are blocked while still-valid plugin contexts may
+append their final custom state entries and usage. Context retirement happens after shutdown hooks,
+including on cancellation; repeated shutdown cannot run those hooks again. This matches current
+Pi's shutdown-before-extension-invalidation order while retaining Rust's transactional preparation.
 
 Plugin-context scalar and point queries use narrow reads owned by `Agent`, `AgentSession`, and
 `SessionLog`: current model/thinking/running state does not clone the transcript, activity checks do

@@ -3702,6 +3702,7 @@ name = "pi-sdk"
 version = "0.7.0"
 dependencies = [
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "fs2",
  "pi-agent",

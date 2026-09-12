@@ -45,6 +45,7 @@ pub const RESOURCE_DIAGNOSTIC_CUSTOM_TYPE: &str = "pi.resource_diagnostic";
 const SESSION_OPEN: u8 = 0;
 const SESSION_TRANSITIONING: u8 = 1;
 const SESSION_CLOSED: u8 = 2;
+const SESSION_SHUTTING_DOWN: u8 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -232,6 +233,10 @@ pub struct AgentSessionOptions {
     pub compaction: CompactionSettings,
     /// Product-level model request to merge with a resumed session model.
     pub initial_model: crate::InitialModelRequest,
+    /// Generation-local tools the product enables when restoring a session.
+    /// The product owns this policy; session replay only reconciles names
+    /// against the new registry and persists the resulting selection.
+    pub additional_active_tools: Vec<String>,
     /// Automatic compaction is enabled only when the model context window is
     /// known. Manual compaction remains available without this value.
     pub context_window: Option<u64>,
@@ -292,6 +297,11 @@ impl AgentSessionOptions {
 
     pub fn initial_model(mut self, request: crate::InitialModelRequest) -> Self {
         self.initial_model = request;
+        self
+    }
+
+    pub fn additional_active_tools(mut self, tools: Vec<String>) -> Self {
+        self.additional_active_tools = tools;
         self
     }
 
@@ -451,6 +461,18 @@ pub struct PreparedAgentSession {
 
 pub(crate) struct AgentSessionTransitionGuard {
     lifecycle_state: Arc<AtomicU8>,
+}
+
+struct AgentSessionShutdownGuard<'a>(&'a AgentSession);
+
+impl Drop for AgentSessionShutdownGuard<'_> {
+    fn drop(&mut self) {
+        self.0.usage_recording_open.store(false, Ordering::Release);
+        self.0
+            .lifecycle_state
+            .store(SESSION_CLOSED, Ordering::Release);
+        self.0.runtime.retire_plugin_context();
+    }
 }
 
 impl Drop for AgentSessionTransitionGuard {
@@ -739,7 +761,14 @@ impl AgentSession {
                 .plugins
                 .build_with_context(identity, runtime.context_parts())?,
         );
-        let context = document.context_with_options(&options.context)?;
+        let mut context = document.context_with_options(&options.context)?;
+        let stored_model = context.model.clone();
+        let stored_thinking_level = context.thinking_level.clone();
+        let stored_active_tools = context.active_tool_names.clone();
+        context
+            .active_tool_names
+            .get_or_insert_with(|| runtime.active_tools())
+            .extend(options.additional_active_tools);
         restore_runtime_context_with_request(
             &runtime,
             &context,
@@ -780,6 +809,31 @@ impl AgentSession {
         });
         Self::install_session_turn_control(&session)?;
         session.attach_agent_bridge();
+        // Commit resolved configuration together after all initialization checks.
+        // Replay must retain explicit resume overrides and new generation tools.
+        let state = session.runtime.agent().state();
+        let mut configuration = Vec::new();
+        let model = SessionModel {
+            provider: state.provider_id.clone(),
+            model_id: state.model_id.clone(),
+        };
+        if stored_model.as_ref() != Some(&model) {
+            configuration.push(SessionEntry::ModelChange(ModelChangeEntry {
+                provider: state.provider_id,
+                model_id: state.model_id,
+            }));
+        }
+        if stored_thinking_level != state.thinking_level.as_str() {
+            configuration.push(SessionEntry::ThinkingLevelChange(ThinkingLevelEntry {
+                thinking_level: state.thinking_level.as_str().to_string(),
+            }));
+        }
+        if stored_active_tools.as_ref() != Some(&state.active_tools) {
+            configuration.push(SessionEntry::ActiveToolsChange(ActiveToolsEntry {
+                active_tool_names: state.active_tools,
+            }));
+        }
+        session.log.append_batch(configuration)?;
         Ok(PreparedAgentSession { session })
     }
 
@@ -1039,12 +1093,15 @@ impl AgentSession {
 
     pub async fn shutdown_with(&self, event: SessionShutdownEvent) {
         let _operation = self.operation_gate.lock().await;
-        if self.lifecycle_state.swap(SESSION_CLOSED, Ordering::AcqRel) == SESSION_CLOSED {
+        if self.is_closed() {
             return;
         }
+        self.lifecycle_state
+            .store(SESSION_SHUTTING_DOWN, Ordering::Release);
+        // Hooks may persist their final checkpoint while their context is still
+        // valid. Retire it even if shutdown is cancelled while awaiting a hook.
+        let _shutdown = AgentSessionShutdownGuard(self);
         self.session_plugin_driver().session_shutdown(&event).await;
-        self.usage_recording_open.store(false, Ordering::Release);
-        self.runtime.retire_plugin_context();
     }
 
     pub fn is_closed(&self) -> bool {
@@ -1997,6 +2054,7 @@ impl AgentSession {
         custom_type: impl Into<String>,
         data: Option<serde_json::Value>,
     ) -> Result<String, SessionError> {
+        self.ensure_open()?;
         // Agent/tool callbacks run inside the prompt operation and need to
         // journal extension state before returning their tool result. The
         // SessionLog owns atomic mutation sequencing, so this one entry type
@@ -2018,7 +2076,11 @@ impl AgentSession {
         custom_type: impl Into<String>,
         data: Option<serde_json::Value>,
     ) -> Result<String, SessionError> {
-        self.ensure_open()?;
+        match self.lifecycle_state.load(Ordering::Acquire) {
+            SESSION_OPEN | SESSION_SHUTTING_DOWN => {}
+            SESSION_CLOSED => return Err(SessionError::Closed),
+            _ => return Err(SessionError::Busy),
+        }
         let entry = SessionEntry::Custom(CustomEntry {
             custom_type: custom_type.into(),
             data,
@@ -3392,14 +3454,24 @@ fn restore_runtime_context_with_request(
         .parse()
         .map_err(SessionError::InvalidPayload)?;
     let thinking_level = clamp_thinking_for_model(runtime, &provider, &model_id, thinking_level);
+    let registered_tools = runtime
+        .tool_specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<std::collections::HashSet<_>>();
+    let mut seen = std::collections::HashSet::new();
+    let active_tools = context
+        .active_tool_names
+        .clone()
+        .unwrap_or(current.active_tools)
+        .into_iter()
+        .filter(|name| registered_tools.contains(name) && seen.insert(name.clone()))
+        .collect();
     runtime.restore_state(RuntimeRestoreState {
         provider_id: provider,
         model_id,
         thinking_level,
-        active_tools: context
-            .active_tool_names
-            .clone()
-            .unwrap_or(current.active_tools),
+        active_tools,
         messages: context.runtime_messages(),
     })?;
     Ok(())

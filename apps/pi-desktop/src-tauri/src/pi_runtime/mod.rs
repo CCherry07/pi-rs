@@ -465,6 +465,7 @@ pub(crate) async fn pi_turn_interrupt(
 #[tauri::command]
 pub(crate) async fn pi_model_list(
     workspace_id: String,
+    thread_id: Option<String>,
     state: State<'_, AppState>,
     pi: State<'_, PiRuntimeState>,
 ) -> Result<Value, String> {
@@ -474,7 +475,7 @@ pub(crate) async fn pi_model_list(
         selected_provider,
         selected_model,
         selected_thinking,
-    } = pi.store.model_catalog(&cwd).await?;
+    } = pi.store.model_catalog(&cwd, thread_id.as_deref()).await?;
     Ok(json!({
         "data": models.iter().map(|model| json!({
             "id": format!("{}/{}", model.provider, model.id),
@@ -1078,8 +1079,9 @@ fn message_items(
             .collect(),
         Message::Custom(custom) if custom.display => vec![json!({
             "id": message_item_id("custom", message_index, 0),
-            "type": "userMessage",
-            "content": [{ "type": "text", "text": content_text(&custom.content.to_blocks()) }],
+            "type": "customMessage",
+            "customType": custom.custom_type,
+            "content": user_content(&custom.content.to_blocks()),
         })],
         _ => Vec::new(),
     }
@@ -1430,6 +1432,25 @@ mod tests {
 
     struct FixturePlugin(Arc<CommandFixture>, usize);
     struct FixtureCommand(Arc<CommandFixture>, usize);
+    struct FixtureCatalog(usize);
+
+    #[pi_core::provider_plugin]
+    impl pi_core::ProviderPlugin for FixtureCatalog {
+        fn id(&self) -> pi_core::PluginId {
+            pi_core::PluginId::new("desktop-model-catalog")
+        }
+        fn register(
+            &self,
+            context: &mut pi_core::ProviderRegisterContext<'_>,
+        ) -> pi_core::Result<()> {
+            context.register_model(ModelSpec::new(
+                "scripted",
+                "desktop-test",
+                format!("generation {}", self.0),
+                "scripted",
+            ))
+        }
+    }
 
     #[pi_core::agent_plugin]
     impl pi_core::AgentPlugin for FixturePlugin {
@@ -1536,6 +1557,7 @@ mod tests {
                 .agent_plugin(pi_plugin_skills::SkillsPlugin::new(skills))
                 .agent_plugin(FixturePlugin(fixture, generation))
                 .provider_plugin(ScriptedProviderPlugin::scripted([turn]))
+                .provider_plugin(FixtureCatalog(generation))
                 .agent_options(AgentOptions {
                     provider_id: ProviderId::new("scripted"),
                     model_id: ModelId::new("desktop-test"),
@@ -1649,7 +1671,7 @@ mod tests {
         assert!(store.list(directory.path()).unwrap().is_empty());
 
         // The workspace model selector reads the same prepared runtime.
-        store.model_catalog(directory.path()).await.unwrap();
+        store.model_catalog(directory.path(), None).await.unwrap();
         assert_eq!(fixture.builds.load(SeqCst), 1);
         let started = store.start_thread(directory.path()).await.unwrap();
         assert!(Arc::ptr_eq(&draft, &started));
@@ -1671,6 +1693,48 @@ mod tests {
         let next = store.start_thread(directory.path()).await.unwrap();
         assert_ne!(next.log().header().id, started.log().header().id);
         assert_eq!(fixture.builds.load(SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn model_catalog_follows_the_selected_generation_without_preparing_another_session() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let directory = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let fixture = Arc::new(CommandFixture::default());
+        let store =
+            scripted_store_with_fixture(directory.path().join("agent"), Arc::clone(&fixture));
+        let first = store.start_thread(directory.path()).await.unwrap();
+        let id = first.log().header().id;
+        let draft = store.model_catalog(directory.path(), None).await.unwrap();
+        assert_eq!(draft.models[0].name, "generation 2");
+        let selected = store
+            .model_catalog(directory.path(), Some(&id))
+            .await
+            .unwrap();
+        assert_eq!(selected.models[0].name, "generation 1");
+
+        store.reload(&id).await.unwrap();
+        let reloaded = store
+            .model_catalog(directory.path(), Some(&id))
+            .await
+            .unwrap();
+        assert_eq!(reloaded.models[0].name, "generation 3");
+        assert_eq!(
+            store
+                .model_catalog(directory.path(), None)
+                .await
+                .unwrap()
+                .models[0]
+                .name,
+            "generation 2"
+        );
+        assert!(store.model_catalog(other.path(), Some(&id)).await.is_err());
+        assert!(store
+            .model_catalog(directory.path(), Some("missing"))
+            .await
+            .is_err());
+        assert_eq!(fixture.builds.load(SeqCst), 3);
+        assert!(store.list(directory.path()).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2414,6 +2478,123 @@ mod tests {
             .iter()
             .flat_map(|turn| turn["items"].as_array().unwrap().clone())
             .collect()
+    }
+
+    #[tokio::test]
+    async fn saved_plugin_history_survives_reopen_and_reload_without_the_plugin() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent_dir = directory.path().join("agent");
+        let manager = MultiSessionManager::new(ScriptedFactory(Arc::default()));
+        let store = SessionStore::new(manager.clone(), agent_dir.clone());
+        let session = store.create(directory.path()).await.unwrap();
+        session.submit("original task").await.unwrap();
+        let id = session.log().header().id;
+        let custom = pi_core::CustomMessage {
+            custom_type: "uninstalled-plugin.note".into(),
+            content: pi_core::CustomMessageContent::Blocks(vec![
+                ContentBlock::Text(pi_core::TextContent::new("**Persisted plugin note**")),
+                ContentBlock::Image(pi_core::ImageContent {
+                    data: "aGVsbG8=".into(),
+                    mime_type: "image/png".into(),
+                }),
+            ]),
+            display: true,
+            details: Some(json!({ "version": 1, "opaqueState": ["saved"] })),
+            timestamp_ms: 42,
+        };
+        session.append_custom_message(custom.clone()).unwrap();
+        session
+            .append_custom_message(pi_core::CustomMessage {
+                custom_type: "uninstalled-plugin.hidden".into(),
+                display: false,
+                ..custom.clone()
+            })
+            .unwrap();
+        let assistant = session
+            .snapshot()
+            .agent
+            .messages
+            .into_iter()
+            .find_map(|message| match message {
+                Message::Assistant(assistant) => Some(assistant),
+                _ => None,
+            })
+            .unwrap();
+        session
+            .log()
+            .append_message(Message::assistant(pi_core::AssistantMessage {
+                content: vec![ContentBlock::ToolCall(pi_core::ToolCall {
+                    id: pi_core::ToolCallId::new("old-mcp-call"),
+                    name: "mcp_old_server_lookup".into(),
+                    namespace: None,
+                    arguments: json!({ "query": "historical query" }),
+                    thought_signature: None,
+                })],
+                stop_reason: pi_core::StopReason::ToolUse,
+                ..(*assistant).clone()
+            }))
+            .unwrap();
+        session
+            .log()
+            .append_message(Message::tool_result(pi_core::ToolResultMessage {
+                tool_call_id: pi_core::ToolCallId::new("old-mcp-call"),
+                tool_name: "mcp_old_server_lookup".into(),
+                content: vec![ContentBlock::Text(pi_core::TextContent::new(
+                    "historical result",
+                ))],
+                details: Some(json!({ "opaqueResult": [1, 2, 3] })),
+                is_error: false,
+                usage: None,
+                added_tool_names: None,
+                timestamp_ms: 43,
+            }))
+            .unwrap();
+        manager.shutdown().await.unwrap();
+
+        let reopened_manager = MultiSessionManager::new(ScriptedFactory(Arc::default()));
+        let reopened_store = SessionStore::new(reopened_manager.clone(), agent_dir);
+        let reopened = reopened_store.open(&id).await.unwrap();
+        let first = thread_from_session(&reopened);
+        let reloaded = reopened_store.reload(&id).await.unwrap();
+        let second = thread_from_session(&reloaded);
+        for thread in [&first, &second] {
+            let items = projected_items(thread);
+            let note = items
+                .iter()
+                .find(|item| item["type"] == "customMessage")
+                .expect("a saved plugin message must retain its own identity");
+            assert_eq!(note["customType"], custom.custom_type);
+            assert_eq!(note["content"][0]["text"], "**Persisted plugin note**");
+            assert_eq!(note["content"][1]["url"], "data:image/png;base64,aGVsbG8=");
+            assert_eq!(
+                items
+                    .iter()
+                    .filter(|item| item["type"] == "customMessage")
+                    .count(),
+                1
+            );
+            let tool = items
+                .iter()
+                .find(|item| item["id"] == "old-mcp-call")
+                .unwrap();
+            assert_eq!(tool["tool"], "mcp_old_server_lookup");
+            assert_eq!(tool["arguments"]["query"], "historical query");
+            assert_eq!(tool["result"], "historical result");
+            assert_eq!(tool["status"], "completed");
+            assert_eq!(
+                items
+                    .iter()
+                    .filter(|item| item["type"] == "userMessage")
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(first["turns"], second["turns"]);
+        reloaded
+            .submit("continue without the plugin")
+            .await
+            .unwrap();
+        reopened_manager.shutdown().await.unwrap();
     }
 
     #[tokio::test]

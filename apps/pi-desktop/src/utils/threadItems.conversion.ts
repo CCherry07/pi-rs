@@ -53,6 +53,23 @@ export function buildConversationItem(
   if (type === "agentMessage") {
     return null;
   }
+  if (type === "customMessage") {
+    const content = Array.isArray(item.content) ? item.content : [];
+    const { images } = parseUserInputs(content as Array<Record<string, unknown>>);
+    const text = content
+      .filter((block) => block.type === "text")
+      .map((block) => asString(block.text))
+      .join("\n");
+    return {
+      id,
+      kind: "tool",
+      toolType: "customMessage",
+      title: asString(item.customType),
+      detail: text,
+      images: images.length > 0 ? images : undefined,
+      status: "completed",
+    };
+  }
   if (type === "notice") {
     return {
       id,

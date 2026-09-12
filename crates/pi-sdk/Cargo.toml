@@ -55,6 +55,7 @@ tempfile = "3.21.0"
 uuid = { version = "1.18.1", features = ["v7"] }
 
 [dev-dependencies]
+axum = "0.8"
 base64 = "0.22"
 pi-test-support.workspace = true
 tempfile = "3.21.0"

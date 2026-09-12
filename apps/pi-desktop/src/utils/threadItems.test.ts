@@ -12,6 +12,41 @@ import {
 } from "./threadItems";
 
 describe("threadItems", () => {
+  it("preserves plugin message identity, Markdown and images in live and saved items", () => {
+    const custom = {
+      id: "custom-2-0",
+      type: "customMessage",
+      customType: "review.notes",
+      content: [
+        { type: "text", text: "**Plugin note**" },
+        { type: "text", text: "\n    indented code\n" },
+        { type: "image", url: "data:image/png;base64,aGVsbG8=" },
+      ],
+    };
+    const expected = {
+      id: "custom-2-0",
+      kind: "tool",
+      toolType: "customMessage",
+      title: "review.notes",
+      detail: "**Plugin note**\n\n    indented code\n",
+      images: ["data:image/png;base64,aGVsbG8="],
+      status: "completed",
+    };
+    expect(buildConversationItem(custom)).toEqual(expected);
+    expect(buildConversationItemFromThreadItem(custom)).toEqual(expected);
+  });
+
+  it("uses the message text limit for displayed plugin content", () => {
+    const item: ConversationItem = {
+      id: "custom",
+      kind: "tool",
+      toolType: "customMessage",
+      title: "review.notes",
+      detail: "x".repeat(3000),
+    };
+    expect(normalizeItem(item)).toEqual(item);
+  });
+
   it("keeps snapshot provider errors as visible notices rather than assistant text", () => {
     const item = buildConversationItemFromThreadItem({
       id: "error-1-0", type: "notice", title: "", detail: "Provider unavailable", status: "failed",

@@ -22,6 +22,16 @@ function makeToolItem(
 }
 
 describe("messageRenderUtils", () => {
+  it("keeps displayed plugin messages outside collapsed tool groups", () => {
+    const entries = buildToolGroups([
+      makeToolItem({ id: "before", toolType: "mcpToolCall" }),
+      makeToolItem({ id: "plugin-message", toolType: "customMessage" }),
+      makeToolItem({ id: "after", toolType: "mcpToolCall" }),
+    ]);
+    expect(entries.map((entry) => entry.kind)).toEqual(["item", "item", "item"]);
+    expect(entries[1]).toMatchObject({ kind: "item", item: { id: "plugin-message" } });
+  });
+
   it("renders web search as searching while in progress", () => {
     const summary = buildToolSummary(makeToolItem({ status: "inProgress" }), "");
     expect(summary.label).toBe("searching");

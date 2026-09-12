@@ -558,8 +558,11 @@ export async function checkoutGitHubPullRequest(
   });
 }
 
-export async function getModelList(workspaceId: string) {
-  return invoke<any>("pi_model_list", { workspaceId });
+export async function getModelList(
+  workspaceId: string,
+  threadId: string | null = null,
+) {
+  return invoke<any>("pi_model_list", { workspaceId, threadId });
 }
 
 export async function configureThread(

@@ -853,7 +853,8 @@
   max-height: 420px;
   max-height: min(420px, 60dvh);
   overflow: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
   scrollbar-width: thin;
   margin: 0;
   padding: 0 12px;
