@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.8.0](https://github.com/CCherry07/pi-rs/compare/v0.7.0...v0.8.0) (2026-09-12)
+
+
+### Features
+
+* add MCP and skill management to desktop settings ([5914f0c](https://github.com/CCherry07/pi-rs/commit/5914f0ce14f53655ae675240c08f1671b5cd5fa9))
+* add React extension framework for Pi Desktop ([f24ad09](https://github.com/CCherry07/pi-rs/commit/f24ad09d9be4ceaacd5bbd1b4b612093feaff477))
+* add reusable agent collaboration and embedded child chats ([b2177d5](https://github.com/CCherry07/pi-rs/commit/b2177d568704e450fde221eaca31b60dcf5d9fdf))
+* add scoped skill curation, scheduling and image input ([dc757e5](https://github.com/CCherry07/pi-rs/commit/dc757e52daae9add9df33dd1430436346929cdfe))
+* add supervised subagents and native desktop commands ([f72ad06](https://github.com/CCherry07/pi-rs/commit/f72ad06f2cd364e027fcac77cc34f2f163a43ada))
+* align Hermes memory behavior ([5ebcb84](https://github.com/CCherry07/pi-rs/commit/5ebcb84849941f3e71e10f637da272be8a842fd7))
+* attribute and display subagent token usage ([1d02590](https://github.com/CCherry07/pi-rs/commit/1d0259013d64ac03bf657c56d840f206ded5f2ed))
+* **cli:** add RPC, ACP, and session migration ([065c012](https://github.com/CCherry07/pi-rs/commit/065c0125862dbaa63b3e42297b423957cd70317a))
+* **cli:** add session import export and share ([c7c9123](https://github.com/CCherry07/pi-rs/commit/c7c9123e3b1c16d31411f5cc9d8133bfdf8116d2))
+* **desktop:** add native Pi desktop application ([39f7308](https://github.com/CCherry07/pi-rs/commit/39f73081b27d3d621507a973947324961de2690a))
+* **desktop:** add native plugin management settings ([23cdc7d](https://github.com/CCherry07/pi-rs/commit/23cdc7dd64ef4cd12392485fa73223b0ea88b82c))
+* enhance session management with RwLock for operation gating and add thinking level to subagent profiles ([9e513b6](https://github.com/CCherry07/pi-rs/commit/9e513b6e6f9e5c4be0ce85d631ee72430ab7b5cd))
+* enhance session management with session ID support ([accca9d](https://github.com/CCherry07/pi-rs/commit/accca9d1dd8ed9d24b78ea753b08bd6b6a11e0c9))
+* Enhance thinking level management and update related components ([dcffc57](https://github.com/CCherry07/pi-rs/commit/dcffc57f7b452a67488bce34889e0e7f93491dfe))
+* Enhance thread management with unarchive event and session summary integration ([5932bce](https://github.com/CCherry07/pi-rs/commit/5932bce169d741cb93459d6bd598181caaae5ae4))
+* **extensions:** expand Pi runtime compatibility ([dece4ca](https://github.com/CCherry07/pi-rs/commit/dece4ca6ae1c2c61ffcd513fbc9a230de3da43f2))
+* **extensions:** support dynamic provider registration ([8dcfca4](https://github.com/CCherry07/pi-rs/commit/8dcfca49cb3537b5bc3adef8944c1a039b70c783))
+* introduce pi-plugin-tools for native plugin authoring and release management ([44cfeb3](https://github.com/CCherry07/pi-rs/commit/44cfeb3e340b63110a6335df6a89521a5b3ddd88))
+* **plugins:** add Hermes memory and subagent workflows ([0ebee3e](https://github.com/CCherry07/pi-rs/commit/0ebee3ec2298f5148740f72eba0dfcb64339d2f9))
+* **plugins:** add rust-first session transfer ([e839807](https://github.com/CCherry07/pi-rs/commit/e839807a752f1dff5ee3ddc949e145c9744d2a18))
+* **providers:** expand Pi provider coverage ([38ef6f7](https://github.com/CCherry07/pi-rs/commit/38ef6f77675f0202f08891fcb946f5534deaacad))
+* **settings:** implement current non-UI runtime settings ([6a4cbcb](https://github.com/CCherry07/pi-rs/commit/6a4cbcb7a768d639ab61b59bf9eb3a5ccceae8d4))
+* **subagents:** add bounded workflow orchestration ([2d2a69a](https://github.com/CCherry07/pi-rs/commit/2d2a69a0327f622ea3884edeee460edd686508c1))
+* upgrade CI workflows to use Ubuntu 24.04 runners ([e9688ef](https://github.com/CCherry07/pi-rs/commit/e9688ef4ead788594368571957ffc9c77a4f8940))
+
+
+### Bug Fixes
+
+* **memory:** fall back from empty mutation batches ([7eb5715](https://github.com/CCherry07/pi-rs/commit/7eb5715722094ff989b3d2b4e4bca9f05aa3a8e4))
+* preserve command display text and harden memory indexing ([719e2d7](https://github.com/CCherry07/pi-rs/commit/719e2d71e0656e9578ecf7d62cd4bc66bc995258))
+* preserve session state and plugin history across reloads ([52e65b2](https://github.com/CCherry07/pi-rs/commit/52e65b2fcd48aab6cb00f42561b4d1ab0386a731))
+* **session:** align token accounting with Pi ([79582c1](https://github.com/CCherry07/pi-rs/commit/79582c105d95df1429ccc2e65430ee063fa8b9c6))
+* **tools:** prefer explicit edit replacements ([a911fb0](https://github.com/CCherry07/pi-rs/commit/a911fb012d86922a8fb61f2f74aefdae3f0c9342))
+
 ## [0.7.0](https://github.com/CCherry07/pi-rs/compare/v0.6.0...v0.7.0) (2026-08-26)
 
 
