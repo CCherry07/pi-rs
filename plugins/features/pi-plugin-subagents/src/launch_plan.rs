@@ -39,6 +39,7 @@ impl SubagentLaunchPlan {
                 model,
                 thinking_level: profile.thinking_level,
                 context: profile.default_context,
+                fork_turns: None,
                 fork_point: None,
             },
         })

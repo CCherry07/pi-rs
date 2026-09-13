@@ -95,6 +95,27 @@ pub(crate) fn fork_entries<'a>(
     entries
 }
 
+/// Keeps complete user-originated turns so a truncated fork never begins with
+/// an assistant message or a tool result detached from its request.
+pub(crate) fn retain_recent_turns(
+    messages: Vec<AgentMessage>,
+    turns: Option<usize>,
+) -> Vec<AgentMessage> {
+    let Some(turns) = turns else {
+        return messages;
+    };
+    debug_assert!(turns > 0);
+    let start = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, message)| matches!(message.role(), "user" | "bashExecution" | "custom"))
+        .nth(turns.saturating_sub(1))
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    messages.into_iter().skip(start).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +147,27 @@ mod tests {
             document.isolated_parent_session_id().unwrap().as_deref(),
             Some("parent")
         );
+    }
+
+    #[test]
+    fn recent_turns_start_at_a_user_boundary_and_keep_complete_groups() {
+        let user = |text| AgentMessage::from(Message::User(pi_core::UserMessage::text(text, 0)));
+        let note =
+            |text| AgentMessage::custom(serde_json::json!({"role":"note","text":text})).unwrap();
+        let messages = vec![
+            note("leading context"),
+            user("one"),
+            note("answer one"),
+            user("two"),
+            note("answer two"),
+            user("three"),
+            note("answer three"),
+        ];
+        assert_eq!(retain_recent_turns(messages.clone(), None), messages);
+        assert_eq!(
+            retain_recent_turns(messages.clone(), Some(2)),
+            messages[3..]
+        );
+        assert_eq!(retain_recent_turns(messages.clone(), Some(9)), messages);
     }
 }

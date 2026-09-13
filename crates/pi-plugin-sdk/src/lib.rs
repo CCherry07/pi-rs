@@ -24,6 +24,7 @@ pub use pi_session::plugin::SessionPlugin;
 
 /// Version of the trusted Rust-ABI plugin contract.
 ///
+/// ABI 21 adds bounded recent-turn inheritance to isolated-session forks.
 /// ABI 20 adds persistent isolated-session turns, messaging and follow-ups.
 /// ABI 18 adds aggregate usage to managed isolated-session outcomes. ABI 17 adds
 /// explicit fresh/fork initialization to isolated-session options.
@@ -44,7 +45,7 @@ pub use pi_session::plugin::SessionPlugin;
 /// tool argument preparation.
 /// Hosts must reject older artifacts before resolving their Rust-ABI
 /// constructors.
-pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 20;
+pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 21;
 pub const BUILD_FINGERPRINT: &str = env!("PI_PLUGIN_BUILD_FINGERPRINT");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -116,15 +117,15 @@ pub type PluginDescriptorFnV1 = unsafe extern "C" fn() -> *const NativePluginDes
 pub type PluginOptionsSchemaFnV1 = unsafe fn() -> String;
 
 #[cfg(feature = "agent")]
-pub type AgentPluginCreateV20 =
+pub type AgentPluginCreateV21 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn AgentPlugin>, PluginLoadError>;
 
 #[cfg(feature = "provider")]
-pub type ProviderPluginCreateV20 =
+pub type ProviderPluginCreateV21 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn ProviderPlugin>, PluginLoadError>;
 
 #[cfg(feature = "session")]
-pub type SessionPluginCreateV20 =
+pub type SessionPluginCreateV21 =
     fn(&PluginLoadContext, &PluginOptionsValue) -> Result<Arc<dyn SessionPlugin>, PluginLoadError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

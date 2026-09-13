@@ -45,6 +45,7 @@ struct TestFactory {
     subagents: SubagentRuntime,
     binding: PluginContextBinding,
     providers: RecordedProviders,
+    root_turns: Vec<ScriptedTurn>,
     child_turns: Vec<ScriptedTurn>,
     agent_paths: Vec<PathBuf>,
 }
@@ -55,9 +56,15 @@ impl TestFactory {
             subagents: SubagentRuntime::default(),
             binding: PluginContextBinding::new(),
             providers: Arc::new(Mutex::new(Vec::new())),
+            root_turns: Vec::new(),
             child_turns: child_turns.into_iter().collect(),
             agent_paths: Vec::new(),
         }
+    }
+
+    fn with_root_turns(mut self, turns: impl IntoIterator<Item = ScriptedTurn>) -> Self {
+        self.root_turns = turns.into_iter().collect();
+        self
     }
 }
 
@@ -80,7 +87,7 @@ impl SessionGenerationFactory for TestFactory {
             .filter(|component| component.as_os_str() == "isolated")
             .count();
         let turns = if depth == 0 {
-            Vec::new()
+            self.root_turns.clone()
         } else {
             self.child_turns.clone()
         };
@@ -702,6 +709,52 @@ async fn spawn_overrides_model_and_thinking_for_only_that_child() {
         (ProviderId::new("scripted"), ModelId::new("test"))
     );
     assert_eq!(agent.thinking_level(), pi_core::ThinkingLevel::Off);
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn spawn_fork_turns_keeps_only_the_requested_recent_parent_turns() {
+    let directory = tempfile::tempdir().unwrap();
+    let factory = TestFactory::new([ScriptedTurn::Text("child result".into())]).with_root_turns([
+        ScriptedTurn::Text("answer one".into()),
+        ScriptedTurn::Text("answer two".into()),
+        ScriptedTurn::Text("answer three".into()),
+    ]);
+    let providers = Arc::clone(&factory.providers);
+    let (manager, root) = root(factory, &directory).await;
+    root.current().prompt("user one").await.unwrap();
+    root.current().prompt("user two").await.unwrap();
+    root.current().prompt("user three").await.unwrap();
+
+    let spawn = invoke(
+        &root,
+        "spawn_agent",
+        json!({
+            "agent":"reviewer",
+            "task":"use recent context",
+            "fork_turns":"2",
+            "detached":true
+        }),
+    )
+    .await;
+    let id = spawn.details.as_ref().unwrap()["agentId"].as_str().unwrap();
+    wait_for_agent_state(&root, id, "idle").await;
+
+    let child_request = providers
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(depth, _)| *depth == 1)
+        .find_map(|(_, provider)| provider.requests().into_iter().next())
+        .expect("child provider request");
+    let messages = serde_json::to_string(&child_request.messages).unwrap();
+    assert!(!messages.contains("user one"));
+    assert!(!messages.contains("answer one"));
+    assert!(messages.contains("user two"));
+    assert!(messages.contains("answer two"));
+    assert!(messages.contains("user three"));
+    assert!(messages.contains("answer three"));
+    assert!(messages.contains("use recent context"));
     manager.shutdown().await.unwrap();
 }
 

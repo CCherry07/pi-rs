@@ -673,18 +673,20 @@ impl AgentSession {
 
     pub(crate) fn isolated_context_seed(
         &self,
+        fork_turns: Option<usize>,
     ) -> Result<crate::isolated_context::IsolatedContextSeed, SessionError> {
         let fork_point = self.isolated_fork_point()?.ok_or_else(|| {
             SessionError::Runtime(
                 "cannot fork an unsaved or empty session; use fresh context".into(),
             )
         })?;
-        self.isolated_context_seed_at(&fork_point)
+        self.isolated_context_seed_at(&fork_point, fork_turns)
     }
 
     pub(crate) fn isolated_context_seed_at(
         &self,
         fork_point: &pi_core::IsolatedForkPoint,
+        fork_turns: Option<usize>,
     ) -> Result<crate::isolated_context::IsolatedContextSeed, SessionError> {
         let document = self.log.load()?;
         if fork_point.parent_session_id != document.header.id {
@@ -697,10 +699,11 @@ impl AgentSession {
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
+        let messages = crate::build_session_context(&entries, &self.context_options).messages;
         Ok(crate::isolated_context::IsolatedContextSeed {
             parent_session_id: document.header.id.clone(),
             parent_entry_id: Some(fork_point.parent_entry_id.clone()),
-            messages: crate::build_session_context(&entries, &self.context_options).messages,
+            messages: crate::isolated_context::retain_recent_turns(messages, fork_turns),
         })
     }
 
@@ -4444,7 +4447,7 @@ mod tests {
         .unwrap();
         let error = small
             .session()
-            .initialize_isolated_context(parent.isolated_context_seed().unwrap())
+            .initialize_isolated_context(parent.isolated_context_seed(None).unwrap())
             .unwrap_err();
         assert!(
             error
@@ -4483,7 +4486,7 @@ mod tests {
         .unwrap();
         let child = prepared.session();
         child
-            .initialize_isolated_context(parent.isolated_context_seed().unwrap())
+            .initialize_isolated_context(parent.isolated_context_seed(None).unwrap())
             .unwrap();
         assert!(!path.exists());
         assert_eq!(

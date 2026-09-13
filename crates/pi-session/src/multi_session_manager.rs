@@ -649,22 +649,29 @@ impl PiSession {
         let parent = self.current();
         let initial_context = match request.options.context {
             pi_core::IsolatedContextMode::Fresh => {
-                if request.options.fork_point.is_some() {
+                if request.options.fork_point.is_some() || request.options.fork_turns.is_some() {
                     return Err(MultiSessionManagerError::InvalidIsolatedRequest(
-                        "fresh context cannot use an isolated fork point".into(),
+                        "fresh context cannot use an isolated fork point or fork turn limit".into(),
                     ));
                 }
                 None
             }
             pi_core::IsolatedContextMode::Fork => {
+                if request.options.fork_turns == Some(0) {
+                    return Err(MultiSessionManagerError::InvalidIsolatedRequest(
+                        "fork turn limit must be positive".into(),
+                    ));
+                }
                 if !parent.log().is_materialized() {
                     return Err(MultiSessionManagerError::InvalidIsolatedRequest(
                         "cannot fork an unsaved session; wait for the first assistant response or use fresh context".to_string(),
                     ));
                 }
                 let seed = match &request.options.fork_point {
-                    Some(fork_point) => parent.isolated_context_seed_at(fork_point),
-                    None => parent.isolated_context_seed(),
+                    Some(fork_point) => {
+                        parent.isolated_context_seed_at(fork_point, request.options.fork_turns)
+                    }
+                    None => parent.isolated_context_seed(request.options.fork_turns),
                 };
                 Some(seed.map_err(|error| {
                     MultiSessionManagerError::InvalidIsolatedRequest(error.to_string())
@@ -1582,6 +1589,83 @@ mod tests {
         assert!(error.to_string().contains("cannot fork an unsaved session"));
         assert_eq!(manager.sessions().len(), 1);
         assert!(!owner.path().exists());
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_turn_limit_keeps_recent_complete_turns_and_rejects_invalid_combinations() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = test_manager_with_turns([
+            ScriptedTurn::Text("answer one".into()),
+            ScriptedTurn::Text("answer two".into()),
+            ScriptedTurn::Text("answer three".into()),
+            ScriptedTurn::Text("child answer".into()),
+        ]);
+        let owner = manager
+            .create_session(directory.path(), directory.path().join("parent.jsonl"))
+            .await
+            .unwrap();
+        owner.current().prompt("user one").await.unwrap();
+        owner.current().prompt("user two").await.unwrap();
+        owner.current().prompt("user three").await.unwrap();
+
+        let id = owner
+            .launch_isolated_session(
+                IsolatedSessionRequest::new(CustomMessageContent::Text("child task".into()))
+                    .options(IsolatedSessionOptions {
+                        context: pi_core::IsolatedContextMode::Fork,
+                        fork_turns: Some(2),
+                        ..Default::default()
+                    }),
+            )
+            .await
+            .unwrap();
+        owner.wait_for_isolated_session(&id).await.unwrap();
+        let child = manager
+            .sessions()
+            .into_iter()
+            .find(|session| session.registration_id() == id.as_str())
+            .unwrap();
+        let inherited = child
+            .current()
+            .log()
+            .load()
+            .unwrap()
+            .inherited_context()
+            .unwrap()
+            .unwrap();
+        let inherited = serde_json::to_string(&inherited.messages).unwrap();
+        assert!(!inherited.contains("user one"));
+        assert!(!inherited.contains("answer one"));
+        assert!(inherited.contains("user two"));
+        assert!(inherited.contains("answer two"));
+        assert!(inherited.contains("user three"));
+        assert!(inherited.contains("answer three"));
+
+        let before_count = manager.sessions().len();
+        for options in [
+            IsolatedSessionOptions {
+                context: pi_core::IsolatedContextMode::Fresh,
+                fork_turns: Some(1),
+                ..Default::default()
+            },
+            IsolatedSessionOptions {
+                context: pi_core::IsolatedContextMode::Fork,
+                fork_turns: Some(0),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                owner
+                    .launch_isolated_session(
+                        IsolatedSessionRequest::new(CustomMessageContent::Text("invalid".into()))
+                            .options(options)
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(manager.sessions().len(), before_count);
+        }
         manager.shutdown().await.unwrap();
     }
 

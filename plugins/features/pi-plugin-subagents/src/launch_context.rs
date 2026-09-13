@@ -3,6 +3,37 @@
 use pi_core::{
     IsolatedContextMode, IsolatedForkPoint, IsolatedSessionOptions, ToolContext, ToolError,
 };
+use serde::{Deserialize, Deserializer};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForkTurns {
+    None,
+    All,
+    Recent(usize),
+}
+
+impl<'de> Deserialize<'de> for ForkTurns {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "none" => Ok(Self::None),
+            "all" => Ok(Self::All),
+            _ => value
+                .parse::<usize>()
+                .ok()
+                .filter(|turns| *turns > 0)
+                .map(Self::Recent)
+                .ok_or_else(|| {
+                    serde::de::Error::custom(
+                        "fork_turns must be \"none\", \"all\", or a positive integer string",
+                    )
+                }),
+        }
+    }
+}
 
 pub(crate) struct LaunchContext<'a> {
     context: &'a ToolContext,
@@ -20,9 +51,23 @@ impl<'a> LaunchContext<'a> {
     pub fn apply(
         &mut self,
         options: &mut IsolatedSessionOptions,
-        explicit: Option<IsolatedContextMode>,
+        explicit: Option<ForkTurns>,
     ) -> Result<(), ToolError> {
-        options.context = explicit.unwrap_or(options.context);
+        match explicit {
+            Some(ForkTurns::None) => {
+                options.context = IsolatedContextMode::Fresh;
+                options.fork_turns = None;
+            }
+            Some(ForkTurns::All) => {
+                options.context = IsolatedContextMode::Fork;
+                options.fork_turns = None;
+            }
+            Some(ForkTurns::Recent(turns)) => {
+                options.context = IsolatedContextMode::Fork;
+                options.fork_turns = Some(turns);
+            }
+            None => {}
+        }
         options.fork_point = None;
         if options.context == IsolatedContextMode::Fresh {
             return Ok(());
@@ -32,9 +77,12 @@ impl<'a> LaunchContext<'a> {
         }
         match self.fork_point.as_ref().expect("captured fork point") {
             Some(fork_point) => options.fork_point = Some(fork_point.clone()),
-            None if explicit.is_none() => options.context = IsolatedContextMode::Fresh,
+            None if explicit.is_none() => {
+                options.context = IsolatedContextMode::Fresh;
+                options.fork_turns = None;
+            }
             None => return Err(ToolError::Execution(
-                "Explicit fork context requires a persisted parent branch; wait for the first assistant response or use fresh context.".into(),
+                "fork_turns all or a positive number requires a persisted parent branch; wait for the first assistant response or use fork_turns none.".into(),
             )),
         }
         Ok(())
@@ -98,12 +146,25 @@ mod tests {
             );
             let mut explicit = IsolatedSessionOptions::default();
             assert_eq!(
-                batch
-                    .apply(&mut explicit, Some(IsolatedContextMode::Fork))
-                    .is_ok(),
+                batch.apply(&mut explicit, Some(ForkTurns::All)).is_ok(),
                 available
             );
             assert_eq!(implicit.fork_point, explicit.fork_point);
+            let mut recent = IsolatedSessionOptions::default();
+            assert_eq!(
+                batch.apply(&mut recent, Some(ForkTurns::Recent(3))).is_ok(),
+                available
+            );
+            assert_eq!(recent.fork_turns, Some(3));
+            assert_eq!(implicit.fork_point, recent.fork_point);
+            let mut none = IsolatedSessionOptions {
+                context: IsolatedContextMode::Fork,
+                fork_turns: Some(2),
+                ..Default::default()
+            };
+            batch.apply(&mut none, Some(ForkTurns::None)).unwrap();
+            assert_eq!(none.context, IsolatedContextMode::Fresh);
+            assert_eq!(none.fork_turns, None);
             assert_eq!(access.reads.load(Ordering::SeqCst), 1);
         }
     }

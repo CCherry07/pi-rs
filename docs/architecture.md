@@ -1247,7 +1247,8 @@ Each assistant stream owns one mutable assembler state behind a read-only `Assis
 reducer, ordered native hooks, and listeners therefore do not clone cumulative content. Consumers
 that require a full message call `snapshot()` explicitly, while `message_end` and `turn_end` share
 the completed immutable assistant message. These hook fields were introduced in native ABI 7;
-ABI 20 adds persistent isolated-session turns, messages and follow-ups. ABI 19 adds typed fork
+ABI 21 adds bounded recent-turn inheritance to isolated-session forks. ABI 20 adds persistent
+isolated-session turns, messages and follow-ups. ABI 19 adds typed fork
 points for deferred isolated-session forks. ABI 18 adds aggregate managed-isolated-session usage
 outcomes. ABI 17 adds fresh/fork isolated-context initialization. ABI 16 adds detached usage
 attribution and ephemeral usage/call outcomes. ABI 8 adds UI
@@ -1799,8 +1800,9 @@ uses its observed child-to-parent metadata to resolve the directly owning manage
 invoke that owner's isolated-session abort; the observation capability itself remains read-only,
 and the child is not promoted into frontend ownership. This also preserves immediate ownership for
 nested children instead of routing every cancellation through the root. Persistent turn handles,
-agent-tree ownership and message routing are feature-owned layers over this interface;
-cross-process reattachment remains unimplemented. Parallel isolated launches prepare their complete runtime generations concurrently;
+agent-tree ownership and message routing are feature-owned layers over this interface. Persisted
+direct-child reattachment is the same manager-owned operation described below. Parallel isolated
+launches prepare their complete runtime generations concurrently;
 the manager's lifecycle gate prevents an owner replacement, close, or shutdown from racing those
 preparations, and the UUID-derived paths avoid active-path collisions.
 
@@ -1819,7 +1821,11 @@ all session lifecycle hooks cancellation-safe or repair an Agent's state after a
 plugin panics.
 
 `IsolatedSessionOptions.context` defaults to `Fresh`; `Fork` initializes the child from the
-caller's active branch after its existing compaction/context projection. During a running tool
+caller's active branch after its existing compaction/context projection. An optional positive
+`fork_turns` limit retains only that many recent complete user-originated turns; it is invalid with
+fresh context, and `None` retains the complete effective fork. Truncation begins at a user, shell,
+or typed custom-message boundary so it cannot detach an assistant tool call from its result.
+During a running tool
 batch, the cutoff precedes the requesting assistant message, including the triggering user input
 but excluding the entire active tool batch even when a sibling has already returned. MessageEnd
 persistence is awaited before tool dispatch; the cutoff matches the active assistant against the
@@ -1833,8 +1839,9 @@ pins later forks to that entry in the calling session's immutable tree. Later pa
 branch navigation and compaction do not change the selected prefix. Foreign session IDs, missing
 entries, and fork points paired with fresh context fail before child preparation. The host owns
 cutoff and projection; plugins carry only typed session/entry identities, not JSONL reconstruction.
-The fork point is not session-resume authority or a new persisted entry type. This native ABI 19
-addition retains existing descriptor checks and process-pinned library lifetime.
+The fork point is not session-resume authority or a new persisted entry type. ABI 21 adds the
+turn-limit field; the fork-point capability itself was added in ABI 19. Existing descriptor checks
+and process-pinned library lifetime remain unchanged.
 
 The host seeds a prepared child before lifecycle activation using a v4 custom entry
 `pi.isolated_context` containing the parent session id and effective `AgentMessage` history.
@@ -1918,11 +1925,13 @@ profiles receive the collaboration tools only when those tools are within the pa
 ceiling. Skills use the existing generation-local projection Interface. The launch record retains
 the resolved profile, so a reload cannot mix a pre-reload launch with a post-reload definition.
 
-`spawn_agent` accepts `context: "fresh" | "fork"`; otherwise the profile default applies. Optional
-per-call `model` and `thinking` values override the profile for that launch and pass through the
+`spawn_agent` accepts Codex-shaped `fork_turns: "none" | "all" | "<positive integer>"`.
+`none` selects fresh context, `all` selects the complete safe fork, and a number selects that many
+recent turns. Omission preserves the profile's `defaultContext` policy. Optional per-call `model`
+and `thinking` values override the profile for that launch and pass through the
 same catalog resolution and reasoning-compatibility checks as profile declarations.
-Implicit fork preference falls back to fresh only when the caller has no persisted branch, while an
-explicit fork fails. The provider-context hook removes inherited parent collaboration calls,
+An omitted profile fork preference falls back to fresh only when the caller has no persisted
+branch, while explicit `all` or numeric inheritance fails. The provider-context hook removes inherited parent collaboration calls,
 results, and collaboration notices but retains ordinary tool pairs and the child's own later
 collaboration history. The private first-line launch marker is stripped before provider use.
 
@@ -1956,7 +1965,8 @@ registrations remain process-local.
 The generic isolated-session capability now owns a persistent child session with multiple typed
 turn handles. It supports non-starting message delivery, idle mailbox retention, queued follow-ups,
 turn-specific wait, and turn-specific abort while keeping concrete `AgentSession` values hidden
-from plugins. These additions are native ABI 20. They add no Pi v4 record variant: messages, queue
+from plugins. These additions are native ABI 20; bounded fork turns are native ABI 21. They add no
+Pi v4 record variant: messages, queue
 records, assistant/tool pairs, and usage adjustments continue through the existing session schema.
 
 The desktop's plugin-owned subagent renderer supplies generic related-session references to

@@ -46,7 +46,8 @@ Stop and follow-up buttons call the plugin's existing command surface:
 
 Both handlers validate direct-child ownership in `SubagentRuntime`; they do not execute arbitrary
 tools. The UI disables controls for historical/unowned tasks, while server-side validation remains
-authoritative. Native session reload retains its existing behavior of stopping children and
-resetting the live graph. Session startup refreshes saved widget data with current ownership;
-history never reconstructs executable child handles. During shutdown, widget publication stops
-before draining children, preserving the existing final usage accounting.
+authoritative. Native session reload stops active turns, then rebuilds durable agent ownership and
+reattaches materialized child sessions without replaying model work. Session startup refreshes
+saved widget data with that current ownership; widget history itself is presentation data and never
+authorizes child control. During shutdown, widget publication stops before draining children,
+preserving the existing final usage accounting.

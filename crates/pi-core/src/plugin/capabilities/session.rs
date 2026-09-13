@@ -280,6 +280,10 @@ pub struct IsolatedForkPoint {
 pub struct IsolatedSessionOptions {
     #[serde(default)]
     pub context: IsolatedContextMode,
+    /// Limit Fork context to the most recent user-originated turns. `None`
+    /// keeps the complete effective branch. Only valid with Fork.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_turns: Option<usize>,
     /// Pin a fork to a previously captured point instead of the live branch.
     /// Only valid with Fork and only for the calling session.
     #[serde(default, skip_serializing_if = "Option::is_none")]

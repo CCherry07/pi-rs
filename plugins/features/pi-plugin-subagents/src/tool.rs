@@ -2,15 +2,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_core::{
-    CustomMessageContent, IsolatedContextMode, IsolatedSessionRequest, ThinkingLevel, Tool,
-    ToolCallId, ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate,
-    ToolUpdateSink,
+    CustomMessageContent, IsolatedSessionRequest, ThinkingLevel, Tool, ToolCallId, ToolContext,
+    ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate, ToolUpdateSink,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::catalog::SubagentCatalog;
-use crate::launch_context::LaunchContext;
+use crate::launch_context::{ForkTurns, LaunchContext};
 use crate::launch_plan::SubagentLaunchPlan;
 use crate::runtime::{SubagentRuntime, WaitEvaluation, WaitMode, result_with_details};
 
@@ -52,7 +51,8 @@ impl AgentTool {
 struct SpawnInput {
     agent: String,
     task: String,
-    context: Option<IsolatedContextMode>,
+    #[serde(rename = "fork_turns")]
+    fork_turns: Option<ForkTurns>,
     model: Option<String>,
     thinking: Option<ThinkingLevel>,
     #[serde(default)]
@@ -112,7 +112,7 @@ impl Tool for AgentTool {
                 json!({
                     "agent":{"type":"string","enum":profiles},
                     "task":{"type":"string","minLength":1},
-                    "context":{"type":"string","enum":["fresh","fork"]},
+                    "fork_turns":{"type":"string","pattern":"^(none|all|[1-9][0-9]*)$","description":"Context to inherit: none, all, or a positive number of recent turns. Omission uses the agent profile default."},
                     "model":{"type":"string","minLength":1,"description":"Optional provider/model or unambiguous model override for this child."},
                     "thinking":{"type":"string","enum":["off","minimal","low","medium","high","xhigh","max"],"description":"Optional reasoning-effort override validated against the selected model."},
                     "detached":{"type":"boolean","default":false,"description":"Opt out of automatically joining the bounded task report into the parent context."}
@@ -238,7 +238,7 @@ impl AgentTool {
             profile.thinking_level = Some(thinking);
         }
         let mut options = SubagentLaunchPlan::resolve(&profile, &context)?.into_options();
-        LaunchContext::new(&context).apply(&mut options, input.context)?;
+        LaunchContext::new(&context).apply(&mut options, input.fork_turns)?;
         let owner = context.session.id()?;
         self.runtime
             .bind_session(owner.clone(), context.session.clone());
@@ -559,6 +559,32 @@ mod tests {
                 targets: vec!["same".into(), "same".into()],
                 ..WaitInput::default()
             })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fork_turns_accepts_codex_strings_and_rejects_other_shapes() {
+        for value in ["none", "all", "1", "25"] {
+            assert!(
+                parse::<SpawnInput>(json!({
+                    "agent":"worker", "task":"work", "fork_turns":value
+                }))
+                .is_ok()
+            );
+        }
+        for value in [json!("0"), json!("-1"), json!("recent"), json!(3)] {
+            assert!(
+                parse::<SpawnInput>(json!({
+                    "agent":"worker", "task":"work", "fork_turns":value
+                }))
+                .is_err()
+            );
+        }
+        assert!(
+            parse::<SpawnInput>(json!({
+                "agent":"worker", "task":"work", "context":"fork"
+            }))
             .is_err()
         );
     }
