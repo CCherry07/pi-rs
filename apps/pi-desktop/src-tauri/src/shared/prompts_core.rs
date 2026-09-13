@@ -1,4 +1,5 @@
-use serde::Serialize;
+use pi_utils::frontmatter::{parse_frontmatter as parse_yaml_frontmatter, split_frontmatter};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -95,66 +96,62 @@ fn move_file(src: &Path, dest: &Path) -> Result<(), String> {
     }
 }
 
-fn parse_frontmatter(content: &str) -> (Option<String>, Option<String>, String) {
-    let mut segments = content.split_inclusive('\n');
-    let Some(first_segment) = segments.next() else {
-        return (None, None, String::new());
-    };
-    let first_line = first_segment.trim_end_matches(['\r', '\n']);
-    if first_line.trim() != "---" {
-        return (None, None, content.to_string());
-    }
+#[derive(Default, Deserialize)]
+struct PromptFrontmatter {
+    description: Option<PromptString>,
+    #[serde(rename = "argument-hint", alias = "argument_hint")]
+    argument_hint: Option<PromptString>,
+}
 
-    let mut description: Option<String> = None;
-    let mut argument_hint: Option<String> = None;
-    let mut frontmatter_closed = false;
-    let mut consumed = first_segment.len();
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PromptFrontmatterValue {
+    Fields(PromptFrontmatter),
+    Other(serde::de::IgnoredAny),
+}
 
-    for segment in segments {
-        let line = segment.trim_end_matches(['\r', '\n']);
-        let trimmed = line.trim();
-
-        if trimmed == "---" {
-            frontmatter_closed = true;
-            consumed += segment.len();
-            break;
+impl PromptFrontmatterValue {
+    fn into_fields(self) -> PromptFrontmatter {
+        match self {
+            Self::Fields(fields) => fields,
+            Self::Other(_) => PromptFrontmatter::default(),
         }
-
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            consumed += segment.len();
-            continue;
-        }
-
-        if let Some((key, value)) = trimmed.split_once(':') {
-            let mut val = value.trim().to_string();
-            if val.len() >= 2 {
-                let bytes = val.as_bytes();
-                let first = bytes[0];
-                let last = bytes[bytes.len() - 1];
-                if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
-                    val = val[1..val.len().saturating_sub(1)].to_string();
-                }
-            }
-            match key.trim().to_ascii_lowercase().as_str() {
-                "description" => description = Some(val),
-                "argument-hint" | "argument_hint" => argument_hint = Some(val),
-                _ => {}
-            }
-        }
-
-        consumed += segment.len();
     }
+}
 
-    if !frontmatter_closed {
-        return (None, None, content.to_string());
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PromptString {
+    String(String),
+    Other(serde::de::IgnoredAny),
+}
+
+impl PromptString {
+    fn into_string(self) -> Option<String> {
+        match self {
+            Self::String(value) => Some(value),
+            Self::Other(_) => None,
+        }
     }
+}
 
-    let body = if consumed >= content.len() {
-        String::new()
-    } else {
-        content[consumed..].to_string()
-    };
-    (description, argument_hint, body)
+fn parse_prompt_document(content: &str) -> (Option<String>, Option<String>, String) {
+    match parse_yaml_frontmatter::<PromptFrontmatterValue>(content) {
+        Ok(document) => {
+            let frontmatter = document
+                .frontmatter
+                .map(PromptFrontmatterValue::into_fields)
+                .unwrap_or_default();
+            (
+                frontmatter.description.and_then(PromptString::into_string),
+                frontmatter
+                    .argument_hint
+                    .and_then(PromptString::into_string),
+                document.body,
+            )
+        }
+        Err(_) => (None, None, split_frontmatter(content).body),
+    }
 }
 
 fn build_prompt_contents(
@@ -241,7 +238,7 @@ fn discover_prompts_in(dir: &Path, scope: Option<&str>) -> Vec<CustomPromptEntry
             Ok(content) => content,
             Err(_) => continue,
         };
-        let (description, argument_hint, body) = parse_frontmatter(&content);
+        let (description, argument_hint, body) = parse_prompt_document(&content);
         out.push(CustomPromptEntry {
             name,
             path: path.to_string_lossy().to_string(),
@@ -476,7 +473,7 @@ pub(crate) async fn prompts_move_core(
     }
     move_file(&target_path, &next_path)?;
     let content = fs::read_to_string(&next_path).unwrap_or_default();
-    let (description, argument_hint, body) = parse_frontmatter(&content);
+    let (description, argument_hint, body) = parse_prompt_document(&content);
     let name = next_path
         .file_stem()
         .and_then(|value| value.to_str())
@@ -490,4 +487,30 @@ pub(crate) async fn prompts_move_core(
         content: body,
         scope: Some(scope),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_metadata_uses_the_shared_frontmatter_parser() {
+        let (description, argument_hint, body) = parse_prompt_document(
+            "\u{feff}---\r\ndescription: |\r\n  Review carefully\r\nargument_hint: <file>\r\n---\r\n\r\nReview it.\r\n",
+        );
+
+        assert_eq!(description.as_deref(), Some("Review carefully\n"));
+        assert_eq!(argument_hint.as_deref(), Some("<file>"));
+        assert_eq!(body, "Review it.");
+    }
+
+    #[test]
+    fn non_mapping_prompt_frontmatter_is_ignored() {
+        let (description, argument_hint, body) =
+            parse_prompt_document("---\nmetadata\n---\nReview it.");
+
+        assert_eq!(description, None);
+        assert_eq!(argument_hint, None);
+        assert_eq!(body, "Review it.");
+    }
 }

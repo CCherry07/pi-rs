@@ -1106,16 +1106,6 @@ fn session_entry_view(record: &SessionRecord) -> Result<SessionEntryView, Plugin
     ))
 }
 
-fn unix_timestamp_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-        })
-}
-
 const BUSY_USER_MESSAGE: &str =
     "Agent is already processing. Specify deliverAs ('steer' or 'followUp') to queue the message.";
 
@@ -1137,7 +1127,7 @@ fn plan_custom_message(
     options: SendMessageOptions,
     running: bool,
 ) -> PluginMessagePlan {
-    let message = message.into_message(unix_timestamp_ms());
+    let message = message.into_message(crate::now_ms());
     if options.deliver_as == Some(MessageDelivery::NextTurn) {
         PluginMessagePlan::Enqueue {
             message: Message::custom(message),
@@ -1171,7 +1161,7 @@ fn plan_user_message(
         Ok(PluginMessagePlan::Enqueue {
             message: Message::User(UserMessage {
                 content: blocks,
-                timestamp_ms: unix_timestamp_ms(),
+                timestamp_ms: crate::now_ms(),
             }),
             kind: delivery_queue(options.deliver_as),
         })
@@ -1180,7 +1170,7 @@ fn plan_user_message(
     } else {
         Ok(PluginMessagePlan::Prompt(Message::User(UserMessage {
             content: blocks,
-            timestamp_ms: unix_timestamp_ms(),
+            timestamp_ms: crate::now_ms(),
         })))
     }
 }

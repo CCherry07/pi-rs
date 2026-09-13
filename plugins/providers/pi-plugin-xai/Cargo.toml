@@ -13,6 +13,7 @@ futures.workspace = true
 pi-core.workspace = true
 pi-provider.workspace = true
 pi-plugin-openai.workspace = true
+pi-utils.workspace = true
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true

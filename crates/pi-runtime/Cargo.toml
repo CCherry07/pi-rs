@@ -13,6 +13,7 @@ pi-core.workspace = true
 pi-agent.workspace = true
 pi-prompt.workspace = true
 pi-resources.workspace = true
+pi-utils.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

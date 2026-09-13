@@ -7,6 +7,7 @@ use pi_core::{AgentPlugin, ModelSelection, ThinkingLevel};
 use pi_runtime::{PiRuntime, PiRuntimeBuilder};
 use tokio::sync::watch;
 
+use crate::journal::{comparable_path, sibling_transaction_path};
 use crate::{
     AgentSession, AgentSessionOptions, ForkOptions, ForkPosition, PiSession, PreparedAgentSession,
     SessionBeforeForkEvent, SessionBeforeSwitchEvent, SessionError, SessionHeader, SessionLog,
@@ -567,21 +568,11 @@ impl AgentSessionRuntime {
             return Err(SessionError::Closed);
         }
         match transition {
-            ResolvedSessionTransition::New {
-                cwd,
-                path,
-                parent_session,
-            } => {
-                self.replace_with_new(current, cwd, path, parent_session)
-                    .await
+            transition @ (ResolvedSessionTransition::New { .. }
+            | ResolvedSessionTransition::Resume { .. }
+            | ResolvedSessionTransition::Import { .. }) => {
+                self.replace_with_switch(current, transition).await
             }
-            ResolvedSessionTransition::Resume { path } => {
-                self.replace_with_resume(current, path).await
-            }
-            ResolvedSessionTransition::Import {
-                source,
-                destination,
-            } => self.replace_with_import(current, source, destination).await,
             ResolvedSessionTransition::Fork { entry_id, position } => {
                 self.replace_with_fork(current, entry_id, position).await
             }
@@ -589,120 +580,105 @@ impl AgentSessionRuntime {
         }
     }
 
-    async fn replace_with_new(
+    /// Executes the shared Pi switch transaction for new, resume, and import.
+    /// Import keeps its staged-file guard until the replacement is published.
+    async fn replace_with_switch(
         &self,
         current: Arc<AgentSession>,
-        cwd: PathBuf,
-        path: PathBuf,
-        parent_session: Option<PathBuf>,
+        transition: ResolvedSessionTransition,
     ) -> Result<AgentSessionReplacement, SessionError> {
-        let before = current
-            .session_plugin_driver()
-            .session_before_switch(&SessionBeforeSwitchEvent {
+        let before_event = match &transition {
+            ResolvedSessionTransition::New { .. } => SessionBeforeSwitchEvent {
                 reason: SessionSwitchReason::New,
                 target_session_file: None,
-            })
-            .await;
-        if before.is_some_and(|result| result.cancel) {
-            return Ok(AgentSessionReplacement::Cancelled);
-        }
-
-        let previous_session_file = current.log().path().to_path_buf();
-        self.replace_current(
-            current,
-            match parent_session {
-                Some(parent) => AgentSessionRuntimeTarget::create_with_parent(cwd, &path, parent),
-                None => AgentSessionRuntimeTarget::create(cwd, &path),
             },
-            SessionStartEvent {
-                reason: SessionStartReason::New,
-                previous_session_file: Some(previous_session_file),
-            },
-            None,
-            SessionShutdownEvent {
-                reason: SessionShutdownReason::New,
-                target_session_file: Some(path),
-            },
-        )
-        .await?;
-        Ok(AgentSessionReplacement::Replaced)
-    }
-
-    async fn replace_with_resume(
-        &self,
-        current: Arc<AgentSession>,
-        path: PathBuf,
-    ) -> Result<AgentSessionReplacement, SessionError> {
-        let before = current
-            .session_plugin_driver()
-            .session_before_switch(&SessionBeforeSwitchEvent {
+            ResolvedSessionTransition::Resume { path } => SessionBeforeSwitchEvent {
                 reason: SessionSwitchReason::Resume,
                 target_session_file: Some(path.clone()),
-            })
+            },
+            ResolvedSessionTransition::Import { destination, .. } => SessionBeforeSwitchEvent {
+                reason: SessionSwitchReason::Resume,
+                target_session_file: Some(destination.clone()),
+            },
+            ResolvedSessionTransition::Fork { .. } | ResolvedSessionTransition::Reload => {
+                unreachable!("fork and reload have dedicated replacement transactions")
+            }
+        };
+        let before = current
+            .session_plugin_driver()
+            .session_before_switch(&before_event)
             .await;
         if before.is_some_and(|result| result.cancel) {
             return Ok(AgentSessionReplacement::Cancelled);
         }
 
         let previous_session_file = current.log().path().to_path_buf();
-        let target = if comparable_path(&previous_session_file) == comparable_path(&path) {
-            AgentSessionRuntimeTarget::reuse_log(current.log().clone())
-        } else {
-            AgentSessionRuntimeTarget::open(&path)
+        let mut imported = None;
+        let (target, start_reason, shutdown_reason, target_session_file) = match transition {
+            ResolvedSessionTransition::New {
+                cwd,
+                path,
+                parent_session,
+            } => {
+                let target = match parent_session {
+                    Some(parent) => {
+                        AgentSessionRuntimeTarget::create_with_parent(cwd, &path, parent)
+                    }
+                    None => AgentSessionRuntimeTarget::create(cwd, &path),
+                };
+                (
+                    target,
+                    SessionStartReason::New,
+                    SessionShutdownReason::New,
+                    Some(path),
+                )
+            }
+            ResolvedSessionTransition::Resume { path } => {
+                let target = if comparable_path(&previous_session_file) == comparable_path(&path) {
+                    AgentSessionRuntimeTarget::reuse_log(current.log().clone())
+                } else {
+                    AgentSessionRuntimeTarget::open(&path)
+                };
+                (
+                    target,
+                    SessionStartReason::Resume,
+                    SessionShutdownReason::Resume,
+                    Some(path),
+                )
+            }
+            ResolvedSessionTransition::Import {
+                source,
+                destination,
+            } => {
+                imported = Some(ImportedFileTransaction::stage(&source, &destination)?);
+                (
+                    AgentSessionRuntimeTarget::open(&destination),
+                    SessionStartReason::Resume,
+                    SessionShutdownReason::Resume,
+                    Some(destination),
+                )
+            }
+            ResolvedSessionTransition::Fork { .. } | ResolvedSessionTransition::Reload => {
+                unreachable!("fork and reload have dedicated replacement transactions")
+            }
         };
         self.replace_current(
             current,
             target,
             SessionStartEvent {
-                reason: SessionStartReason::Resume,
+                reason: start_reason,
                 previous_session_file: Some(previous_session_file),
             },
             None,
             SessionShutdownEvent {
-                reason: SessionShutdownReason::Resume,
-                target_session_file: Some(path),
+                reason: shutdown_reason,
+                target_session_file,
             },
         )
         .await?;
-        Ok(AgentSessionReplacement::Replaced)
-    }
-
-    /// Copies a validated v4 JSONL session, or migrates coding-agent v1-v3,
-    /// into product storage and switches through the resume transaction.
-    async fn replace_with_import(
-        &self,
-        current: Arc<AgentSession>,
-        source: PathBuf,
-        destination: PathBuf,
-    ) -> Result<AgentSessionReplacement, SessionError> {
-        let before = current
-            .session_plugin_driver()
-            .session_before_switch(&SessionBeforeSwitchEvent {
-                reason: SessionSwitchReason::Resume,
-                target_session_file: Some(destination.clone()),
-            })
-            .await;
-        if before.is_some_and(|result| result.cancel) {
-            return Ok(AgentSessionReplacement::Cancelled);
+        if let Some(imported) = imported {
+            imported.commit();
         }
-
-        let imported = ImportedFileTransaction::stage(&source, &destination)?;
-        let previous_session_file = current.log().path().to_path_buf();
-        self.replace_current(
-            current,
-            AgentSessionRuntimeTarget::open(&destination),
-            SessionStartEvent {
-                reason: SessionStartReason::Resume,
-                previous_session_file: Some(previous_session_file),
-            },
-            None,
-            SessionShutdownEvent {
-                reason: SessionShutdownReason::Resume,
-                target_session_file: Some(destination),
-            },
-        )
-        .await?;
-        imported.commit();
         Ok(AgentSessionReplacement::Replaced)
     }
 
@@ -910,33 +886,6 @@ impl AgentSessionRuntime {
     }
 }
 
-fn sibling_transaction_path(path: &Path, purpose: &str) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .map_or_else(|| "session".into(), |name| name.to_os_string());
-    name.push(format!(".{purpose}-{}.tmp", uuid::Uuid::now_v7()));
-    path.with_file_name(name)
-}
-
-fn comparable_path(path: &Path) -> PathBuf {
-    if let Ok(canonical) = std::fs::canonicalize(path) {
-        return canonical;
-    }
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    };
-    match (absolute.parent(), absolute.file_name()) {
-        (Some(parent), Some(file_name)) => std::fs::canonicalize(parent)
-            .map(|parent| parent.join(file_name))
-            .unwrap_or(absolute),
-        _ => absolute,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex as StdMutex;
@@ -961,6 +910,7 @@ mod tests {
         requests: Arc<StdMutex<Vec<GenerationRequestSnapshot>>>,
         cancel_switch: Arc<AtomicBool>,
         fail_prepare: Arc<AtomicBool>,
+        fail_session_plugin_load: Arc<AtomicBool>,
         prepare_count: Arc<AtomicUsize>,
     }
 
@@ -980,6 +930,7 @@ mod tests {
                 requests: Arc::new(StdMutex::new(Vec::new())),
                 cancel_switch: Arc::new(AtomicBool::new(false)),
                 fail_prepare: Arc::new(AtomicBool::new(false)),
+                fail_session_plugin_load: Arc::new(AtomicBool::new(false)),
                 prepare_count: Arc::new(AtomicUsize::new(0)),
             }
         }
@@ -1179,12 +1130,20 @@ mod tests {
                 });
             builder = generation_overlay.apply_to(builder);
             let runtime = builder.build()?;
-            let options = AgentSessionOptions::default().plugins(SessionPlugins::new().plugin(
-                LifecyclePlugin {
-                    events: Arc::clone(&self.events),
-                    cancel_switch: Arc::clone(&self.cancel_switch),
-                },
-            ));
+            let plugin_events = Arc::clone(&self.events);
+            let cancel_switch = Arc::clone(&self.cancel_switch);
+            let fail_session_plugin_load = Arc::clone(&self.fail_session_plugin_load);
+            let options = AgentSessionOptions::default().plugins(
+                SessionPlugins::new().try_plugin_arc_factory(move || {
+                    if fail_session_plugin_load.load(Ordering::Acquire) {
+                        return Err("fixture session plugin load failed");
+                    }
+                    Ok(Arc::new(LifecyclePlugin {
+                        events: Arc::clone(&plugin_events),
+                        cancel_switch: Arc::clone(&cancel_switch),
+                    }) as Arc<dyn SessionPlugin>)
+                }),
+            );
             Ok(PreparedSessionGeneration::new(runtime, options))
         }
     }
@@ -1584,6 +1543,37 @@ mod tests {
             ]
         );
         factory.fail_prepare.store(false, Ordering::Release);
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_plugin_load_failure_keeps_whole_generation_active() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let factory = TestFactory::new();
+        let manager = MultiSessionManager::new(factory.clone());
+        let session = manager
+            .create_session(directory.path(), &path)
+            .await
+            .unwrap();
+        let current = session.current();
+        factory
+            .fail_session_plugin_load
+            .store(true, Ordering::Release);
+
+        let error = session.reload().await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("fixture session plugin load failed")
+        );
+        assert!(Arc::ptr_eq(&current, &session.current()));
+        assert!(!current.is_closed());
+        assert_eq!(
+            factory.events(),
+            ["prepare:Startup", "start:Startup", "prepare:Reload"]
+        );
         manager.shutdown().await.unwrap();
     }
 

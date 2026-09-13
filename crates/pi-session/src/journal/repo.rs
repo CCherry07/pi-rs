@@ -1,19 +1,14 @@
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::jsonl::{validate_header, validate_header_json_shape};
-use crate::{
-    ForkOptions, JsonlSessionCreateOptions, JsonlSessionListOptions, JsonlSessionMetadata,
-    SESSION_SCHEMA_VERSION, Session, SessionError, SessionHeader, SessionLog, next_unique_id,
-    now_ms,
-};
+use crate::{JsonlSessionMetadata, SESSION_SCHEMA_VERSION, SessionError, SessionHeader, now_ms};
+
+use super::jsonl::{validate_header, validate_header_json_shape};
 
 #[derive(Clone)]
 pub struct JsonlSessionRepo {
     sessions_root: PathBuf,
-    mutation_gate: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,41 +25,7 @@ impl JsonlSessionRepo {
     pub fn new(sessions_root: impl Into<PathBuf>) -> Self {
         Self {
             sessions_root: sessions_root.into(),
-            mutation_gate: Arc::new(Mutex::new(())),
         }
-    }
-
-    pub fn create(
-        &self,
-        options: JsonlSessionCreateOptions,
-    ) -> Result<Session<SessionLog>, SessionError> {
-        let _gate = self.gate();
-        let (header, path) = self.prepare_create(options)?;
-        SessionLog::create(path, header).map(Session::new)
-    }
-
-    pub fn open(
-        &self,
-        metadata: &JsonlSessionMetadata,
-    ) -> Result<Session<SessionLog>, SessionError> {
-        if !metadata.path.exists() {
-            return Err(SessionError::NotFound(metadata.id.clone()));
-        }
-        let (log, _) = SessionLog::open(&metadata.path)?;
-        if log.header().id != metadata.id {
-            return Err(SessionError::InvalidEntry(format!(
-                "session id does not match header: {}",
-                metadata.id
-            )));
-        }
-        Ok(Session::new(log))
-    }
-
-    pub fn list(
-        &self,
-        options: &JsonlSessionListOptions,
-    ) -> Result<Vec<JsonlSessionMetadata>, SessionError> {
-        list_jsonl_session_metadata(&self.sessions_root, options)
     }
 
     /// Resolves Pi's project-scoped `--session-id` contract without writing
@@ -76,10 +37,7 @@ impl JsonlSessionRepo {
     ) -> Result<ExactSessionIdResolution, SessionError> {
         validate_session_id(id)?;
         let cwd = absolute_path(cwd.as_ref())?;
-        if let Some(metadata) = self
-            .list(&JsonlSessionListOptions {
-                cwd: Some(cwd.clone()),
-            })?
+        if let Some(metadata) = list_jsonl_session_metadata(&self.sessions_root, Some(&cwd))?
             .into_iter()
             .find(|metadata| metadata.id == id)
         {
@@ -95,80 +53,17 @@ impl JsonlSessionRepo {
         })
     }
 
-    pub fn delete(&self, metadata: &JsonlSessionMetadata) -> Result<(), SessionError> {
-        let _gate = self.gate();
-        match std::fs::remove_file(&metadata.path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    pub fn fork(
-        &self,
-        source: &JsonlSessionMetadata,
-        options: &ForkOptions,
-        mut create: JsonlSessionCreateOptions,
-    ) -> Result<Session<SessionLog>, SessionError> {
-        let _gate = self.gate();
-        let source_log = self.open(source)?.storage().clone();
-        if create.parent_session_id.is_none() {
-            create.parent_session_id = Some(source.id.clone());
-        }
-        let (header, path) = self.prepare_create(create)?;
-        source_log.fork(path, header, options).map(Session::new)
-    }
-
-    fn prepare_create(
-        &self,
-        options: JsonlSessionCreateOptions,
-    ) -> Result<(SessionHeader, PathBuf), SessionError> {
-        let id = options.id.unwrap_or_else(|| next_unique_id("session"));
-        validate_session_id(&id)?;
-        let cwd = absolute_path(&options.cwd)?;
-        let directory = self.session_directory(&cwd)?;
-        if directory.exists() {
-            let suffix = format!("_{id}.jsonl");
-            if std::fs::read_dir(&directory)?
-                .filter_map(Result::ok)
-                .any(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .ends_with(suffix.as_str())
-                })
-            {
-                return Err(SessionError::AlreadyExists(id));
-            }
-        }
-
-        let created_at = now_ms();
-        std::fs::create_dir_all(&directory)?;
-        let path = directory.join(format!("{}_{}.jsonl", session_timestamp(created_at), id));
-        let mut header = SessionHeader::new(id, cwd);
-        header.created_at = created_at;
-        header.parent_session_id = options.parent_session_id;
-        header.metadata = options.metadata;
-        Ok((header, path))
-    }
-
     fn session_directory(&self, cwd: &Path) -> Result<PathBuf, SessionError> {
         Ok(absolute_path(&self.sessions_root)?.join(jsonl_session_directory_name(cwd)))
     }
-
-    fn gate(&self) -> MutexGuard<'_, ()> {
-        self.mutation_gate
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
 }
 
-pub fn list_jsonl_session_metadata(
+fn list_jsonl_session_metadata(
     sessions_root: &Path,
-    options: &JsonlSessionListOptions,
+    cwd: Option<&Path>,
 ) -> Result<Vec<JsonlSessionMetadata>, SessionError> {
     let root = absolute_path(sessions_root)?;
-    let directories = match &options.cwd {
+    let directories = match cwd {
         Some(cwd) => {
             let cwd = absolute_path(cwd)?;
             let directory = root.join(jsonl_session_directory_name(&cwd));
@@ -224,20 +119,6 @@ pub fn list_jsonl_session_metadata(
     }
     metadata.sort_by(|left, right| right.modified_at.total_cmp(&left.modified_at));
     Ok(metadata)
-}
-
-pub fn load_jsonl_session(metadata: &JsonlSessionMetadata) -> Result<SessionLog, SessionError> {
-    if !metadata.path.exists() {
-        return Err(SessionError::NotFound(metadata.id.clone()));
-    }
-    let (log, _) = SessionLog::open(&metadata.path)?;
-    if log.header().id != metadata.id {
-        return Err(SessionError::InvalidEntry(format!(
-            "session id does not match header: {}",
-            metadata.id
-        )));
-    }
-    Ok(log)
 }
 
 fn read_header_for_listing(path: &Path) -> Option<SessionHeader> {
@@ -321,51 +202,8 @@ fn civil_date_from_unix_days(days: i64) -> (i64, i64, i64) {
 
 #[cfg(test)]
 mod tests {
-    use pi_core::{Message, UserMessage};
-
     use super::*;
-    use crate::{ForkPosition, SessionEntryType};
-
-    #[test]
-    fn repo_uses_pi_directory_and_filename_layout() {
-        let directory = tempfile::tempdir().unwrap();
-        let repo = JsonlSessionRepo::new(directory.path());
-        let cwd = directory.path().join("workspace/project");
-        let session = repo
-            .create(JsonlSessionCreateOptions {
-                id: Some("metadata".to_string()),
-                cwd: cwd.clone(),
-                parent_session_id: Some("parent".to_string()),
-                metadata: None,
-            })
-            .unwrap();
-        let metadata = session.metadata().unwrap();
-        assert_eq!(metadata.cwd, cwd);
-        assert!(
-            metadata
-                .path
-                .parent()
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("--")
-        );
-        assert!(
-            metadata
-                .path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .contains("_metadata.jsonl")
-        );
-        assert_eq!(
-            repo.list(&JsonlSessionListOptions::default())
-                .unwrap()
-                .len(),
-            1
-        );
-    }
+    use crate::SessionLog;
 
     #[test]
     fn exact_id_resolution_is_project_scoped_and_does_not_materialize_new_sessions() {
@@ -386,14 +224,16 @@ mod tests {
         assert!(!path.exists());
         assert!(!directory.path().join("sessions").exists());
 
-        let existing = repo
-            .create(JsonlSessionCreateOptions {
-                id: Some("botmux-session".to_string()),
-                cwd: first_project.clone(),
-                ..JsonlSessionCreateOptions::default()
-            })
-            .unwrap();
-        let existing_path = existing.metadata().unwrap().path;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let existing_path = path.clone();
+        SessionLog::create(
+            &existing_path,
+            SessionHeader::new(
+                "botmux-session",
+                std::path::absolute(&first_project).unwrap(),
+            ),
+        )
+        .unwrap();
         assert!(matches!(
             repo.resolve_exact_id(&first_project, "botmux-session")
                 .unwrap(),
@@ -404,50 +244,6 @@ mod tests {
                 .unwrap(),
             ExactSessionIdResolution::New { .. }
         ));
-    }
-
-    #[test]
-    fn branch_and_tree_forks_match_v4_copy_scope() {
-        let directory = tempfile::tempdir().unwrap();
-        let repo = JsonlSessionRepo::new(directory.path());
-        let cwd = directory.path().join("project");
-        let source = repo
-            .create(JsonlSessionCreateOptions {
-                id: Some("source".to_string()),
-                cwd: cwd.clone(),
-                ..JsonlSessionCreateOptions::default()
-            })
-            .unwrap();
-        let first = source
-            .append_message(Message::User(UserMessage::text("first", 1)))
-            .unwrap();
-        source
-            .append_message(Message::User(UserMessage::text("second", 2)))
-            .unwrap();
-        let branch = repo
-            .fork(
-                &source.metadata().unwrap(),
-                &ForkOptions::Branch {
-                    entry_id: Some(first),
-                    position: Some(ForkPosition::At),
-                },
-                JsonlSessionCreateOptions {
-                    id: Some("branch".to_string()),
-                    cwd,
-                    ..JsonlSessionCreateOptions::default()
-                },
-            )
-            .unwrap();
-        assert_eq!(
-            branch
-                .find_entries(crate::EntryQuery {
-                    entry_type: Some(SessionEntryType::Message),
-                    ..crate::EntryQuery::default()
-                })
-                .unwrap()
-                .len(),
-            1
-        );
     }
 
     #[test]

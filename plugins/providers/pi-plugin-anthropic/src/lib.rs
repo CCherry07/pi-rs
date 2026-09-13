@@ -16,7 +16,7 @@ use pi_core::{
     ProviderRequest, ProviderStream,
 };
 use pi_provider::{
-    HttpTransport, ReqwestTransport, TransportError, collect_body_limited,
+    HttpTransport, ReqwestTransport, TransportError, collect_body_limited, insert_header,
     post_json_with_provider_hooks,
 };
 use serde_json::json;
@@ -580,17 +580,6 @@ fn validate_compatible_config(config: &AnthropicCompatibleConfig) -> Result<(), 
         return Err(ProviderError::Failure("invalid API key".to_string()));
     }
     Ok(())
-}
-
-fn insert_header(headers: &mut BTreeMap<String, String>, name: &str, value: &str) {
-    if let Some(existing) = headers
-        .keys()
-        .find(|key| key.eq_ignore_ascii_case(name))
-        .cloned()
-    {
-        headers.remove(&existing);
-    }
-    headers.insert(name.to_string(), value.to_string());
 }
 
 fn apply_compat_headers(headers: &mut BTreeMap<String, String>, request: &ProviderRequest) {

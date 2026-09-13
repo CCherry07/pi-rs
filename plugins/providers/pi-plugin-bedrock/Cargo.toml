@@ -17,6 +17,7 @@ hmac = "0.12"
 percent-encoding = "2.3"
 pi-core.workspace = true
 pi-provider.workspace = true
+pi-utils.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

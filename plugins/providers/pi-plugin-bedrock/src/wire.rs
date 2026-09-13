@@ -8,6 +8,7 @@ use pi_core::{
     ProviderId, ProviderRequest, ProviderStream, ResponseMetadata, ResponseMetadataPatch,
     StopReason, StreamEvent, ThinkingLevel, ToolCallId, Usage,
 };
+use pi_utils::time::unix_timestamp_ms as now_ms;
 use serde_json::{Map, Value, json};
 
 use crate::BEDROCK_CONVERSE_STREAM_API;
@@ -785,15 +786,6 @@ fn map_transport_error(error: pi_provider::TransportError) -> ProviderError {
         | pi_provider::TransportError::InvalidSse(message) => ProviderError::Protocol(message),
         error => ProviderError::Failure(error.to_string()),
     }
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-        })
 }
 
 #[cfg(test)]

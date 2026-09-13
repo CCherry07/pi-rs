@@ -6,7 +6,9 @@ use pi_core::{
     ToolSpec, ToolUpdateSink,
 };
 use pi_tool_support::with_prompt;
-use pi_tool_support::{execution, optional_positive_usize, require_str, resolve_to_cwd, spec};
+use pi_tool_support::{
+    execution, optional_positive_usize, require_str, resolve_to_cwd, spec, truncate_lines_by_bytes,
+};
 use serde_json::{Map, Value, json};
 use std::path::Path;
 use std::sync::Arc;
@@ -110,7 +112,7 @@ impl Tool for FindTool {
         }
 
         let result_limit_reached = entries.len() >= limit;
-        let (mut text, truncation) = truncate_output(&entries);
+        let (mut text, truncation) = truncate_lines_by_bytes(&entries, MAX_OUTPUT_BYTES);
         let mut notices = Vec::new();
         let mut details = Map::new();
         if result_limit_reached {
@@ -159,46 +161,6 @@ fn build_glob(pattern: &str) -> Result<FindMatcher, ToolError> {
 fn is_inside_git_repository(path: &Path) -> bool {
     path.ancestors()
         .any(|ancestor| ancestor.join(".git").exists())
-}
-
-fn truncate_output(lines: &[String]) -> (String, Option<Value>) {
-    let total_bytes = lines.iter().map(String::len).sum::<usize>() + lines.len().saturating_sub(1);
-    if total_bytes <= MAX_OUTPUT_BYTES {
-        return (lines.join("\n"), None);
-    }
-
-    let mut output = String::new();
-    let mut output_lines = 0usize;
-    for line in lines {
-        let separator = usize::from(!output.is_empty());
-        if output
-            .len()
-            .saturating_add(separator)
-            .saturating_add(line.len())
-            > MAX_OUTPUT_BYTES
-        {
-            break;
-        }
-        if separator == 1 {
-            output.push('\n');
-        }
-        output.push_str(line);
-        output_lines += 1;
-    }
-    let details = json!({
-        "content": output.clone(),
-        "truncated": true,
-        "truncatedBy": "bytes",
-        "totalLines": lines.len(),
-        "totalBytes": total_bytes,
-        "outputLines": output_lines,
-        "outputBytes": output.len(),
-        "lastLinePartial": false,
-        "firstLineExceedsLimit": false,
-        "maxLines": 9_007_199_254_740_991u64,
-        "maxBytes": MAX_OUTPUT_BYTES
-    });
-    (output, Some(details))
 }
 
 #[cfg(test)]

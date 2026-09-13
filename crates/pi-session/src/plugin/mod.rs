@@ -4,4 +4,5 @@ mod contract;
 mod driver;
 
 pub use contract::*;
-pub use driver::*;
+pub(crate) use driver::SessionPluginDriver;
+pub use driver::SessionPlugins;

@@ -1,5 +1,6 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
+use pi_utils::time::unix_timestamp_ms_u64 as now_ms;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 
@@ -227,14 +228,6 @@ where
         Value::Number(value) => Ok(value),
         Value::Text(value) => value.parse().map_err(serde::de::Error::custom),
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-        })
 }
 
 #[cfg(test)]

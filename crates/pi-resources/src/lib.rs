@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use pi_prompt::{BuildSystemPromptOptions, ContextFile};
+use pi_utils::path::absolute_from_current_dir as absolute;
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_DIR_NAME: &str = ".pi";
@@ -191,16 +192,6 @@ fn load_context_from_dir(dir: &Path) -> Option<ContextFile> {
             })
             .flatten()
     })
-}
-
-fn absolute(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
-    }
 }
 
 #[cfg(test)]

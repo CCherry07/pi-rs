@@ -8,4 +8,5 @@ publish = false
 
 [dependencies]
 pi-prompt.workspace = true
+pi-utils.workspace = true
 serde.workspace = true

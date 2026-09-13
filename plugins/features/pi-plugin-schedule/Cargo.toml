@@ -14,6 +14,7 @@ croner = "4.0.0"
 fs2 = "0.4.3"
 pi-core.workspace = true
 pi-session.workspace = true
+pi-utils.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile = "3.21.0"

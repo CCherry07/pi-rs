@@ -76,7 +76,7 @@ claiming Pi compatibility; do not implement from memory or from an older Pi shap
 - `models.json` owns registered model/provider catalog and request routing. Keep credentials and
   environment expansion request-time only.
 - Initial model priority is explicit request, restorable session model, catalog default, then
-  runtime fallback. Keep this policy in `ModelRuntimeServices` / `InitialModelResolver`, outside the
+  runtime fallback. Keep this policy in `AgentSessionOptions` / `InitialModelRequest`, outside the
   catalog loader.
 - Generation-time prompt changes flow through plugin hooks. Prompt contributions are run-local and
   must not mutate the reusable base prompt.

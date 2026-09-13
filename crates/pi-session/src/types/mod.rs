@@ -95,47 +95,6 @@ pub enum SessionError {
     Cancelled(&'static str),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionErrorCode {
-    NotFound,
-    AlreadyExists,
-    InvalidEntry,
-    InvalidPayload,
-    InvalidLane,
-    InvalidQuery,
-    InvalidForkTarget,
-    Storage,
-}
-
-impl SessionError {
-    /// Stable category matching Pi's `SessionErrorCode` contract.
-    pub fn code(&self) -> SessionErrorCode {
-        match self {
-            Self::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                SessionErrorCode::NotFound
-            }
-            Self::NotFound(_) => SessionErrorCode::NotFound,
-            Self::AlreadyExists(_) => SessionErrorCode::AlreadyExists,
-            Self::InvalidJson { .. }
-            | Self::MissingHeader
-            | Self::UnsupportedSchema(_)
-            | Self::InvalidEntry(_) => SessionErrorCode::InvalidEntry,
-            Self::InvalidPayload(_) => SessionErrorCode::InvalidPayload,
-            Self::InvalidLane(_) => SessionErrorCode::InvalidLane,
-            Self::InvalidQuery(_) => SessionErrorCode::InvalidQuery,
-            Self::InvalidForkTarget(_) => SessionErrorCode::InvalidForkTarget,
-            Self::Io(_)
-            | Self::Storage(_)
-            | Self::Runtime(_)
-            | Self::SessionPlugin(_)
-            | Self::Busy
-            | Self::Closed
-            | Self::Cancelled(_) => SessionErrorCode::Storage,
-        }
-    }
-}
-
 impl From<pi_runtime::RuntimeError> for SessionError {
     fn from(error: pi_runtime::RuntimeError) -> Self {
         Self::Runtime(error.to_string())
@@ -665,13 +624,6 @@ pub struct SessionDocument {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SessionMetadata {
-    pub id: String,
-    pub created_at: i64,
-    pub parent_session_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct JsonlSessionMetadata {
     pub id: String,
     pub created_at: i64,
@@ -682,25 +634,6 @@ pub struct JsonlSessionMetadata {
     pub parent_session_id: Option<String>,
     pub legacy_parent_session_path: Option<PathBuf>,
     pub metadata: Option<Map<String, Value>>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SessionCreateOptions {
-    pub id: Option<String>,
-    pub parent_session_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct JsonlSessionCreateOptions {
-    pub id: Option<String>,
-    pub cwd: PathBuf,
-    pub parent_session_id: Option<String>,
-    pub metadata: Option<Map<String, Value>>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct JsonlSessionListOptions {
-    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

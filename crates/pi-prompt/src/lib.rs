@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
+use pi_utils::{path::slash_path, text::escape_xml};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,18 +133,6 @@ fn append_context(prompt: &mut String, files: &[ContextFile]) {
         ));
     }
     prompt.push_str("</project_context>\n");
-}
-
-fn slash_path(path: impl AsRef<std::path::Path>) -> String {
-    path.as_ref().to_string_lossy().replace('\\', "/")
-}
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }
 
 #[cfg(test)]

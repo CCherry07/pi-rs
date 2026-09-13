@@ -6,8 +6,8 @@ use pi_core::{
 };
 use pi_runtime::PiRuntime;
 use pi_session::{
-    AgentSession, PiPluginContext, PluginContextBinding, PluginUiBridge, SessionStartEvent,
-    SessionStartReason,
+    AgentSession, AgentSessionOptions, PiPluginContext, PluginContextBinding, PluginUiBridge,
+    SessionStartEvent, SessionStartReason,
 };
 use pi_test_support::ScriptedProviderPlugin;
 
@@ -80,10 +80,13 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
         .plugin_context(context_access)
         .build()
         .unwrap();
-    let prepared =
-        AgentSession::prepare_create(runtime, directory.path().join("native-context.jsonl"))
-            .await
-            .unwrap();
+    let prepared = AgentSession::prepare_create_with_options(
+        runtime,
+        directory.path().join("native-context.jsonl"),
+        AgentSessionOptions::default(),
+    )
+    .await
+    .unwrap();
     access.bind_generation_session(prepared.session());
     let session = prepared
         .activate(SessionStartEvent {

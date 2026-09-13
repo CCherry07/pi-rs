@@ -1,7 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use pi_core::{ToolError, ToolExecutionMode, ToolSpec};
-use serde_json::Value;
+use serde_json::{Value, json};
 use unicode_normalization::UnicodeNormalization as _;
 
 pub const MAX_OUTPUT_BYTES: usize = 1_000_000;
@@ -265,6 +265,50 @@ pub fn truncate_tail(text: &str) -> (String, bool) {
     (kept.join("\n"), true)
 }
 
+/// Limits complete rendered lines by byte length using Pi's tool-result shape.
+///
+/// A line that would cross the limit is excluded rather than split. When
+/// truncation occurs, the returned details match Pi's `truncateHead` metadata.
+pub fn truncate_lines_by_bytes(lines: &[String], maximum_bytes: usize) -> (String, Option<Value>) {
+    let total_bytes = lines.iter().map(String::len).sum::<usize>() + lines.len().saturating_sub(1);
+    if total_bytes <= maximum_bytes {
+        return (lines.join("\n"), None);
+    }
+
+    let mut output = String::new();
+    let mut output_lines = 0usize;
+    for line in lines {
+        let separator = usize::from(!output.is_empty());
+        if output
+            .len()
+            .saturating_add(separator)
+            .saturating_add(line.len())
+            > maximum_bytes
+        {
+            break;
+        }
+        if separator == 1 {
+            output.push('\n');
+        }
+        output.push_str(line);
+        output_lines += 1;
+    }
+    let details = json!({
+        "content": output.clone(),
+        "truncated": true,
+        "truncatedBy": "bytes",
+        "totalLines": lines.len(),
+        "totalBytes": total_bytes,
+        "outputLines": output_lines,
+        "outputBytes": output.len(),
+        "lastLinePartial": false,
+        "firstLineExceedsLimit": false,
+        "maxLines": 9_007_199_254_740_991u64,
+        "maxBytes": maximum_bytes
+    });
+    (output, Some(details))
+}
+
 const NIBBLE_STR: &[u8; 16] = b"ZPMQVRWSNKTXJBYH";
 
 pub fn hashline_tag(line_index: usize, line: &str, had_bom: bool) -> String {
@@ -355,6 +399,31 @@ pub fn execution(message: impl Into<String>) -> ToolError {
 #[cfg(test)]
 mod path_tests {
     use super::*;
+
+    #[test]
+    fn line_output_truncation_keeps_complete_lines_and_reports_pi_details() {
+        let lines = vec!["first".to_string(), "second".to_string()];
+
+        let (output, details) = truncate_lines_by_bytes(&lines, 6);
+
+        assert_eq!(output, "first");
+        assert_eq!(
+            details,
+            Some(serde_json::json!({
+                "content": "first",
+                "truncated": true,
+                "truncatedBy": "bytes",
+                "totalLines": 2,
+                "totalBytes": 12,
+                "outputLines": 1,
+                "outputBytes": 5,
+                "lastLinePartial": false,
+                "firstLineExceedsLimit": false,
+                "maxLines": 9_007_199_254_740_991u64,
+                "maxBytes": 6
+            }))
+        );
+    }
 
     #[test]
     fn absolute_paths_are_not_confined_to_the_working_directory() {

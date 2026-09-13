@@ -13,7 +13,7 @@ use pi_plugin_openai::responses::{
     request_body as responses_request_body, stream as responses_stream,
 };
 use pi_provider::{
-    HttpTransport, ReqwestTransport, TransportError, collect_body_limited,
+    HttpTransport, ReqwestTransport, TransportError, collect_body_limited, insert_header,
     post_json_with_provider_hooks,
 };
 use serde_json::{Value, json};
@@ -254,17 +254,6 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
-}
-
-fn insert_header(headers: &mut BTreeMap<String, String>, name: &str, value: &str) {
-    if let Some(existing) = headers
-        .keys()
-        .find(|key| key.eq_ignore_ascii_case(name))
-        .cloned()
-    {
-        headers.remove(&existing);
-    }
-    headers.insert(name.to_string(), value.to_string());
 }
 
 fn map_transport_error(error: TransportError) -> ProviderError {

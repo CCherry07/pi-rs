@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use futures::FutureExt;
 use pi_core::{
@@ -9,6 +9,7 @@ use pi_core::{
     IsolatedSessionHandle, IsolatedSessionOutcome, IsolatedSessionTurnHandle, PluginContextHandle,
     SendMessageOptions, SessionContext, ToolResult, Usage,
 };
+use pi_utils::time::unix_timestamp_ms_u64 as now_ms;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -1222,14 +1223,6 @@ pub(crate) fn run_marker(text: &str) -> Option<&str> {
 
 fn marker(id: &str) -> String {
     format!("{MARKER_PREFIX}{id}{MARKER_SUFFIX}")
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            duration.as_millis().try_into().unwrap_or(u64::MAX)
-        })
 }
 
 pub(crate) fn result_with_details(text: impl Into<String>, details: Value) -> ToolResult {

@@ -2961,6 +2961,7 @@ dependencies = [
  "pi-runtime",
  "pi-session",
  "pi-test-support",
+ "pi-utils",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
@@ -2978,6 +2979,7 @@ dependencies = [
  "pi-core",
  "pi-telemetry",
  "pi-test-support",
+ "pi-utils",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
@@ -3059,6 +3061,7 @@ dependencies = [
  "pi-js-plugin",
  "pi-sdk",
  "pi-session",
+ "pi-utils",
  "serde",
  "serde_json",
  "sha2",
@@ -3115,6 +3118,7 @@ dependencies = [
  "async-trait",
  "pi-core",
  "pi-session",
+ "pi-utils",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -3191,6 +3195,7 @@ dependencies = [
  "futures",
  "pi-core",
  "pi-provider",
+ "pi-utils",
  "rand 0.8.7",
  "reqwest 0.12.28",
  "serde",
@@ -3239,6 +3244,7 @@ dependencies = [
  "percent-encoding",
  "pi-core",
  "pi-provider",
+ "pi-utils",
  "serde",
  "serde_json",
  "sha2",
@@ -3303,6 +3309,7 @@ dependencies = [
  "gcp_auth",
  "pi-core",
  "pi-provider",
+ "pi-utils",
  "serde_json",
  "tokio",
 ]
@@ -3410,6 +3417,7 @@ dependencies = [
  "pi-session",
  "pi-test-support",
  "pi-tool-support",
+ "pi-utils",
  "regex",
  "rusqlite",
  "same-file",
@@ -3433,6 +3441,7 @@ dependencies = [
  "futures",
  "pi-core",
  "pi-provider",
+ "pi-utils",
  "serde_json",
  "tokio",
 ]
@@ -3475,6 +3484,7 @@ dependencies = [
  "pi-core",
  "pi-provider",
  "pi-runtime",
+ "pi-utils",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -3508,8 +3518,8 @@ dependencies = [
  "pi-core",
  "pi-runtime",
  "pi-test-support",
+ "pi-utils",
  "serde",
- "serde_yaml",
  "tempfile",
  "tokio",
 ]
@@ -3543,6 +3553,7 @@ dependencies = [
  "pi-runtime",
  "pi-session",
  "pi-test-support",
+ "pi-utils",
  "serde",
  "serde_json",
  "tempfile",
@@ -3591,9 +3602,9 @@ dependencies = [
  "pi-core",
  "pi-runtime",
  "pi-test-support",
+ "pi-utils",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2",
  "tempfile",
  "tokio",
@@ -3617,9 +3628,9 @@ dependencies = [
  "pi-runtime",
  "pi-session",
  "pi-test-support",
+ "pi-utils",
  "serde",
  "serde_json",
- "serde_yaml",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -3666,6 +3677,7 @@ dependencies = [
  "pi-core",
  "pi-plugin-openai",
  "pi-provider",
+ "pi-utils",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -3676,6 +3688,7 @@ dependencies = [
 name = "pi-prompt"
 version = "0.1.0"
 dependencies = [
+ "pi-utils",
  "serde",
 ]
 
@@ -3699,6 +3712,7 @@ name = "pi-resources"
 version = "0.1.0"
 dependencies = [
  "pi-prompt",
+ "pi-utils",
  "serde",
 ]
 
@@ -3730,6 +3744,7 @@ dependencies = [
  "pi-prompt",
  "pi-resources",
  "pi-test-support",
+ "pi-utils",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
@@ -3800,15 +3815,13 @@ dependencies = [
  "pi-agent",
  "pi-core",
  "pi-plugin-macros",
- "pi-prompt",
- "pi-resources",
  "pi-runtime",
  "pi-shell",
  "pi-telemetry",
  "pi-test-support",
+ "pi-utils",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.20",
  "time",
@@ -3853,6 +3866,7 @@ dependencies = [
  "async-trait",
  "futures",
  "pi-core",
+ "pi-utils",
  "serde_json",
  "tokio",
 ]
@@ -3867,6 +3881,14 @@ dependencies = [
  "unicode-normalization",
  "url",
  "xxhash-rust",
+]
+
+[[package]]
+name = "pi-utils"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
 ]
 
 [[package]]

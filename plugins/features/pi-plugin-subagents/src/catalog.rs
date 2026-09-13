@@ -3,8 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pi_core::ThinkingLevel;
+use pi_utils::{
+    frontmatter::{FrontmatterStatus, parse_frontmatter},
+    path::absolute_from_current_dir as absolute,
+};
 use serde::{Deserialize, Deserializer, de};
-use serde_yaml::Value as YamlValue;
+use serde_json::Value as YamlValue;
 
 use crate::profiles::{SubagentProfile, SystemPromptMode, builtin_profiles};
 
@@ -289,7 +293,7 @@ fn deserialize_string_list<E: de::Error>(value: YamlValue) -> Result<Vec<String>
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .collect(),
-        YamlValue::Sequence(values) => values
+        YamlValue::Array(values) => values
             .into_iter()
             .map(|value| match value {
                 YamlValue::String(value) if !value.trim().is_empty() => {
@@ -346,10 +350,24 @@ fn load_definition(path: &Path) -> Result<SubagentProfile, SubagentCatalogError>
             format!("definition exceeds {MAX_DEFINITION_BYTES} bytes"),
         ));
     }
-    let (yaml, body) =
-        split_frontmatter(&raw).map_err(|message| definition_error(path, message))?;
-    let frontmatter: AgentFrontmatter =
-        serde_yaml::from_str(&yaml).map_err(|error| definition_error(path, error.to_string()))?;
+    let document = parse_frontmatter::<AgentFrontmatter>(&raw)
+        .map_err(|error| definition_error(path, error.to_string()))?;
+    let frontmatter = match (document.status, document.frontmatter) {
+        (FrontmatterStatus::Present, Some(frontmatter)) => frontmatter,
+        (FrontmatterStatus::Unterminated, _) => {
+            return Err(definition_error(
+                path,
+                "unterminated YAML frontmatter".to_string(),
+            ));
+        }
+        _ => {
+            return Err(definition_error(
+                path,
+                "YAML frontmatter must start on the first line".to_string(),
+            ));
+        }
+    };
+    let body = document.body;
     let name = frontmatter.name.trim();
     if !valid_name(name) {
         return Err(definition_error(
@@ -501,24 +519,6 @@ fn normalize_lexically(path: &Path) -> PathBuf {
     normalized
 }
 
-fn split_frontmatter(raw: &str) -> Result<(String, String), String> {
-    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
-    let rest = normalized
-        .strip_prefix("---\n")
-        .ok_or_else(|| "YAML frontmatter must start on the first line".to_string())?;
-    let end = rest
-        .find("\n---")
-        .ok_or_else(|| "unterminated YAML frontmatter".to_string())?;
-    let after = &rest[end + 4..];
-    if !after.is_empty() && !after.starts_with('\n') {
-        return Err("frontmatter closing delimiter must occupy its own line".to_string());
-    }
-    Ok((
-        rest[..end].to_string(),
-        after.strip_prefix('\n').unwrap_or(after).trim().to_string(),
-    ))
-}
-
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.split('.').all(|segment| {
@@ -552,16 +552,6 @@ fn definition_error(path: &Path, message: String) -> SubagentCatalogError {
     SubagentCatalogError::Definition {
         path: path.to_path_buf(),
         message,
-    }
-}
-
-fn absolute(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
     }
 }
 
@@ -645,6 +635,25 @@ mod tests {
         assert!(!inherited.inherit_project_context);
         assert!(!inherited.inherit_skills);
         assert_eq!(inherited.max_subagent_depth, None);
+    }
+
+    #[test]
+    fn definitions_share_bom_and_crlf_frontmatter_handling() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("agents");
+        write_definition(
+            &root,
+            "portable",
+            "\u{feff}---\r\nname: portable\r\ndescription: Portable agent\r\n---\r\nInspect code.\r\n",
+        );
+        let mut options = SubagentLoaderOptions::new(directory.path(), directory.path());
+        options.additional_paths.push(root);
+
+        let catalog = SubagentCatalog::load(&options).unwrap();
+
+        let profile = catalog.profile("portable").unwrap();
+        assert_eq!(profile.description, "Portable agent");
+        assert_eq!(profile.instructions, "Inspect code.");
     }
 
     #[test]

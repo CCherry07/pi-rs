@@ -13,6 +13,7 @@ thiserror.workspace = true
 tokio.workspace = true
 pi-core.workspace = true
 pi-telemetry.workspace = true
+pi-utils.workspace = true
 
 [dev-dependencies]
 pi-test-support.workspace = true

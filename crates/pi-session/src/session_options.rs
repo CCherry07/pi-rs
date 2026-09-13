@@ -1,24 +1,152 @@
+//! Session initialization options and model-selection policy.
+
+use std::path::PathBuf;
+
 use globset::GlobBuilder;
-use pi_core::{ModelId, ModelSpec, ProviderId, ScopedModel, ThinkingLevel};
+use pi_core::{ModelId, ModelSpec, PluginId, ProviderId, ScopedModel, ThinkingLevel};
 use pi_runtime::PiRuntime;
 
-use crate::SessionModel;
+use crate::{CompactionSettings, SessionContextBuildOptions, SessionModel, SessionPlugins};
 
-/// Why the initial model was selected for a session runtime generation.
+#[derive(Clone, Default)]
+pub struct AgentSessionOptions {
+    pub context: SessionContextBuildOptions,
+    pub plugins: SessionPlugins,
+    pub compaction: CompactionSettings,
+    /// Product-level model request to merge with a resumed session model.
+    pub initial_model: InitialModelRequest,
+    /// Generation-local tools the product enables when restoring a session.
+    /// The product owns this policy; session replay only reconciles names
+    /// against the new registry and persists the resulting selection.
+    pub additional_active_tools: Vec<String>,
+    /// Automatic compaction is enabled only when the model context window is
+    /// known. Manual compaction remains available without this value.
+    pub context_window: Option<u64>,
+    /// Tokens reserved outside abandoned-branch summary input. The selected
+    /// model context window supplies the total budget.
+    pub branch_summary_reserve_tokens: Option<u64>,
+    /// Immutable product registration metadata prepared alongside the runtime
+    /// and session plugin generations.
+    pub runtime_inventory: SessionRuntimeInventory,
+    /// Pi v3-compatible parent session path recorded for a new session.
+    pub parent_session_path: Option<PathBuf>,
+    /// Exact adapter-provided ID for a new session.
+    pub session_id: Option<String>,
+    /// Generation-local defaults for shell shorthand execution. Explicit
+    /// per-call shell paths still take precedence.
+    pub shell_path: Option<PathBuf>,
+    pub shell_command_prefix: Option<String>,
+    /// Session-owned retry policy for transient assistant/provider failures.
+    pub retry: AutoRetrySettings,
+    pub(crate) initial_model_fallback_message: Option<String>,
+}
+
+/// Bounded, abortable retry policy used by normal assistant turns.
+///
+/// The initial provider call does not count toward `max_retries`; attempt one
+/// waits `base_delay_ms`, attempt two waits twice that amount, and so on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InitialModelSource {
-    Requested,
-    Session,
-    Settings,
-    CatalogDefault,
-    RuntimeDefault,
+pub struct AutoRetrySettings {
+    pub enabled: bool,
+    pub max_retries: u32,
+    pub base_delay_ms: u64,
+}
+
+impl Default for AutoRetrySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_retries: 3,
+            base_delay_ms: 2_000,
+        }
+    }
+}
+
+impl AgentSessionOptions {
+    pub fn plugins(mut self, plugins: SessionPlugins) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
+    pub fn compaction(mut self, compaction: CompactionSettings) -> Self {
+        self.compaction = compaction;
+        self
+    }
+
+    pub fn initial_model(mut self, request: InitialModelRequest) -> Self {
+        self.initial_model = request;
+        self
+    }
+
+    pub fn additional_active_tools(mut self, tools: Vec<String>) -> Self {
+        self.additional_active_tools = tools;
+        self
+    }
+
+    pub fn context_window(mut self, context_window: u64) -> Self {
+        self.context_window = Some(context_window);
+        self
+    }
+
+    pub fn branch_summary_reserve_tokens(mut self, reserve_tokens: u64) -> Self {
+        self.branch_summary_reserve_tokens = Some(reserve_tokens);
+        self
+    }
+
+    pub fn runtime_inventory(mut self, inventory: SessionRuntimeInventory) -> Self {
+        self.runtime_inventory = inventory;
+        self
+    }
+
+    pub fn shell(mut self, shell_path: Option<PathBuf>, command_prefix: Option<String>) -> Self {
+        self.shell_path = shell_path;
+        self.shell_command_prefix = command_prefix;
+        self
+    }
+
+    pub fn retry(mut self, retry: AutoRetrySettings) -> Self {
+        self.retry = retry;
+        self
+    }
+
+    /// Carries the product's initial catalog fallback warning into the first
+    /// frontend subscription without persisting it in Pi v4 storage.
+    pub fn initial_model_fallback_message(mut self, message: Option<String>) -> Self {
+        self.initial_model_fallback_message = message;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionRuntimeInventory {
+    js_extensions: Vec<String>,
+    configured_native_plugins: Vec<PluginId>,
+}
+
+impl SessionRuntimeInventory {
+    pub fn new(
+        js_extensions: impl IntoIterator<Item = String>,
+        configured_native_plugins: impl IntoIterator<Item = PluginId>,
+    ) -> Self {
+        Self {
+            js_extensions: js_extensions.into_iter().collect(),
+            configured_native_plugins: configured_native_plugins.into_iter().collect(),
+        }
+    }
+
+    pub fn js_extensions(&self) -> &[String] {
+        &self.js_extensions
+    }
+
+    pub fn configured_native_plugins(&self) -> &[PluginId] {
+        &self.configured_native_plugins
+    }
 }
 
 /// A model selected before an `AgentSession` restores the rest of its context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialModelSelection {
     pub model: SessionModel,
-    pub source: InitialModelSource,
     /// Present when a higher-priority session model could not be restored.
     pub fallback_message: Option<String>,
 }
@@ -50,6 +178,51 @@ impl InitialModelRequest {
         self.settings_model = model;
         self
     }
+
+    /// Resolves this request against one immutable runtime generation without
+    /// changing the runtime's active model.
+    pub fn resolve(
+        self,
+        runtime: &PiRuntime,
+    ) -> Result<InitialModelSelection, InitialModelResolveError> {
+        let state = runtime.agent().state();
+        InitialModelResolver::new(
+            runtime.available_models(),
+            SessionModel {
+                provider: state.provider_id,
+                model_id: state.model_id,
+            },
+        )
+        .resolve(self)
+    }
+
+    /// Resolves this request and applies the selected model to the runtime.
+    pub fn select(
+        self,
+        runtime: &PiRuntime,
+    ) -> Result<InitialModelSelection, InitialModelResolveError> {
+        let selection = self.resolve(runtime)?;
+        let state = runtime.agent().state();
+        if state.provider_id != selection.model.provider
+            || state.model_id != selection.model.model_id
+        {
+            runtime
+                .set_model(
+                    selection.model.provider.clone(),
+                    selection.model.model_id.clone(),
+                )
+                .map_err(|error| InitialModelResolveError::Apply(error.to_string()))?;
+        }
+        if let Some(model) = runtime.model(&selection.model.provider, &selection.model.model_id) {
+            let effective = model.clamp_thinking_level(state.thinking_level);
+            if effective != state.thinking_level {
+                runtime
+                    .set_thinking_level(effective)
+                    .map_err(|error| InitialModelResolveError::Apply(error.to_string()))?;
+            }
+        }
+        Ok(selection)
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -70,24 +243,20 @@ pub enum InitialModelResolveError {
 /// settings default, first catalog model, then the runtime's configured
 /// fallback. Loading models and resolving credentials remain responsibilities
 /// of provider/catalog plugins.
-pub struct InitialModelResolver {
+struct InitialModelResolver {
     models: Vec<ModelSpec>,
     runtime_default: SessionModel,
 }
 
 impl InitialModelResolver {
-    pub fn new(models: Vec<ModelSpec>, runtime_default: SessionModel) -> Self {
+    fn new(models: Vec<ModelSpec>, runtime_default: SessionModel) -> Self {
         Self {
             models,
             runtime_default,
         }
     }
 
-    pub fn models(&self) -> &[ModelSpec] {
-        &self.models
-    }
-
-    pub fn resolve(
+    fn resolve(
         &self,
         request: InitialModelRequest,
     ) -> Result<InitialModelSelection, InitialModelResolveError> {
@@ -100,7 +269,6 @@ impl InitialModelResolver {
             if self.models.is_empty() || self.contains(&session_model) {
                 return Ok(InitialModelSelection {
                     model: session_model,
-                    source: InitialModelSource::Session,
                     fallback_message: None,
                 });
             }
@@ -120,7 +288,6 @@ impl InitialModelResolver {
             {
                 return Ok(InitialModelSelection {
                     model: to_session_model(model),
-                    source: InitialModelSource::Settings,
                     fallback_message,
                 });
             }
@@ -137,7 +304,6 @@ impl InitialModelResolver {
         if let Some(model) = self.models.first() {
             return Ok(InitialModelSelection {
                 model: to_session_model(model),
-                source: InitialModelSource::CatalogDefault,
                 fallback_message: fallback_message
                     .map(|message| format!("{message}; using {}/{}", model.provider, model.id)),
             });
@@ -145,7 +311,6 @@ impl InitialModelResolver {
 
         Ok(InitialModelSelection {
             model: self.runtime_default.clone(),
-            source: InitialModelSource::RuntimeDefault,
             fallback_message,
         })
     }
@@ -178,7 +343,6 @@ impl InitialModelResolver {
         match matches.as_slice() {
             [model] => Ok(InitialModelSelection {
                 model: to_session_model(model),
-                source: InitialModelSource::Requested,
                 fallback_message: None,
             }),
             [] => {
@@ -259,75 +423,8 @@ impl InitialModelResolver {
     }
 }
 
-/// Product-level adapter over the model portion of a `PiRuntime` generation.
-///
-/// The adapter is deliberately cwd/file-format agnostic. A caller first
-/// assembles provider/catalog plugins, then uses this interface to choose the
-/// model that the new session generation starts with.
-pub struct ModelRuntimeServices<'a> {
-    runtime: &'a PiRuntime,
-}
-
-impl<'a> ModelRuntimeServices<'a> {
-    pub fn new(runtime: &'a PiRuntime) -> Self {
-        Self { runtime }
-    }
-
-    pub fn resolver(&self) -> InitialModelResolver {
-        let state = self.runtime.agent().state();
-        InitialModelResolver::new(
-            self.runtime.available_models(),
-            SessionModel {
-                provider: state.provider_id,
-                model_id: state.model_id,
-            },
-        )
-    }
-
-    pub fn resolve_initial_model(
-        &self,
-        request: InitialModelRequest,
-    ) -> Result<InitialModelSelection, InitialModelResolveError> {
-        self.resolver().resolve(request)
-    }
-
-    /// Resolves Pi `enabledModels`/`--models` patterns against the immutable
-    /// available catalogue while preserving pattern and catalogue order.
-    pub fn resolve_model_scope(&self, patterns: &[String]) -> Vec<ScopedModel> {
-        resolve_model_scope(patterns, &self.runtime.available_models())
-    }
-
-    pub fn select_initial_model(
-        &self,
-        request: InitialModelRequest,
-    ) -> Result<InitialModelSelection, InitialModelResolveError> {
-        let selection = self.resolve_initial_model(request)?;
-        let state = self.runtime.agent().state();
-        if state.provider_id != selection.model.provider
-            || state.model_id != selection.model.model_id
-        {
-            self.runtime
-                .set_model(
-                    selection.model.provider.clone(),
-                    selection.model.model_id.clone(),
-                )
-                .map_err(|error| InitialModelResolveError::Apply(error.to_string()))?;
-        }
-        if let Some(model) = self
-            .runtime
-            .model(&selection.model.provider, &selection.model.model_id)
-        {
-            let effective = model.clamp_thinking_level(state.thinking_level);
-            if effective != state.thinking_level {
-                self.runtime
-                    .set_thinking_level(effective)
-                    .map_err(|error| InitialModelResolveError::Apply(error.to_string()))?;
-            }
-        }
-        Ok(selection)
-    }
-}
-
+/// Resolves Pi `enabledModels`/`--models` patterns against an immutable
+/// available catalog while preserving pattern and catalog order.
 pub fn resolve_model_scope(patterns: &[String], models: &[ModelSpec]) -> Vec<ScopedModel> {
     let mut scoped = Vec::new();
     for raw_pattern in patterns {
@@ -415,7 +512,6 @@ fn requested_selection(provider: ProviderId, reference: &str) -> InitialModelSel
             provider,
             model_id: ModelId::new(model_reference),
         },
-        source: InitialModelSource::Requested,
         fallback_message: None,
     }
 }
@@ -516,8 +612,9 @@ mod tests {
             .build()
             .unwrap();
 
-        ModelRuntimeServices::new(&runtime)
-            .select_initial_model(InitialModelRequest::default().requested("scripted", "sparse"))
+        InitialModelRequest::default()
+            .requested("scripted", "sparse")
+            .select(&runtime)
             .unwrap();
 
         assert_eq!(runtime.agent().state().thinking_level, ThinkingLevel::High);
@@ -537,7 +634,6 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(selected.source, InitialModelSource::Requested);
         assert_eq!(selected.model.provider.as_str(), "two");
         assert_eq!(selected.model.model_id.as_str(), "beta");
     }
@@ -551,7 +647,6 @@ mod tests {
             .resolve(InitialModelRequest::default().requested("custom", "unlisted"))
             .unwrap();
 
-        assert_eq!(selected.source, InitialModelSource::Requested);
         assert_eq!(selected.model.provider.as_str(), "custom");
         assert_eq!(selected.model.model_id.as_str(), "unlisted");
     }
@@ -612,7 +707,6 @@ mod tests {
             })))
             .unwrap();
 
-        assert_eq!(selected.source, InitialModelSource::Session);
         assert_eq!(selected.model.provider.as_str(), "two");
     }
 
@@ -634,7 +728,6 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(selected.source, InitialModelSource::Session);
         assert_eq!(selected.model.provider.as_str(), "two");
         assert_eq!(selected.model.model_id.as_str(), "beta");
     }
@@ -653,7 +746,6 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(selected.source, InitialModelSource::Settings);
         assert_eq!(selected.model.provider.as_str(), "two");
         assert_eq!(selected.model.model_id.as_str(), "beta");
     }
@@ -670,7 +762,6 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(selected.source, InitialModelSource::CatalogDefault);
         assert_eq!(selected.model.provider.as_str(), "catalog");
         let diagnostic = selected.fallback_message.expect("fallback diagnostic");
         assert!(diagnostic.contains("Settings model removed/old"));
@@ -689,7 +780,6 @@ mod tests {
             })))
             .unwrap();
 
-        assert_eq!(selected.source, InitialModelSource::CatalogDefault);
         assert_eq!(selected.model.provider.as_str(), "catalog");
         assert!(selected.fallback_message.is_some());
     }
@@ -700,7 +790,6 @@ mod tests {
             InitialModelResolver::new(vec![model("catalog", "first", "First")], fallback());
         let selected = resolver.resolve(InitialModelRequest::default()).unwrap();
 
-        assert_eq!(selected.source, InitialModelSource::CatalogDefault);
         assert_eq!(selected.model.provider.as_str(), "catalog");
     }
 
@@ -709,7 +798,6 @@ mod tests {
         let resolver = InitialModelResolver::new(Vec::new(), fallback());
         let selected = resolver.resolve(InitialModelRequest::default()).unwrap();
 
-        assert_eq!(selected.source, InitialModelSource::RuntimeDefault);
         assert_eq!(selected.model, fallback());
     }
 }

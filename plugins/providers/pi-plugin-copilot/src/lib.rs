@@ -12,7 +12,7 @@ pub use oauth::{
     start_device_authorization as start_github_copilot_device_authorization,
 };
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -28,7 +28,7 @@ use pi_plugin_openai::{
     OPENAI_RESPONSES_API, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
     OpenAiResponsesCompatibleProvider,
 };
-use pi_provider::{HttpTransport, ReqwestTransport};
+use pi_provider::{HttpTransport, ReqwestTransport, insert_header};
 use reqwest::Url;
 
 pub const GITHUB_COPILOT_PROVIDER_ID: &str = "github-copilot";
@@ -333,22 +333,6 @@ fn base_url_from_token(token: &str) -> Option<String> {
     Some(format!("https://{host}"))
 }
 
-fn insert_header(
-    headers: &mut BTreeMap<String, String>,
-    name: impl AsRef<str>,
-    value: impl Into<String>,
-) {
-    let name = name.as_ref();
-    if let Some(existing) = headers
-        .keys()
-        .find(|existing| existing.eq_ignore_ascii_case(name))
-        .cloned()
-    {
-        headers.remove(&existing);
-    }
-    headers.insert(name.to_string(), value.into());
-}
-
 fn env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -357,6 +341,7 @@ fn env(name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     use futures::{StreamExt, stream};

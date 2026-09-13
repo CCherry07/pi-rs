@@ -30,6 +30,7 @@ crates/pi-provider              vendor-neutral HTTP transport and SSE framing
 crates/pi-media                 multimodal byte processing; image detection, conversion and inline limits
 crates/pi-prompt                pure Pi-style system prompt assembly
 crates/pi-resources             generic system/append prompts and project context discovery
+crates/pi-utils                 policy-free shared mechanics, namespaced by concept
 crates/pi-session               Pi v4 storage/runtime plus plugin contracts under plugin/ and types/
 crates/pi-settings              current-format settings documents, snapshots, and safe writes
 crates/pi-sdk                   headless product composition shared by CLI, desktop, and embedded adapters
@@ -84,7 +85,8 @@ pi-provider          -> pi-core
 pi-media             -> pi-core + image codecs
 pi-prompt            -> standard library only
 pi-resources         -> pi-prompt
-pi-session           -> pi-core + pi-prompt + pi-resources + pi-runtime
+pi-utils             -> standard library; serde + YAML decoding behind its `frontmatter` feature
+pi-session           -> pi-core + pi-runtime
 pi-settings          -> serde JSON + filesystem persistence only
 pi-sdk               -> pi-session + pi-settings + pi-runtime + product providers, tools, resources,
                         memory, skills, subagents, and plugin loaders
@@ -227,6 +229,10 @@ implementation details of `MultiSessionManager`. `AgentSessionRuntime` and its s
 crate-private implementation details of the lower-level replacement transaction inside each
 `PiSession`; frontend adapters cannot bypass the managed Interface, and runtime failures use the
 shared public `SessionError` vocabulary.
+Inside `pi-session`, the private `journal` Module owns the durable v4 implementation: shared
+mutation sequencing, validation, state projection, reducer recovery, JSONL persistence, legacy
+import, and repositories. The crate root re-exports the stable
+session Interface, so this locality does not add another public lifecycle or cross-crate seam.
 The print and NDJSON Adapters pin `PiSession::current()` for one invocation; the longer-lived TUI and
 RPC adapters watch the handle's replacement stream. This keeps generation changes behind the same
 Interface while preventing a single in-flight submission from crossing generations.
@@ -1017,13 +1023,15 @@ plugins are registered in every generation even when unavailable, so diagnostics
 catalogs while `/model` exposes only providers with usable credential configuration. Their curated
 catalogs are explicit generation data rather than a claim of complete remote Pi catalog parity.
 
-Initial selection is a separate product policy in `pi-session`. `ModelRuntimeServices` adapts the
-model portion of an assembled `PiRuntime` generation, while `InitialModelResolver` resolves an
-explicit request, a restorable session model, the catalog default, or the runtime fallback in that
-order. The resolver never reads `models.json`, resolves credentials, or registers providers. This
-keeps file/routing mechanics inside `ModelsPlugin`, immutable catalog lookup inside `ModelRuntime`,
-and new/resumed session policy above both. A removed session model falls back to the current catalog
-with a diagnostic instead of silently restoring an unregistered route.
+Initial selection is part of the `AgentSessionOptions` interface in `pi-session`.
+`InitialModelRequest` resolves an explicit request, a restorable session model, the configured
+settings model, the catalog default, or the runtime fallback in that order. Its resolver is a
+private implementation detail of `session_options`; it never reads `models.json`, resolves
+credentials, or registers providers. This keeps file/routing mechanics inside `ModelsPlugin`,
+immutable catalog lookup inside `ModelRuntime`, and new/resumed session policy above both. A removed
+session model falls back to the current catalog with a diagnostic instead of silently restoring an
+unregistered route. The final selection carries that warning into `AgentSession`; its first frontend
+subscription receives a transient product notice, while Pi v4 storage remains unchanged.
 
 ## Settings generations
 
@@ -1091,8 +1099,17 @@ different cwd sends a semantic trust request to the TUI and waits before constru
 generation, so no project resource can be loaded before the decision. `/trust` updates persisted
 policy for the current cwd; generation rebuild/restart applies the changed resource set.
 
+`pi-utils` contains only shared, policy-free mechanics with concept-named modules. Its always-on
+`path`, `text`, and `time` modules own neutral path rendering/resolution, XML escaping, and Unix
+timestamp conversion. Its opt-in `frontmatter` feature owns UTF-8 BOM removal, newline
+normalization, delimiter extraction, and YAML decoding behind `split_frontmatter` and
+`parse_frontmatter`. None of those helpers decide whether metadata is required, which fields are
+valid, whether malformed input is fatal, or how a value is used; those policies stay in the owning
+product modules. This constraint keeps `pi-utils` from becoming a miscellaneous dependency sink or
+making YAML decoding a cost for consumers that do not parse frontmatter.
+
 `SkillsPlugin` is an example of the intended deep-plugin seam: it owns skill root configuration,
-discovery, frontmatter parsing, collision policy, catalog formatting, `/skill:name` command
+discovery, frontmatter field policy, collision policy, catalog formatting, `/skill:name` command
 registration/expansion, and its generation-local diagnostics. The generic sourced loader keeps the
 caller's source value attached to both successful skills and diagnostics. A direct root document
 that does not declare valid skill metadata is silently ignored, while a declared `SKILL.md` remains
@@ -1103,7 +1120,8 @@ through `before_agent_start`, which makes a separate `PromptContributor` trait u
 
 `PromptTemplatesPlugin` owns the parallel prompt-template seam. It discovers trusted project,
 user, and explicit Markdown sources non-recursively; preserves visible symlink names and caller
-provenance; parses frontmatter; applies deterministic first-name-wins collision policy; and
+provenance; owns prompt-template frontmatter field policy and deterministic first-name-wins
+collision policy; and
 registers one slash command per template. Its argument parser and expansion own Pi's quoted tokens,
 `$N`, `$@`, `$ARGUMENTS`, `${@:N}`, and `${@:N:L}` forms. The CLI only supplies trusted roots and
 registers the plugin factory in each generation.
@@ -1294,11 +1312,12 @@ session tree rather than only the selected branch, so resume and navigation do n
 was already billed. The signed v4 usage ledger remains the storage-level statistics contract for
 operation-attributed usage and adjustments.
 
-`Session<Storage>` is the small public façade shared by `InMemorySession` and `SessionLog`. It owns
-ID provisioning, validation, global queries, branch queries, lane views, records, and facts. The two
-repositories implement create/open/list/delete and branch/tree fork semantics. A branch fork copies
-only the selected message path and applicable facts; a tree fork copies all entries, lanes, and
-applicable facts. Neither copies operation records.
+`SessionLog` is the concrete durable storage Adapter. It owns atomic mutation persistence,
+branch/tree fork semantics, and shares `SessionState` projection and payload/query validation inside
+the private `journal` Module. A branch fork copies only the selected message path and applicable
+facts; a tree fork copies all entries, lanes, and applicable facts. Neither copies operation
+records. There is deliberately no public generic `SessionStorage` / `SessionView` seam: no product
+caller varies by backend.
 
 `JsonlSessionRepo::resolve_exact_id` owns the CLI's project-scoped session identity lookup and Pi
 directory/filename layout. Resolution is read-only: an existing ID yields its metadata, while a
@@ -1375,11 +1394,11 @@ target, so resume reconstructs the transformed user, assistant, or tool-result m
 the pre-hook value while ordinary display-text metadata remains intact.
 
 `AgentSession::create` and `AgentSession::open` adapt the v4 tree to `PiRuntime` and return the
-session's stable `Arc<AgentSession>` identity. Configuration changes are v4 entries, completed
-messages are persisted on `message_end`, and pi-rs-only prompt snapshots/resource diagnostics use
-reserved `customType` values rather than extending the v4 entry
-union. Opening restores data state only; executable plugins and resources always come from the
-supplied runtime. Checkout, branch summaries, and compaction rebuild runtime context immediately.
+session's stable `Arc<AgentSession>` identity. Configuration changes are v4 entries and completed
+messages are persisted on `message_end`; generation-local prompts and resource diagnostics are not
+duplicated into session storage. Opening restores data state only; executable plugins and resources
+always come from the supplied runtime. Checkout, branch summaries, and compaction rebuild runtime
+context immediately.
 `prepare_create` and `prepare_open` expose the same shared identity as a `PreparedAgentSession` whose
 `session_start` event is deferred, allowing a host to order replacement lifecycle events correctly.
 
@@ -1420,16 +1439,19 @@ path, cwd, parent session ID, and active plugin generation. Observer failures ar
 wins, and the first cancellation short-circuits, matching Pi's extension runner.
 
 `SessionPluginDriver` is the immutable, generation-local hook executor, parallel to `PluginDriver`
-and `ProviderPluginDriver`. `AgentSession` is the host: it owns the `SessionPlugins` source blueprint,
-the current `Arc<SessionPluginDriver>`, and the atomic reload swap. The driver neither retains plugin
-sources nor selects the active generation.
+and `ProviderPluginDriver`. Each `AgentSession` owns exactly one direct
+`Arc<SessionPluginDriver>` for its lifetime. The generation factory owns the reloadable
+`SessionPlugins` source blueprint and supplies a newly built driver while preparing the complete
+replacement session; neither the driver nor the live session retains a second reload seam.
 
 `SessionContextBuildOptions` remains ordinary session projection configuration rather than a
-plugin-registration surface. `AgentSessionOptions` independently combines it with a
-`SessionPlugins` blueprint. Factory-backed session plugins are rebuilt on reload. The complete next
-generation is prepared before the old generation receives `session_shutdown(reload)`; a load
-failure therefore leaves the old generation running. A successful reload commits the new
-generation and emits `session_start(reload)`.
+plugin-registration surface. `AgentSessionOptions` independently combines it with the prepared
+generation's `SessionPlugins`. Factory-backed session plugins are rebuilt only through whole-session
+product reload. The complete next generation is prepared before the old generation receives
+`session_shutdown(reload)`; a load failure therefore leaves the old generation running. A
+successful reload commits the new generation and emits `session_start(reload)`. There is no
+in-place session-driver swap that could reload one plugin system without its agent, provider,
+catalog, resource, and product-state peers.
 During shutdown, ordinary session mutations are blocked while still-valid plugin contexts may
 append their final custom state entries and usage. Context retirement happens after shutdown hooks,
 including on cancellation; repeated shutdown cannot run those hooks again. This matches current

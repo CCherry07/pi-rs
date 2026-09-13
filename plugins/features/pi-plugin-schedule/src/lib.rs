@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pi_core::{AgentPlugin, PluginId, RegisterContext};
+pub(crate) use pi_utils::time::unix_timestamp_ms as now_ms;
 
 pub use runtime::ScheduleSessionPlugin;
 
@@ -78,8 +79,4 @@ impl AgentPlugin for SchedulePlugin {
             self.options.clone(),
         )))
     }
-}
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
 }

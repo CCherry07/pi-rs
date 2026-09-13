@@ -69,7 +69,7 @@ v4 `EntryAppended` 与 compaction event 携带提交后的 `SessionRecord`，pro
 
 当前 `legacy/pi/packages/coding-agent` 仍声明 `CURRENT_SESSION_VERSION = 3`，header 是 `{type:"session", version, id, timestamp, cwd, parentSession}`（`legacy/pi/packages/coding-agent/src/core/session-manager.ts:30-39`），并内置 v1→v2→v3 迁移（同文件 `:231-295`）。与此同时，较新的低层 agent harness 已定义 `{kind:"header", version:4, createdAt, parentSessionId}`（`legacy/pi/packages/agent/src/harness/session/jsonl/types.ts:47-56`）。
 
-pi-rs 核心继续严格使用 v4；`crates/pi-session/src/legacy_import.rs` 在存储 seam 外提供一次性 converter。`inspect_session_file` 识别 native v4 和 coding-agent v1/v2/v3，`import_session_file` 总是创建新 destination 且不修改 source。它保留 tree IDs、parent links、timestamps、parentSession/branchedFrom path、custom messages、未知 agent-message wire extensions 和 compaction context；v1 `firstKeptEntryIndex` 转换成 entry ID，v2 `hookMessage` 转换成 custom entry，v3 retained tail 显式落入 v4 compaction。
+pi-rs 核心继续严格使用 v4；`crates/pi-session/src/journal/legacy_import.rs` 在存储 seam 外提供一次性 converter。`inspect_session_file` 识别 native v4 和 coding-agent v1/v2/v3，`import_session_file` 总是创建新 destination 且不修改 source。它保留 tree IDs、parent links、timestamps、parentSession/branchedFrom path、custom messages、未知 agent-message wire extensions 和 compaction context；v1 `firstKeptEntryIndex` 转换成 entry ID，v2 `hookMessage` 转换成 custom entry，v3 retained tail 显式落入 v4 compaction。
 
 `/import`、`AgentSessionRuntime` 与 `MultiSessionManager` 已接入 converter。所有行先完整校验，malformed middle line 会硬失败；写入或 generation prepare/switch 失败会删除 staged destination 并保持当前会话不变。native v4 仍走同一事务式 copy/resume 路径。focused tests 覆盖 v1/v3 转换、未知字段保留、非法中间行回滚，以及 runtime 导入失败不改变当前会话。
 

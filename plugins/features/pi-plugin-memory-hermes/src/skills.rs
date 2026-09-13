@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use fs2::FileExt;
+use pi_utils::frontmatter::{FrontmatterStatus, split_frontmatter};
 use serde::Deserialize;
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -560,7 +561,7 @@ fn scan_directory(
 
 fn read_path(roots: &SkillRoots<'_>, scope: SkillScope, path: &Path) -> Option<SkillDocument> {
     let raw = fs::read_to_string(path).ok()?;
-    let parsed = parse_frontmatter(&raw);
+    let parsed = parse_skill_document(&raw);
     let fallback = path
         .parent()
         .and_then(Path::file_name)
@@ -614,7 +615,7 @@ struct ParsedSkill {
 }
 
 pub(crate) fn validate_curated_document(name: &str, raw: &str) -> Result<(), String> {
-    let parsed = parse_frontmatter(raw);
+    let parsed = parse_skill_document(raw);
     if parsed.metadata.get("name").map(String::as_str) != Some(name)
         || parsed
             .metadata
@@ -629,19 +630,15 @@ pub(crate) fn validate_curated_document(name: &str, raw: &str) -> Result<(), Str
     Ok(())
 }
 
-fn parse_frontmatter(raw: &str) -> ParsedSkill {
-    let Some(rest) = raw.strip_prefix("---\n") else {
+fn parse_skill_document(raw: &str) -> ParsedSkill {
+    let document = split_frontmatter(raw);
+    if document.status != FrontmatterStatus::Present {
         return ParsedSkill {
             metadata: Default::default(),
-            body: raw.trim().to_string(),
+            body: document.body.trim().to_string(),
         };
-    };
-    let Some((header, body)) = rest.split_once("\n---\n") else {
-        return ParsedSkill {
-            metadata: Default::default(),
-            body: raw.trim().to_string(),
-        };
-    };
+    }
+    let header = document.frontmatter.unwrap_or_default();
     let metadata = header
         .lines()
         .filter_map(|line| {
@@ -652,7 +649,7 @@ fn parse_frontmatter(raw: &str) -> ParsedSkill {
         .collect();
     ParsedSkill {
         metadata,
-        body: body.trim().to_string(),
+        body: document.body,
     }
 }
 
@@ -935,7 +932,7 @@ fn normalize_flat_global_skills(roots: &SkillRoots<'_>) -> Result<usize, SkillEr
         let result = (|| -> Result<(), SkillError> {
             let source = entry.path();
             let raw = fs::read_to_string(&source)?;
-            let parsed = parse_frontmatter(&raw);
+            let parsed = parse_skill_document(&raw);
             let fallback = source
                 .file_stem()
                 .and_then(|value| value.to_str())
@@ -985,7 +982,7 @@ fn migrate_legacy_markdown(
         }
         let result = (|| -> Result<(), SkillError> {
             let raw = fs::read_to_string(&source)?;
-            let parsed = parse_frontmatter(&raw);
+            let parsed = parse_skill_document(&raw);
             let fallback = source
                 .file_stem()
                 .and_then(|value| value.to_str())

@@ -20,8 +20,9 @@ use pi_core::{
 };
 use pi_provider::{
     HttpTransport, ReqwestTransport, SseDecoder, TransportError, collect_body_limited,
-    post_json_with_provider_hooks,
+    insert_header, post_json_with_provider_hooks,
 };
+use pi_utils::time::unix_timestamp_ms as now_ms;
 use serde_json::{Value, json};
 
 pub const MISTRAL_CONVERSATIONS_API: &str = "mistral-conversations";
@@ -904,34 +905,11 @@ fn contains_header(headers: &BTreeMap<String, String>, target: &str) -> bool {
     headers.keys().any(|name| name.eq_ignore_ascii_case(target))
 }
 
-fn insert_header(
-    headers: &mut BTreeMap<String, String>,
-    name: impl AsRef<str>,
-    value: impl Into<String>,
-) {
-    let name = name.as_ref();
-    if let Some(existing) = headers
-        .keys()
-        .find(|existing| existing.eq_ignore_ascii_case(name))
-        .cloned()
-    {
-        headers.remove(&existing);
-    }
-    headers.insert(name.to_string(), value.into());
-}
-
 fn map_transport_error(error: TransportError) -> ProviderError {
     match error {
         TransportError::Aborted => ProviderError::Aborted,
         error => ProviderError::Failure(error.to_string()),
     }
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ use pi_core::{
     ToolCallId, ToolExecutionMode, UserMessage,
 };
 use pi_telemetry::TelemetryContext;
+use pi_utils::time::unix_timestamp_ms as now_ms;
 use tokio::sync::watch;
 
 use crate::agent_loop::emit_run_failure_lifecycle;
@@ -1026,13 +1027,4 @@ enum RunKind {
         skip_initial_steering_poll: bool,
     },
     Continue,
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-        })
 }

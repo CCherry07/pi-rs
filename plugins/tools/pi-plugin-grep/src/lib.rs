@@ -9,6 +9,7 @@ use pi_core::{
 use pi_tool_support::with_prompt;
 use pi_tool_support::{
     execution, invalid, optional_positive_usize, require_str, resolve_to_cwd, spec,
+    truncate_lines_by_bytes,
 };
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
@@ -112,7 +113,7 @@ impl Tool for GrepTool {
             context_lines,
             hashline,
         )?;
-        let (mut text, truncation) = truncate_output(&output_lines);
+        let (mut text, truncation) = truncate_lines_by_bytes(&output_lines, MAX_OUTPUT_BYTES);
         let mut notices = Vec::new();
         let mut details = Map::new();
         if result.match_limit_reached {
@@ -430,47 +431,6 @@ fn truncate_line(line: &str) -> (String, bool) {
     }
     let truncated = line.chars().take(MAX_LINE_CHARS).collect::<String>();
     (format!("{truncated}... [truncated]"), true)
-}
-
-fn truncate_output(lines: &[String]) -> (String, Option<Value>) {
-    let total_bytes = lines.iter().map(String::len).sum::<usize>() + lines.len().saturating_sub(1);
-    if total_bytes <= MAX_OUTPUT_BYTES {
-        return (lines.join("\n"), None);
-    }
-
-    let mut output = String::new();
-    let mut output_lines = 0usize;
-    for line in lines {
-        let separator = usize::from(!output.is_empty());
-        if output
-            .len()
-            .saturating_add(separator)
-            .saturating_add(line.len())
-            > MAX_OUTPUT_BYTES
-        {
-            break;
-        }
-        if separator == 1 {
-            output.push('\n');
-        }
-        output.push_str(line);
-        output_lines += 1;
-    }
-    let output_bytes = output.len();
-    let details = json!({
-        "content": output.clone(),
-        "truncated": true,
-        "truncatedBy": "bytes",
-        "totalLines": lines.len(),
-        "totalBytes": total_bytes,
-        "outputLines": output_lines,
-        "outputBytes": output_bytes,
-        "lastLinePartial": false,
-        "firstLineExceedsLimit": false,
-        "maxLines": 9_007_199_254_740_991u64,
-        "maxBytes": MAX_OUTPUT_BYTES
-    });
-    (output, Some(details))
 }
 
 fn hash(index: usize, line: &str) -> String {

@@ -1,6 +1,5 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use base64::Engine;
+use pi_utils::time::unix_timestamp_ms_u64 as now_ms;
 use rand::RngCore;
 use reqwest::{Client, Url};
 use serde::Deserialize;
@@ -155,14 +154,6 @@ fn parse_authorization_input(input: &str) -> Result<(String, Option<String>), St
         return Ok((code.to_string(), Some(state.to_string())));
     }
     Ok((input.to_string(), None))
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-        })
 }
 
 #[cfg(test)]

@@ -20,32 +20,29 @@ mod context;
 mod event;
 mod isolated_context;
 mod isolated_session;
-mod jsonl;
-mod legacy_import;
-mod memory;
-mod model_runtime_services;
+mod journal;
 mod multi_session_manager;
 pub mod plugin;
 mod plugin_context;
-mod reducer;
-mod repo;
-mod session;
-mod state;
-pub mod types;
-mod usage;
+mod session_options;
+mod types;
 
 pub use agent_session::{
-    AgentSession, AgentSessionOptions, AutoRetrySettings, PROMPT_SNAPSHOT_CUSTOM_TYPE,
-    PreparedAgentSession, PromptSnapshot, RESOURCE_DIAGNOSTIC_CUSTOM_TYPE, ResourceSnapshot,
-    SessionInput, SessionRuntimeInventory, ShellExecutionOptions, SubmitOutcome,
-    read_prompt_snapshot,
+    AgentSession, PreparedAgentSession, SessionInput, ShellExecutionOptions, SubmitOutcome,
 };
 pub use agent_session_runtime::{
     AgentSessionInitialModelSource, AgentSessionInitialState, AgentSessionReplacement,
     PreparedSessionGeneration, SessionGenerationActivation, SessionGenerationFactory,
     SessionGenerationOverlay, SessionGenerationRequest,
 };
-pub use compaction::*;
+pub(crate) use compaction::{
+    CompactionError, compact, estimate_session_context_tokens, estimate_tokens, prepare_compaction,
+    should_compact,
+};
+pub use compaction::{
+    ContextUsageEstimate, SUMMARIZATION_SYSTEM_PROMPT, calculate_context_tokens,
+    current_session_context_tokens, estimate_context_tokens,
+};
 pub use context::{
     ContextEntryTransform, CustomEntryContextMessageProjector, SessionContext,
     SessionContextBuildOptions, SessionModel, agent_message_to_provider_message,
@@ -58,14 +55,14 @@ pub use event::{
 };
 pub use isolated_context::InheritedSessionContext;
 pub use isolated_session::{IsolatedSessionObservation, IsolatedSessionUsageSnapshot};
-pub use jsonl::SessionLog;
-pub use legacy_import::{
-    LegacySessionImportReport, SessionFileFormat, import_session_file, inspect_session_file,
-};
-pub use memory::{InMemorySession, InMemorySessionRepo};
-pub use model_runtime_services::{
-    InitialModelRequest, InitialModelResolveError, InitialModelResolver, InitialModelSelection,
-    InitialModelSource, ModelRuntimeServices, resolve_model_scope,
+pub use journal::{
+    EffectiveLaneConfiguration, ExactSessionIdResolution, JsonlSessionRepo, LaneOperationState,
+    LaneReductionInput, LaneReductionResult, LaneState, LaneStepState, LegacySessionImportReport,
+    NewestOwnEntryState, OperationTargetState, RecordLogCorruption, RecordLogCorruptionReason,
+    RecordLogSlice, SessionFileFormat, SessionLog, TerminalFailureSource, TerminalFailureState,
+    ToolBatchCallState, ToolBatchState, aggregate_document_usage, aggregate_session_usage,
+    import_session_file, inspect_session_file, reduce_lane_state, session_entry_usage,
+    validate_record_log,
 };
 pub use multi_session_manager::{
     MultiSessionManager, MultiSessionManagerError, PiSession, WeakPiSession,
@@ -77,31 +74,21 @@ pub use plugin::{
     SessionBeforeTreeEvent, SessionBeforeTreeResult, SessionCompactEvent,
     SessionCompactFailedEvent, SessionForkPosition, SessionHook, SessionIdentity,
     SessionInfoChangedEvent, SessionPlugin, SessionPluginContext, SessionPluginDiagnostic,
-    SessionPluginDriver, SessionPluginError, SessionPluginReloadReport, SessionPlugins,
-    SessionShutdownEvent, SessionShutdownReason, SessionStartEvent, SessionStartReason,
-    SessionSwitchReason, SessionTreeEvent, SessionTreeSummary, TreePreparation,
+    SessionPluginError, SessionPlugins, SessionShutdownEvent, SessionShutdownReason,
+    SessionStartEvent, SessionStartReason, SessionSwitchReason, SessionTreeEvent,
+    SessionTreeSummary, TreePreparation,
 };
 pub use plugin_context::{
     PiPluginContext, PluginContextBinding, PluginProviderMutation, PluginProviderMutationAccess,
     PluginUiBridge,
 };
-pub use reducer::*;
-pub use repo::{
-    ExactSessionIdResolution, JsonlSessionRepo, list_jsonl_session_metadata, load_jsonl_session,
+pub use session_options::{
+    AgentSessionOptions, AutoRetrySettings, InitialModelRequest, InitialModelResolveError,
+    InitialModelSelection, SessionRuntimeInventory, resolve_model_scope,
 };
-pub use session::{DefaultIdGenerator, IdGenerator, Session, SessionStorage, SessionView};
 pub use types::*;
-pub use usage::{aggregate_document_usage, aggregate_session_usage, session_entry_usage};
 
-pub(crate) fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-        })
-}
+pub(crate) use pi_utils::time::unix_timestamp_ms as now_ms;
 
 pub(crate) fn next_unique_id(_kind: &str) -> String {
     uuid::Uuid::now_v7().to_string()

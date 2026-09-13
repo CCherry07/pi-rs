@@ -12,6 +12,7 @@ pi-core.workspace = true
 pi-js-plugin.workspace = true
 pi-sdk.workspace = true
 pi-session.workspace = true
+pi-utils.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

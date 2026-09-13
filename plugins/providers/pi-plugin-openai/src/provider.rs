@@ -10,8 +10,9 @@ use pi_core::{
 };
 use pi_provider::{
     HttpTransport, ReqwestTransport, SseDecoder, TransportError, collect_body_limited,
-    post_json_with_provider_hooks,
+    insert_header, post_json_with_provider_hooks,
 };
+use pi_utils::time::unix_timestamp_ms as now_ms;
 
 use crate::config::{OpenAiCompatibleConfig, OpenAiConfig, validate_config};
 use crate::request::{ResolvedOpenAiCompletionsCompat, affinity_headers, request_body};
@@ -205,22 +206,6 @@ fn completions_endpoint(base: &str) -> String {
     }
 }
 
-fn insert_header(
-    headers: &mut BTreeMap<String, String>,
-    name: impl AsRef<str>,
-    value: impl Into<String>,
-) {
-    let name = name.as_ref();
-    if let Some(existing) = headers
-        .keys()
-        .find(|existing| existing.eq_ignore_ascii_case(name))
-        .cloned()
-    {
-        headers.remove(&existing);
-    }
-    headers.insert(name.to_string(), value.into());
-}
-
 pub struct OpenAiProvider {
     inner: OpenAiCompatibleProvider,
 }
@@ -272,15 +257,6 @@ fn map_transport_error(error: TransportError) -> ProviderError {
             ProviderError::Failure(format!("response body exceeds the {limit}-byte limit"))
         }
     }
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |value| {
-            i64::try_from(value.as_millis()).unwrap_or(i64::MAX)
-        })
 }
 
 #[cfg(test)]

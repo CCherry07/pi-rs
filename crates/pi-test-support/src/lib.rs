@@ -13,6 +13,7 @@ use pi_core::{
     ToolCallId, ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdateSink,
     Usage,
 };
+use pi_utils::time::unix_timestamp_ms as now_ms;
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
@@ -172,15 +173,6 @@ impl ProviderPlugin for ScriptedProviderPlugin {
     fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
         context.register_provider(self.provider.clone())
     }
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-        })
 }
 
 #[derive(Clone)]

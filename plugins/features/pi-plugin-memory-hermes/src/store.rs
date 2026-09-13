@@ -10,6 +10,7 @@ use std::sync::{Mutex, RwLock};
 use base64::Engine as _;
 use chrono::{Duration, Utc};
 use fs2::FileExt;
+use pi_utils::time::unix_timestamp_ms as now_ms;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
@@ -2369,10 +2370,6 @@ fn move_directory_contents(
         }
     }
     Ok(())
-}
-
-fn now_ms() -> i64 {
-    Utc::now().timestamp_millis()
 }
 
 #[cfg(test)]

@@ -12,14 +12,12 @@ globset = "0.4.20"
 pi-agent.workspace = true
 pi-core.workspace = true
 pi-plugin-macros.workspace = true
-pi-prompt.workspace = true
-pi-resources.workspace = true
 pi-runtime.workspace = true
 pi-shell.workspace = true
 pi-telemetry.workspace = true
+pi-utils.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10.9"
 thiserror.workspace = true
 tokio.workspace = true
 time = { version = "0.3", features = ["formatting", "parsing"] }

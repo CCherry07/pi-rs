@@ -8,6 +8,7 @@ use pi_core::{
     MessageStartEvent, MessageUpdateEvent, PluginDriver, RunId, StopReason, ToolExecutionEndEvent,
     ToolExecutionStartEvent, ToolExecutionUpdateEvent, TurnEndEvent, TurnStartEvent,
 };
+use pi_utils::time::unix_timestamp_ms as now_ms;
 
 use crate::agent::{AgentState, RegisteredListeners};
 
@@ -293,13 +294,4 @@ impl AgentEventSink for AgentEventDispatcher {
         }
         Ok(event)
     }
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-        })
 }

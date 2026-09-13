@@ -30,6 +30,7 @@ use pi_session::{
     SessionStartEvent, SessionStartReason, SessionSwitchReason, SessionTreeEvent,
     SessionTreeSummary,
 };
+use pi_utils::time::unix_timestamp_ms as now_ms;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -1443,15 +1444,6 @@ fn same_message_role(left: &Message, right: &Message) -> bool {
             | (Message::ToolResult(_), Message::ToolResult(_))
             | (Message::Custom(_), Message::Custom(_))
     )
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-        })
 }
 
 #[async_trait]

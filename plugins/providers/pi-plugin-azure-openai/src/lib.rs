@@ -16,7 +16,7 @@ use pi_core::{
 };
 use pi_plugin_openai::responses;
 use pi_provider::{
-    HttpTransport, ReqwestTransport, TransportError, collect_body_limited,
+    HttpTransport, ReqwestTransport, TransportError, collect_body_limited, insert_header,
     post_json_with_provider_hooks,
 };
 
@@ -398,22 +398,6 @@ fn parse_deployment_name_map(value: &str) -> BTreeMap<String, String> {
                 .then(|| (model.to_string(), deployment.to_string()))
         })
         .collect()
-}
-
-fn insert_header(
-    headers: &mut BTreeMap<String, String>,
-    name: impl AsRef<str>,
-    value: impl Into<String>,
-) {
-    let name = name.as_ref();
-    if let Some(existing) = headers
-        .keys()
-        .find(|existing| existing.eq_ignore_ascii_case(name))
-        .cloned()
-    {
-        headers.remove(&existing);
-    }
-    headers.insert(name.to_string(), value.into());
 }
 
 fn map_transport_error(error: TransportError) -> ProviderError {

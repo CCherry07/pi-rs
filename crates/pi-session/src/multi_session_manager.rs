@@ -19,6 +19,7 @@ use crate::agent_session_runtime::{
     AgentSessionRuntime, AgentSessionRuntimeTarget, ResolvedSessionTransition,
 };
 use crate::isolated_session::IsolatedSessionRegistry;
+use crate::journal::comparable_path;
 use crate::{
     AgentSession, AgentSessionInitialModelSource, AgentSessionInitialState,
     AgentSessionReplacement, ForkPosition, IsolatedSessionObservation, SessionError,
@@ -1053,25 +1054,6 @@ impl MultiSessionManagerInner {
 enum ExistingSessionPolicy {
     Reuse,
     Reject,
-}
-
-fn comparable_path(path: &Path) -> PathBuf {
-    if let Ok(canonical) = std::fs::canonicalize(path) {
-        return canonical;
-    }
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    };
-    match (absolute.parent(), absolute.file_name()) {
-        (Some(parent), Some(file_name)) => std::fs::canonicalize(parent)
-            .map(|parent| parent.join(file_name))
-            .unwrap_or(absolute),
-        _ => absolute,
-    }
 }
 
 #[cfg(test)]

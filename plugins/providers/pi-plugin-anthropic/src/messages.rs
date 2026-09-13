@@ -12,6 +12,7 @@ use pi_core::{
     StreamEvent, ToolCallId, Usage,
 };
 use pi_provider::{HttpBodyStream, SseDecoder, TransportError};
+use pi_utils::time::unix_timestamp_ms as now_ms;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -792,12 +793,6 @@ fn map_transport_error(error: TransportError) -> ProviderError {
         }
         other => ProviderError::Failure(other.to_string()),
     }
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis() as i64)
 }
 
 #[cfg(test)]

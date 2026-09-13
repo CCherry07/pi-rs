@@ -6,10 +6,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::session::{
+use super::state::SessionState;
+use super::validation::{
     validate_mutation_payload, validate_new_lane_record, validate_provisioned_entry,
 };
-use crate::state::SessionState;
+use super::{comparable_path, sibling_transaction_path};
 use crate::{
     AgentMessage, BranchQuery, EntryQuery, ForkOptions, JsonlSessionMetadata, LanePointer,
     LaneRecord, LaneRecordEntry, LogItem, MAIN_LANE, NewLaneRecord, ProvisionedEntry, RecordQuery,
@@ -1010,33 +1011,6 @@ fn sibling_temporary_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-fn sibling_transaction_path(path: &Path, purpose: &str) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .map_or_else(|| "session".into(), |name| name.to_os_string());
-    name.push(format!(".{purpose}-{}.tmp", uuid::Uuid::now_v7()));
-    path.with_file_name(name)
-}
-
-fn comparable_path(path: &Path) -> PathBuf {
-    if let Ok(canonical) = std::fs::canonicalize(path) {
-        return canonical;
-    }
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    };
-    match (absolute.parent(), absolute.file_name()) {
-        (Some(parent), Some(file_name)) => std::fs::canonicalize(parent)
-            .map(|parent| parent.join(file_name))
-            .unwrap_or(absolute),
-        _ => absolute,
-    }
-}
-
 fn file_modified_at(path: &Path) -> Result<f64, SessionError> {
     Ok(std::fs::metadata(path)?
         .modified()
@@ -1203,10 +1177,7 @@ mod tests {
         log.append_message(Message::User(UserMessage::text("root", 1)))
             .unwrap();
         let custom = log
-            .append_custom_entry(
-                "pi.prompt_snapshot",
-                Some(serde_json::json!({"kept": true})),
-            )
+            .append_custom_entry("fixture.metadata", Some(serde_json::json!({"kept": true})))
             .unwrap();
 
         assert_eq!(log.export_branch(&export_path).unwrap(), export_path);
@@ -1306,7 +1277,7 @@ mod tests {
             Ok(_) => panic!("expected invalid header"),
             Err(error) => error,
         };
-        assert_eq!(error.code(), crate::SessionErrorCode::InvalidEntry);
+        assert!(matches!(error, SessionError::InvalidJson { .. }));
 
         let fact_path = directory.path().join("invalid-fact.jsonl");
         let valid_header = serde_json::to_string(&header()).unwrap();
@@ -1322,7 +1293,7 @@ mod tests {
             Ok(_) => panic!("expected invalid fact"),
             Err(error) => error,
         };
-        assert_eq!(error.code(), crate::SessionErrorCode::InvalidEntry);
+        assert!(matches!(error, SessionError::InvalidJson { .. }));
         assert_eq!(std::fs::read_to_string(fact_path).unwrap(), original);
     }
 

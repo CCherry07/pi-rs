@@ -7,4 +7,5 @@ license.workspace = true
 publish = false
 
 [dependencies]
+pi-utils.workspace = true
 serde.workspace = true

@@ -14,7 +14,7 @@ use pi_core::{
 };
 use pi_provider::{
     HttpBodyStream, HttpTransport, ReqwestTransport, TransportError, collect_body_limited,
-    post_json_with_provider_hooks,
+    insert_header, post_json_with_provider_hooks, remove_header,
 };
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
@@ -891,21 +891,6 @@ pub(crate) fn responses_request_body(request: &ProviderRequest) -> Value {
         body.extend(request.sampling_params.clone());
     }
     body
-}
-
-fn insert_header(headers: &mut BTreeMap<String, String>, name: &str, value: &str) {
-    remove_header(headers, name);
-    headers.insert(name.to_string(), value.to_string());
-}
-
-fn remove_header(headers: &mut BTreeMap<String, String>, name: &str) {
-    if let Some(existing) = headers
-        .keys()
-        .find(|key| key.eq_ignore_ascii_case(name))
-        .cloned()
-    {
-        headers.remove(&existing);
-    }
 }
 
 fn map_transport_error(error: TransportError) -> ProviderError {

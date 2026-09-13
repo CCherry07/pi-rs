@@ -12,6 +12,7 @@ async-trait.workspace = true
 futures.workspace = true
 pi-core.workspace = true
 pi-provider.workspace = true
+pi-utils.workspace = true
 base64 = "0.22"
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
 serde.workspace = true

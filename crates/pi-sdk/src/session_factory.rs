@@ -38,21 +38,21 @@ use pi_resources::ResourceLoaderOptions;
 use pi_runtime::{CompletionRetryPolicy, PiRuntime, RuntimeError, SystemPrompt};
 use pi_session::{
     AgentSessionOptions, AutoRetrySettings, CompactionSettings as SessionCompactionSettings,
-    InitialModelRequest, ModelRuntimeServices, PiPluginContext, PluginContextBinding,
-    PluginProviderMutationAccess, PluginUiBridge, PreparedSessionGeneration, SessionError,
-    SessionGenerationActivation, SessionGenerationFactory, SessionGenerationOverlay,
-    SessionGenerationRequest, SessionPlugins, SessionRuntimeInventory,
+    InitialModelRequest, PiPluginContext, PluginContextBinding, PluginProviderMutationAccess,
+    PluginUiBridge, PreparedSessionGeneration, SessionError, SessionGenerationActivation,
+    SessionGenerationFactory, SessionGenerationOverlay, SessionGenerationRequest, SessionPlugins,
+    SessionRuntimeInventory, resolve_model_scope,
 };
 use pi_settings::{
     QueueModeSetting, SettingsContext, SettingsManager, ThinkingLevelSetting, TransportSetting,
 };
 
-use crate::ProductConfig;
 use crate::builtin_providers::BuiltinProviderSet;
 use crate::dynamic_providers::{
     DynamicProviderCandidate, DynamicProviderOverlay, DynamicProviderPreparation,
 };
 use crate::project_trust::ProjectTrustService;
+use crate::{ProductConfig, expand_tilde_path};
 
 const BUILTIN_TOOL_NAMES: [&str; 17] = [
     "read",
@@ -337,7 +337,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
         } else {
             None
         };
-        let runtime = match build_runtime_inner(
+        let built_runtime = match build_runtime_inner(
             &config,
             project_trusted,
             &native_plugins,
@@ -353,13 +353,13 @@ impl SessionGenerationFactory for ProductSessionFactory {
             },
         )
         .map_err(SessionError::from)
-        .and_then(|runtime| {
+        .and_then(|built| {
             if let Some(initial_state) = &initial_state {
-                validate_initial_model_scope(&runtime, &config, initial_state)?;
+                validate_initial_model_scope(&built.runtime, &config, initial_state)?;
             }
-            Ok(runtime)
+            Ok(built)
         }) {
-            Ok(runtime) => runtime,
+            Ok(built) => built,
             Err(error) => {
                 if let Some(candidate) = &dynamic_provider_candidate {
                     self.dynamic_providers.reject(candidate);
@@ -367,6 +367,10 @@ impl SessionGenerationFactory for ProductSessionFactory {
                 return Err(error);
             }
         };
+        let RuntimeBuildOutcome {
+            runtime,
+            initial_model_fallback_message,
+        } = built_runtime;
         let mut session_plugins = SessionPlugins::new();
         if let Some(memory) = memory {
             let plugin = memory.session_plugin();
@@ -400,6 +404,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
                 base_delay_ms: config.runtime_settings.retry.base_delay_ms,
             })
             .initial_model(initial_model_request(&config))
+            .initial_model_fallback_message(initial_model_fallback_message)
             .additional_active_tools(
                 runtime
                     .active_tools()
@@ -601,6 +606,7 @@ fn build_runtime_with_codex_credentials(
             memory: None,
         },
     )
+    .map(|built| built.runtime)
 }
 
 #[cfg(test)]
@@ -626,6 +632,7 @@ async fn build_runtime_with_first_party_memory(
             memory,
         },
     )
+    .map(|built| built.runtime)
 }
 
 struct RuntimeBuildExtras<'a> {
@@ -637,6 +644,11 @@ struct RuntimeBuildExtras<'a> {
     memory: Option<PreparedMemoryProvider>,
 }
 
+struct RuntimeBuildOutcome {
+    runtime: PiRuntime,
+    initial_model_fallback_message: Option<String>,
+}
+
 fn build_runtime_inner(
     config: &ProductConfig,
     project_trusted: bool,
@@ -644,7 +656,7 @@ fn build_runtime_inner(
     js_generation: Option<&JsPluginGeneration>,
     dynamic_providers: Option<&DynamicProviderCandidate>,
     extras: RuntimeBuildExtras<'_>,
-) -> Result<PiRuntime, RuntimeError> {
+) -> Result<RuntimeBuildOutcome, RuntimeError> {
     let memory_supports_memory_tool = extras.memory.is_some();
     let memory_supports_session_search = extras.memory.is_some();
     let memory_is_hermes = extras
@@ -828,11 +840,14 @@ fn build_runtime_inner(
     }
     runtime.set_active_tools(active_tools)?;
 
-    ModelRuntimeServices::new(&runtime)
-        .select_initial_model(initial_model_request(config))
+    let selection = initial_model_request(config)
+        .select(&runtime)
         .map_err(|error| RuntimeError::Build(error.to_string()))?;
 
-    Ok(runtime)
+    Ok(RuntimeBuildOutcome {
+        runtime,
+        initial_model_fallback_message: selection.fallback_message,
+    })
 }
 
 async fn build_memory_provider(
@@ -931,7 +946,7 @@ fn validate_initial_model_scope(
     let Some(patterns) = &config.runtime_settings.enabled_models else {
         return Ok(());
     };
-    let allowed = ModelRuntimeServices::new(runtime).resolve_model_scope(patterns);
+    let allowed = resolve_model_scope(patterns, &runtime.available_models());
     if allowed.iter().any(|candidate| {
         candidate.model.provider == initial_state.model.provider
             && candidate.model.id == initial_state.model.model_id
@@ -1009,18 +1024,6 @@ fn setting_path(path: &str, base: &std::path::Path) -> PathBuf {
     } else {
         base.join(path)
     }
-}
-
-fn expand_tilde_path(path: &str) -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        if path == "~" {
-            return PathBuf::from(home);
-        }
-        if let Some(relative) = path.strip_prefix("~/") {
-            return PathBuf::from(home).join(relative);
-        }
-    }
-    PathBuf::from(path)
 }
 
 #[cfg(test)]

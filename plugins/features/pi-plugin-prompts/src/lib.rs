@@ -9,8 +9,8 @@ use pi_core::{
     AgentPlugin, Command, CommandContext, CommandError, CommandOutcome, CommandSpec, PluginId,
     RegisterContext,
 };
+use pi_utils::{frontmatter::parse_frontmatter, path::absolute_from_current_dir as absolute};
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value;
 
 const CONFIG_DIR_NAME: &str = ".pi";
 
@@ -350,18 +350,27 @@ fn load_template(
             source,
         )
     })?;
-    let (frontmatter, content) = parse_frontmatter(&raw).map_err(|message| {
+    let document = parse_frontmatter::<PromptFrontmatterValue>(&raw).map_err(|error| {
         diagnostic(
             PromptTemplateDiagnosticCode::ParseFailed,
-            message,
+            error.to_string(),
             path,
             source,
         )
     })?;
-    let description = frontmatter_string(&frontmatter, "description")
+    let frontmatter = document
+        .frontmatter
+        .map(PromptFrontmatterValue::into_fields)
+        .unwrap_or_default();
+    let content = document.body;
+    let description = frontmatter
+        .description
+        .and_then(PromptString::into_string)
         .filter(|description| !description.is_empty())
         .unwrap_or_else(|| first_line_description(&content));
-    let argument_hint = frontmatter_string(&frontmatter, "argument-hint")
+    let argument_hint = frontmatter
+        .argument_hint
+        .and_then(PromptString::into_string)
         .filter(|argument_hint| !argument_hint.is_empty());
     let name = path
         .file_name()
@@ -380,27 +389,43 @@ fn load_template(
     })
 }
 
-fn parse_frontmatter(content: &str) -> Result<(Value, String), String> {
-    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
-    if !normalized.starts_with("---") {
-        return Ok((Value::Mapping(Default::default()), normalized));
-    }
-    let Some(relative_end) = normalized[3..].find("\n---") else {
-        return Ok((Value::Mapping(Default::default()), normalized));
-    };
-    let end = 3 + relative_end;
-    let yaml_start = 4.min(end);
-    let frontmatter =
-        serde_yaml::from_str(&normalized[yaml_start..end]).map_err(|error| error.to_string())?;
-    Ok((frontmatter, normalized[end + 4..].trim().to_string()))
+#[derive(Default, Deserialize)]
+struct PromptFrontmatter {
+    description: Option<PromptString>,
+    #[serde(rename = "argument-hint")]
+    argument_hint: Option<PromptString>,
 }
 
-fn frontmatter_string(frontmatter: &Value, key: &str) -> Option<String> {
-    frontmatter
-        .as_mapping()?
-        .get(Value::String(key.to_string()))?
-        .as_str()
-        .map(str::to_string)
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PromptFrontmatterValue {
+    Fields(PromptFrontmatter),
+    Other(serde::de::IgnoredAny),
+}
+
+impl PromptFrontmatterValue {
+    fn into_fields(self) -> PromptFrontmatter {
+        match self {
+            Self::Fields(fields) => fields,
+            Self::Other(_) => PromptFrontmatter::default(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PromptString {
+    String(String),
+    Other(serde::de::IgnoredAny),
+}
+
+impl PromptString {
+    fn into_string(self) -> Option<String> {
+        match self {
+            Self::String(value) => Some(value),
+            Self::Other(_) => None,
+        }
+    }
 }
 
 fn first_line_description(content: &str) -> String {
@@ -533,16 +558,6 @@ pub fn format_prompt_template_invocation(
     substitute_args(&template.content, arguments)
 }
 
-fn absolute(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,6 +610,44 @@ mod tests {
             template.source.kind == PromptTemplateSourceKind::Additional
                 && template.source.root.is_absolute()
         }));
+    }
+
+    #[test]
+    fn prompt_templates_share_bom_crlf_and_multiline_yaml_handling() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("review.md");
+        std::fs::write(
+            &path,
+            "\u{feff}---\r\ndescription: |\r\n  Review carefully\r\nargument-hint: <file>\r\n---\r\n\r\nReview $1\r\n",
+        )
+        .unwrap();
+        let source = PromptTemplateSource {
+            kind: PromptTemplateSourceKind::Additional,
+            root: root.path().to_path_buf(),
+        };
+
+        let template = load_template(&path, &source).unwrap();
+
+        assert_eq!(template.description, "Review carefully\n");
+        assert_eq!(template.argument_hint.as_deref(), Some("<file>"));
+        assert_eq!(template.content, "Review $1");
+    }
+
+    #[test]
+    fn non_mapping_prompt_frontmatter_is_ignored_like_pi() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("review.md");
+        std::fs::write(&path, "---\nmetadata\n---\nReview $1").unwrap();
+        let source = PromptTemplateSource {
+            kind: PromptTemplateSourceKind::Additional,
+            root: root.path().to_path_buf(),
+        };
+
+        let template = load_template(&path, &source).unwrap();
+
+        assert_eq!(template.description, "Review $1");
+        assert_eq!(template.argument_hint, None);
+        assert_eq!(template.content, "Review $1");
     }
 
     #[test]

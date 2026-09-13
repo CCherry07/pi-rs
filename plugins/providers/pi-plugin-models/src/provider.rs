@@ -25,9 +25,9 @@ use pi_plugin_openai::{
     OPENAI_RESPONSES_API, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
     OpenAiResponsesCompatibleProvider,
 };
-use pi_provider::HttpTransport;
 #[cfg(test)]
 use pi_provider::ReqwestTransport;
+use pi_provider::{HttpTransport, insert_header};
 
 use crate::config::{PreparedModel, PreparedOverride, PreparedProvider};
 use crate::resolver::{ConfigValueResolver, ResolveError};
@@ -410,22 +410,6 @@ fn map_resolve_error(error: ResolveError) -> ProviderError {
         ResolveError::Aborted => ProviderError::Aborted,
         ResolveError::Failed(message) => ProviderError::Failure(message),
     }
-}
-
-fn insert_header(
-    headers: &mut BTreeMap<String, String>,
-    name: impl AsRef<str>,
-    value: impl Into<String>,
-) {
-    let name = name.as_ref();
-    if let Some(existing) = headers
-        .keys()
-        .find(|existing| existing.eq_ignore_ascii_case(name))
-        .cloned()
-    {
-        headers.remove(&existing);
-    }
-    headers.insert(name.to_string(), value.into());
 }
 
 #[cfg(test)]

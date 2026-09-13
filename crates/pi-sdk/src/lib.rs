@@ -130,7 +130,7 @@ pub fn default_agent_dir() -> Option<PathBuf> {
         })
 }
 
-fn expand_tilde_path(path: &str) -> PathBuf {
+pub(crate) fn expand_tilde_path(path: &str) -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         if path == "~" {
             return PathBuf::from(home);

@@ -15,6 +15,7 @@ use pi_telemetry::{
     ActiveSpan, AiOperation, AiRequestEnd, AiRequestSpan, AiRequestStart, AiStopReason, SpanStatus,
     TelemetryContext,
 };
+use pi_utils::time::unix_timestamp_ms as now_ms;
 
 use crate::llm_callbacks::StreamFnError;
 use crate::{
@@ -1185,15 +1186,6 @@ fn message_as_tool_result(message: Message) -> Result<ToolResultMessage, AgentLo
             "message_end changed tool-result role to {message:?}"
         ))),
     }
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-        })
 }
 
 #[cfg(test)]

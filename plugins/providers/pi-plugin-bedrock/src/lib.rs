@@ -18,7 +18,9 @@ use pi_core::{
     AbortSignal, PluginId, Provider, ProviderAvailability, ProviderCallContext, ProviderError,
     ProviderId, ProviderPlugin, ProviderRegisterContext, ProviderRequest, ProviderStream,
 };
-use pi_provider::{HttpTransport, ReqwestTransport, TransportError, collect_body_limited};
+use pi_provider::{
+    HttpTransport, ReqwestTransport, TransportError, collect_body_limited, insert_header,
+};
 use time::OffsetDateTime;
 use url::Url;
 
@@ -423,22 +425,6 @@ fn remove_reserved_auth_headers(headers: &mut BTreeMap<String, String>) {
     for name in reserved {
         headers.remove(&name);
     }
-}
-
-fn insert_header(
-    headers: &mut BTreeMap<String, String>,
-    name: impl AsRef<str>,
-    value: impl Into<String>,
-) {
-    let name = name.as_ref();
-    if let Some(existing) = headers
-        .keys()
-        .find(|existing| existing.eq_ignore_ascii_case(name))
-        .cloned()
-    {
-        headers.remove(&existing);
-    }
-    headers.insert(name.to_string(), value.into());
 }
 
 fn value(values: &BTreeMap<String, String>, name: &str) -> Option<String> {

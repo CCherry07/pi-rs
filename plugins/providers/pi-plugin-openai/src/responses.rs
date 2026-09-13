@@ -15,8 +15,9 @@ use pi_core::{
 };
 use pi_provider::{
     HttpBodyStream, HttpTransport, ReqwestTransport, SseDecoder, TransportError,
-    collect_body_limited, post_json_with_provider_hooks,
+    collect_body_limited, insert_header, post_json_with_provider_hooks,
 };
+use pi_utils::time::unix_timestamp_ms as now_ms;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -899,28 +900,6 @@ fn map_transport_error(error: TransportError) -> ProviderError {
         }
         other => ProviderError::Failure(other.to_string()),
     }
-}
-
-fn insert_header(
-    headers: &mut BTreeMap<String, String>,
-    name: impl AsRef<str>,
-    value: impl Into<String>,
-) {
-    let name = name.as_ref();
-    if let Some(existing) = headers
-        .keys()
-        .find(|existing| existing.eq_ignore_ascii_case(name))
-        .cloned()
-    {
-        headers.remove(&existing);
-    }
-    headers.insert(name.to_string(), value.into());
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis() as i64)
 }
 
 #[cfg(test)]

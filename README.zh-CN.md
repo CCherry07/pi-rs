@@ -505,23 +505,11 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 | `plugins/features/pi-plugin-schedule`            | 持久化定时 Prompt 与隔离会话调度                                    |
 | `legacy/pi`                                      | 当前 TypeScript Pi 行为参照                                         |
 | `e2e`                                            | runtime acceptance、黑盒产品 E2E 与示例项目                         |
-| `scripts/perf`                                   | Rust/TypeScript 性能测量和离线看板                                  |
 
 依赖保持向内：核心 contracts 不拥有终端、文件发现、会话存储或厂商路由策略。详细设计、
 hook 顺序和持久化不变量见 [docs/architecture.md](docs/architecture.md)。
 
 ## 开发与验证
-
-一条命令运行 Rust / TypeScript 性能测试并打开离线看板：
-
-```bash
-./scripts/bench-perf --open
-```
-
-性能测试要求 macOS/Linux 和 Node.js 22.19 或更新版本，比较 TypeScript 时需要准备本地 Pi
-checkout。快速验证可加 `--quick`；没有 TypeScript oracle 时使用 `--backend rust`。
-前置条件、测试口径、参数以及 JSON/CSV 原始数据输出见
-[scripts/perf/README.md](scripts/perf/README.md)。
 
 Pi 核心行为的测试子集及其与 TypeScript oracle 的映射见
 [docs/pi-core-test-matrix.md](docs/pi-core-test-matrix.md)。聚焦运行入口是：

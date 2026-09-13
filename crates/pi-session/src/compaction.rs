@@ -116,10 +116,10 @@ pub struct ContextUsageEstimate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CutPointResult {
-    pub first_kept_entry_index: usize,
-    pub turn_start_index: Option<usize>,
-    pub is_split_turn: bool,
+struct CutPointResult {
+    first_kept_entry_index: usize,
+    turn_start_index: Option<usize>,
+    is_split_turn: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,36 +369,6 @@ pub fn estimate_tokens(message: &AgentMessage) -> u64 {
         None => custom_message_chars(message),
     };
     u64::try_from(chars.saturating_add(3) / 4).unwrap_or(u64::MAX)
-}
-
-pub fn find_turn_start_index(
-    entries: &[SessionRecord],
-    entry_index: usize,
-    start_index: usize,
-) -> Option<usize> {
-    (start_index..=entry_index).rev().find(|index| {
-        let entry = &entries[*index].entry;
-        matches!(entry, SessionEntry::BranchSummary(_))
-            || matches!(entry, SessionEntry::Message(message) if matches!(message.message.role(), "user" | "bashExecution"))
-    })
-}
-
-pub fn find_cut_point(
-    entries: &[SessionRecord],
-    start_index: usize,
-    end_index: usize,
-    keep_recent_tokens: u64,
-) -> CutPointResult {
-    let compactable = entries[start_index..end_index]
-        .iter()
-        .map(CompactableEntry::from_record)
-        .collect::<Vec<_>>();
-    let result = find_cut_point_compactable(&compactable, 0, compactable.len(), keep_recent_tokens);
-    CutPointResult {
-        first_kept_entry_index: result.first_kept_entry_index + start_index,
-        turn_start_index: result.turn_start_index.map(|index| index + start_index),
-        is_split_turn: result.is_split_turn,
-    }
 }
 
 pub fn prepare_compaction(
@@ -1186,7 +1156,7 @@ mod tests {
 
     #[test]
     fn cut_point_never_starts_at_a_tool_result() {
-        let entries = vec![
+        let entries = [
             message_record(0, user("request")),
             message_record(1, assistant("call", 10)),
             message_record(
@@ -1205,7 +1175,11 @@ mod tests {
             ),
             message_record(3, assistant("finish", 20)),
         ];
-        let cut = find_cut_point(&entries, 0, entries.len(), 1);
+        let compactable = entries
+            .iter()
+            .map(CompactableEntry::from_record)
+            .collect::<Vec<_>>();
+        let cut = find_cut_point_compactable(&compactable, 0, compactable.len(), 1);
         assert!(
             matches!(entries[cut.first_kept_entry_index].entry, SessionEntry::Message(ref value) if value.message.role() == "assistant")
         );

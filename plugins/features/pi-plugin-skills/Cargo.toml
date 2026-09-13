@@ -9,9 +9,9 @@ publish = false
 [dependencies]
 async-trait.workspace = true
 pi-core.workspace = true
+pi-utils = { workspace = true, features = ["frontmatter"] }
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml = "0.9.34"
 
 sha2 = "0.10"
 tempfile = "3.21.0"

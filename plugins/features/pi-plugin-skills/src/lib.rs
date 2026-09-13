@@ -10,6 +10,11 @@ use pi_core::{
     CommandContext, CommandError, CommandOutcome, CommandSpec, PluginError, PluginId,
     RegisterContext,
 };
+use pi_utils::{
+    frontmatter::{FrontmatterStatus, parse_frontmatter},
+    path::{absolute_from_current_dir as absolute, slash_path},
+    text::escape_xml,
+};
 use serde::{Deserialize, Serialize};
 
 pub mod management;
@@ -649,11 +654,14 @@ fn parse_skill_document(
     content: &str,
     declared: bool,
 ) -> Result<Option<SkillInfo>, String> {
-    let frontmatter = match parse_frontmatter(content) {
-        Ok(frontmatter) => frontmatter,
+    let document = match parse_frontmatter::<Frontmatter>(content) {
+        Ok(document) if document.status != FrontmatterStatus::Unterminated => document,
+        Ok(_) if !declared => return Ok(None),
+        Ok(_) => return Err("unterminated frontmatter".to_string()),
         Err(_) if !declared => return Ok(None),
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.to_string()),
     };
+    let frontmatter = document.frontmatter.unwrap_or_default();
     let description = match frontmatter
         .description
         .filter(|value| !value.trim().is_empty())
@@ -675,41 +683,9 @@ fn parse_skill_document(
         name,
         description,
         file_path: absolute(path),
-        content: strip_frontmatter(content).trim().to_string(),
+        content: document.body.trim().to_string(),
         disable_model_invocation: frontmatter.disable_model_invocation.unwrap_or(false),
     }))
-}
-
-fn parse_frontmatter(content: &str) -> Result<Frontmatter, String> {
-    let Some(rest) = content.strip_prefix("---") else {
-        return Ok(Frontmatter::default());
-    };
-    let rest = rest
-        .strip_prefix("\r\n")
-        .or_else(|| rest.strip_prefix('\n'))
-        .unwrap_or(rest);
-    let end = rest
-        .find("\n---")
-        .ok_or_else(|| "unterminated frontmatter".to_string())?;
-    serde_yaml::from_str(&rest[..end]).map_err(|error| error.to_string())
-}
-
-fn strip_frontmatter(content: &str) -> &str {
-    let Some(rest) = content.strip_prefix("---") else {
-        return content;
-    };
-    let rest = rest
-        .strip_prefix("\r\n")
-        .or_else(|| rest.strip_prefix('\n'))
-        .unwrap_or(rest);
-    let Some(end) = rest.find("\n---") else {
-        return content;
-    };
-    let after = &rest[end + 4..];
-    after
-        .strip_prefix("\r\n")
-        .or_else(|| after.strip_prefix('\n'))
-        .unwrap_or(after)
 }
 
 fn format_skills_for_prompt(skills: &[SkillInfo]) -> String {
@@ -735,35 +711,26 @@ fn format_skills_for_prompt(skills: &[SkillInfo]) -> String {
     prompt
 }
 
-fn absolute(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
-    }
-}
-
-fn slash_path(path: impl AsRef<Path>) -> String {
-    path.as_ref().to_string_lossy().replace('\\', "/")
-}
-
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use pi_core::{AbortHandle, ModelId, ProviderId, RunId};
     use pi_runtime::{PiRuntime, SystemPrompt};
     use pi_test_support::ScriptedProviderPlugin;
+
+    #[test]
+    fn skill_documents_share_bom_and_crlf_frontmatter_handling() {
+        let skill = parse_skill_document(
+            Path::new("/skills/demo/SKILL.md"),
+            "\u{feff}---\r\nname: demo\r\ndescription: Demo skill\r\n---\r\n\r\nUse it.\r\n",
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(skill.name, "demo");
+        assert_eq!(skill.description, "Demo skill");
+        assert_eq!(skill.content, "Use it.");
+    }
 
     #[tokio::test]
     async fn command_registry_expands_explicit_skill_invocation() {

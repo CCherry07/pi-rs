@@ -20,6 +20,7 @@ use pi_core::{
 };
 use pi_prompt::{BuildSystemPromptOptions, build_system_prompt};
 use pi_resources::{ResourceDiagnostic, ResourceLoaderOptions, load_resources};
+use pi_utils::time::unix_timestamp_ms as now_ms;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -54,14 +55,6 @@ pub struct ReloadReport {
     pub resource_diagnostics: Vec<ResourceDiagnostic>,
 }
 
-pub struct RuntimePromptOutcome {
-    pub generation: u64,
-    pub base_system_prompt: String,
-    pub active_tools: Vec<String>,
-    pub prompt_options: Option<BuildSystemPromptOptions>,
-    pub outcome: AgentLoopOutcome,
-}
-
 #[derive(Debug, Clone)]
 pub struct RuntimeCompletionRequest {
     pub system_prompt: String,
@@ -84,7 +77,7 @@ pub struct CompletionRetryPolicy {
 
 pub enum TextSubmissionOutcome {
     Handled,
-    Agent(Box<RuntimePromptOutcome>),
+    Agent(Box<AgentLoopOutcome>),
 }
 
 /// Command/input-hook output prepared for delivery to an already active run.
@@ -143,14 +136,14 @@ impl PreparedRuntimePrompt {
         &self.images
     }
 
-    pub async fn run(self) -> Result<RuntimePromptOutcome, RuntimeError> {
+    pub async fn run(self) -> Result<AgentLoopOutcome, RuntimeError> {
         if self.images.is_empty() {
             self.runtime
-                .prompt_recorded_locked(PromptInput::Text(self.text))
+                .prompt_locked(PromptInput::Text(self.text))
                 .await
         } else {
             self.runtime
-                .prompt_recorded_locked(PromptInput::Messages(vec![Message::User(
+                .prompt_locked(PromptInput::Messages(vec![Message::User(
                     input_user_message(self.text, self.images, now_ms()),
                 )]))
                 .await
@@ -167,9 +160,9 @@ impl PreparedRuntimeMessages {
         &self.messages
     }
 
-    pub async fn run(self) -> Result<RuntimePromptOutcome, RuntimeError> {
+    pub async fn run(self) -> Result<AgentLoopOutcome, RuntimeError> {
         self.runtime
-            .prompt_recorded_locked(PromptInput::Messages(self.messages))
+            .prompt_locked(PromptInput::Messages(self.messages))
             .await
     }
 }
@@ -961,7 +954,8 @@ impl PiRuntime {
         &self,
         input: impl Into<PromptInput>,
     ) -> Result<AgentLoopOutcome, RuntimeError> {
-        Ok(self.prompt_recorded(input).await?.outcome)
+        let _reload_guard = self.reload_lock.lock().await;
+        self.prompt_locked(input.into()).await
     }
 
     /// Runs command dispatch, input hooks, and the agent under one generation
@@ -1038,7 +1032,7 @@ impl PiRuntime {
 
     /// Pins the current generation for an already-structured message batch.
     /// Structured callers deliberately bypass slash-command and input-hook
-    /// preprocessing, matching [`Self::prompt_recorded`].
+    /// preprocessing, matching [`Self::prompt`].
     pub async fn prepare_message_submission(
         &self,
         messages: Vec<Message>,
@@ -1155,39 +1149,14 @@ impl PiRuntime {
         })
     }
 
-    pub async fn prompt_recorded(
-        &self,
-        input: impl Into<PromptInput>,
-    ) -> Result<RuntimePromptOutcome, RuntimeError> {
+    /// Continues from the restored transcript. This is used after overflow
+    /// compaction and transient provider failures.
+    pub async fn continue_run(&self) -> Result<AgentLoopOutcome, RuntimeError> {
         let _reload_guard = self.reload_lock.lock().await;
-        self.prompt_recorded_locked(input.into()).await
-    }
-
-    /// Continues from the restored transcript and captures the same generation
-    /// metadata as a normal prompt. This is used after overflow compaction.
-    pub async fn continue_recorded(&self) -> Result<RuntimePromptOutcome, RuntimeError> {
-        let _reload_guard = self.reload_lock.lock().await;
-        let runtime = self.agent.runtime();
-        let state = self.agent.state();
-        let generation = self.current_generation();
-        debug_assert_eq!(runtime.generation(), generation.agent.generation());
-        let prompt_options = generation
-            .prompt_options
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let outcome = self
-            .agent
+        self.agent
             .continue_run()
             .await
-            .map_err(|error| RuntimeError::Agent(error.to_string()))?;
-        Ok(RuntimePromptOutcome {
-            generation: runtime.generation(),
-            base_system_prompt: runtime.system_prompt().to_string(),
-            active_tools: state.active_tools,
-            prompt_options,
-            outcome,
-        })
+            .map_err(|error| RuntimeError::Agent(error.to_string()))
     }
 
     /// Runs an isolated, tool-free provider completion without mutating the
@@ -1416,31 +1385,11 @@ impl PiRuntime {
             .map_err(|error| RuntimeError::Input(error.to_string()))
     }
 
-    async fn prompt_recorded_locked(
-        &self,
-        input: PromptInput,
-    ) -> Result<RuntimePromptOutcome, RuntimeError> {
-        let runtime = self.agent.runtime();
-        let state = self.agent.state();
-        let generation = self.current_generation();
-        debug_assert_eq!(runtime.generation(), generation.agent.generation());
-        let prompt_options = generation
-            .prompt_options
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let outcome = self
-            .agent
+    async fn prompt_locked(&self, input: PromptInput) -> Result<AgentLoopOutcome, RuntimeError> {
+        self.agent
             .prompt(input)
             .await
-            .map_err(|error| RuntimeError::Agent(error.to_string()))?;
-        Ok(RuntimePromptOutcome {
-            generation: runtime.generation(),
-            base_system_prompt: runtime.system_prompt().to_string(),
-            active_tools: state.active_tools,
-            prompt_options,
-            outcome,
-        })
+            .map_err(|error| RuntimeError::Agent(error.to_string()))
     }
 }
 
@@ -1451,15 +1400,6 @@ fn input_user_message(text: String, images: Vec<ImageContent>, timestamp_ms: i64
         content,
         timestamp_ms,
     }
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-        })
 }
 
 #[cfg(test)]
@@ -2116,10 +2056,9 @@ mod tests {
         assert_eq!(runtime.generation(), 1);
 
         release.notify_one();
-        let TextSubmissionOutcome::Agent(recorded) = submit.await.unwrap() else {
+        let TextSubmissionOutcome::Agent(_) = submit.await.unwrap() else {
             panic!("expected agent run")
         };
-        assert_eq!(recorded.generation, 1);
         assert_eq!(reload.await.unwrap().generation, 2);
 
         let requests = provider.requests();

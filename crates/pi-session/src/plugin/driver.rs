@@ -54,21 +54,6 @@ impl SessionPlugins {
         self
     }
 
-    pub fn try_plugin_factory<F, P, E>(mut self, factory: F) -> Self
-    where
-        F: Fn() -> Result<P, E> + Send + Sync + 'static,
-        P: SessionPlugin + 'static,
-        E: std::fmt::Display,
-    {
-        self.sources
-            .push(SessionPluginSource::Factory(Arc::new(move || {
-                factory()
-                    .map(|plugin| Arc::new(plugin) as Arc<dyn SessionPlugin>)
-                    .map_err(|error| error.to_string())
-            })));
-        self
-    }
-
     /// Registers a type-erased, fallible session plugin factory.
     ///
     /// Dynamic plugin adapters use this seam so the session plugin is rebuilt
@@ -108,7 +93,7 @@ struct SessionPluginSlot {
 }
 
 /// Immutable, generation-local session lifecycle hook driver.
-pub struct SessionPluginDriver {
+pub(crate) struct SessionPluginDriver {
     identity: SessionIdentity,
     generation: u64,
     plugins: Vec<SessionPluginSlot>,
@@ -131,49 +116,15 @@ impl SessionPluginDriver {
         })
     }
 
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    pub fn plugin_order(&self) -> Vec<PluginId> {
-        self.plugins.iter().map(|slot| slot.id.clone()).collect()
-    }
-
-    pub fn identity(&self) -> &SessionIdentity {
-        &self.identity
-    }
-
-    pub fn diagnostics(&self) -> Vec<SessionPluginDiagnostic> {
+    #[cfg(test)]
+    fn diagnostics(&self) -> Vec<SessionPluginDiagnostic> {
         self.diagnostics
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
-    pub fn take_diagnostics(&self) -> Vec<SessionPluginDiagnostic> {
-        std::mem::take(
-            &mut *self
-                .diagnostics
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
-    }
-
-    pub(crate) fn next_generation(
-        &self,
-        sources: &SessionPlugins,
-    ) -> Result<Self, SessionPluginError> {
-        let next_id = self.generation().saturating_add(1);
-        Ok(Self {
-            identity: self.identity.clone(),
-            generation: next_id,
-            plugins: load_plugins(sources)?,
-            diagnostics: Arc::clone(&self.diagnostics),
-            context: self.context.clone(),
-        })
-    }
-
-    pub async fn session_start(&self, event: &SessionStartEvent) {
+    pub(crate) async fn session_start(&self, event: &SessionStartEvent) {
         for slot in &self.plugins {
             if let Err(error) = slot.plugin.session_start(&self.context(slot), event).await {
                 self.record_error(slot, SessionHook::Start, error);
@@ -181,7 +132,7 @@ impl SessionPluginDriver {
         }
     }
 
-    pub async fn session_info_changed(&self, event: &SessionInfoChangedEvent) {
+    pub(crate) async fn session_info_changed(&self, event: &SessionInfoChangedEvent) {
         for slot in &self.plugins {
             if let Err(error) = slot
                 .plugin
@@ -193,7 +144,7 @@ impl SessionPluginDriver {
         }
     }
 
-    pub async fn session_before_switch(
+    pub(crate) async fn session_before_switch(
         &self,
         event: &SessionBeforeSwitchEvent,
     ) -> Option<SessionBeforeSwitchResult> {
@@ -220,7 +171,7 @@ impl SessionPluginDriver {
         result
     }
 
-    pub async fn session_before_fork(
+    pub(crate) async fn session_before_fork(
         &self,
         event: &SessionBeforeForkEvent,
     ) -> Option<SessionBeforeForkResult> {
@@ -247,7 +198,7 @@ impl SessionPluginDriver {
         result
     }
 
-    pub async fn session_before_compact(
+    pub(crate) async fn session_before_compact(
         &self,
         event: &SessionBeforeCompactEvent,
     ) -> Option<SessionBeforeCompactResult> {
@@ -274,7 +225,7 @@ impl SessionPluginDriver {
         result
     }
 
-    pub async fn session_compact(&self, event: &SessionCompactEvent) {
+    pub(crate) async fn session_compact(&self, event: &SessionCompactEvent) {
         for slot in &self.plugins {
             if let Err(error) = slot
                 .plugin
@@ -286,7 +237,7 @@ impl SessionPluginDriver {
         }
     }
 
-    pub async fn session_compact_failed(&self, event: &SessionCompactFailedEvent) {
+    pub(crate) async fn session_compact_failed(&self, event: &SessionCompactFailedEvent) {
         for slot in &self.plugins {
             if let Err(error) = slot
                 .plugin
@@ -298,7 +249,7 @@ impl SessionPluginDriver {
         }
     }
 
-    pub async fn session_shutdown(&self, event: &SessionShutdownEvent) {
+    pub(crate) async fn session_shutdown(&self, event: &SessionShutdownEvent) {
         for slot in &self.plugins {
             if let Err(error) = slot
                 .plugin
@@ -310,7 +261,7 @@ impl SessionPluginDriver {
         }
     }
 
-    pub async fn session_before_tree(
+    pub(crate) async fn session_before_tree(
         &self,
         event: &SessionBeforeTreeEvent,
     ) -> Option<SessionBeforeTreeResult> {
@@ -337,7 +288,7 @@ impl SessionPluginDriver {
         result
     }
 
-    pub async fn session_tree(&self, event: &SessionTreeEvent) {
+    pub(crate) async fn session_tree(&self, event: &SessionTreeEvent) {
         for slot in &self.plugins {
             if let Err(error) = slot.plugin.session_tree(&self.context(slot), event).await {
                 self.record_error(slot, SessionHook::Tree, error);
@@ -381,13 +332,6 @@ fn load_plugins(sources: &SessionPlugins) -> Result<Vec<SessionPluginSlot>, Sess
         plugins.push(SessionPluginSlot { id, plugin });
     }
     Ok(plugins)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionPluginReloadReport {
-    pub previous_generation: u64,
-    pub generation: u64,
-    pub plugin_order: Vec<PluginId>,
 }
 
 #[cfg(test)]

@@ -6,6 +6,8 @@ use crate::{
     SessionFact, SessionHeader, SessionMutation, SessionRecord, SessionStats,
 };
 
+use super::validation::validate_record_query;
+
 #[derive(Debug, Clone)]
 pub(crate) struct SessionState {
     sequence: u64,
@@ -314,6 +316,7 @@ impl SessionState {
         &self,
         query: &RecordQuery,
     ) -> Result<Vec<LaneRecord>, SessionError> {
+        validate_record_query(query)?;
         validate_limit(query.limit)?;
         validate_cursor(query.after_seq)?;
         let source: Box<dyn Iterator<Item = &LaneRecord> + '_> = match query.order {
@@ -455,7 +458,7 @@ impl SessionState {
     /// Projects the complete active main-lane branch as standalone mutations.
     ///
     /// Unlike an interactive fork target, the active leaf may be any session
-    /// entry (for example a prompt snapshot, model change, or compaction).
+    /// entry (for example custom metadata, model change, or compaction).
     pub(crate) fn create_main_branch_snapshot_mutations(
         &self,
     ) -> Result<Vec<SessionMutation>, SessionError> {

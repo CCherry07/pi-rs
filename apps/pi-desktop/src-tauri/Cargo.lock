@@ -4050,6 +4050,7 @@ dependencies = [
  "pi-sdk",
  "pi-session",
  "pi-test-support",
+ "pi-utils",
  "portable-pty",
  "reqwest 0.12.28",
  "serde",
@@ -4357,6 +4358,7 @@ dependencies = [
  "pi-plugin-skills",
  "pi-session",
  "pi-tool-support",
+ "pi-utils",
  "regex",
  "rusqlite",
  "same-file",
@@ -4446,8 +4448,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "pi-core",
+ "pi-utils",
  "serde",
- "serde_yaml",
 ]
 
 [[package]]
@@ -4516,9 +4518,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "pi-core",
+ "pi-utils",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2",
  "tempfile",
  "trash",
@@ -4534,9 +4536,9 @@ dependencies = [
  "pi-plugin-sdk",
  "pi-plugin-skills",
  "pi-session",
+ "pi-utils",
  "serde",
  "serde_json",
- "serde_yaml",
  "thiserror 2.0.18",
  "tokio",
  "uuid",
@@ -4674,14 +4676,11 @@ dependencies = [
  "pi-agent",
  "pi-core",
  "pi-plugin-macros",
- "pi-prompt",
- "pi-resources",
  "pi-runtime",
  "pi-shell",
  "pi-telemetry",
  "serde",
  "serde_json",
- "sha2",
  "thiserror 2.0.18",
  "time",
  "tokio",
@@ -4738,6 +4737,14 @@ dependencies = [
  "unicode-normalization",
  "url",
  "xxhash-rust",
+]
+
+[[package]]
+name = "pi-utils"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
 ]
 
 [[package]]

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use hmac::{Hmac, Mac};
+use pi_provider::{insert_header, remove_header};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use url::Url;
@@ -199,25 +200,6 @@ fn hmac(key: &[u8], value: &[u8]) -> Result<Vec<u8>, String> {
 
 fn normalize_header_value(value: &str) -> String {
     value.split_ascii_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn insert_header(
-    headers: &mut BTreeMap<String, String>,
-    name: impl AsRef<str>,
-    value: impl Into<String>,
-) {
-    remove_header(headers, name.as_ref());
-    headers.insert(name.as_ref().to_string(), value.into());
-}
-
-fn remove_header(headers: &mut BTreeMap<String, String>, name: &str) {
-    if let Some(existing) = headers
-        .keys()
-        .find(|existing| existing.eq_ignore_ascii_case(name))
-        .cloned()
-    {
-        headers.remove(&existing);
-    }
 }
 
 #[cfg(test)]

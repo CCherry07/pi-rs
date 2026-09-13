@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
@@ -8,51 +8,40 @@ use pi_agent::{
 };
 use pi_core::{
     AbortHandle, AgentEvent, CommandOutcome, ContentBlock, CustomMessage, ImageContent,
-    InputStreamingBehavior, Message, ModelId, PluginId, ProviderId, StopReason, ThinkingLevel,
-    Usage, UserMessage,
+    InputStreamingBehavior, Message, ModelId, ProviderId, StopReason, ThinkingLevel, Usage,
+    UserMessage,
 };
-use pi_prompt::BuildSystemPromptOptions;
 use pi_runtime::{
     PiRuntime, PreparedTextSubmission, QueuedTextOutcome, RuntimeCompletionRequest,
-    RuntimePromptOutcome, RuntimeRestoreState,
+    RuntimeRestoreState,
 };
 use pi_shell::{DEFAULT_TIMEOUT, ShellChunk, ShellRequest, ShellResult};
 use pi_telemetry::{
     OperationStartAttributes, RunEnd, RunOperationKind, RunOutcome as TelemetryRunOutcome, RunSpan,
     RunStart, SpanStatus,
 };
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::event::AgentSessionEventHub;
+use crate::plugin::SessionPluginDriver;
 use crate::{
-    ActiveToolsEntry, AgentMessage, BranchSummaryEntry, CompactionEntry, CompactionError,
-    CompactionPreparation, CompactionSettings, CustomEntry, FileOperations, LaneRecordEntry,
-    MAIN_LANE, ModelChangeEntry, NewLaneRecord, OperationError, OperationIntent, OperationOutcome,
-    ProvisionedEntry, QueueKind, QueueSnapshot, SessionBeforeCompactEvent, SessionBeforeTreeEvent,
-    SessionCompactEvent, SessionCompactFailedEvent, SessionContext, SessionContextBuildOptions,
-    SessionDocument, SessionEntry, SessionError, SessionHeader, SessionIdentity,
-    SessionInfoChangedEvent, SessionLog, SessionModel, SessionPluginDriver,
-    SessionPluginReloadReport, SessionPlugins, SessionRecord, SessionShutdownEvent,
+    ActiveToolsEntry, AgentMessage, AgentSessionOptions, AutoRetrySettings, BranchSummaryEntry,
+    CompactionEntry, CompactionError, CompactionPreparation, CompactionSettings, CustomEntry,
+    FileOperations, LaneRecordEntry, MAIN_LANE, ModelChangeEntry, NewLaneRecord, OperationError,
+    OperationIntent, OperationOutcome, ProvisionedEntry, QueueKind, QueueSnapshot,
+    SessionBeforeCompactEvent, SessionBeforeTreeEvent, SessionCompactEvent,
+    SessionCompactFailedEvent, SessionContext, SessionContextBuildOptions, SessionDocument,
+    SessionEntry, SessionError, SessionHeader, SessionIdentity, SessionInfoChangedEvent,
+    SessionLog, SessionModel, SessionRecord, SessionRuntimeInventory, SessionShutdownEvent,
     SessionShutdownReason, SessionStartEvent, SessionStartReason, SessionTreeEvent, SessionUsage,
     ThinkingLevelEntry, TreePreparation, UsageAttribution, UsageRecord,
     compact as generate_compaction, estimate_context_tokens, estimate_session_context_tokens,
     next_unique_id, now_ms, prepare_compaction, reduce_lane_state, should_compact,
 };
 
-pub const PROMPT_SNAPSHOT_CUSTOM_TYPE: &str = "pi.prompt_snapshot";
-pub const RESOURCE_DIAGNOSTIC_CUSTOM_TYPE: &str = "pi.resource_diagnostic";
 const SESSION_OPEN: u8 = 0;
 const SESSION_TRANSITIONING: u8 = 1;
 const SESSION_CLOSED: u8 = 2;
 const SESSION_SHUTTING_DOWN: u8 = 3;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResourceSnapshot {
-    pub path: PathBuf,
-    pub content_sha256: String,
-}
 
 #[derive(Debug, Clone)]
 pub struct ShellExecutionOptions {
@@ -71,66 +60,6 @@ impl Default for ShellExecutionOptions {
             timeout: Some(DEFAULT_TIMEOUT),
             shell_path: None,
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PromptSnapshot {
-    pub timestamp_ms: i64,
-    #[serde(default)]
-    pub generation: u64,
-    pub base_system_prompt: String,
-    pub effective_system_prompt: String,
-    pub active_tools: Vec<String>,
-    pub context_files: Vec<ResourceSnapshot>,
-    pub skills: Vec<ResourceSnapshot>,
-}
-
-impl PromptSnapshot {
-    fn capture(
-        generation: u64,
-        base_system_prompt: String,
-        effective_system_prompt: String,
-        active_tools: Vec<String>,
-        options: Option<&BuildSystemPromptOptions>,
-    ) -> Self {
-        let context_files = options.map_or_else(Vec::new, |options| {
-            options
-                .context_files
-                .iter()
-                .map(|file| ResourceSnapshot {
-                    path: file.path.clone(),
-                    content_sha256: sha256(file.content.as_bytes()),
-                })
-                .collect()
-        });
-        Self {
-            timestamp_ms: now_ms(),
-            generation,
-            base_system_prompt,
-            effective_system_prompt,
-            active_tools,
-            context_files,
-            // Skills are plugin-owned generation resources. The field stays in
-            // this pi-rs diagnostic extension without coupling the session
-            // backend to SkillsPlugin.
-            skills: Vec::new(),
-        }
-    }
-}
-
-impl SessionDocument {
-    pub fn latest_prompt_snapshot(&self) -> Option<PromptSnapshot> {
-        self.branch().ok()?.into_iter().rev().find_map(|record| {
-            let SessionEntry::Custom(custom) = &record.entry else {
-                return None;
-            };
-            if custom.custom_type != PROMPT_SNAPSHOT_CUSTOM_TYPE {
-                return None;
-            }
-            serde_json::from_value(custom.data.clone()?).ok()
-        })
     }
 }
 
@@ -226,155 +155,12 @@ impl SessionActivity {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct AgentSessionOptions {
-    pub context: SessionContextBuildOptions,
-    pub plugins: SessionPlugins,
-    pub compaction: CompactionSettings,
-    /// Product-level model request to merge with a resumed session model.
-    pub initial_model: crate::InitialModelRequest,
-    /// Generation-local tools the product enables when restoring a session.
-    /// The product owns this policy; session replay only reconciles names
-    /// against the new registry and persists the resulting selection.
-    pub additional_active_tools: Vec<String>,
-    /// Automatic compaction is enabled only when the model context window is
-    /// known. Manual compaction remains available without this value.
-    pub context_window: Option<u64>,
-    /// Tokens reserved outside abandoned-branch summary input. The selected
-    /// model context window supplies the total budget.
-    pub branch_summary_reserve_tokens: Option<u64>,
-    /// Immutable product registration metadata prepared alongside the runtime
-    /// and session plugin generations.
-    pub runtime_inventory: SessionRuntimeInventory,
-    /// Pi v3-compatible parent session path recorded for a new session.
-    pub parent_session_path: Option<PathBuf>,
-    /// Exact adapter-provided ID for a new session.
-    pub session_id: Option<String>,
-    /// Generation-local defaults for shell shorthand execution. Explicit
-    /// per-call shell paths still take precedence.
-    pub shell_path: Option<PathBuf>,
-    pub shell_command_prefix: Option<String>,
-    /// Session-owned retry policy for transient assistant/provider failures.
-    pub retry: AutoRetrySettings,
-}
-
-/// Bounded, abortable retry policy used by normal assistant turns.
-///
-/// The initial provider call does not count toward `max_retries`; attempt one
-/// waits `base_delay_ms`, attempt two waits twice that amount, and so on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AutoRetrySettings {
-    pub enabled: bool,
-    pub max_retries: u32,
-    pub base_delay_ms: u64,
-}
-
-impl Default for AutoRetrySettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_retries: 3,
-            base_delay_ms: 2_000,
-        }
-    }
-}
-
-impl AgentSessionOptions {
-    pub fn context(mut self, context: SessionContextBuildOptions) -> Self {
-        self.context = context;
-        self
-    }
-
-    pub fn plugins(mut self, plugins: SessionPlugins) -> Self {
-        self.plugins = plugins;
-        self
-    }
-
-    pub fn compaction(mut self, compaction: CompactionSettings) -> Self {
-        self.compaction = compaction;
-        self
-    }
-
-    pub fn initial_model(mut self, request: crate::InitialModelRequest) -> Self {
-        self.initial_model = request;
-        self
-    }
-
-    pub fn additional_active_tools(mut self, tools: Vec<String>) -> Self {
-        self.additional_active_tools = tools;
-        self
-    }
-
-    pub fn context_window(mut self, context_window: u64) -> Self {
-        self.context_window = Some(context_window);
-        self
-    }
-
-    pub fn branch_summary_reserve_tokens(mut self, reserve_tokens: u64) -> Self {
-        self.branch_summary_reserve_tokens = Some(reserve_tokens);
-        self
-    }
-
-    pub fn runtime_inventory(mut self, inventory: SessionRuntimeInventory) -> Self {
-        self.runtime_inventory = inventory;
-        self
-    }
-
-    pub fn parent_session_path(mut self, path: Option<PathBuf>) -> Self {
-        self.parent_session_path = path;
-        self
-    }
-
-    pub fn session_id(mut self, session_id: Option<String>) -> Self {
-        self.session_id = session_id;
-        self
-    }
-
-    pub fn shell(mut self, shell_path: Option<PathBuf>, command_prefix: Option<String>) -> Self {
-        self.shell_path = shell_path;
-        self.shell_command_prefix = command_prefix;
-        self
-    }
-
-    pub fn retry(mut self, retry: AutoRetrySettings) -> Self {
-        self.retry = retry;
-        self
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SessionRuntimeInventory {
-    js_extensions: Vec<String>,
-    configured_native_plugins: Vec<PluginId>,
-}
-
-impl SessionRuntimeInventory {
-    pub fn new(
-        js_extensions: impl IntoIterator<Item = String>,
-        configured_native_plugins: impl IntoIterator<Item = PluginId>,
-    ) -> Self {
-        Self {
-            js_extensions: js_extensions.into_iter().collect(),
-            configured_native_plugins: configured_native_plugins.into_iter().collect(),
-        }
-    }
-
-    pub fn js_extensions(&self) -> &[String] {
-        &self.js_extensions
-    }
-
-    pub fn configured_native_plugins(&self) -> &[PluginId] {
-        &self.configured_native_plugins
-    }
-}
-
 pub struct AgentSession {
     runtime: PiRuntime,
     log: SessionLog,
     runtime_inventory: SessionRuntimeInventory,
     context_options: SessionContextBuildOptions,
-    session_plugin_sources: SessionPlugins,
-    session_plugin_driver: Arc<RwLock<Arc<SessionPluginDriver>>>,
+    session_plugin_driver: Arc<SessionPluginDriver>,
     operation_gate: Arc<tokio::sync::Mutex<()>>,
     compaction_settings: Arc<RwLock<CompactionSettings>>,
     context_window: Option<u64>,
@@ -391,6 +177,7 @@ pub struct AgentSession {
     in_run_compaction_reconcile: Arc<AtomicBool>,
     shell_path: Option<PathBuf>,
     shell_command_prefix: Option<String>,
+    initial_model_fallback_message: std::sync::Mutex<Option<String>>,
 }
 
 struct SessionTurnControl {
@@ -550,19 +337,6 @@ impl AgentSession {
         Self::create_with_options(runtime, path, AgentSessionOptions::default()).await
     }
 
-    pub async fn create_with_context_options(
-        runtime: PiRuntime,
-        path: impl Into<PathBuf>,
-        context_options: SessionContextBuildOptions,
-    ) -> Result<Arc<Self>, SessionError> {
-        Self::create_with_options(
-            runtime,
-            path,
-            AgentSessionOptions::default().context(context_options),
-        )
-        .await
-    }
-
     pub async fn create_with_options(
         runtime: PiRuntime,
         path: impl Into<PathBuf>,
@@ -576,13 +350,6 @@ impl AgentSession {
             })
             .await;
         Ok(session)
-    }
-
-    pub async fn prepare_create(
-        runtime: PiRuntime,
-        path: impl Into<PathBuf>,
-    ) -> Result<PreparedAgentSession, SessionError> {
-        Self::prepare_create_with_options(runtime, path, AgentSessionOptions::default()).await
     }
 
     pub async fn prepare_create_with_options(
@@ -606,7 +373,7 @@ impl AgentSession {
         let initial_model = crate::InitialModelRequest::default()
             .requested(state.provider_id.clone(), state.model_id.as_str());
         if let Some(session_id) = &options.session_id {
-            crate::repo::validate_session_id(session_id)?;
+            crate::journal::validate_session_id(session_id)?;
         }
         let mut header = SessionHeader::new(
             options
@@ -625,7 +392,7 @@ impl AgentSession {
         );
         let log = SessionLog::create_deferred(path, header)?;
 
-        let mut initial_entries = vec![
+        let initial_entries = vec![
             SessionEntry::ModelChange(ModelChangeEntry {
                 provider: state.provider_id,
                 model_id: state.model_id,
@@ -637,56 +404,13 @@ impl AgentSession {
                 active_tool_names: state.active_tools,
             }),
         ];
-        initial_entries.extend(
-            runtime
-                .resource_diagnostics()
-                .into_iter()
-                .map(|diagnostic| {
-                    SessionEntry::Custom(CustomEntry {
-                        custom_type: RESOURCE_DIAGNOSTIC_CUSTOM_TYPE.to_string(),
-                        data: serde_json::to_value(diagnostic).ok(),
-                    })
-                }),
-        );
         log.append_batch(initial_entries)?;
         let context = log.load()?.context_with_options(&options.context)?;
         // A new session records the runtime's already-validated selection.
         // Preserve it even when the model is intentionally absent from the
         // catalog; catalog fallback applies only while restoring old state.
-        restore_runtime_context_with_request(&runtime, &context, initial_model)?;
-        let activity = Arc::new(std::sync::Mutex::new(SessionActivity::default()));
-        let events = AgentSessionEventHub::new(
-            runtime.agent().state(),
-            log.name(),
-            QueueSnapshot::default(),
-        );
-
-        let session = Arc::new(Self {
-            runtime,
-            log,
-            runtime_inventory: options.runtime_inventory,
-            context_options: options.context,
-            session_plugin_sources: options.plugins,
-            session_plugin_driver: Arc::new(RwLock::new(session_plugin_driver)),
-            operation_gate: Arc::new(tokio::sync::Mutex::new(())),
-            compaction_settings: Arc::new(RwLock::new(options.compaction)),
-            context_window: options.context_window,
-            branch_summary_reserve_tokens: options.branch_summary_reserve_tokens.unwrap_or(16_384),
-            compaction_abort: Arc::new(std::sync::Mutex::new(None)),
-            lifecycle_state: Arc::new(AtomicU8::new(SESSION_OPEN)),
-            usage_recording_open: Arc::new(AtomicBool::new(true)),
-            events,
-            activity,
-            bash_abort: Arc::new(std::sync::Mutex::new(None)),
-            retry_settings: Arc::new(RwLock::new(options.retry)),
-            retry_attempt: Arc::new(AtomicU32::new(0)),
-            retry_abort: Arc::new(std::sync::Mutex::new(None)),
-            in_run_compaction_reconcile: Arc::new(AtomicBool::new(false)),
-            shell_path: options.shell_path,
-            shell_command_prefix: options.shell_command_prefix,
-        });
-        Self::install_session_turn_control(&session)?;
-        session.attach_agent_bridge();
+        let _ = restore_runtime_context_with_request(&runtime, &context, initial_model)?;
+        let session = Self::assemble(runtime, log, options, session_plugin_driver, Vec::new())?;
         Ok(PreparedAgentSession {
             session,
             activation_commit: None,
@@ -702,49 +426,20 @@ impl AgentSession {
         Self::open_with_options(runtime, path, AgentSessionOptions::default()).await
     }
 
-    pub async fn open_with_context_options(
-        runtime: PiRuntime,
-        path: impl Into<PathBuf>,
-        context_options: SessionContextBuildOptions,
-    ) -> Result<Arc<Self>, SessionError> {
-        Self::open_with_options(
-            runtime,
-            path,
-            AgentSessionOptions::default().context(context_options),
-        )
-        .await
-    }
-
     pub async fn open_with_options(
         runtime: PiRuntime,
         path: impl Into<PathBuf>,
         options: AgentSessionOptions,
     ) -> Result<Arc<Self>, SessionError> {
-        let session = Self::prepare_open_with_options(runtime, path, options)
-            .await?
+        let path = path.into();
+        let (log, document) = SessionLog::open(&path)?;
+        let session = Self::prepare_loaded(runtime, log, document, options)?
             .activate(SessionStartEvent {
                 reason: SessionStartReason::Startup,
                 previous_session_file: None,
             })
             .await;
         Ok(session)
-    }
-
-    pub async fn prepare_open(
-        runtime: PiRuntime,
-        path: impl Into<PathBuf>,
-    ) -> Result<PreparedAgentSession, SessionError> {
-        Self::prepare_open_with_options(runtime, path, AgentSessionOptions::default()).await
-    }
-
-    pub async fn prepare_open_with_options(
-        runtime: PiRuntime,
-        path: impl Into<PathBuf>,
-        options: AgentSessionOptions,
-    ) -> Result<PreparedAgentSession, SessionError> {
-        let path = path.into();
-        let (log, document) = SessionLog::open(&path)?;
-        Self::prepare_loaded(runtime, log, document, options)
     }
 
     /// Rebuilds runtime and plugin generations around an existing in-memory
@@ -762,7 +457,7 @@ impl AgentSession {
         runtime: PiRuntime,
         log: SessionLog,
         mut document: SessionDocument,
-        options: AgentSessionOptions,
+        mut options: AgentSessionOptions,
     ) -> Result<PreparedAgentSession, SessionError> {
         default_configure_session_message_conversion(&runtime)?;
         let agent_state = runtime.agent().state();
@@ -795,47 +490,19 @@ impl AgentSession {
         context
             .active_tool_names
             .get_or_insert_with(|| runtime.active_tools())
-            .extend(options.additional_active_tools);
-        restore_runtime_context_with_request(
+            .extend(std::mem::take(&mut options.additional_active_tools));
+        options.initial_model_fallback_message = restore_runtime_context_with_request(
             &runtime,
             &context,
             options.initial_model.clone().session(context.model.clone()),
         )?;
-        let activity = Arc::new(std::sync::Mutex::new(SessionActivity {
-            active_run: None,
-            recovered_queue,
-        }));
-        let queue = activity
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .queue_snapshot();
-        let events = AgentSessionEventHub::new(runtime.agent().state(), log.name(), queue);
-        let session = Arc::new(Self {
+        let session = Self::assemble(
             runtime,
             log,
-            runtime_inventory: options.runtime_inventory,
-            context_options: options.context,
-            session_plugin_sources: options.plugins,
-            session_plugin_driver: Arc::new(RwLock::new(session_plugin_driver)),
-            operation_gate: Arc::new(tokio::sync::Mutex::new(())),
-            compaction_settings: Arc::new(RwLock::new(options.compaction)),
-            context_window: options.context_window,
-            branch_summary_reserve_tokens: options.branch_summary_reserve_tokens.unwrap_or(16_384),
-            compaction_abort: Arc::new(std::sync::Mutex::new(None)),
-            lifecycle_state: Arc::new(AtomicU8::new(SESSION_OPEN)),
-            usage_recording_open: Arc::new(AtomicBool::new(true)),
-            events,
-            activity,
-            bash_abort: Arc::new(std::sync::Mutex::new(None)),
-            retry_settings: Arc::new(RwLock::new(options.retry)),
-            retry_attempt: Arc::new(AtomicU32::new(0)),
-            retry_abort: Arc::new(std::sync::Mutex::new(None)),
-            in_run_compaction_reconcile: Arc::new(AtomicBool::new(false)),
-            shell_path: options.shell_path,
-            shell_command_prefix: options.shell_command_prefix,
-        });
-        Self::install_session_turn_control(&session)?;
-        session.attach_agent_bridge();
+            options,
+            session_plugin_driver,
+            recovered_queue,
+        )?;
         // Commit resolved configuration together after all initialization checks.
         // Replay must retain explicit resume overrides and new generation tools.
         let state = session.runtime.agent().state();
@@ -865,6 +532,53 @@ impl AgentSession {
             session,
             activation_commit: None,
         })
+    }
+
+    fn assemble(
+        runtime: PiRuntime,
+        log: SessionLog,
+        options: AgentSessionOptions,
+        session_plugin_driver: Arc<SessionPluginDriver>,
+        recovered_queue: Vec<PendingSessionMessage>,
+    ) -> Result<Arc<Self>, SessionError> {
+        let activity = Arc::new(std::sync::Mutex::new(SessionActivity {
+            active_run: None,
+            recovered_queue,
+        }));
+        let queue = activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .queue_snapshot();
+        let events = AgentSessionEventHub::new(runtime.agent().state(), log.name(), queue);
+        let session = Arc::new(Self {
+            runtime,
+            log,
+            runtime_inventory: options.runtime_inventory,
+            context_options: options.context,
+            session_plugin_driver,
+            operation_gate: Arc::new(tokio::sync::Mutex::new(())),
+            compaction_settings: Arc::new(RwLock::new(options.compaction)),
+            context_window: options.context_window,
+            branch_summary_reserve_tokens: options.branch_summary_reserve_tokens.unwrap_or(16_384),
+            compaction_abort: Arc::new(std::sync::Mutex::new(None)),
+            lifecycle_state: Arc::new(AtomicU8::new(SESSION_OPEN)),
+            usage_recording_open: Arc::new(AtomicBool::new(true)),
+            events,
+            activity,
+            bash_abort: Arc::new(std::sync::Mutex::new(None)),
+            retry_settings: Arc::new(RwLock::new(options.retry)),
+            retry_attempt: Arc::new(AtomicU32::new(0)),
+            retry_abort: Arc::new(std::sync::Mutex::new(None)),
+            in_run_compaction_reconcile: Arc::new(AtomicBool::new(false)),
+            shell_path: options.shell_path,
+            shell_command_prefix: options.shell_command_prefix,
+            initial_model_fallback_message: std::sync::Mutex::new(
+                options.initial_model_fallback_message,
+            ),
+        });
+        Self::install_session_turn_control(&session)?;
+        session.attach_agent_bridge();
+        Ok(session)
     }
 
     pub fn runtime(&self) -> &PiRuntime {
@@ -1023,7 +737,7 @@ impl AgentSession {
             .load()?
             .context_with_options(&self.context_options)?;
         let state = self.runtime.agent().state();
-        restore_runtime_context_with_request(
+        let _ = restore_runtime_context_with_request(
             &self.runtime,
             &context,
             crate::InitialModelRequest::default()
@@ -1063,7 +777,17 @@ impl AgentSession {
     /// events. Consumers should ignore revisions at or below the snapshot's
     /// revision and refresh via [`Self::snapshot`] after receiver lag.
     pub fn subscribe(&self) -> crate::AgentSessionSubscription {
-        self.events.subscribe()
+        let subscription = self.events.subscribe();
+        let message = self
+            .initial_model_fallback_message
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(message) = message {
+            self.events
+                .publish_extension_notice(message, crate::NoticeLevel::Warning);
+        }
+        subscription
     }
 
     /// Publishes a transient, presentation-neutral notice from an extension.
@@ -1073,44 +797,8 @@ impl AgentSession {
         self.events.publish_extension_notice(message, level);
     }
 
-    pub fn session_plugin_driver(&self) -> Arc<SessionPluginDriver> {
-        Arc::clone(
-            &self
-                .session_plugin_driver
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
-    }
-
-    /// Builds the complete next generation before shutting down the old one.
-    /// A load failure therefore leaves the active generation untouched.
-    pub async fn reload_session_plugins(&self) -> Result<SessionPluginReloadReport, SessionError> {
-        let _operation = self.operation_gate.lock().await;
-        self.ensure_open()?;
-        let previous = self.session_plugin_driver();
-        let prepared = Arc::new(previous.next_generation(&self.session_plugin_sources)?);
-        let report = SessionPluginReloadReport {
-            previous_generation: previous.generation(),
-            generation: prepared.generation(),
-            plugin_order: prepared.plugin_order(),
-        };
-        previous
-            .session_shutdown(&SessionShutdownEvent {
-                reason: SessionShutdownReason::Reload,
-                target_session_file: None,
-            })
-            .await;
-        *self
-            .session_plugin_driver
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(&prepared);
-        prepared
-            .session_start(&SessionStartEvent {
-                reason: SessionStartReason::Reload,
-                previous_session_file: None,
-            })
-            .await;
-        Ok(report)
+    pub(crate) fn session_plugin_driver(&self) -> Arc<SessionPluginDriver> {
+        Arc::clone(&self.session_plugin_driver)
     }
 
     pub async fn shutdown(&self) {
@@ -1322,48 +1010,32 @@ impl AgentSession {
                 _ => SessionEntry::message(message.clone()),
             },
         };
-        let entry_id = target.id.clone();
         let mut activity = self
             .activity
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        if kind == QueueKind::NextRun {
-            self.log.append_record(NewLaneRecord {
-                id: next_unique_id("queue"),
-                lane: MAIN_LANE.to_string(),
-                record: LaneRecordEntry::QueueEnqueued {
-                    queue: kind,
-                    run_id: None,
-                    target: target.clone(),
-                },
-            })?;
-            activity.recovered_queue.push(PendingSessionMessage {
-                kind: Some(kind),
-                run_id: None,
+        let entry_id = if kind == QueueKind::NextRun {
+            self.commit_queue_item(
+                &mut activity.recovered_queue,
+                kind,
+                None,
                 display_text,
-                message: message.clone(),
+                message.clone(),
                 target,
-            });
+            )?
         } else {
             let run = activity.active_run.as_mut().ok_or(SessionError::Busy)?;
-            self.log.append_record(NewLaneRecord {
-                id: next_unique_id("queue"),
-                lane: MAIN_LANE.to_string(),
-                record: LaneRecordEntry::QueueEnqueued {
-                    queue: kind,
-                    run_id: Some(run.id.clone()),
-                    target: target.clone(),
-                },
-            })?;
-            run.pending.push(PendingSessionMessage {
-                kind: Some(kind),
-                run_id: Some(run.id.clone()),
+            let run_id = Some(run.id.clone());
+            self.commit_queue_item(
+                &mut run.pending,
+                kind,
+                run_id,
                 display_text,
-                message: message.clone(),
+                message.clone(),
                 target,
-            });
-        }
+            )?
+        };
         let snapshot = activity.queue_snapshot();
         drop(activity);
         self.events.publish_queue(snapshot);
@@ -1373,6 +1045,29 @@ impl AgentSession {
             QueueKind::NextRun => {}
         }
         Ok(SubmitOutcome::Queued { kind, entry_id })
+    }
+
+    /// Commits the journal record before making the item visible to the live
+    /// queue, preserving durable-before-delivery ordering in one place.
+    fn commit_queue_item(
+        &self,
+        pending: &mut Vec<PendingSessionMessage>,
+        kind: QueueKind,
+        run_id: Option<String>,
+        display_text: String,
+        message: Message,
+        target: ProvisionedEntry,
+    ) -> Result<String, SessionError> {
+        append_queue_enqueued(&self.log, kind, run_id.clone(), &target)?;
+        let entry_id = target.id.clone();
+        pending.push(PendingSessionMessage {
+            kind: Some(kind),
+            run_id,
+            display_text,
+            message,
+            target,
+        });
+        Ok(entry_id)
     }
 
     /// Clears queued messages and returns their editor-ready text. The
@@ -1436,13 +1131,6 @@ impl AgentSession {
         }
     }
 
-    pub fn is_retrying(&self) -> bool {
-        self.retry_abort
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some()
-    }
-
     pub fn auto_compaction_enabled(&self) -> bool {
         self.compaction_settings().enabled
     }
@@ -1452,10 +1140,6 @@ impl AgentSession {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .enabled = enabled;
-    }
-
-    pub fn auto_retry_enabled(&self) -> bool {
-        self.retry_settings().enabled
     }
 
     pub fn set_auto_retry_enabled(&self, enabled: bool) {
@@ -1779,7 +1463,6 @@ impl AgentSession {
             id: next_unique_id("entry"),
             entry: SessionEntry::message(session_message),
         };
-        let entry_id = target.id.clone();
         let mut activity = self
             .activity
             .lock()
@@ -1788,22 +1471,15 @@ impl AgentSession {
         if run.id != expected.0 || run.generation != generation {
             return Err(SessionError::Busy);
         }
-        self.log.append_record(NewLaneRecord {
-            id: next_unique_id("queue"),
-            lane: MAIN_LANE.to_string(),
-            record: LaneRecordEntry::QueueEnqueued {
-                queue: kind,
-                run_id: Some(run.id.clone()),
-                target: target.clone(),
-            },
-        })?;
-        run.pending.push(PendingSessionMessage {
-            kind: Some(kind),
-            run_id: Some(run.id.clone()),
+        let run_id = Some(run.id.clone());
+        let entry_id = self.commit_queue_item(
+            &mut run.pending,
+            kind,
+            run_id,
             display_text,
-            message: message.clone(),
+            message.clone(),
             target,
-        });
+        )?;
         let snapshot = activity.queue_snapshot();
         drop(activity);
         self.events.publish_queue(snapshot);
@@ -1841,25 +1517,7 @@ impl AgentSession {
                 ));
             }
             for mut item in run.pending.into_iter().filter(|item| item.kind.is_some()) {
-                self.log.append_record(NewLaneRecord {
-                    id: next_unique_id("queue-cancel"),
-                    lane: MAIN_LANE.to_string(),
-                    record: LaneRecordEntry::QueueCancelled {
-                        run_id: item.run_id.clone(),
-                        entry_id: item.target.id.clone(),
-                    },
-                })?;
-                item.target.id = next_unique_id("entry");
-                item.run_id = None;
-                self.log.append_record(NewLaneRecord {
-                    id: next_unique_id("queue-recovery"),
-                    lane: MAIN_LANE.to_string(),
-                    record: LaneRecordEntry::QueueEnqueued {
-                        queue: QueueKind::NextRun,
-                        run_id: None,
-                        target: item.target.clone(),
-                    },
-                })?;
+                requeue_for_next_run(&self.log, &mut item)?;
                 activity.recovered_queue.push(item);
             }
             activity.queue_snapshot()
@@ -1972,16 +1630,14 @@ impl AgentSession {
 
     async fn finish_prompt_locked(
         &self,
-        recorded: RuntimePromptOutcome,
+        outcome: AgentLoopOutcome,
     ) -> Result<AgentLoopOutcome, SessionError> {
         self.retry_attempt.store(0, Ordering::Release);
         let _retry_attempt_reset = RetryAttemptReset(&self.retry_attempt);
-        let mut recorded = recorded;
+        let mut outcome = outcome;
         let mut retry_attempt = 0_u32;
         let mut overflow_recovery_attempted = false;
         loop {
-            let outcome = self.record_prompt(recorded)?;
-
             if self.is_overflow_outcome(&outcome) {
                 if retry_attempt > 0 {
                     self.events.publish_auto_retry_end(
@@ -2004,9 +1660,9 @@ impl AgentSession {
                         )
                         .await
                         .is_ok()
-                        && let Ok(retried) = self.runtime.continue_recorded().await
+                        && let Ok(retried) = self.runtime.continue_run().await
                     {
-                        recorded = retried;
+                        outcome = retried;
                         continue;
                     }
                 }
@@ -2041,9 +1697,9 @@ impl AgentSession {
                     );
                     return Ok(outcome);
                 }
-                match self.runtime.continue_recorded().await {
+                match self.runtime.continue_run().await {
                     Ok(retried) => {
-                        recorded = retried;
+                        outcome = retried;
                         continue;
                     }
                     Err(error) => {
@@ -2086,30 +1742,6 @@ impl AgentSession {
         !cancelled
     }
 
-    fn record_prompt(
-        &self,
-        recorded: RuntimePromptOutcome,
-    ) -> Result<AgentLoopOutcome, SessionError> {
-        let outcome = recorded.outcome;
-        let snapshot = PromptSnapshot::capture(
-            recorded.generation,
-            recorded.base_system_prompt,
-            outcome.final_context.system_prompt.clone(),
-            recorded.active_tools,
-            recorded.prompt_options.as_ref(),
-        );
-        let entry = SessionEntry::Custom(CustomEntry {
-            custom_type: PROMPT_SNAPSHOT_CUSTOM_TYPE.to_string(),
-            data: Some(
-                serde_json::to_value(snapshot)
-                    .map_err(|error| SessionError::InvalidPayload(error.to_string()))?,
-            ),
-        });
-        let record = self.log.append_session_record(entry)?;
-        self.events.publish_entry(record);
-        Ok(outcome)
-    }
-
     /// Persists extension state that is deliberately excluded from model
     /// context and publishes the same semantic entry event as other session
     /// mutations.
@@ -2149,10 +1781,7 @@ impl AgentSession {
             custom_type: custom_type.into(),
             data,
         });
-        let record = self.log.append_session_record(entry)?;
-        let id = record.id.clone();
-        self.events.publish_entry(record);
-        Ok(id)
+        self.append_and_publish_entry(entry)
     }
 
     /// Adds usage from an auxiliary provider call without inserting anything
@@ -2187,11 +1816,7 @@ impl AgentSession {
     /// Rebuilding runtime context keeps the next turn and resumed sessions in
     /// agreement with the JSONL tree.
     pub fn append_custom_message(&self, message: CustomMessage) -> Result<String, SessionError> {
-        let _operation = self
-            .operation_gate
-            .try_lock()
-            .map_err(|_| SessionError::Busy)?;
-        self.ensure_open()?;
+        let _operation = self.try_begin_operation()?;
         let entry = SessionEntry::custom_message(&message);
         let record = self.log.append_session_record(entry)?;
         let id = record.id.clone();
@@ -2205,11 +1830,7 @@ impl AgentSession {
     }
 
     pub fn set_label(&self, entry_id: &str, label: Option<String>) -> Result<(), SessionError> {
-        let _operation = self
-            .operation_gate
-            .try_lock()
-            .map_err(|_| SessionError::Busy)?;
-        self.ensure_open()?;
+        let _operation = self.try_begin_operation()?;
         self.log.set_label(entry_id, label)
     }
 
@@ -2217,42 +1838,28 @@ impl AgentSession {
         &self,
         tools: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<(), SessionError> {
-        let _operation = self
-            .operation_gate
-            .try_lock()
-            .map_err(|_| SessionError::Busy)?;
-        self.ensure_open()?;
+        let _operation = self.try_begin_operation()?;
         self.runtime
             .set_active_tools(tools.into_iter().map(Into::into))?;
         let entry = SessionEntry::ActiveToolsChange(ActiveToolsEntry {
             active_tool_names: self.runtime.active_tools(),
         });
-        let record = self.log.append_session_record(entry)?;
-        self.events.publish_entry(record);
+        self.append_and_publish_entry(entry)?;
         Ok(())
     }
 
     pub fn set_model(&self, provider: ProviderId, model_id: ModelId) -> Result<(), SessionError> {
-        let _operation = self
-            .operation_gate
-            .try_lock()
-            .map_err(|_| SessionError::Busy)?;
-        self.ensure_open()?;
+        let _operation = self.try_begin_operation()?;
         let thinking_level = self.runtime.agent().state().thinking_level;
         self.runtime.set_model(provider.clone(), model_id.clone())?;
         let entry = SessionEntry::ModelChange(ModelChangeEntry { provider, model_id });
-        let record = self.log.append_session_record(entry)?;
-        self.events.publish_entry(record);
+        self.append_and_publish_entry(entry)?;
         self.set_thinking_level_locked(thinking_level)?;
         Ok(())
     }
 
     pub fn set_thinking_level(&self, thinking_level: ThinkingLevel) -> Result<(), SessionError> {
-        let _operation = self
-            .operation_gate
-            .try_lock()
-            .map_err(|_| SessionError::Busy)?;
-        self.ensure_open()?;
+        let _operation = self.try_begin_operation()?;
         self.set_thinking_level_locked(thinking_level)?;
         Ok(())
     }
@@ -2275,8 +1882,7 @@ impl AgentSession {
         let entry = SessionEntry::ThinkingLevelChange(ThinkingLevelEntry {
             thinking_level: thinking_level.as_str().to_string(),
         });
-        let record = self.log.append_session_record(entry)?;
-        self.events.publish_entry(record);
+        self.append_and_publish_entry(entry)?;
         self.events
             .publish_thinking(thinking_level, self.runtime.agent().state());
         Ok(thinking_level)
@@ -2299,11 +1905,7 @@ impl AgentSession {
     /// whose public API is synchronous can publish the metadata immediately
     /// and dispatch the async session-plugin hook afterward.
     pub fn set_name_immediate(&self, name: Option<String>) -> Result<Option<String>, SessionError> {
-        let _operation = self
-            .operation_gate
-            .try_lock()
-            .map_err(|_| SessionError::Busy)?;
-        self.ensure_open()?;
+        let _operation = self.try_begin_operation()?;
         let normalized = self.set_name_locked(name)?;
         self.events.publish_session_info(normalized.clone());
         Ok(normalized)
@@ -2749,6 +2351,25 @@ impl AgentSession {
             SESSION_CLOSED => Err(SessionError::Closed),
             _ => Err(SessionError::Busy),
         }
+    }
+
+    fn try_begin_operation(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, SessionError> {
+        let operation = self
+            .operation_gate
+            .try_lock()
+            .map_err(|_| SessionError::Busy)?;
+        self.ensure_open()?;
+        Ok(operation)
+    }
+
+    /// Keeps the durable-before-live ordering for ordinary session entries in
+    /// one place. Callers that must rebuild runtime context before publication
+    /// intentionally use the lower-level journal interface.
+    fn append_and_publish_entry(&self, entry: SessionEntry) -> Result<String, SessionError> {
+        let record = self.log.append_session_record(entry)?;
+        let id = record.id.clone();
+        self.events.publish_entry(record);
+        Ok(id)
     }
 
     pub async fn branch_with_summary(
@@ -3226,6 +2847,41 @@ fn project_product_user_event(event: AgentEvent, display_text: Option<&str>) -> 
     }
 }
 
+fn append_queue_enqueued(
+    log: &SessionLog,
+    kind: QueueKind,
+    run_id: Option<String>,
+    target: &ProvisionedEntry,
+) -> Result<(), SessionError> {
+    log.append_record(NewLaneRecord {
+        id: next_unique_id("queue"),
+        lane: MAIN_LANE.to_string(),
+        record: LaneRecordEntry::QueueEnqueued {
+            queue: kind,
+            run_id,
+            target: target.clone(),
+        },
+    })?;
+    Ok(())
+}
+
+fn requeue_for_next_run(
+    log: &SessionLog,
+    item: &mut PendingSessionMessage,
+) -> Result<(), SessionError> {
+    log.append_record(NewLaneRecord {
+        id: next_unique_id("queue-cancel"),
+        lane: MAIN_LANE.to_string(),
+        record: LaneRecordEntry::QueueCancelled {
+            run_id: item.run_id.clone(),
+            entry_id: item.target.id.clone(),
+        },
+    })?;
+    item.target.id = next_unique_id("entry");
+    item.run_id = None;
+    append_queue_enqueued(log, QueueKind::NextRun, None, &item.target)
+}
+
 fn pending_session_message(
     kind: QueueKind,
     run_id: Option<String>,
@@ -3358,25 +3014,7 @@ fn recover_interrupted_state(
         if item.run_id.is_none() {
             continue;
         }
-        log.append_record(NewLaneRecord {
-            id: next_unique_id("queue-cancel"),
-            lane: MAIN_LANE.to_string(),
-            record: LaneRecordEntry::QueueCancelled {
-                run_id: item.run_id.clone(),
-                entry_id: item.target.id.clone(),
-            },
-        })?;
-        item.target.id = next_unique_id("entry");
-        item.run_id = None;
-        log.append_record(NewLaneRecord {
-            id: next_unique_id("queue-recovery"),
-            lane: MAIN_LANE.to_string(),
-            record: LaneRecordEntry::QueueEnqueued {
-                queue: QueueKind::NextRun,
-                run_id: None,
-                target: item.target.clone(),
-            },
-        })?;
+        requeue_for_next_run(log, item)?;
     }
 
     // If the process stopped before Agent emitted the initial message_end,
@@ -3387,15 +3025,7 @@ fn recover_interrupted_state(
         if recovered.iter().any(|item| item.target.id == target.id) {
             continue;
         }
-        log.append_record(NewLaneRecord {
-            id: next_unique_id("queue-recovery"),
-            lane: MAIN_LANE.to_string(),
-            record: LaneRecordEntry::QueueEnqueued {
-                queue: QueueKind::NextRun,
-                run_id: None,
-                target: target.clone(),
-            },
-        })?;
+        append_queue_enqueued(log, QueueKind::NextRun, None, &target)?;
         if let Some(item) = pending_session_message(QueueKind::NextRun, None, target, None) {
             recovered.push(item);
         }
@@ -3501,18 +3131,22 @@ fn restore_runtime_context(
         context,
         crate::InitialModelRequest::default().session(context.model.clone()),
     )
+    .map(drop)
 }
 
 fn restore_runtime_context_with_request(
     runtime: &PiRuntime,
     context: &SessionContext,
     request: crate::InitialModelRequest,
-) -> Result<(), SessionError> {
+) -> Result<Option<String>, SessionError> {
     let current = runtime.agent().state();
-    let selection = crate::ModelRuntimeServices::new(runtime)
-        .resolve_initial_model(request)
+    let selection = request
+        .resolve(runtime)
         .map_err(|error| SessionError::Runtime(error.to_string()))?;
-    let SessionModel { provider, model_id } = selection.model;
+    let crate::InitialModelSelection {
+        model: SessionModel { provider, model_id },
+        fallback_message,
+    } = selection;
     let thinking_level = context
         .thinking_level
         .parse()
@@ -3538,22 +3172,7 @@ fn restore_runtime_context_with_request(
         active_tools,
         messages: context.runtime_messages(),
     })?;
-    Ok(())
-}
-
-fn sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
-}
-
-pub fn read_prompt_snapshot(path: &Path) -> Result<Option<PromptSnapshot>, SessionError> {
-    let (_, document) = SessionLog::open(path)?;
-    Ok(document.latest_prompt_snapshot())
+    Ok(fallback_message)
 }
 
 #[cfg(test)]
@@ -3729,6 +3348,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initial_model_fallback_is_reported_to_the_frontend() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = AgentSession::create_with_options(
+            scripted_runtime([]),
+            directory.path().join("session.jsonl"),
+            AgentSessionOptions::default()
+                .initial_model_fallback_message(Some("using fallback model".to_string())),
+        )
+        .await
+        .unwrap();
+
+        let mut subscription = session.subscribe();
+        let event = subscription.events.recv().await.unwrap();
+        assert!(matches!(
+            event.event,
+            AgentSessionEvent::PluginNotice {
+                message,
+                level: crate::NoticeLevel::Warning,
+            } if message == "using fallback model"
+        ));
+    }
+
+    #[tokio::test]
     async fn extension_messages_and_entries_update_live_and_resumed_session_state() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
@@ -3895,7 +3537,10 @@ mod tests {
         let session = AgentSession::create_with_options(
             scripted_runtime([]),
             directory.path().join("child.jsonl"),
-            AgentSessionOptions::default().parent_session_path(Some(parent.clone())),
+            AgentSessionOptions {
+                parent_session_path: Some(parent.clone()),
+                ..AgentSessionOptions::default()
+            },
         )
         .await
         .unwrap();
@@ -3913,7 +3558,10 @@ mod tests {
         let session = AgentSession::create_with_options(
             scripted_runtime([]),
             &path,
-            AgentSessionOptions::default().session_id(Some("botmux-session".to_string())),
+            AgentSessionOptions {
+                session_id: Some("botmux-session".to_string()),
+                ..AgentSessionOptions::default()
+            },
         )
         .await
         .unwrap();
@@ -4826,9 +4474,13 @@ mod tests {
                 .is_empty()
         );
         let path = directory.path().join("child.jsonl");
-        let prepared = AgentSession::prepare_create(runtime(7), &path)
-            .await
-            .unwrap();
+        let prepared = AgentSession::prepare_create_with_options(
+            runtime(7),
+            &path,
+            AgentSessionOptions::default(),
+        )
+        .await
+        .unwrap();
         let child = prepared.session();
         child
             .initialize_isolated_context(parent.isolated_context_seed().unwrap())
@@ -4885,7 +4537,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_records_v4_configuration_messages_and_prompt_snapshot() {
+    async fn create_records_only_v4_configuration_and_messages() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
         let runtime = PiRuntime::builder()
@@ -4908,7 +4560,6 @@ mod tests {
         let document = session.log().load().unwrap();
         assert_eq!(document.header.version, 4);
         assert_eq!(document.messages().len(), 2);
-        assert!(document.latest_prompt_snapshot().is_some());
         assert_eq!(document.context().unwrap().thinking_level, "high");
 
         let values = std::fs::read_to_string(path)
@@ -5271,127 +4922,6 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(matches!(&messages[0], Message::User(user)
             if matches!(&user.content[0], ContentBlock::Text(text) if text.text.contains("short"))));
-    }
-
-    #[tokio::test]
-    async fn session_plugin_reload_emits_shutdown_then_start_and_exposes_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("session.jsonl");
-        let runtime = PiRuntime::builder()
-            .provider_plugin(ScriptedProviderPlugin::scripted([]))
-            .agent_options(AgentOptions {
-                cwd: directory.path().to_path_buf(),
-                ..AgentOptions::default()
-            })
-            .build()
-            .unwrap();
-        let builds = Arc::new(AtomicUsize::new(0));
-        let contexts = Arc::new(Mutex::new(Vec::new()));
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let plugins = SessionPlugins::new().plugin_factory({
-            let builds = Arc::clone(&builds);
-            let contexts = Arc::clone(&contexts);
-            let events = Arc::clone(&events);
-            move || LifecyclePlugin {
-                value: builds.fetch_add(1, Ordering::SeqCst) + 1,
-                contexts: Arc::clone(&contexts),
-                events: Arc::clone(&events),
-                cancel_tree: false,
-                replace_compaction: false,
-            }
-        });
-        let session = AgentSession::create_with_options(
-            runtime,
-            &path,
-            AgentSessionOptions::default().plugins(plugins),
-        )
-        .await
-        .unwrap();
-
-        let previous_driver = session.session_plugin_driver();
-        let report = session.reload_session_plugins().await.unwrap();
-        assert_eq!(report.previous_generation, 1);
-        assert_eq!(report.generation, 2);
-        assert_eq!(builds.load(Ordering::SeqCst), 2);
-        assert_eq!(report.plugin_order, vec![PluginId::new("lifecycle")]);
-        assert_eq!(previous_driver.generation(), 1);
-        assert_eq!(session.session_plugin_driver().generation(), 2);
-        assert_eq!(
-            *events
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            vec![
-                "start:1:Startup".to_string(),
-                "shutdown:1:Reload".to_string(),
-                "start:2:Reload".to_string(),
-            ]
-        );
-
-        let contexts = contexts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(contexts.len(), 3);
-        assert_eq!(contexts[0].plugin_id(), &PluginId::new("lifecycle"));
-        assert_eq!(contexts[0].generation(), 1);
-        assert_eq!(contexts[1].generation(), 1);
-        assert_eq!(contexts[2].generation(), 2);
-        assert_eq!(contexts[0].identity().id, session.log().header().id);
-        assert_eq!(contexts[0].identity().path, path);
-        assert_eq!(contexts[0].identity().cwd, directory.path());
-    }
-
-    #[tokio::test]
-    async fn failed_session_plugin_reload_keeps_previous_generation_running() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("session.jsonl");
-        let runtime = PiRuntime::builder()
-            .provider_plugin(ScriptedProviderPlugin::scripted([]))
-            .build()
-            .unwrap();
-        let builds = Arc::new(AtomicUsize::new(0));
-        let contexts = Arc::new(Mutex::new(Vec::new()));
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let plugins = SessionPlugins::new().try_plugin_factory({
-            let builds = Arc::clone(&builds);
-            let contexts = Arc::clone(&contexts);
-            let events = Arc::clone(&events);
-            move || {
-                let value = builds.fetch_add(1, Ordering::SeqCst) + 1;
-                if value > 1 {
-                    Err("fixture reload failed")
-                } else {
-                    Ok(LifecyclePlugin {
-                        value,
-                        contexts: Arc::clone(&contexts),
-                        events: Arc::clone(&events),
-                        cancel_tree: false,
-                        replace_compaction: false,
-                    })
-                }
-            }
-        });
-        let session = AgentSession::create_with_options(
-            runtime,
-            &path,
-            AgentSessionOptions::default().plugins(plugins),
-        )
-        .await
-        .unwrap();
-
-        let previous_driver = session.session_plugin_driver();
-        let error = session.reload_session_plugins().await.unwrap_err();
-        assert!(error.to_string().contains("fixture reload failed"));
-        assert_eq!(session.session_plugin_driver().generation(), 1);
-        assert!(Arc::ptr_eq(
-            &previous_driver,
-            &session.session_plugin_driver()
-        ));
-        assert_eq!(
-            *events
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            vec!["start:1:Startup".to_string()]
-        );
     }
 
     #[tokio::test]
@@ -5997,13 +5527,13 @@ mod tests {
                 break;
             }
         }
-        assert!(session.is_retrying());
+        assert!(session.snapshot().auto_retry.is_some());
         session.abort();
 
         let outcome = prompting.await.unwrap().unwrap();
         assert_eq!(outcome.stop, AgentLoopStop::ProviderError);
         assert_eq!(provider.requests().len(), 1);
-        assert!(!session.is_retrying());
+        assert!(session.snapshot().auto_retry.is_none());
         let retry_end = loop {
             let event = subscription.events.recv().await.unwrap();
             if let AgentSessionEvent::AutoRetryEnd {

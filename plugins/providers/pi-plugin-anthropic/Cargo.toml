@@ -16,6 +16,7 @@ reqwest = { version = "0.12.23", default-features = false, features = ["json", "
 sha2 = "0.10"
 pi-core.workspace = true
 pi-provider.workspace = true
+pi-utils.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

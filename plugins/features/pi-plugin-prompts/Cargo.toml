@@ -9,8 +9,8 @@ publish = false
 [dependencies]
 async-trait.workspace = true
 pi-core.workspace = true
+pi-utils = { workspace = true, features = ["frontmatter"] }
 serde.workspace = true
-serde_yaml = "0.9.34"
 
 [dev-dependencies]
 pi-runtime.workspace = true

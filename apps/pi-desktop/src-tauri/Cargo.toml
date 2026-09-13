@@ -41,6 +41,7 @@ pi-core = { path = "../../../crates/pi-core" }
 pi-runtime = { path = "../../../crates/pi-runtime" }
 pi-sdk = { path = "../../../crates/pi-sdk" }
 pi-session = { path = "../../../crates/pi-session" }
+pi-utils = { path = "../../../crates/pi-utils", features = ["frontmatter"] }
 pi-plugin-skills = { path = "../../../plugins/features/pi-plugin-skills" }
 tauri-plugin-dialog = "2.7.3"
 git2 = { version = "0.20.3", features = ["vendored-openssl", "vendored-libgit2"] }

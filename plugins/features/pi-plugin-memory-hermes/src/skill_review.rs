@@ -3,6 +3,8 @@ use crate::curator::metadata::{self, Metadata};
 use crate::execution::HermesRunKind;
 use crate::{execution::ReviewObservations, store::HermesMemoryStore};
 use pi_core::{ToolContext, ToolError, ToolResult};
+use pi_utils::frontmatter::{FrontmatterStatus, parse_frontmatter};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
@@ -28,6 +30,12 @@ fn atomic(path: &Path, content: &[u8]) -> Result<(), ToolError> {
 
 fn io(error: std::io::Error) -> ToolError {
     ToolError::Execution(error.to_string())
+}
+
+#[derive(Default, Deserialize)]
+struct ImportedSkillFrontmatter {
+    name: Option<String>,
+    description: Option<String>,
 }
 
 fn resolve_skill(
@@ -252,18 +260,21 @@ fn execute_inner(
             .get("content")
             .and_then(Value::as_str)
             .map(str::to_string)
-        && let Some(rest) = content.strip_prefix("---\n")
-        && let Some((frontmatter, body)) = rest.split_once("\n---\n")
+        && let Ok(document) = parse_frontmatter::<ImportedSkillFrontmatter>(&content)
+        && document.status == FrontmatterStatus::Present
+        && let Some(frontmatter) = document.frontmatter
     {
-        for line in frontmatter.lines() {
-            if let Some((key, value)) = line.split_once(':')
-                && matches!(key.trim(), "name" | "description")
-                && input.get(key.trim()).is_none()
-            {
-                input[key.trim()] = json!(value.trim().trim_matches(['\'', '"']));
-            }
+        if input.get("name").is_none()
+            && let Some(name) = frontmatter.name
+        {
+            input["name"] = json!(name);
         }
-        input["content"] = json!(body);
+        if input.get("description").is_none()
+            && let Some(description) = frontmatter.description
+        {
+            input["description"] = json!(description);
+        }
+        input["content"] = json!(document.body);
     }
     let writing = !matches!(action.as_str(), "view" | "" | "create");
     let agent_owned = document

@@ -26,6 +26,7 @@ use pi_session::{
     AgentSessionEvent, MultiSessionManager, PiSession, SessionEntry, SessionGenerationOverlay,
     SessionHeader,
 };
+use pi_utils::time::unix_timestamp_ms as now_ms;
 use tokio::sync::Mutex;
 
 const MODEL_CONFIG_ID: &str = "model";
@@ -1038,15 +1039,6 @@ fn internal_error(error: impl ToString) -> agent_client_protocol::Error {
 
 fn comparable_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-        })
 }
 
 #[cfg(test)]

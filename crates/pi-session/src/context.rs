@@ -438,10 +438,6 @@ impl SessionDocument {
         self.context_at_with_options(self.leaf_id(MAIN_LANE)?, options)
     }
 
-    pub fn context_at(&self, leaf_id: Option<&str>) -> Result<SessionContext, SessionError> {
-        self.context_at_with_options(leaf_id, &SessionContextBuildOptions::default())
-    }
-
     pub fn context_at_with_options(
         &self,
         leaf_id: Option<&str>,

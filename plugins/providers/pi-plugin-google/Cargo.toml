@@ -13,5 +13,6 @@ futures.workspace = true
 gcp_auth.workspace = true
 pi-core.workspace = true
 pi-provider.workspace = true
+pi-utils.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

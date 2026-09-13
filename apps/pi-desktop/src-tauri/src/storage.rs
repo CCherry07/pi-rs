@@ -2,57 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::types::{AppSettings, WorkspaceEntry, WorkspaceSettings};
+use crate::utils::normalize_windows_namespace_path;
 use serde_json::Value;
-
-fn normalize_windows_namespace_path(path: &str) -> String {
-    if path.is_empty() {
-        return String::new();
-    }
-
-    fn strip_prefix_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-        value
-            .get(..prefix.len())
-            .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
-            .map(|_| &value[prefix.len()..])
-    }
-
-    fn starts_with_drive_path(value: &str) -> bool {
-        let bytes = value.as_bytes();
-        bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && (bytes[2] == b'\\' || bytes[2] == b'/')
-    }
-
-    if let Some(rest) = strip_prefix_ascii_case(path, r"\\?\UNC\") {
-        return format!(r"\\{rest}");
-    }
-    if let Some(rest) = strip_prefix_ascii_case(path, "//?/UNC/") {
-        return format!("//{rest}");
-    }
-    if let Some(rest) =
-        strip_prefix_ascii_case(path, r"\\?\").filter(|rest| starts_with_drive_path(rest))
-    {
-        return rest.to_string();
-    }
-    if let Some(rest) =
-        strip_prefix_ascii_case(path, "//?/").filter(|rest| starts_with_drive_path(rest))
-    {
-        return rest.to_string();
-    }
-    if let Some(rest) =
-        strip_prefix_ascii_case(path, r"\\.\").filter(|rest| starts_with_drive_path(rest))
-    {
-        return rest.to_string();
-    }
-    if let Some(rest) =
-        strip_prefix_ascii_case(path, "//./").filter(|rest| starts_with_drive_path(rest))
-    {
-        return rest.to_string();
-    }
-
-    path.to_string()
-}
 
 fn normalize_optional_windows_namespace_path(path: Option<String>) -> (Option<String>, bool) {
     match path {

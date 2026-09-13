@@ -600,24 +600,12 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 | `plugins/features/pi-plugin-schedule`            | Persistent scheduled prompts and isolated-session dispatch                              |
 | `legacy/pi`                                      | Current TypeScript Pi behavioral oracle                                                  |
 | `e2e`                                            | In-process runtime acceptance and example projects                          |
-| `scripts/perf`                                   | Rust/TypeScript performance measurements and an offline dashboard                       |
 
 Dependencies point inward: core contracts do not own terminal behavior, filesystem discovery,
 session storage, or vendor routing policy. See [docs/architecture.md](docs/architecture.md) for hook
 ordering, persistence invariants, and the detailed design.
 
 ## Development and validation
-
-Run the Rust / TypeScript performance suite and open its offline dashboard:
-
-```bash
-./scripts/bench-perf --open
-```
-
-The performance suite requires Node.js 22.19 or newer on macOS/Linux and a prepared local Pi
-checkout for TypeScript comparisons. Use `--quick` for a smoke run or `--backend rust` without the
-TypeScript oracle. Setup, measurement caveats, options, and raw JSON/CSV
-outputs are documented in [scripts/perf/README.md](scripts/perf/README.md).
 
 The Pi core conformance subset and its oracle mapping are documented in
 [docs/pi-core-test-matrix.md](docs/pi-core-test-matrix.md). Run that focused set with:

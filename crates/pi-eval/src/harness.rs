@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use pi_core::{
     AgentPlugin, AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, ContentBlock,
@@ -8,6 +8,7 @@ use pi_core::{
 use pi_js_plugin::JsPluginHost;
 use pi_sdk::{Pi, ProductConfig};
 use pi_session::{SessionGenerationOverlay, SubmitOutcome};
+use pi_utils::time::unix_timestamp_ms as now_ms;
 
 use crate::model::EVAL_RUN_SCHEMA_VERSION;
 use crate::snapshot::{changes, copy_bootstrap_file, copy_fixture, snapshot_workspace};
@@ -513,14 +514,6 @@ fn add_usage(summary: &mut EvalUsage, usage: &Usage, model_has_pricing: bool) {
         summary.estimated_cost_usd =
             Some(summary.estimated_cost_usd.unwrap_or_default() + usage.cost.total);
     }
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-        })
 }
 
 fn resolve_local_path(cwd: &std::path::Path, path: &std::path::Path) -> std::path::PathBuf {

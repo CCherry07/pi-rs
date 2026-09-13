@@ -2,6 +2,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use pi_core::{IsolatedContextMode, ThinkingLevel};
+use pi_utils::{
+    frontmatter::{FrontmatterStatus, split_frontmatter},
+    text::escape_xml,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SystemPromptMode {
@@ -55,7 +59,7 @@ impl BuiltinProfile {
                 _ => Vec::new(),
             },
             description: self.description.to_string(),
-            instructions: definition_body(self.definition).to_string(),
+            instructions: definition_body(self.definition),
             system_prompt_mode: self.system_prompt_mode,
             inherit_project_context: self.inherit_project_context,
             // The upstream builtins are ordinary children, not nested orchestrators.
@@ -77,14 +81,14 @@ impl BuiltinProfile {
     }
 }
 
-fn definition_body(definition: &str) -> &str {
-    let definition = definition
-        .strip_prefix("---\n")
-        .expect("bundled subagent definition must start with YAML frontmatter");
-    definition
-        .split_once("\n---\n")
-        .map(|(_, body)| body.trim())
-        .expect("bundled subagent definition must close YAML frontmatter")
+fn definition_body(definition: &str) -> String {
+    let document = split_frontmatter(definition);
+    assert_eq!(
+        document.status,
+        FrontmatterStatus::Present,
+        "bundled subagent definition must contain YAML frontmatter"
+    );
+    document.body
 }
 
 pub(crate) fn builtin_profiles() -> Vec<SubagentProfile> {
@@ -164,10 +168,7 @@ Do not broaden yourself into general parent orchestration. Do not launch follow-
 The maxSubagentDepth cap still applies and may block further fanout. Use wait_agent and send_message to coordinate the descendants you own.\n\
 If you need to edit files, use the available editing tools. Do not print tool-call syntax, patches, or pseudo-tool calls as text.";
 
-    let identity = format!(
-        "<active_agent name=\"{}\"/>",
-        escape_xml_attribute(&profile.name)
-    );
+    let identity = format!("<active_agent name=\"{}\"/>", escape_xml(&profile.name));
     let role = format!("{identity}\n\n{}", profile.instructions);
     let filtered_base = (!profile.inherit_project_context).then(|| strip_project_context(base));
     let base = filtered_base.as_deref().unwrap_or(base);
@@ -210,15 +211,6 @@ fn strip_project_context(prompt: &str) -> String {
     format!("{}{}", &prompt[..start], &prompt[end..])
 }
 
-fn escape_xml_attribute(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,7 +221,7 @@ mod tests {
         let prompt = specialized_system_prompt("base prompt", &reviewer);
         assert!(prompt.starts_with("You are a child agent, not the parent orchestrator."));
         assert!(prompt.contains("<active_agent name=\"reviewer\"/>"));
-        assert!(prompt.ends_with(definition_body(include_str!("../agents/reviewer.md"))));
+        assert!(prompt.ends_with(&definition_body(include_str!("../agents/reviewer.md"))));
         assert!(!prompt.contains("base prompt"));
         assert!(!prompt.contains("Delegated subagent role"));
         assert!(!prompt.contains("depth 2 of 3"));
@@ -237,7 +229,7 @@ mod tests {
         let delegate = builtin_profile("delegate");
         let prompt = specialized_system_prompt("base prompt", &delegate);
         assert!(prompt.contains("base prompt\n\n<active_agent name=\"delegate\"/>"));
-        assert!(prompt.ends_with(definition_body(include_str!("../agents/delegate.md"))));
+        assert!(prompt.ends_with(&definition_body(include_str!("../agents/delegate.md"))));
     }
 
     #[test]
