@@ -313,6 +313,7 @@ dependencies = [
  "futures",
  "pi-core",
  "pi-telemetry",
+ "pi-utils",
  "serde_json",
  "thiserror",
  "tokio",
@@ -359,6 +360,7 @@ dependencies = [
 name = "pi-prompt"
 version = "0.1.0"
 dependencies = [
+ "pi-utils",
  "serde",
 ]
 
@@ -367,6 +369,7 @@ name = "pi-resources"
 version = "0.1.0"
 dependencies = [
  "pi-prompt",
+ "pi-utils",
  "serde",
 ]
 
@@ -379,6 +382,7 @@ dependencies = [
  "pi-core",
  "pi-prompt",
  "pi-resources",
+ "pi-utils",
  "thiserror",
  "tokio",
 ]
@@ -395,6 +399,7 @@ dependencies = [
  "pi-runtime",
  "pi-shell",
  "pi-telemetry",
+ "pi-utils",
  "serde",
  "serde_json",
  "thiserror",
@@ -420,6 +425,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "pi-utils"
+version = "0.1.0"
 
 [[package]]
 name = "pin-project-lite"
