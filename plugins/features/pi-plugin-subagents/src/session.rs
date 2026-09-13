@@ -57,7 +57,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_releases_the_owner_budget() {
-        let runtime = SubagentRuntime::default();
+        let runtime = SubagentRuntime::without_persistence_for_testing();
         let plugin = SubagentsSessionPlugin::new(runtime.clone());
         let context = SessionPluginContext::unavailable_for_testing(
             PluginId::new("subagents"),
@@ -70,7 +70,7 @@ mod tests {
             },
         );
         let run = runtime
-            .begin_launch("root", builtin_profile("delegate"), 4)
+            .begin_launch("root", builtin_profile("delegate"), 4, false)
             .unwrap();
 
         plugin

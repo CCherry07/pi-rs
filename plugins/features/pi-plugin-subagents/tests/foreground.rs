@@ -3,7 +3,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use pi_agent::AgentOptions;
-use pi_core::{ModelId, PluginContext, PresentationMode, ProviderId, ToolCallId};
+use pi_core::{
+    ModelId, ModelSpec, PluginContext, PluginId, PresentationMode, ProviderId, ProviderPlugin,
+    ProviderRegisterContext, ToolCallId,
+};
 use pi_plugin_find::FindPlugin;
 use pi_plugin_grep::GrepPlugin;
 use pi_plugin_ls::LsPlugin;
@@ -21,6 +24,21 @@ use pi_test_support::{ScriptedProvider, ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::{Value, json};
 
 type RecordedProviders = Arc<Mutex<Vec<(usize, Arc<ScriptedProvider>)>>>;
+
+struct TestModelCatalogPlugin;
+
+#[pi_core::provider_plugin]
+impl ProviderPlugin for TestModelCatalogPlugin {
+    fn id(&self) -> PluginId {
+        PluginId::new("test-model-catalog")
+    }
+
+    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+        let mut model = ModelSpec::new("scripted", "test", "Test", "scripted");
+        model.reasoning = true;
+        context.register_model(model)
+    }
+}
 
 #[derive(Clone)]
 struct TestFactory {
@@ -47,6 +65,7 @@ impl TestFactory {
 impl SessionGenerationFactory for TestFactory {
     fn session_registered(&self, session: &pi_session::PiSession) {
         self.binding.bind(session.clone());
+        self.subagents.session_registered(session.clone());
     }
 
     async fn prepare_generation(
@@ -117,6 +136,7 @@ impl SessionGenerationFactory for TestFactory {
             .apply_to(PiRuntime::builder())
             .plugin_context(context_access)
             .provider_plugin(provider_plugin)
+            .provider_plugin(TestModelCatalogPlugin)
             .agent_plugin(subagents)
             .agent_plugin(ReadPlugin)
             .agent_plugin(GrepPlugin)
@@ -196,6 +216,55 @@ fn desktop_widget(root: &pi_session::PiSession) -> Value {
         .expect("subagent widget snapshot")
 }
 
+fn joined_reports(root: &pi_session::PiSession) -> Vec<Value> {
+    root.current()
+        .log()
+        .load()
+        .unwrap()
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let value = serde_json::to_value(entry).unwrap();
+            if value["type"] == "custom_message" && value["customType"] == "agent_settled" {
+                Some(value)
+            } else if value["type"] == "message"
+                && value["message"]["role"] == "custom"
+                && value["message"]["customType"] == "agent_settled"
+            {
+                Some(value["message"].clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+async fn wait_for_agent_state(
+    root: &pi_session::PiSession,
+    agent_id: &str,
+    expected: &str,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let snapshot = invoke(root, "list_agents", json!({})).await;
+        if let Some(agent) = snapshot.details.as_ref().unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|agent| agent["id"] == agent_id)
+            && agent["state"] == expected
+        {
+            return agent.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "agent {agent_id} did not reach {expected}: {:?}",
+            snapshot.details
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 #[tokio::test]
 async fn desktop_commands_publish_final_state_without_reusing_tool_call_state() {
     let directory = tempfile::tempdir().unwrap();
@@ -257,14 +326,14 @@ async fn desktop_commands_publish_final_state_without_reusing_tool_call_state() 
     assert_eq!(completed["agents"][id]["state"], "idle");
     assert_eq!(completed["liveAgentIds"], json!([id]));
     assert!(
-        completed["agents"][id].get("lastResult").is_none(),
+        completed["agents"][id].get("lastReport").is_none(),
         "widgets never duplicate child transcripts"
     );
     manager.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn desktop_commands_reject_foreign_agents_and_native_reload_clears_live_ownership() {
+async fn desktop_commands_reject_foreign_agents_and_reload_restores_live_ownership() {
     let directory = tempfile::tempdir().unwrap();
     let (manager, root) = root(TestFactory::new([ScriptedTurn::WaitForAbort]), &directory).await;
     let spawn = invoke(
@@ -288,21 +357,28 @@ async fn desktop_commands_reject_foreign_agents_and_native_reload_clears_live_ow
         .unwrap_err();
     assert!(error.to_string().contains("not a direct child"));
     root.reload().await.unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let restored = invoke(&root, "list_agents", json!({})).await;
+        if restored.details.as_ref().unwrap()["agents"][0]["state"] == "interrupted" {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "reloaded child ownership was not restored"
+        );
+        tokio::task::yield_now().await;
+    }
     let restored = desktop_widget(&root);
-    assert!(
-        restored["agents"].get(id).is_some(),
-        "historical display data survives"
-    );
-    assert_eq!(restored["liveAgentIds"], json!([]));
-    let error = root
-        .current()
+    assert_eq!(restored["liveAgentIds"], json!([id]));
+    root.current()
         .submit(pi_session::SessionInput::new(format!(
             "/subagents:followup {}",
             json!({"target":id,"task":"continue"}),
         )))
         .await
-        .unwrap_err();
-    assert!(error.to_string().contains("unknown agent"));
+        .unwrap();
+    invoke(&root, "interrupt_agent", json!({"target":id})).await;
     manager.shutdown().await.unwrap();
 }
 
@@ -340,8 +416,12 @@ async fn spawn_wait_message_and_followup_reuse_one_agent_session() {
         "idle"
     );
     assert_eq!(
-        first.details.as_ref().unwrap()["agents"][0]["lastResult"]["text"],
+        first.details.as_ref().unwrap()["agents"][0]["lastReport"]["summary"],
         "first review"
+    );
+    assert_eq!(
+        first.details.as_ref().unwrap()["agents"][0]["lastReport"]["outcome"],
+        "succeeded"
     );
     let child_session_id = first.details.as_ref().unwrap()["agents"][0]["childSessionId"]
         .as_str()
@@ -370,7 +450,7 @@ async fn spawn_wait_message_and_followup_reuse_one_agent_session() {
     )
     .await;
     assert_eq!(
-        second.details.as_ref().unwrap()["agents"][0]["lastResult"]["text"],
+        second.details.as_ref().unwrap()["agents"][0]["lastReport"]["summary"],
         "second review"
     );
     assert_eq!(
@@ -486,7 +566,7 @@ async fn interrupt_stops_only_the_active_turn_and_agent_remains_reusable() {
         "idle"
     );
     assert_eq!(
-        recovered.details.as_ref().unwrap()["agents"][0]["lastResult"]["text"],
+        recovered.details.as_ref().unwrap()["agents"][0]["lastReport"]["summary"],
         "recovered follow-up"
     );
     manager.shutdown().await.unwrap();
@@ -548,6 +628,362 @@ async fn wait_any_is_a_race_and_wait_all_is_a_barrier() {
             .unwrap()
             .iter()
             .all(|agent| agent["state"] == "interrupted")
+    );
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn completed_reports_are_bounded_before_entering_the_parent_context() {
+    let directory = tempfile::tempdir().unwrap();
+    let result = "result-".repeat(4_000);
+    let (manager, root) = root(
+        TestFactory::new([ScriptedTurn::Text(result.clone())]),
+        &directory,
+    )
+    .await;
+    let spawn = invoke(
+        &root,
+        "spawn_agent",
+        json!({"agent":"reviewer","task":"return a large report"}),
+    )
+    .await;
+    let agent_id = spawn.details.as_ref().unwrap()["agentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let completed = invoke(
+        &root,
+        "wait_agent",
+        json!({"targets":[agent_id],"mode":"all","timeoutMs":2000}),
+    )
+    .await;
+    let report = &completed.details.as_ref().unwrap()["agents"][0]["lastReport"];
+    let summary = report["summary"].as_str().unwrap();
+    assert_eq!(report["truncated"], true);
+    assert!(summary.ends_with('…'));
+    assert!(summary.len() < result.len());
+    assert!(summary.len() <= 16 * 1024);
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn spawn_overrides_model_and_thinking_for_only_that_child() {
+    let directory = tempfile::tempdir().unwrap();
+    let (manager, root) = root(
+        TestFactory::new([ScriptedTurn::Text("done".into())]),
+        &directory,
+    )
+    .await;
+    let spawn = invoke(
+        &root,
+        "spawn_agent",
+        json!({
+            "agent":"reviewer",
+            "task":"use an explicit runtime selection",
+            "model":"scripted/test",
+            "thinking":"off",
+            "detached":true
+        }),
+    )
+    .await;
+    let child_session_id = spawn.details.as_ref().unwrap()["sessionId"]
+        .as_str()
+        .unwrap();
+    let child = manager
+        .sessions()
+        .into_iter()
+        .find(|session| session.id() == child_session_id)
+        .expect("spawned child session");
+    let child_session = child.current();
+    let agent = child_session.runtime().agent();
+    assert_eq!(
+        agent.model_selection(),
+        (ProviderId::new("scripted"), ModelId::new("test"))
+    );
+    assert_eq!(agent.thinking_level(), pi_core::ThinkingLevel::Off);
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn completed_reports_join_the_parent_context_unless_detached() {
+    let directory = tempfile::tempdir().unwrap();
+    let (manager, root) = root(
+        TestFactory::new([
+            ScriptedTurn::Text("joined result".into()),
+            ScriptedTurn::Text("detached result".into()),
+        ]),
+        &directory,
+    )
+    .await;
+    let joined = invoke(
+        &root,
+        "spawn_agent",
+        json!({"agent":"reviewer","task":"join this result"}),
+    )
+    .await;
+    let joined_id = joined.details.as_ref().unwrap()["agentId"]
+        .as_str()
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let reports = joined_reports(&root);
+        if let Some(report) = reports.first() {
+            assert_eq!(report["details"]["agentId"], joined_id);
+            assert_eq!(report["details"]["report"]["summary"], "joined result");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "completed report did not join the parent context: agents={:?}, entries={:?}",
+            invoke(&root, "list_agents", json!({})).await.details,
+            root.current().log().load().unwrap().entries
+        );
+        tokio::task::yield_now().await;
+    }
+
+    let detached = invoke(
+        &root,
+        "spawn_agent",
+        json!({"agent":"reviewer","task":"do not join this result","detached":true}),
+    )
+    .await;
+    let detached_id = detached.details.as_ref().unwrap()["agentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let snapshot = invoke(&root, "list_agents", json!({})).await;
+        let detached = snapshot.details.as_ref().unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|agent| agent["id"] == detached_id)
+            .unwrap();
+        if detached["state"] == "idle" {
+            assert_eq!(detached["detached"], true);
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "detached agent did not settle"
+        );
+        tokio::task::yield_now().await;
+    }
+    tokio::task::yield_now().await;
+    assert_eq!(joined_reports(&root).len(), 1);
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn launches_over_the_root_concurrency_limit_queue_and_start_fifo() {
+    let directory = tempfile::tempdir().unwrap();
+    let (manager, root) = root(TestFactory::new([ScriptedTurn::WaitForAbort]), &directory).await;
+    let mut ids = Vec::new();
+    for index in 0..10 {
+        let spawn = invoke(
+            &root,
+            "spawn_agent",
+            json!({"agent":"reviewer","task":format!("task {index}")}),
+        )
+        .await;
+        ids.push(
+            spawn.details.as_ref().unwrap()["agentId"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let snapshot = invoke(&root, "list_agents", json!({})).await;
+    assert_eq!(
+        snapshot.details.as_ref().unwrap()["agents"][8]["state"],
+        "queued"
+    );
+    assert_eq!(
+        snapshot.details.as_ref().unwrap()["agents"][9]["state"],
+        "queued"
+    );
+
+    invoke(&root, "interrupt_agent", json!({"target":ids[0]})).await;
+    invoke(
+        &root,
+        "wait_agent",
+        json!({"targets":[ids[0]],"mode":"all","timeoutMs":2000}),
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let snapshot = invoke(&root, "list_agents", json!({})).await;
+        if snapshot.details.as_ref().unwrap()["agents"][8]["state"] == "running"
+            && snapshot.details.as_ref().unwrap()["agents"][9]["state"] == "queued"
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "queued agent did not start"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    invoke(&root, "interrupt_agent", json!({"target":ids[1]})).await;
+    invoke(
+        &root,
+        "wait_agent",
+        json!({"targets":[ids[1]],"mode":"all","timeoutMs":2000}),
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let snapshot = invoke(&root, "list_agents", json!({})).await;
+        if snapshot.details.as_ref().unwrap()["agents"][9]["state"] == "running" {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "second queued agent did not start in FIFO order"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    for id in &ids[2..] {
+        invoke(&root, "interrupt_agent", json!({"target":id})).await;
+    }
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn process_restart_reattaches_completed_agent_for_a_new_turn() {
+    let directory = tempfile::tempdir().unwrap();
+    let parent_path = directory.path().join("parent.jsonl");
+    let (manager, root) = root(
+        TestFactory::new([ScriptedTurn::Text("before restart".into())]),
+        &directory,
+    )
+    .await;
+    root.current().log().materialize().unwrap();
+    let spawn = invoke(
+        &root,
+        "spawn_agent",
+        json!({"agent":"reviewer","task":"finish once","detached":true}),
+    )
+    .await;
+    let agent_id = spawn.details.as_ref().unwrap()["agentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let child_session_id = spawn.details.as_ref().unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let first = invoke(
+        &root,
+        "wait_agent",
+        json!({"targets":[agent_id],"mode":"all","timeoutMs":2000}),
+    )
+    .await;
+    assert_eq!(
+        first.details.as_ref().unwrap()["agents"][0]["lastReport"]["summary"],
+        "before restart"
+    );
+    manager.shutdown().await.unwrap();
+    drop(root);
+
+    let factory = TestFactory::new([ScriptedTurn::Text("after restart".into())]);
+    let providers = factory.providers.clone();
+    let manager = MultiSessionManager::new(factory);
+    let root = manager.open_session(&parent_path).await.unwrap();
+    let restored = wait_for_agent_state(&root, &agent_id, "idle").await;
+    assert_eq!(restored["childSessionId"], child_session_id);
+    assert_eq!(restored["lastReport"]["summary"], "before restart");
+    assert_eq!(
+        providers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(depth, _)| *depth > 0)
+            .map(|(_, provider)| provider.requests().len())
+            .sum::<usize>(),
+        0,
+        "reattaching an idle child must not start a provider turn"
+    );
+
+    invoke(
+        &root,
+        "followup_task",
+        json!({"target":agent_id,"task":"continue safely"}),
+    )
+    .await;
+    let completed = wait_for_agent_state(&root, &agent_id, "idle").await;
+    assert_eq!(completed["childSessionId"], child_session_id);
+    assert_eq!(completed["lastReport"]["summary"], "after restart");
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn process_restart_interrupts_running_turn_but_replays_queued_launches_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let parent_path = directory.path().join("parent.jsonl");
+    let (manager, root) = root(TestFactory::new([ScriptedTurn::WaitForAbort]), &directory).await;
+    root.current().log().materialize().unwrap();
+    let mut ids = Vec::new();
+    for index in 0..9 {
+        let spawn = invoke(
+            &root,
+            "spawn_agent",
+            json!({"agent":"reviewer","task":format!("restart task {index}"),"detached":true}),
+        )
+        .await;
+        ids.push(
+            spawn.details.as_ref().unwrap()["agentId"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let before = invoke(&root, "list_agents", json!({})).await;
+    assert_eq!(
+        before.details.as_ref().unwrap()["agents"][0]["state"],
+        "running"
+    );
+    assert_eq!(
+        before.details.as_ref().unwrap()["agents"][8]["state"],
+        "queued"
+    );
+
+    // Drop without lifecycle shutdown to leave the last durable running/queued
+    // checkpoints exactly as a terminated process would.
+    drop(root);
+    drop(manager);
+    tokio::task::yield_now().await;
+
+    let factory = TestFactory::new([ScriptedTurn::Text("recovered queued task".into())]);
+    let providers = factory.providers.clone();
+    let manager = MultiSessionManager::new(factory);
+    let root = manager.open_session(&parent_path).await.unwrap();
+    let interrupted = wait_for_agent_state(&root, &ids[0], "interrupted").await;
+    assert_eq!(interrupted["lastReport"]["outcome"], "interrupted");
+    assert!(
+        interrupted["lastReport"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("No tool call was replayed")
+    );
+    let queued = wait_for_agent_state(&root, &ids[8], "idle").await;
+    assert_eq!(queued["lastReport"]["summary"], "recovered queued task");
+    assert_eq!(
+        providers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(depth, _)| *depth > 0)
+            .map(|(_, provider)| provider.requests().len())
+            .sum::<usize>(),
+        1,
+        "only the never-started queued launch may execute after restart"
     );
     manager.shutdown().await.unwrap();
 }

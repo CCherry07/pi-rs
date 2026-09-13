@@ -278,8 +278,9 @@ pub trait SessionGenerationFactory: Send + Sync {
     ) -> Result<PreparedSessionGeneration, SessionError>;
 
     /// Observe a stable frontend handle after the multi-session manager has
-    /// registered it. Product adapters use this lifecycle seam to bind outer
-    /// capabilities without requiring callers to perform a second setup step.
+    /// registered it and after each replacement has been published. Product
+    /// adapters use this lifecycle seam to rebind outer capabilities without
+    /// requiring callers to perform a second setup step.
     fn session_registered(&self, _session: &PiSession) {}
 }
 

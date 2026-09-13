@@ -586,7 +586,11 @@ impl ManagedSessionReplacement {
         request: SessionReplacementRequest,
     ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
         let transition = request.resolve(&self.owner, &self.manager)?;
-        Ok(self.owner.runtime.transition(transition).await?)
+        let replacement = self.owner.runtime.transition(transition).await?;
+        if replacement == AgentSessionReplacement::Replaced {
+            self.manager.factory.session_registered(&self.owner);
+        }
+        Ok(replacement)
     }
 }
 
@@ -701,6 +705,63 @@ impl PiSession {
             .isolated_sessions
             .launch(self.registration_id().to_owned(), child, request.input)
             .await)
+    }
+
+    /// Reattaches one persisted direct child as an idle isolated session.
+    ///
+    /// This never starts or replays a model turn. The target must live in this
+    /// owner's isolated-session directory and carry durable provenance naming
+    /// the current owner session.
+    pub async fn restore_isolated_session(
+        &self,
+        path: impl Into<PathBuf>,
+    ) -> Result<IsolatedSessionId, MultiSessionManagerError> {
+        let path = path.into();
+        let expected_directory = comparable_path(&isolated_session_directory(&self.path()));
+        let comparable = comparable_path(&path);
+        if comparable.parent() != Some(expected_directory.as_path()) {
+            return Err(MultiSessionManagerError::InvalidIsolatedRequest(format!(
+                "restored child path must be directly inside {}",
+                expected_directory.display()
+            )));
+        }
+
+        let manager = self.manager()?;
+        let operation = Arc::clone(&manager.operation_gate).read_owned().await;
+        manager.ensure_open()?;
+        manager.ensure_managed(self)?;
+        let parent_session_id = self.id();
+
+        if let Some(active) = manager.session_at_path(&comparable) {
+            validate_isolated_parent(&active, &parent_session_id)?;
+            return manager
+                .isolated_sessions
+                .restored_id(self.registration_id(), &active)
+                .ok_or(MultiSessionManagerError::SessionAlreadyActive(comparable));
+        }
+
+        let acquired = Arc::clone(&manager)
+            .acquire_with_guard(
+                operation,
+                SessionAcquisition {
+                    target: AgentSessionRuntimeTarget::open(&path),
+                    existing: ExistingSessionPolicy::Reject,
+                    generation_overlay: SessionGenerationOverlay::default()
+                        .with_execution_origin(pi_core::SessionExecutionOrigin::Subagent),
+                    initial_state: None,
+                    initial_context: None,
+                    unclaimed: UnclaimedSessionPolicy::Close,
+                },
+            )
+            .await?;
+        let (child, _operation) = acquired.claim();
+        if let Err(error) = validate_isolated_parent(&child, &parent_session_id) {
+            manager.close_session_tree_locked(&child).await?;
+            return Err(error);
+        }
+        Ok(manager
+            .isolated_sessions
+            .restore(self.registration_id().to_owned(), child))
     }
 
     pub async fn wait_for_isolated_session(
@@ -972,6 +1033,10 @@ fn legacy_import_destination(source: &Path) -> PathBuf {
 }
 
 fn isolated_session_path(owner: &Path) -> PathBuf {
+    isolated_session_directory(owner).join(format!("{}.jsonl", uuid::Uuid::now_v7()))
+}
+
+fn isolated_session_directory(owner: &Path) -> PathBuf {
     let stem = owner
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -981,7 +1046,22 @@ fn isolated_session_path(owner: &Path) -> PathBuf {
         .unwrap_or_else(|| Path::new("."))
         .join(stem)
         .join("isolated")
-        .join(format!("{}.jsonl", uuid::Uuid::now_v7()))
+}
+
+fn validate_isolated_parent(
+    child: &PiSession,
+    expected_parent_session_id: &str,
+) -> Result<(), MultiSessionManagerError> {
+    let actual = child.current().log().load()?.isolated_parent_session_id()?;
+    if actual.as_deref() == Some(expected_parent_session_id) {
+        Ok(())
+    } else {
+        Err(MultiSessionManagerError::InvalidIsolatedRequest(format!(
+            "restored child belongs to parent {:?}, not {:?}",
+            actual.as_deref(),
+            expected_parent_session_id
+        )))
+    }
 }
 
 impl WeakPiSession {

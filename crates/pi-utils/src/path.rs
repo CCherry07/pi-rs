@@ -35,6 +35,6 @@ mod tests {
 
     #[test]
     fn slash_path_normalizes_backslashes() {
-        assert_eq!(slash_path(r"dir\\child"), "dir/child");
+        assert_eq!(slash_path(r"dir\child"), "dir/child");
     }
 }

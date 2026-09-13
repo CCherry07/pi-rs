@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_core::{
-    CustomMessageContent, IsolatedContextMode, IsolatedSessionRequest, Tool, ToolCallId,
-    ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate, ToolUpdateSink,
+    CustomMessageContent, IsolatedContextMode, IsolatedSessionRequest, ThinkingLevel, Tool,
+    ToolCallId, ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate,
+    ToolUpdateSink,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -52,6 +53,10 @@ struct SpawnInput {
     agent: String,
     task: String,
     context: Option<IsolatedContextMode>,
+    model: Option<String>,
+    thinking: Option<ThinkingLevel>,
+    #[serde(default)]
+    detached: bool,
 }
 
 #[derive(Deserialize)]
@@ -103,14 +108,17 @@ impl Tool for AgentTool {
             AgentToolKind::Spawn => (
                 "spawn_agent",
                 "Spawn agent",
-                "Start one configured child agent asynchronously. The returned agent id names a reusable child session; call wait_agent for results and followup_task for later turns.",
+                "Submit one configured child agent asynchronously. Capacity is allocated per root and excess work queues FIFO. The returned agent id names a reusable child session; reports join the parent context by default, wait_agent provides explicit barriers, and followup_task starts later turns.",
                 json!({
                     "agent":{"type":"string","enum":profiles},
                     "task":{"type":"string","minLength":1},
-                    "context":{"type":"string","enum":["fresh","fork"]}
+                    "context":{"type":"string","enum":["fresh","fork"]},
+                    "model":{"type":"string","minLength":1,"description":"Optional provider/model or unambiguous model override for this child."},
+                    "thinking":{"type":"string","enum":["off","minimal","low","medium","high","xhigh","max"],"description":"Optional reasoning-effort override validated against the selected model."},
+                    "detached":{"type":"boolean","default":false,"description":"Opt out of automatically joining the bounded task report into the parent context."}
                 }),
                 vec!["agent", "task"],
-                vec!["Use multiple spawn_agent calls in the same assistant response for independent parallel work. Spawn returns before the child finishes.".to_string()],
+                vec!["Use multiple spawn_agent calls in the same assistant response for independent parallel work. Spawn returns before the child finishes; set detached only when its report should not automatically rejoin the parent context.".to_string()],
             ),
             AgentToolKind::SendMessage => (
                 "send_message",
@@ -220,9 +228,15 @@ impl AgentTool {
     ) -> Result<ToolResult, ToolError> {
         let agent_name = non_empty(&input.agent, "agent")?;
         let task = non_empty(&input.task, "task")?;
-        let profile = self.catalog.profile(agent_name).ok_or_else(|| {
+        let mut profile = self.catalog.profile(agent_name).ok_or_else(|| {
             ToolError::InvalidArguments(format!("unknown agent profile {agent_name:?}"))
         })?;
+        if let Some(model) = input.model.as_deref() {
+            profile.model = Some(non_empty(model, "model")?.to_string());
+        }
+        if let Some(thinking) = input.thinking {
+            profile.thinking_level = Some(thinking);
+        }
         let mut options = SubagentLaunchPlan::resolve(&profile, &context)?.into_options();
         LaunchContext::new(&context).apply(&mut options, input.context)?;
         let owner = context.session.id()?;
@@ -230,22 +244,65 @@ impl AgentTool {
             .bind_session(owner.clone(), context.session.clone());
         let ticket = self
             .runtime
-            .begin_launch(&owner, profile.clone(), self.max_depth)
+            .begin_launch(&owner, profile.clone(), self.max_depth, input.detached)
             .map_err(|error| ToolError::Execution(error.to_string()))?;
         let mut guard = SpawnGuard {
             runtime: self.runtime.clone(),
             id: ticket.id().to_string(),
             committed: false,
         };
-        self.runtime.set_task(ticket.id(), task);
+        self.runtime
+            .set_task(ticket.id(), task)
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
         let request =
             IsolatedSessionRequest::new(CustomMessageContent::Text(ticket.child_prompt(task)))
                 .options(options);
+        if ticket.is_queued() {
+            self.runtime
+                .spawn_queued_launch(
+                    owner,
+                    ticket.id().to_string(),
+                    context.session.clone(),
+                    request,
+                    profile.timeout,
+                )
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            guard.committed = true;
+            updates.send(ToolUpdate {
+                content: vec![pi_core::ContentBlock::Text(pi_core::TextContent::new(
+                    format!("{} agent queued", profile.name),
+                ))],
+                details: Some(json!({
+                    "agentId":ticket.id(),
+                    "agent":profile.name,
+                    "state":"queued"
+                })),
+            });
+            return Ok(result_with_details(
+                format!(
+                    "Agent {} queued asynchronously. Its exact id is {}; wait_agent will observe it through launch and completion.",
+                    profile.name,
+                    ticket.id()
+                ),
+                json!({
+                    "agentId":ticket.id(),
+                    "agent":profile.name,
+                    "depth":ticket.depth(),
+                    "state":ticket.state()
+                }),
+            ));
+        }
         let handle = context.session.launch_isolated_session(request).await?;
-        let turn = self
+        let turn = match self
             .runtime
             .attach_handle(&owner, ticket.id(), handle.clone())
-            .map_err(|error| ToolError::Execution(error.to_string()))?;
+        {
+            Ok(turn) => turn,
+            Err(error) => {
+                let _ = handle.abort();
+                return Err(ToolError::Execution(error.to_string()));
+            }
+        };
         let child_session_id = self
             .runtime
             .child_session_id(&owner, ticket.id())

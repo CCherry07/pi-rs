@@ -1129,6 +1129,16 @@ macro_rules! impl_session_context {
                     .await?;
                 Ok(IsolatedSessionHandle::new(id, self.handle.clone()))
             }
+
+            /// Reconstructs a control handle for an isolated session that the
+            /// host has already attached to this owner.
+            ///
+            /// The handle carries no authority by itself: every operation is
+            /// still checked by the host against the current owning session.
+            #[doc(hidden)]
+            pub fn isolated_session_handle(&self, id: IsolatedSessionId) -> IsolatedSessionHandle {
+                IsolatedSessionHandle::new(id, self.handle.clone())
+            }
         }
     };
 }

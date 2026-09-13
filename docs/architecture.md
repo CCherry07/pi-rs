@@ -369,8 +369,8 @@ The Rust author interface `pi_plugin_sdk::desktop::WidgetPublisher` owns key/siz
 duplicate suppression, tombstones and the entry envelope; a plugin-owned projection Module still
 decides what to publish and how restored history relates to current executable ownership.
 Subagents publish bounded task snapshots independently of the already-completed spawn tool. On
-native reload/resume, they preserve history and republish actual current ownership, avoiding a false
-claim that persisted task identities are still controllable.
+native reload/resume, the feature runtime restores durable agent ownership before republishing it;
+the desktop consumes that live projection and never infers control authority from widget history.
 
 Desktop controls invoke exact registered plugin commands through `AgentSession::invoke_command`.
 The interface validates registration/lifecycle then follows the existing submit pipeline once,
@@ -1851,6 +1851,13 @@ The seed remains separate from child-authored message entries and returned run o
 17 includes the context-mode field; ABI 18 adds aggregate usage to managed isolated-session
 outcomes. Exact-build plugin compatibility and pinned-library lifetime are otherwise unchanged.
 
+The same host seam can reattach a persisted direct child as an idle managed isolated session. The
+reattachment path must be directly inside the owner's generated `isolated/` directory, and the
+child's durable isolated-context provenance must name that owner. Reattachment rebuilds the child
+generation with `SessionExecutionOrigin::Subagent`, registers control under the current owner, and
+does not start or replay a model turn. This is product-internal session orchestration rather than a
+new native-plugin capability or Pi v4 record variant.
+
 `pi-plugin-subagents` is the first policy module over that seam. This is a deliberate
 Rust product design, not a compatibility port of legacy Pi or `nicobailon/pi-subagents`. It exposes
 six parallel-safe tools: `spawn_agent`, `send_message`, `followup_task`, `wait_agent`,
@@ -1867,12 +1874,23 @@ programming language.
 
 An agent identity names one reusable managed isolated session. A turn identity names one active or
 completed prompt within that session. `spawn_agent` always returns asynchronously with an exact
-agent id and initial turn id. `followup_task` starts a new turn when the child is idle and joins
-the active turn's durable follow-up queue when it is running. `send_message` never starts a turn:
+agent id and the admission state; an immediately admitted launch also returns its initial turn id,
+while a queued launch acquires that identity only after admission. `followup_task` starts a new turn
+when the child is idle and joins the active turn's durable follow-up queue when it is running.
+`send_message` never starts a turn:
 an active child receives durable steering, an idle child retains the message in its next-turn
 mailbox, and a child may address its immediate parent as `parent`. `interrupt_agent` cancels only
-the current turn, leaving the agent session available for another follow-up. `list_agents`
+the current turn, or cancels a queued launch before session creation, leaving an already-created
+agent session available for another follow-up. `list_agents`
 returns a read-only descendant-tree snapshot.
+
+Each terminal turn produces one typed `TaskReport` with outcome, nullable turn id, bounded summary,
+truncation marker, and turn usage. Summary text is capped at 16 KiB before it can enter the parent
+context. Unless `spawn_agent(detached: true)` opted out, the report is delivered as a semantic
+`agent_settled` message and triggers or joins the parent's next run. A concurrent explicit
+`wait_agent` consumes the same snapshot as its synchronization result and suppresses duplicate
+automatic delivery. Parent-only `agent_settled` and `agent_message` records are excluded from forked
+child prefixes.
 
 Control operations require exact ids and direct ownership; prefixes and model-supplied arbitrary
 session ids are rejected. The runtime maps child session ids to launch records before the first
@@ -1900,25 +1918,40 @@ profiles receive the collaboration tools only when those tools are within the pa
 ceiling. Skills use the existing generation-local projection Interface. The launch record retains
 the resolved profile, so a reload cannot mix a pre-reload launch with a post-reload definition.
 
-`spawn_agent` accepts `context: "fresh" | "fork"`; otherwise the profile default applies.
+`spawn_agent` accepts `context: "fresh" | "fork"`; otherwise the profile default applies. Optional
+per-call `model` and `thinking` values override the profile for that launch and pass through the
+same catalog resolution and reasoning-compatibility checks as profile declarations.
 Implicit fork preference falls back to fresh only when the caller has no persisted branch, while an
 explicit fork fails. The provider-context hook removes inherited parent collaboration calls,
 results, and collaboration notices but retains ordinary tool pairs and the child's own later
 collaboration history. The private first-line launch marker is stripped before provider use.
 
 The shared runtime enforces an inherited maximum depth, 64 cumulative spawns per root session, and
-8 simultaneously active agents. The default maximum depth is 4; `PI_SUBAGENT_MAX_DEPTH`, then
+8 simultaneously active agents per root session. Excess initial launches enter a root-local FIFO
+queue instead of failing; queued records remain visible and interruptible, and only admitted
+launches consume active capacity. Root-local accounting prevents unrelated parent sessions from
+blocking one another. The default maximum depth is 4; `PI_SUBAGENT_MAX_DEPTH`, then
 `<agent-dir>/extensions/subagent/config.json`, may override it, and a profile may only tighten the
 inherited ceiling. Profile `timeoutMs` bounds each turn. Invalid configuration fails candidate
 generation transactionally.
 
 Every turn monitor records only that turn's usage delta to its immediate parent. Nested usage
 therefore rolls upward once per turn without double-counting earlier turns in the same child
-session. Agent snapshots retain cumulative child usage plus the last turn result. Monitor tasks are
-owned and drained by the session plugin; owner close or reload interrupts the live tree and removes
-its feature state. Live trees, inboxes, and wait registrations are intentionally process-local and
-generation-bound; process-restart reattachment and executable workflow recovery are not part of
-this design.
+session. Agent snapshots retain cumulative child usage plus the last typed task report. Monitor
+tasks are owned and drained by the session plugin; owner close or reload interrupts the live tree.
+Each agent mutation also appends a versioned `pi.subagents.agent` checkpoint to the root session;
+the latest checkpoint per agent on the active branch retains lineage, the resolved profile, child
+session path, bounded report, usage and any never-started launch request. A tombstone prevents a
+failed spawn from being resurrected.
+
+After process restart or generation replacement, the feature rebuilds the root-local tree and
+reattaches materialized child sessions without making provider requests. Previously `starting`,
+`running`, or `interrupting` turns reconcile to `interrupted` with an explicit no-replay report;
+the user may continue them through a new `followup_task` turn. Only a durable `queued` initial
+launch that has no child session is resubmitted, in its original root-local FIFO order. This
+deliberately provides Codex-style agent-conversation recovery rather than execution-stack recovery,
+so an uncertain tool call is never repeated implicitly. Feature inboxes and active wait
+registrations remain process-local.
 
 The generic isolated-session capability now owns a persistent child session with multiple typed
 turn handles. It supports non-starting message delivery, idle mailbox retention, queued follow-ups,

@@ -185,6 +185,7 @@ impl ProductSessionFactory {
 impl SessionGenerationFactory for ProductSessionFactory {
     fn session_registered(&self, session: &pi_session::PiSession) {
         self.plugin_context_binding.bind(session.clone());
+        self.subagents.session_registered(session.clone());
     }
 
     async fn prepare_generation(

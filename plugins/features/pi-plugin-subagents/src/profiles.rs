@@ -6,14 +6,17 @@ use pi_utils::{
     frontmatter::{FrontmatterStatus, split_frontmatter},
     text::escape_xml,
 };
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum SystemPromptMode {
     Append,
     Replace,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SubagentProfile {
     pub(crate) name: String,
     pub(crate) aliases: Vec<String>,

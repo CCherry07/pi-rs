@@ -251,6 +251,40 @@ impl IsolatedSessionRegistry {
         id
     }
 
+    /// Attaches a persisted, idle child to the live owner without starting a
+    /// model turn. The caller validates durable parentage before registration.
+    pub(crate) fn restore(
+        &self,
+        owner_registration_id: String,
+        session: PiSession,
+    ) -> IsolatedSessionId {
+        let id = IsolatedSessionId::new(session.registration_id().to_owned());
+        let run = Arc::new(IsolatedSessionRun {
+            owner_registration_id,
+            session,
+            turns: Mutex::new(IsolatedTurnState::default()),
+        });
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.clone(), run);
+        id
+    }
+
+    pub(crate) fn restored_id(
+        &self,
+        owner_registration_id: &str,
+        session: &PiSession,
+    ) -> Option<IsolatedSessionId> {
+        let id = IsolatedSessionId::new(session.registration_id().to_owned());
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id)
+            .filter(|run| run.owner_registration_id == owner_registration_id)
+            .map(|_| id)
+    }
+
     pub(crate) fn wait(
         &self,
         owner_registration_id: &str,
