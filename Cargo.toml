@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/pi-cli",
+    "apps/pi-eval",
     "crates/pi-core",
     "crates/pi-media",
     "crates/pi-agent",
@@ -21,6 +22,7 @@ members = [
     "crates/pi-js-package-manager",
     "crates/pi-js-plugin",
     "crates/pi-test-support",
+    "crates/pi-eval",
     "crates/pi-telemetry",
     "crates/pi-rpc",
     "crates/pi-acp",
@@ -95,6 +97,7 @@ pi-plugin-tools = { path = "crates/pi-plugin-tools" }
 pi-js-package-manager = { path = "crates/pi-js-package-manager" }
 pi-js-plugin = { path = "crates/pi-js-plugin" }
 pi-test-support = { path = "crates/pi-test-support" }
+pi-eval = { path = "crates/pi-eval" }
 pi-telemetry = { path = "crates/pi-telemetry" }
 pi-rpc = { path = "crates/pi-rpc" }
 pi-acp = { path = "crates/pi-acp" }

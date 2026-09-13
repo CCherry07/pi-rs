@@ -1,4 +1,5 @@
 target/
+.eval/
 legacy/
 node_modules/
 packages/pi/pi-napi.*.node

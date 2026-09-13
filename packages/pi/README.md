@@ -32,7 +32,8 @@ NDJSON event stream, tools, sessions, model catalog, skills, and plugins all use
 ### npm package
 
 The npm package is the recommended installation when JavaScript/TypeScript extension support is
-needed. It requires Node.js 20 or newer and installs both `pi` and `pi-rs` commands.
+needed. It requires Node.js 20 or newer and installs `pi`, `pi-rs`, and the model-backed
+`pi-eval` runner.
 
 ```bash
 npm install --global @pi-rs/cli
@@ -43,8 +44,9 @@ pi
 
 The package selects a native optional dependency for the current OS, CPU, and Linux libc. Supported
 release targets are macOS arm64/x64, Linux glibc arm64/x64, and Windows MSVC arm64/x64. Both `pi`
-and `pi-rs` invoke the same installed launcher; `npm list --global` confirms which npm version is
-installed. If npm skips the native optional dependency, the launcher prints exact npx and
+and `pi-rs` invoke the product launcher, while `pi-eval` invokes the same runtime through an
+eval-specific Node/NAPI entry. `npm list --global` confirms which npm version is installed. If npm
+skips the native optional dependency, the launcher prints exact npx and
 global-install repair commands for the installed CLI version and platform. This can happen when
 optional dependencies are disabled or a configured npm registry mirror has not synchronized the
 matching platform package.

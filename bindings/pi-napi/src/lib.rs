@@ -314,11 +314,26 @@ impl JsPluginHost for NativePiHost {
 #[napi]
 pub async fn run_pi(arguments: Vec<String>, dispatch: DispatchFunction) -> napi::Result<()> {
     dotenvy::dotenv().ok();
-    let host: Arc<dyn JsPluginHost> = Arc::new(NativePiHost {
-        dispatch: Arc::new(dispatch),
-        encode_buffer: Mutex::new(Vec::with_capacity(2 * 1024)),
-    });
+    let host = native_host(dispatch);
     pi_cli::run_with_js_host(arguments, host)
         .await
         .map_err(|message| napi::Error::new(Status::GenericFailure, message))
+}
+
+/// Starts the model-backed eval runner while Node owns JavaScript/TypeScript
+/// extension loading. `arguments` matches `process.argv.slice(2)`.
+#[napi]
+pub async fn run_pi_eval(arguments: Vec<String>, dispatch: DispatchFunction) -> napi::Result<()> {
+    dotenvy::dotenv().ok();
+    let host = native_host(dispatch);
+    pi_eval_cli::run_with_js_host(arguments, host)
+        .await
+        .map_err(|message| napi::Error::new(Status::GenericFailure, message))
+}
+
+fn native_host(dispatch: DispatchFunction) -> Arc<dyn JsPluginHost> {
+    Arc::new(NativePiHost {
+        dispatch: Arc::new(dispatch),
+        encode_buffer: Mutex::new(Vec::with_capacity(2 * 1024)),
+    })
 }

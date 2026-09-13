@@ -44,3 +44,12 @@ export class PiNodeHost {
     );
   }
 }
+
+export class PiEvalNodeHost extends PiNodeHost {
+  override async run(): Promise<void> {
+    const binding = this.nativeBinding ?? loadNativeBinding();
+    await binding.runPiEval(this.arguments, (operation, context) =>
+      this.extensionHost.dispatch(operation, context),
+    );
+  }
+}

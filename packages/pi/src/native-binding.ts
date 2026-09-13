@@ -27,12 +27,23 @@ export interface NativeBinding {
       context?: NativeExtensionContext,
     ) => Promise<string>,
   ): Promise<void>;
+  runPiEval(
+    arguments_: string[],
+    dispatch: (
+      operation: string,
+      context?: NativeExtensionContext,
+    ) => Promise<string>,
+  ): Promise<void>;
 }
 
 const nativeBindingSchema = z.looseObject({
   runPi: z.custom<NativeBinding["runPi"]>(
     (value) => typeof value === "function",
     "runPi must be a function",
+  ),
+  runPiEval: z.custom<NativeBinding["runPiEval"]>(
+    (value) => typeof value === "function",
+    "runPiEval must be a function",
   ),
 });
 

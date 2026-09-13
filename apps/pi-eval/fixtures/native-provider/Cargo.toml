@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "pi-eval-native-provider-fixture"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+futures = "0.3.31"
+pi-plugin-sdk = { path = "../../../../crates/pi-plugin-sdk", features = ["provider"] }

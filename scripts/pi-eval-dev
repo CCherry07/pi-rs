@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+pi_eval_script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec env PI_RS_NODE_ENTRY=pi-eval.ts "$pi_eval_script_dir/pi-dev" "$@"

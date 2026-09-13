@@ -3050,6 +3050,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-eval"
+version = "0.7.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "pi-core",
+ "pi-js-plugin",
+ "pi-sdk",
+ "pi-session",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "pi-eval-cli"
+version = "0.7.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "clap",
+ "dotenvy",
+ "pi-core",
+ "pi-eval",
+ "pi-js-plugin",
+ "pi-sdk",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "pi-js-package-manager"
 version = "0.7.0"
 dependencies = [
@@ -3137,6 +3174,7 @@ dependencies = [
  "napi-derive",
  "pi-cli",
  "pi-core",
+ "pi-eval-cli",
  "pi-js-plugin",
  "serde",
  "serde_json",

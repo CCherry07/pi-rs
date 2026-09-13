@@ -1,0 +1,25 @@
+[package]
+name = "pi-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+pi-core.workspace = true
+pi-js-plugin.workspace = true
+pi-sdk.workspace = true
+pi-session.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tempfile = "3.21.0"
+thiserror.workspace = true
+tokio.workspace = true
+uuid = { version = "1.18.1", features = ["v7"] }
+
+[dev-dependencies]
+axum = "0.8"
+tokio = { workspace = true, features = ["net"] }

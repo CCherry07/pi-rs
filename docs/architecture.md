@@ -34,6 +34,8 @@ crates/pi-session               Pi v4 storage/runtime plus plugin contracts unde
 crates/pi-settings              current-format settings documents, snapshots, and safe writes
 crates/pi-sdk                   headless product composition shared by CLI, desktop, and embedded adapters
 crates/pi-telemetry             typed Pi AI/harness span schemas and sink adapters
+crates/pi-eval                  model-backed eval cases, product harness, native eval overlays, graders,
+                                artifacts and paired comparison data
 crates/pi-rpc                   Pi JSON projector and stdin/stdout RPC adapter
 crates/pi-mcp                   protocol-neutral MCP client, tool projection, and process ownership
 crates/pi-acp                   official stable-v1 ACP adapter and ACP session policy
@@ -50,6 +52,7 @@ crates/pi-js-plugin             JS wire DTOs plus three Rust lifecycle adapters
 bindings/pi-napi                NAPI-RS boundary between Node callbacks and the Rust product
 packages/pi                     Node launcher, jiti extension loader, and callback host
 crates/pi-test-support          deterministic scripted providers and tools for tests
+apps/pi-eval                    eval CLI and the first-party eval case catalog
 plugins/providers/pi-plugin-openai        OpenAI provider plus reusable Responses wire support
 plugins/providers/pi-plugin-anthropic     Anthropic Messages, Claude Code mode, provider, and catalog
 plugins/providers/pi-plugin-xai           xAI Responses provider and Grok catalog
@@ -113,7 +116,9 @@ pi-plugin-manager    -> HTTP + filesystem package source adapters
 pi-plugin-tools      -> pi-plugin-manager release format + pi-plugin-loader + Cargo/GitHub CLI adapters
 pi-js-package-manager -> filesystem + npm/git process adapters (no Node dependency)
 pi-js-plugin         -> pi-core + pi-session (no Node or terminal dependency)
-bindings/pi-napi     -> pi-js-plugin + apps/pi-cli + NAPI-RS
+crates/pi-eval       -> pi-sdk + pi-session + pi-core + pi-js-plugin
+apps/pi-eval         -> pi-eval + pi-sdk + pi-js-plugin
+bindings/pi-napi     -> pi-js-plugin + apps/pi-cli + apps/pi-eval + NAPI-RS
 packages/pi          -> Node + jiti + platform pi-napi artifact
 ```
 
@@ -173,12 +178,37 @@ available after exit for saved path references. Pending reads never insert into 
 changed draft or focused selector. SSH has no native-read Adapter; terminal text/path paste and
 startup `@file` remain available. Native clipboard availability is platform/session dependent.
 
-`packages/pi` does not own a terminal frontend. Its executable creates the JavaScript extension host
-and invokes the NAPI `runPi` entry; interactive, print, JSON, RPC, piped-input, and plugin-management
-arguments are forwarded unchanged. This keeps extension callbacks in Node without allowing Node and
-Rust to compete for raw mode, stdout, editor state, or transcript projection.
+`packages/pi` does not own a terminal frontend. Its product executable creates the JavaScript extension
+host and invokes the NAPI `runPi` entry; interactive, print, JSON, RPC, piped-input, and plugin-management
+arguments are forwarded unchanged. Its separate `pi-eval` executable reuses that host and invokes
+`runPiEval`, so model-backed extension cases exercise the same Jiti loader and callback Adapter rather
+than a test-only JavaScript implementation. This keeps extension callbacks in Node without allowing Node
+and Rust to compete for raw mode, stdout, editor state, or transcript projection.
 
-`scripts/pi-dev` is the source-checkout Adapter for that same Interface. It incrementally builds
+`pi-eval` is an outer product-quality Module, not a production dependency of the runtime. Its harness
+enters through `pi-sdk::Pi`, creates isolated workspace/agent/session directories, and may accept the
+same `JsPluginHost` capability as other embedded Adapters. Case-local Rust `AgentPlugin` factories are
+applied with `SessionGenerationOverlay`, so structured submission tools and prompt treatments are rebuilt
+on reload but never serialized. Real native plugin evaluation stays on the product loader path: explicit
+libraries/manifests flow through `ProductConfig::native_plugins`, while trusted project manifests under
+`.pi/plugins` are rediscovered on reload. The eval layer does not load dynamic libraries itself.
+
+Comparative evals pair observations by eval set, case identity, and repetition. Correctness lift is based
+only on pairs with completed, scored observations; token, latency, and estimated-cost deltas use the same
+eligible pairs. Missing, duplicate, errored, and unscored runs remain explicit diagnostics rather than
+being converted to failures or zero-valued telemetry. Native session JSONL and normalized observations
+are retained per run, while invocation-level `report.json` and `report.txt` are derived artifacts.
+Provider-authoring cases validate the reloaded catalog and make a direct completion against a
+case-owned loopback fixture through the ordinary models.json provider route. The probe is a transient
+native agent plugin, while protocol selection, request-time authentication, transport, SSE decoding,
+and usage accounting remain owned by the production provider generation.
+The separate native-provider case builds a test-only version-locked `cdylib`, supplies its artifact
+as an explicit product plugin, reloads the generation, and probes its success and failure streams
+through `SessionContext::complete`. The fixture implements the ordinary SDK `ProviderPlugin` and
+`Provider` interfaces; eval adds no provider lifecycle or streaming protocol of its own.
+
+`scripts/pi-dev` is the source-checkout Adapter for that same Interface; `scripts/pi-eval-dev` selects
+the eval entry while reusing its build and binding resolution. The shared script incrementally builds
 `pi-napi` for Rust's current host target and passes the resulting absolute library path through
 `PI_RS_NATIVE_BINDING` before starting the TypeScript host. It never relies on copied package
 artifacts, so an older `packages/pi/pi-napi.*.node` cannot shadow the current Rust generation. The

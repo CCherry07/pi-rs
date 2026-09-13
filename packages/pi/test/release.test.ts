@@ -52,6 +52,8 @@ test("release builds discover every crate inheriting the workspace version", () 
     new Set([
       "pi-acp",
       "pi-cli",
+      "pi-eval",
+      "pi-eval-cli",
       "pi-js-package-manager",
       "pi-mcp",
       "pi-media",

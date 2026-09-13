@@ -1,0 +1,17 @@
+# Product-contract documentation audited by the model-backed eval suite.
+# Historical snapshots, research notes, and eval documentation are excluded.
+README.md
+apps/pi-cli/README.md
+apps/pi-desktop/README.md
+crates/pi-acp/README.md
+crates/pi-js-package-manager/README.md
+crates/pi-mcp/README.md
+crates/pi-media/README.md
+crates/pi-plugin-manager/README.md
+crates/pi-plugin-sdk/README.md
+crates/pi-plugin-tools/README.md
+crates/pi-sdk/README.md
+docs/architecture.md
+docs/js-extension-compatibility.md
+packages/pi/README.md
+packages/pi-desktop-sdk/README.md

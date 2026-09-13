@@ -12,6 +12,7 @@
   },
   "bin": {
     "pi": "dist/bin/pi.js",
+    "pi-eval": "dist/bin/pi-eval.js",
     "pi-rs": "dist/bin/pi.js"
   },
   "files": [

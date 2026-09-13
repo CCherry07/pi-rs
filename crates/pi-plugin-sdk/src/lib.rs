@@ -291,9 +291,9 @@ pub mod provider {
             ModelId, ModelSelection, ModelSpec, ModelsContext, PluginContextError,
             PluginContextResult, PluginError, PluginId, PresentationMode, Provider,
             ProviderCallContext, ProviderError, ProviderId, ProviderPlugin, ProviderPluginContext,
-            ProviderRegisterContext, ProviderRequest, ProviderStream, Result, SessionContext,
-            SessionEntryKind, SessionEntryView, SessionExecutionOrigin, SessionSnapshot,
-            StreamEvent, ThinkingLevel, UiContext,
+            ProviderRegisterContext, ProviderRequest, ProviderStream, ResponseMetadata, Result,
+            SessionContext, SessionEntryKind, SessionEntryView, SessionExecutionOrigin,
+            SessionSnapshot, StopReason, StreamEvent, ThinkingLevel, UiContext, Usage,
         };
         pub use serde_json::{Value, json};
     }
