@@ -457,6 +457,7 @@ impl AgentTurnControl for SessionTurnControl {
 /// old `session_shutdown` followed by new `session_start`.
 pub struct PreparedAgentSession {
     session: Arc<AgentSession>,
+    activation_commit: Option<Box<dyn FnOnce() + Send>>,
 }
 
 pub(crate) struct AgentSessionTransitionGuard {
@@ -495,7 +496,30 @@ impl PreparedAgentSession {
         Arc::clone(&self.session)
     }
 
-    pub async fn activate(self, event: SessionStartEvent) -> Arc<AgentSession> {
+    /// Attaches generation-external state that must become visible with this
+    /// prepared session, immediately before its `session_start` hooks run.
+    ///
+    /// Dropping the preparation without activating it drops the callback and
+    /// its captures instead. Product adapters use RAII captures to roll back
+    /// staged package and provider state on failed or cancelled preparation.
+    pub(crate) fn with_activation_commit(
+        mut self,
+        commit: impl FnOnce() + Send + 'static,
+    ) -> PreparedAgentSession {
+        self.activation_commit = Some(match self.activation_commit.take() {
+            Some(previous) => Box::new(move || {
+                previous();
+                commit();
+            }),
+            None => Box::new(commit),
+        });
+        self
+    }
+
+    pub async fn activate(mut self, event: SessionStartEvent) -> Arc<AgentSession> {
+        if let Some(commit) = self.activation_commit.take() {
+            commit();
+        }
         self.session
             .session_plugin_driver()
             .session_start(&event)
@@ -663,7 +687,10 @@ impl AgentSession {
         });
         Self::install_session_turn_control(&session)?;
         session.attach_agent_bridge();
-        Ok(PreparedAgentSession { session })
+        Ok(PreparedAgentSession {
+            session,
+            activation_commit: None,
+        })
     }
 
     /// Restores only data state. Plugin code, registries and resources always
@@ -834,7 +861,10 @@ impl AgentSession {
             }));
         }
         session.log.append_batch(configuration)?;
-        Ok(PreparedAgentSession { session })
+        Ok(PreparedAgentSession {
+            session,
+            activation_commit: None,
+        })
     }
 
     pub fn runtime(&self) -> &PiRuntime {

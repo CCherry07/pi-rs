@@ -2089,8 +2089,8 @@ fn push_history_message(transcript: &mut Vec<TranscriptItem>, message: &pi_sessi
 mod tests {
     use super::*;
     use pi_session::{
-        AgentSessionRuntimeRequest, AgentSessionRuntimeTarget, CompactionEntry,
-        MultiSessionManager, SessionHeader, SessionLog, SessionRecord,
+        AgentSessionOptions, CompactionEntry, MultiSessionManager, PreparedSessionGeneration,
+        SessionGenerationRequest, SessionHeader, SessionLog, SessionRecord,
     };
     use ratatui::backend::TestBackend;
     use ratatui::{TerminalOptions, Viewport};
@@ -2589,23 +2589,23 @@ mod tests {
                 "done".to_string(),
             )]));
             let provider = plugin.provider();
-            let sessions = MultiSessionManager::new(move |request: AgentSessionRuntimeRequest| {
+            let sessions = MultiSessionManager::new(move |request: SessionGenerationRequest| {
                 let plugin = plugin.clone();
                 async move {
-                    let AgentSessionRuntimeTarget::Create { cwd, path, .. } = request.target else {
-                        unreachable!()
-                    };
                     let runtime = pi_runtime::PiRuntime::builder()
                         .provider_plugin_arc(plugin)
                         .agent_options(pi_agent::AgentOptions {
                             provider_id: ProviderId::new("scripted"),
                             model_id: ModelId::new("test"),
-                            cwd,
+                            cwd: request.cwd,
                             ..pi_agent::AgentOptions::default()
                         })
                         .system_prompt(pi_runtime::SystemPrompt::Final("test".to_string()))
                         .build()?;
-                    AgentSession::prepare_create(runtime, path).await
+                    Ok(PreparedSessionGeneration::new(
+                        runtime,
+                        AgentSessionOptions::default(),
+                    ))
                 }
             });
             let path = directory.path().join("session.jsonl");
@@ -2663,10 +2663,7 @@ mod tests {
     #[tokio::test]
     async fn name_and_session_commands_use_the_active_session_log() {
         let directory = tempfile::tempdir().unwrap();
-        let sessions = MultiSessionManager::new(|request: AgentSessionRuntimeRequest| async move {
-            let AgentSessionRuntimeTarget::Create { cwd, path, .. } = request.target else {
-                unreachable!("this test does not replace the session")
-            };
+        let sessions = MultiSessionManager::new(|request: SessionGenerationRequest| async move {
             let pi_runtime = pi_runtime::PiRuntime::builder()
                 .provider_plugin(
                     pi_plugin_openai::OpenAiCompatiblePlugin::new(
@@ -2678,12 +2675,15 @@ mod tests {
                 )
                 .agent_options(pi_agent::AgentOptions {
                     provider_id: ProviderId::new("openai-compatible"),
-                    cwd,
+                    cwd: request.cwd,
                     ..pi_agent::AgentOptions::default()
                 })
                 .system_prompt(pi_runtime::SystemPrompt::Final("test".to_string()))
                 .build()?;
-            AgentSession::prepare_create(pi_runtime, path).await
+            Ok(PreparedSessionGeneration::new(
+                pi_runtime,
+                AgentSessionOptions::default(),
+            ))
         });
         let runtime = sessions
             .create_session(directory.path(), directory.path().join("session.jsonl"))

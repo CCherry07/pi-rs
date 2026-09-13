@@ -11,9 +11,9 @@ use pi_core::{ModelId, PluginContext, PresentationMode, ProviderId};
 use pi_plugin_schedule::{ScheduleOptions, SchedulePlugin, ScheduleSessionPlugin};
 use pi_runtime::{PiRuntime, SystemPrompt};
 use pi_session::{
-    AgentSession, AgentSessionOptions, AgentSessionRuntimeFactory, AgentSessionRuntimeRequest,
-    AgentSessionRuntimeTarget, MultiSessionManager, PiPluginContext, PiSession,
-    PluginContextBinding, PreparedAgentSession, SessionError, SessionPlugins,
+    AgentSessionOptions, MultiSessionManager, PiPluginContext, PiSession, PluginContextBinding,
+    PreparedSessionGeneration, SessionError, SessionGenerationFactory, SessionGenerationRequest,
+    SessionPlugins,
 };
 use pi_test_support::{ScriptedProvider, ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::{Value, json};
@@ -44,32 +44,20 @@ impl Factory {
 }
 
 #[async_trait]
-impl AgentSessionRuntimeFactory for Factory {
+impl SessionGenerationFactory for Factory {
     fn session_registered(&self, session: &PiSession) {
         self.binding.bind(session.clone());
     }
 
-    async fn prepare(
+    async fn prepare_generation(
         &self,
-        request: AgentSessionRuntimeRequest,
-    ) -> Result<PreparedAgentSession, SessionError> {
+        request: SessionGenerationRequest,
+    ) -> Result<PreparedSessionGeneration, SessionError> {
         if self.fail.load(Ordering::SeqCst) {
             return Err(SessionError::Runtime("candidate rejected".into()));
         }
-        let (cwd, path, reused, create) = match request.target {
-            AgentSessionRuntimeTarget::Create { cwd, path, .. } => (cwd, path, None, true),
-            AgentSessionRuntimeTarget::Reuse { log } => (
-                log.header().cwd.clone(),
-                log.path().to_path_buf(),
-                Some(log),
-                false,
-            ),
-            AgentSessionRuntimeTarget::Open { path } => {
-                let (log, document) = pi_session::SessionLog::open(&path)?;
-                (document.header.cwd, path, Some(log), false)
-            }
-        };
         let child = request.initial_state.is_some();
+        let cwd = request.cwd;
         let provider = ScriptedProviderPlugin::scripted(if child {
             vec![self.child_turn.clone()]
         } else {
@@ -102,21 +90,12 @@ impl AgentSessionRuntimeFactory for Factory {
                 ..AgentOptions::default()
             });
         let runtime = request.generation_overlay.apply_to(builder).build()?;
-        if let Some(initial) = request.initial_state {
-            initial.apply_to(&runtime)?;
-        }
         let session_options = AgentSessionOptions::default().plugins(
             SessionPlugins::new()
                 .plugin_factory(move || ScheduleSessionPlugin::new(options.clone())),
         );
-        let prepared = if create {
-            AgentSession::prepare_create_with_options(runtime, path, session_options).await?
-        } else {
-            AgentSession::prepare_reuse_with_options(runtime, reused.unwrap(), session_options)
-                .await?
-        };
-        context.bind_generation_session(prepared.session());
-        Ok(prepared)
+        Ok(PreparedSessionGeneration::new(runtime, session_options)
+            .bind_session(move |session| context.bind_generation_session(session)))
     }
 }
 

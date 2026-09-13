@@ -13,9 +13,9 @@ use pi_plugin_subagents::{
 };
 use pi_runtime::PiRuntime;
 use pi_session::{
-    AgentSession, AgentSessionOptions, AgentSessionRuntimeFactory, AgentSessionRuntimeRequest,
-    AgentSessionRuntimeTarget, MultiSessionManager, PiPluginContext, PluginContextBinding,
-    PreparedAgentSession, SessionError, SessionPlugins,
+    AgentSessionOptions, MultiSessionManager, PiPluginContext, PluginContextBinding,
+    PreparedSessionGeneration, SessionError, SessionGenerationFactory, SessionGenerationRequest,
+    SessionPlugins,
 };
 use pi_test_support::{ScriptedProvider, ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::{Value, json};
@@ -44,28 +44,19 @@ impl TestFactory {
 }
 
 #[async_trait]
-impl AgentSessionRuntimeFactory for TestFactory {
+impl SessionGenerationFactory for TestFactory {
     fn session_registered(&self, session: &pi_session::PiSession) {
         self.binding.bind(session.clone());
     }
 
-    async fn prepare(
+    async fn prepare_generation(
         &self,
-        request: AgentSessionRuntimeRequest,
-    ) -> Result<PreparedAgentSession, SessionError> {
+        request: SessionGenerationRequest,
+    ) -> Result<PreparedSessionGeneration, SessionError> {
         let initial_state = request.initial_state;
-        let (cwd, path, restored_log) = match request.target {
-            AgentSessionRuntimeTarget::Create { cwd, path, .. } => (cwd, path, None),
-            AgentSessionRuntimeTarget::Open { path } => {
-                let (log, document) = pi_session::SessionLog::open(&path)?;
-                (document.header.cwd, path, Some(log))
-            }
-            AgentSessionRuntimeTarget::Reuse { log } => {
-                let cwd = log.load()?.header.cwd;
-                (cwd, log.path().to_path_buf(), Some(log))
-            }
-        };
-        let depth = path
+        let cwd = request.cwd;
+        let depth = request
+            .session_path
             .components()
             .filter(|component| component.as_os_str() == "isolated")
             .count();
@@ -143,13 +134,8 @@ impl AgentSessionRuntimeFactory for TestFactory {
         let options = AgentSessionOptions::default().plugins(
             SessionPlugins::new().plugin(SubagentsSessionPlugin::new(self.subagents.clone())),
         );
-        let prepared = if let Some(log) = restored_log {
-            AgentSession::prepare_reuse_with_options(runtime, log, options).await?
-        } else {
-            AgentSession::prepare_create_with_options(runtime, path, options).await?
-        };
-        plugin_context.bind_generation_session(prepared.session());
-        Ok(prepared)
+        Ok(PreparedSessionGeneration::new(runtime, options)
+            .bind_session(move |session| plugin_context.bind_generation_session(session)))
     }
 }
 

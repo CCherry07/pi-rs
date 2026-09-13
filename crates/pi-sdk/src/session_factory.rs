@@ -37,11 +37,11 @@ use pi_provider::{HttpTransport, ReqwestTransport, ReqwestTransportConfig};
 use pi_resources::ResourceLoaderOptions;
 use pi_runtime::{CompletionRetryPolicy, PiRuntime, RuntimeError, SystemPrompt};
 use pi_session::{
-    AgentSession, AgentSessionOptions, AgentSessionRuntimeFactory, AgentSessionRuntimeRequest,
-    AgentSessionRuntimeTarget, AutoRetrySettings, CompactionSettings as SessionCompactionSettings,
+    AgentSessionOptions, AutoRetrySettings, CompactionSettings as SessionCompactionSettings,
     InitialModelRequest, ModelRuntimeServices, PiPluginContext, PluginContextBinding,
-    PluginProviderMutationAccess, PluginUiBridge, PreparedAgentSession, SessionError,
-    SessionGenerationOverlay, SessionPlugins, SessionRuntimeInventory,
+    PluginProviderMutationAccess, PluginUiBridge, PreparedSessionGeneration, SessionError,
+    SessionGenerationActivation, SessionGenerationFactory, SessionGenerationOverlay,
+    SessionGenerationRequest, SessionPlugins, SessionRuntimeInventory,
 };
 use pi_settings::{
     QueueModeSetting, SettingsContext, SettingsManager, ThinkingLevelSetting, TransportSetting,
@@ -49,7 +49,9 @@ use pi_settings::{
 
 use crate::ProductConfig;
 use crate::builtin_providers::BuiltinProviderSet;
-use crate::dynamic_providers::{DynamicProviderCandidate, DynamicProviderOverlay};
+use crate::dynamic_providers::{
+    DynamicProviderCandidate, DynamicProviderOverlay, DynamicProviderPreparation,
+};
 use crate::project_trust::ProjectTrustService;
 
 const BUILTIN_TOOL_NAMES: [&str; 17] = [
@@ -83,6 +85,60 @@ pub struct ProductSessionFactory {
     presentation_mode: PresentationMode,
     dynamic_providers: DynamicProviderOverlay,
     subagents: SubagentRuntime,
+}
+
+/// Generation-external product state staged while a complete session
+/// generation is prepared. The contained package reconciliations roll back on
+/// drop; provider mutations remain pending only when this candidate commits.
+struct PreparedProductActivation {
+    dynamic_providers: DynamicProviderOverlay,
+    dynamic_provider_candidate: Option<DynamicProviderCandidate>,
+    dynamic_provider_preparation: DynamicProviderPreparation,
+    package_reconciliations: Vec<PreparedPluginReconcile>,
+}
+
+impl SessionGenerationActivation for PreparedProductActivation {
+    fn commit(self: Box<Self>) {
+        let Self {
+            dynamic_providers,
+            dynamic_provider_candidate,
+            mut dynamic_provider_preparation,
+            package_reconciliations,
+        } = *self;
+        for reconciliation in package_reconciliations {
+            reconciliation.commit();
+        }
+        if let Some(candidate) = dynamic_provider_candidate {
+            dynamic_providers.commit(candidate);
+        }
+        dynamic_provider_preparation.finish();
+    }
+
+    fn rollback(self: Box<Self>, error: SessionError) -> SessionError {
+        let Self {
+            dynamic_providers,
+            dynamic_provider_candidate,
+            dynamic_provider_preparation: _dynamic_provider_preparation,
+            package_reconciliations,
+        } = *self;
+        if let Some(candidate) = &dynamic_provider_candidate {
+            dynamic_providers.reject(candidate);
+        }
+        let mut rollback_errors = Vec::new();
+        for reconciliation in package_reconciliations.into_iter().rev() {
+            if let Err(rollback_error) = reconciliation.rollback() {
+                rollback_errors.push(rollback_error.to_string());
+            }
+        }
+        if rollback_errors.is_empty() {
+            error
+        } else {
+            SessionError::Runtime(format!(
+                "{error}; native package rollback failed: {}",
+                rollback_errors.join("; ")
+            ))
+        }
+    }
 }
 
 impl ProductSessionFactory {
@@ -126,49 +182,25 @@ impl ProductSessionFactory {
 }
 
 #[async_trait]
-impl AgentSessionRuntimeFactory for ProductSessionFactory {
+impl SessionGenerationFactory for ProductSessionFactory {
     fn session_registered(&self, session: &pi_session::PiSession) {
         self.plugin_context_binding.bind(session.clone());
     }
 
-    async fn prepare(
+    async fn prepare_generation(
         &self,
-        request: AgentSessionRuntimeRequest,
-    ) -> Result<PreparedAgentSession, SessionError> {
-        let generation_overlay = request.generation_overlay;
-        let initial_state = request.initial_state;
-        let reloading = request.start_event.reason == pi_session::SessionStartReason::Reload;
-        let mut reload_model = None;
-        let (path, create, cwd, reused_log, parent_session, session_id) = match request.target {
-            AgentSessionRuntimeTarget::Create {
-                cwd,
-                path,
-                parent_session,
-                session_id,
-            } => (path, true, cwd, None, parent_session, session_id),
-            AgentSessionRuntimeTarget::Open { path } => {
-                let (_, document) = pi_session::SessionLog::open(&path)?;
-                if reloading {
-                    reload_model = document.context()?.model;
-                }
-                (path, false, document.header.cwd, None, None, None)
-            }
-            AgentSessionRuntimeTarget::Reuse { log } => {
-                let document = log.load()?;
-                if reloading {
-                    reload_model = document.context()?.model;
-                }
-                (
-                    log.path().to_path_buf(),
-                    false,
-                    document.header.cwd,
-                    Some(log),
-                    None,
-                    None,
-                )
-            }
-        };
-        let mut dynamic_provider_preparation = self.dynamic_providers.begin_preparation();
+        request: SessionGenerationRequest,
+    ) -> Result<PreparedSessionGeneration, SessionError> {
+        let SessionGenerationRequest {
+            cwd,
+            session_path: path,
+            reason,
+            generation_overlay,
+            initial_state,
+            reload_model,
+        } = request;
+        let reloading = reason == pi_session::SessionStartReason::Reload;
+        let dynamic_provider_preparation = self.dynamic_providers.begin_preparation();
         let mut config = self.config.clone();
         config.cwd = cwd;
         if reloading {
@@ -323,13 +355,7 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
         .map_err(SessionError::from)
         .and_then(|runtime| {
             if let Some(initial_state) = &initial_state {
-                if !create {
-                    return Err(SessionError::Runtime(
-                        "initial runtime state is valid only for a fresh session".to_string(),
-                    ));
-                }
                 validate_initial_model_scope(&runtime, &config, initial_state)?;
-                initial_state.apply_to(&runtime)?;
             }
             Ok(runtime)
         }) {
@@ -395,48 +421,16 @@ impl AgentSessionRuntimeFactory for ProductSessionFactory {
                     .as_deref()
                     .map(expand_tilde_path),
                 config.runtime_settings.shell_command_prefix.clone(),
-            )
-            .parent_session_path(parent_session)
-            .session_id(session_id);
-        let prepared = if create {
-            AgentSession::prepare_create_with_options(runtime, path, session_options).await
-        } else if let Some(log) = reused_log {
-            AgentSession::prepare_reuse_with_options(runtime, log, session_options).await
-        } else {
-            AgentSession::prepare_open_with_options(runtime, path, session_options).await
+            );
+        let activation = PreparedProductActivation {
+            dynamic_providers: self.dynamic_providers.clone(),
+            dynamic_provider_candidate,
+            dynamic_provider_preparation,
+            package_reconciliations,
         };
-        match prepared {
-            Ok(prepared) => {
-                plugin_context.bind_generation_session(prepared.session());
-                for reconciliation in package_reconciliations {
-                    reconciliation.commit();
-                }
-                if let Some(candidate) = dynamic_provider_candidate {
-                    self.dynamic_providers.commit(candidate);
-                }
-                dynamic_provider_preparation.finish();
-                Ok(prepared)
-            }
-            Err(error) => {
-                if let Some(candidate) = &dynamic_provider_candidate {
-                    self.dynamic_providers.reject(candidate);
-                }
-                let mut rollback_errors = Vec::new();
-                for reconciliation in package_reconciliations.into_iter().rev() {
-                    if let Err(rollback_error) = reconciliation.rollback() {
-                        rollback_errors.push(rollback_error.to_string());
-                    }
-                }
-                if rollback_errors.is_empty() {
-                    Err(error)
-                } else {
-                    Err(SessionError::Runtime(format!(
-                        "{error}; native package rollback failed: {}",
-                        rollback_errors.join("; ")
-                    )))
-                }
-            }
-        }
+        Ok(PreparedSessionGeneration::new(runtime, session_options)
+            .bind_session(move |session| plugin_context.bind_generation_session(session))
+            .with_activation(activation))
     }
 }
 
@@ -1035,12 +1029,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use pi_session::{AgentSession, MultiSessionManager};
 
     #[derive(Default)]
     struct RecordingJsHost {
         generation: AtomicUsize,
         requests: Mutex<Vec<JsGenerationRequest>>,
         retired: Mutex<Vec<String>>,
+        provider_registrations: Mutex<Vec<pi_js_plugin::JsProviderRegistration>>,
     }
 
     #[async_trait]
@@ -1078,7 +1074,7 @@ mod tests {
                     }],
                 }],
                 provider_plugins: Vec::new(),
-                provider_registrations: Vec::new(),
+                provider_registrations: self.provider_registrations.lock().unwrap().clone(),
                 session_plugins: Vec::new(),
                 diagnostics: Vec::new(),
             })
@@ -2091,6 +2087,89 @@ command = "fixture-command"
     }
 
     #[tokio::test]
+    async fn product_factory_defers_dynamic_provider_commit_until_session_activation() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent_dir = directory.path().join("agent");
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let host = Arc::new(RecordingJsHost::default());
+        host.provider_registrations
+            .lock()
+            .unwrap()
+            .push(pi_js_plugin::JsProviderRegistration {
+                plugin_id: "js:0:provider.ts".to_string(),
+                path: "/provider.ts".to_string(),
+                name: "activation-provider".to_string(),
+                config: serde_json::json!({
+                    "baseUrl": "https://activation.example/v1",
+                    "apiKey": "test-key",
+                    "api": "openai-responses",
+                    "models": [{ "id": "activation-model" }]
+                }),
+            });
+        let mut config = app_config(&agent_dir, None);
+        config.cwd = project.clone();
+        config.trust_override = Some(true);
+        config.discover_extensions = false;
+        config.load_mcp_config = false;
+        let (trust, _) = ProjectTrustService::new(
+            &agent_dir,
+            Some(true),
+            false,
+            pi_settings::DefaultProjectTrust::Ask,
+        )
+        .unwrap();
+        let factory = ProductSessionFactory::new(config, trust, SettingsManager::new(&agent_dir))
+            .with_plugin_context(PresentationMode::Tui, PluginContextBinding::new())
+            .with_js_plugin_host(host);
+        let session_path = agent_dir.join("activation.jsonl");
+        let prepared = factory
+            .prepare_generation(SessionGenerationRequest {
+                cwd: project.clone(),
+                session_path: session_path.clone(),
+                reason: pi_session::SessionStartReason::Startup,
+                generation_overlay: SessionGenerationOverlay::default(),
+                initial_state: None,
+                reload_model: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            !factory
+                .dynamic_providers
+                .candidate(&[])
+                .unwrap()
+                .provider_configs()
+                .any(|(provider, _)| provider.as_str() == "activation-provider")
+        );
+        drop(prepared);
+
+        let manager = MultiSessionManager::new(factory.clone());
+        let session = manager
+            .create_session(&project, &session_path)
+            .await
+            .unwrap();
+
+        assert!(
+            session
+                .current()
+                .runtime()
+                .has_provider(&ProviderId::new("activation-provider"))
+        );
+        assert!(
+            factory
+                .dynamic_providers
+                .candidate(&[])
+                .unwrap()
+                .provider_configs()
+                .any(|(provider, _)| provider.as_str() == "activation-provider")
+        );
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn whole_session_reload_prepares_a_fresh_javascript_generation() {
         let directory = tempfile::tempdir().unwrap();
         let agent_dir = directory.path().join("agent");
@@ -2132,25 +2211,24 @@ command = "fixture-command"
             ProductSessionFactory::new(config.clone(), trust, SettingsManager::new(&agent_dir))
                 .with_plugin_context(PresentationMode::Tui, PluginContextBinding::new())
                 .with_js_plugin_host(host.clone());
-        let runtime = pi_session::AgentSessionRuntime::create(
-            factory,
-            AgentSessionRuntimeTarget::create(&project, &config.session_path),
-        )
-        .await
-        .unwrap();
+        let manager = MultiSessionManager::new(factory);
+        let session = manager
+            .create_session(&project, &config.session_path)
+            .await
+            .unwrap();
 
         assert_eq!(
-            runtime.session().runtime_inventory().js_extensions(),
+            session.current().runtime_inventory().js_extensions(),
             [package_source]
         );
 
-        runtime.reload().await.unwrap();
+        session.reload().await.unwrap();
         assert_eq!(
-            runtime.session().runtime_inventory().js_extensions(),
+            session.current().runtime_inventory().js_extensions(),
             [package_source]
         );
         assert_eq!(*host.retired.lock().unwrap(), ["js-1"]);
-        runtime.shutdown().await.unwrap();
+        manager.shutdown().await.unwrap();
 
         assert_eq!(host.generation.load(Ordering::SeqCst), 2);
         let requests = host.requests.lock().unwrap();
@@ -2167,7 +2245,8 @@ command = "fixture-command"
                 .all(|request| request.extension_paths == [extension.display().to_string()])
         );
         drop(requests);
-        drop(runtime);
+        drop(session);
+        drop(manager);
         assert_eq!(*host.retired.lock().unwrap(), ["js-1", "js-2"]);
     }
 

@@ -1,22 +1,21 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use pi_core::{AgentPlugin, ModelSelection, ThinkingLevel};
 use pi_runtime::{PiRuntime, PiRuntimeBuilder};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::watch;
 
 use crate::{
-    AgentSession, ForkOptions, ForkPosition, PiSession, PreparedAgentSession,
+    AgentSession, AgentSessionOptions, ForkOptions, ForkPosition, PiSession, PreparedAgentSession,
     SessionBeforeForkEvent, SessionBeforeSwitchEvent, SessionError, SessionHeader, SessionLog,
     SessionShutdownEvent, SessionShutdownReason, SessionStartEvent, SessionStartReason,
     SessionSwitchReason, import_session_file,
 };
 
 #[derive(Debug, Clone)]
-pub enum AgentSessionRuntimeTarget {
+pub(crate) enum AgentSessionRuntimeTarget {
     Create {
         cwd: PathBuf,
         path: PathBuf,
@@ -32,7 +31,7 @@ pub enum AgentSessionRuntimeTarget {
 }
 
 impl AgentSessionRuntimeTarget {
-    pub fn create(cwd: impl Into<PathBuf>, path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn create(cwd: impl Into<PathBuf>, path: impl Into<PathBuf>) -> Self {
         Self::Create {
             cwd: cwd.into(),
             path: path.into(),
@@ -41,7 +40,7 @@ impl AgentSessionRuntimeTarget {
         }
     }
 
-    pub fn create_with_id(
+    pub(crate) fn create_with_id(
         cwd: impl Into<PathBuf>,
         path: impl Into<PathBuf>,
         session_id: impl Into<String>,
@@ -54,7 +53,7 @@ impl AgentSessionRuntimeTarget {
         }
     }
 
-    pub fn create_with_parent(
+    fn create_with_parent(
         cwd: impl Into<PathBuf>,
         path: impl Into<PathBuf>,
         parent_session: impl Into<PathBuf>,
@@ -67,15 +66,15 @@ impl AgentSessionRuntimeTarget {
         }
     }
 
-    pub fn open(path: impl Into<PathBuf>) -> Self {
+    pub(crate) fn open(path: impl Into<PathBuf>) -> Self {
         Self::Open { path: path.into() }
     }
 
-    pub fn reuse_log(log: SessionLog) -> Self {
+    fn reuse_log(log: SessionLog) -> Self {
         Self::Reuse { log }
     }
 
-    pub fn path(&self) -> &std::path::Path {
+    pub(crate) fn path(&self) -> &std::path::Path {
         match self {
             Self::Create { path, .. } | Self::Open { path } => path,
             Self::Reuse { log } => log.path(),
@@ -140,14 +139,19 @@ impl SessionGenerationOverlay {
 }
 
 #[derive(Debug, Clone)]
-pub struct AgentSessionRuntimeRequest {
-    pub target: AgentSessionRuntimeTarget,
-    pub start_event: SessionStartEvent,
+pub struct SessionGenerationRequest {
+    pub cwd: PathBuf,
+    pub session_path: PathBuf,
+    pub reason: SessionStartReason,
     pub generation_overlay: SessionGenerationOverlay,
     /// Complete initial state for a fresh runtime. Product factories must
-    /// apply it before preparing the new session so its first persisted
-    /// configuration and provider request agree.
+    /// validate any product-specific policy; `AgentSessionRuntime` applies it
+    /// before constructing the session so persistence and provider state agree.
     pub initial_state: Option<AgentSessionInitialState>,
+    /// Settled selection restored from the current conversation when the
+    /// generation is being rebuilt for reload. Product policy may use this to
+    /// avoid reapplying startup-only model arguments.
+    pub reload_model: Option<ModelSelection>,
 }
 
 /// Fully resolved initial runtime state for a fresh agent session.
@@ -173,7 +177,7 @@ pub enum AgentSessionInitialModelSource {
 
 impl AgentSessionInitialState {
     /// Applies the complete state to a built runtime before session creation.
-    pub fn apply_to(&self, runtime: &PiRuntime) -> Result<(), SessionError> {
+    fn apply_to(&self, runtime: &PiRuntime) -> Result<(), SessionError> {
         if let Some(model) = runtime.model(&self.model.provider, &self.model.model_id)
             && !model.supports_thinking_level(self.thinking_level)
         {
@@ -198,13 +202,79 @@ impl AgentSessionInitialState {
     }
 }
 
+/// Product state that commits atomically with a prepared session generation.
+///
+/// Implementations should own rollback-on-drop guards as the cancellation
+/// fallback. `rollback` is called when session construction returns an error
+/// so adapters can preserve any more specific rollback diagnostics.
+pub trait SessionGenerationActivation: Send {
+    fn commit(self: Box<Self>);
+
+    fn rollback(self: Box<Self>, error: SessionError) -> SessionError {
+        error
+    }
+}
+
+type SessionGenerationBinding = Box<dyn FnOnce(Arc<AgentSession>) + Send>;
+
+/// A complete runtime and session-plugin generation that has not yet been
+/// bound to storage or activated.
+#[must_use = "prepared generations must be bound to a session or dropped to roll back staged state"]
+pub struct PreparedSessionGeneration {
+    runtime: PiRuntime,
+    options: AgentSessionOptions,
+    session_bindings: Vec<SessionGenerationBinding>,
+    activations: Vec<Box<dyn SessionGenerationActivation>>,
+}
+
+impl PreparedSessionGeneration {
+    pub fn new(runtime: PiRuntime, options: AgentSessionOptions) -> Self {
+        Self {
+            runtime,
+            options,
+            session_bindings: Vec::new(),
+            activations: Vec::new(),
+        }
+    }
+
+    /// Binds generation-scoped capabilities after the session is constructed
+    /// and before its `session_start` hooks run.
+    pub fn bind_session(
+        mut self,
+        binding: impl FnOnce(Arc<AgentSession>) + Send + 'static,
+    ) -> Self {
+        self.session_bindings.push(Box::new(binding));
+        self
+    }
+
+    /// Stages generation-external state for the same activation transaction.
+    pub fn with_activation(
+        mut self,
+        activation: impl SessionGenerationActivation + 'static,
+    ) -> Self {
+        self.activations.push(Box::new(activation));
+        self
+    }
+
+    fn rollback(
+        mut activations: Vec<Box<dyn SessionGenerationActivation>>,
+        mut error: SessionError,
+    ) -> SessionError {
+        while let Some(activation) = activations.pop() {
+            error = activation.rollback(error);
+        }
+        error
+    }
+}
+
 #[async_trait]
-pub trait AgentSessionRuntimeFactory: Send + Sync {
-    /// Build the complete next session without emitting `session_start`.
-    async fn prepare(
+pub trait SessionGenerationFactory: Send + Sync {
+    /// Prepare a complete product generation without opening or mutating the
+    /// session journal and without emitting `session_start`.
+    async fn prepare_generation(
         &self,
-        request: AgentSessionRuntimeRequest,
-    ) -> Result<PreparedAgentSession, SessionError>;
+        request: SessionGenerationRequest,
+    ) -> Result<PreparedSessionGeneration, SessionError>;
 
     /// Observe a stable frontend handle after the multi-session manager has
     /// registered it. Product adapters use this lifecycle seam to bind outer
@@ -213,15 +283,15 @@ pub trait AgentSessionRuntimeFactory: Send + Sync {
 }
 
 #[async_trait]
-impl<F, Fut> AgentSessionRuntimeFactory for F
+impl<F, Fut> SessionGenerationFactory for F
 where
-    F: Fn(AgentSessionRuntimeRequest) -> Fut + Send + Sync,
-    Fut: Future<Output = Result<PreparedAgentSession, SessionError>> + Send,
+    F: Fn(SessionGenerationRequest) -> Fut + Send + Sync,
+    Fut: Future<Output = Result<PreparedSessionGeneration, SessionError>> + Send,
 {
-    async fn prepare(
+    async fn prepare_generation(
         &self,
-        request: AgentSessionRuntimeRequest,
-    ) -> Result<PreparedAgentSession, SessionError> {
+        request: SessionGenerationRequest,
+    ) -> Result<PreparedSessionGeneration, SessionError> {
         self(request).await
     }
 }
@@ -232,28 +302,39 @@ pub enum AgentSessionReplacement {
     Cancelled,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum AgentSessionRuntimeError {
-    #[error(transparent)]
-    Session(#[from] SessionError),
-    #[error("agent session runtime is closed")]
-    Closed,
+pub(crate) enum ResolvedSessionTransition {
+    New {
+        cwd: PathBuf,
+        path: PathBuf,
+        parent_session: Option<PathBuf>,
+    },
+    Resume {
+        path: PathBuf,
+    },
+    Import {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+    Fork {
+        entry_id: String,
+        position: ForkPosition,
+    },
+    Reload,
 }
 
 /// Owns the replaceable current `AgentSession`.
 ///
-/// Replacement is serialized. The current agent is first settled, then the
-/// factory prepares the complete next session. A preparation failure leaves
-/// the current session active. A successful transition emits old
-/// `session_shutdown`, then new `session_start`, then publishes the new handle
-/// to subscribers.
+/// Managed replacement is serialized by `MultiSessionManager`. The current
+/// agent is first settled, then the factory prepares the next product
+/// generation and this module binds it to the target journal. A preparation
+/// failure leaves the current session active. A successful transition emits
+/// old `session_shutdown`, then new `session_start`, then publishes the new
+/// handle to subscribers.
 #[derive(Clone)]
-pub struct AgentSessionRuntime {
+pub(crate) struct AgentSessionRuntime {
     current: watch::Sender<Arc<AgentSession>>,
-    factory: Arc<dyn AgentSessionRuntimeFactory>,
+    factory: Arc<dyn SessionGenerationFactory>,
     generation_overlay: SessionGenerationOverlay,
-    transition_gate: Arc<Mutex<()>>,
-    closed: Arc<AtomicBool>,
 }
 
 struct ImportedFileTransaction {
@@ -336,59 +417,116 @@ impl Drop for ImportedFileTransaction {
     }
 }
 
-impl AgentSessionRuntime {
-    pub async fn create<F>(
-        factory: F,
-        initial_target: AgentSessionRuntimeTarget,
-    ) -> Result<Self, AgentSessionRuntimeError>
-    where
-        F: AgentSessionRuntimeFactory + 'static,
-    {
-        Self::create_with_overlay(factory, initial_target, SessionGenerationOverlay::default())
-            .await
-    }
+enum ResolvedSessionTarget {
+    Create {
+        path: PathBuf,
+        parent_session: Option<PathBuf>,
+        session_id: Option<String>,
+    },
+    Existing {
+        log: SessionLog,
+    },
+}
 
-    pub async fn create_with_overlay<F>(
-        factory: F,
-        initial_target: AgentSessionRuntimeTarget,
+impl ResolvedSessionTarget {
+    fn resolve(
+        target: AgentSessionRuntimeTarget,
+        reason: SessionStartReason,
         generation_overlay: SessionGenerationOverlay,
-    ) -> Result<Self, AgentSessionRuntimeError>
-    where
-        F: AgentSessionRuntimeFactory + 'static,
-    {
-        Self::create_with_overlay_and_initial_state(
-            factory,
-            initial_target,
-            generation_overlay,
-            None,
-            None,
-        )
-        .await
+        initial_state: Option<AgentSessionInitialState>,
+    ) -> Result<(Self, SessionGenerationRequest), SessionError> {
+        if initial_state.is_some() && !matches!(&target, AgentSessionRuntimeTarget::Create { .. }) {
+            return Err(SessionError::Runtime(
+                "initial runtime state is valid only for a fresh session".to_string(),
+            ));
+        }
+        match target {
+            AgentSessionRuntimeTarget::Create {
+                cwd,
+                path,
+                parent_session,
+                session_id,
+            } => {
+                let request = SessionGenerationRequest {
+                    cwd,
+                    session_path: path.clone(),
+                    reason,
+                    generation_overlay,
+                    initial_state,
+                    reload_model: None,
+                };
+                Ok((
+                    Self::Create {
+                        path,
+                        parent_session,
+                        session_id,
+                    },
+                    request,
+                ))
+            }
+            AgentSessionRuntimeTarget::Open { path } => {
+                let (log, document) = SessionLog::open(&path)?;
+                Self::resolve_existing(log, document, reason, generation_overlay)
+            }
+            AgentSessionRuntimeTarget::Reuse { log } => {
+                let document = log.load()?;
+                Self::resolve_existing(log, document, reason, generation_overlay)
+            }
+        }
     }
 
-    pub(crate) async fn create_with_overlay_and_initial_state<F>(
-        factory: F,
+    fn resolve_existing(
+        log: SessionLog,
+        document: crate::SessionDocument,
+        reason: SessionStartReason,
+        generation_overlay: SessionGenerationOverlay,
+    ) -> Result<(Self, SessionGenerationRequest), SessionError> {
+        let reload_model = reload_model(&document, reason)?;
+        let request = SessionGenerationRequest {
+            cwd: document.header.cwd,
+            session_path: log.path().to_path_buf(),
+            reason,
+            generation_overlay,
+            initial_state: None,
+            reload_model,
+        };
+        Ok((Self::Existing { log }, request))
+    }
+}
+
+fn reload_model(
+    document: &crate::SessionDocument,
+    reason: SessionStartReason,
+) -> Result<Option<ModelSelection>, SessionError> {
+    if reason != SessionStartReason::Reload {
+        return Ok(None);
+    }
+    Ok(document
+        .context()?
+        .model
+        .map(|model| ModelSelection::new(model.provider, model.model_id)))
+}
+
+impl AgentSessionRuntime {
+    pub(crate) async fn create_with_overlay_and_initial_state(
+        factory: Arc<dyn SessionGenerationFactory>,
         initial_target: AgentSessionRuntimeTarget,
         generation_overlay: SessionGenerationOverlay,
         initial_state: Option<AgentSessionInitialState>,
         initial_context: Option<crate::isolated_context::IsolatedContextSeed>,
-    ) -> Result<Self, AgentSessionRuntimeError>
-    where
-        F: AgentSessionRuntimeFactory + 'static,
-    {
-        let factory: Arc<dyn AgentSessionRuntimeFactory> = Arc::new(factory);
+    ) -> Result<Self, SessionError> {
         let start_event = SessionStartEvent {
             reason: SessionStartReason::Startup,
             previous_session_file: None,
         };
-        let prepared = factory
-            .prepare(AgentSessionRuntimeRequest {
-                target: initial_target,
-                start_event: start_event.clone(),
-                generation_overlay: generation_overlay.clone(),
-                initial_state,
-            })
-            .await?;
+        let prepared = Self::prepare_session(
+            factory.as_ref(),
+            initial_target,
+            start_event.reason,
+            generation_overlay.clone(),
+            initial_state,
+        )
+        .await?;
         if let Some(seed) = initial_context {
             prepared.session().initialize_isolated_context(seed)?;
         }
@@ -396,20 +534,9 @@ impl AgentSessionRuntime {
         Ok(Self::from_parts(session, factory, generation_overlay))
     }
 
-    pub fn from_session<F>(session: Arc<AgentSession>, factory: F) -> Self
-    where
-        F: AgentSessionRuntimeFactory + 'static,
-    {
-        Self::from_parts(
-            session,
-            Arc::new(factory),
-            SessionGenerationOverlay::default(),
-        )
-    }
-
     fn from_parts(
         session: Arc<AgentSession>,
-        factory: Arc<dyn AgentSessionRuntimeFactory>,
+        factory: Arc<dyn SessionGenerationFactory>,
         generation_overlay: SessionGenerationOverlay,
     ) -> Self {
         let (current, _) = watch::channel(session);
@@ -417,37 +544,58 @@ impl AgentSessionRuntime {
             current,
             factory,
             generation_overlay,
-            transition_gate: Arc::new(Mutex::new(())),
-            closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    pub fn session(&self) -> Arc<AgentSession> {
+    pub(crate) fn session(&self) -> Arc<AgentSession> {
         Arc::clone(&self.current.borrow())
     }
 
-    pub fn subscribe(&self) -> watch::Receiver<Arc<AgentSession>> {
+    pub(crate) fn subscribe(&self) -> watch::Receiver<Arc<AgentSession>> {
         self.current.subscribe()
     }
 
-    pub async fn new_session(
+    pub(crate) async fn transition(
         &self,
-        cwd: impl Into<PathBuf>,
-        path: impl Into<PathBuf>,
-    ) -> Result<AgentSessionReplacement, AgentSessionRuntimeError> {
-        self.new_session_with_parent(cwd, path, None).await
+        transition: ResolvedSessionTransition,
+    ) -> Result<AgentSessionReplacement, SessionError> {
+        // MultiSessionManager holds its lifecycle write guard across this
+        // entire call. AgentSession::begin_replacement remains the inner gate
+        // against live mutations of the captured session.
+        let current = self.session();
+        if current.is_closed() {
+            return Err(SessionError::Closed);
+        }
+        match transition {
+            ResolvedSessionTransition::New {
+                cwd,
+                path,
+                parent_session,
+            } => {
+                self.replace_with_new(current, cwd, path, parent_session)
+                    .await
+            }
+            ResolvedSessionTransition::Resume { path } => {
+                self.replace_with_resume(current, path).await
+            }
+            ResolvedSessionTransition::Import {
+                source,
+                destination,
+            } => self.replace_with_import(current, source, destination).await,
+            ResolvedSessionTransition::Fork { entry_id, position } => {
+                self.replace_with_fork(current, entry_id, position).await
+            }
+            ResolvedSessionTransition::Reload => self.replace_with_reload(current).await,
+        }
     }
 
-    pub async fn new_session_with_parent(
+    async fn replace_with_new(
         &self,
-        cwd: impl Into<PathBuf>,
-        path: impl Into<PathBuf>,
+        current: Arc<AgentSession>,
+        cwd: PathBuf,
+        path: PathBuf,
         parent_session: Option<PathBuf>,
-    ) -> Result<AgentSessionReplacement, AgentSessionRuntimeError> {
-        let _transition = self.transition_gate.lock().await;
-        self.ensure_open()?;
-        let current = self.session();
-        let path = path.into();
+    ) -> Result<AgentSessionReplacement, SessionError> {
         let before = current
             .session_plugin_driver()
             .session_before_switch(&SessionBeforeSwitchEvent {
@@ -462,20 +610,15 @@ impl AgentSessionRuntime {
         let previous_session_file = current.log().path().to_path_buf();
         self.replace_current(
             current,
-            AgentSessionRuntimeRequest {
-                target: match parent_session {
-                    Some(parent) => {
-                        AgentSessionRuntimeTarget::create_with_parent(cwd, &path, parent)
-                    }
-                    None => AgentSessionRuntimeTarget::create(cwd, &path),
-                },
-                start_event: SessionStartEvent {
-                    reason: SessionStartReason::New,
-                    previous_session_file: Some(previous_session_file),
-                },
-                generation_overlay: self.generation_overlay.clone(),
-                initial_state: None,
+            match parent_session {
+                Some(parent) => AgentSessionRuntimeTarget::create_with_parent(cwd, &path, parent),
+                None => AgentSessionRuntimeTarget::create(cwd, &path),
             },
+            SessionStartEvent {
+                reason: SessionStartReason::New,
+                previous_session_file: Some(previous_session_file),
+            },
+            None,
             SessionShutdownEvent {
                 reason: SessionShutdownReason::New,
                 target_session_file: Some(path),
@@ -485,14 +628,11 @@ impl AgentSessionRuntime {
         Ok(AgentSessionReplacement::Replaced)
     }
 
-    pub async fn switch_session(
+    async fn replace_with_resume(
         &self,
-        path: impl Into<PathBuf>,
-    ) -> Result<AgentSessionReplacement, AgentSessionRuntimeError> {
-        let _transition = self.transition_gate.lock().await;
-        self.ensure_open()?;
-        let current = self.session();
-        let path = path.into();
+        current: Arc<AgentSession>,
+        path: PathBuf,
+    ) -> Result<AgentSessionReplacement, SessionError> {
         let before = current
             .session_plugin_driver()
             .session_before_switch(&SessionBeforeSwitchEvent {
@@ -512,15 +652,12 @@ impl AgentSessionRuntime {
         };
         self.replace_current(
             current,
-            AgentSessionRuntimeRequest {
-                target,
-                start_event: SessionStartEvent {
-                    reason: SessionStartReason::Resume,
-                    previous_session_file: Some(previous_session_file),
-                },
-                generation_overlay: self.generation_overlay.clone(),
-                initial_state: None,
+            target,
+            SessionStartEvent {
+                reason: SessionStartReason::Resume,
+                previous_session_file: Some(previous_session_file),
             },
+            None,
             SessionShutdownEvent {
                 reason: SessionShutdownReason::Resume,
                 target_session_file: Some(path),
@@ -532,16 +669,12 @@ impl AgentSessionRuntime {
 
     /// Copies a validated v4 JSONL session, or migrates coding-agent v1-v3,
     /// into product storage and switches through the resume transaction.
-    pub async fn import_session(
+    async fn replace_with_import(
         &self,
-        source: impl Into<PathBuf>,
-        destination: impl Into<PathBuf>,
-    ) -> Result<AgentSessionReplacement, AgentSessionRuntimeError> {
-        let _transition = self.transition_gate.lock().await;
-        self.ensure_open()?;
-        let current = self.session();
-        let source = source.into();
-        let destination = destination.into();
+        current: Arc<AgentSession>,
+        source: PathBuf,
+        destination: PathBuf,
+    ) -> Result<AgentSessionReplacement, SessionError> {
         let before = current
             .session_plugin_driver()
             .session_before_switch(&SessionBeforeSwitchEvent {
@@ -557,15 +690,12 @@ impl AgentSessionRuntime {
         let previous_session_file = current.log().path().to_path_buf();
         self.replace_current(
             current,
-            AgentSessionRuntimeRequest {
-                target: AgentSessionRuntimeTarget::open(&destination),
-                start_event: SessionStartEvent {
-                    reason: SessionStartReason::Resume,
-                    previous_session_file: Some(previous_session_file),
-                },
-                generation_overlay: self.generation_overlay.clone(),
-                initial_state: None,
+            AgentSessionRuntimeTarget::open(&destination),
+            SessionStartEvent {
+                reason: SessionStartReason::Resume,
+                previous_session_file: Some(previous_session_file),
             },
+            None,
             SessionShutdownEvent {
                 reason: SessionShutdownReason::Resume,
                 target_session_file: Some(destination),
@@ -578,15 +708,12 @@ impl AgentSessionRuntime {
 
     /// Forks the current session at a message and atomically switches to the fork.
     /// `Before` is Pi's `/fork` behavior; `At` is `/clone`.
-    pub async fn fork_session(
+    async fn replace_with_fork(
         &self,
-        entry_id: impl Into<String>,
+        current: Arc<AgentSession>,
+        entry_id: String,
         position: ForkPosition,
-    ) -> Result<AgentSessionReplacement, AgentSessionRuntimeError> {
-        let _transition = self.transition_gate.lock().await;
-        self.ensure_open()?;
-        let current = self.session();
-        let entry_id = entry_id.into();
+    ) -> Result<AgentSessionReplacement, SessionError> {
         let before = current
             .session_plugin_driver()
             .session_before_fork(&SessionBeforeForkEvent {
@@ -622,20 +749,19 @@ impl AgentSessionRuntime {
             reason: SessionStartReason::Fork,
             previous_session_file: Some(previous_session_file),
         };
-        let prepared = match self
-            .factory
-            .prepare(AgentSessionRuntimeRequest {
-                target: AgentSessionRuntimeTarget::reuse_log(fork),
-                start_event: start_event.clone(),
-                generation_overlay: self.generation_overlay.clone(),
-                initial_state: None,
-            })
-            .await
+        let prepared = match Self::prepare_session(
+            self.factory.as_ref(),
+            AgentSessionRuntimeTarget::reuse_log(fork),
+            start_event.reason,
+            self.generation_overlay.clone(),
+            None,
+        )
+        .await
         {
             Ok(prepared) => prepared,
             Err(error) => {
                 let _ = std::fs::remove_file(&path);
-                return Err(error.into());
+                return Err(error);
             }
         };
         current
@@ -652,46 +778,45 @@ impl AgentSessionRuntime {
     /// Rebuilds the entire current session through the factory. This reloads
     /// runtime, provider, feature, resource, and session plugin generations as
     /// one product-level transition.
-    pub async fn reload(&self) -> Result<(), AgentSessionRuntimeError> {
-        let _transition = self.transition_gate.lock().await;
-        self.ensure_open()?;
-        let current = self.session();
+    async fn replace_with_reload(
+        &self,
+        current: Arc<AgentSession>,
+    ) -> Result<AgentSessionReplacement, SessionError> {
         // Both generations refer to the same conversation. Sharing its journal
         // includes final shutdown-hook writes and preserves one mutation sequence,
         // including when the file has already materialized.
         let target = AgentSessionRuntimeTarget::reuse_log(current.log().clone());
         self.replace_current(
             current,
-            AgentSessionRuntimeRequest {
-                target,
-                start_event: SessionStartEvent {
-                    reason: SessionStartReason::Reload,
-                    previous_session_file: None,
-                },
-                generation_overlay: self.generation_overlay.clone(),
-                initial_state: None,
+            target,
+            SessionStartEvent {
+                reason: SessionStartReason::Reload,
+                previous_session_file: None,
             },
+            None,
             SessionShutdownEvent {
                 reason: SessionShutdownReason::Reload,
                 target_session_file: None,
             },
         )
-        .await
+        .await?;
+        Ok(AgentSessionReplacement::Replaced)
     }
 
-    pub fn abort(&self) {
+    pub(crate) fn abort(&self) {
         let session = self.session();
         session.abort();
         session.abort_compaction();
         session.abort_shell();
     }
 
-    pub async fn shutdown(&self) -> Result<(), AgentSessionRuntimeError> {
-        let _transition = self.transition_gate.lock().await;
-        if self.closed.swap(true, Ordering::AcqRel) {
+    pub(crate) async fn shutdown(&self) -> Result<(), SessionError> {
+        // Close and manager shutdown hold the same lifecycle write guard used
+        // by transition, so no separate runtime mutex is needed here.
+        let current = self.session();
+        if current.is_closed() {
             return Ok(());
         }
-        let current = self.session();
         let _transition = current.begin_replacement().await?;
         current.shutdown().await;
         Ok(())
@@ -700,23 +825,87 @@ impl AgentSessionRuntime {
     async fn replace_current(
         &self,
         current: Arc<AgentSession>,
-        request: AgentSessionRuntimeRequest,
+        target: AgentSessionRuntimeTarget,
+        start_event: SessionStartEvent,
+        initial_state: Option<AgentSessionInitialState>,
         shutdown_event: SessionShutdownEvent,
-    ) -> Result<(), AgentSessionRuntimeError> {
+    ) -> Result<(), SessionError> {
         let _session_transition = current.begin_replacement().await?;
-        let start_event = request.start_event.clone();
-        let prepared = self.factory.prepare(request).await?;
+        let prepared = Self::prepare_session(
+            self.factory.as_ref(),
+            target,
+            start_event.reason,
+            self.generation_overlay.clone(),
+            initial_state,
+        )
+        .await?;
         current.shutdown_with(shutdown_event).await;
         let next = prepared.activate(start_event).await;
         self.current.send_replace(next);
         Ok(())
     }
 
-    fn ensure_open(&self) -> Result<(), AgentSessionRuntimeError> {
-        if self.closed.load(Ordering::Acquire) {
-            Err(AgentSessionRuntimeError::Closed)
+    async fn prepare_session(
+        factory: &dyn SessionGenerationFactory,
+        target: AgentSessionRuntimeTarget,
+        reason: SessionStartReason,
+        generation_overlay: SessionGenerationOverlay,
+        initial_state: Option<AgentSessionInitialState>,
+    ) -> Result<PreparedAgentSession, SessionError> {
+        let (target, request) = ResolvedSessionTarget::resolve(
+            target,
+            reason,
+            generation_overlay,
+            initial_state.clone(),
+        )?;
+        let generation = factory.prepare_generation(request).await?;
+        let PreparedSessionGeneration {
+            runtime,
+            mut options,
+            session_bindings,
+            activations,
+        } = generation;
+
+        if let Some(initial_state) = initial_state
+            && let Err(error) = initial_state.apply_to(&runtime)
+        {
+            return Err(PreparedSessionGeneration::rollback(activations, error));
+        }
+
+        let prepared = match target {
+            ResolvedSessionTarget::Create {
+                path,
+                parent_session,
+                session_id,
+            } => {
+                options.parent_session_path = parent_session;
+                options.session_id = session_id;
+                AgentSession::prepare_create_with_options(runtime, path, options).await
+            }
+            ResolvedSessionTarget::Existing { log } => {
+                options.parent_session_path = None;
+                options.session_id = None;
+                AgentSession::prepare_reuse_with_options(runtime, log, options).await
+            }
+        };
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(PreparedSessionGeneration::rollback(activations, error));
+            }
+        };
+        let session = prepared.session();
+        for binding in session_bindings {
+            binding(Arc::clone(&session));
+        }
+        if activations.is_empty() {
+            Ok(prepared)
         } else {
-            Ok(())
+            Ok(prepared.with_activation_commit(move || {
+                for activation in activations {
+                    activation.commit();
+                }
+            }))
         }
     }
 }
@@ -751,7 +940,7 @@ fn comparable_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex as StdMutex;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use pi_agent::AgentOptions;
     use pi_core::{
@@ -759,26 +948,36 @@ mod tests {
     };
     use pi_runtime::PiRuntime;
     use pi_test_support::ScriptedProviderPlugin;
-    use tokio::sync::Notify;
 
     use super::*;
     use crate::{
-        AgentSessionOptions, SessionPlugin, SessionPluginContext, SessionPluginError,
-        SessionPlugins,
+        AgentSessionOptions, MultiSessionManager, MultiSessionManagerError, SessionPlugin,
+        SessionPluginContext, SessionPluginError, SessionPlugins,
     };
 
     #[derive(Clone)]
     struct TestFactory {
         events: Arc<StdMutex<Vec<String>>>,
+        requests: Arc<StdMutex<Vec<GenerationRequestSnapshot>>>,
         cancel_switch: Arc<AtomicBool>,
         fail_prepare: Arc<AtomicBool>,
         prepare_count: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct GenerationRequestSnapshot {
+        cwd: PathBuf,
+        session_path: PathBuf,
+        reason: SessionStartReason,
+        reload_model: Option<ModelSelection>,
+        has_initial_state: bool,
     }
 
     impl TestFactory {
         fn new() -> Self {
             Self {
                 events: Arc::new(StdMutex::new(Vec::new())),
+                requests: Arc::new(StdMutex::new(Vec::new())),
                 cancel_switch: Arc::new(AtomicBool::new(false)),
                 fail_prepare: Arc::new(AtomicBool::new(false)),
                 prepare_count: Arc::new(AtomicUsize::new(0)),
@@ -798,6 +997,13 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(event.into());
         }
+
+        fn requests(&self) -> Vec<GenerationRequestSnapshot> {
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
     }
 
     struct LifecyclePlugin {
@@ -806,6 +1012,81 @@ mod tests {
     }
 
     struct OverlayPlugin;
+
+    struct StagedActivation {
+        committed: Arc<AtomicBool>,
+        rolled_back: Arc<AtomicBool>,
+        armed: bool,
+    }
+
+    impl StagedActivation {
+        fn new(committed: Arc<AtomicBool>, rolled_back: Arc<AtomicBool>) -> Self {
+            Self {
+                committed,
+                rolled_back,
+                armed: true,
+            }
+        }
+
+        fn commit(mut self) {
+            self.committed.store(true, Ordering::Release);
+            self.armed = false;
+        }
+    }
+
+    impl Drop for StagedActivation {
+        fn drop(&mut self) {
+            if self.armed {
+                self.rolled_back.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    struct RecordedActivation {
+        factory: TestFactory,
+        label: &'static str,
+        staged: Option<StagedActivation>,
+    }
+
+    impl SessionGenerationActivation for RecordedActivation {
+        fn commit(mut self: Box<Self>) {
+            if let Some(staged) = self.staged.take() {
+                staged.commit();
+            }
+            self.factory.record(self.label);
+        }
+    }
+
+    #[derive(Clone)]
+    struct ActivationFactory {
+        inner: TestFactory,
+        committed: Arc<AtomicBool>,
+        rolled_back: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl SessionGenerationFactory for ActivationFactory {
+        async fn prepare_generation(
+            &self,
+            request: SessionGenerationRequest,
+        ) -> Result<PreparedSessionGeneration, SessionError> {
+            let generation = self.inner.prepare_generation(request).await?;
+            Ok(generation
+                .with_activation(RecordedActivation {
+                    factory: self.inner.clone(),
+                    label: "commit:first",
+                    staged: None,
+                })
+                .with_activation(RecordedActivation {
+                    factory: self.inner.clone(),
+                    label: "commit:second",
+                    staged: Some(StagedActivation::new(
+                        Arc::clone(&self.committed),
+                        Arc::clone(&self.rolled_back),
+                    )),
+                }))
+        }
+    }
 
     #[pi_core::agent_plugin]
     impl AgentPlugin for OverlayPlugin {
@@ -864,13 +1145,23 @@ mod tests {
     }
 
     #[async_trait]
-    impl AgentSessionRuntimeFactory for TestFactory {
-        async fn prepare(
+    impl SessionGenerationFactory for TestFactory {
+        async fn prepare_generation(
             &self,
-            request: AgentSessionRuntimeRequest,
-        ) -> Result<PreparedAgentSession, SessionError> {
+            request: SessionGenerationRequest,
+        ) -> Result<PreparedSessionGeneration, SessionError> {
             self.prepare_count.fetch_add(1, Ordering::AcqRel);
-            self.record(format!("prepare:{:?}", request.start_event.reason));
+            self.record(format!("prepare:{:?}", request.reason));
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(GenerationRequestSnapshot {
+                    cwd: request.cwd.clone(),
+                    session_path: request.session_path.clone(),
+                    reason: request.reason,
+                    reload_model: request.reload_model.clone(),
+                    has_initial_state: request.initial_state.is_some(),
+                });
             if self.fail_prepare.load(Ordering::Acquire) {
                 return Err(SessionError::Runtime(
                     "fixture preparation failed".to_string(),
@@ -878,28 +1169,12 @@ mod tests {
             }
 
             let generation_overlay = request.generation_overlay;
-            let (cwd, path, create, reused_log) = match request.target {
-                AgentSessionRuntimeTarget::Create { cwd, path, .. } => (cwd, path, true, None),
-                AgentSessionRuntimeTarget::Open { path } => {
-                    let (_, document) = crate::SessionLog::open(&path)?;
-                    (document.header.cwd, path, false, None)
-                }
-                AgentSessionRuntimeTarget::Reuse { log } => {
-                    let document = log.load()?;
-                    (
-                        document.header.cwd,
-                        log.path().to_path_buf(),
-                        false,
-                        Some(log),
-                    )
-                }
-            };
             let mut builder = PiRuntime::builder()
                 .provider_plugin(ScriptedProviderPlugin::scripted([]))
                 .agent_options(AgentOptions {
                     provider_id: ProviderId::new("scripted"),
                     model_id: ModelId::new("test"),
-                    cwd,
+                    cwd: request.cwd,
                     ..AgentOptions::default()
                 });
             builder = generation_overlay.apply_to(builder);
@@ -910,14 +1185,125 @@ mod tests {
                     cancel_switch: Arc::clone(&self.cancel_switch),
                 },
             ));
-            if create {
-                AgentSession::prepare_create_with_options(runtime, path, options).await
-            } else if let Some(log) = reused_log {
-                AgentSession::prepare_reuse_with_options(runtime, log, options).await
-            } else {
-                AgentSession::prepare_open_with_options(runtime, path, options).await
-            }
+            Ok(PreparedSessionGeneration::new(runtime, options))
         }
+    }
+
+    #[tokio::test]
+    async fn factory_receives_resolved_generation_context_without_owning_session_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path().join("project");
+        let path = directory.path().join("session.jsonl");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let factory = TestFactory::new();
+        let manager = MultiSessionManager::new(factory.clone());
+        let session = manager.create_session(&cwd, &path).await.unwrap();
+
+        assert_eq!(session.path(), path);
+        assert_eq!(
+            factory.requests(),
+            [GenerationRequestSnapshot {
+                cwd: cwd.clone(),
+                session_path: path.clone(),
+                reason: SessionStartReason::Startup,
+                reload_model: None,
+                has_initial_state: false,
+            }]
+        );
+
+        session.reload().await.unwrap();
+
+        assert_eq!(session.path(), path);
+        assert_eq!(
+            factory.requests()[1],
+            GenerationRequestSnapshot {
+                cwd,
+                session_path: path,
+                reason: SessionStartReason::Reload,
+                reload_model: Some(ModelSelection::new("scripted", "test")),
+                has_initial_state: false,
+            }
+        );
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_session_defers_external_state_until_activation() {
+        let directory = tempfile::tempdir().unwrap();
+        let inner = TestFactory::new();
+        let committed = Arc::new(AtomicBool::new(false));
+        let rolled_back = Arc::new(AtomicBool::new(false));
+        let factory = ActivationFactory {
+            inner: inner.clone(),
+            committed: Arc::clone(&committed),
+            rolled_back: Arc::clone(&rolled_back),
+        };
+        let start_event = SessionStartEvent {
+            reason: SessionStartReason::Startup,
+            previous_session_file: None,
+        };
+        let prepared = AgentSessionRuntime::prepare_session(
+            &factory,
+            AgentSessionRuntimeTarget::create(
+                directory.path(),
+                directory.path().join("session.jsonl"),
+            ),
+            start_event.reason,
+            SessionGenerationOverlay::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(!committed.load(Ordering::Acquire));
+        assert!(!rolled_back.load(Ordering::Acquire));
+        assert_eq!(inner.events(), ["prepare:Startup"]);
+
+        let session = prepared.activate(start_event).await;
+
+        assert!(committed.load(Ordering::Acquire));
+        assert!(!rolled_back.load(Ordering::Acquire));
+        assert_eq!(
+            inner.events(),
+            [
+                "prepare:Startup",
+                "commit:first",
+                "commit:second",
+                "start:Startup",
+            ]
+        );
+        session.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn dropping_a_prepared_session_rolls_back_staged_external_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let inner = TestFactory::new();
+        let committed = Arc::new(AtomicBool::new(false));
+        let rolled_back = Arc::new(AtomicBool::new(false));
+        let factory = ActivationFactory {
+            inner: inner.clone(),
+            committed: Arc::clone(&committed),
+            rolled_back: Arc::clone(&rolled_back),
+        };
+        let prepared = AgentSessionRuntime::prepare_session(
+            &factory,
+            AgentSessionRuntimeTarget::create(
+                directory.path(),
+                directory.path().join("session.jsonl"),
+            ),
+            SessionStartReason::Startup,
+            SessionGenerationOverlay::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        drop(prepared);
+
+        assert!(!committed.load(Ordering::Acquire));
+        assert!(rolled_back.load(Ordering::Acquire));
+        assert_eq!(inner.events(), ["prepare:Startup"]);
     }
 
     #[tokio::test]
@@ -930,67 +1316,44 @@ mod tests {
             factory_loads.fetch_add(1, Ordering::AcqRel);
             Arc::new(OverlayPlugin)
         });
-        let runtime = AgentSessionRuntime::create_with_overlay(
-            TestFactory::new(),
-            AgentSessionRuntimeTarget::create(directory.path(), &path),
-            overlay,
-        )
-        .await
-        .unwrap();
+        let manager = MultiSessionManager::new(TestFactory::new());
+        let session = manager
+            .create_session_with_overlay(directory.path(), &path, overlay)
+            .await
+            .unwrap();
 
         assert!(
-            runtime
-                .session()
+            session
+                .current()
                 .runtime()
                 .plugin_order()
                 .contains(&PluginId::new("session-overlay"))
         );
         assert_eq!(loads.load(Ordering::Acquire), 1);
 
-        runtime.reload().await.unwrap();
+        session.reload().await.unwrap();
         assert!(
-            runtime
-                .session()
+            session
+                .current()
                 .runtime()
                 .plugin_order()
                 .contains(&PluginId::new("session-overlay"))
         );
         assert_eq!(loads.load(Ordering::Acquire), 2);
 
-        runtime
+        session
             .new_session(directory.path(), directory.path().join("second.jsonl"))
             .await
             .unwrap();
         assert!(
-            runtime
-                .session()
+            session
+                .current()
                 .runtime()
                 .plugin_order()
                 .contains(&PluginId::new("session-overlay"))
         );
         assert_eq!(loads.load(Ordering::Acquire), 3);
-    }
-
-    #[derive(Clone)]
-    struct BlockingFactory {
-        inner: TestFactory,
-        block: Arc<AtomicBool>,
-        entered: Arc<Notify>,
-        release: Arc<Notify>,
-    }
-
-    #[async_trait]
-    impl AgentSessionRuntimeFactory for BlockingFactory {
-        async fn prepare(
-            &self,
-            request: AgentSessionRuntimeRequest,
-        ) -> Result<PreparedAgentSession, SessionError> {
-            if self.block.load(Ordering::Acquire) {
-                self.entered.notify_one();
-                self.release.notified().await;
-            }
-            self.inner.prepare(request).await
-        }
+        manager.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -999,24 +1362,23 @@ mod tests {
         let first_path = directory.path().join("first.jsonl");
         let second_path = directory.path().join("second.jsonl");
         let factory = TestFactory::new();
-        let runtime = AgentSessionRuntime::create(
-            factory.clone(),
-            AgentSessionRuntimeTarget::create(directory.path(), &first_path),
-        )
-        .await
-        .unwrap();
-        let mut changes = runtime.subscribe();
-        let first = runtime.session();
+        let manager = MultiSessionManager::new(factory.clone());
+        let session = manager
+            .create_session(directory.path(), &first_path)
+            .await
+            .unwrap();
+        let mut changes = session.subscribe();
+        let first = session.current();
         first.log().materialize().unwrap();
 
-        let outcome = runtime
+        let outcome = session
             .new_session(directory.path(), &second_path)
             .await
             .unwrap();
 
         assert_eq!(outcome, AgentSessionReplacement::Replaced);
         changes.changed().await.unwrap();
-        let second = runtime.session();
+        let second = session.current();
         assert!(!Arc::ptr_eq(&first, &second));
         assert!(first.is_closed());
         assert!(matches!(
@@ -1036,10 +1398,10 @@ mod tests {
             ]
         );
 
-        let outcome = runtime.switch_session(&first_path).await.unwrap();
+        let outcome = session.resume_session(&first_path).await.unwrap();
 
         assert_eq!(outcome, AgentSessionReplacement::Replaced);
-        assert_eq!(runtime.session().log().path(), first_path);
+        assert_eq!(session.path(), first_path);
         assert_eq!(
             &factory.events()[6..],
             [
@@ -1049,6 +1411,7 @@ mod tests {
                 "start:Resume",
             ]
         );
+        manager.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1064,21 +1427,20 @@ mod tests {
             .append_message(Message::User(UserMessage::text("portable", 1)))
             .unwrap();
         let factory = TestFactory::new();
-        let runtime = AgentSessionRuntime::create(
-            factory.clone(),
-            AgentSessionRuntimeTarget::create(directory.path(), &current_path),
-        )
-        .await
-        .unwrap();
-        let current = runtime.session();
+        let manager = MultiSessionManager::new(factory.clone());
+        let session = manager
+            .create_session(directory.path(), &current_path)
+            .await
+            .unwrap();
+        let current = session.current();
 
-        let outcome = runtime.import_session(&source, &destination).await.unwrap();
+        let outcome = session.import_session(&source).await.unwrap();
 
         assert_eq!(outcome, AgentSessionReplacement::Replaced);
         assert!(current.is_closed());
-        assert_eq!(runtime.session().log().path(), destination);
-        assert_eq!(runtime.session().log().header().id, "imported");
-        assert_eq!(runtime.session().log().load().unwrap().messages().len(), 1);
+        assert_eq!(session.path(), destination);
+        assert_eq!(session.current().log().header().id, "imported");
+        assert_eq!(session.current().log().load().unwrap().messages().len(), 1);
         assert!(source.exists());
         assert_eq!(
             factory.events(),
@@ -1091,36 +1453,34 @@ mod tests {
                 "start:Resume",
             ]
         );
+        manager.shutdown().await.unwrap();
     }
 
     #[tokio::test]
     async fn failed_import_leaves_the_source_and_current_session_unchanged() {
         let directory = tempfile::tempdir().unwrap();
+        let source_directory = tempfile::tempdir().unwrap();
         let current_path = directory.path().join("current.jsonl");
         let destination = directory.path().join("legacy.jsonl");
-        let source = directory.path().join("outside-legacy.jsonl");
+        let source = source_directory.path().join("legacy.jsonl");
         let legacy = r#"{"type":"session","version":3,"id":"legacy"}
 "#;
         std::fs::write(&source, legacy).unwrap();
-        let factory = TestFactory::new();
-        let runtime = AgentSessionRuntime::create(
-            factory,
-            AgentSessionRuntimeTarget::create(directory.path(), &current_path),
-        )
-        .await
-        .unwrap();
-        let current = runtime.session();
-
-        let error = runtime
-            .import_session(&source, &destination)
+        let manager = MultiSessionManager::new(TestFactory::new());
+        let session = manager
+            .create_session(directory.path(), &current_path)
             .await
-            .unwrap_err();
+            .unwrap();
+        let current = session.current();
 
-        assert!(matches!(error, AgentSessionRuntimeError::Session(_)));
-        assert!(Arc::ptr_eq(&current, &runtime.session()));
+        let error = session.import_session(&source).await.unwrap_err();
+
+        assert!(matches!(error, MultiSessionManagerError::Session(_)));
+        assert!(Arc::ptr_eq(&current, &session.current()));
         assert!(!current.is_closed());
         assert!(!destination.exists());
         assert_eq!(std::fs::read_to_string(source).unwrap(), legacy);
+        manager.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1128,27 +1488,26 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let first_path = directory.path().join("first.jsonl");
         let factory = TestFactory::new();
-        let runtime = AgentSessionRuntime::create(
-            factory.clone(),
-            AgentSessionRuntimeTarget::create(directory.path(), &first_path),
-        )
-        .await
-        .unwrap();
-        let first = runtime.session();
+        let manager = MultiSessionManager::new(factory.clone());
+        let session = manager
+            .create_session(directory.path(), &first_path)
+            .await
+            .unwrap();
+        let first = session.current();
         let user = first
             .log()
             .append_message(Message::User(UserMessage::text("fork here", 1)))
             .unwrap();
         first.log().materialize().unwrap();
 
-        let outcome = runtime
+        let outcome = session
             .fork_session(&user, ForkPosition::Before)
             .await
             .unwrap();
 
         assert_eq!(outcome, AgentSessionReplacement::Replaced);
         assert!(first.is_closed());
-        let fork = runtime.session();
+        let fork = session.current();
         assert_ne!(fork.log().path(), first_path);
         assert_eq!(
             fork.log().header().parent_session_id.as_deref(),
@@ -1159,6 +1518,7 @@ mod tests {
             &factory.events()[2..],
             ["prepare:Fork", "shutdown:Fork", "start:Fork"]
         );
+        manager.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1166,27 +1526,27 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let first_path = directory.path().join("first.jsonl");
         let factory = TestFactory::new();
-        let runtime = AgentSessionRuntime::create(
-            factory.clone(),
-            AgentSessionRuntimeTarget::create(directory.path(), &first_path),
-        )
-        .await
-        .unwrap();
-        let first = runtime.session();
+        let manager = MultiSessionManager::new(factory.clone());
+        let session = manager
+            .create_session(directory.path(), &first_path)
+            .await
+            .unwrap();
+        let first = session.current();
         factory.cancel_switch.store(true, Ordering::Release);
 
-        let outcome = runtime
+        let outcome = session
             .new_session(directory.path(), directory.path().join("second.jsonl"))
             .await
             .unwrap();
 
         assert_eq!(outcome, AgentSessionReplacement::Cancelled);
-        assert!(Arc::ptr_eq(&first, &runtime.session()));
+        assert!(Arc::ptr_eq(&first, &session.current()));
         assert_eq!(factory.prepare_count.load(Ordering::Acquire), 1);
         assert_eq!(
             factory.events(),
             vec!["prepare:Startup", "start:Startup", "before:New"]
         );
+        manager.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1194,22 +1554,21 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let first_path = directory.path().join("first.jsonl");
         let factory = TestFactory::new();
-        let runtime = AgentSessionRuntime::create(
-            factory.clone(),
-            AgentSessionRuntimeTarget::create(directory.path(), &first_path),
-        )
-        .await
-        .unwrap();
-        let first = runtime.session();
+        let manager = MultiSessionManager::new(factory.clone());
+        let session = manager
+            .create_session(directory.path(), &first_path)
+            .await
+            .unwrap();
+        let first = session.current();
         factory.fail_prepare.store(true, Ordering::Release);
 
-        let error = runtime
+        let error = session
             .new_session(directory.path(), directory.path().join("second.jsonl"))
             .await
             .unwrap_err();
 
-        assert!(matches!(error, AgentSessionRuntimeError::Session(_)));
-        assert!(Arc::ptr_eq(&first, &runtime.session()));
+        assert!(matches!(error, MultiSessionManagerError::Session(_)));
+        assert!(Arc::ptr_eq(&first, &session.current()));
         assert!(!first.is_closed());
         first
             .set_name(Some("still active".to_string()))
@@ -1224,63 +1583,29 @@ mod tests {
                 "prepare:New",
             ]
         );
+        factory.fail_prepare.store(false, Ordering::Release);
+        manager.shutdown().await.unwrap();
     }
 
     #[tokio::test]
-    async fn cancelled_replacement_future_reopens_the_current_session() {
-        let directory = tempfile::tempdir().unwrap();
-        let first_path = directory.path().join("first.jsonl");
-        let inner = TestFactory::new();
-        let factory = BlockingFactory {
-            inner,
-            block: Arc::new(AtomicBool::new(false)),
-            entered: Arc::new(Notify::new()),
-            release: Arc::new(Notify::new()),
-        };
-        let runtime = AgentSessionRuntime::create(
-            factory.clone(),
-            AgentSessionRuntimeTarget::create(directory.path(), &first_path),
-        )
-        .await
-        .unwrap();
-        let first = runtime.session();
-        factory.block.store(true, Ordering::Release);
-
-        let replacing = {
-            let runtime = runtime.clone();
-            let cwd = directory.path().to_path_buf();
-            let second_path = directory.path().join("second.jsonl");
-            tokio::spawn(async move { runtime.new_session(cwd, second_path).await })
-        };
-        factory.entered.notified().await;
-        replacing.abort();
-        assert!(replacing.await.unwrap_err().is_cancelled());
-
-        assert!(Arc::ptr_eq(&first, &runtime.session()));
-        assert!(!first.is_closed());
-        first.set_name(Some("reopened".to_string())).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn reload_rebuilds_the_whole_session_and_shutdown_is_idempotent() {
+    async fn reload_rebuilds_the_whole_session_and_manager_shutdown_is_idempotent() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
         let factory = TestFactory::new();
-        let runtime = AgentSessionRuntime::create(
-            factory.clone(),
-            AgentSessionRuntimeTarget::create(directory.path(), &path),
-        )
-        .await
-        .unwrap();
-        let first = runtime.session();
+        let manager = MultiSessionManager::new(factory.clone());
+        let session = manager
+            .create_session(directory.path(), &path)
+            .await
+            .unwrap();
+        let first = session.current();
         assert!(!path.exists());
 
-        runtime.reload().await.unwrap();
+        session.reload().await.unwrap();
 
-        assert!(!Arc::ptr_eq(&first, &runtime.session()));
-        assert_eq!(runtime.session().log().path(), path);
+        assert!(!Arc::ptr_eq(&first, &session.current()));
+        assert_eq!(session.path(), path);
         assert!(!path.exists());
-        assert!(!runtime.session().log().is_materialized());
+        assert!(!session.current().log().is_materialized());
         assert_eq!(
             factory.events(),
             vec![
@@ -1292,15 +1617,15 @@ mod tests {
             ]
         );
 
-        runtime.shutdown().await.unwrap();
-        runtime.shutdown().await.unwrap();
+        manager.shutdown().await.unwrap();
+        manager.shutdown().await.unwrap();
         assert_eq!(
             factory.events().last().map(String::as_str),
             Some("shutdown:Quit")
         );
         assert!(matches!(
-            runtime.reload().await.unwrap_err(),
-            AgentSessionRuntimeError::Closed
+            session.reload().await.unwrap_err(),
+            MultiSessionManagerError::Closed
         ));
     }
 }

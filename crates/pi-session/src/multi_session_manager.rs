@@ -1,8 +1,12 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::task::{Context, Poll};
 
+#[cfg(test)]
 use async_trait::async_trait;
 use pi_core::{
     CustomMessageContent, IsolatedFollowUpReceipt, IsolatedMessageReceipt, IsolatedSessionId,
@@ -11,14 +15,17 @@ use pi_core::{
 };
 use tokio::sync::watch;
 
+use crate::agent_session_runtime::{
+    AgentSessionRuntime, AgentSessionRuntimeTarget, ResolvedSessionTransition,
+};
 use crate::isolated_session::IsolatedSessionRegistry;
 use crate::{
     AgentSession, AgentSessionInitialModelSource, AgentSessionInitialState,
-    AgentSessionReplacement, AgentSessionRuntime, AgentSessionRuntimeError,
-    AgentSessionRuntimeFactory, AgentSessionRuntimeRequest, AgentSessionRuntimeTarget,
-    ForkPosition, IsolatedSessionObservation, PreparedAgentSession, SessionError,
-    SessionFileFormat, SessionGenerationOverlay, inspect_session_file,
+    AgentSessionReplacement, ForkPosition, IsolatedSessionObservation, SessionError,
+    SessionFileFormat, SessionGenerationFactory, SessionGenerationOverlay, inspect_session_file,
 };
+#[cfg(test)]
+use crate::{PreparedSessionGeneration, SessionGenerationActivation, SessionGenerationRequest};
 
 /// Owns and coordinates multiple active Pi sessions.
 ///
@@ -30,10 +37,10 @@ pub struct MultiSessionManager {
 }
 
 struct MultiSessionManagerInner {
-    factory: Arc<dyn AgentSessionRuntimeFactory>,
+    factory: Arc<dyn SessionGenerationFactory>,
     sessions: Mutex<HashMap<String, PiSession>>,
     isolated_sessions: IsolatedSessionRegistry,
-    operation_gate: tokio::sync::RwLock<()>,
+    operation_gate: Arc<tokio::sync::RwLock<()>>,
     closed: AtomicBool,
 }
 
@@ -61,7 +68,7 @@ pub struct WeakPiSession {
 #[derive(Debug, thiserror::Error)]
 pub enum MultiSessionManagerError {
     #[error(transparent)]
-    Runtime(#[from] AgentSessionRuntimeError),
+    Session(#[from] SessionError),
     #[error("multi-session manager is closed")]
     Closed,
     #[error("session is not managed by this multi-session manager")]
@@ -76,30 +83,214 @@ pub enum MultiSessionManagerError {
     InvalidIsolatedRequest(String),
 }
 
-#[derive(Clone)]
-struct SharedFactory(Arc<dyn AgentSessionRuntimeFactory>);
+enum SessionReplacementRequest {
+    New {
+        cwd: PathBuf,
+        path: PathBuf,
+        parent_session: Option<PathBuf>,
+    },
+    Resume {
+        path: PathBuf,
+    },
+    Import {
+        source: PathBuf,
+    },
+    Fork {
+        entry_id: String,
+        position: ForkPosition,
+    },
+    Reload,
+}
 
-#[async_trait]
-impl AgentSessionRuntimeFactory for SharedFactory {
-    async fn prepare(
-        &self,
-        request: AgentSessionRuntimeRequest,
-    ) -> Result<PreparedAgentSession, SessionError> {
-        self.0.prepare(request).await
+impl SessionReplacementRequest {
+    fn resolve(
+        self,
+        owner: &PiSession,
+        manager: &MultiSessionManagerInner,
+    ) -> Result<ResolvedSessionTransition, MultiSessionManagerError> {
+        match self {
+            Self::New {
+                cwd,
+                path,
+                parent_session,
+            } => {
+                manager.ensure_path_available(owner, &path)?;
+                Ok(ResolvedSessionTransition::New {
+                    cwd,
+                    path,
+                    parent_session,
+                })
+            }
+            Self::Resume { path } => {
+                manager.ensure_path_available(owner, &path)?;
+                Ok(ResolvedSessionTransition::Resume { path })
+            }
+            Self::Import { source } => {
+                let file_name = source
+                    .file_name()
+                    .ok_or_else(|| MultiSessionManagerError::InvalidImportPath(source.clone()))?;
+                let current_path = owner.path();
+                let mut destination = current_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(file_name);
+                if comparable_path(&source) == comparable_path(&destination)
+                    && matches!(
+                        inspect_session_file(&source)?,
+                        SessionFileFormat::Legacy { .. }
+                    )
+                {
+                    destination = legacy_import_destination(&destination);
+                }
+                if comparable_path(&current_path) == comparable_path(&destination) {
+                    return Err(MultiSessionManagerError::ImportWouldReplaceCurrent(
+                        destination,
+                    ));
+                }
+                manager.ensure_path_available(owner, &destination)?;
+                Ok(ResolvedSessionTransition::Import {
+                    source,
+                    destination,
+                })
+            }
+            Self::Fork { entry_id, position } => {
+                Ok(ResolvedSessionTransition::Fork { entry_id, position })
+            }
+            Self::Reload => Ok(ResolvedSessionTransition::Reload),
+        }
+    }
+}
+
+/// Owns every manager-level capability for one session replacement until the
+/// nested runtime transaction either commits or returns an error.
+struct ManagedSessionReplacement {
+    owner: PiSession,
+    manager: Arc<MultiSessionManagerInner>,
+    _operation: tokio::sync::OwnedRwLockWriteGuard<()>,
+}
+
+/// Polls a lifecycle transaction in place and detaches only its unfinished
+/// remainder when the requesting future is dropped.
+struct CompleteOnDrop<T: Send + 'static> {
+    future: Option<Pin<Box<dyn Future<Output = T> + Send>>>,
+    runtime: tokio::runtime::Handle,
+    polling: bool,
+}
+
+#[derive(Clone, Copy)]
+enum UnclaimedSessionPolicy {
+    Retain,
+    Close,
+}
+
+struct SessionAcquisition {
+    target: AgentSessionRuntimeTarget,
+    existing: ExistingSessionPolicy,
+    generation_overlay: SessionGenerationOverlay,
+    initial_state: Option<AgentSessionInitialState>,
+    initial_context: Option<crate::isolated_context::IsolatedContextSeed>,
+    unclaimed: UnclaimedSessionPolicy,
+}
+
+struct AcquiredSession<G: Send + 'static> {
+    session: Option<PiSession>,
+    operation: Option<G>,
+    manager: Arc<MultiSessionManagerInner>,
+    policy: UnclaimedSessionPolicy,
+    runtime: tokio::runtime::Handle,
+}
+
+impl<G: Send + 'static> AcquiredSession<G> {
+    fn claim(mut self) -> (PiSession, G) {
+        (
+            self.session
+                .take()
+                .expect("acquired session must be available until claimed"),
+            self.operation
+                .take()
+                .expect("acquisition guard must be available until claimed"),
+        )
+    }
+}
+
+impl<G: Send + 'static> Drop for AcquiredSession<G> {
+    fn drop(&mut self) {
+        if !matches!(self.policy, UnclaimedSessionPolicy::Close) {
+            return;
+        }
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        // Release the shared acquisition guard before waiting for exclusive
+        // cleanup. The registered path remains owned by the manager meanwhile.
+        drop(self.operation.take());
+        let manager = Arc::clone(&self.manager);
+        drop(self.runtime.spawn(async move {
+            let _operation = Arc::clone(&manager.operation_gate).write_owned().await;
+            if manager.ensure_managed(&session).is_ok() {
+                let _ = manager.close_session_tree_locked(&session).await;
+            }
+        }));
+    }
+}
+
+impl<T: Send + 'static> Unpin for CompleteOnDrop<T> {}
+
+impl<T: Send + 'static> Future for CompleteOnDrop<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        this.polling = true;
+        let result = this
+            .future
+            .as_mut()
+            .expect("completed lifecycle future must not be polled again")
+            .as_mut()
+            .poll(context);
+        this.polling = false;
+        if result.is_ready() {
+            this.future.take();
+        }
+        result
+    }
+}
+
+impl<T: Send + 'static> Drop for CompleteOnDrop<T> {
+    fn drop(&mut self) {
+        // A panic while polling must unwind normally; repolling a panicked
+        // future is invalid. Ordinary cancellation happens between polls.
+        if self.polling {
+            return;
+        }
+        if let Some(future) = self.future.take() {
+            drop(self.runtime.spawn(future));
+        }
+    }
+}
+
+fn complete_on_drop<T>(future: impl Future<Output = T> + Send + 'static) -> CompleteOnDrop<T>
+where
+    T: Send + 'static,
+{
+    CompleteOnDrop {
+        future: Some(Box::pin(future)),
+        runtime: tokio::runtime::Handle::current(),
+        polling: false,
     }
 }
 
 impl MultiSessionManager {
     pub fn new<F>(factory: F) -> Self
     where
-        F: AgentSessionRuntimeFactory + 'static,
+        F: SessionGenerationFactory + 'static,
     {
         Self {
             inner: Arc::new(MultiSessionManagerInner {
                 factory: Arc::new(factory),
                 sessions: Mutex::new(HashMap::new()),
                 isolated_sessions: IsolatedSessionRegistry::default(),
-                operation_gate: tokio::sync::RwLock::new(()),
+                operation_gate: Arc::new(tokio::sync::RwLock::new(())),
                 closed: AtomicBool::new(false),
             }),
         }
@@ -222,15 +413,70 @@ impl MultiSessionManager {
         existing: ExistingSessionPolicy,
         generation_overlay: SessionGenerationOverlay,
     ) -> Result<PiSession, MultiSessionManagerError> {
-        let _operation = self.inner.operation_gate.write().await;
-        self.inner.ensure_open()?;
-        self.inner
-            .acquire_locked(target, existing, generation_overlay, None, None)
-            .await
+        let manager = Arc::clone(&self.inner);
+        let operation = Arc::clone(&manager.operation_gate).write_owned().await;
+        manager.ensure_open()?;
+        let acquired = manager
+            .acquire_with_guard(
+                operation,
+                SessionAcquisition {
+                    target,
+                    existing,
+                    generation_overlay,
+                    initial_state: None,
+                    initial_context: None,
+                    unclaimed: UnclaimedSessionPolicy::Retain,
+                },
+            )
+            .await?;
+        let (session, _operation) = acquired.claim();
+        Ok(session)
     }
 }
 
 impl MultiSessionManagerInner {
+    /// Once the lifecycle guard has been acquired, construction, activation,
+    /// and registration finish together even if the requesting future is
+    /// dropped. The returned guard lets isolated-session callers retain their
+    /// shared exclusion through launch readiness.
+    async fn acquire_with_guard<G>(
+        self: Arc<Self>,
+        operation: G,
+        acquisition: SessionAcquisition,
+    ) -> Result<AcquiredSession<G>, MultiSessionManagerError>
+    where
+        G: Send + 'static,
+    {
+        complete_on_drop(async move {
+            let SessionAcquisition {
+                target,
+                existing,
+                generation_overlay,
+                initial_state,
+                initial_context,
+                unclaimed,
+            } = acquisition;
+            let manager = Arc::clone(&self);
+            let session = self
+                .acquire_locked(
+                    target,
+                    existing,
+                    generation_overlay,
+                    initial_state,
+                    initial_context,
+                )
+                .await?;
+            Ok(AcquiredSession {
+                session: Some(session),
+                operation: Some(operation),
+                manager,
+                policy: unclaimed,
+                runtime: tokio::runtime::Handle::current(),
+            })
+        })
+        .await
+    }
+
     async fn acquire_locked(
         self: &Arc<Self>,
         target: AgentSessionRuntimeTarget,
@@ -249,7 +495,7 @@ impl MultiSessionManagerInner {
             };
         }
         let runtime = AgentSessionRuntime::create_with_overlay_and_initial_state(
-            SharedFactory(Arc::clone(&self.factory)),
+            Arc::clone(&self.factory),
             target,
             generation_overlay,
             initial_state,
@@ -312,6 +558,37 @@ impl MultiSessionManagerInner {
     }
 }
 
+impl ManagedSessionReplacement {
+    async fn begin(owner: PiSession) -> Result<Self, MultiSessionManagerError> {
+        let manager = owner.manager()?;
+        let operation = Arc::clone(&manager.operation_gate).write_owned().await;
+        manager.ensure_open()?;
+        manager.ensure_managed(&owner)?;
+        Ok(Self {
+            owner,
+            manager,
+            _operation: operation,
+        })
+    }
+
+    /// Dropping the caller's future detaches the unfinished transaction with
+    /// its owned path guard through the last lifecycle await and publication.
+    async fn run(
+        self,
+        request: SessionReplacementRequest,
+    ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
+        complete_on_drop(self.execute(request)).await
+    }
+
+    async fn execute(
+        self,
+        request: SessionReplacementRequest,
+    ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
+        let transition = request.resolve(&self.owner, &self.manager)?;
+        Ok(self.owner.runtime.transition(transition).await?)
+    }
+}
+
 impl PiSession {
     pub fn downgrade(&self) -> WeakPiSession {
         WeakPiSession {
@@ -354,7 +631,7 @@ impl PiSession {
         // Isolated paths are UUID-derived, so child preparations may run in
         // parallel while session replacement, close, and shutdown remain
         // excluded by the write side of this gate.
-        let _operation = manager.operation_gate.read().await;
+        let operation = Arc::clone(&manager.operation_gate).read_owned().await;
         manager.ensure_open()?;
         if !manager
             .sessions
@@ -392,16 +669,21 @@ impl PiSession {
         let fresh_context = initial_context.is_none();
         let initial_state = resolve_isolated_initial_state(&parent, request.options)?;
         let path = isolated_session_path(&self.path());
-        let child = manager
-            .acquire_locked(
-                AgentSessionRuntimeTarget::create(self.cwd(), path),
-                ExistingSessionPolicy::Reject,
-                SessionGenerationOverlay::default()
-                    .with_execution_origin(pi_core::SessionExecutionOrigin::Subagent),
-                Some(initial_state),
-                initial_context,
+        let acquired = Arc::clone(&manager)
+            .acquire_with_guard(
+                operation,
+                SessionAcquisition {
+                    target: AgentSessionRuntimeTarget::create(self.cwd(), path),
+                    existing: ExistingSessionPolicy::Reject,
+                    generation_overlay: SessionGenerationOverlay::default()
+                        .with_execution_origin(pi_core::SessionExecutionOrigin::Subagent),
+                    initial_state: Some(initial_state),
+                    initial_context,
+                    unclaimed: UnclaimedSessionPolicy::Close,
+                },
             )
             .await?;
+        let (child, _operation) = acquired.claim();
         if fresh_context {
             let origin = crate::SessionEntry::Custom(crate::CustomEntry {
                 custom_type: crate::isolated_context::ORIGIN_CUSTOM_TYPE.into(),
@@ -529,13 +811,12 @@ impl PiSession {
         cwd: impl Into<PathBuf>,
         path: impl Into<PathBuf>,
     ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
-        let cwd = cwd.into();
-        let path = path.into();
-        let manager = self.manager()?;
-        let _operation = manager.operation_gate.write().await;
-        manager.ensure_open()?;
-        manager.ensure_path_available(self, &path)?;
-        Ok(self.runtime.new_session(cwd, path).await?)
+        self.replace(SessionReplacementRequest::New {
+            cwd: cwd.into(),
+            path: path.into(),
+            parent_session: None,
+        })
+        .await
     }
 
     pub async fn new_session_with_parent(
@@ -544,28 +825,20 @@ impl PiSession {
         path: impl Into<PathBuf>,
         parent_session: impl Into<PathBuf>,
     ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
-        let cwd = cwd.into();
-        let path = path.into();
-        let manager = self.manager()?;
-        let _operation = manager.operation_gate.write().await;
-        manager.ensure_open()?;
-        manager.ensure_path_available(self, &path)?;
-        Ok(self
-            .runtime
-            .new_session_with_parent(cwd, path, Some(parent_session.into()))
-            .await?)
+        self.replace(SessionReplacementRequest::New {
+            cwd: cwd.into(),
+            path: path.into(),
+            parent_session: Some(parent_session.into()),
+        })
+        .await
     }
 
     pub async fn resume_session(
         &self,
         path: impl Into<PathBuf>,
     ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
-        let path = path.into();
-        let manager = self.manager()?;
-        let _operation = manager.operation_gate.write().await;
-        manager.ensure_open()?;
-        manager.ensure_path_available(self, &path)?;
-        Ok(self.runtime.switch_session(path).await?)
+        self.replace(SessionReplacementRequest::Resume { path: path.into() })
+            .await
     }
 
     /// Imports a v4 JSONL file, or migrates a coding-agent v1-v3 file, into the
@@ -574,34 +847,10 @@ impl PiSession {
         &self,
         source: impl Into<PathBuf>,
     ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
-        let source = source.into();
-        let file_name = source
-            .file_name()
-            .ok_or_else(|| MultiSessionManagerError::InvalidImportPath(source.clone()))?;
-        let current_path = self.path();
-        let mut destination = current_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(file_name);
-        if comparable_path(&source) == comparable_path(&destination)
-            && matches!(
-                inspect_session_file(&source).map_err(AgentSessionRuntimeError::from)?,
-                SessionFileFormat::Legacy { .. }
-            )
-        {
-            destination = legacy_import_destination(&destination);
-        }
-        if comparable_path(&current_path) == comparable_path(&destination) {
-            return Err(MultiSessionManagerError::ImportWouldReplaceCurrent(
-                destination,
-            ));
-        }
-
-        let manager = self.manager()?;
-        let _operation = manager.operation_gate.write().await;
-        manager.ensure_open()?;
-        manager.ensure_path_available(self, &destination)?;
-        Ok(self.runtime.import_session(source, destination).await?)
+        self.replace(SessionReplacementRequest::Import {
+            source: source.into(),
+        })
+        .await
     }
 
     pub async fn fork_session(
@@ -609,17 +858,15 @@ impl PiSession {
         entry_id: impl Into<String>,
         position: ForkPosition,
     ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
-        let manager = self.manager()?;
-        let _operation = manager.operation_gate.write().await;
-        manager.ensure_open()?;
-        Ok(self.runtime.fork_session(entry_id, position).await?)
+        self.replace(SessionReplacementRequest::Fork {
+            entry_id: entry_id.into(),
+            position,
+        })
+        .await
     }
 
     pub async fn reload(&self) -> Result<(), MultiSessionManagerError> {
-        let manager = self.manager()?;
-        let _operation = manager.operation_gate.write().await;
-        manager.ensure_open()?;
-        self.runtime.reload().await?;
+        self.replace(SessionReplacementRequest::Reload).await?;
         Ok(())
     }
 
@@ -631,6 +878,16 @@ impl PiSession {
         self.manager
             .upgrade()
             .ok_or(MultiSessionManagerError::Closed)
+    }
+
+    async fn replace(
+        &self,
+        request: SessionReplacementRequest,
+    ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
+        ManagedSessionReplacement::begin(self.clone())
+            .await?
+            .run(request)
+            .await
     }
 }
 
@@ -760,6 +1017,15 @@ impl MultiSessionManagerInner {
             .cloned()
     }
 
+    fn ensure_managed(&self, session: &PiSession) -> Result<(), MultiSessionManagerError> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(session.registration_id())
+            .then_some(())
+            .ok_or(MultiSessionManagerError::UnknownSession)
+    }
+
     fn ensure_path_available(
         &self,
         owner: &PiSession,
@@ -810,6 +1076,8 @@ fn comparable_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use pi_agent::AgentOptions;
     use pi_core::{
         ContentBlock, CustomMessageContent, Message, ModelId, ProviderId, ResponseMetadata,
@@ -819,7 +1087,123 @@ mod tests {
     use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 
     use super::*;
-    use crate::AgentSessionOptions;
+    use crate::{
+        AgentSessionOptions, SessionPlugin, SessionPluginContext, SessionPluginError,
+        SessionPlugins, SessionShutdownEvent, SessionStartEvent,
+    };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ReplacementPause {
+        Prepare,
+        Shutdown,
+        Start,
+    }
+
+    #[derive(Clone, Default)]
+    struct ReplacementGates {
+        pause: Arc<Mutex<Option<ReplacementPause>>>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        registered: Arc<tokio::sync::Notify>,
+        activation_committed: Arc<AtomicBool>,
+        shutdowns: Arc<AtomicUsize>,
+    }
+
+    impl ReplacementGates {
+        fn pause_at(&self, phase: ReplacementPause) {
+            *self
+                .pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(phase);
+        }
+
+        async fn wait_at(&self, phase: ReplacementPause) {
+            let paused = *self
+                .pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if paused == Some(phase) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+        }
+
+        fn resume(&self) {
+            *self
+                .pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            self.release.notify_one();
+        }
+    }
+
+    struct GatedLifecyclePlugin(ReplacementGates);
+
+    struct GatedActivation(Arc<AtomicBool>);
+
+    impl SessionGenerationActivation for GatedActivation {
+        fn commit(self: Box<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[pi_session::session_plugin]
+    impl SessionPlugin for GatedLifecyclePlugin {
+        fn id(&self) -> pi_core::PluginId {
+            pi_core::PluginId::new("replacement-gate")
+        }
+
+        async fn session_start(
+            &self,
+            _context: &SessionPluginContext,
+            _event: &SessionStartEvent,
+        ) -> Result<(), SessionPluginError> {
+            self.0.wait_at(ReplacementPause::Start).await;
+            Ok(())
+        }
+
+        async fn session_shutdown(
+            &self,
+            _context: &SessionPluginContext,
+            _event: &SessionShutdownEvent,
+        ) -> Result<(), SessionPluginError> {
+            self.0.shutdowns.fetch_add(1, Ordering::AcqRel);
+            self.0.wait_at(ReplacementPause::Shutdown).await;
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct GatedGenerationFactory(ReplacementGates);
+
+    #[async_trait]
+    impl SessionGenerationFactory for GatedGenerationFactory {
+        fn session_registered(&self, _session: &PiSession) {
+            self.0.registered.notify_one();
+        }
+
+        async fn prepare_generation(
+            &self,
+            request: SessionGenerationRequest,
+        ) -> Result<PreparedSessionGeneration, SessionError> {
+            self.0.wait_at(ReplacementPause::Prepare).await;
+            let runtime = request
+                .generation_overlay
+                .apply_to(PiRuntime::builder())
+                .provider_plugin(ScriptedProviderPlugin::scripted([]))
+                .agent_options(AgentOptions {
+                    provider_id: ProviderId::new("scripted"),
+                    model_id: ModelId::new("test"),
+                    cwd: request.cwd,
+                    ..AgentOptions::default()
+                })
+                .build()?;
+            let options = AgentSessionOptions::default()
+                .plugins(SessionPlugins::new().plugin(GatedLifecyclePlugin(self.0.clone())));
+            Ok(PreparedSessionGeneration::new(runtime, options)
+                .with_activation(GatedActivation(Arc::clone(&self.0.activation_committed))))
+        }
+    }
 
     fn test_manager() -> MultiSessionManager {
         test_manager_with_turns([])
@@ -854,26 +1238,9 @@ mod tests {
         turns: impl IntoIterator<Item = ScriptedTurn>,
     ) -> MultiSessionManager {
         let turns = turns.into_iter().collect::<Vec<_>>();
-        MultiSessionManager::new(move |request: AgentSessionRuntimeRequest| {
+        MultiSessionManager::new(move |request: SessionGenerationRequest| {
             let turns = turns.clone();
             async move {
-                let initial_state = request.initial_state;
-                let (cwd, path, create, reused_log) = match request.target {
-                    AgentSessionRuntimeTarget::Create { cwd, path, .. } => (cwd, path, true, None),
-                    AgentSessionRuntimeTarget::Open { path } => {
-                        let (_, document) = crate::SessionLog::open(&path)?;
-                        (document.header.cwd, path, false, None)
-                    }
-                    AgentSessionRuntimeTarget::Reuse { log } => {
-                        let document = log.load()?;
-                        (
-                            document.header.cwd,
-                            log.path().to_path_buf(),
-                            false,
-                            Some(log),
-                        )
-                    }
-                };
                 let runtime = request
                     .generation_overlay
                     .apply_to(PiRuntime::builder())
@@ -881,35 +1248,14 @@ mod tests {
                     .agent_options(AgentOptions {
                         provider_id: ProviderId::new("scripted"),
                         model_id: ModelId::new("test"),
-                        cwd,
+                        cwd: request.cwd,
                         ..AgentOptions::default()
                     })
                     .build()?;
-                if let Some(initial_state) = initial_state {
-                    initial_state.apply_to(&runtime)?;
-                }
-                if create {
-                    AgentSession::prepare_create_with_options(
-                        runtime,
-                        path,
-                        AgentSessionOptions::default(),
-                    )
-                    .await
-                } else if let Some(log) = reused_log {
-                    AgentSession::prepare_reuse_with_options(
-                        runtime,
-                        log,
-                        AgentSessionOptions::default(),
-                    )
-                    .await
-                } else {
-                    AgentSession::prepare_open_with_options(
-                        runtime,
-                        path,
-                        AgentSessionOptions::default(),
-                    )
-                    .await
-                }
+                Ok(PreparedSessionGeneration::new(
+                    runtime,
+                    AgentSessionOptions::default(),
+                ))
             }
         })
     }
@@ -1508,6 +1854,10 @@ mod tests {
 
         manager.close_session(&first).await.unwrap();
         assert!(first.current().is_closed());
+        assert!(matches!(
+            first.reload().await,
+            Err(MultiSessionManagerError::UnknownSession)
+        ));
         assert!(!second.current().is_closed());
         assert_eq!(manager.sessions().len(), 1);
 
@@ -1555,6 +1905,266 @@ mod tests {
         assert_eq!(created.registration_id, opened.registration_id);
         assert_eq!(manager.sessions().len(), 1);
         manager.shutdown().await.unwrap();
+    }
+
+    async fn assert_cancelled_managed_replacement_finishes(phase: ReplacementPause) {
+        let directory = tempfile::tempdir().unwrap();
+        let gates = ReplacementGates::default();
+        let manager = MultiSessionManager::new(GatedGenerationFactory(gates.clone()));
+        let original_path = directory.path().join("original.jsonl");
+        let replacement_path = directory.path().join("replacement.jsonl");
+        let owner = manager
+            .create_session(directory.path(), &original_path)
+            .await
+            .unwrap();
+        let original = owner.current();
+        let mut replacements = owner.subscribe();
+
+        gates.pause_at(phase);
+        let replacement = tokio::spawn({
+            let owner = owner.clone();
+            let cwd = directory.path().to_path_buf();
+            let path = replacement_path.clone();
+            async move { owner.new_session(cwd, path).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), gates.entered.notified())
+            .await
+            .expect("replacement did not reach the requested pause");
+
+        replacement.abort();
+        assert!(replacement.await.unwrap_err().is_cancelled());
+        assert_eq!(owner.path(), original_path);
+
+        let mut contender = tokio::spawn({
+            let manager = manager.clone();
+            let cwd = directory.path().to_path_buf();
+            let path = replacement_path.clone();
+            async move { manager.create_session(cwd, path).await }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut contender)
+                .await
+                .is_err(),
+            "the replacement must retain the manager path guard after caller cancellation"
+        );
+
+        gates.resume();
+        tokio::time::timeout(std::time::Duration::from_secs(2), replacements.changed())
+            .await
+            .expect("detached replacement did not publish")
+            .unwrap();
+        assert_eq!(owner.path(), replacement_path);
+        assert!(original.is_closed());
+        assert!(!owner.current().is_closed());
+
+        let contender_result = tokio::time::timeout(std::time::Duration::from_secs(2), contender)
+            .await
+            .expect("path contender remained blocked after publication")
+            .unwrap();
+        let error = match contender_result {
+            Ok(_) => panic!("path contender unexpectedly acquired the replacement path"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            MultiSessionManagerError::SessionAlreadyActive(_)
+        ));
+        assert_eq!(manager.sessions().len(), 1);
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_gate_serializes_replacements_before_runtime_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let gates = ReplacementGates::default();
+        let manager = MultiSessionManager::new(GatedGenerationFactory(gates.clone()));
+        let original_path = directory.path().join("original.jsonl");
+        let replacement_path = directory.path().join("replacement.jsonl");
+        let owner = manager
+            .create_session(directory.path(), &original_path)
+            .await
+            .unwrap();
+
+        gates.pause_at(ReplacementPause::Prepare);
+        let first = tokio::spawn({
+            let owner = owner.clone();
+            let cwd = directory.path().to_path_buf();
+            let path = replacement_path.clone();
+            async move { owner.new_session(cwd, path).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), gates.entered.notified())
+            .await
+            .expect("first replacement did not enter preparation");
+
+        let mut second = tokio::spawn({
+            let owner = owner.clone();
+            async move { owner.reload().await }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut second)
+                .await
+                .is_err(),
+            "a second replacement must wait before capturing the runtime session"
+        );
+
+        gates.resume();
+        assert_eq!(
+            first.await.unwrap().unwrap(),
+            AgentSessionReplacement::Replaced
+        );
+        second.await.unwrap().unwrap();
+        assert_eq!(owner.path(), replacement_path);
+        assert!(!owner.current().is_closed());
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_managed_replacement_during_prepare_still_publishes_it() {
+        assert_cancelled_managed_replacement_finishes(ReplacementPause::Prepare).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_managed_replacement_during_shutdown_still_publishes_it() {
+        assert_cancelled_managed_replacement_finishes(ReplacementPause::Shutdown).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_managed_replacement_during_start_still_publishes_it() {
+        assert_cancelled_managed_replacement_finishes(ReplacementPause::Start).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_managed_acquisition_during_start_still_registers_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let gates = ReplacementGates::default();
+        gates.pause_at(ReplacementPause::Start);
+        let manager = MultiSessionManager::new(GatedGenerationFactory(gates.clone()));
+        let path = directory.path().join("session.jsonl");
+
+        let acquisition = tokio::spawn({
+            let manager = manager.clone();
+            let cwd = directory.path().to_path_buf();
+            let path = path.clone();
+            async move { manager.create_session(cwd, path).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), gates.entered.notified())
+            .await
+            .expect("acquisition did not reach session_start");
+        assert!(gates.activation_committed.load(Ordering::Acquire));
+        assert!(manager.sessions().is_empty());
+
+        acquisition.abort();
+        let cancellation = match acquisition.await {
+            Err(error) => error,
+            Ok(_) => panic!("acquisition caller unexpectedly completed"),
+        };
+        assert!(cancellation.is_cancelled());
+
+        let mut contender = tokio::spawn({
+            let manager = manager.clone();
+            let cwd = directory.path().to_path_buf();
+            let path = path.clone();
+            async move { manager.create_session(cwd, path).await }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut contender)
+                .await
+                .is_err(),
+            "the acquisition must retain the manager lifecycle guard after caller cancellation"
+        );
+
+        gates.resume();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            gates.registered.notified(),
+        )
+        .await
+        .expect("detached acquisition did not register");
+        let sessions = manager.sessions();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].path(), path);
+        assert!(!sessions[0].current().is_closed());
+
+        let contender_result = tokio::time::timeout(std::time::Duration::from_secs(2), contender)
+            .await
+            .expect("path contender remained blocked after registration")
+            .unwrap();
+        let error = match contender_result {
+            Ok(_) => panic!("path contender unexpectedly acquired the registered path"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            MultiSessionManagerError::SessionAlreadyActive(_)
+        ));
+        manager.shutdown().await.unwrap();
+    }
+
+    async fn assert_cancelled_isolated_acquisition_closes_unclaimed_child(phase: ReplacementPause) {
+        let directory = tempfile::tempdir().unwrap();
+        let gates = ReplacementGates::default();
+        let manager = MultiSessionManager::new(GatedGenerationFactory(gates.clone()));
+        let owner = manager
+            .create_session(directory.path(), directory.path().join("owner.jsonl"))
+            .await
+            .unwrap();
+        // Consume the owner's registration notification so the next one
+        // belongs to the candidate child.
+        gates.registered.notified().await;
+        gates.activation_committed.store(false, Ordering::Release);
+        gates.pause_at(phase);
+
+        let launch = tokio::spawn({
+            let owner = owner.clone();
+            async move {
+                owner
+                    .launch_isolated_session(IsolatedSessionRequest::new(
+                        CustomMessageContent::Text("inspect".to_string()),
+                    ))
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), gates.entered.notified())
+            .await
+            .expect("isolated acquisition did not reach the requested pause");
+        assert_eq!(
+            gates.activation_committed.load(Ordering::Acquire),
+            phase == ReplacementPause::Start
+        );
+        assert_eq!(manager.sessions().len(), 1);
+
+        launch.abort();
+        assert!(launch.await.unwrap_err().is_cancelled());
+        gates.resume();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            gates.registered.notified(),
+        )
+        .await
+        .expect("detached child acquisition did not register before cleanup");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while gates.shutdowns.load(Ordering::Acquire) != 1 || manager.sessions().len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unclaimed isolated child was not closed");
+        assert_eq!(
+            manager.sessions()[0].registration_id(),
+            owner.registration_id()
+        );
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_isolated_acquisition_during_prepare_closes_the_unclaimed_child() {
+        assert_cancelled_isolated_acquisition_closes_unclaimed_child(ReplacementPause::Prepare)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_isolated_acquisition_during_start_closes_the_unclaimed_child() {
+        assert_cancelled_isolated_acquisition_closes_unclaimed_child(ReplacementPause::Start).await;
     }
 
     #[tokio::test]

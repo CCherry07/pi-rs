@@ -12,8 +12,8 @@ use pi_core::{
 };
 use pi_runtime::PiRuntime;
 use pi_session::{
-    AgentSession, AgentSessionRuntimeRequest, AgentSessionRuntimeTarget, MultiSessionManager,
-    PiSession,
+    AgentSessionOptions, MultiSessionManager, PiSession, PreparedSessionGeneration,
+    SessionGenerationRequest,
 };
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 use tokio::sync::Notify;
@@ -82,14 +82,12 @@ fn manager_with_prepare_gate(
     probe: LifecycleProbe,
     prepare_gate: Option<PrepareGate>,
 ) -> MultiSessionManager {
-    MultiSessionManager::new(move |request: AgentSessionRuntimeRequest| {
+    MultiSessionManager::new(move |request: SessionGenerationRequest| {
         let probe = probe.clone();
         let prepare_gate = prepare_gate.clone();
         async move {
-            let AgentSessionRuntimeTarget::Create { cwd, path, .. } = request.target else {
-                panic!("lifecycle tests only create sessions");
-            };
-            if path
+            if request
+                .session_path
                 .components()
                 .any(|component| component.as_os_str() == "isolated")
                 && let Some(gate) = prepare_gate
@@ -109,14 +107,14 @@ fn manager_with_prepare_gate(
                 .agent_options(AgentOptions {
                     provider_id: ProviderId::new("scripted"),
                     model_id: ModelId::new("test"),
-                    cwd,
+                    cwd: request.cwd,
                     ..AgentOptions::default()
                 })
                 .build()?;
-            if let Some(initial_state) = request.initial_state {
-                initial_state.apply_to(&runtime)?;
-            }
-            AgentSession::prepare_create(runtime, path).await
+            Ok(PreparedSessionGeneration::new(
+                runtime,
+                AgentSessionOptions::default(),
+            ))
         }
     })
 }

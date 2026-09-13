@@ -1382,8 +1382,8 @@ mod tests {
     use pi_core::{ModelId, ProviderId};
     use pi_runtime::PiRuntime;
     use pi_session::{
-        AgentSessionOptions, AgentSessionRuntimeRequest, AgentSessionRuntimeTarget,
-        MultiSessionManager, SessionHeader, SessionLog,
+        AgentSessionOptions, MultiSessionManager, PreparedSessionGeneration,
+        SessionGenerationRequest, SessionHeader, SessionLog,
     };
     use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 
@@ -1480,14 +1480,14 @@ mod tests {
     struct ScriptedFactory(Arc<CommandFixture>);
 
     #[pi_core::__plugin_async_trait]
-    impl pi_session::AgentSessionRuntimeFactory for ScriptedFactory {
+    impl pi_session::SessionGenerationFactory for ScriptedFactory {
         fn session_registered(&self, session: &pi_session::PiSession) {
             self.0.binding.bind(session.clone());
         }
-        async fn prepare(
+        async fn prepare_generation(
             &self,
-            request: AgentSessionRuntimeRequest,
-        ) -> Result<pi_session::PreparedAgentSession, pi_session::SessionError> {
+            request: SessionGenerationRequest,
+        ) -> Result<PreparedSessionGeneration, pi_session::SessionError> {
             let fixture = Arc::clone(&self.0);
             if fixture
                 .fail_reload
@@ -1501,11 +1501,7 @@ mod tests {
                 .builds
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 + 1;
-            let cwd = match &request.target {
-                AgentSessionRuntimeTarget::Create { cwd, .. } => cwd.clone(),
-                AgentSessionRuntimeTarget::Open { path } => SessionLog::read(path)?.header.cwd,
-                AgentSessionRuntimeTarget::Reuse { log } => log.header().cwd,
-            };
+            let cwd = request.cwd;
             let context = Arc::new(pi_session::PiPluginContext::new(
                 PresentationMode::Rpc,
                 true,
@@ -1535,31 +1531,8 @@ mod tests {
                     ..AgentOptions::default()
                 })
                 .build()?;
-            let prepared = match request.target {
-                AgentSessionRuntimeTarget::Create {
-                    path,
-                    parent_session,
-                    session_id,
-                    ..
-                } => {
-                    AgentSession::prepare_create_with_options(
-                        runtime,
-                        path,
-                        options
-                            .parent_session_path(parent_session)
-                            .session_id(session_id),
-                    )
-                    .await
-                }
-                AgentSessionRuntimeTarget::Open { path } => {
-                    AgentSession::prepare_open_with_options(runtime, path, options).await
-                }
-                AgentSessionRuntimeTarget::Reuse { log } => {
-                    AgentSession::prepare_reuse_with_options(runtime, log, options).await
-                }
-            }?;
-            context.bind_generation_session(prepared.session());
-            Ok(prepared)
+            Ok(PreparedSessionGeneration::new(runtime, options)
+                .bind_session(move |session| context.bind_generation_session(session)))
         }
     }
 

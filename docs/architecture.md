@@ -223,8 +223,10 @@ Modules remain responsible for session behavior. `MultiSessionManager`
 owns the runtime factory, manager shutdown, and a private table of active handles. `PiSession` is the
 cloneable per-frontend handle for current-session events and new/resume/fork/reload transitions.
 There is deliberately no public `SessionRegistry`: duplicate-path checks and handle bookkeeping are
-implementation details of `MultiSessionManager`. `AgentSessionRuntime` remains the lower-level replacement
-transaction used inside each `PiSession`, rather than a type frontend adapters coordinate directly.
+implementation details of `MultiSessionManager`. `AgentSessionRuntime` and its storage target are
+crate-private implementation details of the lower-level replacement transaction inside each
+`PiSession`; frontend adapters cannot bypass the managed Interface, and runtime failures use the
+shared public `SessionError` vocabulary.
 The print and NDJSON Adapters pin `PiSession::current()` for one invocation; the longer-lived TUI and
 RPC adapters watch the handle's replacement stream. This keeps generation changes behind the same
 Interface while preventing a single in-flight submission from crossing generations.
@@ -303,8 +305,8 @@ Catalog reads wait for an already requested resume without opening another sessi
 Model configuration writes require a successfully loaded catalog for the selected workspace and
 thread. Selected-session refresh treats the native current model as authoritative, so a previous
 thread's preferences or a stale response cannot undo reload's preserved model selection.
-There is no generation FIFO, activation observer bookkeeping, or detached replacement commit
-introduced for Desktop. Dropping the managed handle closes its watch and stops the forwarder;
+Desktop introduces no generation FIFO or activation observer bookkeeping; it consumes the
+manager-published replacement exactly like the other frontends. Dropping the managed handle closes its watch and stops the forwarder;
 no liveness polling is needed. Snapshot revisions delimit subsequent events so history captured
 at subscription time is not displayed twice. When subscription starts during an active response,
 the forwarder also refreshes the completed snapshot on settlement so a missed message-start event
@@ -449,10 +451,41 @@ adaptation keeps subsequent reload and context replay consistent without materia
 session. Ordinary resume still gives an explicit model request priority over the saved model.
 
 Product wiring installs agent, provider, and session plugins through their three independent factory
-seams. Each `PiSession` uses `AgentSessionRuntime` for cross-system atomicity: its factory prepares
-the complete runtime and session plugin generations before shutting down or replacing the current
-session. The prepared session carries registration inventory as generation-local metadata; it is
-not persisted into Pi v4 session data and does not introduce another plugin lifecycle.
+seams. Each `PiSession` uses `AgentSessionRuntime` for cross-system atomicity. The injected
+`SessionGenerationFactory` receives only resolved generation context—cwd, journal path, start reason,
+reload model, optional fresh-session state, and the transient overlay—and returns a
+`PreparedSessionGeneration` containing `PiRuntime`, session options, and staged product activation.
+`AgentSessionRuntime` alone resolves Create/Open/Reuse targets, opens or reuses the `SessionLog`,
+applies fresh-session state, injects parent/session identity, and constructs the `AgentSession`.
+Adapters therefore do not duplicate storage and recovery branches. The resulting session carries
+registration inventory as generation-local metadata; it is not persisted into Pi v4 session data
+and does not introduce another plugin lifecycle. Product state outside the session object, including
+prepared package activation and dynamic-provider overlays, remains owned by the prepared generation's
+activation transaction. Dropping an unactivated candidate rolls that state back through its RAII
+guards; activation commits it immediately before the new generation's `session_start`. Preparation
+therefore has no published product-state commit of its own.
+
+`MultiSessionManager` adds the manager-owned activation boundary around that lower-level transaction.
+Initial acquisition cancelled while waiting for the lifecycle gate starts no work. Once the gate is
+acquired, generation preparation, `session_start`, and manager registration run as one owned operation;
+dropping the requester detaches the unfinished operation so committed external state cannot be
+stranded without a managed session. `PiSession` uses the same rule for replacement:
+`ManagedSessionReplacement` owns the operation and its write guard through preparation, ordered
+old-session shutdown, new-session start, and watch publication, detaching that remainder only if the
+requester is dropped. Its unresolved `SessionReplacementRequest` owns manager
+policy such as active-path checks and import destination selection, then resolves to one
+`ResolvedSessionTransition`. The internal runtime exposes only `transition`; the manager write guard
+serializes that call through publication, while `AgentSession::begin_replacement` excludes mutations
+of the captured session. The runtime therefore needs no second transition mutex: it captures the
+current session once and checks its liveness before dispatching to private lifecycle implementations.
+The captured `AgentSession` lifecycle is also the sole source of open/closed state; the runtime does
+not maintain a parallel closed flag.
+Runtime preparation and lifecycle failures use `SessionError` directly; manager `Closed` and
+`UnknownSession` policy is decided before crossing this seam. Dropping the requesting future after
+that point discards only its result; it cannot leave a closed old session unpublished or release
+target-path ownership early. Import destination resolution also happens inside this boundary so it
+observes the current path protected by the same guard. This is a Rust cancellation-safety guarantee
+at the product-session seam, not a Pi wire or lifecycle-order divergence.
 `pi-plugin-loader` discovers global manifests and trusted project manifests, resolves explicit
 `--plugin` paths, verifies a C-layout descriptor before resolving an exact-build Rust constructor,
 and partitions packages into separately ordered agent, provider, and session factories. It snapshots
@@ -572,14 +605,15 @@ Native plugin manifests do not declare runtime plugin dependencies: Rust crate d
 build-time concerns, and hook registration order remains consumer policy rather than a package graph.
 
 `ProductSessionFactory` in `crates/pi-sdk/src/session_factory.rs` is the production Adapter at the
-session-construction Seam. It prepares global package state and, after trust resolution, trusted
+generation-construction Seam. It prepares global package state and, after trust resolution, trusted
 project package state before native discovery. The manager holds a package-state guard and retains
 the previous lock and activation view until the complete runtime and session generation prepares
 successfully. Failed native loading or plugin initialization therefore rolls package activation
-back together with the generation; success commits the prepared package state. The same factory is
-used for initial sessions and `/reload`. The loader consumes only the local activation view and does
-not know about networks, semver, registries, install commands, or package transactions. This
-distribution layer does not introduce a fourth plugin lifecycle or mutable runtime registries.
+back together with the generation; success transfers the prepared package state into the generation
+activation transaction and publishes it only when that generation activates. The same factory is used
+for initial sessions and `/reload`. The loader consumes only the local activation view and does not
+know about networks, semver, registries, install commands, or package transactions. This distribution
+layer does not introduce a fourth plugin lifecycle or mutable runtime registries.
 
 The current static Registry is signed-data-ready transport only: SHA-256 proves downloaded content
 integrity but not publisher identity. Publisher signatures, Git repository and OCI adapters,
@@ -838,10 +872,12 @@ Configuration-form `pi.registerProvider(name, config)` and `pi.unregisterProvide
 same native capability without mutating a published registry. Load-time registrations are validated
 as part of the JavaScript manifest. Runtime calls stage ordered mutations in the generation-external
 `DynamicProviderOverlay`; `ProductSessionFactory` combines load-time registrations and staged
-mutations, prepares the complete replacement session/runtime generation, and commits the overlay
-only after preparation succeeds. Failure drops the staged batch and preserves the current
-generation. Calls made during an active run take effect at the next whole-run safe point, while a
-command's immediately following `setModel` acts as a flush barrier. Extension provider state is
+mutations and prepares the complete replacement product generation. `AgentSessionRuntime` binds
+that generation to the session log and commits the overlay only on activation. It is an internal
+implementation detail; JavaScript and other frontend Adapters request replacement through
+`PiSession`. Failure drops the staged batch and preserves the current generation. Calls made during
+an active run take effect at the next whole-run safe point, while a command's immediately following
+`setModel` acts as a flush barrier. Extension provider state is
 executable runtime state and is never serialized into Pi v4 JSONL.
 
 Tool argument preparation is an asynchronous method on the core `Tool` Interface. This preserves
@@ -1267,8 +1303,9 @@ applicable facts. Neither copies operation records.
 `JsonlSessionRepo::resolve_exact_id` owns the CLI's project-scoped session identity lookup and Pi
 directory/filename layout. Resolution is read-only: an existing ID yields its metadata, while a
 missing ID yields a timestamped `..._<id>.jsonl` target without creating a directory. The chosen ID
-then travels through `AgentSessionRuntimeTarget` and `ProductSessionFactory` into the new session
-header, keeping the adapter thin and deferred persistence intact.
+then enters `MultiSessionManager::create_session_with_id`; its internal runtime target injects the ID
+into the new session header after generation preparation. The product factory never sees the
+storage target, keeping the adapter thin and deferred persistence intact.
 
 `SessionDocument::context()` derives model, thinking level, and active tools from the entire selected
 path. Its default transform starts at the latest compaction; that compaction contributes its summary
@@ -1404,12 +1441,15 @@ not clone the frontend snapshot, and session id/name/label/entry/header reads do
 `SessionDocument`. Coherent multi-entry inspection remains the explicit `SessionSnapshot` path.
 
 `MultiSessionManager` is the multi-session product Module above `AgentSession`. It owns the injected
-`AgentSessionRuntimeFactory` and keeps its active-session map private. Ordinary acquisition,
+`SessionGenerationFactory` and keeps its active-session map private. Ordinary acquisition,
 replacement, close, and shutdown operations remain exclusive. UUID-addressed isolated-session
 preparations share the read side of that lifecycle gate, so parallel tool calls can build children
 concurrently while still excluding replacement, close, and shutdown. Opening an already-active
 path reuses its `PiSession`; creating or switching to a path owned by another handle fails before
-any session lifecycle transition starts. Manager shutdown drains and closes every managed handle.
+any session lifecycle transition starts. Acquisition and replacement operations retain their
+lifecycle guard through registration or replacement publication even if their original caller is
+cancelled, so a competing operation cannot claim a candidate path mid-transition. Manager shutdown
+waits behind that guard, then drains and closes every managed handle.
 
 ## Memory systems
 
@@ -1711,12 +1751,13 @@ semantics without weakening other session mutation gates.
 
 `SessionContext::launch_isolated_session` is a deliberate Rust product extension seam rather than
 Pi core workflow policy. It creates a fresh `PiSession` through the same
-`AgentSessionRuntimeFactory`, starts one user-message run, and returns a generation-bound opaque
+`SessionGenerationFactory`, starts one user-message run, and returns a generation-bound opaque
 handle with `wait` and `abort`. Optional initial active tools, model, and thinking level inherit
 from the caller when omitted. `MultiSessionManager` resolves those values into one complete
 `AgentSessionInitialState`, rejects any tool selection outside the caller's active-tool ceiling,
-and passes it to the product factory. The factory applies that state before session preparation, so
-the first provider request and the initial Pi v4 model/thinking/tool records agree. The generation
+and passes it through the generation request for product-policy validation. `AgentSessionRuntime`
+applies that state before session construction, so the first provider request and the initial Pi v4
+model/thinking/tool records agree. The generation
 overlay also marks the child as `SessionExecutionOrigin::Subagent` before any hook runs. That
 transient origin survives live generation replacement and nested children, without changing Pi v4
 wire records or disabling ordinary plugin tools. The caller's
@@ -1899,11 +1940,14 @@ The other five tools use ordinary tool presentation. There is no
 workflow-item or legacy-tool projection. Isolated child files remain outside top-level resume
 discovery; live control remains with the owning session.
 Each `PiSession` has one replaceable current `AgentSession`. Its internal `AgentSessionRuntime`
-serializes replacement, dispatches `session_before_switch` or `session_before_fork`, settles the
-active agent, prepares the complete next session, emits old `session_shutdown`, emits new
-`session_start`, and only then publishes the new generation through a Tokio watch channel.
-Cancellation performs no preparation. Preparation failure leaves the current session open, while a
-successful replacement closes stale `AgentSession` handles so they reject later mutations. New,
+accepts one validated `ResolvedSessionTransition` under the manager lifecycle write guard, dispatches
+`session_before_switch` or `session_before_fork`, settles the active agent, prepares the complete
+next product generation, binds it to the target session log, emits old `session_shutdown`, emits
+new `session_start`, and only then publishes the new session through a Tokio watch channel.
+Cancellation before the manager lifecycle gate is acquired performs no preparation. After
+acquisition, cancellation drops only the caller's result while the guarded replacement finishes
+publication. Preparation failure leaves the current session open, while a successful replacement
+closes stale `AgentSession` handles so they reject later mutations. New,
 resume, reload, fork, and import all use this transaction. Fork creates a Pi v4 branch copy before
 preparation and removes it if candidate preparation fails. Import first inspects the source as
 native v4 or Pi coding-agent v1/v2/v3. Native files are validated and copied; legacy files are
@@ -1956,9 +2000,11 @@ Rust product addition inspired by Hermes, using upstream Pi's resource-start/shu
 `legacy/pi/packages/coding-agent/docs/extensions.md`.
 
 The generic isolated-session launch path owns cancellation until it returns a control handle.
-Dropping a launch future while it awaits child readiness aborts the unclaimed prompt, including
-when a scheduler's generation is shutting down. This is generic child ownership, not knowledge of
-the scheduling plugin, and does not change native ABI or Pi v4 records.
+If it is dropped during child preparation or `session_start`, any activation that has begun finishes
+under the manager lifecycle guard and the newly registered but unclaimed child is then closed. Once
+the prompt has started, dropping the launch aborts that unclaimed prompt while preserving its managed
+cleanup path, including when a scheduler's generation is shutting down. This is generic child
+ownership, not knowledge of the scheduling plugin, and does not change native ABI or Pi v4 records.
 
 ## Event ordering
 

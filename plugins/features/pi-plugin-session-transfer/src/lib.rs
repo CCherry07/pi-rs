@@ -387,9 +387,9 @@ mod tests {
     use pi_core::{Message, PluginContext, PresentationMode, UserMessage};
     use pi_runtime::{PiRuntime, SystemPrompt};
     use pi_session::{
-        AgentSession, AgentSessionRuntimeFactory, AgentSessionRuntimeRequest,
-        AgentSessionRuntimeTarget, MultiSessionManager, PiPluginContext, PiSession,
-        PluginContextBinding, PluginUiBridge, PreparedAgentSession, SessionError, SubmitOutcome,
+        AgentSessionOptions, MultiSessionManager, PiPluginContext, PiSession, PluginContextBinding,
+        PluginUiBridge, PreparedSessionGeneration, SessionError, SessionGenerationFactory,
+        SessionGenerationRequest, SubmitOutcome,
     };
     use pi_test_support::ScriptedProviderPlugin;
 
@@ -450,25 +450,15 @@ mod tests {
     }
 
     #[async_trait]
-    impl AgentSessionRuntimeFactory for TestFactory {
+    impl SessionGenerationFactory for TestFactory {
         fn session_registered(&self, session: &PiSession) {
             self.binding.bind(session.clone());
         }
 
-        async fn prepare(
+        async fn prepare_generation(
             &self,
-            request: AgentSessionRuntimeRequest,
-        ) -> Result<PreparedAgentSession, SessionError> {
-            let (cwd, path, create) = match request.target {
-                AgentSessionRuntimeTarget::Create { cwd, path, .. } => (cwd, path, true),
-                AgentSessionRuntimeTarget::Open { path } => {
-                    let (_, document) = pi_session::SessionLog::open(&path)?;
-                    (document.header.cwd, path, false)
-                }
-                AgentSessionRuntimeTarget::Reuse { .. } => {
-                    unreachable!("session transfer test does not reuse logs")
-                }
-            };
+            request: SessionGenerationRequest,
+        ) -> Result<PreparedSessionGeneration, SessionError> {
             let plugin_context = Arc::new(
                 PiPluginContext::new(PresentationMode::Tui, true, self.binding.clone())
                     .with_ui_bridge(self.ui.clone()),
@@ -481,18 +471,15 @@ mod tests {
                 .provider_plugin(ScriptedProviderPlugin::scripted([]))
                 .plugin_context(context_access)
                 .agent_options(AgentOptions {
-                    cwd,
+                    cwd: request.cwd,
                     ..AgentOptions::default()
                 })
                 .system_prompt(SystemPrompt::Final("test".to_string()))
                 .build()?;
-            let prepared = if create {
-                AgentSession::prepare_create(runtime, path).await?
-            } else {
-                AgentSession::prepare_open(runtime, path).await?
-            };
-            plugin_context.bind_generation_session(prepared.session());
-            Ok(prepared)
+            Ok(
+                PreparedSessionGeneration::new(runtime, AgentSessionOptions::default())
+                    .bind_session(move |session| plugin_context.bind_generation_session(session)),
+            )
         }
     }
 

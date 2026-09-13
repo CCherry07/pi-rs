@@ -4,11 +4,10 @@ use pi_agent::AgentOptions;
 use pi_core::{ModelId, PluginContext, PluginId, PresentationMode, ProviderId, Usage};
 use pi_runtime::PiRuntime;
 use pi_session::{
-    AgentSession, AgentSessionOptions, AgentSessionRuntime, AgentSessionRuntimeFactory,
-    AgentSessionRuntimeRequest, AgentSessionRuntimeTarget, LaneRecordEntry, PiPluginContext,
-    PluginContextBinding, PreparedAgentSession, SessionError, SessionLog, SessionPlugin,
-    SessionPluginContext, SessionPluginError, SessionPlugins, SessionShutdownEvent,
-    SessionStartEvent,
+    AgentSessionOptions, LaneRecordEntry, MultiSessionManager, PiPluginContext,
+    PluginContextBinding, PreparedSessionGeneration, SessionError, SessionGenerationFactory,
+    SessionGenerationRequest, SessionLog, SessionPlugin, SessionPluginContext, SessionPluginError,
+    SessionPlugins, SessionShutdownEvent, SessionStartEvent,
 };
 use pi_test_support::ScriptedProviderPlugin;
 use serde_json::{Value, json};
@@ -68,16 +67,11 @@ impl SessionPlugin for CheckpointPlugin {
 }
 
 #[async_trait::async_trait]
-impl AgentSessionRuntimeFactory for CheckpointFactory {
-    async fn prepare(
+impl SessionGenerationFactory for CheckpointFactory {
+    async fn prepare_generation(
         &self,
-        request: AgentSessionRuntimeRequest,
-    ) -> Result<PreparedAgentSession, SessionError> {
-        let cwd = match &request.target {
-            AgentSessionRuntimeTarget::Create { cwd, .. } => cwd.clone(),
-            AgentSessionRuntimeTarget::Open { path } => SessionLog::open(path)?.1.header.cwd,
-            AgentSessionRuntimeTarget::Reuse { log } => log.header().cwd,
-        };
+        request: SessionGenerationRequest,
+    ) -> Result<PreparedSessionGeneration, SessionError> {
         let access = Arc::new(PiPluginContext::new(
             PresentationMode::Print,
             true,
@@ -86,7 +80,7 @@ impl AgentSessionRuntimeFactory for CheckpointFactory {
         let runtime = PiRuntime::builder()
             .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .agent_options(AgentOptions {
-                cwd,
+                cwd: request.cwd,
                 provider_id: ProviderId::new("scripted"),
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
@@ -95,19 +89,8 @@ impl AgentSessionRuntimeFactory for CheckpointFactory {
             .build()?;
         let options = AgentSessionOptions::default()
             .plugins(SessionPlugins::new().plugin(CheckpointPlugin(self.clone())));
-        let prepared = match request.target {
-            AgentSessionRuntimeTarget::Create { path, .. } => {
-                AgentSession::prepare_create_with_options(runtime, path, options).await?
-            }
-            AgentSessionRuntimeTarget::Open { path } => {
-                AgentSession::prepare_open_with_options(runtime, path, options).await?
-            }
-            AgentSessionRuntimeTarget::Reuse { log } => {
-                AgentSession::prepare_reuse_with_options(runtime, log, options).await?
-            }
-        };
-        access.bind_generation_session(prepared.session());
-        Ok(prepared)
+        Ok(PreparedSessionGeneration::new(runtime, options)
+            .bind_session(move |session| access.bind_generation_session(session)))
     }
 }
 
@@ -119,22 +102,18 @@ async fn shutdown_checkpoint_is_available_when_reopening() {
         checkpoint: true,
         ..CheckpointFactory::default()
     };
-    let runtime = AgentSessionRuntime::create(
-        factory.clone(),
-        AgentSessionRuntimeTarget::create(directory.path(), &path),
-    )
-    .await
-    .unwrap();
-    runtime.session().log().materialize().unwrap();
-    runtime.shutdown().await.unwrap();
-    let reopened =
-        AgentSessionRuntime::create(factory.clone(), AgentSessionRuntimeTarget::open(&path))
-            .await
-            .unwrap();
+    let manager = MultiSessionManager::new(factory.clone());
+    let session = manager
+        .create_session(directory.path(), &path)
+        .await
+        .unwrap();
+    session.current().log().materialize().unwrap();
+    manager.close_session(&session).await.unwrap();
+    let _reopened = manager.open_session(&path).await.unwrap();
     assert!(factory.starts.lock().unwrap()[1].iter().any(|entry| {
         entry["customType"] == "checkpoint-fixture" && entry["data"]["saved"] == true
     }));
-    reopened.shutdown().await.unwrap();
+    manager.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -142,17 +121,16 @@ async fn reload_retains_shutdown_records_and_continuous_log_sequences() {
     for materialized in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
-        let runtime = AgentSessionRuntime::create(
-            CheckpointFactory::default(),
-            AgentSessionRuntimeTarget::create(directory.path(), &path),
-        )
-        .await
-        .unwrap();
+        let manager = MultiSessionManager::new(CheckpointFactory::default());
+        let session = manager
+            .create_session(directory.path(), &path)
+            .await
+            .unwrap();
         if materialized {
-            runtime.session().log().materialize().unwrap();
+            session.current().log().materialize().unwrap();
         }
-        runtime.reload().await.unwrap();
-        let current = runtime.session();
+        session.reload().await.unwrap();
+        let current = session.current();
         assert_eq!(
             current
                 .log()
@@ -170,7 +148,7 @@ async fn reload_retains_shutdown_records_and_continuous_log_sequences() {
         if materialized {
             SessionLog::open(&path).expect("reload must not reuse an already written sequence");
         }
-        runtime.shutdown().await.unwrap();
+        manager.shutdown().await.unwrap();
     }
 }
 
@@ -183,16 +161,15 @@ async fn reload_start_sees_the_previous_plugins_shutdown_checkpoint() {
             checkpoint: true,
             ..CheckpointFactory::default()
         };
-        let runtime = AgentSessionRuntime::create(
-            factory.clone(),
-            AgentSessionRuntimeTarget::create(directory.path(), &path),
-        )
-        .await
-        .unwrap();
+        let manager = MultiSessionManager::new(factory.clone());
+        let session = manager
+            .create_session(directory.path(), &path)
+            .await
+            .unwrap();
         if materialized {
-            runtime.session().log().materialize().unwrap();
+            session.current().log().materialize().unwrap();
         }
-        runtime.reload().await.unwrap();
+        session.reload().await.unwrap();
         assert!(
             factory.starts.lock().unwrap()[1]
                 .iter()
@@ -200,7 +177,7 @@ async fn reload_start_sees_the_previous_plugins_shutdown_checkpoint() {
             "new plugin must read previous checkpoint (materialized={materialized})"
         );
         assert_eq!(path.exists(), materialized);
-        runtime.shutdown().await.unwrap();
+        manager.shutdown().await.unwrap();
     }
 }
 
@@ -208,25 +185,25 @@ async fn reload_start_sees_the_previous_plugins_shutdown_checkpoint() {
 async fn cancelled_shutdown_retires_the_plugin_context_after_its_final_write() {
     let directory = tempfile::tempdir().unwrap();
     let entered = Arc::new(tokio::sync::Notify::new());
-    let runtime = AgentSessionRuntime::create(
-        CheckpointFactory {
-            checkpoint: true,
-            pause_shutdown: Some(entered.clone()),
-            ..CheckpointFactory::default()
-        },
-        AgentSessionRuntimeTarget::create(directory.path(), directory.path().join("session.jsonl")),
-    )
-    .await
-    .unwrap();
-    let session = runtime.session();
+    let manager = MultiSessionManager::new(CheckpointFactory {
+        checkpoint: true,
+        pause_shutdown: Some(entered.clone()),
+        ..CheckpointFactory::default()
+    });
+    let owner = manager
+        .create_session(directory.path(), directory.path().join("session.jsonl"))
+        .await
+        .unwrap();
+    let session = owner.current();
     let retained = pi_core::CommandContextParts::new(
         session
             .runtime()
             .plugin_context_handle(pi_core::PluginContextScope::Command),
     );
     let shutdown = tokio::spawn({
-        let runtime = runtime.clone();
-        async move { runtime.shutdown().await }
+        let manager = manager.clone();
+        let owner = owner.clone();
+        async move { manager.close_session(&owner).await }
     });
     tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
         .await
@@ -247,6 +224,7 @@ async fn cancelled_shutdown_retires_the_plugin_context_after_its_final_write() {
         &entry.entry,
         pi_session::SessionEntry::Custom(custom) if custom.custom_type == "checkpoint-fixture"
     )).count(), 1);
+    manager.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -258,30 +236,29 @@ async fn resuming_the_current_file_keeps_shutdown_writes_and_sequence_ownership(
             checkpoint: true,
             ..CheckpointFactory::default()
         };
-        let runtime = AgentSessionRuntime::create(
-            factory.clone(),
-            AgentSessionRuntimeTarget::create(directory.path(), &path),
-        )
-        .await
-        .unwrap();
-        runtime.session().log().materialize().unwrap();
+        let manager = MultiSessionManager::new(factory.clone());
+        let session = manager
+            .create_session(directory.path(), &path)
+            .await
+            .unwrap();
+        session.current().log().materialize().unwrap();
         let target = if alias {
             directory.path().join(".").join("session.jsonl")
         } else {
             path.clone()
         };
-        runtime.switch_session(target).await.unwrap();
+        session.resume_session(target).await.unwrap();
         assert!(
             factory.starts.lock().unwrap()[1]
                 .iter()
                 .any(|entry| { entry["customType"] == "checkpoint-fixture" }),
             "same-file resume must include shutdown checkpoint (alias={alias})"
         );
-        runtime
-            .session()
+        session
+            .current()
             .append_custom_entry("after-resume", None)
             .unwrap();
         SessionLog::open(&path).unwrap();
-        runtime.shutdown().await.unwrap();
+        manager.shutdown().await.unwrap();
     }
 }

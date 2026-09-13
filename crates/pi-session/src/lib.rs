@@ -42,8 +42,8 @@ pub use agent_session::{
 };
 pub use agent_session_runtime::{
     AgentSessionInitialModelSource, AgentSessionInitialState, AgentSessionReplacement,
-    AgentSessionRuntime, AgentSessionRuntimeError, AgentSessionRuntimeFactory,
-    AgentSessionRuntimeRequest, AgentSessionRuntimeTarget, SessionGenerationOverlay,
+    PreparedSessionGeneration, SessionGenerationActivation, SessionGenerationFactory,
+    SessionGenerationOverlay, SessionGenerationRequest,
 };
 pub use compaction::*;
 pub use context::{

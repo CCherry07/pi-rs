@@ -1078,72 +1078,31 @@ mod tests {
     use agent_client_protocol::{ByteStreams, Client};
     use pi_agent::AgentOptions;
     use pi_runtime::PiRuntime;
-    use pi_session::{
-        AgentSession, AgentSessionOptions, AgentSessionRuntimeRequest, AgentSessionRuntimeTarget,
-        SessionLog,
-    };
+    use pi_session::{AgentSessionOptions, PreparedSessionGeneration, SessionGenerationRequest};
     use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
     use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
     use super::*;
 
     fn test_manager(turn: ScriptedTurn) -> MultiSessionManager {
-        MultiSessionManager::new(move |request: AgentSessionRuntimeRequest| {
+        MultiSessionManager::new(move |request: SessionGenerationRequest| {
             let turn = turn.clone();
             async move {
-                let AgentSessionRuntimeRequest {
-                    target,
-                    generation_overlay,
-                    ..
-                } = request;
-                let (cwd, path, create, reused_log) = match target {
-                    AgentSessionRuntimeTarget::Create { cwd, path, .. } => (cwd, path, true, None),
-                    AgentSessionRuntimeTarget::Open { path } => {
-                        let (_, document) = SessionLog::open(&path)?;
-                        (document.header.cwd, path, false, None)
-                    }
-                    AgentSessionRuntimeTarget::Reuse { log } => {
-                        let document = log.load()?;
-                        (
-                            document.header.cwd,
-                            log.path().to_path_buf(),
-                            false,
-                            Some(log),
-                        )
-                    }
-                };
+                let generation_overlay = request.generation_overlay;
                 let mut builder = PiRuntime::builder()
                     .provider_plugin(ScriptedProviderPlugin::scripted([turn]))
                     .agent_options(AgentOptions {
                         provider_id: ProviderId::new("scripted"),
                         model_id: ModelId::new("test"),
-                        cwd,
+                        cwd: request.cwd,
                         ..AgentOptions::default()
                     });
                 builder = generation_overlay.apply_to(builder);
                 let runtime = builder.build()?;
-                if create {
-                    AgentSession::prepare_create_with_options(
-                        runtime,
-                        path,
-                        AgentSessionOptions::default(),
-                    )
-                    .await
-                } else if let Some(log) = reused_log {
-                    AgentSession::prepare_reuse_with_options(
-                        runtime,
-                        log,
-                        AgentSessionOptions::default(),
-                    )
-                    .await
-                } else {
-                    AgentSession::prepare_open_with_options(
-                        runtime,
-                        path,
-                        AgentSessionOptions::default(),
-                    )
-                    .await
-                }
+                Ok(PreparedSessionGeneration::new(
+                    runtime,
+                    AgentSessionOptions::default(),
+                ))
             }
         })
     }
