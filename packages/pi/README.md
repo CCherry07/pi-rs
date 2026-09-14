@@ -43,7 +43,7 @@ pi
 ```
 
 The package selects a native optional dependency for the current OS, CPU, and Linux libc. Supported
-release targets are macOS arm64/x64, Linux glibc arm64/x64, and Windows MSVC arm64/x64. Both `pi`
+release targets are macOS arm64/x64, Linux glibc 2.36+ arm64/x64, and Windows MSVC arm64/x64. Both `pi`
 and `pi-rs` invoke the product launcher, while `pi-eval` invokes the same runtime through an
 eval-specific Node/NAPI entry. `npm list --global` confirms which npm version is installed. If npm
 skips the native optional dependency, the launcher prints exact npx and
@@ -510,7 +510,9 @@ INSTALL_DIR=/usr/local/bin ./scripts/install-package.sh \
 The npm release uses a small `@pi-rs/cli` root package plus exact-version native platform packages.
 Platform packages publish first and the root package publishes last. Release Please owns the
 version/changelog PR; the protected workflow publishes through npm Trusted Publishing OIDC and
-verifies every registry tarball before publishing the draft GitHub release. Trusted Publishing must
+validates each accepted publish against the exact staged tarball before publishing the draft GitHub
+release. A rerun verifies an already-published version against registry metadata before accepting
+it. Trusted Publishing must
 be configured separately for the root package and all six platform packages, using repository
 `CCherry07/pi-rs`, workflow `release.yml`, and environment `npm-publish`. The complete pipeline is in
 `.github/workflows/release.yml`.

@@ -555,7 +555,7 @@ macOS 与 Linux 可安装 `dist/release/` 中匹配当前宿主的最新 archive
 ./scripts/install-package.sh
 ```
 
-发布矩阵覆盖 macOS arm64/x64、Linux glibc arm64/x64 与 Windows MSVC arm64/x64。GitHub
+发布矩阵覆盖 macOS arm64/x64、Linux glibc 2.36+ arm64/x64 与 Windows MSVC arm64/x64。GitHub
 archive 是纯 Rust standalone 版本；npm 使用一个 JavaScript 根包和一个按 OS/CPU/libc 选择的
 NAPI 可选包。Release Please 维护版本/changelog PR，npm Trusted Publishing 使用短期 OIDC
 身份并自动生成 provenance，不保存长期 npm token。当前产物已有 checksum 和 native smoke

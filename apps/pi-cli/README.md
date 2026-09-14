@@ -46,7 +46,7 @@ pi
 ```
 
 The package selects a native optional dependency for the current OS, CPU, and Linux libc. Supported
-release targets are macOS arm64/x64, Linux glibc arm64/x64, and Windows MSVC arm64/x64. If npm
+release targets are macOS arm64/x64, Linux glibc 2.36+ arm64/x64, and Windows MSVC arm64/x64. If npm
 skips that optional dependency, the launcher prints exact npx and global-install repair commands
 for the installed CLI version and platform, including the public registry override needed when a
 mirror is stale.
@@ -842,7 +842,8 @@ INSTALL_DIR=/usr/local/bin ./scripts/install-package.sh \
 The npm release uses a small `@pi-rs/cli` root package plus exact-version native platform packages.
 Platform packages publish first and the root package publishes last. Release Please owns the
 version/changelog PR; the protected workflow publishes through npm Trusted Publishing OIDC and
-verifies every registry tarball before publishing the draft GitHub release. See
+validates each accepted publish against the exact staged tarball before publishing the draft GitHub
+release; reruns verify exact registry metadata for already-published versions. See
 [`packages/pi/README.md`](../../packages/pi/README.md#distribution--发布) for the release workflow.
 
 Release artifacts currently use checksums and native smoke tests but are not

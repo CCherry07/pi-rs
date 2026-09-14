@@ -653,7 +653,7 @@ macOS and Linux can install the newest matching archive from `dist/release/`:
 ./scripts/install-package.sh
 ```
 
-The release matrix covers macOS arm64/x64, Linux glibc arm64/x64, and Windows MSVC arm64/x64.
+The release matrix covers macOS arm64/x64, Linux glibc 2.36+ arm64/x64, and Windows MSVC arm64/x64.
 GitHub archives are standalone Rust builds; npm uses a JavaScript root plus one OS/CPU/libc-specific
 NAPI optional package. Release Please maintains the version/changelog PR, while npm Trusted
 Publishing supplies short-lived OIDC authentication and automatic provenance. The current artifacts

@@ -58,6 +58,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || '' }}
     steps:
       - uses: actions/checkout@v4
         with:

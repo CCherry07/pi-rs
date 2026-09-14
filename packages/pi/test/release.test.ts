@@ -4,13 +4,19 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  assertCompatibleGlibcReferences,
+  assertNpmPublishResultMatches,
   assertPublishedPackageMatches,
+  glibcVersionsFromReadelf,
+  isNpmAlreadyPublishedError,
+  maximumLinuxGlibcVersion,
+  npmCommandArguments,
+  parseNpmPublishOutput,
   parseSingleNpmViewOutput,
   publishPackageDirectories,
   releaseMatrix,
   synchronizeCargoLockWorkspaceVersions,
   validateReleaseConfiguration,
-  waitForPublishedPackage,
   workspaceVersionPackageNames,
 } from "../scripts/release.js";
 import { VERSION } from "../src/compat-api.js";
@@ -76,18 +82,49 @@ test("release matrix has one native runner per supported target", () => {
   assert.ok(matrix.include.every((entry) => entry.runner.length > 0));
 });
 
-test("release matrix builds Linux artifacts on the Ubuntu 24.04 baseline", () => {
-  const linuxRunners = new Map(
+test("release matrix builds Linux artifacts in the glibc 2.36 container", () => {
+  const linuxBuilds = new Map(
     releaseMatrix().include
       .filter((entry) => entry.target.endsWith("unknown-linux-gnu"))
-      .map((entry) => [entry.target, entry.runner]),
+      .map((entry) => [entry.target, { runner: entry.runner, container: entry.container }]),
   );
   assert.deepEqual(
-    linuxRunners,
+    linuxBuilds,
     new Map([
-      ["aarch64-unknown-linux-gnu", "ubuntu-24.04-arm"],
-      ["x86_64-unknown-linux-gnu", "ubuntu-24.04"],
+      [
+        "aarch64-unknown-linux-gnu",
+        { runner: "ubuntu-24.04-arm", container: "rust:1.98.0-bookworm" },
+      ],
+      [
+        "x86_64-unknown-linux-gnu",
+        { runner: "ubuntu-24.04", container: "rust:1.98.0-bookworm" },
+      ],
     ]),
+  );
+  assert.equal(maximumLinuxGlibcVersion, "2.36");
+
+  const releaseWorkflow = readFileSync(
+    new URL("../../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(releaseWorkflow, /container: \$\{\{ matrix\.container \|\| '' \}\}/);
+});
+
+test("release GLIBC audit rejects symbols newer than 2.36", () => {
+  const compatible = `
+    0x0010: Name: GLIBC_2.2.5  Flags: none  Version: 12
+    0x0020: Name: GLIBC_2.34   Flags: none  Version: 11
+    0x0030: Name: GLIBC_2.36   Flags: none  Version: 10
+  `;
+  assert.deepEqual(glibcVersionsFromReadelf(compatible), ["2.2.5", "2.34", "2.36"]);
+  assert.doesNotThrow(() => assertCompatibleGlibcReferences(compatible, "pi"));
+  assert.throws(
+    () => assertCompatibleGlibcReferences(`${compatible}\nName: GLIBC_2.37`, "pi-napi.node"),
+    /pi-napi\.node requires GLIBC_2\.37, newer than supported GLIBC_2\.36/,
+  );
+  assert.throws(
+    () => assertCompatibleGlibcReferences("no version section", "pi"),
+    /pi has no readable GLIBC version requirements/,
   );
 });
 
@@ -123,63 +160,73 @@ test("registry verification requires the exact staged tarball and selectors", ()
   );
 });
 
-test("registry verification polls through npm publication propagation", () => {
+test("npm publish JSON proves the registry accepted the exact staged tarball", () => {
   const staged = {
     name: "@pi-rs/cli-win32-x64-msvc",
     version: "0.4.1",
     os: ["win32"],
     cpu: ["x64"],
   };
-  const published = {
-    ...staged,
-    dist: {
-      integrity: "sha512-release",
-      tarball:
-        "https://registry.npmjs.org/@pi-rs/cli-win32-x64-msvc/-/cli-win32-x64-msvc-0.4.1.tgz",
-    },
+  const publishResult = {
+    id: "@pi-rs/cli-win32-x64-msvc@0.4.1",
+    name: "@pi-rs/cli-win32-x64-msvc",
+    version: "0.4.1",
+    integrity: "sha512-release",
   };
-  const delays: number[] = [];
-  let queries = 0;
 
-  waitForPublishedPackage(staged, "sha512-release", {
-    attempts: 4,
-    initialDelayMs: 100,
-    maxDelayMs: 250,
-    query: () => {
-      queries += 1;
-      if (queries < 4) throw new Error("npm view returned E404");
-      return published;
-    },
-    sleep: (delayMs) => delays.push(delayMs),
-    onRetry: () => {},
-  });
+  const keyedOutput = JSON.stringify({ [staged.name]: publishResult });
+  assert.ok(npmCommandArguments("release.tgz").includes("--json"));
+  const parsed = parseNpmPublishOutput(keyedOutput, staged.name, staged.version);
+  assert.deepEqual(parsed, publishResult);
+  assert.doesNotThrow(() =>
+    assertNpmPublishResultMatches(staged, parsed, "sha512-release"),
+  );
 
-  assert.equal(queries, 4);
-  assert.deepEqual(delays, [100, 200, 250]);
+  assert.deepEqual(
+    parseNpmPublishOutput(JSON.stringify([publishResult]), staged.name, staged.version),
+    publishResult,
+  );
 });
 
-test("registry verification fails after its bounded polling window", () => {
+test("npm publish JSON rejects the wrong package identity or tarball", () => {
   const staged = {
     name: "@pi-rs/cli-win32-x64-msvc",
     version: "0.4.1",
   };
-  const delays: number[] = [];
+  const publishResult = {
+    id: "@pi-rs/cli-win32-x64-msvc@0.4.1",
+    name: "@pi-rs/cli-win32-x64-msvc",
+    version: "0.4.1",
+    integrity: "sha512-release",
+  };
 
   assert.throws(
-    () =>
-      waitForPublishedPackage(staged, "sha512-release", {
-        attempts: 3,
-        initialDelayMs: 50,
-        maxDelayMs: 100,
-        query: () => {
-          throw new Error("npm view returned E404");
-        },
-        sleep: (delayMs) => delays.push(delayMs),
-        onRetry: () => {},
-      }),
-    /was not verifiable after 3 attempts/,
+    () => assertNpmPublishResultMatches(staged, publishResult, "sha512-other"),
+    /npm publish tarball integrity differs/,
   );
-  assert.deepEqual(delays, [50, 100]);
+  assert.throws(
+    () =>
+      assertNpmPublishResultMatches(
+        staged,
+        { ...publishResult, id: "@pi-rs/cli-win32-x64-msvc@0.4.0" },
+        "sha512-release",
+      ),
+    /npm publish returned the wrong identity/,
+  );
+});
+
+test("only an exact already-published error activates registry recovery", () => {
+  assert.equal(
+    isNpmAlreadyPublishedError(
+      "You cannot publish over the previously published versions: 0.4.1.",
+    ),
+    true,
+  );
+  assert.equal(isNpmAlreadyPublishedError("npm error code EPUBLISHCONFLICT"), true);
+  assert.equal(
+    isNpmAlreadyPublishedError("npm error code E403: package publish access denied"),
+    false,
+  );
 });
 
 test("registry verification accepts npm 12 singleton view results", () => {

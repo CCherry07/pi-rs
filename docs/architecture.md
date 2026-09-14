@@ -712,7 +712,8 @@ remain a future opt-in layer, and fullscreen interaction requires a future PTY A
 Product distribution is an outer Release Module and does not add a runtime, session, frontend, or
 transport layer. `packages/pi/scripts/release.ts` is its command-line Interface: it validates the
 single product version, emits the CI matrix, builds one native target, assembles npm packages, and
-publishes already-verified tarballs before checking their exact registry metadata and integrity.
+publishes already-verified tarballs while validating each successful npm publish result against the
+exact package identity and tarball integrity.
 `.github/workflows/release.yml` is a thin Adapter that supplies native runners and an npm OIDC
 identity to that Interface; target naming, package layout, checksums, publication order, and smoke
 tests do not live in workflow YAML.
@@ -729,11 +730,14 @@ release workflow. The dispatch derives the version tag from the merged manifest,
 tag targets the triggering commit, and skips an existing run. This both avoids duplicates and
 recovers when Release Please creates a tag but fails before exposing its action outputs. The
 explicit dispatch is required because a tag created with `GITHUB_TOKEN` does not recursively start
-another workflow. The publish command polls the public registry with bounded backoff after each
-package and verifies its exact metadata and integrity before continuing. Platform packages therefore
-become verifiably public before the root package is published, and the draft GitHub Release becomes
-public only after the root package passes the same check. The standalone verification command
-remains available for manual audit and release recovery.
+another workflow. The publish command sends each exact tarball directly through `npm publish
+--json`; a successful command means npm accepted the registry write, and the Release Module checks
+the returned package identity and integrity before continuing. It does not race a separate
+pre-publish version query or wait for registry read-replica propagation. On a rerun, only npm's exact
+already-published error activates recovery: one exact registry lookup must match the staged metadata
+and tarball integrity. Platform packages publish before the root package, and the draft GitHub
+Release becomes public only after the root publish is accepted or exactly recovered. The standalone
+verification command remains available for manual post-publication audit and release recovery.
 
 `packages/pi/src/native-target.ts` is the one target vocabulary shared by release tooling and the
 Node loader. Supported artifacts currently cover macOS arm64/x64, Linux glibc arm64/x64, and
@@ -757,9 +761,12 @@ npm staging is distinct from the private source package, preventing a developmen
 from bypassing matrix validation. The protected workflow uses npm Trusted Publishing directly;
 there is no long-lived npm token, and npm attaches provenance to the OIDC publication. Application
 archives and NAPI artifacts receive SHA-256 files, the assembled sets receive `SHA256SUMS`, and npm
-registry `dist.integrity` must equal the SHA-512 of each locally verified tarball.
-Linux glibc artifacts use Ubuntu 24.04 runners for both x64 and arm64; this is the native dependency
-and system-library compatibility baseline for those release targets.
+publish results must report the SHA-512 of each locally verified tarball. Conflict recovery and the
+standalone registry audit additionally require registry `dist.integrity` to equal that SHA-512.
+Linux glibc artifacts use native Ubuntu 24.04 x64 and arm64 runners, but their build steps run in a
+Debian 12 container so both architectures share a glibc 2.36 system-library baseline. The Release
+Module audits the standalone and NAPI ELF version requirements and rejects references newer than
+`GLIBC_2.36` before checksumming or packaging them.
 Developer-ID/Authenticode signing and notarization remain release-hardening work rather than
 runtime concerns.
 

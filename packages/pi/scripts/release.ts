@@ -33,10 +33,8 @@ const sourcePackagePath = join(packageDirectory, "package.json");
 const releaseDirectory = join(workspaceDirectory, "dist", "release");
 const npmDirectory = join(workspaceDirectory, "dist", "npm");
 const npmRegistry = "https://registry.npmjs.org";
-const publishedPackagePollAttempts = 12;
-const publishedPackageInitialDelayMs = 1_000;
-const publishedPackageMaxDelayMs = 10_000;
-const sleepBuffer = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+export const maximumLinuxGlibcVersion = "2.36";
+const linuxBuildContainer = "rust:1.98.0-bookworm";
 
 const packageManifestSchema = z.looseObject({
   name: z.string().min(1),
@@ -72,6 +70,13 @@ const publishedPackageSchema = stagedPackageSchema.extend({
   }),
 });
 
+const npmPublishResultSchema = z.looseObject({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  version: z.string().min(1),
+  integrity: z.string().min(1),
+});
+
 const cargoMetadataSchema = z.object({
   packages: z.array(
     z.object({
@@ -92,6 +97,15 @@ const runnerByTarget = {
   "x86_64-pc-windows-msvc": "windows-2025",
 } as const satisfies Record<(typeof supportedNativeTargets)[number]["rustTarget"], string>;
 
+const containerByTarget = {
+  "aarch64-apple-darwin": "",
+  "x86_64-apple-darwin": "",
+  "aarch64-unknown-linux-gnu": linuxBuildContainer,
+  "x86_64-unknown-linux-gnu": linuxBuildContainer,
+  "aarch64-pc-windows-msvc": "",
+  "x86_64-pc-windows-msvc": "",
+} as const satisfies Record<(typeof supportedNativeTargets)[number]["rustTarget"], string>;
+
 export interface ReleaseConfiguration {
   version: string;
   packageManifest: PackageManifest;
@@ -101,6 +115,7 @@ export interface ReleaseMatrixEntry {
   target: string;
   napiSuffix: string;
   runner: string;
+  container: string;
 }
 
 function parsePackageManifest(path: string): PackageManifest {
@@ -245,6 +260,7 @@ export function releaseMatrix(): { include: ReleaseMatrixEntry[] } {
       target: target.rustTarget,
       napiSuffix: target.napiSuffix,
       runner: runnerByTarget[target.rustTarget],
+      container: containerByTarget[target.rustTarget],
     })),
   };
 }
@@ -377,6 +393,49 @@ function signMacArtifact(path: string, target: NativeTarget): void {
   run("codesign", ["--force", "--sign", "-", path]);
 }
 
+function compareVersions(left: string, right: string): number {
+  const leftParts = left.split(".").map(Number);
+  const rightParts = right.split(".").map(Number);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+export function glibcVersionsFromReadelf(output: string): string[] {
+  return [...new Set([...output.matchAll(/\bGLIBC_(\d+(?:\.\d+)+)\b/g)].map((match) => match[1]))]
+    .filter((version): version is string => version !== undefined)
+    .sort(compareVersions);
+}
+
+export function assertCompatibleGlibcReferences(
+  output: string,
+  artifact: string,
+  maximumVersion = maximumLinuxGlibcVersion,
+): void {
+  const versions = glibcVersionsFromReadelf(output);
+  const highestVersion = versions.at(-1);
+  if (!highestVersion) {
+    throw new Error(`${artifact} has no readable GLIBC version requirements`);
+  }
+  if (compareVersions(highestVersion, maximumVersion) > 0) {
+    throw new Error(
+      `${artifact} requires GLIBC_${highestVersion}, newer than supported GLIBC_${maximumVersion}`,
+    );
+  }
+}
+
+function verifyLinuxGlibcArtifact(path: string, target: NativeTarget): void {
+  if (target.platform !== "linux") return;
+  const result = runCapture("readelf", ["--version-info", "--wide", path]);
+  if (result.status !== 0) {
+    throw new Error(`Cannot inspect GLIBC requirements for ${path}:\n${result.stderr}`);
+  }
+  assertCompatibleGlibcReferences(result.stdout, path);
+}
+
 function copyNativeArtifact(
   target: NativeTarget,
   profile: "debug" | "release",
@@ -507,6 +566,7 @@ function buildDistribution(arguments_: string[]): void {
   mkdirSync(releaseDirectory, { recursive: true });
   const napiArtifact = join(releaseDirectory, `pi-napi.${target.napiSuffix}.node`);
   copyNativeArtifact(target, "release", napiArtifact);
+  verifyLinuxGlibcArtifact(napiArtifact, target);
   writeChecksum(napiArtifact);
 
   const builtBinary = join(
@@ -514,6 +574,7 @@ function buildDistribution(arguments_: string[]): void {
     standaloneBinaryName(target),
   );
   if (!existsSync(builtBinary)) throw new Error(`CLI build output does not exist: ${builtBinary}`);
+  verifyLinuxGlibcArtifact(builtBinary, target);
   const archive = archiveStandalone(target, version, builtBinary);
   process.stdout.write(`Created ${archive}\nCreated ${napiArtifact}\n`);
 }
@@ -630,10 +691,11 @@ function writeChecksumManifest(directory: string, names: string[]): void {
   writeFileSync(join(directory, "SHA256SUMS"), `${lines.join("\n")}\n`);
 }
 
-function npmCommandArguments(packageSpec: string, dryRun = false): string[] {
+export function npmCommandArguments(packageSpec: string, dryRun = false): string[] {
   const arguments_ = [
     "publish",
     packageSpec,
+    "--json",
     "--access",
     "public",
     "--ignore-scripts",
@@ -816,23 +878,6 @@ function readFileNames(directory: string): string[] {
   return existsSync(directory) ? readdirSync(directory) : [];
 }
 
-function packageIsPublished(name: string, version: string): boolean {
-  const result = runCapture("npm", [
-    "view",
-    `${name}@${version}`,
-    "version",
-    "--json",
-    `--registry=${npmRegistry}`,
-  ]);
-  if (result.status === 0) {
-    const publishedVersion = parseSingleNpmViewOutput(result.stdout, `${name}@${version}`);
-    return publishedVersion === version;
-  }
-  const output = `${result.stdout}\n${result.stderr}`;
-  if (output.includes("E404") || output.includes("404 Not Found")) return false;
-  throw new Error(`Cannot query ${name}@${version}:\n${output}`);
-}
-
 function publishedPackage(name: string, version: string): z.infer<typeof publishedPackageSchema> {
   const result = runCapture("npm", [
     "view",
@@ -898,69 +943,67 @@ export function assertPublishedPackageMatches(
   }
 }
 
-export interface PublishedPackagePollOptions {
-  attempts?: number;
-  initialDelayMs?: number;
-  maxDelayMs?: number;
-  query?: (name: string, version: string) => unknown;
-  sleep?: (delayMs: number) => void;
-  onRetry?: (error: unknown, attempt: number, delayMs: number) => void;
+export function parseNpmPublishOutput(
+  stdout: string,
+  name: string,
+  version: string,
+): z.infer<typeof npmPublishResultSchema> {
+  const identity = `${name}@${version}`;
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout) as unknown;
+  } catch (error) {
+    throw new Error(`Cannot parse npm publish result for ${identity}: ${stdout}`, {
+      cause: error,
+    });
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length !== 1) {
+      throw new Error(
+        `Expected exactly one npm publish result for ${identity}, received ${value.length}`,
+      );
+    }
+    value = value[0];
+  } else if (typeof value === "object" && value !== null && Object.hasOwn(value, name)) {
+    value = (value as Record<string, unknown>)[name];
+  }
+
+  const parsed = npmPublishResultSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new Error(
+      `Invalid npm publish result for ${identity}: ${z.prettifyError(parsed.error)}`,
+      { cause: parsed.error },
+    );
+  }
+  return parsed.data;
 }
 
-function sleepSynchronously(delayMs: number): void {
-  Atomics.wait(sleepBuffer, 0, 0, delayMs);
-}
-
-export function waitForPublishedPackage(
+export function assertNpmPublishResultMatches(
   stagedValue: unknown,
+  publishedValue: unknown,
   expectedIntegrity: string,
-  options: PublishedPackagePollOptions = {},
 ): void {
   const staged = stagedPackageSchema.parse(stagedValue);
+  const published = npmPublishResultSchema.parse(publishedValue);
   const identity = `${staged.name}@${staged.version}`;
-  const attempts = options.attempts ?? publishedPackagePollAttempts;
-  const initialDelayMs = options.initialDelayMs ?? publishedPackageInitialDelayMs;
-  const maxDelayMs = options.maxDelayMs ?? publishedPackageMaxDelayMs;
-  if (!Number.isInteger(attempts) || attempts < 1) {
-    throw new Error("Published package polling attempts must be a positive integer");
+  if (
+    published.id !== identity ||
+    published.name !== staged.name ||
+    published.version !== staged.version
+  ) {
+    throw new Error(`npm publish returned the wrong identity for ${identity}`);
   }
-  if (initialDelayMs < 1 || maxDelayMs < initialDelayMs) {
-    throw new Error("Published package polling delays must be positive and ordered");
+  if (published.integrity !== expectedIntegrity) {
+    throw new Error(`npm publish tarball integrity differs for ${identity}`);
   }
+}
 
-  const query = options.query ?? publishedPackage;
-  const sleep = options.sleep ?? sleepSynchronously;
-  const onRetry =
-    options.onRetry ??
-    ((_error: unknown, attempt: number, delayMs: number) => {
-      process.stdout.write(
-        `Waiting for ${identity} to become verifiable ` +
-          `(attempt ${attempt}/${attempts}; retrying in ${delayMs}ms)\n`,
-      );
-    });
-  let delayMs = initialDelayMs;
-  let lastError: unknown;
-
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      assertPublishedPackageMatches(
-        staged,
-        query(staged.name, staged.version),
-        expectedIntegrity,
-      );
-      return;
-    } catch (error) {
-      lastError = error;
-      if (attempt === attempts) break;
-      onRetry(error, attempt, delayMs);
-      sleep(delayMs);
-      delayMs = Math.min(delayMs * 2, maxDelayMs);
-    }
-  }
-
-  throw new Error(`Published package ${identity} was not verifiable after ${attempts} attempts`, {
-    cause: lastError,
-  });
+export function isNpmAlreadyPublishedError(output: string): boolean {
+  return (
+    /\bEPUBLISHCONFLICT\b/i.test(output) ||
+    /cannot publish over (?:the )?previously published versions?/i.test(output)
+  );
 }
 
 function verifyPublishedPackagePath(directory: string, packagePath: string): void {
@@ -969,7 +1012,11 @@ function verifyPublishedPackagePath(directory: string, packagePath: string): voi
   );
   const tarball = npmTarballPath(directory, manifest.name, manifest.version);
   if (!existsSync(tarball)) throw new Error(`Publish tarball does not exist: ${tarball}`);
-  waitForPublishedPackage(manifest, sha512Integrity(tarball));
+  assertPublishedPackageMatches(
+    manifest,
+    publishedPackage(manifest.name, manifest.version),
+    sha512Integrity(tarball),
+  );
   process.stdout.write(`Verified published ${manifest.name}@${manifest.version}\n`);
 }
 
@@ -987,18 +1034,41 @@ function publishNpm(arguments_: string[]): void {
 
   for (const packagePath of publishPackageDirectories(directory)) {
     const packagePathname = join(packagePath, "package.json");
-    const manifest = publishIdentitySchema.parse(
+    const manifest = stagedPackageSchema.parse(
       JSON.parse(readFileSync(packagePathname, "utf8")) as unknown,
     );
-    if (!dryRun && packageIsPublished(manifest.name, manifest.version)) {
-      process.stdout.write(`Skipping already-published ${manifest.name}@${manifest.version}\n`);
-      verifyPublishedPackagePath(directory, packagePath);
-      continue;
-    }
     const tarball = npmTarballPath(directory, manifest.name, manifest.version);
     if (!existsSync(tarball)) throw new Error(`Publish tarball does not exist: ${tarball}`);
-    run("npm", npmCommandArguments(tarball, dryRun));
-    if (!dryRun) verifyPublishedPackagePath(directory, packagePath);
+    const argumentsForNpm = npmCommandArguments(tarball, dryRun);
+    process.stdout.write(`$ npm ${argumentsForNpm.join(" ")}\n`);
+    const result = runCapture("npm", argumentsForNpm);
+    const output = `${result.stdout}\n${result.stderr}`.trim();
+
+    if (result.status !== 0) {
+      if (!dryRun && isNpmAlreadyPublishedError(output)) {
+        verifyPublishedPackagePath(directory, packagePath);
+        process.stdout.write(
+          `Accepted already-published ${manifest.name}@${manifest.version} after exact verification\n`,
+        );
+        continue;
+      }
+      throw new Error(
+        `npm publish failed for ${manifest.name}@${manifest.version} ` +
+          `(status ${result.status}):\n${output}`,
+      );
+    }
+
+    const expectedIntegrity = sha512Integrity(tarball);
+    const publishResult = parseNpmPublishOutput(
+      result.stdout,
+      manifest.name,
+      manifest.version,
+    );
+    assertNpmPublishResultMatches(manifest, publishResult, expectedIntegrity);
+    process.stdout.write(
+      `${dryRun ? "Validated npm publish dry run" : "Published"} ` +
+        `${manifest.name}@${manifest.version}\n`,
+    );
   }
 }
 
