@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use pi_agent::AgentOptions;
 use pi_core::{
-    ModelId, ModelSpec, PluginContext, PluginId, PresentationMode, ProviderId, ProviderPlugin,
-    ProviderRegisterContext, ToolCallId,
+    ContentBlock, ModelId, ModelSpec, PluginContext, PluginId, PresentationMode, ProviderId,
+    ProviderPlugin, ProviderRegisterContext, ToolCallId, ToolResult,
 };
 use pi_plugin_find::FindPlugin;
 use pi_plugin_grep::GrepPlugin;
@@ -192,7 +192,19 @@ async fn invoke(root: &pi_session::PiSession, name: &str, input: Value) -> pi_co
     )
     .await
     .unwrap_or_else(|_| panic!("tool {name} must settle"))
-    .unwrap()
+    .unwrap_or_else(|error| panic!("tool {name} failed: {error}"))
+}
+
+fn tool_text(result: &ToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn root(
@@ -411,6 +423,9 @@ async fn spawn_wait_message_and_followup_reuse_one_agent_session() {
     let spawned_session_id = details["sessionId"].as_str().unwrap().to_string();
     assert!(!agent_id.is_empty());
     assert!(!isolated_session_id.is_empty());
+    let spawn_text = tool_text(&spawn);
+    assert!(spawn_text.contains(&format!("Agent ID: {agent_id}")));
+    assert!(spawn_text.contains(&format!("Child session ID: {spawned_session_id}")));
 
     let first = invoke(
         &root,
@@ -430,6 +445,12 @@ async fn spawn_wait_message_and_followup_reuse_one_agent_session() {
         first.details.as_ref().unwrap()["agents"][0]["lastReport"]["outcome"],
         "succeeded"
     );
+    let first_text = tool_text(&first);
+    assert!(first_text.contains(&format!("Agent ID: {agent_id}")));
+    assert!(first_text.contains(&format!("Child session ID: {spawned_session_id}")));
+    assert!(first_text.contains("State: idle"));
+    assert!(first_text.contains("Outcome: succeeded"));
+    assert!(first_text.contains("Summary: first review"));
     let child_session_id = first.details.as_ref().unwrap()["agents"][0]["childSessionId"]
         .as_str()
         .unwrap()
@@ -443,6 +464,9 @@ async fn spawn_wait_message_and_followup_reuse_one_agent_session() {
     )
     .await;
     assert_eq!(sent.details.as_ref().unwrap()["acceptedAs"], "mailbox");
+    let sent_text = tool_text(&sent);
+    assert!(sent_text.contains(&format!("Target: {agent_id}")));
+    assert!(sent_text.contains("Delivery: mailbox"));
     let follow = invoke(
         &root,
         "followup_task",
@@ -450,6 +474,9 @@ async fn spawn_wait_message_and_followup_reuse_one_agent_session() {
     )
     .await;
     assert_eq!(follow.details.as_ref().unwrap()["started"], true);
+    let follow_text = tool_text(&follow);
+    assert!(follow_text.contains(&format!("Agent ID: {agent_id}")));
+    assert!(follow_text.contains("Follow-up started a new turn"));
     let second = invoke(
         &root,
         "wait_agent",
@@ -485,6 +512,214 @@ async fn spawn_wait_message_and_followup_reuse_one_agent_session() {
             .len(),
         1
     );
+    let list_text = tool_text(&list);
+    assert!(list_text.contains(&format!("Agent ID: {agent_id}")));
+    assert!(list_text.contains(&format!("Child session ID: {child_session_id}")));
+    assert!(list_text.contains("State: idle"));
+    assert!(list_text.contains("Summary: second review"));
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn child_message_sent_before_parent_wait_is_not_lost() {
+    let directory = tempfile::tempdir().unwrap();
+    let factory = TestFactory::new([ScriptedTurn::WaitForAbort])
+        .with_root_turns([ScriptedTurn::WaitForAbort]);
+    let providers = Arc::clone(&factory.providers);
+    let (manager, root) = root(factory, &directory).await;
+
+    let running_root = root.current();
+    let root_turn = tokio::spawn(async move { running_root.prompt("hold parent open").await });
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !root.current().runtime().agent().is_running()
+        || !providers
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(depth, provider)| *depth == 0 && !provider.requests().is_empty())
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "parent turn did not start"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    let spawn = invoke(
+        &root,
+        "spawn_agent",
+        json!({"agent":"reviewer","task":"hold child open","detached":true}),
+    )
+    .await;
+    let agent_id = spawn.details.as_ref().unwrap()["agentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let child_session_id = spawn.details.as_ref().unwrap()["sessionId"]
+        .as_str()
+        .unwrap();
+    let child = manager
+        .sessions()
+        .into_iter()
+        .find(|session| session.id() == child_session_id)
+        .expect("spawned child session");
+
+    let sent = invoke(
+        &child,
+        "send_message",
+        json!({"target":"parent","message":"CHILD_READY"}),
+    )
+    .await;
+    let event_id = sent.details.as_ref().unwrap()["eventRecordId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let event_seq = sent.details.as_ref().unwrap()["eventRecordSeq"]
+        .as_u64()
+        .unwrap();
+
+    // This deliberately begins after send_message has returned. The old
+    // process-local waiter split routed the message away from wait_agent and
+    // timed out here.
+    let waited = invoke(
+        &root,
+        "wait_agent",
+        json!({"targets":[agent_id],"mode":"any","timeoutMs":200}),
+    )
+    .await;
+    let details = waited.details.as_ref().unwrap();
+    assert!(format!("{:?}", waited.content).contains("CHILD_READY"));
+    assert_eq!(details["state"], "ready");
+    assert_eq!(details["messages"][0]["id"], event_id);
+    assert_eq!(details["messages"][0]["sequence"], event_seq);
+    assert_eq!(details["messages"][0]["from"], agent_id);
+    assert_eq!(details["messages"][0]["message"], "CHILD_READY");
+    let repeated = invoke(
+        &root,
+        "wait_agent",
+        json!({"targets":[agent_id],"mode":"any","timeoutMs":0}),
+    )
+    .await;
+    assert_eq!(repeated.details.as_ref().unwrap()["timedOut"], true);
+
+    let record = root
+        .current()
+        .log()
+        .load()
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|record| record.id == event_id)
+        .expect("durable collaboration event");
+    let record = serde_json::to_value(record).unwrap();
+    assert_eq!(record["seq"], event_seq);
+    assert_eq!(record["customType"], "pi.subagents.event");
+    assert_eq!(record["data"]["kind"], "message");
+    assert_eq!(record["data"]["recipientSessionId"], root.id());
+
+    invoke(&root, "interrupt_agent", json!({"target":agent_id})).await;
+    root.current().abort();
+    root_turn.await.unwrap().unwrap();
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn child_message_to_an_idle_parent_is_durable_before_projection() {
+    let directory = tempfile::tempdir().unwrap();
+    let factory = TestFactory::new([ScriptedTurn::WaitForAbort])
+        .with_root_turns([ScriptedTurn::WaitForAbort]);
+    let (manager, root) = root(factory, &directory).await;
+    let spawn = invoke(
+        &root,
+        "spawn_agent",
+        json!({"agent":"reviewer","task":"hold child open","detached":true}),
+    )
+    .await;
+    let agent_id = spawn.details.as_ref().unwrap()["agentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let child_session_id = spawn.details.as_ref().unwrap()["sessionId"]
+        .as_str()
+        .unwrap();
+    let child = manager
+        .sessions()
+        .into_iter()
+        .find(|session| session.id() == child_session_id)
+        .expect("spawned child session");
+
+    assert!(!root.current().runtime().agent().is_running());
+    let sent = invoke(
+        &child,
+        "send_message",
+        json!({"target":"parent","message":"WAKE_IDLE_PARENT"}),
+    )
+    .await;
+    let event_id = sent.details.as_ref().unwrap()["eventRecordId"]
+        .as_str()
+        .unwrap();
+    assert!(
+        root.current()
+            .log()
+            .load()
+            .unwrap()
+            .entries
+            .iter()
+            .any(|record| record.id == event_id)
+    );
+
+    invoke(&root, "interrupt_agent", json!({"target":agent_id})).await;
+    root.current().abort();
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn parent_message_sent_before_child_wait_is_not_lost() {
+    let directory = tempfile::tempdir().unwrap();
+    let (manager, root) = root(TestFactory::new([ScriptedTurn::WaitForAbort]), &directory).await;
+    let spawn = invoke(
+        &root,
+        "spawn_agent",
+        json!({"agent":"reviewer","task":"hold child open","detached":true}),
+    )
+    .await;
+    let agent_id = spawn.details.as_ref().unwrap()["agentId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let child_session_id = spawn.details.as_ref().unwrap()["sessionId"]
+        .as_str()
+        .unwrap();
+    let child = manager
+        .sessions()
+        .into_iter()
+        .find(|session| session.id() == child_session_id)
+        .expect("spawned child session");
+
+    let sent = invoke(
+        &root,
+        "send_message",
+        json!({"target":agent_id,"message":"PARENT_READY"}),
+    )
+    .await;
+    let event_id = sent.details.as_ref().unwrap()["eventRecordId"]
+        .as_str()
+        .unwrap();
+
+    let waited = invoke(
+        &child,
+        "wait_agent",
+        json!({"targets":["parent"],"mode":"any","timeoutMs":200}),
+    )
+    .await;
+    let details = waited.details.as_ref().unwrap();
+    assert!(format!("{:?}", waited.content).contains("PARENT_READY"));
+    assert_eq!(details["state"], "ready");
+    assert_eq!(details["messages"][0]["id"], event_id);
+    assert_eq!(details["messages"][0]["from"], "parent");
+    assert_eq!(details["messages"][0]["message"], "PARENT_READY");
+
+    invoke(&root, "interrupt_agent", json!({"target":agent_id})).await;
     manager.shutdown().await.unwrap();
 }
 
@@ -515,7 +750,8 @@ async fn interrupt_stops_only_the_active_turn_and_agent_remains_reusable() {
     )
     .await;
     assert_eq!(sent.details.as_ref().unwrap()["acceptedAs"], "steer");
-    invoke(&root, "interrupt_agent", json!({"target":agent_id})).await;
+    let cancellation = invoke(&root, "interrupt_agent", json!({"target":agent_id})).await;
+    assert!(tool_text(&cancellation).contains(&format!("Agent ID: {agent_id}")));
     let interrupted = invoke(
         &root,
         "wait_agent",
@@ -526,6 +762,7 @@ async fn interrupt_stops_only_the_active_turn_and_agent_remains_reusable() {
         interrupted.details.as_ref().unwrap()["agents"][0]["state"],
         "interrupted"
     );
+    assert!(tool_text(&interrupted).contains("State: interrupted"));
 
     let follow = invoke(
         &root,
@@ -675,21 +912,24 @@ async fn completed_reports_are_bounded_before_entering_the_parent_context() {
 }
 
 #[tokio::test]
-async fn spawn_overrides_model_and_thinking_for_only_that_child() {
+async fn profile_without_model_or_thinking_inherits_the_parent_selection() {
     let directory = tempfile::tempdir().unwrap();
-    let (manager, root) = root(
-        TestFactory::new([ScriptedTurn::Text("done".into())]),
-        &directory,
+    let agent_root = directory.path().join("agents");
+    std::fs::create_dir_all(&agent_root).unwrap();
+    std::fs::write(
+        agent_root.join("inherited.md"),
+        "---\nname: inherited\ndescription: Profile with no runtime selection\ntools: read\n---\nComplete the task.",
     )
-    .await;
+    .unwrap();
+    let mut factory = TestFactory::new([ScriptedTurn::Text("done".into())]);
+    factory.agent_paths.push(agent_root);
+    let (manager, root) = root(factory, &directory).await;
     let spawn = invoke(
         &root,
         "spawn_agent",
         json!({
-            "agent":"reviewer",
-            "task":"use an explicit runtime selection",
-            "model":"scripted/test",
-            "thinking":"off",
+            "agent":"inherited",
+            "task":"inherit the current runtime selection",
             "detached":true
         }),
     )

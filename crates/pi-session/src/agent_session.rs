@@ -1753,6 +1753,19 @@ impl AgentSession {
         custom_type: impl Into<String>,
         data: Option<serde_json::Value>,
     ) -> Result<String, SessionError> {
+        self.append_custom_record(custom_type, data)
+            .map(|record| record.id)
+    }
+
+    /// Persists extension state and returns its authoritative v4 record.
+    ///
+    /// Callers that need a durable event cursor should use this form instead
+    /// of reconstructing identity from a later snapshot.
+    pub fn append_custom_record(
+        &self,
+        custom_type: impl Into<String>,
+        data: Option<serde_json::Value>,
+    ) -> Result<SessionRecord, SessionError> {
         self.ensure_open()?;
         // Agent/tool callbacks run inside the prompt operation and need to
         // journal extension state before returning their tool result. The
@@ -1764,7 +1777,7 @@ impl AgentSession {
         if operation.is_none() && !self.runtime.agent().is_running() {
             return Err(SessionError::Busy);
         }
-        self.append_custom_entry_from_plugin(custom_type, data)
+        self.append_custom_record_from_plugin(custom_type, data)
     }
 
     /// Plugin contexts are invoked inside the session's owning operation and
@@ -1775,6 +1788,15 @@ impl AgentSession {
         custom_type: impl Into<String>,
         data: Option<serde_json::Value>,
     ) -> Result<String, SessionError> {
+        self.append_custom_record_from_plugin(custom_type, data)
+            .map(|record| record.id)
+    }
+
+    fn append_custom_record_from_plugin(
+        &self,
+        custom_type: impl Into<String>,
+        data: Option<serde_json::Value>,
+    ) -> Result<SessionRecord, SessionError> {
         match self.lifecycle_state.load(Ordering::Acquire) {
             SESSION_OPEN | SESSION_SHUTTING_DOWN => {}
             SESSION_CLOSED => return Err(SessionError::Closed),
@@ -1784,7 +1806,7 @@ impl AgentSession {
             custom_type: custom_type.into(),
             data,
         });
-        self.append_and_publish_entry(entry)
+        self.append_and_publish_record(entry)
     }
 
     /// Adds usage from an auxiliary provider call without inserting anything
@@ -2369,10 +2391,17 @@ impl AgentSession {
     /// one place. Callers that must rebuild runtime context before publication
     /// intentionally use the lower-level journal interface.
     fn append_and_publish_entry(&self, entry: SessionEntry) -> Result<String, SessionError> {
+        self.append_and_publish_record(entry)
+            .map(|record| record.id)
+    }
+
+    fn append_and_publish_record(
+        &self,
+        entry: SessionEntry,
+    ) -> Result<SessionRecord, SessionError> {
         let record = self.log.append_session_record(entry)?;
-        let id = record.id.clone();
-        self.events.publish_entry(record);
-        Ok(id)
+        self.events.publish_entry(record.clone());
+        Ok(record)
     }
 
     pub async fn branch_with_summary(

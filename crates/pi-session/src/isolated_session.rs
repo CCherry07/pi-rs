@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use pi_agent::AgentLoopStop;
 use pi_core::{
-    AbortHandle, AbortSignal, CustomMessageContent, IsolatedFollowUpReceipt,
+    AbortHandle, AbortSignal, CustomMessageContent, CustomMessageInput, IsolatedFollowUpReceipt,
     IsolatedMessageDelivery, IsolatedMessageReceipt, IsolatedSessionId, IsolatedSessionOutcome,
     IsolatedSessionTurnId, Message, Usage, UsageCost, UserMessage,
 };
@@ -106,7 +106,7 @@ struct IsolatedSessionRun {
 struct IsolatedTurnState {
     active: Option<IsolatedSessionTurnId>,
     turns: HashMap<IsolatedSessionTurnId, Arc<IsolatedTurnRun>>,
-    mailbox: Vec<CustomMessageContent>,
+    mailbox: Vec<Message>,
 }
 
 struct IsolatedTurnRun {
@@ -239,7 +239,7 @@ impl IsolatedSessionRegistry {
                 &run,
                 &mut state,
                 initial_turn_id,
-                vec![input],
+                vec![user_message(input)],
                 Some(launch_signal),
             )
         };
@@ -331,31 +331,17 @@ impl IsolatedSessionRegistry {
         content: CustomMessageContent,
     ) -> Result<IsolatedMessageReceipt, String> {
         let run = self.owned_session(owner_registration_id, id)?;
-        let mut state = run
-            .turns
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(turn_id) = state.active.clone() {
-            match run
-                .session
-                .current()
-                .enqueue_message(user_message(content.clone()), QueueKind::Steer)
-            {
-                Ok(_) => {
-                    return Ok(IsolatedMessageReceipt {
-                        accepted_as: IsolatedMessageDelivery::Steer,
-                        turn_id: Some(turn_id),
-                    });
-                }
-                Err(SessionError::Busy) => {}
-                Err(error) => return Err(error.to_string()),
-            }
-        }
-        state.mailbox.push(content);
-        Ok(IsolatedMessageReceipt {
-            accepted_as: IsolatedMessageDelivery::Mailbox,
-            turn_id: None,
-        })
+        deliver_message(&run, user_message(content))
+    }
+
+    pub(crate) fn send_custom_message(
+        &self,
+        owner_registration_id: &str,
+        id: &IsolatedSessionId,
+        message: CustomMessageInput,
+    ) -> Result<IsolatedMessageReceipt, String> {
+        let run = self.owned_session(owner_registration_id, id)?;
+        deliver_message(&run, Message::custom(message.into_message(now_ms())))
     }
 
     pub(crate) async fn follow_up(
@@ -365,6 +351,7 @@ impl IsolatedSessionRegistry {
         content: CustomMessageContent,
     ) -> Result<IsolatedFollowUpReceipt, String> {
         let run = self.owned_session(owner_registration_id, id)?;
+        let message = user_message(content);
         let (turn_id, readiness) = loop {
             let active = run
                 .turns
@@ -376,7 +363,7 @@ impl IsolatedSessionRegistry {
                 match run
                     .session
                     .current()
-                    .enqueue_message(user_message(content.clone()), QueueKind::FollowUp)
+                    .enqueue_message(message.clone(), QueueKind::FollowUp)
                 {
                     Ok(_) => {
                         return Ok(IsolatedFollowUpReceipt {
@@ -398,7 +385,7 @@ impl IsolatedSessionRegistry {
             }
             let turn_id = IsolatedSessionTurnId::new(uuid::Uuid::now_v7().to_string());
             let mut messages = std::mem::take(&mut state.mailbox);
-            messages.push(content);
+            messages.push(message.clone());
             let readiness = start_turn_locked(&run, &mut state, turn_id.clone(), messages, None);
             break (turn_id, readiness);
         };
@@ -526,11 +513,42 @@ impl IsolatedSessionRegistry {
     }
 }
 
+fn deliver_message(
+    run: &Arc<IsolatedSessionRun>,
+    message: Message,
+) -> Result<IsolatedMessageReceipt, String> {
+    let mut state = run
+        .turns
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(turn_id) = state.active.clone() {
+        match run
+            .session
+            .current()
+            .enqueue_message(message.clone(), QueueKind::Steer)
+        {
+            Ok(_) => {
+                return Ok(IsolatedMessageReceipt {
+                    accepted_as: IsolatedMessageDelivery::Steer,
+                    turn_id: Some(turn_id),
+                });
+            }
+            Err(SessionError::Busy) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    state.mailbox.push(message);
+    Ok(IsolatedMessageReceipt {
+        accepted_as: IsolatedMessageDelivery::Mailbox,
+        turn_id: None,
+    })
+}
+
 fn start_turn_locked(
     run: &Arc<IsolatedSessionRun>,
     state: &mut IsolatedTurnState,
     turn_id: IsolatedSessionTurnId,
-    input: Vec<CustomMessageContent>,
+    input: Vec<Message>,
     launch_signal: Option<AbortSignal>,
 ) -> watch::Receiver<Option<IsolatedResult>> {
     debug_assert!(state.active.is_none());
@@ -593,7 +611,7 @@ async fn drain_runs(runs: Vec<Arc<IsolatedSessionRun>>) {
 async fn run_prompt(
     session: Arc<crate::AgentSession>,
     session_id: String,
-    input: Vec<CustomMessageContent>,
+    input: Vec<Message>,
     launch_signal: Option<AbortSignal>,
     abort_signal: AbortSignal,
 ) -> IsolatedResult {
@@ -605,8 +623,7 @@ async fn run_prompt(
         .load()
         .map(|document| aggregate_document_usage(&document))
         .map_err(|error| error.to_string())?;
-    let messages = input.into_iter().map(user_message).collect::<Vec<_>>();
-    let mut prompt = std::pin::pin!(session.prompt(messages));
+    let mut prompt = std::pin::pin!(session.prompt(input));
     let (result, launch_cancelled) = if let Some(launch_signal) = launch_signal {
         tokio::select! {
             biased;

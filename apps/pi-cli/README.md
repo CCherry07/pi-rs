@@ -391,7 +391,7 @@ tool output can contain source code, local paths, or credentials.
 
 The built-in collaboration feature exposes six tools:
 
-- `spawn_agent { agent, task, context? }` starts one child asynchronously and returns its exact
+- `spawn_agent { agent, task, fork_turns?, detached? }` starts one child asynchronously and returns its exact
   agent and turn ids.
 - `send_message { target, message }` sends information without starting a turn. Assigned children
   may use `target: "parent"`.
@@ -450,6 +450,9 @@ Supported fields are `name`, `description`, `aliases`, `systemPromptMode`,
 `inheritProjectContext`, `allowNestedSubagents`, `maxSubagentDepth`, `tools`,
 `excludeTools`, `model`, `thinking`, `inheritSkills`, `skills`, `skillPath`,
 `defaultContext`, and `timeoutMs`. Omitted selections inherit from the immediate parent.
+`model` and `thinking` are profile-only: `spawn_agent` has no per-launch override for either, so
+the calling model cannot choose a child runtime selection. Set them in the relevant profile Markdown
+(for example `<agent-dir>/agents/worker.md`); omit either field to inherit the parent's current value.
 Explicit tools remain below the parent's active-tool ceiling; `memory` is removed from managed
 children. A profile with `allowNestedSubagents: false` never receives `spawn_agent`.
 

@@ -1770,7 +1770,10 @@ remains published.
 The plugin-facing custom-entry capability permits an atomic extension-state append while the Agent
 itself owns the prompt operation. `SessionLog` still assigns the shared mutation sequence; busy
 compaction, switch, fork, and tree operations remain rejected. This preserves Pi extension-state
-semantics without weakening other session mutation gates.
+semantics without weakening other session mutation gates. The ordinary capability continues to
+return only success, while the concrete first-party `AgentSession::append_custom_record` Interface
+returns the committed `SessionRecord` when a product feature needs its assigned id and sequence for
+a durable cursor.
 
 `SessionContext::launch_isolated_session` is a deliberate Rust product extension seam rather than
 Pi core workflow policy. It creates a fresh `PiSession` through the same
@@ -1902,11 +1905,26 @@ child prefixes.
 Control operations require exact ids and direct ownership; prefixes and model-supplied arbitrary
 session ids are rejected. The runtime maps child session ids to launch records before the first
 provider request, so nested permissions come from host state rather than inherited prompt text.
-A caller may control its direct children and inspect its descendant tree. While a caller is inside
-`wait_agent`, child-to-parent messages use the feature mailbox and wake the wait; otherwise they
-enter the parent's semantic message stream. This state is protected by one feature-owned Module
-that also owns admission, turn monitors, inboxes, snapshots, and shutdown cleanup. The six tool
-Adapters only validate arguments and call that Module.
+A caller may control its direct children and inspect its descendant tree. Every parent/child
+`send_message` first appends one `pi.subagents.event` custom entry to the root session. The existing
+`SessionRecord` is the event envelope: its `id` is the stable event identity, its shared `seq` is the
+durable order/cursor, and its timestamp and parent link retain ordinary branch semantics. The typed
+payload contains the root, recipient session, sender, and message; no parallel `AgentEvent` storage
+type or subagent-specific revision exists. Delivery then projects the event into the recipient as a
+typed `agent_message` carrying `sourceRecordId`/`sourceRecordSeq`.
+
+`wait_agent` subscribes to the root's existing race-free `AgentSessionSubscription` before reading
+the authoritative branch. A pre-subscription append is therefore present in the snapshot, while a
+later append is present in the revisioned event stream; receiver lag refreshes from the session
+snapshot. The runtime's own change watch remains only for live agent-state changes. A wait result
+claims matching unconsumed event records and returns their content. Before the next provider
+request, the context hook recognizes those event ids in the persisted `wait_agent` result and
+removes the redundant `agent_message` projection, so the model observes the content once whether
+the message arrived before or during the wait. Without an explicit wait, the ordinary durable
+semantic projection remains visible. The feature-owned Module owns this policy together with
+admission, turn monitors, snapshots, and shutdown cleanup; the six tool Adapters only validate
+arguments and call that Module. This is a deliberate Codex-inspired Rust product design, not legacy
+Pi conformance.
 
 The generation-local agent catalog provides `scout`, `worker`, `reviewer`, `oracle`, and
 `delegate`, overlaid by Markdown definitions from the global `agents/` subtree and the nearest
@@ -1927,9 +1945,11 @@ the resolved profile, so a reload cannot mix a pre-reload launch with a post-rel
 
 `spawn_agent` accepts Codex-shaped `fork_turns: "none" | "all" | "<positive integer>"`.
 `none` selects fresh context, `all` selects the complete safe fork, and a number selects that many
-recent turns. Omission preserves the profile's `defaultContext` policy. Optional per-call `model`
-and `thinking` values override the profile for that launch and pass through the
-same catalog resolution and reasoning-compatibility checks as profile declarations.
+recent turns. Omission preserves the profile's `defaultContext` policy. Model and thinking are
+profile-only selections: a launch cannot override them. Agent-definition Markdown frontmatter is
+the configuration authority, and omitted `model` or `thinking` settings inherit the immediate
+parent selection. Explicit profile selections pass through the same catalog resolution and
+reasoning-compatibility checks before launch.
 An omitted profile fork preference falls back to fresh only when the caller has no persisted
 branch, while explicit `all` or numeric inheritance fails. The provider-context hook removes inherited parent collaboration calls,
 results, and collaboration notices but retains ordinary tool pairs and the child's own later
@@ -1959,14 +1979,18 @@ reattaches materialized child sessions without making provider requests. Previou
 the user may continue them through a new `followup_task` turn. Only a durable `queued` initial
 launch that has no child session is resubmitted, in its original root-local FIFO order. This
 deliberately provides Codex-style agent-conversation recovery rather than execution-stack recovery,
-so an uncertain tool call is never repeated implicitly. Feature inboxes and active wait
-registrations remain process-local.
+so an uncertain tool call is never repeated implicitly. Collaboration messages are recoverable
+from root-session event records and their target-session projections. Only active wait registrations
+used to suppress concurrent automatic completion reports and the brief in-flight claim before a
+wait result is persisted remain process-local.
 
 The generic isolated-session capability now owns a persistent child session with multiple typed
 turn handles. It supports non-starting message delivery, idle mailbox retention, queued follow-ups,
 turn-specific wait, and turn-specific abort while keeping concrete `AgentSession` values hidden
-from plugins. These additions are native ABI 20; bounded fork turns are native ABI 21. They add no
-Pi v4 record variant: messages, queue
+from plugins. Its first-party host Adapter can retain a typed custom message in the same mailbox or
+durable queue, preserving projection metadata instead of flattening every delivery to a user
+message. These additions are native ABI 20; bounded fork turns are native ABI 21. The typed host
+Adapter does not change the native plugin ABI. They add no Pi v4 record variant: messages, queue
 records, assistant/tool pairs, and usage adjustments continue through the existing session schema.
 
 The desktop's plugin-owned subagent renderer supplies generic related-session references to

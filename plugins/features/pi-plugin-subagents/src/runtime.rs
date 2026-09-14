@@ -8,7 +8,7 @@ use futures::FutureExt;
 use pi_core::{
     ContentBlock, CustomMessageContent, CustomMessageInput, IsolatedMessageDelivery,
     IsolatedSessionHandle, IsolatedSessionOutcome, IsolatedSessionRequest,
-    IsolatedSessionTurnHandle, PluginContextHandle, SendMessageOptions, SessionContext,
+    IsolatedSessionTurnHandle, Message, PluginContextHandle, SendMessageOptions, SessionContext,
     SessionSnapshot, ToolResult, Usage,
 };
 use pi_utils::time::unix_timestamp_ms_u64 as now_ms;
@@ -17,6 +17,11 @@ use serde_json::{Value, json};
 use tokio::sync::watch;
 use uuid::Uuid;
 
+use crate::collaboration::{
+    COLLABORATION_ENTRY_TYPE, CollaborationMessage, consumed_event_ids_from_messages,
+    consumed_event_ids_from_records, message_event_data, messages_for_recipient,
+    projection_details, remove_consumed_projections,
+};
 use crate::profiles::SubagentProfile;
 
 pub(crate) const DEFAULT_MAX_DEPTH: usize = 4;
@@ -86,8 +91,8 @@ struct RuntimeState {
     agents: HashMap<String, AgentRecord>,
     assignments: HashMap<String, String>,
     roots: HashMap<String, RootBudget>,
-    inboxes: HashMap<String, Vec<AgentMessage>>,
-    waiters: HashMap<String, usize>,
+    observed_messages: HashMap<String, HashSet<String>>,
+    active_waits: HashMap<String, usize>,
     recovering_roots: HashSet<String>,
     next_submission_seq: u64,
 }
@@ -165,10 +170,10 @@ pub(crate) enum TaskOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentTaskReport {
-    turn_id: Option<String>,
-    outcome: TaskOutcome,
-    summary: String,
-    truncated: bool,
+    pub(crate) turn_id: Option<String>,
+    pub(crate) outcome: TaskOutcome,
+    pub(crate) summary: String,
+    pub(crate) truncated: bool,
     usage: Usage,
 }
 
@@ -224,13 +229,30 @@ pub(crate) struct AgentSnapshot {
     pub updated_at: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AgentMessage {
-    pub id: String,
-    pub from: String,
-    pub message: String,
-    pub created_at: u64,
+impl AgentState {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Interrupting => "interrupting",
+            Self::Idle => "idle",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+            Self::TimedOut => "timed_out",
+        }
+    }
+}
+
+impl TaskOutcome {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+            Self::TimedOut => "timed_out",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,7 +265,7 @@ pub(crate) enum WaitEvaluation {
     Pending,
     Ready {
         agents: Vec<AgentSnapshot>,
-        messages: Vec<AgentMessage>,
+        messages: Vec<CollaborationMessage>,
     },
 }
 
@@ -311,10 +333,10 @@ impl Drop for WaitRegistration {
             return;
         };
         let mut state = runtime.lock();
-        if let Some(count) = state.waiters.get_mut(&self.session_id) {
+        if let Some(count) = state.active_waits.get_mut(&self.session_id) {
             *count = count.saturating_sub(1);
             if *count == 0 {
-                state.waiters.remove(&self.session_id);
+                state.active_waits.remove(&self.session_id);
             }
         }
     }
@@ -1331,7 +1353,7 @@ impl SubagentRuntime {
         if target == "parent" {
             return self.send_to_parent(sender_session_id, message);
         }
-        let (handle, child_session_id, agent_id) = {
+        let (handle, child_session_id, agent_id, root_session_id, root, owner) = {
             let state = self.lock();
             let agent = owned_agent(&state, sender_session_id, target)?;
             (
@@ -1341,31 +1363,45 @@ impl SubagentRuntime {
                     .ok_or_else(|| LaunchError::NotLaunched(target.to_string()).to_string())?,
                 agent.child_session_id.clone(),
                 agent.id.clone(),
+                agent.root_session_id.clone(),
+                state
+                    .sessions
+                    .get(&agent.root_session_id)
+                    .and_then(|session| session.pi_session.as_ref())
+                    .and_then(pi_session::WeakPiSession::upgrade)
+                    .ok_or_else(|| "root session is no longer available".to_string())?,
+                state
+                    .sessions
+                    .get(sender_session_id)
+                    .and_then(|session| session.pi_session.as_ref())
+                    .and_then(pi_session::WeakPiSession::upgrade)
+                    .ok_or_else(|| "owner session is no longer available".to_string())?,
             )
         };
-        if let Some(child_session_id) = child_session_id {
-            let mut state = self.lock();
-            if state.waiters.get(&child_session_id).copied().unwrap_or(0) > 0 {
-                state
-                    .inboxes
-                    .entry(child_session_id)
-                    .or_default()
-                    .push(AgentMessage {
-                        id: Uuid::now_v7().to_string(),
-                        from: "parent".to_string(),
-                        message,
-                        created_at: now_ms(),
-                    });
-                drop(state);
-                self.wake();
-                return Ok(json!({"target":agent_id,"acceptedAs":"wait_mailbox"}));
-            }
-        }
-        let receipt = handle
-            .send_message(CustomMessageContent::Text(message))
-            .map_err(|error| error.to_string())?;
+        let child_session_id = child_session_id
+            .ok_or_else(|| LaunchError::NotLaunched(target.to_string()).to_string())?;
+        let event = persist_message_event(
+            &root,
+            &root_session_id,
+            &child_session_id,
+            "parent",
+            &message,
+        )?;
+        let receipt = owner
+            .send_custom_to_isolated_session(
+                handle.id(),
+                CustomMessageInput {
+                    custom_type: "agent_message".into(),
+                    content: CustomMessageContent::Text(message),
+                    display: true,
+                    details: Some(projection_details(&event, &child_session_id)),
+                },
+            )
+            .map_err(|error| format!("could not project collaboration message: {error}"))?;
         Ok(json!({
             "target": agent_id,
+            "eventRecordId": event.id,
+            "eventRecordSeq": event.sequence,
             "acceptedAs": match receipt.accepted_as {
                 IsolatedMessageDelivery::Steer => "steer",
                 IsolatedMessageDelivery::Mailbox => "mailbox",
@@ -1375,7 +1411,7 @@ impl SubagentRuntime {
     }
 
     fn send_to_parent(&self, sender_session_id: &str, message: String) -> Result<Value, String> {
-        let (agent_id, parent_session_id, parent_handle, parent_waiting) = {
+        let (agent_id, parent_session_id, root_session_id, root, parent) = {
             let state = self.lock();
             let agent_id = state.assignments.get(sender_session_id).ok_or_else(|| {
                 "target \"parent\" is available only inside an assigned agent".to_string()
@@ -1387,47 +1423,44 @@ impl SubagentRuntime {
             (
                 agent.id.clone(),
                 agent.parent_session_id.clone(),
+                agent.root_session_id.clone(),
+                state
+                    .sessions
+                    .get(&agent.root_session_id)
+                    .and_then(|session| session.pi_session.as_ref())
+                    .and_then(pi_session::WeakPiSession::upgrade)
+                    .ok_or_else(|| "root session is no longer available".to_string())?,
                 state
                     .sessions
                     .get(&agent.parent_session_id)
-                    .map(|registered| registered.session.handle_for_adapter()),
-                state
-                    .waiters
-                    .get(&agent.parent_session_id)
-                    .copied()
-                    .unwrap_or(0)
-                    > 0,
+                    .and_then(|session| session.pi_session.as_ref())
+                    .and_then(pi_session::WeakPiSession::upgrade),
             )
         };
-        if parent_waiting {
-            self.lock()
-                .inboxes
-                .entry(parent_session_id)
-                .or_default()
-                .push(AgentMessage {
-                    id: Uuid::now_v7().to_string(),
-                    from: agent_id.clone(),
-                    message,
-                    created_at: now_ms(),
-                });
-            self.wake();
-            return Ok(json!({"target":"parent","acceptedAs":"wait_mailbox"}));
-        }
-        let handle =
-            parent_handle.ok_or_else(|| "parent session is no longer available".to_string())?;
-        send_custom_message(
-            &handle,
-            CustomMessageInput {
+        let event = persist_message_event(
+            &root,
+            &root_session_id,
+            &parent_session_id,
+            &agent_id,
+            &message,
+        )?;
+        let parent = parent.ok_or_else(|| "parent session is no longer available".to_string())?;
+        parent
+            .send_custom_message(CustomMessageInput {
                 custom_type: "agent_message".into(),
                 content: CustomMessageContent::Text(format!(
                     "Message from agent {agent_id}:\n{message}"
                 )),
                 display: true,
-                details: Some(json!({"from":agent_id,"message":message})),
-            },
-            true,
-        )?;
-        Ok(json!({"target":"parent","acceptedAs":"steer"}))
+                details: Some(projection_details(&event, &parent_session_id)),
+            })
+            .map_err(|error| format!("could not project collaboration message: {error}"))?;
+        Ok(json!({
+            "target":"parent",
+            "acceptedAs":"steer",
+            "eventRecordId":event.id,
+            "eventRecordSeq":event.sequence,
+        }))
     }
 
     pub(crate) fn interrupt(&self, owner: &str, id: &str) -> Result<AgentSnapshot, String> {
@@ -1524,19 +1557,20 @@ impl SubagentRuntime {
     pub(crate) fn register_wait(
         &self,
         session_id: &str,
-    ) -> (WaitRegistration, watch::Receiver<u64>) {
+    ) -> Result<(WaitRegistration, pi_session::PiSession), String> {
+        let root = self.root_session(session_id)?;
         *self
             .lock()
-            .waiters
+            .active_waits
             .entry(session_id.to_string())
             .or_default() += 1;
-        (
+        Ok((
             WaitRegistration {
                 runtime: self.downgrade(),
                 session_id: session_id.to_string(),
             },
-            self.subscribe(),
-        )
+            root,
+        ))
     }
 
     pub(crate) fn evaluate_wait(
@@ -1545,17 +1579,49 @@ impl SubagentRuntime {
         targets: &[String],
         mode: WaitMode,
     ) -> Result<WaitEvaluation, String> {
+        let (root_session_id, root, recipient) = {
+            let state = self.lock();
+            let root_session_id = state
+                .assignments
+                .get(owner)
+                .and_then(|id| state.agents.get(id))
+                .map_or_else(|| owner.to_string(), |agent| agent.root_session_id.clone());
+            let root = state
+                .sessions
+                .get(&root_session_id)
+                .map(|session| session.session.clone())
+                .ok_or_else(|| format!("root session {root_session_id} is unavailable"))?;
+            let recipient = state
+                .sessions
+                .get(owner)
+                .map(|session| session.session.clone())
+                .ok_or_else(|| format!("session {owner} is unavailable"))?;
+            (root_session_id, root, recipient)
+        };
+        let root_records = snapshot_records(&root.snapshot().map_err(|error| error.to_string())?)?;
+        let recipient_records =
+            snapshot_records(&recipient.snapshot().map_err(|error| error.to_string())?)?;
+        let consumed = consumed_event_ids_from_records(recipient_records.iter());
+        let pending_messages = messages_for_recipient(root_records.iter(), &root_session_id, owner);
+
         let mut state = self.lock();
         let agents = targets
             .iter()
             .filter(|id| id.as_str() != "parent")
             .map(|id| owned_agent(&state, owner, id).map(snapshot))
             .collect::<Result<Vec<_>, _>>()?;
-        let inbox = state.inboxes.entry(owner.to_string()).or_default();
-        let (messages, retained): (Vec<_>, Vec<_>) = std::mem::take(inbox)
+        let messages = pending_messages
             .into_iter()
-            .partition(|message| targets.iter().any(|id| id == &message.from));
-        *inbox = retained;
+            .filter(|message| targets.iter().any(|id| id == &message.from))
+            .filter(|message| !consumed.contains(&message.id))
+            .filter(|message| {
+                state
+                    .observed_messages
+                    .entry(owner.to_string())
+                    .or_default()
+                    .insert(message.id.clone())
+            })
+            .collect::<Vec<_>>();
         if !messages.is_empty() {
             return Ok(WaitEvaluation::Ready { agents, messages });
         }
@@ -1573,6 +1639,35 @@ impl SubagentRuntime {
         } else {
             Ok(WaitEvaluation::Pending)
         }
+    }
+
+    pub(crate) fn project_collaboration_context(
+        &self,
+        session_id: &str,
+        messages: Vec<Message>,
+    ) -> Vec<Message> {
+        let consumed = consumed_event_ids_from_messages(&messages);
+        // Claims only serialize concurrent wait calls until a real tool result
+        // is available. Never use a claim itself as proof of consumption: if
+        // tool-result persistence fails, the semantic projection must remain
+        // visible on the next provider request.
+        self.lock().observed_messages.remove(session_id);
+        remove_consumed_projections(messages, &consumed)
+    }
+
+    fn root_session(&self, owner: &str) -> Result<pi_session::PiSession, String> {
+        let state = self.lock();
+        let root_session_id = state
+            .assignments
+            .get(owner)
+            .and_then(|id| state.agents.get(id))
+            .map_or(owner, |agent| agent.root_session_id.as_str());
+        state
+            .sessions
+            .get(root_session_id)
+            .and_then(|session| session.pi_session.as_ref())
+            .and_then(pi_session::WeakPiSession::upgrade)
+            .ok_or_else(|| format!("root session {root_session_id} is no longer available"))
     }
 
     pub(crate) async fn drain_monitors(&self, owner: &str) {
@@ -1628,8 +1723,8 @@ impl SubagentRuntime {
     pub(crate) fn forget_session(&self, session_id: &str) {
         let mut state = self.lock();
         state.sessions.remove(session_id);
-        state.inboxes.remove(session_id);
-        state.waiters.remove(session_id);
+        state.observed_messages.remove(session_id);
+        state.active_waits.remove(session_id);
         let closing_root = !state.assignments.contains_key(session_id);
         let removed = state
             .agents
@@ -1729,7 +1824,7 @@ impl SubagentRuntime {
             };
             if agent.detached
                 || state
-                    .waiters
+                    .active_waits
                     .get(&agent.parent_session_id)
                     .copied()
                     .unwrap_or_default()
@@ -1912,6 +2007,42 @@ fn send_custom_message(
             )
         })
         .map_err(|error| error.to_string())
+}
+
+fn persist_message_event(
+    root: &pi_session::PiSession,
+    root_session_id: &str,
+    recipient_session_id: &str,
+    from: &str,
+    message: &str,
+) -> Result<CollaborationMessage, String> {
+    let record = root
+        .current()
+        .append_custom_record(
+            COLLABORATION_ENTRY_TYPE,
+            Some(message_event_data(
+                root_session_id,
+                recipient_session_id,
+                from,
+                message,
+            )),
+        )
+        .map_err(|error| format!("could not persist collaboration event: {error}"))?;
+    Ok(CollaborationMessage {
+        id: record.id,
+        sequence: record.seq,
+        from: from.to_string(),
+        message: message.to_string(),
+        created_at: u64::try_from(record.timestamp_ms).unwrap_or_default(),
+    })
+}
+
+fn snapshot_records(snapshot: &SessionSnapshot) -> Result<Vec<pi_session::SessionRecord>, String> {
+    snapshot
+        .branch()
+        .iter()
+        .map(|entry| serde_json::from_value(entry.raw().clone()).map_err(|error| error.to_string()))
+        .collect()
 }
 
 fn add_usage(total: &mut Usage, usage: &Usage) {
@@ -2203,6 +2334,7 @@ pub(crate) fn result_with_details(text: impl Into<String>, details: Value) -> To
 mod tests {
     use super::*;
     use crate::profiles::builtin_profile;
+    use pi_core::CustomMessage;
 
     fn runtime(max_depth: usize, max_spawns: usize, max_active: usize) -> SubagentRuntime {
         SubagentRuntime::with_limits_and_checkpointing(
@@ -2257,5 +2389,26 @@ mod tests {
         let prompt = format!("{}\nwork", marker(&id));
         assert_eq!(run_marker(&prompt), Some(id.as_str()));
         assert_eq!(run_marker("work"), None);
+    }
+
+    #[test]
+    fn an_uncommitted_wait_claim_never_hides_the_semantic_message() {
+        let runtime = runtime(2, 2, 1);
+        runtime
+            .lock()
+            .observed_messages
+            .insert("root".into(), HashSet::from(["event-1".into()]));
+        let projection = Message::custom(CustomMessage {
+            custom_type: "agent_message".into(),
+            content: CustomMessageContent::Text("ready".into()),
+            display: true,
+            details: Some(json!({"sourceRecordId":"event-1"})),
+            timestamp_ms: 1,
+        });
+
+        let projected = runtime.project_collaboration_context("root", vec![projection.clone()]);
+
+        assert_eq!(projected, vec![projection]);
+        assert!(!runtime.lock().observed_messages.contains_key("root"));
     }
 }

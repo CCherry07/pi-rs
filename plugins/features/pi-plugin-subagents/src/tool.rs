@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_core::{
-    CustomMessageContent, IsolatedSessionRequest, ThinkingLevel, Tool, ToolCallId, ToolContext,
-    ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate, ToolUpdateSink,
+    CustomMessageContent, IsolatedSessionRequest, Tool, ToolCallId, ToolContext, ToolError,
+    ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate, ToolUpdateSink,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -11,7 +11,9 @@ use serde_json::{Value, json};
 use crate::catalog::SubagentCatalog;
 use crate::launch_context::{ForkTurns, LaunchContext};
 use crate::launch_plan::SubagentLaunchPlan;
-use crate::runtime::{SubagentRuntime, WaitEvaluation, WaitMode, result_with_details};
+use crate::runtime::{
+    AgentSnapshot, SubagentRuntime, WaitEvaluation, WaitMode, result_with_details,
+};
 
 #[derive(Clone, Copy)]
 pub(crate) enum AgentToolKind {
@@ -53,8 +55,6 @@ struct SpawnInput {
     task: String,
     #[serde(rename = "fork_turns")]
     fork_turns: Option<ForkTurns>,
-    model: Option<String>,
-    thinking: Option<ThinkingLevel>,
     #[serde(default)]
     detached: bool,
 }
@@ -113,8 +113,6 @@ impl Tool for AgentTool {
                     "agent":{"type":"string","enum":profiles},
                     "task":{"type":"string","minLength":1},
                     "fork_turns":{"type":"string","pattern":"^(none|all|[1-9][0-9]*)$","description":"Context to inherit: none, all, or a positive number of recent turns. Omission uses the agent profile default."},
-                    "model":{"type":"string","minLength":1,"description":"Optional provider/model or unambiguous model override for this child."},
-                    "thinking":{"type":"string","enum":["off","minimal","low","medium","high","xhigh","max"],"description":"Optional reasoning-effort override validated against the selected model."},
                     "detached":{"type":"boolean","default":false,"description":"Opt out of automatically joining the bounded task report into the parent context."}
                 }),
                 vec!["agent", "task"],
@@ -228,15 +226,9 @@ impl AgentTool {
     ) -> Result<ToolResult, ToolError> {
         let agent_name = non_empty(&input.agent, "agent")?;
         let task = non_empty(&input.task, "task")?;
-        let mut profile = self.catalog.profile(agent_name).ok_or_else(|| {
+        let profile = self.catalog.profile(agent_name).ok_or_else(|| {
             ToolError::InvalidArguments(format!("unknown agent profile {agent_name:?}"))
         })?;
-        if let Some(model) = input.model.as_deref() {
-            profile.model = Some(non_empty(model, "model")?.to_string());
-        }
-        if let Some(thinking) = input.thinking {
-            profile.thinking_level = Some(thinking);
-        }
         let mut options = SubagentLaunchPlan::resolve(&profile, &context)?.into_options();
         LaunchContext::new(&context).apply(&mut options, input.fork_turns)?;
         let owner = context.session.id()?;
@@ -280,9 +272,9 @@ impl AgentTool {
             });
             return Ok(result_with_details(
                 format!(
-                    "Agent {} queued asynchronously. Its exact id is {}; wait_agent will observe it through launch and completion.",
+                    "Agent {} queued asynchronously.\nAgent ID: {}\nState: queued\nwait_agent will observe it through launch and completion.",
                     profile.name,
-                    ticket.id()
+                    ticket.id(),
                 ),
                 json!({
                     "agentId":ticket.id(),
@@ -328,9 +320,11 @@ impl AgentTool {
         });
         Ok(result_with_details(
             format!(
-                "Agent {} started asynchronously. Use wait_agent with the exact id {} when you need its result.",
+                "Agent {} started asynchronously.\nAgent ID: {}\nChild session ID: {}\nTurn ID: {}\nUse wait_agent with the exact id when you need its result.",
                 profile.name,
-                ticket.id()
+                ticket.id(),
+                child_session_id.as_deref().unwrap_or("not launched"),
+                turn.id().as_str(),
             ),
             json!({
                 "agentId":ticket.id(),
@@ -351,7 +345,7 @@ impl AgentTool {
             .runtime
             .send_message(&context.session.id()?, target, message.to_string())
             .map_err(ToolError::Execution)?;
-        Ok(result_with_details("Message accepted.", details))
+        Ok(result_with_details(message_receipt_text(&details), details))
     }
 
     async fn follow_up(
@@ -368,9 +362,13 @@ impl AgentTool {
             .map_err(ToolError::Execution)?;
         Ok(result_with_details(
             if started {
-                "Follow-up started a new turn in the existing agent session."
+                format!(
+                    "Follow-up started a new turn in the existing agent session.\nAgent ID: {target}\nTurn ID: {turn_id}"
+                )
             } else {
-                "Follow-up joined the agent's active turn."
+                format!(
+                    "Follow-up joined the agent's active turn.\nAgent ID: {target}\nTurn ID: {turn_id}"
+                )
             },
             json!({"agentId":target,"turnId":turn_id,"started":started}),
         ))
@@ -387,7 +385,13 @@ impl AgentTool {
             WaitInputMode::All => WaitMode::All,
         };
         let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(120_000));
-        let (_registration, mut changed) = self.runtime.register_wait(&owner);
+        let (_registration, root) = self
+            .runtime
+            .register_wait(&owner)
+            .map_err(ToolError::Execution)?;
+        let mut runtime_changed = self.runtime.subscribe();
+        let mut replacement = root.subscribe();
+        let mut session_events = root.current().subscribe();
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
         loop {
@@ -397,19 +401,36 @@ impl AgentTool {
                 .map_err(ToolError::Execution)?
             {
                 WaitEvaluation::Ready { agents, messages } => {
+                    let mut result_text = if messages.is_empty() {
+                        "Agent wait condition satisfied.".to_string()
+                    } else {
+                        let messages = messages
+                            .iter()
+                            .map(|message| {
+                                format!(
+                                    "Message from {} (event {}):\n{}",
+                                    message.from, message.id, message.message
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        format!("Agent message requires attention.\n\n{messages}")
+                    };
+                    result_text.push_str("\n\n");
+                    result_text.push_str(&model_visible_agent_summary(&agents));
                     return Ok(result_with_details(
-                        if messages.is_empty() {
-                            "Agent wait condition satisfied."
-                        } else {
-                            "Agent message requires attention."
-                        },
+                        result_text,
                         json!({"state":"ready","mode":match mode { WaitMode::Any => "any", WaitMode::All => "all" },"agents":agents,"messages":messages}),
                     ));
                 }
                 WaitEvaluation::Pending if timeout.is_zero() => {
+                    let agents = self.runtime.list(&owner);
                     return Ok(result_with_details(
-                        "Agent work is still running.",
-                        json!({"state":"running","timedOut":true,"agents":self.runtime.list(&owner)}),
+                        format!(
+                            "Agent work is still running.\n\n{}",
+                            model_visible_agent_summary(&agents)
+                        ),
+                        json!({"state":"running","timedOut":true,"agents":agents}),
                     ));
                 }
                 WaitEvaluation::Pending => {}
@@ -418,14 +439,35 @@ impl AgentTool {
                 biased;
                 () = context.signal().wait() => return Err(ToolError::Aborted),
                 () = &mut deadline => {
+                    let agents = self.runtime.list(&owner);
                     return Ok(result_with_details(
-                        "Wait window elapsed; agent work continues.",
-                        json!({"state":"running","timedOut":true,"agents":self.runtime.list(&owner)}),
+                        format!(
+                            "Wait window elapsed; agent work continues.\n\n{}",
+                            model_visible_agent_summary(&agents)
+                        ),
+                        json!({"state":"running","timedOut":true,"agents":agents}),
                     ));
                 }
-                changed_result = changed.changed() => {
+                changed_result = runtime_changed.changed() => {
                     if changed_result.is_err() {
                         return Err(ToolError::Execution("agent runtime closed while waiting".into()));
+                    }
+                }
+                replacement_result = replacement.changed() => {
+                    if replacement_result.is_err() {
+                        return Err(ToolError::Execution("root session closed while waiting".into()));
+                    }
+                    session_events = replacement.borrow_and_update().subscribe();
+                }
+                session_event = session_events.events.recv() => {
+                    match session_event {
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            session_events = root.current().subscribe();
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            return Err(ToolError::Execution("root session event stream closed while waiting".into()));
+                        }
                     }
                 }
             }
@@ -439,21 +481,22 @@ impl AgentTool {
             .interrupt(&context.session.id()?, target)
             .map_err(ToolError::Execution)?;
         Ok(result_with_details(
-            "Interrupt request accepted; the agent session remains reusable.",
+            format!(
+                "Interrupt request accepted; the agent session remains reusable.\n\n{}",
+                model_visible_agent_summary(std::slice::from_ref(&snapshot))
+            ),
             json!({"agent":snapshot}),
         ))
     }
 
     fn list(&self, context: ToolContext, _input: EmptyInput) -> Result<ToolResult, ToolError> {
         let agents = self.runtime.list(&context.session.id()?);
-        Ok(result_with_details(
-            if agents.is_empty() {
-                "No descendant agents."
-            } else {
-                "Agent tree snapshot."
-            },
-            json!({"agents":agents}),
-        ))
+        let text = if agents.is_empty() {
+            "No descendant agents.".to_string()
+        } else {
+            model_visible_agent_summary(&agents)
+        };
+        Ok(result_with_details(text, json!({"agents":agents})))
     }
 }
 
@@ -484,6 +527,58 @@ fn non_empty<'a>(value: &'a str, field: &str) -> Result<&'a str, ToolError> {
     } else {
         Ok(value)
     }
+}
+
+fn message_receipt_text(details: &Value) -> String {
+    let target = details
+        .get("target")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let delivery = details
+        .get("acceptedAs")
+        .and_then(Value::as_str)
+        .unwrap_or("accepted");
+    let mut text = format!("Message accepted.\nTarget: {target}\nDelivery: {delivery}");
+    if let Some(event_id) = details.get("eventRecordId").and_then(Value::as_str) {
+        text.push_str(&format!("\nEvent ID: {event_id}"));
+    }
+    text
+}
+
+/// Renders the bounded runtime facts that a supervising model needs to
+/// coordinate child sessions. Full structured snapshots remain in
+/// `ToolResult::details`; provider adapters send this projection through
+/// `ToolResult::content`.
+fn model_visible_agent_summary(agents: &[AgentSnapshot]) -> String {
+    if agents.is_empty() {
+        return "Agents: none.".to_string();
+    }
+
+    let mut lines = vec!["Agents:".to_string()];
+    for agent in agents {
+        lines.push(format!("- Agent ID: {}", agent.id));
+        lines.push(format!("  Profile: {}", agent.agent));
+        lines.push(format!(
+            "  Child session ID: {}",
+            agent.child_session_id.as_deref().unwrap_or("not launched")
+        ));
+        lines.push(format!("  State: {}", agent.state.as_str()));
+        if let Some(turn_id) = &agent.current_turn_id {
+            lines.push(format!("  Current turn ID: {turn_id}"));
+        }
+        if let Some(report) = &agent.last_report {
+            lines.push(format!("  Outcome: {}", report.outcome.as_str()));
+            if let Some(turn_id) = &report.turn_id {
+                lines.push(format!("  Report turn ID: {turn_id}"));
+            }
+            lines.push(format!("  Truncated: {}", report.truncated));
+            lines.push(format!(
+                "  Summary: {}",
+                report.summary.replace('\n', "\n    ")
+            ));
+        }
+    }
+    lines.join("\n")
 }
 
 fn validate_wait(input: &WaitInput) -> Result<(), ToolError> {
@@ -587,5 +682,27 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn spawn_model_and_thinking_are_profile_only() {
+        let spawn = AgentTool::new(
+            SubagentRuntime::default(),
+            SubagentCatalog::builtins(),
+            4,
+            AgentToolKind::Spawn,
+        );
+        let properties = &spawn.spec().parameters["properties"];
+        assert!(properties.get("model").is_none());
+        assert!(properties.get("thinking").is_none());
+
+        for override_field in [json!({"model":"scripted/test"}), json!({"thinking":"low"})] {
+            let mut input = json!({"agent":"worker", "task":"work"});
+            input
+                .as_object_mut()
+                .unwrap()
+                .extend(override_field.as_object().unwrap().clone());
+            assert!(parse::<SpawnInput>(input).is_err());
+        }
     }
 }

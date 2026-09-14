@@ -9,9 +9,9 @@ use std::task::{Context, Poll};
 #[cfg(test)]
 use async_trait::async_trait;
 use pi_core::{
-    CustomMessageContent, IsolatedFollowUpReceipt, IsolatedMessageReceipt, IsolatedSessionId,
-    IsolatedSessionOptions, IsolatedSessionOutcome, IsolatedSessionRequest, IsolatedSessionTurnId,
-    ModelSelection, PluginContextError,
+    CustomMessageContent, CustomMessageInput, IsolatedFollowUpReceipt, IsolatedMessageReceipt,
+    IsolatedSessionId, IsolatedSessionOptions, IsolatedSessionOutcome, IsolatedSessionRequest,
+    IsolatedSessionTurnId, Message, ModelSelection, PluginContextError,
 };
 use tokio::sync::watch;
 
@@ -827,6 +827,52 @@ impl PiSession {
             .map_err(PluginContextError::Failed)
     }
 
+    /// Delivers a typed custom message to an owned isolated session without
+    /// starting a new turn. This is used by first-party session features that
+    /// need durable projection metadata in addition to visible content.
+    #[doc(hidden)]
+    pub fn send_custom_to_isolated_session(
+        &self,
+        id: &IsolatedSessionId,
+        message: CustomMessageInput,
+    ) -> Result<IsolatedMessageReceipt, PluginContextError> {
+        self.manager()
+            .map_err(|error| PluginContextError::Failed(error.to_string()))?
+            .isolated_sessions
+            .send_custom_message(self.registration_id(), id, message)
+            .map_err(PluginContextError::Failed)
+    }
+
+    /// Delivers a typed custom message to this session's active run, or starts
+    /// a new run when it is idle.
+    #[doc(hidden)]
+    pub fn send_custom_message(
+        &self,
+        message: CustomMessageInput,
+    ) -> Result<IsolatedMessageReceipt, PluginContextError> {
+        let session = self.current();
+        let message = Message::custom(message.into_message(crate::now_ms()));
+        if session.runtime().agent().is_running() {
+            match session.enqueue_message(message.clone(), crate::QueueKind::Steer) {
+                Ok(crate::SubmitOutcome::Queued { .. }) => {
+                    return Ok(IsolatedMessageReceipt {
+                        accepted_as: pi_core::IsolatedMessageDelivery::Steer,
+                        turn_id: None,
+                    });
+                }
+                Ok(_) | Err(SessionError::Busy) => {}
+                Err(error) => return Err(PluginContextError::Failed(error.to_string())),
+            }
+        }
+        tokio::spawn(async move {
+            let _ = session.prompt(vec![message]).await;
+        });
+        Ok(IsolatedMessageReceipt {
+            accepted_as: pi_core::IsolatedMessageDelivery::Mailbox,
+            turn_id: None,
+        })
+    }
+
     pub async fn follow_up_isolated_session(
         &self,
         id: &IsolatedSessionId,
@@ -1483,6 +1529,21 @@ mod tests {
             message.accepted_as,
             pi_core::IsolatedMessageDelivery::Mailbox
         );
+        let custom = owner
+            .send_custom_to_isolated_session(
+                &id,
+                CustomMessageInput {
+                    custom_type: "agent_message".into(),
+                    content: CustomMessageContent::Text("typed mailbox context".into()),
+                    display: true,
+                    details: Some(serde_json::json!({"sourceRecordId":"event-1"})),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            custom.accepted_as,
+            pi_core::IsolatedMessageDelivery::Mailbox
+        );
         let follow_up = owner
             .follow_up_isolated_session(
                 &id,
@@ -1513,6 +1574,9 @@ mod tests {
         let document = child.current().log().load().unwrap();
         let context = document.context().unwrap();
         assert!(format!("{:?}", context.messages).contains("mailbox context"));
+        let context = format!("{:?}", context.messages);
+        assert!(context.contains("typed mailbox context"));
+        assert!(context.contains("event-1"));
         manager.shutdown().await.unwrap();
     }
 
