@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.1](https://github.com/CCherry07/pi-rs/compare/v0.8.0...v0.8.1) (2026-09-14)
+
+
+### Features
+
+* update release process to support glibc 2.36+ and enhance npm publish validation ([2639bf2](https://github.com/CCherry07/pi-rs/commit/2639bf244599d2c2ca9b788f901023c0d36ce908))
+
+
+### Miscellaneous Chores
+
+* release 0.8.1 ([05e6182](https://github.com/CCherry07/pi-rs/commit/05e6182c3691aebcf8fffc2e77dbc2c8ebe04107))
+
 ## [0.8.0](https://github.com/CCherry07/pi-rs/compare/v0.7.0...v0.8.0) (2026-09-14)
 
 
