@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/CCherry07/pi-rs/compare/v0.8.1...v0.8.2) (2026-09-15)
+
+
+### Miscellaneous Chores
+
+* release 0.8.2 ([0edb8f8](https://github.com/CCherry07/pi-rs/commit/0edb8f8231145b9add5e5295d2e6ea809a64f1bf))
+
 ## [0.8.1](https://github.com/CCherry07/pi-rs/compare/v0.8.0...v0.8.1) (2026-09-14)
 
 
