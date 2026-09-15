@@ -780,12 +780,7 @@ fn payload_error(kind: &str, value: &Value) -> String {
 }
 
 fn map_transport_error(error: pi_provider::TransportError) -> ProviderError {
-    match error {
-        pi_provider::TransportError::Aborted => ProviderError::Aborted,
-        pi_provider::TransportError::InvalidConfiguration(message)
-        | pi_provider::TransportError::InvalidSse(message) => ProviderError::Protocol(message),
-        error => ProviderError::Failure(error.to_string()),
-    }
+    error.into_provider_error()
 }
 
 #[cfg(test)]

@@ -1437,7 +1437,12 @@ ordinary retries, so it cannot consume both policies or create a compaction loop
 compaction and branch-summary completions reuse the generation's retry policy without mutating the
 agent transcript. Shared HTTP transport retries configured transport failures and retryable status
 codes independently at the wire boundary, honors server retry delays up to the configured cap, and
-keeps header/body timeouts abortable.
+keeps header/body timeouts abortable. It also owns the thin provider-neutral failure boundary:
+transport errors retain their original source chain while exposing only a query-free request
+origin, and non-success responses prepend the HTTP status before passing through the complete,
+unmodified raw response body. The shared layer does not infer vendor JSON schemas, cap response
+body length, or discard unknown response fields, and Provider Adapters do not independently
+flatten HTTP failures.
 
 Session extensions use a third, session-owned lifecycle system. `SessionPlugin` mirrors Pi's ten
 `session_*` extension hooks: start, info change, before switch/fork/compact/tree, compact success or

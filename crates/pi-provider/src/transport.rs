@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
+use std::error::Error as StdError;
 use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use pi_core::{AbortSignal, ProviderCallContext};
+use pi_core::{AbortSignal, ProviderCallContext, ProviderError};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 
@@ -31,6 +32,26 @@ pub enum TransportError {
     BodyTooLarge { limit: usize },
     #[error("invalid SSE stream: {0}")]
     InvalidSse(String),
+}
+
+impl TransportError {
+    /// Converts shared HTTP/SSE failures into the provider error contract
+    /// without making each provider flatten or reclassify them independently.
+    pub fn into_provider_error(self) -> ProviderError {
+        match self {
+            Self::Aborted => ProviderError::Aborted,
+            Self::InvalidConfiguration(message) | Self::InvalidSse(message) => {
+                ProviderError::Protocol(message)
+            }
+            Self::Timeout { seconds } => {
+                ProviderError::Failure(format!("request timed out after {seconds}s"))
+            }
+            Self::Request(message) => ProviderError::Failure(message),
+            Self::BodyTooLarge { limit } => {
+                ProviderError::Failure(format!("response body exceeds the {limit}-byte limit"))
+            }
+        }
+    }
 }
 
 pub struct HttpResponse {
@@ -202,14 +223,14 @@ impl HttpTransport for ReqwestTransport {
                 tokio::select! {
                     _ = signal.wait() => return Err(TransportError::Aborted),
                     result = tokio::time::timeout(timeout, send) => match result {
-                        Ok(result) => result.map_err(|error| TransportError::Request(error.to_string())),
+                        Ok(result) => result.map_err(reqwest_request_error),
                         Err(_) => Err(TransportError::Timeout { seconds: timeout.as_secs() }),
                     }
                 }
             } else {
                 tokio::select! {
                     _ = signal.wait() => return Err(TransportError::Aborted),
-                    result = send => result.map_err(|error| TransportError::Request(error.to_string())),
+                    result = send => result.map_err(reqwest_request_error),
                 }
             };
             match result {
@@ -284,7 +305,7 @@ impl HttpTransport for ReqwestTransport {
                 match next {
                     Some(Ok(chunk)) => yield Ok(chunk.to_vec()),
                     Some(Err(error)) => {
-                        yield Err(TransportError::Request(error.to_string()));
+                        yield Err(reqwest_request_error(error));
                         return;
                     }
                     None => return,
@@ -298,6 +319,29 @@ impl HttpTransport for ReqwestTransport {
             body: Box::pin(output),
         })
     }
+}
+
+fn reqwest_request_error(error: reqwest::Error) -> TransportError {
+    let request_url = error.url().map(|url| url.as_str().to_string());
+    let origin = error.url().and_then(|url| {
+        let origin = url.origin().ascii_serialization();
+        (origin != "null").then_some(origin)
+    });
+    let redact_url = |message: String| {
+        request_url.as_deref().map_or(message.clone(), |url| {
+            message.replace(url, origin.as_deref().unwrap_or("<request URL>"))
+        })
+    };
+    let mut messages = vec![redact_url(error.to_string())];
+    let mut source = StdError::source(&error);
+    while let Some(cause) = source {
+        let message = redact_url(cause.to_string());
+        if !message.is_empty() && messages.last() != Some(&message) {
+            messages.push(message);
+        }
+        source = StdError::source(cause);
+    }
+    TransportError::Request(sanitize_diagnostic_text(&messages.join(": ")))
 }
 
 fn response_is_retryable(status: u16, headers: &HeaderMap) -> bool {
@@ -392,6 +436,48 @@ pub async fn collect_body_limited(
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// Reads a non-success provider response without interpreting its vendor-owned
+/// payload. The HTTP status is prepended and the complete raw body is retained.
+pub async fn read_error_response(response: HttpResponse) -> Result<String, TransportError> {
+    let status = response.status;
+    let body = match collect_body(response.body).await {
+        Ok(body) => body,
+        Err(TransportError::Aborted) => return Err(TransportError::Aborted),
+        Err(error) => return Ok(format!("{}\n{error}", http_status_line(status))),
+    };
+    let mut message = http_status_line(status);
+    if !body.is_empty() {
+        message.push('\n');
+        message.push_str(&body);
+    }
+    Ok(message)
+}
+
+async fn collect_body(mut body: HttpBodyStream) -> Result<String, TransportError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next().await {
+        bytes.extend_from_slice(&chunk?);
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn http_status_line(status: u16) -> String {
+    reqwest::StatusCode::from_u16(status)
+        .ok()
+        .and_then(|status| status.canonical_reason())
+        .map_or_else(
+            || format!("HTTP {status}"),
+            |reason| format!("HTTP {status} {reason}"),
+        )
+}
+
+fn sanitize_diagnostic_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -411,8 +497,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        DEFAULT_REMOTE_TIMEOUT, HttpResponse, HttpTransport, ReqwestTransport, TransportError,
-        post_json_with_provider_hooks, response_is_retryable, retry_delay,
+        DEFAULT_REMOTE_TIMEOUT, HttpResponse, HttpTransport, ReqwestTransport,
+        ReqwestTransportConfig, TransportError, post_json_with_provider_hooks, read_error_response,
+        response_is_retryable, retry_delay,
     };
 
     struct CapturingTransport {
@@ -572,5 +659,72 @@ mod tests {
 
         assert!(response.body.next().await.is_none());
         assert_eq!(body_polls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn provider_error_response_preserves_the_raw_body() {
+        let body = r#"{"error":{"message":"Rate limit reached","type":"rate_limit_error","code":"rate_limit_exceeded","unknown":{"scope":"tokens_per_minute"}}}"#;
+        let response = HttpResponse {
+            status: 429,
+            content_type: Some("application/json".to_string()),
+            headers: vec![
+                ("x-request-id".to_string(), "req_123".to_string()),
+                ("retry-after".to_string(), "15".to_string()),
+            ],
+            body: Box::pin(futures::stream::iter(vec![Ok(body.as_bytes().to_vec())])),
+        };
+
+        let message = read_error_response(response).await.unwrap();
+
+        assert_eq!(message, format!("HTTP 429 Too Many Requests\n{body}"));
+    }
+
+    #[tokio::test]
+    async fn provider_error_response_keeps_status_when_body_read_fails() {
+        let response = HttpResponse {
+            status: 502,
+            content_type: None,
+            headers: vec![("request-id".to_string(), "gateway_456".to_string())],
+            body: Box::pin(futures::stream::iter(vec![Err(TransportError::Request(
+                "connection reset".to_string(),
+            ))])),
+        };
+
+        let message = read_error_response(response).await.unwrap();
+
+        assert_eq!(
+            message,
+            "HTTP 502 Bad Gateway\nHTTP request failed: connection reset"
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_error_keeps_cause_without_exposing_request_query() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let transport = ReqwestTransport::with_config(ReqwestTransportConfig {
+            timeout: Some(Duration::from_secs(2)),
+            ..ReqwestTransportConfig::default()
+        })
+        .unwrap();
+        let (_, signal) = pi_core::AbortHandle::new();
+
+        let result = transport
+            .post_json(
+                &format!("http://{address}/v1/messages?key=super-secret"),
+                &BTreeMap::new(),
+                &json!({}),
+                signal,
+            )
+            .await;
+        let Err(error) = result else {
+            panic!("request to a closed local port unexpectedly succeeded");
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("error sending request for url (http://127.0.0.1"));
+        assert!(message.contains("client error"));
+        assert!(!message.contains("super-secret"));
     }
 }

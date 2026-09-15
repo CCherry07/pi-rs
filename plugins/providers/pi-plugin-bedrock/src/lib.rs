@@ -19,7 +19,7 @@ use pi_core::{
     ProviderId, ProviderPlugin, ProviderRegisterContext, ProviderRequest, ProviderStream,
 };
 use pi_provider::{
-    HttpTransport, ReqwestTransport, TransportError, collect_body_limited, insert_header,
+    HttpTransport, ReqwestTransport, TransportError, insert_header, read_error_response,
 };
 use time::OffsetDateTime;
 use url::Url;
@@ -325,13 +325,10 @@ impl Provider for AmazonBedrockProvider {
             )
             .await;
         if !(200..300).contains(&response.status) {
-            let status = response.status;
-            let body = collect_body_limited(response.body, 64 * 1024)
+            let message = read_error_response(response)
                 .await
                 .map_err(map_transport_error)?;
-            return Err(ProviderError::Failure(format!(
-                "Amazon Bedrock API error ({status}): {body}"
-            )));
+            return Err(ProviderError::Failure(message));
         }
         if !response.content_type.as_deref().is_some_and(|value| {
             value
@@ -441,13 +438,7 @@ fn env(name: &str) -> Option<String> {
 }
 
 fn map_transport_error(error: TransportError) -> ProviderError {
-    match error {
-        TransportError::Aborted => ProviderError::Aborted,
-        TransportError::InvalidConfiguration(message) | TransportError::InvalidSse(message) => {
-            ProviderError::Protocol(message)
-        }
-        error => ProviderError::Failure(error.to_string()),
-    }
+    error.into_provider_error()
 }
 
 #[cfg(test)]

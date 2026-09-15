@@ -14,8 +14,8 @@ use pi_core::{
     ResponseMetadata, ResponseMetadataPatch, StopReason, StreamEvent, ToolCallId, ToolSpec, Usage,
 };
 use pi_provider::{
-    HttpBodyStream, HttpTransport, ReqwestTransport, SseDecoder, TransportError,
-    collect_body_limited, insert_header, post_json_with_provider_hooks,
+    HttpBodyStream, HttpTransport, ReqwestTransport, SseDecoder, TransportError, insert_header,
+    post_json_with_provider_hooks, read_error_response,
 };
 use pi_utils::time::unix_timestamp_ms as now_ms;
 use serde::Deserialize;
@@ -165,11 +165,10 @@ impl Provider for OpenAiResponsesCompatibleProvider {
         .await
         .map_err(map_transport_error)?;
         if !(200..300).contains(&response.status) {
-            let status = response.status;
-            let body = collect_body_limited(response.body, 64 * 1024)
+            let message = read_error_response(response)
                 .await
                 .map_err(map_transport_error)?;
-            return Err(ProviderError::Failure(format!("HTTP {status}: {body}")));
+            return Err(ProviderError::Failure(message));
         }
         if !response
             .content_type
@@ -893,13 +892,7 @@ fn response_affinity_headers(request: &ProviderRequest) -> BTreeMap<String, Stri
 }
 
 fn map_transport_error(error: TransportError) -> ProviderError {
-    match error {
-        TransportError::Aborted => ProviderError::Aborted,
-        TransportError::InvalidConfiguration(message) | TransportError::InvalidSse(message) => {
-            ProviderError::Protocol(message)
-        }
-        other => ProviderError::Failure(other.to_string()),
-    }
+    error.into_provider_error()
 }
 
 #[cfg(test)]

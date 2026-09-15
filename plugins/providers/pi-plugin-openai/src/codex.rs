@@ -13,8 +13,8 @@ use pi_core::{
     ProviderRequest, ProviderStream,
 };
 use pi_provider::{
-    HttpBodyStream, HttpTransport, ReqwestTransport, TransportError, collect_body_limited,
-    insert_header, post_json_with_provider_hooks, remove_header,
+    HttpBodyStream, HttpTransport, ReqwestTransport, TransportError, insert_header,
+    post_json_with_provider_hooks, read_error_response, remove_header,
 };
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
@@ -369,11 +369,10 @@ impl Provider for OpenAiCodexProvider {
         .await
         .map_err(map_transport_error)?;
         if !(200..300).contains(&response.status) {
-            let status = response.status;
-            let body = collect_body_limited(response.body, 64 * 1024)
+            let message = read_error_response(response)
                 .await
                 .map_err(map_transport_error)?;
-            return Err(ProviderError::Failure(format!("HTTP {status}: {body}")));
+            return Err(ProviderError::Failure(message));
         }
         if response
             .content_type
@@ -894,10 +893,7 @@ pub(crate) fn responses_request_body(request: &ProviderRequest) -> Value {
 }
 
 fn map_transport_error(error: TransportError) -> ProviderError {
-    match error {
-        TransportError::Aborted => ProviderError::Aborted,
-        other => ProviderError::Failure(other.to_string()),
-    }
+    error.into_provider_error()
 }
 
 #[cfg(test)]

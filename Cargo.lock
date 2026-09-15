@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "pi-acp"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "agent-client-protocol",
  "pi-agent",
@@ -2987,7 +2987,7 @@ dependencies = [
 
 [[package]]
 name = "pi-cli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arboard",
  "async-trait",
@@ -3053,7 +3053,7 @@ dependencies = [
 
 [[package]]
 name = "pi-eval"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -3073,7 +3073,7 @@ dependencies = [
 
 [[package]]
 name = "pi-eval-cli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -3091,7 +3091,7 @@ dependencies = [
 
 [[package]]
 name = "pi-js-package-manager"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "futures",
  "glob",
@@ -3128,7 +3128,7 @@ dependencies = [
 
 [[package]]
 name = "pi-mcp"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -3145,7 +3145,7 @@ dependencies = [
 
 [[package]]
 name = "pi-media"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -3155,7 +3155,7 @@ dependencies = [
 
 [[package]]
 name = "pi-memory-loader"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "pi-core",
@@ -3169,7 +3169,7 @@ dependencies = [
 
 [[package]]
 name = "pi-napi"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "dotenvy",
@@ -3401,7 +3401,7 @@ dependencies = [
 
 [[package]]
 name = "pi-plugin-memory-hermes"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3718,7 +3718,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rpc"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "pi-agent",
  "pi-core",
@@ -3753,7 +3753,7 @@ dependencies = [
 
 [[package]]
 name = "pi-sdk"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -3831,7 +3831,7 @@ dependencies = [
 
 [[package]]
 name = "pi-settings"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "fs2",
  "serde",
@@ -4389,6 +4389,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",

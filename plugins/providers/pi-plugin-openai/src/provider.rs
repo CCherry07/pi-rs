@@ -9,8 +9,8 @@ use pi_core::{
     ProviderRequest, ProviderStream, ResponseMetadata, StreamEvent,
 };
 use pi_provider::{
-    HttpTransport, ReqwestTransport, SseDecoder, TransportError, collect_body_limited,
-    insert_header, post_json_with_provider_hooks,
+    HttpTransport, ReqwestTransport, SseDecoder, TransportError, insert_header,
+    post_json_with_provider_hooks, read_error_response,
 };
 use pi_utils::time::unix_timestamp_ms as now_ms;
 
@@ -102,11 +102,10 @@ impl Provider for OpenAiCompatibleProvider {
         .await
         .map_err(map_transport_error)?;
         if !(200..300).contains(&response.status) {
-            let status = response.status;
-            let body = collect_body_limited(response.body, 64 * 1024)
+            let message = read_error_response(response)
                 .await
                 .map_err(map_transport_error)?;
-            return Err(ProviderError::Failure(format!("HTTP {status}: {body}")));
+            return Err(ProviderError::Failure(message));
         }
         if !response
             .content_type
@@ -244,19 +243,7 @@ impl Provider for OpenAiProvider {
 }
 
 fn map_transport_error(error: TransportError) -> ProviderError {
-    match error {
-        TransportError::Aborted => ProviderError::Aborted,
-        TransportError::InvalidConfiguration(message) | TransportError::InvalidSse(message) => {
-            ProviderError::Protocol(message)
-        }
-        TransportError::Timeout { seconds } => {
-            ProviderError::Failure(format!("request timed out after {seconds}s"))
-        }
-        TransportError::Request(message) => ProviderError::Failure(message),
-        TransportError::BodyTooLarge { limit } => {
-            ProviderError::Failure(format!("response body exceeds the {limit}-byte limit"))
-        }
-    }
+    error.into_provider_error()
 }
 
 #[cfg(test)]
@@ -276,6 +263,27 @@ mod tests {
     struct CapturingTransport {
         body: Mutex<Option<Value>>,
         headers: Mutex<Option<BTreeMap<String, String>>>,
+    }
+
+    struct ErrorTransport;
+
+    #[async_trait]
+    impl HttpTransport for ErrorTransport {
+        async fn post_json(
+            &self,
+            _url: &str,
+            _headers: &BTreeMap<String, String>,
+            _body: &Value,
+            _signal: AbortSignal,
+        ) -> Result<HttpResponse, TransportError> {
+            let body = r#"{"error":{"message":"API key is invalid","type":"invalid_request_error","code":"invalid_api_key","unknown":"preserved"}}"#;
+            Ok(HttpResponse {
+                status: 401,
+                content_type: Some("application/json".to_string()),
+                headers: vec![("x-request-id".to_string(), "req_auth".to_string())],
+                body: Box::pin(futures::stream::iter(vec![Ok(body.as_bytes().to_vec())])),
+            })
+        }
     }
 
     #[async_trait]
@@ -479,5 +487,48 @@ mod tests {
         assert_eq!(headers["Accept"], "text/event-stream");
         assert_eq!(headers["X-Hooked"], "yes");
         assert_eq!(*responses.lock().unwrap(), vec!["200:response-1"]);
+    }
+
+    #[tokio::test]
+    async fn non_success_response_retains_provider_diagnostics() {
+        let provider = OpenAiCompatibleProvider::with_transport(
+            OpenAiCompatibleConfig::without_api_key("https://example.test/v1"),
+            Arc::new(ErrorTransport),
+        )
+        .unwrap();
+        let call_context = ProviderCallContext::new(
+            1,
+            "/project",
+            ProviderId::new("openai-compatible"),
+            ModelId::new("model"),
+            Arc::new(ProviderPluginDriver::new(Vec::new()).unwrap()),
+        );
+        let request = ProviderRequest {
+            model: ModelId::new("model"),
+            model_spec: None,
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            thinking_level: ThinkingLevel::Off,
+            thinking_budgets: None,
+            max_output_tokens: None,
+            headers: BTreeMap::new(),
+            sampling_params: BTreeMap::new(),
+            session_id: None,
+        };
+        let (_, signal) = pi_core::AbortHandle::new();
+
+        let result = provider.stream(request, call_context, signal).await;
+        let Err(ProviderError::Failure(message)) = result else {
+            panic!("provider unexpectedly accepted an HTTP 401 response");
+        };
+
+        assert_eq!(
+            message,
+            concat!(
+                "HTTP 401 Unauthorized\n",
+                r#"{"error":{"message":"API key is invalid","type":"invalid_request_error","code":"invalid_api_key","unknown":"preserved"}}"#
+            )
+        );
     }
 }

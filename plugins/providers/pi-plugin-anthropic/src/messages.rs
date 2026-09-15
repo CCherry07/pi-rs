@@ -786,13 +786,7 @@ fn map_stop_reason(reason: &str) -> StopReason {
 }
 
 fn map_transport_error(error: TransportError) -> ProviderError {
-    match error {
-        TransportError::Aborted => ProviderError::Aborted,
-        TransportError::InvalidConfiguration(message) | TransportError::InvalidSse(message) => {
-            ProviderError::Protocol(message)
-        }
-        other => ProviderError::Failure(other.to_string()),
-    }
+    error.into_provider_error()
 }
 
 #[cfg(test)]

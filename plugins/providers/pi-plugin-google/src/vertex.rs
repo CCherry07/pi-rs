@@ -10,8 +10,8 @@ use pi_core::{
     ProviderRequest, ProviderStream,
 };
 use pi_provider::{
-    HttpTransport, ReqwestTransport, TransportError, collect_body_limited, insert_header,
-    post_json_with_provider_hooks,
+    HttpTransport, ReqwestTransport, TransportError, insert_header, post_json_with_provider_hooks,
+    read_error_response,
 };
 use tokio::sync::OnceCell;
 
@@ -411,13 +411,10 @@ impl Provider for GoogleVertexCompatibleProvider {
         .await
         .map_err(map_transport_error)?;
         if !(200..300).contains(&response.status) {
-            let status = response.status;
-            let body = collect_body_limited(response.body, 64 * 1024)
+            let message = read_error_response(response)
                 .await
                 .map_err(map_transport_error)?;
-            return Err(ProviderError::Failure(format!(
-                "Google Vertex API error ({status}): {body}"
-            )));
+            return Err(ProviderError::Failure(message));
         }
         if !response
             .content_type
@@ -636,13 +633,7 @@ fn env(name: &str) -> Option<String> {
 }
 
 fn map_transport_error(error: TransportError) -> ProviderError {
-    match error {
-        TransportError::Aborted => ProviderError::Aborted,
-        TransportError::InvalidConfiguration(message) | TransportError::InvalidSse(message) => {
-            ProviderError::Protocol(message)
-        }
-        error => ProviderError::Failure(error.to_string()),
-    }
+    error.into_provider_error()
 }
 
 #[cfg(test)]
