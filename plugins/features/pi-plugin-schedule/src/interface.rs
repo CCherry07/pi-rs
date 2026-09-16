@@ -126,32 +126,70 @@ impl ScheduleCommand {
     }
 }
 
+fn tool_parameters() -> Value {
+    json!({
+        "type": "object",
+        "oneOf": [
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["action", "name", "prompt", "schedule"],
+                "properties": {
+                    "action": {"type": "string", "enum": ["create"]},
+                    "scope": {"type": "string", "enum": ["global", "project"]},
+                    "name": {"type": "string"},
+                    "prompt": {"type": "string"},
+                    "schedule": {"type": "string", "description": "in 30m, every 2h, RFC3339, or five-field cron"},
+                    "timezone": {"type": "string", "description": "IANA timezone; default UTC"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+                    "max_runs": {"type": "integer", "minimum": 1},
+                    "paused": {"type": "boolean"},
+                    "notify": {"type": "boolean"}
+                }
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["action"],
+                "properties": {
+                    "action": {"type": "string", "enum": ["list"]},
+                    "scope": {"type": "string", "enum": ["global", "project"]}
+                }
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["action", "job_id"],
+                "properties": {
+                    "action": {"type": "string", "enum": ["pause", "resume", "remove", "run_now"]},
+                    "scope": {"type": "string", "enum": ["global", "project"]},
+                    "job_id": {"type": "string", "minLength": 1}
+                }
+            },
+            {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["action"],
+                "properties": {
+                    "action": {"type": "string", "enum": ["history"]},
+                    "scope": {"type": "string", "enum": ["global", "project"]},
+                    "job_id": {"type": "string", "minLength": 1}
+                }
+            }
+        ]
+    })
+}
+
 #[async_trait]
 impl Tool for ScheduleTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "schedule".into(), label: "Scheduled tasks".into(),
             description: "Manage persistent scheduled prompts. Jobs run in fresh isolated sessions while a primary Pi session in the same cwd is open and idle. Actions: create, list, pause, resume, remove, run_now, history. run_now queues an asynchronous run. Scope defaults to global; project requires trust. Creating a job snapshots the current model, thinking and active tools.".into(),
-            parameters: json!({
-                "type": "object", "additionalProperties": false,
-                "required": ["action"],
-                "properties": {
-                    "action": {"type":"string", "enum":["create","list","pause","resume","remove","run_now","history"]},
-                    "scope": {"type":"string", "enum":["global","project"]},
-                    "job_id": {"type":"string"},
-                    "name": {"type":"string"},
-                    "prompt": {"type":"string"},
-                    "schedule": {"type":"string", "description":"in 30m, every 2h, RFC3339, or five-field cron"},
-                    "timezone": {"type":"string", "description":"IANA timezone; default UTC"},
-                    "timeout_seconds": {"type":"integer", "minimum":1, "maximum":86400},
-                    "max_runs": {"type":"integer", "minimum":1},
-                    "paused": {"type":"boolean"},
-                    "notify": {"type":"boolean"}
-                }
-            }),
+            parameters: tool_parameters(),
             execution_mode: ToolExecutionMode::Sequential,
             prompt_snippet: Some("Schedule future or recurring work with the schedule tool.".into()),
-            prompt_guidelines: vec!["Use self-contained prompts: scheduled sessions have no parent conversation history. Specify an IANA timezone for wall-clock cron times. Pi must remain running in the job's working directory. Missed triggers coalesce; interrupted attempts are not automatically replayed.".into()],
+            prompt_guidelines: vec!["Use self-contained prompts: scheduled sessions have no parent conversation history. Omit job_id when creating a task; job_id is only used to address an existing task. Specify an IANA timezone for wall-clock cron times. Pi must remain running in the job's working directory. Missed triggers coalesce; interrupted attempts are not automatically replayed.".into()],
         }
     }
 
@@ -374,5 +412,31 @@ mod tests {
         assert!(parse_command("pause").is_err());
         assert!(Request::parse(json!({"action":"create","name":"x","prompt":"x","schedule":"in 1m","timeout_seconds":0})).is_err());
         assert!(Request::parse(json!({"action":"list","unrecognized":true})).is_err());
+    }
+
+    #[test]
+    fn tool_schema_scopes_job_id_to_actions_that_address_existing_jobs() {
+        let parameters = tool_parameters();
+        let variants = parameters["oneOf"].as_array().unwrap();
+        let create = &variants[0];
+        let existing_job = &variants[2];
+
+        assert_eq!(create["properties"]["action"]["enum"], json!(["create"]));
+        assert!(create["properties"].get("job_id").is_none());
+        assert_eq!(
+            existing_job["properties"]["action"]["enum"],
+            json!(["pause", "resume", "remove", "run_now"])
+        );
+        assert_eq!(existing_job["required"], json!(["action", "job_id"]));
+        assert!(
+            Request::parse(json!({
+                "action": "create",
+                "job_id": "",
+                "name": "hello 提醒",
+                "prompt": "只向用户发送：hello",
+                "schedule": "in 10s"
+            }))
+            .is_err()
+        );
     }
 }

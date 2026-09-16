@@ -4075,7 +4075,7 @@ dependencies = [
 
 [[package]]
 name = "pi-js-package-manager"
-version = "0.7.0"
+version = "0.8.3"
 dependencies = [
  "futures",
  "glob",
@@ -4111,7 +4111,7 @@ dependencies = [
 
 [[package]]
 name = "pi-mcp"
-version = "0.7.0"
+version = "0.8.3"
 dependencies = [
  "async-trait",
  "http",
@@ -4127,7 +4127,7 @@ dependencies = [
 
 [[package]]
 name = "pi-media"
-version = "0.7.0"
+version = "0.8.3"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -4137,7 +4137,7 @@ dependencies = [
 
 [[package]]
 name = "pi-memory-loader"
-version = "0.7.0"
+version = "0.8.3"
 dependencies = [
  "async-trait",
  "pi-core",
@@ -4352,7 +4352,7 @@ dependencies = [
 
 [[package]]
 name = "pi-plugin-memory-hermes"
-version = "0.7.0"
+version = "0.8.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4629,7 +4629,7 @@ dependencies = [
 
 [[package]]
 name = "pi-sdk"
-version = "0.7.0"
+version = "0.8.3"
 dependencies = [
  "async-trait",
  "fs2",
@@ -4702,7 +4702,7 @@ dependencies = [
 
 [[package]]
 name = "pi-settings"
-version = "0.7.0"
+version = "0.8.3"
 dependencies = [
  "fs2",
  "serde",
@@ -5357,6 +5357,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
