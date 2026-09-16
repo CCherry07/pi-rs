@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.3](https://github.com/CCherry07/pi-rs/compare/v0.8.2...v0.8.3) (2026-09-16)
+
+
+### Performance Improvements
+
+* **session:** optimize large session persistence ([1d20b4e](https://github.com/CCherry07/pi-rs/commit/1d20b4e5f828547f92ed21634380626557c2d449))
+
 ## [0.8.2](https://github.com/CCherry07/pi-rs/compare/v0.8.1...v0.8.2) (2026-09-15)
 
 
