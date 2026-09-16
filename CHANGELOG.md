@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/CCherry07/pi-rs/compare/v0.8.3...v0.9.0) (2026-09-16)
+
+
+### Features
+
+* **schedule:** update tool parameters and enhance job management actions ([9f183f7](https://github.com/CCherry07/pi-rs/commit/9f183f7e8b161448601b9c00bcc9661d41b4f995))
+
 ## [0.8.3](https://github.com/CCherry07/pi-rs/compare/v0.8.2...v0.8.3) (2026-09-16)
 
 
