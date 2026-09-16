@@ -253,11 +253,11 @@ impl PiPluginContext {
             .ok_or(PluginContextError::Unbound)
     }
 
-    fn document(&self) -> Result<(Arc<AgentSession>, SessionDocument), PluginContextError> {
+    fn document(&self) -> Result<(Arc<AgentSession>, Arc<SessionDocument>), PluginContextError> {
         let session = self.session()?;
         let document = session
             .log()
-            .load()
+            .shared_document()
             .map_err(|error| PluginContextError::Failed(error.to_string()))?;
         Ok((session, document))
     }
@@ -421,7 +421,7 @@ impl SessionContextAccess for PiPluginContext {
         let session = self.session()?;
         let document = session
             .log()
-            .load()
+            .shared_document()
             .map_err(|error| PluginContextError::Failed(error.to_string()))?;
         let leaf_id = document
             .leaf_id(MAIN_LANE)
@@ -465,15 +465,19 @@ impl SessionContextAccess for PiPluginContext {
         let raw_header = value(&document.header)?;
 
         Ok(SessionSnapshot::new(
-            document.header.id,
-            document.header.cwd,
+            document.header.id.clone(),
+            document.header.cwd.clone(),
             directory,
             file,
-            document.name,
+            document.name.clone(),
             leaf_id,
             entries,
             branch,
-            document.labels.into_iter().collect::<BTreeMap<_, _>>(),
+            document
+                .labels
+                .iter()
+                .map(|(target, label)| (target.clone(), label.clone()))
+                .collect::<BTreeMap<_, _>>(),
             raw_header,
         ))
     }
@@ -503,17 +507,12 @@ impl SessionContextAccess for PiPluginContext {
         let Some(context_window) = session.active_context_window() else {
             return Ok(None);
         };
-        let document = session
+        let branch = session
             .log()
-            .load()
+            .branch_entries()
             .map_err(|error| PluginContextError::Failed(error.to_string()))?;
-        let branch = document
-            .branch()
-            .map_err(|error| PluginContextError::Failed(error.to_string()))?
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        let context = document
+        let context = session
+            .log()
             .context()
             .map_err(|error| PluginContextError::Failed(error.to_string()))?;
         let tokens =
@@ -636,7 +635,7 @@ impl SessionContextAccess for PiPluginContext {
 
     fn session_entries(&self) -> Result<Vec<Value>, PluginContextError> {
         let (_, document) = self.document()?;
-        values(document.entries)
+        values(&document.entries)
     }
 
     fn session_tree(&self) -> Result<Vec<Value>, PluginContextError> {

@@ -2,10 +2,12 @@
 //! session lifecycle plugins.
 
 use std::collections::HashSet;
+use std::ops::Range;
+use std::sync::{Arc, OnceLock};
 
 use pi_core::{CustomMessage, CustomMessageContent, Message, ModelId, ProviderId, Usage};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::Value;
+use serde_json::{Value, value::RawValue};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionWireError {
@@ -16,18 +18,68 @@ pub enum SessionWireError {
 /// Pi's extensible agent-level message. Standard provider messages retain
 /// their typed representation; extension-defined roles are preserved as JSON.
 #[derive(Debug, Clone)]
-pub struct AgentMessage(AgentMessageKind);
+pub struct AgentMessage(Arc<AgentMessageKind>);
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum AgentMessageKind {
     Standard {
         message: Message,
-        original: Option<Value>,
+        original: Option<OriginalMessage>,
+        display_text_cache: OnceLock<Option<String>>,
     },
     Custom {
         role: String,
         value: Value,
     },
+}
+
+enum OriginalMessage {
+    Value(Value),
+    SharedRaw {
+        source: Arc<Vec<u8>>,
+        range: Range<usize>,
+    },
+}
+
+impl std::fmt::Debug for OriginalMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Value(value) => formatter.debug_tuple("Value").field(value).finish(),
+            Self::SharedRaw { source, range } => formatter
+                .debug_struct("SharedRaw")
+                .field("source_bytes", &source.len())
+                .field("range", range)
+                .finish(),
+        }
+    }
+}
+
+impl OriginalMessage {
+    fn shared_raw_str<'a>(source: &'a [u8], range: &Range<usize>) -> Option<&'a str> {
+        std::str::from_utf8(source.get(range.clone())?).ok()
+    }
+
+    fn display_text(&self) -> Option<String> {
+        match self {
+            Self::Value(value) => display_text_from_value(value),
+            Self::SharedRaw { source, range } => {
+                serde_json::from_str::<Value>(Self::shared_raw_str(source, range)?)
+                    .ok()
+                    .as_ref()
+                    .and_then(display_text_from_value)
+            }
+        }
+    }
+}
+
+fn display_text_from_value(value: &Value) -> Option<String> {
+    value
+        .as_object()
+        .and_then(|object| object.get("piRs"))
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("displayText"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
 }
 
 impl AgentMessage {
@@ -43,19 +95,46 @@ impl AgentMessage {
             })?
             .to_string();
         if matches!(role.as_str(), "user" | "assistant" | "toolResult") {
-            let message = serde_json::from_value(value.clone())
+            // Deserialize through a borrowed Value so the original wire object
+            // can preserve unknown extensions without first cloning the whole
+            // nested message tree.
+            let message = Message::deserialize(&value)
                 .map_err(|error| SessionWireError::InvalidPayload(error.to_string()))?;
-            Ok(Self(AgentMessageKind::Standard {
+            Ok(Self(Arc::new(AgentMessageKind::Standard {
                 message,
-                original: Some(value),
-            }))
+                original: Some(OriginalMessage::Value(value)),
+                display_text_cache: OnceLock::new(),
+            })))
         } else {
-            Ok(Self(AgentMessageKind::Custom { role, value }))
+            Ok(Self(Arc::new(AgentMessageKind::Custom { role, value })))
+        }
+    }
+
+    pub(crate) fn from_shared_raw_json(
+        source: Arc<Vec<u8>>,
+        range: Range<usize>,
+    ) -> Result<Self, SessionWireError> {
+        let raw = OriginalMessage::shared_raw_str(&source, &range).ok_or_else(|| {
+            SessionWireError::InvalidPayload("agent message source range is invalid".to_string())
+        })?;
+        match serde_json::from_str::<Message>(raw) {
+            Ok(message @ (Message::User(_) | Message::Assistant(_) | Message::ToolResult(_))) => {
+                Ok(Self(Arc::new(AgentMessageKind::Standard {
+                    message,
+                    original: Some(OriginalMessage::SharedRaw { source, range }),
+                    display_text_cache: OnceLock::new(),
+                })))
+            }
+            Ok(Message::Custom(_)) | Err(_) => {
+                let value = serde_json::from_str(raw)
+                    .map_err(|error| SessionWireError::InvalidPayload(error.to_string()))?;
+                Self::custom(value)
+            }
         }
     }
 
     pub fn role(&self) -> &str {
-        match &self.0 {
+        match self.0.as_ref() {
             AgentMessageKind::Standard {
                 message: Message::User(_),
                 ..
@@ -77,16 +156,41 @@ impl AgentMessage {
     }
 
     pub fn as_standard(&self) -> Option<&Message> {
-        match &self.0 {
+        match self.0.as_ref() {
             AgentMessageKind::Standard { message, .. } => Some(message),
             AgentMessageKind::Custom { .. } => None,
         }
     }
 
     pub fn as_custom(&self) -> Option<&Value> {
-        match &self.0 {
+        match self.0.as_ref() {
             AgentMessageKind::Standard { .. } => None,
             AgentMessageKind::Custom { value, .. } => Some(value),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_replay_source_with(&self, other: &Self) -> bool {
+        match (self.0.as_ref(), other.0.as_ref()) {
+            (
+                AgentMessageKind::Standard {
+                    original:
+                        Some(OriginalMessage::SharedRaw {
+                            source: left_source,
+                            ..
+                        }),
+                    ..
+                },
+                AgentMessageKind::Standard {
+                    original:
+                        Some(OriginalMessage::SharedRaw {
+                            source: right_source,
+                            ..
+                        }),
+                    ..
+                },
+            ) => Arc::ptr_eq(left_source, right_source),
+            _ => false,
         }
     }
 
@@ -112,15 +216,14 @@ impl AgentMessage {
     }
 
     pub fn display_text(&self) -> Option<&str> {
-        match &self.0 {
+        match self.0.as_ref() {
             AgentMessageKind::Standard {
-                original: Some(Value::Object(object)),
+                original,
+                display_text_cache,
                 ..
-            } => object
-                .get("piRs")
-                .and_then(Value::as_object)
-                .and_then(|metadata| metadata.get("displayText"))
-                .and_then(Value::as_str),
+            } => display_text_cache
+                .get_or_init(|| original.as_ref().and_then(OriginalMessage::display_text))
+                .as_deref(),
             _ => None,
         }
     }
@@ -128,7 +231,7 @@ impl AgentMessage {
 
 impl PartialEq for AgentMessage {
     fn eq(&self, other: &Self) -> bool {
-        match (&self.0, &other.0) {
+        match (self.0.as_ref(), other.0.as_ref()) {
             (
                 AgentMessageKind::Standard { message: left, .. },
                 AgentMessageKind::Standard { message: right, .. },
@@ -150,10 +253,11 @@ impl From<Message> for AgentMessage {
                     .expect("pi-core custom messages always serialize to JSON");
                 Self::custom(value).expect("pi-core custom messages always contain a role")
             }
-            message => Self(AgentMessageKind::Standard {
+            message => Self(Arc::new(AgentMessageKind::Standard {
                 message,
                 original: None,
-            }),
+                display_text_cache: OnceLock::new(),
+            })),
         }
     }
 }
@@ -163,9 +267,22 @@ impl Serialize for AgentMessage {
     where
         S: Serializer,
     {
-        match &self.0 {
-            AgentMessageKind::Standard { message, original } => match original {
-                Some(value) => value.serialize(serializer),
+        match self.0.as_ref() {
+            AgentMessageKind::Standard {
+                message, original, ..
+            } => match original {
+                Some(OriginalMessage::Value(value)) => value.serialize(serializer),
+                Some(OriginalMessage::SharedRaw { source, range }) => {
+                    let raw = OriginalMessage::shared_raw_str(source, range).ok_or_else(|| {
+                        serde::ser::Error::custom("agent message source range is invalid")
+                    })?;
+                    let raw: &RawValue = serde_json::from_str(raw).map_err(|error| {
+                        serde::ser::Error::custom(format!(
+                            "agent message source is no longer valid JSON: {error}"
+                        ))
+                    })?;
+                    raw.serialize(serializer)
+                }
                 None => message.serialize(serializer),
             },
             AgentMessageKind::Custom { value, .. } => value.serialize(serializer),
@@ -336,6 +453,7 @@ pub struct ProvisionedEntry {
 pub struct SessionRecord {
     pub id: String,
     pub seq: u64,
+    #[serde(deserialize_with = "super::required_nullable::deserialize")]
     pub parent_id: Option<String>,
     #[serde(rename = "timestamp", with = "super::iso_timestamp_ms")]
     pub timestamp_ms: i64,

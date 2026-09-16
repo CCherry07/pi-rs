@@ -467,25 +467,23 @@ impl ResolvedSessionTarget {
                 ))
             }
             AgentSessionRuntimeTarget::Open { path } => {
-                let (log, document) = SessionLog::open(&path)?;
-                Self::resolve_existing(log, document, reason, generation_overlay)
+                let log = SessionLog::open_handle(&path)?;
+                Self::resolve_existing(log, reason, generation_overlay)
             }
             AgentSessionRuntimeTarget::Reuse { log } => {
-                let document = log.load()?;
-                Self::resolve_existing(log, document, reason, generation_overlay)
+                Self::resolve_existing(log, reason, generation_overlay)
             }
         }
     }
 
     fn resolve_existing(
         log: SessionLog,
-        document: crate::SessionDocument,
         reason: SessionStartReason,
         generation_overlay: SessionGenerationOverlay,
     ) -> Result<(Self, SessionGenerationRequest), SessionError> {
-        let reload_model = reload_model(&document, reason)?;
+        let reload_model = reload_model(&log, reason)?;
         let request = SessionGenerationRequest {
-            cwd: document.header.cwd,
+            cwd: log.header().cwd.clone(),
             session_path: log.path().to_path_buf(),
             reason,
             generation_overlay,
@@ -497,13 +495,13 @@ impl ResolvedSessionTarget {
 }
 
 fn reload_model(
-    document: &crate::SessionDocument,
+    log: &SessionLog,
     reason: SessionStartReason,
 ) -> Result<Option<ModelSelection>, SessionError> {
     if reason != SessionStartReason::Reload {
         return Ok(None);
     }
-    Ok(document
+    Ok(log
         .context()?
         .model
         .map(|model| ModelSelection::new(model.provider, model.model_id)))

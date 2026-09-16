@@ -1,25 +1,29 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::{
     BranchQuery, EntryOrder, EntryQuery, ForkOptions, ForkPosition, LanePointer, LaneRecord,
-    LaneRecordEntry, LogItem, MAIN_LANE, RecordQuery, SessionDocument, SessionEntry, SessionError,
-    SessionFact, SessionHeader, SessionMutation, SessionRecord, SessionStats,
+    LaneRecordEntry, LogItem, MAIN_LANE, RecordQuery, SessionContext, SessionDocument,
+    SessionEntry, SessionError, SessionFact, SessionHeader, SessionMutation, SessionRecord,
+    SessionStats,
 };
 
 use super::validation::validate_record_query;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct SessionState {
     sequence: u64,
-    used_ids: HashSet<String>,
+    record_ids: HashSet<String>,
     entries: Vec<SessionRecord>,
     entries_by_id: HashMap<String, usize>,
     records: Vec<LaneRecord>,
+    open_operation_indices: HashMap<String, Vec<usize>>,
     lanes: Vec<LanePointer>,
     log: Vec<StoredLogItem>,
     stats: SessionStats,
     name: Option<String>,
     labels: HashMap<String, String>,
+    document_cache: Option<Arc<SessionDocument>>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,10 +84,11 @@ impl Default for SessionState {
     fn default() -> Self {
         Self {
             sequence: 0,
-            used_ids: HashSet::new(),
+            record_ids: HashSet::new(),
             entries: Vec::new(),
             entries_by_id: HashMap::new(),
             records: Vec::new(),
+            open_operation_indices: HashMap::new(),
             lanes: vec![LanePointer {
                 lane: MAIN_LANE.to_string(),
                 leaf_id: None,
@@ -92,11 +97,27 @@ impl Default for SessionState {
             stats: SessionStats::default(),
             name: None,
             labels: HashMap::new(),
+            document_cache: None,
         }
     }
 }
 
 impl SessionState {
+    pub(crate) fn with_replay_capacities(
+        mutations: usize,
+        entry_capacity: usize,
+        record_capacity: usize,
+    ) -> Self {
+        Self {
+            record_ids: HashSet::with_capacity(record_capacity),
+            entries: Vec::with_capacity(entry_capacity),
+            entries_by_id: HashMap::with_capacity(entry_capacity),
+            records: Vec::with_capacity(record_capacity),
+            log: Vec::with_capacity(mutations),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn next_sequence(&self) -> u64 {
         self.sequence.saturating_add(1)
     }
@@ -126,113 +147,302 @@ impl SessionState {
     }
 
     pub(crate) fn validate_unused_id(&self, id: &str) -> Result<(), SessionError> {
-        if self.used_ids.contains(id) {
+        if self.entries_by_id.contains_key(id) || self.record_ids.contains(id) {
             return Err(SessionError::AlreadyExists(id.to_string()));
         }
         Ok(())
     }
 
-    pub(crate) fn apply_mutation(&mut self, mutation: SessionMutation) -> Result<(), SessionError> {
+    pub(crate) fn validate_mutation(&self, mutation: &SessionMutation) -> Result<(), SessionError> {
         let seq = mutation.seq();
+        self.validate_next_sequence(seq)?;
+
+        match mutation {
+            SessionMutation::Entry { lane, record } => {
+                self.validate_entry_mutation(lane.as_deref(), record)
+            }
+            SessionMutation::Record { record } => self.validate_record_mutation(record),
+            SessionMutation::Lane { leaf_id, .. } => self.validate_target(leaf_id.as_deref()),
+            SessionMutation::Fact { fact, .. } => self.validate_fact_mutation(fact),
+        }
+    }
+
+    fn validate_next_sequence(&self, seq: u64) -> Result<(), SessionError> {
         if seq != self.next_sequence() {
             return Err(SessionError::InvalidEntry(format!(
                 "non-consecutive seq {seq}; expected {}",
                 self.next_sequence()
             )));
         }
+        Ok(())
+    }
 
-        match mutation {
-            SessionMutation::Entry { lane, record } => {
-                self.validate_unused_id(&record.id)?;
-                if let Some(lane) = &lane {
-                    let leaf = self.require_lane(lane)?;
-                    if record.parent_id != leaf {
+    fn validate_entry_mutation(
+        &self,
+        lane: Option<&str>,
+        record: &SessionRecord,
+    ) -> Result<(), SessionError> {
+        self.validate_unused_id(&record.id)?;
+        if let Some(lane) = lane {
+            let leaf = self.require_lane(lane)?;
+            if record.parent_id != leaf {
+                return Err(SessionError::InvalidEntry(format!(
+                    "entry {} does not chain to lane {lane}",
+                    record.id
+                )));
+            }
+        }
+        if let Some(parent_id) = &record.parent_id
+            && !self.entries_by_id.contains_key(parent_id)
+        {
+            return Err(SessionError::InvalidEntry(format!(
+                "entry {} references missing parent {parent_id}",
+                record.id
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_record_mutation(&self, record: &LaneRecord) -> Result<(), SessionError> {
+        self.require_lane(&record.lane)?;
+        self.validate_unused_id(&record.id)
+    }
+
+    fn validate_fact_mutation(&self, fact: &SessionFact) -> Result<(), SessionError> {
+        if let SessionFact::Label { target_id, .. } = fact {
+            self.validate_target(Some(target_id))?;
+        }
+        Ok(())
+    }
+
+    /// Validates a mutation batch without cloning the materialized session
+    /// state. Only transaction-local IDs and lane tips are staged.
+    pub(crate) fn validate_mutations(
+        &self,
+        mutations: &[SessionMutation],
+    ) -> Result<(), SessionError> {
+        if let [mutation] = mutations {
+            return self.validate_mutation(mutation);
+        }
+
+        let mut next_sequence = self.next_sequence();
+        let mut transaction_ids = HashSet::with_capacity(mutations.len());
+        let mut transaction_entry_ids = HashSet::with_capacity(mutations.len());
+        let mut lane_tips = self
+            .lanes
+            .iter()
+            .map(|pointer| (pointer.lane.clone(), pointer.leaf_id.clone()))
+            .collect::<HashMap<_, _>>();
+
+        for mutation in mutations {
+            let seq = mutation.seq();
+            if seq != next_sequence {
+                return Err(SessionError::InvalidEntry(format!(
+                    "non-consecutive seq {seq}; expected {next_sequence}"
+                )));
+            }
+
+            let target_exists = |id: &str| {
+                self.entries_by_id.contains_key(id) || transaction_entry_ids.contains(id)
+            };
+            let validate_unused_id = |id: &str| {
+                if self.entries_by_id.contains_key(id)
+                    || self.record_ids.contains(id)
+                    || transaction_ids.contains(id)
+                {
+                    Err(SessionError::AlreadyExists(id.to_string()))
+                } else {
+                    Ok(())
+                }
+            };
+
+            match mutation {
+                SessionMutation::Entry { lane, record } => {
+                    validate_unused_id(&record.id)?;
+                    if let Some(lane) = lane {
+                        let leaf = lane_tips.get(lane).ok_or_else(|| {
+                            SessionError::InvalidLane(format!("lane not found: {lane}"))
+                        })?;
+                        if &record.parent_id != leaf {
+                            return Err(SessionError::InvalidEntry(format!(
+                                "entry {} does not chain to lane {lane}",
+                                record.id
+                            )));
+                        }
+                    }
+                    if let Some(parent_id) = &record.parent_id
+                        && !target_exists(parent_id)
+                    {
                         return Err(SessionError::InvalidEntry(format!(
-                            "entry {} does not chain to lane {lane}",
+                            "entry {} references missing parent {parent_id}",
                             record.id
                         )));
                     }
+                    transaction_ids.insert(record.id.as_str());
+                    transaction_entry_ids.insert(record.id.as_str());
+                    if let Some(lane) = lane {
+                        lane_tips.insert(lane.clone(), Some(record.id.clone()));
+                    }
                 }
-                if let Some(parent_id) = &record.parent_id
-                    && !self.entries_by_id.contains_key(parent_id)
-                {
-                    return Err(SessionError::InvalidEntry(format!(
-                        "entry {} references missing parent {parent_id}",
-                        record.id
-                    )));
+                SessionMutation::Record { record } => {
+                    if !lane_tips.contains_key(&record.lane) {
+                        return Err(SessionError::InvalidLane(format!(
+                            "lane not found: {}",
+                            record.lane
+                        )));
+                    }
+                    validate_unused_id(&record.id)?;
+                    transaction_ids.insert(record.id.as_str());
                 }
+                SessionMutation::Lane { lane, leaf_id, .. } => {
+                    if let Some(leaf_id) = leaf_id
+                        && !target_exists(leaf_id)
+                    {
+                        return Err(SessionError::NotFound(leaf_id.clone()));
+                    }
+                    lane_tips.insert(lane.clone(), leaf_id.clone());
+                }
+                SessionMutation::Fact { fact, .. } => {
+                    if let SessionFact::Label { target_id, .. } = fact
+                        && !target_exists(target_id)
+                    {
+                        return Err(SessionError::NotFound(target_id.clone()));
+                    }
+                }
+            }
+            next_sequence = next_sequence.saturating_add(1);
+        }
+        Ok(())
+    }
 
-                self.sequence = seq;
-                self.used_ids.insert(record.id.clone());
-                if matches!(record.entry, SessionEntry::Message(_)) {
-                    self.stats.message_count = self.stats.message_count.saturating_add(1);
-                }
-                let entry_index = self.entries.len();
-                let entry_id = record.id.clone();
-                if let Some(lane) = lane {
-                    self.lane_mut(&lane)?.leaf_id = Some(entry_id.clone());
-                }
-                self.entries.push(record);
-                self.entries_by_id.insert(entry_id, entry_index);
-                self.log.push(StoredLogItem::Entry { seq, entry_index });
+    /// Applies a mutation that has already passed validation. This path is
+    /// infallible so durable append can precede the in-memory state update.
+    pub(crate) fn apply_validated_mutation(&mut self, mutation: SessionMutation) {
+        let seq = mutation.seq();
+        match mutation {
+            SessionMutation::Entry { lane, record } => self.apply_entry(seq, lane, record),
+            SessionMutation::Record { record } => self.apply_record(seq, record),
+            SessionMutation::Lane { lane, leaf_id, .. } => self.apply_lane(seq, lane, leaf_id),
+            SessionMutation::Fact { fact, .. } => self.apply_fact(seq, fact),
+        }
+    }
+
+    pub(crate) fn apply_mutation(&mut self, mutation: SessionMutation) -> Result<(), SessionError> {
+        let seq = mutation.seq();
+        self.validate_next_sequence(seq)?;
+        match mutation {
+            SessionMutation::Entry { lane, record } => {
+                self.validate_entry_mutation(lane.as_deref(), &record)?;
+                self.apply_entry(seq, lane, record);
             }
             SessionMutation::Record { record } => {
-                self.require_lane(&record.lane)?;
-                self.validate_unused_id(&record.id)?;
-                self.sequence = seq;
-                self.used_ids.insert(record.id.clone());
-                if let LaneRecordEntry::Usage(usage) = &record.record {
-                    self.stats.cached_tokens = self
-                        .stats
-                        .cached_tokens
-                        .saturating_add(usage.usage.cache_read);
-                    self.stats.uncached_tokens = self
-                        .stats
-                        .uncached_tokens
-                        .saturating_add(usage.usage.input)
-                        .saturating_add(usage.usage.cache_write);
-                    self.stats.total_tokens = self
-                        .stats
-                        .total_tokens
-                        .saturating_add(usage.usage.total_tokens);
-                    self.stats.cost_total += usage.usage.cost.total;
-                }
-                let record_index = self.records.len();
-                self.records.push(record);
-                self.log.push(StoredLogItem::Record { seq, record_index });
+                self.validate_record_mutation(&record)?;
+                self.apply_record(seq, record);
             }
             SessionMutation::Lane { lane, leaf_id, .. } => {
                 self.validate_target(leaf_id.as_deref())?;
-                self.sequence = seq;
-                if let Some(pointer) = self.lanes.iter_mut().find(|pointer| pointer.lane == lane) {
-                    pointer.leaf_id.clone_from(&leaf_id);
-                } else {
-                    self.lanes.push(LanePointer {
-                        lane: lane.clone(),
-                        leaf_id: leaf_id.clone(),
-                    });
-                }
-                self.log.push(StoredLogItem::Lane { seq, lane, leaf_id });
+                self.apply_lane(seq, lane, leaf_id);
             }
             SessionMutation::Fact { fact, .. } => {
-                if let SessionFact::Label { target_id, .. } = &fact {
-                    self.validate_target(Some(target_id))?;
-                }
-                self.sequence = seq;
-                match &fact {
-                    SessionFact::Name { name } => self.name.clone_from(name),
-                    SessionFact::Label { target_id, label } => {
-                        if let Some(label) = label {
-                            self.labels.insert(target_id.clone(), label.clone());
-                        } else {
-                            self.labels.remove(target_id);
-                        }
-                    }
-                }
-                self.log.push(StoredLogItem::Fact { seq, fact });
+                self.validate_fact_mutation(&fact)?;
+                self.apply_fact(seq, fact);
             }
         }
         Ok(())
+    }
+
+    fn apply_entry(&mut self, seq: u64, lane: Option<String>, record: SessionRecord) {
+        self.document_cache = None;
+        self.sequence = seq;
+        if matches!(record.entry, SessionEntry::Message(_)) {
+            self.stats.message_count = self.stats.message_count.saturating_add(1);
+        }
+        let entry_index = self.entries.len();
+        let entry_id = record.id.clone();
+        if let Some(lane) = lane {
+            self.lanes
+                .iter_mut()
+                .find(|pointer| pointer.lane == lane)
+                .expect("validated mutation lane must remain present")
+                .leaf_id = Some(entry_id.clone());
+        }
+        self.entries.push(record);
+        self.entries_by_id.insert(entry_id, entry_index);
+        self.log.push(StoredLogItem::Entry { seq, entry_index });
+    }
+
+    fn apply_record(&mut self, seq: u64, record: LaneRecord) {
+        self.document_cache = None;
+        self.sequence = seq;
+        self.record_ids.insert(record.id.clone());
+        if let LaneRecordEntry::Usage(usage) = &record.record {
+            self.stats.cached_tokens = self
+                .stats
+                .cached_tokens
+                .saturating_add(usage.usage.cache_read);
+            self.stats.uncached_tokens = self
+                .stats
+                .uncached_tokens
+                .saturating_add(usage.usage.input)
+                .saturating_add(usage.usage.cache_write);
+            self.stats.total_tokens = self
+                .stats
+                .total_tokens
+                .saturating_add(usage.usage.total_tokens);
+            self.stats.cost_total += usage.usage.cost.total;
+        }
+        let record_index = self.records.len();
+        let started_lane = matches!(&record.record, LaneRecordEntry::OperationStarted { .. })
+            .then(|| record.lane.clone());
+        let finished_operation = match &record.record {
+            LaneRecordEntry::OperationFinished { run_id, .. } => {
+                Some((record.lane.clone(), run_id.clone()))
+            }
+            _ => None,
+        };
+        self.records.push(record);
+        if let Some(lane) = started_lane {
+            self.open_operation_indices
+                .entry(lane)
+                .or_default()
+                .push(record_index);
+        }
+        if let Some((lane, run_id)) = finished_operation
+            && let Some(open) = self.open_operation_indices.get_mut(&lane)
+        {
+            open.retain(|index| self.records[*index].id != run_id);
+        }
+        self.log.push(StoredLogItem::Record { seq, record_index });
+    }
+
+    fn apply_lane(&mut self, seq: u64, lane: String, leaf_id: Option<String>) {
+        self.document_cache = None;
+        self.sequence = seq;
+        if let Some(pointer) = self.lanes.iter_mut().find(|pointer| pointer.lane == lane) {
+            pointer.leaf_id.clone_from(&leaf_id);
+        } else {
+            self.lanes.push(LanePointer {
+                lane: lane.clone(),
+                leaf_id: leaf_id.clone(),
+            });
+        }
+        self.log.push(StoredLogItem::Lane { seq, lane, leaf_id });
+    }
+
+    fn apply_fact(&mut self, seq: u64, fact: SessionFact) {
+        self.document_cache = None;
+        self.sequence = seq;
+        match &fact {
+            SessionFact::Name { name } => self.name.clone_from(name),
+            SessionFact::Label { target_id, label } => {
+                if let Some(label) = label {
+                    self.labels.insert(target_id.clone(), label.clone());
+                } else {
+                    self.labels.remove(target_id);
+                }
+            }
+        }
+        self.log.push(StoredLogItem::Fact { seq, fact });
     }
 
     pub(crate) fn get_entry(&self, id: &str) -> Option<SessionRecord> {
@@ -312,6 +522,46 @@ impl SessionState {
         Ok(results)
     }
 
+    pub(crate) fn branch_entries_for_lane(
+        &self,
+        lane: &str,
+    ) -> Result<Vec<SessionRecord>, SessionError> {
+        self.branch_entries_at(self.require_lane(lane)?.as_deref())
+    }
+
+    pub(crate) fn branch_entries_at(
+        &self,
+        leaf_id: Option<&str>,
+    ) -> Result<Vec<SessionRecord>, SessionError> {
+        let mut path = match leaf_id {
+            Some(id) => self.walk_to_root(id)?,
+            None => Vec::new(),
+        };
+        path.reverse();
+        Ok(path.into_iter().cloned().collect())
+    }
+
+    pub(crate) fn default_context_for_lane(
+        &self,
+        lane: &str,
+    ) -> Result<SessionContext, SessionError> {
+        self.default_context_at(self.require_lane(lane)?.as_deref())
+    }
+
+    pub(crate) fn default_context_at(
+        &self,
+        leaf_id: Option<&str>,
+    ) -> Result<SessionContext, SessionError> {
+        let mut path = match leaf_id {
+            Some(id) => self.walk_to_root(id)?,
+            None => Vec::new(),
+        };
+        path.reverse();
+        Ok(crate::context::build_default_session_context_from_refs(
+            &path,
+        ))
+    }
+
     pub(crate) fn find_records(
         &self,
         query: &RecordQuery,
@@ -342,22 +592,15 @@ impl SessionState {
         limit: Option<usize>,
     ) -> Result<Vec<LaneRecord>, SessionError> {
         validate_limit(limit)?;
-        let mut open = Vec::<LaneRecord>::new();
-        for record in &self.records {
-            if record.lane != lane {
-                continue;
-            }
-            match &record.record {
-                LaneRecordEntry::OperationStarted { .. } => open.push(record.clone()),
-                LaneRecordEntry::OperationFinished { run_id, .. } => {
-                    open.retain(|started| started.id != *run_id);
-                }
-                _ => {}
-            }
-        }
-        open.reverse();
-        open.truncate(limit.unwrap_or(usize::MAX));
-        Ok(open)
+        Ok(self
+            .open_operation_indices
+            .get(lane)
+            .into_iter()
+            .flatten()
+            .rev()
+            .take(limit.unwrap_or(usize::MAX))
+            .map(|index| self.records[*index].clone())
+            .collect())
     }
 
     pub(crate) fn get_log(
@@ -399,6 +642,23 @@ impl SessionState {
             labels: self.labels.clone(),
             stats: self.stats.clone(),
         }
+    }
+
+    /// Returns the immutable document for the current mutation revision.
+    /// Repeated readers share the same materialization until the next
+    /// successfully applied mutation invalidates it.
+    pub(crate) fn shared_document(&mut self, header: SessionHeader) -> Arc<SessionDocument> {
+        if let Some(document) = &self.document_cache {
+            return Arc::clone(document);
+        }
+        let document = Arc::new(self.document(header));
+        self.document_cache = Some(Arc::clone(&document));
+        document
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_cached_document(&self) -> bool {
+        self.document_cache.is_some()
     }
 
     pub(crate) fn create_fork_mutations(
@@ -531,13 +791,6 @@ impl SessionState {
             seq = seq.saturating_add(1);
         }
         mutations
-    }
-
-    fn lane_mut(&mut self, lane: &str) -> Result<&mut LanePointer, SessionError> {
-        self.lanes
-            .iter_mut()
-            .find(|pointer| pointer.lane == lane)
-            .ok_or_else(|| SessionError::InvalidLane(format!("lane not found: {lane}")))
     }
 
     fn entry_by_id(&self, id: &str) -> Option<&SessionRecord> {
@@ -681,5 +934,81 @@ mod tests {
             1,
             "the canonical entry payload should be retained only once"
         );
+    }
+
+    #[test]
+    fn atomic_validation_tracks_transaction_local_entries_and_lane_tips() {
+        let mut state = SessionState::default();
+        let mutations = vec![
+            SessionMutation::Entry {
+                lane: Some(MAIN_LANE.to_string()),
+                record: SessionRecord {
+                    id: "root".to_string(),
+                    seq: 1,
+                    parent_id: None,
+                    timestamp_ms: 1,
+                    entry: SessionEntry::Custom(CustomEntry {
+                        custom_type: "root".to_string(),
+                        data: None,
+                    }),
+                },
+            },
+            SessionMutation::Lane {
+                seq: 2,
+                lane: "worker".to_string(),
+                leaf_id: Some("root".to_string()),
+            },
+            SessionMutation::Entry {
+                lane: Some("worker".to_string()),
+                record: SessionRecord {
+                    id: "child".to_string(),
+                    seq: 3,
+                    parent_id: Some("root".to_string()),
+                    timestamp_ms: 2,
+                    entry: SessionEntry::Custom(CustomEntry {
+                        custom_type: "child".to_string(),
+                        data: None,
+                    }),
+                },
+            },
+            SessionMutation::Fact {
+                seq: 4,
+                fact: SessionFact::Label {
+                    target_id: "child".to_string(),
+                    label: Some("checkpoint".to_string()),
+                },
+            },
+        ];
+
+        state.validate_mutations(&mutations).unwrap();
+        for mutation in mutations {
+            state.apply_validated_mutation(mutation);
+        }
+
+        assert_eq!(state.sequence, 4);
+        assert_eq!(
+            state.require_lane("worker").unwrap().as_deref(),
+            Some("child")
+        );
+        assert_eq!(state.label("child").as_deref(), Some("checkpoint"));
+
+        let invalid = vec![SessionMutation::Entry {
+            lane: Some(MAIN_LANE.to_string()),
+            record: SessionRecord {
+                id: "root".to_string(),
+                seq: 5,
+                parent_id: Some("root".to_string()),
+                timestamp_ms: 3,
+                entry: SessionEntry::Custom(CustomEntry {
+                    custom_type: "duplicate".to_string(),
+                    data: None,
+                }),
+            },
+        }];
+        assert!(matches!(
+            state.validate_mutations(&invalid),
+            Err(SessionError::AlreadyExists(_))
+        ));
+        assert_eq!(state.sequence, 4, "validation must not mutate live state");
     }
 }

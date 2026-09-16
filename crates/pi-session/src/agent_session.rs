@@ -26,16 +26,17 @@ use crate::plugin::SessionPluginDriver;
 use crate::{
     ActiveToolsEntry, AgentMessage, AgentSessionOptions, AutoRetrySettings, BranchSummaryEntry,
     CompactionEntry, CompactionError, CompactionPreparation, CompactionSettings, CustomEntry,
-    FileOperations, LaneRecordEntry, MAIN_LANE, ModelChangeEntry, NewLaneRecord, OperationError,
-    OperationIntent, OperationOutcome, ProvisionedEntry, QueueKind, QueueSnapshot,
-    SessionBeforeCompactEvent, SessionBeforeTreeEvent, SessionCompactEvent,
-    SessionCompactFailedEvent, SessionContext, SessionContextBuildOptions, SessionDocument,
-    SessionEntry, SessionError, SessionHeader, SessionIdentity, SessionInfoChangedEvent,
-    SessionLog, SessionModel, SessionRecord, SessionRuntimeInventory, SessionShutdownEvent,
-    SessionShutdownReason, SessionStartEvent, SessionStartReason, SessionTreeEvent, SessionUsage,
-    ThinkingLevelEntry, TreePreparation, UsageAttribution, UsageRecord,
-    compact as generate_compaction, estimate_context_tokens, estimate_session_context_tokens,
-    next_unique_id, now_ms, prepare_compaction, reduce_lane_state, should_compact,
+    EntryOrder, FileOperations, LaneRecord, LaneRecordEntry, MAIN_LANE, ModelChangeEntry,
+    NewLaneRecord, OperationError, OperationIntent, OperationOutcome, ProvisionedEntry, QueueKind,
+    QueueSnapshot, RecordQuery, SessionBeforeCompactEvent, SessionBeforeTreeEvent,
+    SessionCompactEvent, SessionCompactFailedEvent, SessionContext, SessionContextBuildOptions,
+    SessionDocument, SessionEntry, SessionError, SessionHeader, SessionIdentity,
+    SessionInfoChangedEvent, SessionLog, SessionModel, SessionRecord, SessionRuntimeInventory,
+    SessionShutdownEvent, SessionShutdownReason, SessionStartEvent, SessionStartReason,
+    SessionTreeEvent, SessionUsage, ThinkingLevelEntry, TreePreparation, UsageAttribution,
+    UsageRecord, compact as generate_compaction, estimate_context_tokens,
+    estimate_session_context_tokens, next_unique_id, now_ms, prepare_compaction, reduce_lane_state,
+    should_compact,
 };
 
 const SESSION_OPEN: u8 = 0;
@@ -405,7 +406,7 @@ impl AgentSession {
             }),
         ];
         log.append_batch(initial_entries)?;
-        let context = log.load()?.context_with_options(&options.context)?;
+        let context = log.context_with_options(&options.context)?;
         // A new session records the runtime's already-validated selection.
         // Preserve it even when the model is intentionally absent from the
         // catalog; catalog fallback applies only while restoring old state.
@@ -432,8 +433,8 @@ impl AgentSession {
         options: AgentSessionOptions,
     ) -> Result<Arc<Self>, SessionError> {
         let path = path.into();
-        let (log, document) = SessionLog::open(&path)?;
-        let session = Self::prepare_loaded(runtime, log, document, options)?
+        let log = SessionLog::open_handle(&path)?;
+        let session = Self::prepare_loaded(runtime, log, options)?
             .activate(SessionStartEvent {
                 reason: SessionStartReason::Startup,
                 previous_session_file: None,
@@ -449,14 +450,12 @@ impl AgentSession {
         log: SessionLog,
         options: AgentSessionOptions,
     ) -> Result<PreparedAgentSession, SessionError> {
-        let document = log.load()?;
-        Self::prepare_loaded(runtime, log, document, options)
+        Self::prepare_loaded(runtime, log, options)
     }
 
     fn prepare_loaded(
         runtime: PiRuntime,
         log: SessionLog,
-        mut document: SessionDocument,
         mut options: AgentSessionOptions,
     ) -> Result<PreparedAgentSession, SessionError> {
         default_configure_session_message_conversion(&runtime)?;
@@ -469,21 +468,17 @@ impl AgentSession {
             thinking_level: agent_state.thinking_level.as_str().to_string(),
             active_tool_names: runtime.active_tools(),
         };
-        let recovered_queue = recover_interrupted_state(&log, &document, recovery_defaults)?;
-        // Recovery may commit accepted deferred writes before runtime context is
-        // restored, so always project the reconciled document rather than the
-        // stale open snapshot.
-        document = log.load()?;
-        runtime
-            .agent()
-            .set_session_id(Some(document.header.id.clone()));
-        let identity = session_identity(&document.header, log.path().to_path_buf());
+        let recovery = recover_interrupted_state(&log, recovery_defaults)?;
+        let recovered_queue = recovery.queue;
+        let header = log.header();
+        runtime.agent().set_session_id(Some(header.id.clone()));
+        let identity = session_identity(&header, log.path().to_path_buf());
         let session_plugin_driver = Arc::new(
             options
                 .plugins
                 .build_with_context(identity, runtime.context_parts())?,
         );
-        let mut context = document.context_with_options(&options.context)?;
+        let mut context = log.context_with_options(&options.context)?;
         let stored_model = context.model.clone();
         let stored_thinking_level = context.thinking_level.clone();
         let stored_active_tools = context.active_tool_names.clone();
@@ -601,9 +596,7 @@ impl AgentSession {
 
     async fn compact_before_next_turn(&self, turn: &AgentTurnContext) -> Option<AgentContext> {
         let context_window = self.active_context_window()?;
-        let document = self.log.load().ok()?;
-        let branch = document.branch().ok()?;
-        let entries = branch.into_iter().cloned().collect::<Vec<_>>();
+        let entries = self.log.branch_entries().ok()?;
         let session_context = crate::build_session_context(&entries, &self.context_options);
         let tokens = estimate_session_context_tokens(&entries, &session_context.messages).tokens;
         if !should_compact(tokens, context_window, self.compaction_settings()) {
@@ -631,10 +624,7 @@ impl AgentSession {
         if !self.in_run_compaction_reconcile.load(Ordering::Acquire) {
             return Ok(());
         }
-        let context = self
-            .log
-            .load()?
-            .context_with_options(&self.context_options)?;
+        let context = self.log.context_with_options(&self.context_options)?;
         restore_runtime_context(&self.runtime, &context)?;
         self.in_run_compaction_reconcile
             .store(false, Ordering::Release);
@@ -651,8 +641,7 @@ impl AgentSession {
         if !self.log.is_materialized() {
             return Ok(None);
         }
-        let document = self.log.load()?;
-        let entries = document.branch()?.into_iter().cloned().collect::<Vec<_>>();
+        let entries = self.log.branch_entries()?;
         let state = self.runtime.agent().state();
         let request = state
             .is_running
@@ -666,7 +655,7 @@ impl AgentSession {
             .flatten();
         let entries = crate::isolated_context::fork_entries(&entries, request);
         Ok(entries.last().map(|entry| pi_core::IsolatedForkPoint {
-            parent_session_id: document.header.id.clone(),
+            parent_session_id: self.log.id().to_string(),
             parent_entry_id: entry.id.clone(),
         }))
     }
@@ -688,20 +677,17 @@ impl AgentSession {
         fork_point: &pi_core::IsolatedForkPoint,
         fork_turns: Option<usize>,
     ) -> Result<crate::isolated_context::IsolatedContextSeed, SessionError> {
-        let document = self.log.load()?;
-        if fork_point.parent_session_id != document.header.id {
+        if fork_point.parent_session_id != self.log.id() {
             return Err(SessionError::Runtime(
                 "isolated fork point belongs to another parent session".into(),
             ));
         }
-        let entries = document
-            .branch_at(Some(&fork_point.parent_entry_id))?
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
+        let entries = self
+            .log
+            .branch_entries_at(Some(&fork_point.parent_entry_id))?;
         let messages = crate::build_session_context(&entries, &self.context_options).messages;
         Ok(crate::isolated_context::IsolatedContextSeed {
-            parent_session_id: document.header.id.clone(),
+            parent_session_id: self.log.id().to_string(),
             parent_entry_id: Some(fork_point.parent_entry_id.clone()),
             messages: crate::isolated_context::retain_recent_turns(messages, fork_turns),
         })
@@ -735,10 +721,7 @@ impl AgentSession {
                         .map_err(|error| SessionError::InvalidPayload(error.to_string()))?,
                 ),
             }))?;
-        let context = self
-            .log
-            .load()?
-            .context_with_options(&self.context_options)?;
+        let context = self.log.context_with_options(&self.context_options)?;
         let state = self.runtime.agent().state();
         let _ = restore_runtime_context_with_request(
             &self.runtime,
@@ -1259,10 +1242,7 @@ impl AgentSession {
         let entry = SessionEntry::message(message);
         let record = match (|| -> Result<SessionRecord, SessionError> {
             let record = self.log.append_session_record(entry)?;
-            let context = self
-                .log
-                .load()?
-                .context_with_options(&self.context_options)?;
+            let context = self.log.context_with_options(&self.context_options)?;
             restore_runtime_context(&self.runtime, &context)?;
             Ok(record)
         })() {
@@ -1845,10 +1825,7 @@ impl AgentSession {
         let entry = SessionEntry::custom_message(&message);
         let record = self.log.append_session_record(entry)?;
         let id = record.id.clone();
-        let context = self
-            .log
-            .load()?
-            .context_with_options(&self.context_options)?;
+        let context = self.log.context_with_options(&self.context_options)?;
         restore_runtime_context(&self.runtime, &context)?;
         self.events.publish_entry(record);
         Ok(id)
@@ -1961,8 +1938,10 @@ impl AgentSession {
     pub async fn checkout(&self, leaf_id: Option<&str>) -> Result<SessionContext, SessionError> {
         let _operation = self.operation_gate.lock().await;
         self.ensure_open()?;
-        let document = self.log.load()?;
-        let context = document.context_at_with_options(leaf_id, &self.context_options)?;
+        let document = self.log.shared_document()?;
+        let context = self
+            .log
+            .context_at_with_options(leaf_id, &self.context_options)?;
         let previous_leaf = self.log.leaf_id();
         if previous_leaf.as_deref() == leaf_id {
             return Ok(context);
@@ -2009,8 +1988,7 @@ impl AgentSession {
         let _operation = self.operation_gate.lock().await;
         self.ensure_open()?;
         let reason = crate::CompactionReason::Manual;
-        let document = self.log.load()?;
-        let branch_entries = document.branch()?.into_iter().cloned().collect::<Vec<_>>();
+        let branch_entries = self.log.branch_entries()?;
         let compaction_settings = self.compaction_settings();
         let preparation =
             prepare_compaction(&branch_entries, compaction_settings, &self.context_options)
@@ -2060,10 +2038,7 @@ impl AgentSession {
             let record = self
                 .log
                 .append_session_record(SessionEntry::Compaction(compaction.clone()))?;
-            let context = self
-                .log
-                .load()?
-                .context_with_options(&self.context_options)?;
+            let context = self.log.context_with_options(&self.context_options)?;
             restore_runtime_context(&self.runtime, &context)?;
             Ok(record)
         })();
@@ -2141,13 +2116,9 @@ impl AgentSession {
         let Some(context_window) = self.active_context_window() else {
             return;
         };
-        let Ok(document) = self.log.load() else {
+        let Ok(entries) = self.log.branch_entries() else {
             return;
         };
-        let Ok(branch) = document.branch() else {
-            return;
-        };
-        let entries = branch.into_iter().cloned().collect::<Vec<_>>();
         let context = crate::build_session_context(&entries, &self.context_options);
         let tokens = estimate_session_context_tokens(&entries, &context.messages).tokens;
         if should_compact(tokens, context_window, self.compaction_settings()) {
@@ -2206,8 +2177,7 @@ impl AgentSession {
         remove_failed_assistant: bool,
         activation: RuntimeContextActivation,
     ) -> Result<CompletedCompaction, SessionError> {
-        let document = self.log.load()?;
-        let branch_entries = document.branch()?.into_iter().cloned().collect::<Vec<_>>();
+        let branch_entries = self.log.branch_entries()?;
         let mut preparation_entries = branch_entries.clone();
         if remove_failed_assistant
             && let Some(index) = preparation_entries.iter().rposition(|record| {
@@ -2314,10 +2284,7 @@ impl AgentSession {
             let record = self
                 .log
                 .append_session_record(SessionEntry::Compaction(compaction.clone()))?;
-            let context = self
-                .log
-                .load()?
-                .context_with_options(&self.context_options)?;
+            let context = self.log.context_with_options(&self.context_options)?;
             if activation == RuntimeContextActivation::Immediate {
                 restore_runtime_context(&self.runtime, &context)?;
             }
@@ -2411,8 +2378,9 @@ impl AgentSession {
     ) -> Result<String, SessionError> {
         let _operation = self.operation_gate.lock().await;
         self.ensure_open()?;
-        let document = self.log.load()?;
-        document.context_at_with_options(leaf_id, &self.context_options)?;
+        let document = self.log.shared_document()?;
+        self.log
+            .context_at_with_options(leaf_id, &self.context_options)?;
         let previous_leaf = self.log.leaf_id();
         let preparation = tree_preparation(&document, leaf_id, true)?;
         let (_, signal) = AbortHandle::new();
@@ -2446,10 +2414,7 @@ impl AgentSession {
         if let Some(label) = label {
             self.log.set_label(&id, Some(label))?;
         }
-        let context = self
-            .log
-            .load()?
-            .context_with_options(&self.context_options)?;
+        let context = self.log.context_with_options(&self.context_options)?;
         restore_runtime_context(&self.runtime, &context)?;
         self.events.publish_entry(record);
         self.session_plugin_driver()
@@ -2477,7 +2442,7 @@ impl AgentSession {
         const PROMPT: &str = "Create a structured summary of this conversation branch for context when returning later.\n\nUse this EXACT format:\n\n## Goal\n[What was the user trying to accomplish in this branch?]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Work that was started but not finished]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [What should happen next to continue this work]\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.";
 
         self.ensure_open()?;
-        let document = self.log.load()?;
+        let document = self.log.shared_document()?;
         let preparation = tree_preparation(&document, Some(leaf_id), true)?;
         let context =
             crate::build_session_context(&preparation.entries_to_summarize, &self.context_options);
@@ -2949,22 +2914,15 @@ fn pending_session_message(
     })
 }
 
-fn recover_pending_queue(document: &SessionDocument) -> Vec<PendingSessionMessage> {
-    let persisted = document
-        .entries
-        .iter()
-        .map(|entry| entry.id.as_str())
-        .collect::<std::collections::HashSet<_>>();
-    let cancelled = document
-        .records
+fn recover_pending_queue(log: &SessionLog, records: &[LaneRecord]) -> Vec<PendingSessionMessage> {
+    let cancelled = records
         .iter()
         .filter_map(|record| match &record.record {
             LaneRecordEntry::QueueCancelled { entry_id, .. } => Some(entry_id.as_str()),
             _ => None,
         })
         .collect::<std::collections::HashSet<_>>();
-    document
-        .records
+    records
         .iter()
         .filter_map(|record| {
             let LaneRecordEntry::QueueEnqueued {
@@ -2975,7 +2933,7 @@ fn recover_pending_queue(document: &SessionDocument) -> Vec<PendingSessionMessag
             else {
                 return None;
             };
-            if persisted.contains(target.id.as_str()) || cancelled.contains(target.id.as_str()) {
+            if log.get_entry(&target.id).is_some() || cancelled.contains(target.id.as_str()) {
                 return None;
             }
             pending_session_message(
@@ -2988,14 +2946,22 @@ fn recover_pending_queue(document: &SessionDocument) -> Vec<PendingSessionMessag
         .collect()
 }
 
+struct RecoveredSessionState {
+    queue: Vec<PendingSessionMessage>,
+}
+
 fn recover_interrupted_state(
     log: &SessionLog,
-    document: &SessionDocument,
     defaults: crate::EffectiveLaneConfiguration,
-) -> Result<Vec<PendingSessionMessage>, SessionError> {
+) -> Result<RecoveredSessionState, SessionError> {
     let open_operations = log.find_open_operations(MAIN_LANE, None)?;
     let mut missing_initial_messages = Vec::new();
     if let Some(started) = open_operations.first() {
+        // Reducer recovery is intentionally the slow path. It needs the full
+        // tree and record log to reconstruct accepted writes from an
+        // interrupted operation, while settled sessions never materialize a
+        // SessionDocument during startup.
+        let document = log.shared_document()?;
         let branch = document.branch()?;
         let reduction = reduce_lane_state(&crate::LaneReductionInput {
             slice: crate::RecordLogSlice {
@@ -3040,8 +3006,14 @@ fn recover_interrupted_state(
         }
     }
 
-    let reconciled = log.load()?;
-    let mut recovered = recover_pending_queue(&reconciled);
+    // Queue recovery and operation closure only need the append-only record
+    // ledger. Query it after reducer repairs so this view is current without
+    // cloning the entry tree, facts, lane pointers, and interleaved log.
+    let records = log.find_records(&RecordQuery {
+        order: EntryOrder::OldestFirst,
+        ..RecordQuery::default()
+    })?;
+    let mut recovered = recover_pending_queue(log, &records);
     for item in &mut recovered {
         if item.run_id.is_none() {
             continue;
@@ -3063,15 +3035,14 @@ fn recover_interrupted_state(
         }
     }
 
-    let finished = reconciled
-        .records
+    let finished = records
         .iter()
         .filter_map(|record| match &record.record {
             LaneRecordEntry::OperationFinished { run_id, .. } => Some(run_id.as_str()),
             _ => None,
         })
         .collect::<std::collections::HashSet<_>>();
-    for operation in reconciled.records.iter().filter(|record| {
+    for operation in records.iter().filter(|record| {
         matches!(record.record, LaneRecordEntry::OperationStarted { .. })
             && !finished.contains(record.id.as_str())
     }) {
@@ -3088,7 +3059,7 @@ fn recover_interrupted_state(
             },
         })?;
     }
-    Ok(recovered)
+    Ok(RecoveredSessionState { queue: recovered })
 }
 
 fn tree_preparation(
@@ -3377,6 +3348,40 @@ mod tests {
             .system_prompt(SystemPrompt::Pi(Box::default()))
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn settled_open_does_not_materialize_full_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settled-session.jsonl");
+        let runtime = scripted_runtime([]);
+        let state = runtime.agent().state();
+        let log = SessionLog::create(
+            &path,
+            SessionHeader::new("settled-session", directory.path()),
+        )
+        .unwrap();
+        log.append_batch([
+            SessionEntry::ModelChange(ModelChangeEntry {
+                provider: state.provider_id,
+                model_id: state.model_id,
+            }),
+            SessionEntry::ThinkingLevelChange(ThinkingLevelEntry {
+                thinking_level: state.thinking_level.as_str().to_string(),
+            }),
+            SessionEntry::ActiveToolsChange(ActiveToolsEntry {
+                active_tool_names: state.active_tools,
+            }),
+            SessionEntry::message(Message::User(UserMessage::text("remember me", 1))),
+        ])
+        .unwrap();
+        assert!(!log.has_cached_document());
+        drop(log);
+
+        let session = AgentSession::open(runtime, &path).await.unwrap();
+
+        assert_eq!(session.runtime().agent().state().messages.len(), 1);
+        assert!(!session.log().has_cached_document());
     }
 
     #[tokio::test]

@@ -14,17 +14,37 @@ pub use wire::*;
 pub const SESSION_SCHEMA_VERSION: u32 = 4;
 pub const MAIN_LANE: &str = "main";
 
-pub(crate) mod iso_timestamp_ms {
-    use serde::{Deserialize, Deserializer, Serializer};
-    use time::OffsetDateTime;
-    use time::format_description::well_known::Rfc3339;
+pub(crate) mod strict_optional {
+    use serde::{Deserialize, Deserializer};
 
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Timestamp {
-        Milliseconds(i64),
-        Iso(String),
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        T::deserialize(deserializer).map(Some)
     }
+}
+
+pub(crate) mod required_nullable {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        Option::<T>::deserialize(deserializer)
+    }
+}
+
+pub(crate) mod iso_timestamp_ms {
+    use std::fmt;
+
+    use serde::de::Visitor;
+    use serde::{Deserializer, Serializer};
+    use time::format_description::well_known::Rfc3339;
+    use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
     pub fn serialize<S>(timestamp_ms: &i64, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -45,15 +65,93 @@ pub(crate) mod iso_timestamp_ms {
     where
         D: Deserializer<'de>,
     {
-        match Timestamp::deserialize(deserializer)? {
-            Timestamp::Milliseconds(value) => Ok(value),
-            Timestamp::Iso(value) => {
-                let timestamp =
-                    OffsetDateTime::parse(&value, &Rfc3339).map_err(serde::de::Error::custom)?;
-                i64::try_from(timestamp.unix_timestamp_nanos() / 1_000_000)
-                    .map_err(serde::de::Error::custom)
+        struct TimestampVisitor;
+
+        impl Visitor<'_> for TimestampVisitor {
+            type Value = i64;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an integer millisecond timestamp or RFC3339 string")
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(value)
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                i64::try_from(value).map_err(E::custom)
+            }
+
+            fn visit_borrowed_str<E>(self, value: &'_ str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                parse_rfc3339_ms(value).map_err(E::custom)
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                parse_rfc3339_ms(value).map_err(E::custom)
             }
         }
+
+        deserializer.deserialize_any(TimestampVisitor)
+    }
+
+    fn parse_rfc3339_ms(value: &str) -> Result<i64, String> {
+        if let Some(timestamp) = parse_canonical_utc_ms(value) {
+            return Ok(timestamp);
+        }
+        let timestamp =
+            OffsetDateTime::parse(value, &Rfc3339).map_err(|error| error.to_string())?;
+        i64::try_from(timestamp.unix_timestamp_nanos() / 1_000_000)
+            .map_err(|error| error.to_string())
+    }
+
+    fn parse_canonical_utc_ms(value: &str) -> Option<i64> {
+        let bytes = value.as_bytes();
+        let fractional = match bytes.len() {
+            20 if bytes[19] == b'Z' => 0,
+            24 if bytes[19] == b'.' && bytes[23] == b'Z' => decimal(bytes, 20, 3)?,
+            _ => return None,
+        };
+        if bytes[4] != b'-'
+            || bytes[7] != b'-'
+            || bytes[10] != b'T'
+            || bytes[13] != b':'
+            || bytes[16] != b':'
+        {
+            return None;
+        }
+        let year = i32::try_from(decimal(bytes, 0, 4)?).ok()?;
+        let month = Month::try_from(u8::try_from(decimal(bytes, 5, 2)?).ok()?).ok()?;
+        let day = u8::try_from(decimal(bytes, 8, 2)?).ok()?;
+        let hour = u8::try_from(decimal(bytes, 11, 2)?).ok()?;
+        let minute = u8::try_from(decimal(bytes, 14, 2)?).ok()?;
+        let second = u8::try_from(decimal(bytes, 17, 2)?).ok()?;
+        let millisecond = u16::try_from(fractional).ok()?;
+        let date = Date::from_calendar_date(year, month, day).ok()?;
+        let time = Time::from_hms_milli(hour, minute, second, millisecond).ok()?;
+        let timestamp = PrimitiveDateTime::new(date, time).assume_utc();
+        i64::try_from(timestamp.unix_timestamp_nanos() / 1_000_000).ok()
+    }
+
+    fn decimal(bytes: &[u8], start: usize, len: usize) -> Option<u32> {
+        bytes
+            .get(start..start.checked_add(len)?)?
+            .iter()
+            .try_fold(0_u32, |value, byte| {
+                byte.is_ascii_digit().then(|| {
+                    value
+                        .saturating_mul(10)
+                        .saturating_add(u32::from(*byte - b'0'))
+                })
+            })
     }
 }
 
@@ -123,11 +221,23 @@ pub struct SessionHeader {
     pub id: String,
     pub created_at: i64,
     pub cwd: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "strict_optional::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub parent_session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "strict_optional::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub legacy_parent_session_path: Option<PathBuf>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "strict_optional::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub metadata: Option<Map<String, Value>>,
 }
 
@@ -510,6 +620,7 @@ pub enum SessionMutation {
     Lane {
         seq: u64,
         lane: String,
+        #[serde(deserialize_with = "required_nullable::deserialize")]
         leaf_id: Option<String>,
     },
     Fact {
@@ -820,5 +931,30 @@ mod tests {
         let decoded: AgentMessage = serde_json::from_value(future_standard.clone()).unwrap();
         assert!(matches!(decoded.as_standard(), Some(Message::User(_))));
         assert_eq!(serde_json::to_value(decoded).unwrap(), future_standard);
+    }
+
+    #[test]
+    fn timestamp_decoder_keeps_canonical_numeric_and_offset_compatibility() {
+        for (timestamp, expected) in [
+            (json!(123), 123),
+            (json!("1970-01-01T00:00:00Z"), 0),
+            (json!("1970-01-01T00:00:00.123Z"), 123),
+            (json!("1970-01-01T01:00:00+01:00"), 0),
+        ] {
+            let mutation: SessionMutation = serde_json::from_value(json!({
+                "kind": "entry",
+                "type": "custom",
+                "id": "timestamp-entry",
+                "seq": 1,
+                "parentId": null,
+                "timestamp": timestamp,
+                "customType": "timestamp-test"
+            }))
+            .unwrap();
+            let SessionMutation::Entry { record, .. } = mutation else {
+                panic!("expected entry mutation");
+            };
+            assert_eq!(record.timestamp_ms, expected);
+        }
     }
 }

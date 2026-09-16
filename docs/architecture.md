@@ -37,6 +37,7 @@ crates/pi-sdk                   headless product composition shared by CLI, desk
 crates/pi-telemetry             typed Pi AI/harness span schemas and sink adapters
 crates/pi-eval                  model-backed eval cases, product harness, native eval overlays, graders,
                                 artifacts and paired comparison data
+crates/pi-bench                 deterministic, test-only performance workloads and provenance-rich JSON reports
 crates/pi-rpc                   Pi JSON projector and stdin/stdout RPC adapter
 crates/pi-mcp                   protocol-neutral MCP client, tool projection, and process ownership
 crates/pi-acp                   official stable-v1 ACP adapter and ACP session policy
@@ -118,6 +119,7 @@ pi-plugin-manager    -> HTTP + filesystem package source adapters
 pi-plugin-tools      -> pi-plugin-manager release format + pi-plugin-loader + Cargo/GitHub CLI adapters
 pi-js-package-manager -> filesystem + npm/git process adapters (no Node dependency)
 pi-js-plugin         -> pi-core + pi-session (no Node or terminal dependency)
+pi-bench             -> pi-agent + pi-runtime + pi-session + pi-core + pi-test-support (test-only)
 crates/pi-eval       -> pi-sdk + pi-session + pi-core + pi-js-plugin
 apps/pi-eval         -> pi-eval + pi-sdk + pi-js-plugin
 bindings/pi-napi     -> pi-js-plugin + apps/pi-cli + apps/pi-eval + NAPI-RS
@@ -1327,6 +1329,54 @@ facts; a tree fork copies all entries, lanes, and applicable facts. Neither copi
 records. There is deliberately no public generic `SessionStorage` / `SessionView` seam: no product
 caller varies by backend.
 
+Persisted mutations decode directly from each JSONL byte slice into the strongly typed v4 mutation
+union, then pass through the same sequence, timestamp, payload, and state validation. Fields where
+Serde would otherwise collapse an omitted value and explicit `null` retain Pi's stricter shape
+rules through typed required-nullable adapters or a narrow fallback check. This is a replay
+optimization, not a weaker storage format: complete schema-invalid tails remain errors and only a
+syntactically torn final append is repairable. Replayed standard messages retain byte ranges into
+one immutable shared file buffer while decoding their typed message directly, so nested unknown
+wire fields survive replay without allocating and copying a second raw JSON value for every entry.
+Document/context snapshots clone the shared message handle rather than deep-copying user content;
+serialization re-emits the retained raw range. Canonical UTC entry timestamps use an
+allocation-free parser while non-canonical RFC3339 offsets and legacy numeric timestamps retain the
+compatibility fallback. Journals above both a mutation-count and byte-size threshold decode
+independent lines in bounded worker chunks, then validate and apply those results strictly in source
+order. Small sessions stay serial, and large-session errors, sequence checks, and torn-tail repair
+therefore keep the same first-line-wins semantics. Canonical mutation prefixes also route
+non-entry records directly to their generic decoder and size replay indexes by observed entry and
+record counts; alternate valid JSON ordering keeps the compatibility decoder and balanced capacity
+fallback.
+
+Live journal commits use a prepare/validate/persist/apply boundary. Validation reads the current
+state plus a transaction-local overlay of new IDs and lane tips; it does not clone the materialized
+session. After the complete encoded batch is durably appended, the already-validated mutations are
+applied in place through an infallible path. This preserves the rule that a rejected or failed
+append cannot advance live state while keeping incremental commit work independent of accumulated
+message payload size. The read model also retains open-operation indexes by lane, so admission and
+recovery queries scale with currently open operations rather than rescanning the complete record
+history. These are internal JSONL implementation details and do not change the existing v4 wire
+shape.
+
+Materialized session documents are revision-scoped immutable read views. The first document read
+after a successful mutation projects the journal state; all later readers of the same revision
+share that `Arc<SessionDocument>`. Applying the next validated mutation invalidates the cached view,
+while existing readers retain a coherent snapshot. The owning `SessionLog::load` API remains as a
+compatibility adapter for callers that require an independently owned document; runtime and plugin
+read paths should use the shared view so repeated context, usage, and branch queries do not clone
+the full session.
+
+Hot branch and provider-context reads are query-first: they walk the selected parent chain through
+the journal state's entry index and project only that branch. They do not materialize the complete
+document, record ledger, facts, or mutation log. Default context projection can borrow indexed
+records while holding the state read boundary; extension transforms and projectors receive an
+owned branch after the lock is released so plugin callbacks cannot re-enter a held journal mutex.
+Full shared documents remain the explicit seam for tree snapshots, export, and other operations
+that genuinely consume multiple read-model collections. Startup recovery first queries the
+open-operation index and the record ledger. A settled session restores queue state and closes no
+operations without projecting a document; only an actually interrupted operation materializes the
+full tree/record view required by the reducer.
+
 `JsonlSessionRepo::resolve_exact_id` owns the CLI's project-scoped session identity lookup and Pi
 directory/filename layout. Resolution is read-only: an existing ID yields its metadata, while a
 missing ID yields a timestamped `..._<id>.jsonl` target without creating a directory. The chosen ID
@@ -1341,6 +1391,10 @@ Callers may apply additional entry transforms and register projectors keyed by `
 Pi's agent-level message union is extensible, `SessionContext` preserves both standard and custom
 roles losslessly, including unknown wire fields. `provider_messages()` applies the same projection as
 Pi's `convertToLlm`, including branch/compaction wrappers and bash/custom messages.
+The common default projection walks borrowed branch records and materializes only its output
+messages. Custom transforms/projectors retain the owned-entry path required by their public
+contract; this keeps plugin semantics unchanged while avoiding repeated full-record copies for the
+ordinary resume path.
 Interactive bash execution keeps the last 2,000 lines or 50KB in the session message. When that
 tail is truncated, `pi-shell` streams the complete combined output to a temporary file and persists
 its `fullOutputPath`, so restored context and NDJSON frontends can expose the same continuation
@@ -1377,6 +1431,12 @@ old-plugin shutdown must share one mutation sequence. Final shutdown checkpoints
 therefore remain visible to the next generation instead of being overwritten by an independently
 opened journal with an older sequence. Resuming the already-active file, including a canonical path
 alias, follows the same ownership rule.
+The CLI also retains the fully validated `SessionLog` used to recover the persisted cwd and hands
+that handle to `MultiSessionManager`; generation construction does not replay the same JSONL file a
+second time. Settled sessions keep recovery query-first: the header is read directly, queue and
+operation state come from indexed entries plus the record ledger, and runtime context walks only
+the active branch. Interrupted-operation reduction may materialize a revision-scoped document, but
+subsequent repairs invalidate that view and context restoration still reads current indexed state.
 
 Command and input-hook transformations preserve two text views. The effective text remains the
 standard user-message content used by Agent, provider projection, replay, and recovery. When it

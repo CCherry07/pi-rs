@@ -239,16 +239,20 @@ async fn run(
         }
     }
     let session_exists = !cli.acp && config.session_path.exists();
-    if session_exists {
-        let (_, document) =
-            SessionLog::open(&config.session_path).map_err(|error| error.to_string())?;
-        config.cwd = std::fs::canonicalize(&document.header.cwd).map_err(|error| {
+    let resumed_log = if session_exists {
+        let log =
+            SessionLog::open_handle(&config.session_path).map_err(|error| error.to_string())?;
+        let header = log.header();
+        config.cwd = std::fs::canonicalize(&header.cwd).map_err(|error| {
             format!(
                 "cannot access resumed session cwd {}: {error}",
-                document.header.cwd.display()
+                header.cwd.display()
             )
         })?;
-    }
+        Some(log)
+    } else {
+        None
+    };
     let stdin_is_terminal = std::io::stdin().is_terminal();
     let interactive =
         CLIMode::requested_presentation(&cli, stdin_is_terminal) == PresentationMode::Tui;
@@ -322,8 +326,8 @@ async fn run(
         let shutdown = sessions.shutdown().await.map_err(|error| error.to_string());
         return finish_run(result, shutdown);
     }
-    let session = if session_exists {
-        sessions.open_session(&session_path).await
+    let session = if let Some(log) = resumed_log {
+        sessions.open_session_from_log(log).await
     } else if let Some(session_id) = create_session_id {
         sessions
             .create_session_with_id(&cwd, &session_path, session_id)

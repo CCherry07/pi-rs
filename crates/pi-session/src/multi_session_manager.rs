@@ -23,7 +23,8 @@ use crate::journal::comparable_path;
 use crate::{
     AgentSession, AgentSessionInitialModelSource, AgentSessionInitialState,
     AgentSessionReplacement, ForkPosition, IsolatedSessionObservation, SessionError,
-    SessionFileFormat, SessionGenerationFactory, SessionGenerationOverlay, inspect_session_file,
+    SessionFileFormat, SessionGenerationFactory, SessionGenerationOverlay, SessionLog,
+    inspect_session_file,
 };
 #[cfg(test)]
 use crate::{PreparedSessionGeneration, SessionGenerationActivation, SessionGenerationRequest};
@@ -346,6 +347,21 @@ impl MultiSessionManager {
     ) -> Result<PiSession, MultiSessionManagerError> {
         self.acquire(
             AgentSessionRuntimeTarget::open(path),
+            ExistingSessionPolicy::Reuse,
+            SessionGenerationOverlay::default(),
+        )
+        .await
+    }
+
+    /// Opens a session from a journal that has already been replayed and
+    /// validated. Product frontends use this when persisted metadata is needed
+    /// before generation construction, so the JSONL file is not parsed twice.
+    pub async fn open_session_from_log(
+        &self,
+        log: SessionLog,
+    ) -> Result<PiSession, MultiSessionManagerError> {
+        self.acquire(
+            AgentSessionRuntimeTarget::Reuse { log },
             ExistingSessionPolicy::Reuse,
             SessionGenerationOverlay::default(),
         )
@@ -1105,7 +1121,11 @@ fn validate_isolated_parent(
     child: &PiSession,
     expected_parent_session_id: &str,
 ) -> Result<(), MultiSessionManagerError> {
-    let actual = child.current().log().load()?.isolated_parent_session_id()?;
+    let actual = child
+        .current()
+        .log()
+        .shared_document()?
+        .isolated_parent_session_id()?;
     if actual.as_deref() == Some(expected_parent_session_id) {
         Ok(())
     } else {
@@ -2114,6 +2134,31 @@ mod tests {
 
         assert_eq!(created.registration_id, opened.registration_id);
         assert_eq!(manager.sessions().len(), 1);
+        manager.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn opening_a_preloaded_log_preserves_the_replayed_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let log = SessionLog::create(
+            &path,
+            crate::SessionHeader::new("preloaded-session", directory.path()),
+        )
+        .unwrap();
+        let entry_id = log
+            .append_custom_entry("preloaded", Some(serde_json::json!({ "ready": true })))
+            .unwrap();
+        drop(log);
+
+        let replayed = SessionLog::open_handle(&path).unwrap();
+        let manager = test_manager();
+        let opened = manager.open_session_from_log(replayed).await.unwrap();
+
+        assert_eq!(opened.id(), "preloaded-session");
+        assert_eq!(opened.path(), path);
+        let document = opened.current().log().load().unwrap();
+        assert!(document.entries.iter().any(|entry| entry.id == entry_id));
         manager.shutdown().await.unwrap();
     }
 

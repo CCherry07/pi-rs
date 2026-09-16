@@ -3,8 +3,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use serde::Serialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, value::RawValue};
 
 use super::state::SessionState;
 use super::validation::{
@@ -13,12 +13,16 @@ use super::validation::{
 use super::{comparable_path, sibling_transaction_path};
 use crate::{
     AgentMessage, BranchQuery, EntryQuery, ForkOptions, JsonlSessionMetadata, LanePointer,
-    LaneRecord, LaneRecordEntry, LogItem, MAIN_LANE, NewLaneRecord, ProvisionedEntry, RecordQuery,
-    SESSION_SCHEMA_VERSION, SessionDocument, SessionEntry, SessionError, SessionFact,
-    SessionHeader, SessionMutation, SessionRecord, SessionStats, next_unique_id, now_ms,
+    LaneRecord, LaneRecordEntry, LogItem, MAIN_LANE, MessageEntry, NewLaneRecord, ProvisionedEntry,
+    RecordQuery, SESSION_SCHEMA_VERSION, SessionContext, SessionContextBuildOptions,
+    SessionDocument, SessionEntry, SessionError, SessionFact, SessionHeader, SessionMutation,
+    SessionRecord, SessionStats, SessionWireError, build_session_context, next_unique_id, now_ms,
 };
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const PARALLEL_REPLAY_MIN_BYTES: usize = 1_048_576;
+const PARALLEL_REPLAY_MIN_MUTATIONS: usize = 2_048;
+const PARALLEL_REPLAY_MAX_WORKERS: usize = 8;
 
 #[derive(Clone)]
 pub struct SessionLog {
@@ -96,6 +100,16 @@ impl SessionLog {
     }
 
     pub fn open(path: impl Into<PathBuf>) -> Result<(Self, SessionDocument), SessionError> {
+        let log = Self::open_handle(path)?;
+        let document = log.load()?;
+        Ok((log, document))
+    }
+
+    /// Opens and fully validates a persisted journal without cloning an
+    /// immediate [`SessionDocument`] snapshot. Frontends that need session
+    /// metadata before constructing the runtime can retain this handle and
+    /// hand it to the session manager, avoiding a second JSONL replay.
+    pub fn open_handle(path: impl Into<PathBuf>) -> Result<Self, SessionError> {
         let path = path.into();
         let (header, state, repair) = load_file(&path)?;
         let modified_at = file_modified_at(&path)?;
@@ -108,16 +122,12 @@ impl SessionLog {
             }
             TailRepair::TruncateTo(valid_len) => repair_torn_tail(&path, valid_len)?,
         }
-        let document = state.document(header.clone());
-        Ok((
-            Self::from_parts(
-                path,
-                header,
-                state,
-                modified_at,
-                SessionPersistence::Materialized,
-            ),
-            document,
+        Ok(Self::from_parts(
+            path,
+            header,
+            state,
+            modified_at,
+            SessionPersistence::Materialized,
         ))
     }
 
@@ -231,6 +241,18 @@ impl SessionLog {
 
     pub fn load(&self) -> Result<SessionDocument, SessionError> {
         Ok(self.state().document(self.inner.header.clone()))
+    }
+
+    /// Returns a revision-stable immutable document shared by all readers.
+    /// The first read after a mutation materializes the document; subsequent
+    /// reads at the same revision clone only the [`Arc`].
+    pub fn shared_document(&self) -> Result<Arc<SessionDocument>, SessionError> {
+        Ok(self.state().shared_document(self.inner.header.clone()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_cached_document(&self) -> bool {
+        self.state().has_cached_document()
     }
 
     /// Exports the active main-lane branch as a standalone v4 JSONL session.
@@ -430,15 +452,16 @@ impl SessionLog {
         entries: impl IntoIterator<Item = SessionEntry>,
     ) -> Result<Vec<String>, SessionError> {
         let mut state = self.state();
-        let mut staged = state.clone();
         let mut mutations = Vec::new();
         let mut ids = Vec::new();
+        let mut parent_id = state.require_lane(MAIN_LANE)?;
+        let mut next_sequence = state.next_sequence();
         for entry in entries {
             let id = next_unique_id("entry");
             let record = SessionRecord {
                 id: id.clone(),
-                seq: staged.next_sequence(),
-                parent_id: staged.require_lane(MAIN_LANE)?,
+                seq: next_sequence,
+                parent_id,
                 timestamp_ms: now_ms(),
                 entry,
             };
@@ -446,12 +469,12 @@ impl SessionLog {
                 lane: Some(MAIN_LANE.to_string()),
                 record,
             };
-            staged.apply_mutation(mutation.clone())?;
             mutations.push(mutation);
+            parent_id = Some(id.clone());
+            next_sequence = next_sequence.saturating_add(1);
             ids.push(id);
         }
-        self.append_mutations(&mutations)?;
-        *state = staged;
+        self.commit_mutations(&mut state, mutations)?;
         Ok(ids)
     }
 
@@ -501,6 +524,46 @@ impl SessionLog {
         query: &BranchQuery,
     ) -> Result<Vec<SessionRecord>, SessionError> {
         self.state().find_entries_on_branch(query, lane)
+    }
+
+    /// Reads the active main branch directly from the journal's structural
+    /// index without materializing records, facts, or the full mutation log.
+    pub fn branch_entries(&self) -> Result<Vec<SessionRecord>, SessionError> {
+        self.state().branch_entries_for_lane(MAIN_LANE)
+    }
+
+    pub fn branch_entries_at(
+        &self,
+        leaf_id: Option<&str>,
+    ) -> Result<Vec<SessionRecord>, SessionError> {
+        self.state().branch_entries_at(leaf_id)
+    }
+
+    pub fn context(&self) -> Result<SessionContext, SessionError> {
+        self.context_with_options(&SessionContextBuildOptions::default())
+    }
+
+    pub fn context_with_options(
+        &self,
+        options: &SessionContextBuildOptions,
+    ) -> Result<SessionContext, SessionError> {
+        if options.entry_transforms.is_empty() && options.entry_projectors.is_empty() {
+            return self.state().default_context_for_lane(MAIN_LANE);
+        }
+        let entries = self.branch_entries()?;
+        Ok(build_session_context(&entries, options))
+    }
+
+    pub fn context_at_with_options(
+        &self,
+        leaf_id: Option<&str>,
+        options: &SessionContextBuildOptions,
+    ) -> Result<SessionContext, SessionError> {
+        if options.entry_transforms.is_empty() && options.entry_projectors.is_empty() {
+            return self.state().default_context_at(leaf_id);
+        }
+        let entries = self.branch_entries_at(leaf_id)?;
+        Ok(build_session_context(&entries, options))
     }
 
     pub fn find_records(&self, query: &RecordQuery) -> Result<Vec<LaneRecord>, SessionError> {
@@ -617,12 +680,25 @@ impl SessionLog {
         mutation: SessionMutation,
     ) -> Result<(), SessionError> {
         validate_mutation_payload(&mutation)?;
-        // Validate on a clone before the durable append, so rejected mutations
-        // never poison the log.
-        let mut staged = (**state).clone();
-        staged.apply_mutation(mutation.clone())?;
+        state.validate_mutation(&mutation)?;
         self.append_mutations(std::slice::from_ref(&mutation))?;
-        **state = staged;
+        state.apply_validated_mutation(mutation);
+        Ok(())
+    }
+
+    fn commit_mutations(
+        &self,
+        state: &mut MutexGuard<'_, SessionState>,
+        mutations: Vec<SessionMutation>,
+    ) -> Result<(), SessionError> {
+        for mutation in &mutations {
+            validate_mutation_payload(mutation)?;
+        }
+        state.validate_mutations(&mutations)?;
+        self.append_mutations(&mutations)?;
+        for mutation in mutations {
+            state.apply_validated_mutation(mutation);
+        }
         Ok(())
     }
 
@@ -632,7 +708,6 @@ impl SessionLog {
         }
         let mut encoded = Vec::new();
         for (index, mutation) in mutations.iter().enumerate() {
-            validate_mutation_payload(mutation)?;
             let line = encode_json_line(mutation, index + 2)?;
             encoded.extend_from_slice(&line);
         }
@@ -661,8 +736,182 @@ enum TailRepair {
     TruncateTo(usize),
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EntryMutationKind {
+    Entry,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MessageEntryKind {
+    Message,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMessageMutation<'a> {
+    #[serde(rename = "kind")]
+    _kind: EntryMutationKind,
+    seq: u64,
+    #[serde(
+        default,
+        deserialize_with = "crate::types::strict_optional::deserialize"
+    )]
+    lane: Option<String>,
+    id: String,
+    #[serde(
+        rename = "parentId",
+        deserialize_with = "crate::types::required_nullable::deserialize"
+    )]
+    parent_id: Option<String>,
+    #[serde(rename = "timestamp", with = "crate::types::iso_timestamp_ms")]
+    timestamp_ms: i64,
+    #[serde(rename = "type")]
+    _entry_type: MessageEntryKind,
+    #[serde(borrow)]
+    message: &'a RawValue,
+    #[serde(default)]
+    terminate: bool,
+}
+
+impl RawMessageMutation<'_> {
+    fn into_mutation(self, source: Arc<Vec<u8>>) -> Result<SessionMutation, SessionWireError> {
+        let source_start = source.as_ptr() as usize;
+        let message_start = self.message.get().as_ptr() as usize;
+        let start = message_start.checked_sub(source_start).ok_or_else(|| {
+            SessionWireError::InvalidPayload(
+                "agent message is outside the session source buffer".to_string(),
+            )
+        })?;
+        let end = start.checked_add(self.message.get().len()).ok_or_else(|| {
+            SessionWireError::InvalidPayload("agent message source range overflowed".to_string())
+        })?;
+        if end > source.len() {
+            return Err(SessionWireError::InvalidPayload(
+                "agent message is outside the session source buffer".to_string(),
+            ));
+        }
+        Ok(SessionMutation::Entry {
+            lane: self.lane,
+            record: SessionRecord {
+                id: self.id,
+                seq: self.seq,
+                parent_id: self.parent_id,
+                timestamp_ms: self.timestamp_ms,
+                entry: SessionEntry::Message(MessageEntry {
+                    message: AgentMessage::from_shared_raw_json(source, start..end)?,
+                    terminate: self.terminate,
+                }),
+            },
+        })
+    }
+}
+
+enum MutationDecodeError {
+    Json(serde_json::Error),
+    Wire(SessionWireError),
+}
+
+impl MutationDecodeError {
+    fn is_torn_json(&self) -> bool {
+        matches!(self, Self::Json(error) if error.is_syntax() || error.is_eof())
+    }
+
+    fn message(self) -> String {
+        match self {
+            Self::Json(error) => error.to_string(),
+            Self::Wire(error) => error.to_string(),
+        }
+    }
+}
+
+fn decode_mutation(
+    line: &[u8],
+    source: &Arc<Vec<u8>>,
+) -> Result<SessionMutation, MutationDecodeError> {
+    // serde emits the internally tagged `kind` first, as does current Pi's
+    // JSONL writer. Route non-entry mutations directly to the generic decoder
+    // so operation-heavy sessions do not parse every record twice. Files with
+    // alternate valid whitespace or field ordering retain the generic path.
+    if line.starts_with(br#"{"kind":"entry","#) {
+        match serde_json::from_slice::<RawMessageMutation<'_>>(line) {
+            Ok(message) => message
+                .into_mutation(Arc::clone(source))
+                .map_err(MutationDecodeError::Wire),
+            Err(_) => serde_json::from_slice(line).map_err(MutationDecodeError::Json),
+        }
+    } else {
+        serde_json::from_slice(line).map_err(MutationDecodeError::Json)
+    }
+}
+
+fn decode_mutations_parallel(
+    lines: &[&[u8]],
+    source: &Arc<Vec<u8>>,
+) -> Vec<Result<SessionMutation, MutationDecodeError>> {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(PARALLEL_REPLAY_MAX_WORKERS)
+        .min(lines.len());
+    if workers <= 1 {
+        return lines
+            .iter()
+            .map(|line| decode_mutation(line, source))
+            .collect();
+    }
+
+    let chunk_size = lines.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let handles = lines
+            .chunks(chunk_size)
+            .map(|chunk| {
+                let source = Arc::clone(source);
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|line| decode_mutation(line, &source))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut decoded = Vec::with_capacity(lines.len());
+        for handle in handles {
+            match handle.join() {
+                Ok(mut chunk) => decoded.append(&mut chunk),
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        }
+        decoded
+    })
+}
+
+fn replay_capacities(lines: &[&[u8]]) -> (usize, usize) {
+    let mut entries = 0usize;
+    let mut records = 0usize;
+    let mut unclassified = 0usize;
+    for line in lines {
+        if line.starts_with(br#"{"kind":"entry","#) {
+            entries += 1;
+        } else if line.starts_with(br#"{"kind":"record","#) {
+            records += 1;
+        } else if !line.starts_with(br#"{"kind":"lane","#)
+            && !line.starts_with(br#"{"kind":"fact","#)
+        {
+            // Alternate valid whitespace or field ordering is decoded by the
+            // compatibility path. Preserve the old balanced estimate for
+            // those lines rather than assuming their mutation kind.
+            unclassified += 1;
+        }
+    }
+    (
+        entries + unclassified.div_ceil(2),
+        records + unclassified / 2,
+    )
+}
+
 fn load_file(path: &Path) -> Result<(SessionHeader, SessionState, TailRepair), SessionError> {
-    let bytes = std::fs::read(path)?;
+    let bytes = Arc::new(std::fs::read(path)?);
     if bytes.is_empty() {
         return Err(SessionError::MissingHeader);
     }
@@ -690,35 +939,38 @@ fn load_file(path: &Path) -> Result<(SessionHeader, SessionState, TailRepair), S
         })?;
     validate_header(&header)?;
 
-    let mut state = SessionState::default();
+    let mutation_count = lines.len().saturating_sub(1);
+    let (entry_capacity, record_capacity) = replay_capacities(&lines[1..]);
+    let mut state =
+        SessionState::with_replay_capacities(mutation_count, entry_capacity, record_capacity);
     let mut offset = header_line.len() + usize::from(lines.len() > 1 || terminated);
+    let mut decoded = (lines.len().saturating_sub(1) >= PARALLEL_REPLAY_MIN_MUTATIONS
+        && bytes.len() >= PARALLEL_REPLAY_MIN_BYTES)
+        .then(|| decode_mutations_parallel(&lines[1..], &bytes).into_iter());
     for (index, line) in lines.iter().enumerate().skip(1) {
         let line_number = index + 1;
         let is_last = index == lines.len() - 1;
-        let value = match serde_json::from_slice::<Value>(line) {
-            Ok(value) => value,
-            Err(_error) if is_last => {
+        let result = decoded.as_mut().map_or_else(
+            || decode_mutation(line, &bytes),
+            |decoded| {
+                decoded
+                    .next()
+                    .expect("parallel replay decoder preserves line count")
+            },
+        );
+        let mutation = match result {
+            Ok(mutation) => mutation,
+            Err(error) if is_last && error.is_torn_json() => {
                 return Ok((header, state, TailRepair::TruncateTo(offset)));
             }
             Err(error) => {
                 return Err(SessionError::InvalidJson {
                     line: line_number,
-                    message: error.to_string(),
+                    message: error.message(),
                 });
             }
         };
-        if !value.is_object() {
-            return Err(SessionError::InvalidJson {
-                line: line_number,
-                message: "session mutation is not a JSON object".to_string(),
-            });
-        }
-        validate_mutation_json_shape(&value, line_number)?;
-        let mutation: SessionMutation =
-            serde_json::from_value(value).map_err(|error| SessionError::InvalidJson {
-                line: line_number,
-                message: error.to_string(),
-            })?;
+        validate_ambiguous_optional_fields(line, &mutation, line_number)?;
         validate_mutation_shape(&mutation, line_number)?;
         state
             .apply_mutation(mutation)
@@ -734,6 +986,38 @@ fn load_file(path: &Path) -> Result<(SessionHeader, SessionState, TailRepair), S
         TailRepair::AppendNewline
     };
     Ok((header, state, repair))
+}
+
+fn validate_ambiguous_optional_fields(
+    line_bytes: &[u8],
+    mutation: &SessionMutation,
+    line: usize,
+) -> Result<(), SessionError> {
+    let field = match mutation {
+        SessionMutation::Entry { lane: None, .. } => Some("lane"),
+        SessionMutation::Fact {
+            fact: SessionFact::Name { name: None },
+            ..
+        } => Some("name"),
+        SessionMutation::Fact {
+            fact: SessionFact::Label { label: None, .. },
+            ..
+        } => Some("label"),
+        _ => None,
+    };
+    let Some(field) = field else {
+        return Ok(());
+    };
+    let value: Value =
+        serde_json::from_slice(line_bytes).map_err(|error| SessionError::InvalidJson {
+            line,
+            message: error.to_string(),
+        })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_json_shape(line, "is not a JSON object"))?;
+    optional_json_string(object, field, line)?;
+    Ok(())
 }
 
 pub(crate) fn validate_header(header: &SessionHeader) -> Result<(), SessionError> {
@@ -784,96 +1068,6 @@ pub(crate) fn validate_header_json_shape(value: &Value, line: usize) -> Result<(
     Ok(())
 }
 
-fn validate_mutation_json_shape(value: &Value, line: usize) -> Result<(), SessionError> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| invalid_json_shape(line, "is not a JSON object"))?;
-    require_safe_integer(object.get("seq"), line, "seq", false)?;
-    match object.get("kind").and_then(Value::as_str) {
-        Some("entry") => {
-            optional_json_string(object, "lane", line)?;
-            require_json_string(object, "id", line)?;
-            let entry_type = require_json_string(object, "type", line)?;
-            if !matches!(
-                entry_type,
-                "message"
-                    | "custom_message"
-                    | "model_change"
-                    | "thinking_level_change"
-                    | "active_tools_change"
-                    | "compaction"
-                    | "branch_summary"
-                    | "custom"
-            ) {
-                return Err(invalid_json_shape(
-                    line,
-                    format!("has unknown entry type {entry_type}"),
-                ));
-            }
-            require_nullable_json_string(object, "parentId", line)?;
-            require_pi_timestamp(object.get("timestamp"), line)?;
-            if matches!(entry_type, "custom" | "custom_message") {
-                require_json_string(object, "customType", line)?;
-            }
-        }
-        Some("record") => {
-            require_json_string(object, "id", line)?;
-            require_json_string(object, "lane", line)?;
-            let record_type = require_json_string(object, "type", line)?;
-            if !matches!(
-                record_type,
-                "operation_started"
-                    | "abort_requested"
-                    | "operation_finished"
-                    | "step_attempt"
-                    | "tool_started"
-                    | "queue_enqueued"
-                    | "queue_cancelled"
-                    | "write_deferred"
-                    | "usage"
-            ) {
-                return Err(invalid_json_shape(
-                    line,
-                    format!("has unknown record type {record_type}"),
-                ));
-            }
-            require_pi_timestamp(object.get("timestamp"), line)?;
-            if record_type == "operation_started" {
-                let intent = object
-                    .get("intent")
-                    .and_then(Value::as_object)
-                    .ok_or_else(|| invalid_json_shape(line, "has invalid intent"))?;
-                let kind = require_json_string(intent, "kind", line)?;
-                if !matches!(kind, "run" | "compaction" | "navigation") {
-                    return Err(invalid_json_shape(
-                        line,
-                        format!("has unknown operation kind {kind}"),
-                    ));
-                }
-            }
-            if record_type == "operation_finished" {
-                require_json_string(object, "runId", line)?;
-            }
-        }
-        Some("lane") => {
-            require_json_string(object, "lane", line)?;
-            require_nullable_json_string(object, "leafId", line)?;
-        }
-        Some("fact") => match object.get("fact").and_then(Value::as_str) {
-            Some("name") => {
-                optional_json_string(object, "name", line)?;
-            }
-            Some("label") => {
-                require_json_string(object, "targetId", line)?;
-                optional_json_string(object, "label", line)?;
-            }
-            _ => return Err(invalid_json_shape(line, "has unknown fact type")),
-        },
-        _ => return Err(invalid_json_shape(line, "has unknown mutation kind")),
-    }
-    Ok(())
-}
-
 fn require_json_string<'a>(
     object: &'a serde_json::Map<String, Value>,
     field: &str,
@@ -898,17 +1092,6 @@ fn optional_json_string(
     }
 }
 
-fn require_nullable_json_string(
-    object: &serde_json::Map<String, Value>,
-    field: &str,
-    line: usize,
-) -> Result<(), SessionError> {
-    match object.get(field) {
-        Some(Value::Null | Value::String(_)) => Ok(()),
-        _ => Err(invalid_json_shape(line, format!("has invalid {field}"))),
-    }
-}
-
 fn require_safe_integer(
     value: Option<&Value>,
     line: usize,
@@ -923,13 +1106,6 @@ fn require_safe_integer(
     } else {
         Err(invalid_json_shape(line, format!("has invalid {field}")))
     }
-}
-
-fn require_pi_timestamp(value: Option<&Value>, line: usize) -> Result<(), SessionError> {
-    if matches!(value, Some(Value::String(_))) {
-        return Ok(());
-    }
-    require_safe_integer(value, line, "timestamp", true)
 }
 
 fn invalid_json_shape(line: usize, message: impl Into<String>) -> SessionError {
@@ -1063,6 +1239,165 @@ mod tests {
         let (_, reopened) = SessionLog::open(&path).unwrap();
         assert_eq!(reopened.messages().len(), 2);
         assert_eq!(reopened.labels.get(&id).map(String::as_str), Some("first"));
+    }
+
+    #[test]
+    fn open_handle_replays_once_and_defers_document_materialization() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let log = SessionLog::create(&path, header()).unwrap();
+        let id = log
+            .append_message(Message::User(UserMessage::text("hello", 1)))
+            .unwrap();
+        drop(log);
+
+        let reopened = SessionLog::open_handle(&path).unwrap();
+
+        assert_eq!(reopened.leaf_id().as_deref(), Some(id.as_str()));
+        assert_eq!(reopened.load().unwrap().messages().len(), 1);
+    }
+
+    #[test]
+    fn shared_document_is_stable_until_the_next_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        let log =
+            SessionLog::create_deferred(directory.path().join("session.jsonl"), header()).unwrap();
+        log.append_message(Message::User(UserMessage::text("first", 1)))
+            .unwrap();
+
+        let first = log.shared_document().unwrap();
+        let same_revision = log.shared_document().unwrap();
+        assert!(Arc::ptr_eq(&first, &same_revision));
+        assert_eq!(first.messages().len(), 1);
+
+        log.append_message(Message::User(UserMessage::text("second", 2)))
+            .unwrap();
+        let next_revision = log.shared_document().unwrap();
+        assert!(!Arc::ptr_eq(&first, &next_revision));
+        assert_eq!(first.messages().len(), 1);
+        assert_eq!(next_revision.messages().len(), 2);
+        assert!(Arc::ptr_eq(&next_revision, &log.shared_document().unwrap()));
+    }
+
+    #[test]
+    fn replayed_messages_share_the_immutable_file_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let log = SessionLog::create(&path, header()).unwrap();
+        log.append_batch([
+            SessionEntry::message(Message::User(UserMessage::text("first", 1))),
+            SessionEntry::message(Message::User(UserMessage::text("second", 2))),
+        ])
+        .unwrap();
+        drop(log);
+
+        let reopened = SessionLog::open_handle(&path).unwrap();
+        let entries = reopened.branch_entries().unwrap();
+        let SessionEntry::Message(first) = &entries[0].entry else {
+            panic!("expected message entry");
+        };
+        let SessionEntry::Message(second) = &entries[1].entry else {
+            panic!("expected message entry");
+        };
+
+        assert!(first.message.shares_replay_source_with(&second.message));
+    }
+
+    #[test]
+    fn parallel_replay_preserves_order_shared_source_and_torn_tail_repair() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large-session.jsonl");
+        let log = SessionLog::create(&path, header()).unwrap();
+        let payload = "x".repeat(512);
+        log.append_batch((0..2_048).map(|index| {
+            SessionEntry::message(Message::User(UserMessage::text(
+                format!("{index}:{payload}"),
+                index,
+            )))
+        }))
+        .unwrap();
+        drop(log);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(br#"{"kind":"entry"#)
+            .unwrap();
+
+        let reopened = SessionLog::open_handle(&path).unwrap();
+        let entries = reopened.branch_entries().unwrap();
+
+        assert_eq!(entries.len(), 2_048);
+        assert!(matches!(
+            &entries[0].entry,
+            SessionEntry::Message(message)
+                if matches!(message.message.as_standard(), Some(Message::User(user))
+                    if user.content.iter().any(|block| matches!(block,
+                        pi_core::ContentBlock::Text(text) if text.text.starts_with("0:"))))
+        ));
+        assert!(matches!(
+            &entries[2_047].entry,
+            SessionEntry::Message(message)
+                if matches!(message.message.as_standard(), Some(Message::User(user))
+                    if user.content.iter().any(|block| matches!(block,
+                        pi_core::ContentBlock::Text(text) if text.text.starts_with("2047:"))))
+        ));
+        let (SessionEntry::Message(first), SessionEntry::Message(last)) =
+            (&entries[0].entry, &entries[2_047].entry)
+        else {
+            panic!("expected message entries");
+        };
+        assert!(first.message.shares_replay_source_with(&last.message));
+        assert!(std::fs::read(&path).unwrap().ends_with(b"\n"));
+    }
+
+    #[test]
+    fn indexed_branch_and_context_match_document_without_materializing_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let log =
+            SessionLog::create_deferred(directory.path().join("session.jsonl"), header()).unwrap();
+        let first = log
+            .append_message(Message::User(UserMessage::text("first", 1)))
+            .unwrap();
+        let second = log
+            .append_message(Message::User(UserMessage::text("second", 2)))
+            .unwrap();
+        log.branch(Some(&first)).unwrap();
+        let sibling = log
+            .append_message(Message::User(UserMessage::text("sibling", 3)))
+            .unwrap();
+
+        assert!(!log.state().has_cached_document());
+        let indexed_branch = log.branch_entries().unwrap();
+        let indexed_context = log.context().unwrap();
+        let indexed_second_context = log
+            .context_at_with_options(Some(&second), &SessionContextBuildOptions::default())
+            .unwrap();
+        assert!(!log.state().has_cached_document());
+
+        let document = log.load().unwrap();
+        let document_branch = document
+            .branch()
+            .unwrap()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            indexed_branch
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            [first.as_str(), sibling.as_str()]
+        );
+        assert_eq!(indexed_branch, document_branch);
+        assert_eq!(indexed_context, document.context().unwrap());
+        assert_eq!(
+            indexed_second_context,
+            document
+                .context_at_with_options(Some(&second), &SessionContextBuildOptions::default())
+                .unwrap()
+        );
+        assert!(!log.state().has_cached_document());
     }
 
     #[test]
@@ -1249,7 +1584,11 @@ mod tests {
         let log = SessionLog::create(&path, header()).unwrap();
         let wire = serde_json::json!({
             "role": "user",
-            "content": "compact input",
+            "content": [{
+                "type": "text",
+                "text": "compact input",
+                "futureNested": {"keep": true}
+            }],
             "timestamp": 9,
             "futureField": {"keep": true}
         });
@@ -1295,6 +1634,43 @@ mod tests {
         };
         assert!(matches!(error, SessionError::InvalidJson { .. }));
         assert_eq!(std::fs::read_to_string(fact_path).unwrap(), original);
+    }
+
+    #[test]
+    fn direct_replay_keeps_required_nullable_fields_strict() {
+        let directory = tempfile::tempdir().unwrap();
+        let valid_header = serde_json::to_string(&header()).unwrap();
+        for (name, mutation) in [
+            (
+                "missing-parent",
+                serde_json::json!({
+                    "kind": "entry",
+                    "seq": 1,
+                    "id": "entry",
+                    "timestamp": 1,
+                    "type": "message",
+                    "message": {"role": "user", "content": "hello", "timestamp": 1}
+                }),
+            ),
+            (
+                "missing-leaf",
+                serde_json::json!({
+                    "kind": "lane",
+                    "seq": 1,
+                    "lane": "review"
+                }),
+            ),
+        ] {
+            let path = directory.path().join(format!("{name}.jsonl"));
+            let original = format!("{valid_header}\n{mutation}\n");
+            std::fs::write(&path, &original).unwrap();
+
+            assert!(matches!(
+                SessionLog::open(&path),
+                Err(SessionError::InvalidJson { .. })
+            ));
+            assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+        }
     }
 
     #[test]

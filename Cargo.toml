@@ -23,6 +23,7 @@ members = [
     "crates/pi-js-package-manager",
     "crates/pi-js-plugin",
     "crates/pi-test-support",
+    "crates/pi-bench",
     "crates/pi-eval",
     "crates/pi-telemetry",
     "crates/pi-rpc",

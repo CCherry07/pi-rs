@@ -67,14 +67,9 @@ impl IsolatedSessionObservation {
     /// the managed child session.
     pub fn usage_snapshot(&self) -> Option<IsolatedSessionUsageSnapshot> {
         let session = self.session.current();
-        let document = session.log().load().ok()?;
-        let context_tokens = document.context().ok().and_then(|context| {
-            let branch = document
-                .branch()
-                .ok()?
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>();
+        let document = session.log().shared_document().ok()?;
+        let context_tokens = session.log().context().ok().and_then(|context| {
+            let branch = session.log().branch_entries().ok()?;
             current_session_context_tokens(&branch, &context.messages).map(|usage| usage.tokens)
         });
         Some(IsolatedSessionUsageSnapshot {
@@ -620,7 +615,7 @@ async fn run_prompt(
     }
     let before = session
         .log()
-        .load()
+        .shared_document()
         .map(|document| aggregate_document_usage(&document))
         .map_err(|error| error.to_string())?;
     let mut prompt = std::pin::pin!(session.prompt(input));
@@ -650,7 +645,7 @@ async fn run_prompt(
     let outcome = result.map_err(|error| error.to_string())?;
     let after = session
         .log()
-        .load()
+        .shared_document()
         .map(|document| aggregate_document_usage(&document))
         .map_err(|error| error.to_string())?;
     Ok(IsolatedSessionOutcome {

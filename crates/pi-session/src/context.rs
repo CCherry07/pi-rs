@@ -72,6 +72,15 @@ pub fn session_entry_to_context_messages(
     entries: &[SessionRecord],
     options: &SessionContextBuildOptions,
 ) -> Vec<AgentMessage> {
+    session_entry_to_context_messages_inner(record, index, Some(entries), options)
+}
+
+fn session_entry_to_context_messages_inner(
+    record: &SessionRecord,
+    index: usize,
+    entries: Option<&[SessionRecord]>,
+    options: &SessionContextBuildOptions,
+) -> Vec<AgentMessage> {
     match &record.entry {
         SessionEntry::Message(message) => {
             if matches!(
@@ -115,14 +124,76 @@ pub fn session_entry_to_context_messages(
             crate::isolated_context::read_seed(&record.entry)
                 .map_or_else(Vec::new, |seed| seed.messages)
         }
-        SessionEntry::Custom(custom) => options
-            .entry_projectors
-            .get(&custom.custom_type)
-            .map_or_else(Vec::new, |projector| projector(custom, index, entries)),
+        SessionEntry::Custom(custom) => entries
+            .and_then(|entries| {
+                options
+                    .entry_projectors
+                    .get(&custom.custom_type)
+                    .map(|projector| projector(custom, index, entries))
+            })
+            .unwrap_or_default(),
         SessionEntry::ModelChange(_)
         | SessionEntry::ThinkingLevelChange(_)
         | SessionEntry::ActiveToolsChange(_)
         | SessionEntry::BranchSummary(_) => Vec::new(),
+    }
+}
+
+pub(crate) fn build_default_session_context_from_refs(
+    path_entries: &[&SessionRecord],
+) -> SessionContext {
+    let mut thinking_level = "off".to_string();
+    let mut model = None;
+    let mut active_tool_names = None;
+    for record in path_entries {
+        match &record.entry {
+            SessionEntry::ThinkingLevelChange(change) => {
+                thinking_level.clone_from(&change.thinking_level);
+            }
+            SessionEntry::ModelChange(change) => {
+                model = Some(SessionModel {
+                    provider: change.provider.clone(),
+                    model_id: change.model_id.clone(),
+                });
+            }
+            SessionEntry::Message(message) => {
+                if let Some(Message::Assistant(assistant)) = message.message.as_standard()
+                    && assistant.provider.as_str() != "unknown"
+                    && assistant.model.as_str() != "unknown"
+                {
+                    model = Some(SessionModel {
+                        provider: assistant.provider.clone(),
+                        model_id: assistant.model.clone(),
+                    });
+                }
+            }
+            SessionEntry::ActiveToolsChange(change) => {
+                active_tool_names = Some(change.active_tool_names.clone());
+            }
+            SessionEntry::Compaction(_)
+            | SessionEntry::BranchSummary(_)
+            | SessionEntry::CustomMessage(_)
+            | SessionEntry::Custom(_) => {}
+        }
+    }
+
+    let context_start = path_entries
+        .iter()
+        .rposition(|record| matches!(record.entry, SessionEntry::Compaction(_)))
+        .unwrap_or(0);
+    let options = SessionContextBuildOptions::default();
+    let messages = path_entries[context_start..]
+        .iter()
+        .enumerate()
+        .flat_map(|(index, record)| {
+            session_entry_to_context_messages_inner(record, index, None, &options)
+        })
+        .collect();
+    SessionContext {
+        messages,
+        thinking_level,
+        model,
+        active_tool_names,
     }
 }
 
@@ -443,6 +514,10 @@ impl SessionDocument {
         leaf_id: Option<&str>,
         options: &SessionContextBuildOptions,
     ) -> Result<SessionContext, SessionError> {
+        if options.entry_transforms.is_empty() && options.entry_projectors.is_empty() {
+            let path = self.branch_at(leaf_id)?;
+            return Ok(build_default_session_context_from_refs(&path));
+        }
         let path = self
             .branch_at(leaf_id)?
             .into_iter()
@@ -621,6 +696,8 @@ mod tests {
         ];
 
         let context = build_session_context(&path, &SessionContextBuildOptions::default());
+        let path_refs = path.iter().collect::<Vec<_>>();
+        assert_eq!(build_default_session_context_from_refs(&path_refs), context);
         assert_eq!(context.messages.len(), 4);
         assert_eq!(
             context
