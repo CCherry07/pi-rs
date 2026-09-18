@@ -7,7 +7,7 @@ use pi_session::{MultiSessionManager, PluginContextBinding, PluginUiBridge};
 use pi_settings::{SettingsContext, SettingsManager};
 use tokio::sync::mpsc;
 
-use crate::{ProductConfig, ProductSessionFactory, ProjectTrustPromptRequest, ProjectTrustService};
+use crate::{Config, ProductSessionFactory, ProjectTrustPromptRequest, ProjectTrustService};
 
 /// Headless Pi application host shared by presentation adapters.
 pub struct Pi {
@@ -18,7 +18,7 @@ pub struct Pi {
 }
 
 pub struct PiBuilder {
-    config: ProductConfig,
+    config: Config,
     presentation_mode: PresentationMode,
     interactive_project_trust: bool,
     js_plugin_host: Option<Arc<dyn JsPluginHost>>,
@@ -26,7 +26,7 @@ pub struct PiBuilder {
 }
 
 impl Pi {
-    pub fn builder(config: ProductConfig) -> PiBuilder {
+    pub fn builder(config: Config) -> PiBuilder {
         PiBuilder {
             config,
             presentation_mode: PresentationMode::Print,
@@ -112,14 +112,14 @@ impl PiBuilder {
 mod tests {
     use super::*;
 
-    fn config(cwd: &Path, agent_dir: &Path) -> ProductConfig {
+    fn config(cwd: &Path, agent_dir: &Path) -> Config {
         std::fs::create_dir_all(agent_dir).unwrap();
         std::fs::write(
             agent_dir.join("memory.json"),
             r#"{"version": 1, "enabled": false}"#,
         )
         .unwrap();
-        let mut config = ProductConfig::new(cwd.to_path_buf(), agent_dir.to_path_buf());
+        let mut config = Config::new(cwd.to_path_buf(), agent_dir.to_path_buf());
         config.discover_extensions = false;
         config
     }

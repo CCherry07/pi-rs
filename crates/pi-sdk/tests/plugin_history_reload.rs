@@ -8,7 +8,7 @@ use pi_core::{
     CustomMessageContent, Message, PluginError, PluginId, RegisterContext, Tool, ToolCallId,
     ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdateSink, UserMessage,
 };
-use pi_sdk::{Pi, ProductConfig};
+use pi_sdk::{Config, Pi};
 use pi_session::{AgentMessage, AgentSession, PiSession, SessionGenerationOverlay};
 use serde_json::{Value, json};
 
@@ -190,7 +190,7 @@ impl HistoryFixture {
     }
 
     fn host(&self) -> Pi {
-        let mut config = ProductConfig::new(
+        let mut config = Config::new(
             self.root.path().to_path_buf(),
             self.root.path().join("agent"),
         );

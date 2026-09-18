@@ -4,6 +4,7 @@ mod builtin_providers;
 mod credentials;
 pub mod desktop_extensions;
 mod dynamic_providers;
+mod features;
 mod host;
 pub mod mcp;
 pub mod plugins;
@@ -12,6 +13,7 @@ mod session_factory;
 pub mod skills;
 
 pub use credentials::{StoredCredential, read_credentials, read_stored_credential};
+pub use features::Features;
 pub use host::{Pi, PiBuilder};
 pub use pi_plugin_memory_hermes::curator;
 pub use project_trust::{
@@ -29,7 +31,9 @@ use pi_js_package_manager::ResolveRequest as JsResolveRequest;
 
 /// Product configuration shared by every Pi presentation adapter.
 #[derive(Debug, Clone)]
-pub struct ProductConfig {
+pub struct Config {
+    /// First-party runtime features; defaults to all enabled.
+    pub features: Features,
     pub cwd: PathBuf,
     pub agent_dir: PathBuf,
     pub session_path: PathBuf,
@@ -53,7 +57,7 @@ pub struct ProductConfig {
     pub settings_diagnostics: Vec<pi_resources::ResourceDiagnostic>,
 }
 
-impl ProductConfig {
+impl Config {
     pub fn new(cwd: PathBuf, agent_dir: PathBuf) -> Self {
         let provider = "openai-compatible".to_string();
         let api_key = std::env::var("OPENAI_API_KEY")
@@ -71,6 +75,7 @@ impl ProductConfig {
             .join("sessions")
             .join(format!("{}.jsonl", uuid::Uuid::now_v7()));
         Self {
+            features: Features::default(),
             cwd,
             agent_dir,
             session_path,

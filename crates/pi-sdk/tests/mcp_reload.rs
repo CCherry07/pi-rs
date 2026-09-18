@@ -7,7 +7,7 @@ use pi_core::{
     AbortHandle, ContentBlock, CustomMessage, CustomMessageContent, TextContent, ToolContext,
     ToolUpdateSink,
 };
-use pi_sdk::{Pi, ProductConfig};
+use pi_sdk::{Config, Pi};
 use pi_session::PiSession;
 use serde_json::{Value, json};
 
@@ -78,7 +78,7 @@ impl McpFixture {
         )
         .unwrap();
         Self::write_servers(&agent.join("mcp.json"), &url, enabled);
-        let mut config = ProductConfig::new(project.clone(), agent.clone());
+        let mut config = Config::new(project.clone(), agent.clone());
         config.discover_extensions = false;
         config.trust_override = Some(false);
         let pi = Pi::builder(config).build().unwrap();

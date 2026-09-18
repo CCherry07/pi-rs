@@ -339,7 +339,7 @@ pub(crate) enum PluginPublishCommand {
     },
 }
 
-pub(crate) type AppConfig = pi_sdk::ProductConfig;
+pub(crate) type AppConfig = pi_sdk::Config;
 
 pub(crate) fn resolve_app_config(cli: &Cli) -> Result<AppConfig, String> {
     let cwd = std::fs::canonicalize(&cli.cwd)

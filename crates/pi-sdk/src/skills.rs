@@ -7,10 +7,10 @@ use pi_plugin_memory_hermes::managed_skill_roots;
 use pi_plugin_skills::{SkillLoaderOptions, management::SkillLibrary};
 use pi_settings::{SettingsContext, SettingsManager};
 
-use crate::{ProductConfig, ProjectTrustEvaluation, ProjectTrustService};
+use crate::{Config, ProjectTrustEvaluation, ProjectTrustService};
 
 pub(crate) fn runtime_skill_options(
-    config: &ProductConfig,
+    config: &Config,
     trusted: bool,
     hermes: bool,
 ) -> SkillLoaderOptions {
@@ -51,7 +51,7 @@ pub fn desktop_skill_library(
     };
     let base = cwd.unwrap_or(agent_dir);
     let settings = SettingsManager::new(agent_dir).load(&SettingsContext::new(base, trusted));
-    let mut config = ProductConfig::new(base.to_path_buf(), agent_dir.to_path_buf());
+    let mut config = Config::new(base.to_path_buf(), agent_dir.to_path_buf());
     config.runtime_settings = settings.effective().clone();
     config.settings_skill_paths = crate::session_factory::scoped_setting_paths(
         &settings.global().skills,

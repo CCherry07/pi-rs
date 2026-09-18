@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand};
 use pi_eval::{ArtifactStore, EvalExecutionOutcome, EvalRun, PiEvalHarness, summarize_comparisons};
 use pi_js_plugin::JsPluginHost;
-use pi_sdk::ProductConfig;
+use pi_sdk::Config;
 
 use crate::catalog::{EvalPlan, resolve_plan};
 
@@ -195,13 +195,13 @@ fn product_config(
     provider: &str,
     model: &str,
     base_url: Option<&str>,
-) -> ProductConfig {
-    let mut config = ProductConfig::new(cwd.to_path_buf(), source_agent_dir.to_path_buf());
+) -> Config {
+    let mut config = Config::new(cwd.to_path_buf(), source_agent_dir.to_path_buf());
     config.provider = provider.to_string();
     config.requested_provider = Some(provider.to_string());
     config.model = Some(model.to_string());
     if provider != "openai-compatible" {
-        // ProductConfig discovers OPENAI_API_KEY for its default provider. A
+        // Config discovers OPENAI_API_KEY for its default provider. A
         // later eval provider selection must not reuse that credential.
         config.api_key = None;
     }

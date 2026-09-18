@@ -8,7 +8,7 @@ use pi_core::{
     ThinkingLevel, Tool, ToolCallId, ToolContext, ToolError, ToolExecutionMode, ToolResult,
     ToolSpec, ToolUpdateSink, UserMessage,
 };
-use pi_sdk::{Pi, ProductConfig};
+use pi_sdk::{Config, Pi};
 use pi_session::{QueueKind, SessionGenerationOverlay};
 
 fn write_catalog(agent_dir: &Path, models: &[&str]) {
@@ -41,7 +41,7 @@ fn fixture(root: &Path) -> Pi {
     )
     .unwrap();
     write_catalog(&agent_dir, &["alpha", "beta"]);
-    let mut config = ProductConfig::new(root.to_path_buf(), agent_dir);
+    let mut config = Config::new(root.to_path_buf(), agent_dir);
     config.provider = "reload-fixture".to_string();
     config.model = Some("alpha".to_string());
     config.thinking = Some(ThinkingLevel::Low);

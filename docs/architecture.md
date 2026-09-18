@@ -194,7 +194,7 @@ enters through `pi-sdk::Pi`, creates isolated workspace/agent/session directorie
 same `JsPluginHost` capability as other embedded Adapters. Case-local Rust `AgentPlugin` factories are
 applied with `SessionGenerationOverlay`, so structured submission tools and prompt treatments are rebuilt
 on reload but never serialized. Real native plugin evaluation stays on the product loader path: explicit
-libraries/manifests flow through `ProductConfig::native_plugins`, while trusted project manifests under
+libraries/manifests flow through `Config::native_plugins`, while trusted project manifests under
 `.pi/plugins` are rediscovered on reload. The eval layer does not load dynamic libraries itself.
 
 Comparative evals pair observations by eval set, case identity, and repetition. Correctness lift is based
@@ -222,7 +222,17 @@ an active requirement fails with an actionable launcher message unless the user 
 discovery. This probe is read-only and never installs or updates a package.
 
 All frontend adapters enter the product through `pi-sdk`, whose `Pi` Module owns the shared
-product composition and exposes the session manager. Beneath that interface, two public session
+product composition and exposes the session manager. `Config::features` is a typed, host-captured
+runtime selection of first-party memory, subagents, scheduling, skills, prompt templates, and
+session-transfer plugins. All default to enabled. Generation construction gates complete agent/session
+registrations and initialization, so disabled memory never loads its provider and disabled scheduling
+never starts its worker. The selection survives settings refresh and managed session replacement/reload;
+it is neither serialized into session history nor mutated in live registries. Providers, core tools,
+explicit native/JS/MCP plugins, general context resources, and read-only skill-file management remain
+independent. This is deliberate Rust SDK composition policy, not Cargo dependency pruning or a plugin
+security boundary. In particular disabling skills/templates removes their built-in plugin, unlike
+legacy Pi's `noSkills`/`noPromptTemplates` automatic-discovery suppression, which retains explicit paths.
+Beneath that interface, two public session
 Modules remain responsible for session behavior. `MultiSessionManager`
 owns the runtime factory, manager shutdown, and a private table of active handles. `PiSession` is the
 cloneable per-frontend handle for current-session events and new/resume/fork/reload transitions.

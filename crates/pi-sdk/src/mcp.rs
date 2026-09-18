@@ -659,7 +659,7 @@ mod tests {
             r#"{"version":1,"enabled":false}"#,
         )
         .unwrap();
-        let mut config = crate::ProductConfig::new(project.clone(), agent.clone());
+        let mut config = crate::Config::new(project.clone(), agent.clone());
         config.discover_extensions = false;
         config.trust_override = Some(false);
         let pi = crate::Pi::builder(config.clone()).build().unwrap();

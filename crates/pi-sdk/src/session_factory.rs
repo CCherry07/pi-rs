@@ -52,7 +52,7 @@ use crate::dynamic_providers::{
     DynamicProviderCandidate, DynamicProviderOverlay, DynamicProviderPreparation,
 };
 use crate::project_trust::ProjectTrustService;
-use crate::{ProductConfig, expand_tilde_path};
+use crate::{Config, expand_tilde_path};
 
 const BUILTIN_TOOL_NAMES: [&str; 17] = [
     "read",
@@ -76,7 +76,7 @@ const BUILTIN_TOOL_NAMES: [&str; 17] = [
 
 #[derive(Clone)]
 pub struct ProductSessionFactory {
-    config: ProductConfig,
+    config: Config,
     project_trust: ProjectTrustService,
     settings: SettingsManager,
     js_plugin_host: Option<Arc<dyn JsPluginHost>>,
@@ -143,7 +143,7 @@ impl SessionGenerationActivation for PreparedProductActivation {
 
 impl ProductSessionFactory {
     pub fn new(
-        config: ProductConfig,
+        config: Config,
         project_trust: ProjectTrustService,
         settings: SettingsManager,
     ) -> Self {
@@ -185,7 +185,9 @@ impl ProductSessionFactory {
 impl SessionGenerationFactory for ProductSessionFactory {
     fn session_registered(&self, session: &pi_session::PiSession) {
         self.plugin_context_binding.bind(session.clone());
-        self.subagents.session_registered(session.clone());
+        if self.config.features.subagents {
+            self.subagents.session_registered(session.clone());
+        }
     }
 
     async fn prepare_generation(
@@ -378,14 +380,18 @@ impl SessionGenerationFactory for ProductSessionFactory {
             session_plugins = session_plugins
                 .try_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)));
         }
-        let session_plugins = session_plugins.plugin_factory({
-            let subagents = self.subagents.clone();
-            move || SubagentsSessionPlugin::new(subagents.clone())
-        });
-        let schedule_options =
-            ScheduleOptions::new(&config.cwd, &config.agent_dir, project_trusted);
-        let session_plugins = session_plugins
-            .plugin_factory(move || ScheduleSessionPlugin::new(schedule_options.clone()));
+        if config.features.subagents {
+            session_plugins = session_plugins.plugin_factory({
+                let subagents = self.subagents.clone();
+                move || SubagentsSessionPlugin::new(subagents.clone())
+            });
+        }
+        if config.features.schedule {
+            let schedule_options =
+                ScheduleOptions::new(&config.cwd, &config.agent_dir, project_trusted);
+            session_plugins = session_plugins
+                .plugin_factory(move || ScheduleSessionPlugin::new(schedule_options.clone()));
+        }
         let mut session_plugins = native_plugins.apply_session(session_plugins);
         if let Some(js_generation) = &js_generation {
             for plugin in js_generation.session_plugins() {
@@ -539,7 +545,7 @@ fn compact_extension_labels(paths: &[PathBuf]) -> Vec<String> {
 }
 
 async fn prepare_native_packages(
-    config: &ProductConfig,
+    config: &Config,
     project_trusted: bool,
 ) -> Result<Vec<PreparedPluginReconcile>, SessionError> {
     let mut options = PluginManagerOptions::new(&config.cwd, &config.agent_dir);
@@ -567,7 +573,7 @@ async fn prepare_native_packages(
 
 #[cfg(test)]
 fn build_runtime(
-    config: &ProductConfig,
+    config: &Config,
     project_trusted: bool,
     native_plugins: &NativePlugins,
     js_generation: Option<&JsPluginGeneration>,
@@ -585,7 +591,7 @@ fn build_runtime(
 
 #[cfg(test)]
 fn build_runtime_with_codex_credentials(
-    config: &ProductConfig,
+    config: &Config,
     project_trusted: bool,
     native_plugins: &NativePlugins,
     js_generation: Option<&JsPluginGeneration>,
@@ -611,9 +617,7 @@ fn build_runtime_with_codex_credentials(
 }
 
 #[cfg(test)]
-async fn build_runtime_with_first_party_memory(
-    config: &ProductConfig,
-) -> Result<PiRuntime, RuntimeError> {
+async fn build_runtime_with_first_party_memory(config: &Config) -> Result<PiRuntime, RuntimeError> {
     let memory = build_memory_provider(config, None, false)
         .await
         .map_err(RuntimeError::Build)?;
@@ -651,7 +655,7 @@ struct RuntimeBuildOutcome {
 }
 
 fn build_runtime_inner(
-    config: &ProductConfig,
+    config: &Config,
     project_trusted: bool,
     native_plugins: &NativePlugins,
     js_generation: Option<&JsPluginGeneration>,
@@ -671,7 +675,7 @@ fn build_runtime_inner(
     let effective_api_key = builtin_providers.effective_api_key().map(str::to_string);
     let skill_options =
         crate::skills::runtime_skill_options(config, project_trusted, memory_is_hermes);
-    if memory_is_hermes {
+    if config.features.skills && memory_is_hermes {
         skill_activity_observer = Some(pi_plugin_memory_hermes::curator::activity_observer(
             managed_skill_roots(&config.agent_dir, &config.cwd, project_trusted),
         ));
@@ -719,18 +723,21 @@ fn build_runtime_inner(
         Arc::clone(&transport),
         codex_transport_options,
     );
-    let skill_prompt_projector =
-        Arc::new(SubagentSkillPromptProjector::new(extras.subagents.clone()));
-    let builder = builder
-        .try_provider_plugin_factory({
-            let model_options = model_options.clone();
-            let transport = Arc::clone(&transport);
-            move || ModelsPlugin::load_with_transport(model_options.clone(), Arc::clone(&transport))
-        })
-        .agent_plugin_factory({
+    let skill_prompt_projector = config
+        .features
+        .subagents
+        .then(|| Arc::new(SubagentSkillPromptProjector::new(extras.subagents.clone())));
+    let mut builder = builder.try_provider_plugin_factory({
+        let model_options = model_options.clone();
+        let transport = Arc::clone(&transport);
+        move || ModelsPlugin::load_with_transport(model_options.clone(), Arc::clone(&transport))
+    });
+    if config.features.prompt_templates {
+        builder = builder.agent_plugin_factory({
             let prompt_template_options = prompt_template_options.clone();
             move || PromptTemplatesPlugin::load(prompt_template_options.clone())
         });
+    }
     let builder = match extras.memory {
         Some(memory) => {
             let plugin = memory.agent_plugin();
@@ -738,29 +745,40 @@ fn build_runtime_inner(
         }
         None => builder,
     };
-    let builder = builder
-        .try_agent_plugin_factory({
+    let mut builder = builder;
+    if config.features.subagents {
+        builder = builder.try_agent_plugin_factory({
             let subagents = extras.subagents.clone();
             let subagent_options = subagent_options.clone();
             move || SubagentsPlugin::load(subagents.clone(), subagent_options.clone())
-        })
-        .agent_plugin_factory({
+        });
+    }
+    if config.features.skills {
+        builder = builder.agent_plugin_factory({
             let skill_options = skill_options.clone();
-            let skill_prompt_projector = Arc::clone(&skill_prompt_projector);
             let skill_activity_observer = skill_activity_observer.clone();
             move || {
-                SkillsPlugin::load_with_prompt_projector(
-                    skill_options.clone(),
-                    skill_prompt_projector.clone(),
-                )
-                .with_activity_observer(skill_activity_observer.clone())
+                let plugin = match &skill_prompt_projector {
+                    Some(projector) => SkillsPlugin::load_with_prompt_projector(
+                        skill_options.clone(),
+                        projector.clone(),
+                    ),
+                    None => SkillsPlugin::load(skill_options.clone()),
+                };
+                plugin.with_activity_observer(skill_activity_observer.clone())
             }
-        })
-        .agent_plugin_factory(SessionTransferPlugin::default)
-        .agent_plugin_factory({
+        });
+    }
+    if config.features.session_transfer {
+        builder = builder.agent_plugin_factory(SessionTransferPlugin::default);
+    }
+    if config.features.schedule {
+        builder = builder.agent_plugin_factory({
             let options = ScheduleOptions::new(&config.cwd, &config.agent_dir, project_trusted);
             move || SchedulePlugin::new(options.clone())
-        })
+        });
+    }
+    let builder = builder
         .agent_plugin_factory({
             let auto_resize_images = config.runtime_settings.images.auto_resize;
             move || ConfiguredReadPlugin::new(auto_resize_images)
@@ -808,6 +826,9 @@ fn build_runtime_inner(
                 .filter(|tool| match *tool {
                     "memory" => memory_supports_memory_tool,
                     "session_search" => memory_supports_session_search,
+                    "spawn_agent" | "send_message" | "followup_task" | "wait_agent"
+                    | "interrupt_agent" | "list_agents" => config.features.subagents,
+                    "schedule" => config.features.schedule,
                     _ => true,
                 })
                 .map(str::to_string)
@@ -852,10 +873,13 @@ fn build_runtime_inner(
 }
 
 async fn build_memory_provider(
-    config: &ProductConfig,
+    config: &Config,
     active_session_path: Option<&std::path::Path>,
     project_trusted: bool,
 ) -> Result<Option<PreparedMemoryProvider>, String> {
+    if !config.features.memory {
+        return Ok(None);
+    }
     let mut options = MemoryLoaderOptions::new(&config.cwd, &config.agent_dir);
     options.project_trusted = project_trusted;
     if let Some(session_root) = config.session_path.parent() {
@@ -871,13 +895,13 @@ async fn build_memory_provider(
         .map_err(|error| error.to_string())
 }
 
-fn provider_transport(config: &ProductConfig) -> Result<Arc<dyn HttpTransport>, RuntimeError> {
+fn provider_transport(config: &Config) -> Result<Arc<dyn HttpTransport>, RuntimeError> {
     let transport = ReqwestTransport::with_config(provider_transport_config(config))
         .map_err(|error| RuntimeError::Build(error.to_string()))?;
     Ok(Arc::new(transport))
 }
 
-fn provider_transport_config(config: &ProductConfig) -> ReqwestTransportConfig {
+fn provider_transport_config(config: &Config) -> ReqwestTransportConfig {
     let provider_retry = config.runtime_settings.retry.provider;
     let timeout_ms = provider_retry
         .timeout_ms
@@ -891,7 +915,7 @@ fn provider_transport_config(config: &ProductConfig) -> ReqwestTransportConfig {
     }
 }
 
-fn codex_transport_options(config: &ProductConfig) -> CodexTransportOptions {
+fn codex_transport_options(config: &Config) -> CodexTransportOptions {
     let timeout_ms = config
         .runtime_settings
         .retry
@@ -922,7 +946,7 @@ fn codex_transport_options(config: &ProductConfig) -> CodexTransportOptions {
     }
 }
 
-fn initial_model_request(config: &ProductConfig) -> InitialModelRequest {
+fn initial_model_request(config: &Config) -> InitialModelRequest {
     InitialModelRequest {
         requested_provider: config.requested_provider.clone().map(ProviderId::new),
         requested_model: config.model.clone(),
@@ -938,7 +962,7 @@ fn initial_model_request(config: &ProductConfig) -> InitialModelRequest {
 
 fn validate_initial_model_scope(
     runtime: &PiRuntime,
-    config: &ProductConfig,
+    config: &Config,
     initial_state: &pi_session::AgentSessionInitialState,
 ) -> Result<(), SessionError> {
     if initial_state.model_source == pi_session::AgentSessionInitialModelSource::Inherited {
@@ -968,7 +992,7 @@ fn settings_queue_mode(mode: QueueModeSetting) -> QueueMode {
     }
 }
 
-fn settings_thinking_level(config: &ProductConfig) -> ThinkingLevel {
+fn settings_thinking_level(config: &Config) -> ThinkingLevel {
     if let Some(level) = config.thinking {
         return level;
     }
@@ -984,7 +1008,7 @@ fn settings_thinking_level(config: &ProductConfig) -> ThinkingLevel {
     }
 }
 
-fn settings_thinking_budgets(config: &ProductConfig) -> Option<ThinkingBudgets> {
+fn settings_thinking_budgets(config: &Config) -> Option<ThinkingBudgets> {
     config
         .runtime_settings
         .thinking_budgets
@@ -996,7 +1020,7 @@ fn settings_thinking_budgets(config: &ProductConfig) -> Option<ThinkingBudgets> 
         })
 }
 
-fn session_compaction_settings(config: &ProductConfig) -> SessionCompactionSettings {
+fn session_compaction_settings(config: &Config) -> SessionCompactionSettings {
     let settings = config.runtime_settings.compaction;
     SessionCompactionSettings {
         enabled: settings.enabled,
@@ -1207,8 +1231,9 @@ command = "fixture-command"
         format!("header.{payload}.signature")
     }
 
-    fn app_config(agent_dir: &std::path::Path, model: Option<&str>) -> ProductConfig {
-        ProductConfig {
+    fn app_config(agent_dir: &std::path::Path, model: Option<&str>) -> Config {
+        Config {
+            features: crate::Features::default(),
             cwd: agent_dir.to_path_buf(),
             agent_dir: agent_dir.to_path_buf(),
             session_path: agent_dir.join("session.jsonl"),

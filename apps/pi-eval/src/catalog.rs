@@ -1206,7 +1206,7 @@ mod tests {
     use axum::http::header::CONTENT_TYPE;
     use axum::routing::post;
     use pi_eval::{ArtifactStore, PiEvalHarness};
-    use pi_sdk::ProductConfig;
+    use pi_sdk::Config;
 
     use super::*;
 
@@ -1287,7 +1287,7 @@ mod tests {
         let harness =
             PiEvalHarness::new(ArtifactStore::new(root.path().join("artifacts")).unwrap());
         let plan = resolve_plan("provider").unwrap();
-        let mut config = ProductConfig::new(root.path().to_path_buf(), source_agent);
+        let mut config = Config::new(root.path().to_path_buf(), source_agent);
         config.provider = "openai-compatible".to_string();
         config.requested_provider = Some(config.provider.clone());
         config.model = Some("gpt-4o-mini".to_string());
@@ -1328,7 +1328,7 @@ mod tests {
         assert_eq!(plan.variants[0].native_plugins.len(), 1);
         assert!(plan.variants[0].native_plugins[0].is_file());
         assert!(matches!(plan.cases[0].steps[0], EvalStep::Reload));
-        let mut config = ProductConfig::new(root.path().to_path_buf(), source_agent);
+        let mut config = Config::new(root.path().to_path_buf(), source_agent);
         config.provider = "openai-compatible".to_string();
         config.requested_provider = Some(config.provider.clone());
         config.model = Some("gpt-4o-mini".to_string());

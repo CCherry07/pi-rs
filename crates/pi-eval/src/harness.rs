@@ -6,7 +6,7 @@ use pi_core::{
     Message, PluginError, PluginId, PresentationMode, StopReason, Usage,
 };
 use pi_js_plugin::JsPluginHost;
-use pi_sdk::{Pi, ProductConfig};
+use pi_sdk::{Config, Pi};
 use pi_session::{SessionGenerationOverlay, SubmitOutcome};
 use pi_utils::time::unix_timestamp_ms as now_ms;
 
@@ -44,7 +44,7 @@ impl PiEvalHarness {
         case: &EvalCase,
         variant: impl Into<EvalVariant>,
         repetition: u32,
-        mut config: ProductConfig,
+        mut config: Config,
     ) -> Result<EvalRun, EvalError> {
         case.validate()?;
         if repetition == 0 {
@@ -612,7 +612,7 @@ mod tests {
             .step(EvalStep::Prompt("Capital of France?".to_string()))
             .grader(ExactOutputGrader::new("Paris"))
             .active_tools(Vec::<String>::new());
-        let mut config = ProductConfig::new(root.path().to_path_buf(), source_agent);
+        let mut config = Config::new(root.path().to_path_buf(), source_agent);
         config.provider = "openai-compatible".to_string();
         config.requested_provider = Some(config.provider.clone());
         config.model = Some("gpt-4o-mini".to_string());
@@ -653,7 +653,7 @@ mod tests {
             .step(EvalStep::Prompt("Capital of France?".to_string()))
             .grader(ExactOutputGrader::new("Paris"))
             .active_tools(Vec::<String>::new());
-        let mut config = ProductConfig::new(root.path().to_path_buf(), source_agent);
+        let mut config = Config::new(root.path().to_path_buf(), source_agent);
         config.provider = "openai-compatible".to_string();
         config.requested_provider = Some(config.provider.clone());
         config.model = Some("gpt-4o-mini".to_string());
@@ -685,7 +685,7 @@ mod tests {
             PiEvalHarness::new(ArtifactStore::new(root.path().join("artifacts")).unwrap());
         let case = EvalCase::new("native/explicit", "native path")
             .step(EvalStep::Prompt("unused".to_string()));
-        let config = ProductConfig::new(root.path().to_path_buf(), source_agent);
+        let config = Config::new(root.path().to_path_buf(), source_agent);
         let error = harness
             .run(
                 &case,
@@ -712,7 +712,7 @@ mod tests {
                 &case,
                 "candidate",
                 1,
-                ProductConfig::new(root.path().to_path_buf(), source_agent),
+                Config::new(root.path().to_path_buf(), source_agent),
             )
             .await
             .unwrap_err();

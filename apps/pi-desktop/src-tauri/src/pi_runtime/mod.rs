@@ -18,7 +18,7 @@ use pi_core::{
     ContentBlock, ImageContent, Message, ModelId, ModelSpec, PresentationMode, ProviderId,
     ThinkingLevel,
 };
-use pi_sdk::{Pi, ProductConfig};
+use pi_sdk::{Pi, Config};
 use pi_session::{
     AgentSession, AgentSessionSnapshot, BranchQuery, EntryOrder, EntryQuery,
     IsolatedSessionObservation, QueueSnapshot, SessionEntry, SessionInput, SessionRecord,
@@ -60,7 +60,7 @@ pub(crate) fn create_state() -> Result<PiRuntimeState, String> {
     dotenvy::dotenv().ok();
     let agent_dir = crate::agent_paths::agent_dir()?;
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    let mut config = ProductConfig::new(cwd, agent_dir.clone());
+    let mut config = Config::new(cwd, agent_dir.clone());
     config.discover_extensions = false;
     let ready = config.api_key.is_some() || !config.base_url.contains("api.openai.com");
     let info = PiDesktopInfo {
@@ -81,11 +81,11 @@ pub(crate) fn create_state() -> Result<PiRuntimeState, String> {
         .build()?;
     Ok(PiRuntimeState {
         project_trust: sdk.project_trust().clone(),
-        skill_mutation_gate: Arc::new(std::sync::Mutex::new(())),
+        skill_mutation_gate: skills::SkillMutationGate::default(),
         desktop_command_scopes: desktop_commands::DesktopCommandScopes::default(),
         store: SessionStore::new(sdk.session_manager(), agent_dir),
         info,
-        forwarders: Arc::new(Mutex::new(HashSet::new())),
+        forwarders: projection::ForwarderRegistry::default(),
     })
 }
 
@@ -2329,7 +2329,7 @@ mod tests {
     async fn background_prompt_returns_text_without_leaving_a_session() {
         let directory = tempfile::tempdir().unwrap();
         let pi = PiRuntimeState {
-            project_trust: Pi::builder(ProductConfig::new(
+            project_trust: Pi::builder(Config::new(
                 directory.path().to_path_buf(),
                 directory.path().join("agent"),
             ))

@@ -15,7 +15,7 @@ use pi_plugin_xai::XAiPlugin;
 use pi_provider::HttpTransport;
 use pi_runtime::{PiRuntimeBuilder, RuntimeError};
 
-use crate::ProductConfig;
+use crate::Config;
 use crate::credentials::{StoredCredential, read_stored_credential};
 
 pub(crate) struct BuiltinProviderSet {
@@ -35,7 +35,7 @@ pub(crate) struct BuiltinProviderSet {
 
 impl BuiltinProviderSet {
     pub(crate) fn load(
-        config: &ProductConfig,
+        config: &Config,
         codex_override: Option<CodexCredentials>,
     ) -> Result<Self, RuntimeError> {
         let load = |provider| {
@@ -95,7 +95,7 @@ impl BuiltinProviderSet {
     pub(crate) fn register(
         self,
         builder: PiRuntimeBuilder,
-        config: &ProductConfig,
+        config: &Config,
         transport: Arc<dyn HttpTransport>,
         codex_transport_options: CodexTransportOptions,
     ) -> PiRuntimeBuilder {
