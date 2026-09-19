@@ -222,8 +222,28 @@ an active requirement fails with an actionable launcher message unless the user 
 discovery. This probe is read-only and never installs or updates a package.
 
 All frontend adapters enter the product through `pi-sdk`, whose `Pi` Module owns the shared
-product composition and exposes the session manager. `Config::features` is a typed, host-captured
-runtime selection of first-party memory, subagents, scheduling, skills, prompt templates, and
+product composition and exposes the session manager. It selects first-party components, adapts
+settings into owner-defined options, connects cross-plugin capabilities and coordinates prepared
+product activation. Domain parsing and validation belong to their owning crates; inner crates must
+not depend on `pi-sdk::Config`. In particular, the composition layer retains the complete
+package/provider activation transaction rather than splitting commits across domain loaders.
+Inside the SDK, private `session_factory` owns generation preparation, trust-before-discovery,
+context binding and `PreparedProductActivation`; `runtime_composition` owns first-party selection,
+ordered agent/provider/session registrations, cross-plugin wiring and active-tool policy.
+Its private borrowed `GenerationComponents` view contains only already-prepared native, JavaScript,
+MCP, memory and subagent components. Runtime and session registration use the same view, retaining
+the same memory provider through their ordinary factory seams. Runtime context is required (tests
+supply an explicitly unavailable context); overlays, dynamic catalog candidates, settings and
+activation guards are not component fields. `BuiltinProviderSet` prepares the shared HTTP transport
+before reading credentials, retaining error precedence, and supplies it to both built-ins and
+`ModelsPlugin`. Codex credential/transport overrides are test-only provider preparation inputs,
+not runtime-build options. These helpers do not start or commit another generation lifecycle.
+Private `configuration` maps snapshots and explicit selections into owner-defined options;
+`runtime_inventory` derives product labels from resolved/loaded metadata without loading code.
+Their tests follow those responsibilities, with lifecycle/rollback tests retained at the factory
+and frontend-facing handoff tests using the public SDK. This is an internal Rust refactor: no new
+runtime lifecycle, crate dependency or public configuration surface is introduced.
+`Config::features` is a typed, host-captured runtime selection of first-party memory, subagents, scheduling, skills, prompt templates, and
 session-transfer plugins. All default to enabled. Generation construction gates complete agent/session
 registrations and initialization, so disabled memory never loads its provider and disabled scheduling
 never starts its worker. The selection survives settings refresh and managed session replacement/reload;
@@ -356,9 +376,11 @@ switches; renderer failures and missing packages fall back to ordinary transcrip
 inherited snapshots do not execute plugin renderers. Generic registered renderers are displayed
 outside collapsed tool groups.
 
-Read-only discovery in `pi-sdk::desktop_extensions` reads bundled ESM/CSS packages from the agent
-`desktop-extensions` directory and trusted project `.pi/desktop-extensions`, consuming the shared
-project-trust decision. It does not grant trust or prepare a session. Native manifests, dynamic-library
+Read-only discovery in the Desktop-owned `pi_runtime::desktop_extensions::catalog` module reads
+bundled ESM/CSS packages from the agent `desktop-extensions` directory and trusted project
+`.pi/desktop-extensions`, consuming the shared `pi-sdk::ProjectTrustService` decision. Manifest
+validation, resource containment, byte limits, hashing and presentation DTOs remain in the app,
+not the headless SDK. It does not grant trust or prepare a session. Native manifests, dynamic-library
 ABI and installation are unchanged; combined native/desktop packaging is future work. The local
 builder bundles dependencies while binding React/ReactDOM/JSX imports to the desktop's exact React
 instance. Third-party packages can replace a complete bundled definition with the same identity.
@@ -1051,6 +1073,10 @@ immutable catalog lookup inside `ModelRuntime`, and new/resumed session policy a
 session model falls back to the current catalog with a diagnostic instead of silently restoring an
 unregistered route. The final selection carries that warning into `AgentSession`; its first frontend
 subscription receives a transient product notice, while Pi v4 storage remains unchanged.
+The same module owns `validate_initial_model_scope`: product composition supplies an isolated
+session's model, selection source, optional configured patterns and available catalog. Inherited
+models bypass the scope check; an absent scope is unrestricted, while an explicit empty scope
+admits no requested model. No SDK configuration type crosses this seam.
 
 ## Settings generations
 
@@ -1083,8 +1109,11 @@ The global `<agent-dir>/memory.json` document selects one registered memory prov
 host recall limits; project settings never merge into it or redirect durable memory. The bundled
 factory id is `local`, and automatic capture remains off.
 Built-in provider credential loading, selected-provider overrides, and factory registration sit
-behind `BuiltinProviderSet`; the session-construction Adapter supplies one transport and does not
-contain provider-name construction branches.
+behind `BuiltinProviderSet`, which also owns preparation of the shared generation-local transport;
+the session-construction Adapter does not contain provider-name construction branches. The set applies explicit credentials only to the
+selected provider and delegates vendor-specific stored metadata decoding to that provider
+(e.g. Copilot enterprise routing and OAuth account model filters), while `auth.json` envelope
+loading remains a product concern.
 
 ## Project trust
 
@@ -1129,7 +1158,10 @@ making YAML decoding a cost for consumers that do not parse frontmatter.
 
 `SkillsPlugin` is an example of the intended deep-plugin seam: it owns skill root configuration,
 discovery, frontmatter field policy, collision policy, catalog formatting, `/skill:name` command
-registration/expansion, and its generation-local diagnostics. The generic sourced loader keeps the
+registration/expansion, and its generation-local diagnostics. Default discovery also owns the
+always-trusted user `~/.agents/skills` root. It follows explicit/managed roots in the existing
+first-root-wins product order and is omitted with other defaults when `include_defaults` is false;
+the SDK only supplies configured and cross-plugin roots. The generic sourced loader keeps the
 caller's source value attached to both successful skills and diagnostics. A direct root document
 that does not declare valid skill metadata is silently ignored, while a declared `SKILL.md` remains
 diagnostic on invalid metadata. Each registered `SkillCommand` owns its metadata and execution, so
@@ -1148,8 +1180,13 @@ registers the plugin factory in each generation.
 ## MCP configuration and generation ownership
 
 MCP is a deliberate Rust product extension: `legacy/pi/packages/coding-agent/README.md`
-explicitly excludes built-in MCP. `pi-sdk::mcp::McpLibrary` owns independent
-`<agent-dir>/mcp.json` and `<cwd>/.pi/mcp.json` files; MCP does not live in `settings.json`.
+explicitly excludes built-in MCP. `pi-mcp::config` owns document parsing, static transport
+validation, environment-reference syntax and connection-time transport/path resolution behind
+validated entries and an explicit configuration-directory/default-cwd context. It does not discover
+files, decide trust or scope precedence, persist documents, or create sessions.
+`pi-sdk::mcp::McpLibrary` owns independent `<agent-dir>/mcp.json` and `<cwd>/.pi/mcp.json` files,
+scoped merging, trust checks, revision-safe management and product command registration;
+MCP does not live in `settings.json`.
 Documents contain `version: 1` and `mcpServers`, keyed by server name. Each entry has
 `type: "stdio"` (command, args, env, cwd) or `type: "http"` (url, headers), and optional
 `enabled` (default true). Missing type is inferred from command/url for common MCP configs.

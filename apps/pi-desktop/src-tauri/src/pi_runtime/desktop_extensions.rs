@@ -1,6 +1,8 @@
+mod catalog;
+
 use super::{workspace_path, PiRuntimeState};
 use crate::state::AppState;
-use pi_sdk::desktop_extensions::{read_catalog, DesktopExtensionCatalog};
+use catalog::{read_catalog, DesktopExtensionCatalog};
 use tauri::State;
 
 #[tauri::command]

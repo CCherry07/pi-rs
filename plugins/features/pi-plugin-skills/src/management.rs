@@ -380,7 +380,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // macOS /var is a system symlink; use its canonical form in tests.
         let root = fs::canonicalize(dir.path()).unwrap();
-        let options = SkillLoaderOptions::new(&root, root.join("agent"));
+        let mut options = SkillLoaderOptions::new(&root, root.join("agent"));
+        options.include_defaults = false;
+        options.additional_paths.push(root.join("agent/skills"));
         let library = SkillLibrary::new(options, Some(root.join("agent/skills")));
         (dir, library)
     }

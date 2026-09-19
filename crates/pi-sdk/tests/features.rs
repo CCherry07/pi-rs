@@ -150,21 +150,25 @@ fn assert_feature_registrations(session: &AgentSession, features: &Features) {
             assert_eq!(commands.contains(*name), enabled, "command {name}");
         }
     }
-    let plugins = runtime.plugin_order();
-    for (name, enabled) in [
+    let feature_plugins = [
+        ("prompt-templates", features.prompt_templates),
         ("memory-hermes", features.memory),
         ("subagents", features.subagents),
-        ("schedule", features.schedule),
         ("skills", features.skills),
-        ("prompt-templates", features.prompt_templates),
         ("session-transfer", features.session_transfer),
-    ] {
-        assert_eq!(
-            plugins.iter().any(|id| id.as_str() == name),
-            enabled,
-            "agent plugin {name}",
-        );
-    }
+        ("schedule", features.schedule),
+    ];
+    let plugins = runtime.plugin_order();
+    let actual = plugins
+        .iter()
+        .map(|id| id.as_str())
+        .filter(|name| feature_plugins.iter().any(|(feature, _)| feature == name))
+        .collect::<Vec<_>>();
+    let expected = feature_plugins
+        .into_iter()
+        .filter_map(|(name, enabled)| enabled.then_some(name))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "feature agent plugin registration order");
 }
 
 async fn projected_prompt(session: &AgentSession) -> String {
@@ -216,6 +220,9 @@ async fn default_features_retain_existing_product_registrations_and_skill_prompt
             .await
             .contains(SKILL_NAME)
     );
+    assert!(!session.current().log().is_materialized());
+    session.reload().await.unwrap();
+    assert_feature_registrations(&session.current(), &Features::all());
     assert!(!session.current().log().is_materialized());
     pi.sessions().shutdown().await.unwrap();
 }

@@ -12,7 +12,7 @@ pub use oauth::{
     start_device_authorization as start_github_copilot_device_authorization,
 };
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -40,6 +40,47 @@ pub struct GitHubCopilotStoredCredential<'a> {
     pub token: &'a str,
     pub enterprise_domain: Option<&'a str>,
     pub available_model_ids: Option<&'a [String]>,
+}
+
+/// Provider-owned interpretation of extension fields from a stored credential.
+/// The host remains responsible for loading the credential envelope and secret.
+#[derive(Clone, Default)]
+pub struct GitHubCopilotStoredMetadata {
+    enterprise_domain: Option<String>,
+    available_model_ids: Option<Vec<String>>,
+}
+
+impl GitHubCopilotStoredMetadata {
+    pub fn from_extensions(oauth: bool, fields: &BTreeMap<String, serde_json::Value>) -> Self {
+        let enterprise_domain = fields
+            .get("enterpriseUrl")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        // An empty OAuth catalog excludes every model; absent or malformed data
+        // leaves the catalog unfiltered, as does any API-key credential.
+        let available_model_ids = oauth
+            .then(|| {
+                fields
+                    .get("availableModelIds")?
+                    .as_array()?
+                    .iter()
+                    .map(|value| value.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .flatten();
+        Self {
+            enterprise_domain,
+            available_model_ids,
+        }
+    }
+
+    pub fn credential<'a>(&'a self, token: &'a str) -> GitHubCopilotStoredCredential<'a> {
+        GitHubCopilotStoredCredential {
+            token,
+            enterprise_domain: self.enterprise_domain.as_deref(),
+            available_model_ids: self.available_model_ids.as_deref(),
+        }
+    }
 }
 
 pub struct GitHubCopilotPlugin {
@@ -372,6 +413,67 @@ mod tests {
         let models = plugin.models();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id.as_str(), "gpt-4.1");
+    }
+
+    #[test]
+    fn stored_metadata_only_filters_valid_oauth_catalogs() {
+        for (fields, oauth, expected) in [
+            (serde_json::json!({}), true, None),
+            (serde_json::json!({"availableModelIds": null}), true, None),
+            (
+                serde_json::json!({"availableModelIds": "gpt-4.1"}),
+                true,
+                None,
+            ),
+            (
+                serde_json::json!({"availableModelIds": ["gpt-4.1", 1]}),
+                true,
+                None,
+            ),
+            (
+                serde_json::json!({"availableModelIds": []}),
+                true,
+                Some(vec![]),
+            ),
+            (
+                serde_json::json!({"availableModelIds": ["gpt-4.1"]}),
+                true,
+                Some(vec!["gpt-4.1".to_string()]),
+            ),
+            (serde_json::json!({"availableModelIds": []}), false, None),
+        ] {
+            let fields = serde_json::from_value(fields).unwrap();
+            let metadata = GitHubCopilotStoredMetadata::from_extensions(oauth, &fields);
+            assert_eq!(
+                metadata.credential("token").available_model_ids,
+                expected.as_deref()
+            );
+        }
+    }
+
+    #[test]
+    fn stored_metadata_preserves_enterprise_domain_without_decoding_the_auth_envelope() {
+        for oauth in [false, true] {
+            let fields = serde_json::from_value(serde_json::json!({
+                "enterpriseUrl": "https://github.example.com",
+                "unknown": {"retainedByHost": true},
+            }))
+            .unwrap();
+            let metadata = GitHubCopilotStoredMetadata::from_extensions(oauth, &fields);
+            let credential = metadata.credential("stored-token");
+            assert_eq!(credential.token, "stored-token");
+            assert_eq!(
+                credential.enterprise_domain,
+                Some("https://github.example.com")
+            );
+        }
+        let fields = serde_json::from_value(serde_json::json!({"enterpriseUrl": 1})).unwrap();
+        assert!(
+            GitHubCopilotStoredMetadata::from_extensions(true, &fields)
+                .credential("token")
+                .enterprise_domain
+                .is_none()
+        );
     }
 
     #[derive(Default)]

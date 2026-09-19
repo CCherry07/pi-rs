@@ -7,6 +7,8 @@
 //! configuration into [`McpServerConfig`] and inject [`McpToolSet::plugin`]
 //! through their own generation seam.
 
+pub mod config;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;

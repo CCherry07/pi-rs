@@ -5,8 +5,11 @@ desktop application, and other presentation adapters.
 
 It owns the product runtime composition: providers and model catalogs, built-in
 tools, skills, memory, subagents, settings, project trust, plugin generations,
-and session construction. It does not own terminal, Tauri, RPC, or other
-presentation behavior.
+and session construction. This is selection, settings adaptation, cross-plugin wiring,
+and transactional generation activation—not ownership of each component's implementation.
+Domain configuration and validation stay with the corresponding crates, whose APIs accept
+their own typed inputs rather than `pi_sdk::Config`. It does not own terminal, Tauri, RPC,
+or other presentation behavior; Desktop extension package discovery lives in the Desktop app.
 
 ```rust
 use pi_core::PresentationMode;
@@ -18,6 +21,25 @@ let pi = Pi::builder(config)
     .build()?;
 let session = pi.sessions().create_session(cwd, session_path).await?;
 ```
+
+## Internal responsibilities
+
+- `session_factory`: complete generation preparation, trust gates, context binding and staged
+  product activation/rollback.
+- `runtime_composition`: plugin selection and registration order, cross-plugin wiring, memory
+  preparation and default/extension tool activation policy.
+- `configuration`: settings and explicit-selection adapters into domain-owned options; no
+  resource discovery or plugin activation.
+- `runtime_inventory`: labels for resolved JavaScript sources and loaded configured native plugins.
+
+Runtime and session registration share one borrowed `GenerationComponents` view of already-prepared
+native/JavaScript/MCP/memory/subagent components. It carries no credentials, configuration or
+activation state. Runtime capabilities and overlays remain explicit inputs; built-in provider
+preparation owns the shared transport and keeps test credential overrides out of the runtime seam.
+
+These modules are private. `Pi`, `Config`, `ProductSessionFactory` and managed-session entry points
+remain unchanged. Configuration/registration tests live beside their owners; factory tests focus
+on lifecycle, trust and transactional preparation.
 
 ## Runtime features
 

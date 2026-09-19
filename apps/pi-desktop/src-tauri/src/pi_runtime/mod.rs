@@ -18,7 +18,7 @@ use pi_core::{
     ContentBlock, ImageContent, Message, ModelId, ModelSpec, PresentationMode, ProviderId,
     ThinkingLevel,
 };
-use pi_sdk::{Pi, Config};
+use pi_sdk::{Config, Pi};
 use pi_session::{
     AgentSession, AgentSessionSnapshot, BranchQuery, EntryOrder, EntryQuery,
     IsolatedSessionObservation, QueueSnapshot, SessionEntry, SessionInput, SessionRecord,
@@ -27,7 +27,6 @@ use pi_session::{
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
-use tokio::sync::Mutex;
 
 use crate::backend::events::PiEvent;
 use crate::state::AppState;
@@ -1378,6 +1377,8 @@ fn emit(app: &AppHandle, workspace_id: &str, method: &str, params: Value) {
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::Mutex;
+
     use pi_agent::AgentOptions;
     use pi_core::{ModelId, ProviderId};
     use pi_runtime::PiRuntime;
@@ -1928,6 +1929,21 @@ mod tests {
         assert_eq!(hydrated["turns"].as_array().unwrap().len(), 2);
         assert!(hydrated.to_string().contains("persisted branch"));
         assert!(hydrated.to_string().contains("after resume"));
+        // Scripted responses persist model `test`, while this fixture's catalog
+        // contains only `desktop-test`. Resume emits its fallback warning after
+        // the subscription snapshot; it must not replay any hydrated messages.
+        let notice = live.subscription.events.try_recv().unwrap();
+        assert!(notice.revision > live.subscription.snapshot.revision);
+        assert!(
+            matches!(
+                &notice.event,
+                pi_session::AgentSessionEvent::PluginNotice {
+                    message,
+                    level: pi_session::NoticeLevel::Warning,
+                } if message == "Session model scripted/test is not in the registered catalog; using scripted/desktop-test"
+            ),
+            "unexpected queued event: {notice:?}"
+        );
         assert!(live.subscription.events.try_recv().is_err());
     }
 

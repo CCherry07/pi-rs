@@ -1,78 +1,37 @@
-use std::collections::HashSet;
-use std::path::PathBuf;
+//! Complete product-generation preparation and its staged activation transaction.
+
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_agent::{AgentOptions, QueueMode};
-use pi_core::{
-    ModelId, PluginContext, PluginId, PresentationMode, ProviderId, ThinkingBudgets, ThinkingLevel,
-};
-use pi_js_package_manager::{PackageManager as JsPackageManager, ResolvedExtensionIdentity};
+use pi_core::{PluginContext, PresentationMode};
+use pi_js_package_manager::PackageManager as JsPackageManager;
 use pi_js_plugin::{JsGenerationRequest, JsPluginGeneration, JsPluginHost};
-use pi_memory_loader::{MemoryLoader, MemoryLoaderOptions, PreparedMemoryProvider};
-use pi_plugin_bash::{BashToolOptions, ConfiguredBashPlugin};
-use pi_plugin_edit::EditPlugin;
-use pi_plugin_find::FindPlugin;
-use pi_plugin_grep::GrepPlugin;
-use pi_plugin_hashline_edit::HashlineEditPlugin;
-use pi_plugin_loader::{NativePluginLoader, NativePluginLoaderOptions, NativePlugins};
-use pi_plugin_ls::LsPlugin;
+use pi_plugin_loader::{NativePluginLoader, NativePluginLoaderOptions};
 use pi_plugin_manager::{
     InstallScope, PluginManager, PluginManagerOptions, PreparedPluginReconcile,
 };
-use pi_plugin_memory_hermes::{HermesMemoryProviderFactory, managed_skill_roots};
-use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
-use pi_plugin_openai::{CodexTransport, CodexTransportOptions};
-use pi_plugin_prompts::{PromptTemplateLoaderOptions, PromptTemplatesPlugin};
-use pi_plugin_read::ConfiguredReadPlugin;
-use pi_plugin_schedule::{ScheduleOptions, SchedulePlugin, ScheduleSessionPlugin};
-use pi_plugin_session_transfer::SessionTransferPlugin;
-use pi_plugin_skills::SkillsPlugin;
-use pi_plugin_subagents::{
-    SubagentLoaderOptions, SubagentRuntime, SubagentSkillPromptProjector, SubagentsPlugin,
-    SubagentsSessionPlugin,
-};
-use pi_plugin_write::WritePlugin;
-use pi_provider::{HttpTransport, ReqwestTransport, ReqwestTransportConfig};
-use pi_resources::ResourceLoaderOptions;
-use pi_runtime::{CompletionRetryPolicy, PiRuntime, RuntimeError, SystemPrompt};
+use pi_plugin_subagents::SubagentRuntime;
 use pi_session::{
-    AgentSessionOptions, AutoRetrySettings, CompactionSettings as SessionCompactionSettings,
-    InitialModelRequest, PiPluginContext, PluginContextBinding, PluginProviderMutationAccess,
-    PluginUiBridge, PreparedSessionGeneration, SessionError, SessionGenerationActivation,
-    SessionGenerationFactory, SessionGenerationOverlay, SessionGenerationRequest, SessionPlugins,
-    SessionRuntimeInventory, resolve_model_scope,
+    PiPluginContext, PluginContextBinding, PluginProviderMutationAccess, PluginUiBridge,
+    PreparedSessionGeneration, SessionError, SessionGenerationActivation, SessionGenerationFactory,
+    SessionGenerationRequest, SessionRuntimeInventory, validate_initial_model_scope,
 };
-use pi_settings::{
-    QueueModeSetting, SettingsContext, SettingsManager, ThinkingLevelSetting, TransportSetting,
-};
+use pi_settings::{SettingsContext, SettingsManager};
 
+use crate::Config;
 use crate::builtin_providers::BuiltinProviderSet;
+use crate::configuration::{
+    apply_settings, initial_model_request, memory_options, session_options,
+};
 use crate::dynamic_providers::{
     DynamicProviderCandidate, DynamicProviderOverlay, DynamicProviderPreparation,
 };
 use crate::project_trust::ProjectTrustService;
-use crate::{Config, expand_tilde_path};
-
-const BUILTIN_TOOL_NAMES: [&str; 17] = [
-    "read",
-    "grep",
-    "find",
-    "ls",
-    "write",
-    "edit",
-    "hashline_edit",
-    "bash",
-    "spawn_agent",
-    "send_message",
-    "followup_task",
-    "wait_agent",
-    "interrupt_agent",
-    "list_agents",
-    "memory",
-    "session_search",
-    "schedule",
-];
+use crate::runtime_composition::{
+    GenerationComponents, RuntimeBuildOutcome, additional_active_tools, prepare_memory_provider,
+};
+use crate::runtime_inventory::{configured_native_plugin_ids, javascript_inventory_labels};
 
 #[derive(Clone)]
 pub struct ProductSessionFactory {
@@ -223,31 +182,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
         let settings = self
             .settings
             .load(&SettingsContext::new(&config.cwd, project_trusted));
-        config.runtime_settings = settings.effective().clone();
-        // Pi treats the proxy as process/bootstrap configuration. A trusted
-        // project may tune request behavior, but cannot redirect HTTP traffic.
-        config.runtime_settings.http_proxy = settings.global().http_proxy.clone();
-        config.settings_diagnostics = settings
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| pi_resources::ResourceDiagnostic {
-                kind: pi_resources::DiagnosticKind::Warning,
-                message: diagnostic.message.clone(),
-                path: diagnostic.path.clone(),
-            })
-            .collect();
-        config.settings_skill_paths = scoped_setting_paths(
-            &settings.global().skills,
-            &config.agent_dir,
-            &settings.project().skills,
-            &config.cwd.join(".pi"),
-        );
-        config.settings_prompt_paths = scoped_setting_paths(
-            &settings.global().prompts,
-            &config.agent_dir,
-            &settings.project().prompts,
-            &config.cwd.join(".pi"),
-        );
+        apply_settings(&mut config, &settings);
         let local_mcp = if config.load_mcp_config {
             Some(
                 crate::mcp::McpLibrary::new(&config.agent_dir, Some(&config.cwd), project_trusted)
@@ -258,10 +193,20 @@ impl SessionGenerationFactory for ProductSessionFactory {
         } else {
             None
         };
-        let memory = build_memory_provider(&config, Some(&path), project_trusted)
-            .await
-            .map_err(SessionError::Runtime)?;
-        let package_reconciliations = prepare_native_packages(&config, project_trusted).await?;
+        let memory = prepare_memory_provider(
+            config.features.memory,
+            memory_options(
+                &config.cwd,
+                &config.agent_dir,
+                &config.session_path,
+                Some(&path),
+                project_trusted,
+            ),
+        )
+        .await
+        .map_err(SessionError::Runtime)?;
+        let package_reconciliations =
+            prepare_native_packages(&config.cwd, &config.agent_dir, project_trusted).await?;
         let mut native_options = NativePluginLoaderOptions::new(&config.cwd, &config.agent_dir);
         native_options.project_trusted = project_trusted;
         native_options.explicit_paths = config.native_plugins.clone();
@@ -340,28 +285,36 @@ impl SessionGenerationFactory for ProductSessionFactory {
         } else {
             None
         };
-        let built_runtime = match build_runtime_inner(
-            &config,
-            project_trusted,
-            &native_plugins,
-            js_generation.as_ref(),
-            dynamic_provider_candidate.as_ref(),
-            RuntimeBuildExtras {
-                local_mcp,
-                generation_overlay: &generation_overlay,
-                codex_credentials: None,
-                plugin_context: Some(Arc::clone(&context_access)),
-                subagents: self.subagents.clone(),
-                memory: memory.clone(),
-            },
-        )
-        .map_err(SessionError::from)
-        .and_then(|built| {
-            if let Some(initial_state) = &initial_state {
-                validate_initial_model_scope(&built.runtime, &config, initial_state)?;
-            }
-            Ok(built)
-        }) {
+        let components = GenerationComponents {
+            native: &native_plugins,
+            javascript: js_generation.as_ref(),
+            mcp: local_mcp.as_ref(),
+            memory: memory.as_ref(),
+            subagents: &self.subagents,
+        };
+        let built_runtime = match BuiltinProviderSet::prepare(&config)
+            .and_then(|providers| {
+                components.build_runtime(
+                    &config,
+                    project_trusted,
+                    context_access,
+                    &generation_overlay,
+                    dynamic_provider_candidate.as_ref(),
+                    providers,
+                )
+            })
+            .map_err(SessionError::from)
+            .and_then(|built| {
+                if let Some(initial_state) = &initial_state {
+                    validate_initial_model_scope(
+                        &initial_state.model,
+                        initial_state.model_source,
+                        config.runtime_settings.enabled_models.as_deref(),
+                        &built.runtime.available_models(),
+                    )?;
+                }
+                Ok(built)
+            }) {
             Ok(built) => built,
             Err(error) => {
                 if let Some(candidate) = &dynamic_provider_candidate {
@@ -374,66 +327,22 @@ impl SessionGenerationFactory for ProductSessionFactory {
             runtime,
             initial_model_fallback_message,
         } = built_runtime;
-        let mut session_plugins = SessionPlugins::new();
-        if let Some(memory) = memory {
-            let plugin = memory.session_plugin();
-            session_plugins = session_plugins
-                .try_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)));
-        }
-        if config.features.subagents {
-            session_plugins = session_plugins.plugin_factory({
-                let subagents = self.subagents.clone();
-                move || SubagentsSessionPlugin::new(subagents.clone())
-            });
-        }
-        if config.features.schedule {
-            let schedule_options =
-                ScheduleOptions::new(&config.cwd, &config.agent_dir, project_trusted);
-            session_plugins = session_plugins
-                .plugin_factory(move || ScheduleSessionPlugin::new(schedule_options.clone()));
-        }
-        let mut session_plugins = native_plugins.apply_session(session_plugins);
-        if let Some(js_generation) = &js_generation {
-            for plugin in js_generation.session_plugins() {
-                session_plugins = session_plugins.try_plugin_arc_factory({
-                    let plugin = Arc::clone(&plugin);
-                    move || Ok::<_, String>(Arc::clone(&plugin))
-                });
-            }
-        }
-        let session_options = AgentSessionOptions::default()
-            .plugins(session_plugins)
-            .compaction(session_compaction_settings(&config))
-            .branch_summary_reserve_tokens(config.runtime_settings.branch_summary.reserve_tokens)
-            .retry(AutoRetrySettings {
-                enabled: config.runtime_settings.retry.enabled,
-                max_retries: config.runtime_settings.retry.max_retries,
-                base_delay_ms: config.runtime_settings.retry.base_delay_ms,
-            })
-            .initial_model(initial_model_request(&config))
-            .initial_model_fallback_message(initial_model_fallback_message)
-            .additional_active_tools(
-                runtime
-                    .active_tools()
-                    .into_iter()
-                    .filter(|name| {
-                        runtime.execution_origin() == pi_core::SessionExecutionOrigin::User
-                            && !BUILTIN_TOOL_NAMES.contains(&name.as_str())
-                    })
-                    .collect(),
-            )
-            .runtime_inventory(SessionRuntimeInventory::new(
-                js_extensions,
-                configured_native_plugins,
-            ))
-            .shell(
-                config
-                    .runtime_settings
-                    .shell_path
-                    .as_deref()
-                    .map(expand_tilde_path),
-                config.runtime_settings.shell_command_prefix.clone(),
-            );
+        let session_plugins = components.session_plugins(&config, project_trusted);
+        let session_options = session_options(
+            &config.runtime_settings,
+            initial_model_request(
+                config.requested_provider.as_deref(),
+                config.model.as_deref(),
+                &config.runtime_settings,
+            ),
+        )
+        .plugins(session_plugins)
+        .initial_model_fallback_message(initial_model_fallback_message)
+        .additional_active_tools(additional_active_tools(&runtime))
+        .runtime_inventory(SessionRuntimeInventory::new(
+            js_extensions,
+            configured_native_plugins,
+        ));
         let activation = PreparedProductActivation {
             dynamic_providers: self.dynamic_providers.clone(),
             dynamic_provider_candidate,
@@ -446,109 +355,12 @@ impl SessionGenerationFactory for ProductSessionFactory {
     }
 }
 
-fn configured_native_plugin_ids(
-    reconciliations: &[PreparedPluginReconcile],
-    native_plugins: &NativePlugins,
-) -> Vec<PluginId> {
-    retain_loaded_configured_native_plugins(
-        reconciliations
-            .iter()
-            .flat_map(PreparedPluginReconcile::installed)
-            .map(|plugin| plugin.id),
-        native_plugins
-            .descriptors()
-            .into_iter()
-            .map(|descriptor| descriptor.id),
-    )
-}
-
-fn retain_loaded_configured_native_plugins(
-    configured: impl IntoIterator<Item = String>,
-    loaded: impl IntoIterator<Item = String>,
-) -> Vec<PluginId> {
-    let loaded = loaded.into_iter().collect::<HashSet<_>>();
-    let mut seen = HashSet::new();
-    configured
-        .into_iter()
-        .filter(|id| loaded.contains(id) && seen.insert(id.clone()))
-        .map(PluginId::new)
-        .collect()
-}
-
-fn javascript_inventory_labels(identities: &[ResolvedExtensionIdentity]) -> Vec<String> {
-    let paths = identities
-        .iter()
-        .filter_map(|identity| match identity {
-            ResolvedExtensionIdentity::Package(_) => None,
-            ResolvedExtensionIdentity::Path(path) => Some(path.clone()),
-        })
-        .collect::<Vec<_>>();
-    let mut path_labels = compact_extension_labels(&paths).into_iter();
-    let mut seen = HashSet::new();
-
-    identities
-        .iter()
-        .filter_map(|identity| {
-            let label = match identity {
-                ResolvedExtensionIdentity::Package(source) => source.clone(),
-                ResolvedExtensionIdentity::Path(_) => path_labels.next()?,
-            };
-            seen.insert(label.clone()).then_some(label)
-        })
-        .collect()
-}
-
-fn compact_extension_labels(paths: &[PathBuf]) -> Vec<String> {
-    let segments = paths
-        .iter()
-        .map(|path| {
-            let mut segments = path
-                .iter()
-                .map(|segment| segment.to_string_lossy().into_owned())
-                .filter(|segment| !segment.is_empty() && segment != "/")
-                .collect::<Vec<_>>();
-            if segments.len() > 1
-                && matches!(
-                    segments.last().map(String::as_str),
-                    Some("index.ts" | "index.js")
-                )
-            {
-                segments.pop();
-            }
-            if segments.is_empty() {
-                segments.push(path.display().to_string());
-            }
-            segments
-        })
-        .collect::<Vec<_>>();
-
-    segments
-        .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            (1..=path.len())
-                .find_map(|count| {
-                    let candidate = &path[path.len() - count..];
-                    segments
-                        .iter()
-                        .enumerate()
-                        .all(|(other_index, other)| {
-                            other_index == index
-                                || other.len() < count
-                                || !other.ends_with(candidate)
-                        })
-                        .then(|| candidate.join("/"))
-                })
-                .unwrap_or_else(|| path.join("/"))
-        })
-        .collect()
-}
-
 async fn prepare_native_packages(
-    config: &Config,
+    cwd: &Path,
+    agent_dir: &Path,
     project_trusted: bool,
 ) -> Result<Vec<PreparedPluginReconcile>, SessionError> {
-    let mut options = PluginManagerOptions::new(&config.cwd, &config.agent_dir);
+    let mut options = PluginManagerOptions::new(cwd, agent_dir);
     options.registry = std::env::var("PI_PLUGIN_REGISTRY")
         .ok()
         .filter(|registry| !registry.trim().is_empty());
@@ -572,492 +384,14 @@ async fn prepare_native_packages(
 }
 
 #[cfg(test)]
-fn build_runtime(
-    config: &Config,
-    project_trusted: bool,
-    native_plugins: &NativePlugins,
-    js_generation: Option<&JsPluginGeneration>,
-    dynamic_providers: Option<&DynamicProviderCandidate>,
-) -> Result<PiRuntime, RuntimeError> {
-    build_runtime_with_codex_credentials(
-        config,
-        project_trusted,
-        native_plugins,
-        js_generation,
-        dynamic_providers,
-        None,
-    )
-}
-
-#[cfg(test)]
-fn build_runtime_with_codex_credentials(
-    config: &Config,
-    project_trusted: bool,
-    native_plugins: &NativePlugins,
-    js_generation: Option<&JsPluginGeneration>,
-    dynamic_providers: Option<&DynamicProviderCandidate>,
-    codex_credentials: Option<pi_plugin_openai::CodexCredentials>,
-) -> Result<PiRuntime, RuntimeError> {
-    build_runtime_inner(
-        config,
-        project_trusted,
-        native_plugins,
-        js_generation,
-        dynamic_providers,
-        RuntimeBuildExtras {
-            local_mcp: None,
-            generation_overlay: &SessionGenerationOverlay::default(),
-            codex_credentials,
-            plugin_context: None,
-            subagents: SubagentRuntime::default(),
-            memory: None,
-        },
-    )
-    .map(|built| built.runtime)
-}
-
-#[cfg(test)]
-async fn build_runtime_with_first_party_memory(config: &Config) -> Result<PiRuntime, RuntimeError> {
-    let memory = build_memory_provider(config, None, false)
-        .await
-        .map_err(RuntimeError::Build)?;
-    let generation_overlay = SessionGenerationOverlay::default();
-    build_runtime_inner(
-        config,
-        false,
-        &NativePlugins::default(),
-        None,
-        None,
-        RuntimeBuildExtras {
-            local_mcp: None,
-            generation_overlay: &generation_overlay,
-            codex_credentials: Some(pi_plugin_openai::CodexCredentials::default()),
-            plugin_context: None,
-            subagents: SubagentRuntime::default(),
-            memory,
-        },
-    )
-    .map(|built| built.runtime)
-}
-
-struct RuntimeBuildExtras<'a> {
-    local_mcp: Option<Arc<dyn pi_core::AgentPlugin>>,
-    generation_overlay: &'a SessionGenerationOverlay,
-    codex_credentials: Option<pi_plugin_openai::CodexCredentials>,
-    plugin_context: Option<Arc<dyn PluginContext>>,
-    subagents: SubagentRuntime,
-    memory: Option<PreparedMemoryProvider>,
-}
-
-struct RuntimeBuildOutcome {
-    runtime: PiRuntime,
-    initial_model_fallback_message: Option<String>,
-}
-
-fn build_runtime_inner(
-    config: &Config,
-    project_trusted: bool,
-    native_plugins: &NativePlugins,
-    js_generation: Option<&JsPluginGeneration>,
-    dynamic_providers: Option<&DynamicProviderCandidate>,
-    extras: RuntimeBuildExtras<'_>,
-) -> Result<RuntimeBuildOutcome, RuntimeError> {
-    let memory_supports_memory_tool = extras.memory.is_some();
-    let memory_supports_session_search = extras.memory.is_some();
-    let memory_is_hermes = extras
-        .memory
-        .as_ref()
-        .is_some_and(|memory| memory.provider_id() == "hermes");
-    let mut skill_activity_observer = None;
-    let transport = provider_transport(config)?;
-    let codex_transport_options = codex_transport_options(config);
-    let builtin_providers = BuiltinProviderSet::load(config, extras.codex_credentials.clone())?;
-    let effective_api_key = builtin_providers.effective_api_key().map(str::to_string);
-    let skill_options =
-        crate::skills::runtime_skill_options(config, project_trusted, memory_is_hermes);
-    if config.features.skills && memory_is_hermes {
-        skill_activity_observer = Some(pi_plugin_memory_hermes::curator::activity_observer(
-            managed_skill_roots(&config.agent_dir, &config.cwd, project_trusted),
-        ));
-    }
-    let mut prompt_template_options =
-        PromptTemplateLoaderOptions::new(&config.cwd, &config.agent_dir);
-    prompt_template_options.project_trusted = project_trusted;
-    prompt_template_options
-        .additional_paths
-        .extend(config.settings_prompt_paths.iter().cloned());
-    let mut subagent_options = SubagentLoaderOptions::new(&config.cwd, &config.agent_dir);
-    subagent_options.project_trusted = project_trusted;
-    let mut model_options = ModelsPluginOptions::for_agent_dir(&config.agent_dir);
-    if let Some(api_key) = &effective_api_key {
-        model_options = model_options.runtime_api_key(config.provider.clone(), api_key.clone());
-    }
-    if let Some(dynamic_providers) = dynamic_providers {
-        for (provider, provider_config) in dynamic_providers.provider_configs() {
-            model_options = model_options.extension_provider_config(provider, provider_config);
-        }
-    }
-    let bash_options = BashToolOptions::new(
-        config
-            .runtime_settings
-            .shell_path
-            .as_deref()
-            .map(expand_tilde_path),
-        config.runtime_settings.shell_command_prefix.clone(),
-    );
-
-    let builder = PiRuntime::builder()
-        .supplemental_diagnostics(config.settings_diagnostics.clone())
-        .completion_retry_policy(CompletionRetryPolicy {
-            enabled: config.runtime_settings.retry.enabled,
-            max_retries: config.runtime_settings.retry.max_retries,
-            base_delay_ms: config.runtime_settings.retry.base_delay_ms,
-        });
-    let builder = match extras.plugin_context {
-        Some(plugin_context) => builder.plugin_context(plugin_context),
-        None => builder,
-    };
-    let builder = builtin_providers.register(
-        builder,
-        config,
-        Arc::clone(&transport),
-        codex_transport_options,
-    );
-    let skill_prompt_projector = config
-        .features
-        .subagents
-        .then(|| Arc::new(SubagentSkillPromptProjector::new(extras.subagents.clone())));
-    let mut builder = builder.try_provider_plugin_factory({
-        let model_options = model_options.clone();
-        let transport = Arc::clone(&transport);
-        move || ModelsPlugin::load_with_transport(model_options.clone(), Arc::clone(&transport))
-    });
-    if config.features.prompt_templates {
-        builder = builder.agent_plugin_factory({
-            let prompt_template_options = prompt_template_options.clone();
-            move || PromptTemplatesPlugin::load(prompt_template_options.clone())
-        });
-    }
-    let builder = match extras.memory {
-        Some(memory) => {
-            let plugin = memory.agent_plugin();
-            builder.try_agent_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)))
-        }
-        None => builder,
-    };
-    let mut builder = builder;
-    if config.features.subagents {
-        builder = builder.try_agent_plugin_factory({
-            let subagents = extras.subagents.clone();
-            let subagent_options = subagent_options.clone();
-            move || SubagentsPlugin::load(subagents.clone(), subagent_options.clone())
-        });
-    }
-    if config.features.skills {
-        builder = builder.agent_plugin_factory({
-            let skill_options = skill_options.clone();
-            let skill_activity_observer = skill_activity_observer.clone();
-            move || {
-                let plugin = match &skill_prompt_projector {
-                    Some(projector) => SkillsPlugin::load_with_prompt_projector(
-                        skill_options.clone(),
-                        projector.clone(),
-                    ),
-                    None => SkillsPlugin::load(skill_options.clone()),
-                };
-                plugin.with_activity_observer(skill_activity_observer.clone())
-            }
-        });
-    }
-    if config.features.session_transfer {
-        builder = builder.agent_plugin_factory(SessionTransferPlugin::default);
-    }
-    if config.features.schedule {
-        builder = builder.agent_plugin_factory({
-            let options = ScheduleOptions::new(&config.cwd, &config.agent_dir, project_trusted);
-            move || SchedulePlugin::new(options.clone())
-        });
-    }
-    let builder = builder
-        .agent_plugin_factory({
-            let auto_resize_images = config.runtime_settings.images.auto_resize;
-            move || ConfiguredReadPlugin::new(auto_resize_images)
-        })
-        .agent_plugin_factory(|| GrepPlugin)
-        .agent_plugin_factory(|| FindPlugin)
-        .agent_plugin_factory(|| LsPlugin)
-        .agent_plugin_factory(|| WritePlugin)
-        .agent_plugin_factory(|| EditPlugin)
-        .agent_plugin_factory(|| HashlineEditPlugin)
-        .agent_plugin_factory(move || ConfiguredBashPlugin::new(bash_options.clone()));
-    let mut builder = native_plugins.apply_runtime(builder);
-    if let Some(plugin) = extras.local_mcp {
-        builder =
-            builder.try_agent_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)));
-    }
-    if let Some(js_generation) = js_generation {
-        for plugin in js_generation.agent_plugins() {
-            builder = builder.try_agent_plugin_arc_factory({
-                let plugin = Arc::clone(&plugin);
-                move || Ok::<_, String>(Arc::clone(&plugin))
-            });
-        }
-        for plugin in js_generation.provider_plugins() {
-            builder = builder.try_provider_plugin_arc_factory({
-                let plugin = Arc::clone(&plugin);
-                move || Ok::<_, String>(Arc::clone(&plugin))
-            });
-        }
-    }
-    builder = extras.generation_overlay.apply_to(builder);
-
-    let mut resources = ResourceLoaderOptions::new(&config.cwd, &config.agent_dir);
-    resources.project_trusted = project_trusted;
-
-    let runtime = builder
-        .agent_options(AgentOptions {
-            provider_id: ProviderId::new(config.provider.clone()),
-            model_id: ModelId::new(config.model.as_deref().unwrap_or(&config.fallback_model)),
-            thinking_level: settings_thinking_level(config),
-            thinking_budgets: settings_thinking_budgets(config),
-            block_images: config.runtime_settings.images.block_images,
-            active_tools: BUILTIN_TOOL_NAMES
-                .into_iter()
-                .filter(|tool| match *tool {
-                    "memory" => memory_supports_memory_tool,
-                    "session_search" => memory_supports_session_search,
-                    "spawn_agent" | "send_message" | "followup_task" | "wait_agent"
-                    | "interrupt_agent" | "list_agents" => config.features.subagents,
-                    "schedule" => config.features.schedule,
-                    _ => true,
-                })
-                .map(str::to_string)
-                .collect(),
-            cwd: config.cwd.clone(),
-            max_tool_iterations: 100,
-            steering_mode: settings_queue_mode(config.runtime_settings.steering_mode),
-            follow_up_mode: settings_queue_mode(config.runtime_settings.follow_up_mode),
-            ..AgentOptions::default()
-        })
-        .system_prompt(SystemPrompt::Pi(Box::default()))
-        .resources(resources)
-        .build()?;
-
-    let registered_tools = runtime
-        .tool_specs()
-        .into_iter()
-        .map(|spec| spec.name)
-        .collect::<HashSet<_>>();
-    let mut active_tools = config
-        .runtime_settings
-        .default_tools
-        .as_ref()
-        .map_or_else(|| runtime.active_tools(), |configured| configured.clone());
-    active_tools.retain(|tool| registered_tools.contains(tool));
-    let mut seen = active_tools.iter().cloned().collect::<HashSet<_>>();
-    for spec in runtime.tool_specs() {
-        if !BUILTIN_TOOL_NAMES.contains(&spec.name.as_str()) && seen.insert(spec.name.clone()) {
-            active_tools.push(spec.name);
-        }
-    }
-    runtime.set_active_tools(active_tools)?;
-
-    let selection = initial_model_request(config)
-        .select(&runtime)
-        .map_err(|error| RuntimeError::Build(error.to_string()))?;
-
-    Ok(RuntimeBuildOutcome {
-        runtime,
-        initial_model_fallback_message: selection.fallback_message,
-    })
-}
-
-async fn build_memory_provider(
-    config: &Config,
-    active_session_path: Option<&std::path::Path>,
-    project_trusted: bool,
-) -> Result<Option<PreparedMemoryProvider>, String> {
-    if !config.features.memory {
-        return Ok(None);
-    }
-    let mut options = MemoryLoaderOptions::new(&config.cwd, &config.agent_dir);
-    options.project_trusted = project_trusted;
-    if let Some(session_root) = config.session_path.parent() {
-        options.session_roots.push(session_root.to_path_buf());
-    }
-    if let Some(session_root) = active_session_path.and_then(std::path::Path::parent) {
-        options.session_roots.push(session_root.to_path_buf());
-    }
-    MemoryLoader::new(options)
-        .provider_factory(HermesMemoryProviderFactory)
-        .load()
-        .await
-        .map_err(|error| error.to_string())
-}
-
-fn provider_transport(config: &Config) -> Result<Arc<dyn HttpTransport>, RuntimeError> {
-    let transport = ReqwestTransport::with_config(provider_transport_config(config))
-        .map_err(|error| RuntimeError::Build(error.to_string()))?;
-    Ok(Arc::new(transport))
-}
-
-fn provider_transport_config(config: &Config) -> ReqwestTransportConfig {
-    let provider_retry = config.runtime_settings.retry.provider;
-    let timeout_ms = provider_retry
-        .timeout_ms
-        .unwrap_or(config.runtime_settings.http_idle_timeout_ms);
-    ReqwestTransportConfig {
-        timeout: Some(std::time::Duration::from_millis(timeout_ms)),
-        user_agent: Some(format!("pi-rs/{}", env!("CARGO_PKG_VERSION"))),
-        proxy: config.runtime_settings.http_proxy.clone(),
-        max_retries: provider_retry.max_retries.unwrap_or(0),
-        max_retry_delay: std::time::Duration::from_millis(provider_retry.max_retry_delay_ms),
-    }
-}
-
-fn codex_transport_options(config: &Config) -> CodexTransportOptions {
-    let timeout_ms = config
-        .runtime_settings
-        .retry
-        .provider
-        .timeout_ms
-        .unwrap_or(config.runtime_settings.http_idle_timeout_ms);
-    CodexTransportOptions {
-        transport: match config.runtime_settings.transport {
-            TransportSetting::Sse => CodexTransport::Sse,
-            TransportSetting::Websocket => CodexTransport::Websocket,
-            TransportSetting::WebsocketCached => CodexTransport::WebsocketCached,
-            TransportSetting::Auto => CodexTransport::Auto,
-        },
-        websocket_connect_timeout: config
-            .runtime_settings
-            .websocket_connect_timeout_ms
-            .map_or(Some(std::time::Duration::from_secs(15)), |timeout_ms| {
-                (timeout_ms != 0).then(|| std::time::Duration::from_millis(timeout_ms))
-            }),
-        websocket_idle_timeout: (timeout_ms != 0)
-            .then(|| std::time::Duration::from_millis(timeout_ms)),
-        http_proxy_configured: config
-            .runtime_settings
-            .http_proxy
-            .as_deref()
-            .is_some_and(|proxy| !proxy.trim().is_empty()),
-        base_url: None,
-    }
-}
-
-fn initial_model_request(config: &Config) -> InitialModelRequest {
-    InitialModelRequest {
-        requested_provider: config.requested_provider.clone().map(ProviderId::new),
-        requested_model: config.model.clone(),
-        settings_provider: config
-            .runtime_settings
-            .default_provider
-            .clone()
-            .map(ProviderId::new),
-        settings_model: config.runtime_settings.default_model.clone(),
-        ..InitialModelRequest::default()
-    }
-}
-
-fn validate_initial_model_scope(
-    runtime: &PiRuntime,
-    config: &Config,
-    initial_state: &pi_session::AgentSessionInitialState,
-) -> Result<(), SessionError> {
-    if initial_state.model_source == pi_session::AgentSessionInitialModelSource::Inherited {
-        return Ok(());
-    }
-    let Some(patterns) = &config.runtime_settings.enabled_models else {
-        return Ok(());
-    };
-    let allowed = resolve_model_scope(patterns, &runtime.available_models());
-    if allowed.iter().any(|candidate| {
-        candidate.model.provider == initial_state.model.provider
-            && candidate.model.id == initial_state.model.model_id
-    }) {
-        Ok(())
-    } else {
-        Err(SessionError::Runtime(format!(
-            "isolated session model {}/{} is outside the configured model scope",
-            initial_state.model.provider, initial_state.model.model_id
-        )))
-    }
-}
-
-fn settings_queue_mode(mode: QueueModeSetting) -> QueueMode {
-    match mode {
-        QueueModeSetting::All => QueueMode::All,
-        QueueModeSetting::OneAtATime => QueueMode::OneAtATime,
-    }
-}
-
-fn settings_thinking_level(config: &Config) -> ThinkingLevel {
-    if let Some(level) = config.thinking {
-        return level;
-    }
-    match config.runtime_settings.default_thinking_level {
-        Some(ThinkingLevelSetting::Off) => ThinkingLevel::Off,
-        Some(ThinkingLevelSetting::Minimal) => ThinkingLevel::Minimal,
-        Some(ThinkingLevelSetting::Low) => ThinkingLevel::Low,
-        Some(ThinkingLevelSetting::Medium) => ThinkingLevel::Medium,
-        Some(ThinkingLevelSetting::High) => ThinkingLevel::High,
-        Some(ThinkingLevelSetting::XHigh) => ThinkingLevel::XHigh,
-        Some(ThinkingLevelSetting::Max) => ThinkingLevel::Max,
-        None => ThinkingLevel::Medium,
-    }
-}
-
-fn settings_thinking_budgets(config: &Config) -> Option<ThinkingBudgets> {
-    config
-        .runtime_settings
-        .thinking_budgets
-        .map(|budgets| ThinkingBudgets {
-            minimal: budgets.minimal,
-            low: budgets.low,
-            medium: budgets.medium,
-            high: budgets.high,
-        })
-}
-
-fn session_compaction_settings(config: &Config) -> SessionCompactionSettings {
-    let settings = config.runtime_settings.compaction;
-    SessionCompactionSettings {
-        enabled: settings.enabled,
-        reserve_tokens: settings.reserve_tokens,
-        keep_recent_tokens: settings.keep_recent_tokens,
-    }
-}
-
-pub(crate) fn scoped_setting_paths(
-    global: &[String],
-    global_base: &std::path::Path,
-    project: &[String],
-    project_base: &std::path::Path,
-) -> Vec<PathBuf> {
-    global
-        .iter()
-        .map(|path| setting_path(path, global_base))
-        .chain(project.iter().map(|path| setting_path(path, project_base)))
-        .collect()
-}
-
-fn setting_path(path: &str, base: &std::path::Path) -> PathBuf {
-    let path = expand_tilde_path(path);
-    if path.is_absolute() {
-        path
-    } else {
-        base.join(path)
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use pi_session::{AgentSession, MultiSessionManager};
+    use crate::test_support::app_config;
+    use pi_core::ProviderId;
+    use pi_session::{MultiSessionManager, SessionGenerationOverlay};
 
     #[derive(Default)]
     struct RecordingJsHost {
@@ -1131,132 +465,6 @@ command = "fixture-command"
         package
     }
 
-    #[test]
-    fn native_inventory_only_keeps_loaded_plugins_from_plugins_json() {
-        let plugins = retain_loaded_configured_native_plugins(
-            [
-                "configured".to_string(),
-                "not-loaded".to_string(),
-                "configured".to_string(),
-            ],
-            ["configured".to_string(), "explicit-path".to_string()],
-        );
-
-        assert_eq!(plugins, [PluginId::new("configured")]);
-    }
-
-    #[test]
-    fn javascript_inventory_uses_package_sources_without_hiding_local_extensions() {
-        let labels = javascript_inventory_labels(&[
-            ResolvedExtensionIdentity::Package("npm:@counterposition/pi-web-search".to_string()),
-            ResolvedExtensionIdentity::Package("npm:@narumitw/pi-lsp@0.49.5".to_string()),
-            ResolvedExtensionIdentity::Path(PathBuf::from(
-                "/workspace/.pi/extensions/clipboard.ts",
-            )),
-            ResolvedExtensionIdentity::Path(PathBuf::from(
-                "/workspace/local/session-tools/index.ts",
-            )),
-        ]);
-
-        assert_eq!(
-            labels,
-            [
-                "npm:@counterposition/pi-web-search",
-                "npm:@narumitw/pi-lsp@0.49.5",
-                "clipboard.ts",
-                "session-tools",
-            ]
-        );
-    }
-
-    #[test]
-    fn javascript_provider_candidate_is_compiled_into_the_runtime_generation() {
-        let directory = tempfile::tempdir().unwrap();
-        let overlay = DynamicProviderOverlay::default();
-        let candidate = overlay
-            .candidate(&[pi_js_plugin::JsProviderRegistration {
-                plugin_id: "js:0:provider.ts".to_string(),
-                path: "/provider.ts".to_string(),
-                name: "extension-provider".to_string(),
-                config: serde_json::json!({
-                    "baseUrl": "https://extension.example/v1",
-                    "apiKey": "test-key",
-                    "api": "openai-responses",
-                    "models": [{
-                        "id": "extension-model",
-                        "name": "Extension Model",
-                        "reasoning": true,
-                        "input": ["text"],
-                        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-                        "contextWindow": 64000,
-                        "maxTokens": 4096
-                    }]
-                }),
-            }])
-            .unwrap();
-
-        let runtime = build_runtime_with_codex_credentials(
-            &app_config(directory.path(), None),
-            false,
-            &NativePlugins::default(),
-            None,
-            Some(&candidate),
-            Some(pi_plugin_openai::CodexCredentials::default()),
-        )
-        .unwrap();
-        let model = runtime
-            .model(
-                &ProviderId::new("extension-provider"),
-                &ModelId::new("extension-model"),
-            )
-            .unwrap();
-
-        assert_eq!(model.name, "Extension Model");
-        assert_eq!(model.context_window, 64_000);
-        assert_eq!(
-            model.base_url.as_deref(),
-            Some("https://extension.example/v1")
-        );
-    }
-
-    fn jwt(account_id: &str) -> String {
-        use base64::Engine;
-
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
-            serde_json::json!({
-                "https://api.openai.com/auth": {"chatgpt_account_id": account_id}
-            })
-            .to_string(),
-        );
-        format!("header.{payload}.signature")
-    }
-
-    fn app_config(agent_dir: &std::path::Path, model: Option<&str>) -> Config {
-        Config {
-            features: crate::Features::default(),
-            cwd: agent_dir.to_path_buf(),
-            agent_dir: agent_dir.to_path_buf(),
-            session_path: agent_dir.join("session.jsonl"),
-            model: model.map(str::to_string),
-            thinking: None,
-            fallback_model: "gpt-4o-mini".to_string(),
-            base_url: "https://fallback.example/v1".to_string(),
-            api_key: None,
-            provider: "openai-compatible".to_string(),
-            requested_provider: None,
-            trust_override: None,
-            native_plugins: Vec::new(),
-            extensions: Vec::new(),
-            discover_extensions: true,
-            load_mcp_config: true,
-            extension_flag_values: std::collections::BTreeMap::new(),
-            runtime_settings: pi_settings::SettingsValues::default(),
-            settings_skill_paths: Vec::new(),
-            settings_prompt_paths: Vec::new(),
-            settings_diagnostics: Vec::new(),
-        }
-    }
-
     #[tokio::test]
     async fn shared_factory_binds_plugin_context_to_each_managed_session() {
         let directory = tempfile::tempdir().unwrap();
@@ -1311,732 +519,6 @@ command = "fixture-command"
         sessions.shutdown().await.unwrap();
     }
 
-    #[test]
-    fn current_network_settings_build_generation_local_transport_configuration() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = app_config(directory.path(), None);
-        config.runtime_settings.http_proxy = Some("http://proxy.example:8080".to_string());
-        config.runtime_settings.http_idle_timeout_ms = 321_000;
-        config.runtime_settings.transport = TransportSetting::WebsocketCached;
-        config.runtime_settings.websocket_connect_timeout_ms = Some(9_876);
-        config.runtime_settings.retry.provider = pi_settings::ProviderRetrySettings {
-            timeout_ms: Some(12_345),
-            max_retries: Some(2),
-            max_retry_delay_ms: 4_567,
-        };
-
-        let transport = provider_transport_config(&config);
-
-        assert_eq!(
-            transport.timeout,
-            Some(std::time::Duration::from_millis(12_345))
-        );
-        assert_eq!(
-            transport.proxy.as_deref(),
-            Some("http://proxy.example:8080")
-        );
-        assert_eq!(transport.max_retries, 2);
-        assert_eq!(
-            transport.max_retry_delay,
-            std::time::Duration::from_millis(4_567)
-        );
-        let codex = codex_transport_options(&config);
-        assert_eq!(codex.transport, CodexTransport::WebsocketCached);
-        assert_eq!(
-            codex.websocket_connect_timeout,
-            Some(std::time::Duration::from_millis(9_876))
-        );
-        assert_eq!(
-            codex.websocket_idle_timeout,
-            Some(std::time::Duration::from_millis(12_345))
-        );
-        assert!(codex.http_proxy_configured);
-
-        config.runtime_settings.retry.provider.timeout_ms = None;
-        assert_eq!(
-            provider_transport_config(&config).timeout,
-            Some(std::time::Duration::from_millis(321_000))
-        );
-        config.runtime_settings.websocket_connect_timeout_ms = Some(0);
-        assert_eq!(
-            codex_transport_options(&config).websocket_connect_timeout,
-            None
-        );
-    }
-
-    #[test]
-    fn product_runtime_registers_schedule_without_creating_storage() {
-        let directory = tempfile::tempdir().unwrap();
-        let runtime = build_runtime_with_codex_credentials(
-            &app_config(directory.path(), None),
-            false,
-            &NativePlugins::default(),
-            None,
-            None,
-            Some(pi_plugin_openai::CodexCredentials::default()),
-        )
-        .unwrap();
-        assert!(runtime.active_tools().iter().any(|tool| tool == "schedule"));
-        assert!(
-            runtime
-                .command_specs()
-                .iter()
-                .any(|command| command.name == "schedule")
-        );
-        assert!(!directory.path().join("schedule").exists());
-    }
-
-    #[test]
-    fn product_runtime_registers_the_agent_collaboration_tools() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = app_config(directory.path(), None);
-        let runtime = build_runtime_with_codex_credentials(
-            &config,
-            false,
-            &NativePlugins::default(),
-            None,
-            None,
-            Some(pi_plugin_openai::CodexCredentials::default()),
-        )
-        .unwrap();
-
-        for name in [
-            "spawn_agent",
-            "send_message",
-            "followup_task",
-            "wait_agent",
-            "interrupt_agent",
-            "list_agents",
-        ] {
-            assert!(runtime.active_tools().iter().any(|tool| tool == name));
-        }
-        assert!(!runtime.active_tools().iter().any(|tool| tool == "subagent"));
-        let spec = runtime
-            .tool_specs()
-            .into_iter()
-            .find(|spec| spec.name == "spawn_agent")
-            .expect("spawn_agent should be registered");
-        assert_eq!(
-            spec.parameters["properties"]["agent"]["enum"],
-            serde_json::json!([
-                "scout",
-                "worker",
-                "developer",
-                "coder",
-                "implementer",
-                "develop",
-                "reviewer",
-                "oracle",
-                "advisor",
-                "delegate"
-            ])
-        );
-        assert!(spec.parameters.get("oneOf").is_none());
-        assert!(spec.parameters["properties"].get("stages").is_none());
-    }
-
-    #[tokio::test]
-    async fn product_runtime_registers_hermes_memory_tools_commands_and_skills() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(directory.path().join("pi-hermes-memory/skills/deploy-demo"))
-            .unwrap();
-        std::fs::write(
-            directory
-                .path()
-                .join("pi-hermes-memory/skills/deploy-demo/SKILL.md"),
-            "---\nname: deploy-demo\ndescription: Deploy the demo safely\n---\n\n## Procedure\n1. Run tests\n",
-        )
-        .unwrap();
-        let config = app_config(directory.path(), None);
-        let runtime = build_runtime_with_first_party_memory(&config)
-            .await
-            .unwrap();
-        assert!(runtime.active_tools().iter().any(|tool| tool == "memory"));
-        assert!(
-            runtime
-                .active_tools()
-                .iter()
-                .any(|tool| tool == "session_search")
-        );
-        assert!(
-            runtime
-                .active_tools()
-                .iter()
-                .any(|tool| tool == "skill_manage")
-        );
-        assert!(
-            runtime
-                .command_specs()
-                .iter()
-                .any(|command| command.name == "skill:deploy-demo")
-        );
-        for command in [
-            "memory-consolidate",
-            "memory-index-sessions",
-            "memory-insights",
-            "memory-interview",
-            "learn-memory-tool",
-            "memory-preview-context",
-            "memory-skills",
-            "memory-sync-markdown",
-        ] {
-            assert!(
-                runtime
-                    .command_specs()
-                    .iter()
-                    .any(|registered| registered.name == command),
-                "expected Hermes command {command}"
-            );
-        }
-        std::fs::write(
-            directory.path().join("memory.json"),
-            r#"{"version": 1, "enabled": false}"#,
-        )
-        .unwrap();
-        let disabled = build_runtime_with_first_party_memory(&config)
-            .await
-            .unwrap();
-        assert!(
-            !disabled
-                .tool_specs()
-                .iter()
-                .any(|tool| tool.name == "memory")
-        );
-        assert!(
-            !disabled
-                .command_specs()
-                .iter()
-                .any(|command| command.name.starts_with("memory-"))
-        );
-    }
-
-    #[tokio::test]
-    async fn removed_local_memory_provider_is_rejected() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(
-            directory.path().join("memory.json"),
-            r#"{"version": 1, "provider": "local"}"#,
-        )
-        .unwrap();
-        let config = app_config(directory.path(), None);
-
-        let error = match build_runtime_with_first_party_memory(&config).await {
-            Ok(_) => panic!("the removed local provider must not be accepted"),
-            Err(error) => error,
-        };
-
-        assert_eq!(
-            error.to_string(),
-            "runtime build failed: memory.json selects unknown provider local; registered providers: hermes"
-        );
-    }
-
-    #[test]
-    fn trusted_project_markdown_agents_extend_the_subagent_catalog() {
-        let directory = tempfile::tempdir().unwrap();
-        let agent_dir = directory.path().join("agent");
-        let project = directory.path().join("project");
-        std::fs::create_dir_all(project.join(".git")).unwrap();
-        std::fs::create_dir_all(project.join(".pi/agents")).unwrap();
-        std::fs::write(
-            project.join(".pi/agents/project-scout.md"),
-            "---\nname: project-scout\ndescription: Project-only scout\nsystemPromptMode: append\n---\nInspect this project.",
-        )
-        .unwrap();
-        let mut config = app_config(&agent_dir, None);
-        config.cwd = project;
-
-        let build = |project_trusted| {
-            build_runtime_with_codex_credentials(
-                &config,
-                project_trusted,
-                &NativePlugins::default(),
-                None,
-                None,
-                Some(pi_plugin_openai::CodexCredentials::default()),
-            )
-            .unwrap()
-        };
-        let trusted = build(true);
-        let trusted_spec = trusted
-            .tool_specs()
-            .into_iter()
-            .find(|spec| spec.name == "spawn_agent")
-            .unwrap();
-        assert!(
-            trusted_spec.parameters["properties"]["agent"]["enum"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!("project-scout"))
-        );
-
-        let untrusted = build(false);
-        let untrusted_spec = untrusted
-            .tool_specs()
-            .into_iter()
-            .find(|spec| spec.name == "spawn_agent")
-            .unwrap();
-        assert!(
-            !untrusted_spec.parameters["properties"]["agent"]["enum"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!("project-scout"))
-        );
-    }
-
-    #[test]
-    fn current_settings_configure_runtime_tools_thinking_queues_and_compaction() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = app_config(directory.path(), None);
-        config.runtime_settings.default_thinking_level = Some(ThinkingLevelSetting::High);
-        config.runtime_settings.thinking_budgets = Some(pi_settings::ThinkingBudgetsSettings {
-            minimal: Some(111),
-            low: None,
-            medium: None,
-            high: Some(999),
-        });
-        config.runtime_settings.default_tools =
-            Some(vec!["read".to_string(), "not-registered".to_string()]);
-        config.runtime_settings.steering_mode = QueueModeSetting::All;
-        config.runtime_settings.follow_up_mode = QueueModeSetting::OneAtATime;
-        config.runtime_settings.compaction = pi_settings::CompactionSettings {
-            enabled: false,
-            reserve_tokens: 123,
-            keep_recent_tokens: 456,
-        };
-
-        let runtime = build_runtime_with_codex_credentials(
-            &config,
-            false,
-            &NativePlugins::default(),
-            None,
-            None,
-            Some(pi_plugin_openai::CodexCredentials::default()),
-        )
-        .unwrap();
-        let state = runtime.agent().state();
-
-        assert_eq!(state.thinking_level, ThinkingLevel::High);
-        assert_eq!(
-            runtime.agent().thinking_budgets(),
-            Some(ThinkingBudgets {
-                minimal: Some(111),
-                low: None,
-                medium: None,
-                high: Some(999),
-            })
-        );
-        assert_eq!(state.active_tools, ["read"]);
-        assert_eq!(
-            settings_queue_mode(config.runtime_settings.steering_mode),
-            QueueMode::All
-        );
-        assert_eq!(
-            settings_queue_mode(config.runtime_settings.follow_up_mode),
-            QueueMode::OneAtATime
-        );
-        assert_eq!(
-            session_compaction_settings(&config),
-            SessionCompactionSettings {
-                enabled: false,
-                reserve_tokens: 123,
-                keep_recent_tokens: 456,
-            }
-        );
-    }
-
-    #[test]
-    fn product_thinking_defaults_to_pi_medium() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = app_config(directory.path(), None);
-
-        assert_eq!(settings_thinking_level(&config), ThinkingLevel::Medium);
-    }
-
-    #[test]
-    fn current_setting_paths_use_scope_bases_and_expand_tilde() {
-        let directory = tempfile::tempdir().unwrap();
-        let global = directory.path().join("agent");
-        let project = directory.path().join("project/.pi");
-        let resolved = scoped_setting_paths(
-            &["skills/global".to_string()],
-            &global,
-            &["../shared".to_string(), "/absolute/skill".to_string()],
-            &project,
-        );
-
-        assert_eq!(resolved[0], global.join("skills/global"));
-        assert_eq!(resolved[1], project.join("../shared"));
-        assert_eq!(resolved[2], PathBuf::from("/absolute/skill"));
-        if let Some(home) = std::env::var_os("HOME") {
-            assert_eq!(expand_tilde_path("~"), PathBuf::from(home));
-        }
-    }
-
-    #[test]
-    fn codex_catalog_is_registered_even_when_another_provider_is_selected() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = app_config(directory.path(), None);
-
-        let runtime = build_runtime_with_codex_credentials(
-            &config,
-            false,
-            &NativePlugins::default(),
-            None,
-            None,
-            Some(pi_plugin_openai::CodexCredentials::default()),
-        )
-        .unwrap();
-
-        assert!(
-            runtime
-                .model(&ProviderId::new("openai-codex"), &ModelId::new("gpt-5.5"))
-                .is_some()
-        );
-        assert!(runtime.available_models().is_empty());
-    }
-
-    #[test]
-    fn xai_catalog_is_registered_but_unavailable_without_credentials() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = app_config(directory.path(), None);
-
-        let runtime = build_runtime_with_codex_credentials(
-            &config,
-            false,
-            &NativePlugins::default(),
-            None,
-            None,
-            Some(pi_plugin_openai::CodexCredentials::default()),
-        )
-        .unwrap();
-
-        let model = runtime
-            .model(&ProviderId::new("xai"), &ModelId::new("grok-4.6"))
-            .unwrap();
-        assert_eq!(model.context_window, 500_000);
-        assert!(
-            runtime
-                .available_models()
-                .iter()
-                .all(|model| model.provider != ProviderId::new("xai"))
-        );
-    }
-
-    #[test]
-    fn explicit_xai_selection_uses_cli_credentials_without_duplicate_registration() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = app_config(directory.path(), Some("grok-4.6"));
-        config.provider = "xai".to_string();
-        config.requested_provider = Some("xai".to_string());
-        config.api_key = Some("xai-test-token".to_string());
-
-        let runtime = build_runtime_with_codex_credentials(
-            &config,
-            false,
-            &NativePlugins::default(),
-            None,
-            None,
-            Some(pi_plugin_openai::CodexCredentials::default()),
-        )
-        .unwrap();
-
-        assert_eq!(runtime.agent().state().provider_id.as_str(), "xai");
-        assert_eq!(runtime.agent().state().model_id.as_str(), "grok-4.6");
-        assert!(runtime.available_models().iter().any(|model| {
-            model.provider == ProviderId::new("xai") && model.id == ModelId::new("grok-4.6")
-        }));
-    }
-
-    #[test]
-    fn stored_google_api_key_registers_and_selects_builtin_catalog() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(
-            directory.path().join("auth.json"),
-            serde_json::json!({
-                "google": {"type": "api_key", "key": "gemini-test-key"}
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let mut config = app_config(directory.path(), Some("gemini-3.1-pro-preview"));
-        config.provider = "google".to_string();
-        config.requested_provider = Some("google".to_string());
-
-        let runtime = build_runtime_with_codex_credentials(
-            &config,
-            false,
-            &NativePlugins::default(),
-            None,
-            None,
-            Some(pi_plugin_openai::CodexCredentials::default()),
-        )
-        .unwrap();
-
-        let model = runtime
-            .model(
-                &ProviderId::new("google"),
-                &ModelId::new("gemini-3.1-pro-preview"),
-            )
-            .expect("the built-in Google catalog must be registered");
-        assert_eq!(model.context_window, 1_048_576);
-        assert_eq!(runtime.agent().state().provider_id.as_str(), "google");
-        assert!(runtime.available_models().iter().any(|model| {
-            model.provider == ProviderId::new("google")
-                && model.id == ModelId::new("gemini-3.1-pro-preview")
-        }));
-    }
-
-    #[test]
-    fn expanded_provider_catalogs_use_stored_auth_and_copilot_account_filtering() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(
-            directory.path().join("auth.json"),
-            serde_json::json!({
-                "amazon-bedrock": {"type": "api_key", "key": "bedrock-bearer"},
-                "google-vertex": {"type": "api_key", "key": "vertex-key"},
-                "mistral": {"type": "api_key", "key": "mistral-key"},
-                "openrouter": {
-                    "type": "oauth",
-                    "access": "openrouter-key",
-                    "refresh": "",
-                    "expires": 9_007_199_254_740_991_f64
-                },
-                "github-copilot": {
-                    "type": "oauth",
-                    "access": "copilot-token",
-                    "refresh": "github-token",
-                    "expires": 4_102_444_800_000_f64,
-                    "availableModelIds": ["gpt-4.1"]
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let runtime = build_runtime_with_codex_credentials(
-            &app_config(directory.path(), None),
-            false,
-            &NativePlugins::default(),
-            None,
-            None,
-            Some(pi_plugin_openai::CodexCredentials::default()),
-        )
-        .unwrap();
-
-        for (provider, model) in [
-            ("amazon-bedrock", "amazon.nova-2-lite-v1:0"),
-            ("azure-openai-responses", "gpt-5.4"),
-            ("google-vertex", "gemini-2.5-flash"),
-            ("mistral", "mistral-small-latest"),
-            ("openrouter", "openai/gpt-5.4"),
-            ("github-copilot", "gpt-4.1"),
-        ] {
-            assert!(
-                runtime
-                    .model(&ProviderId::new(provider), &ModelId::new(model))
-                    .is_some(),
-                "missing {provider}/{model}"
-            );
-        }
-        for provider in [
-            "amazon-bedrock",
-            "google-vertex",
-            "mistral",
-            "openrouter",
-            "github-copilot",
-        ] {
-            assert!(
-                runtime
-                    .available_models()
-                    .iter()
-                    .any(|model| model.provider == ProviderId::new(provider)),
-                "{provider} should be available"
-            );
-        }
-        assert!(
-            runtime
-                .model(&ProviderId::new("github-copilot"), &ModelId::new("gpt-5.4"))
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn anthropic_catalog_is_registered_and_cli_credentials_select_claude() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = app_config(directory.path(), Some("claude-sonnet-4-6"));
-        config.provider = "anthropic".to_string();
-        config.requested_provider = Some("anthropic".to_string());
-        config.api_key = Some("anthropic-test-token".to_string());
-
-        let runtime = build_runtime_with_codex_credentials(
-            &config,
-            false,
-            &NativePlugins::default(),
-            None,
-            None,
-            Some(pi_plugin_openai::CodexCredentials::default()),
-        )
-        .unwrap();
-
-        assert_eq!(runtime.agent().state().provider_id.as_str(), "anthropic");
-        assert_eq!(
-            runtime.agent().state().model_id.as_str(),
-            "claude-sonnet-4-6"
-        );
-    }
-
-    #[test]
-    fn stored_codex_oauth_credential_makes_the_catalog_available() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(
-            directory.path().join("auth.json"),
-            serde_json::json!({
-                "openai-codex": {
-                    "type": "oauth",
-                    "access": jwt("acct-stored"),
-                    "refresh": "refresh-token",
-                    "expires": 4_102_444_800_000_f64,
-                    "accountId": "acct-stored"
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let mut config = app_config(directory.path(), Some("gpt-5.5"));
-        config.provider = "openai-codex".to_string();
-        config.requested_provider = Some("openai-codex".to_string());
-
-        let runtime = build_runtime_with_codex_credentials(
-            &config,
-            false,
-            &NativePlugins::default(),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(runtime.agent().state().provider_id.as_str(), "openai-codex");
-        assert!(runtime.available_models().iter().any(|model| {
-            model.provider == ProviderId::new("openai-codex") && model.id == ModelId::new("gpt-5.5")
-        }));
-    }
-
-    #[test]
-    fn openai_codex_provider_loads_its_builtin_model_catalog() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = app_config(directory.path(), Some("gpt-5.5"));
-        config.provider = "openai-codex".to_string();
-        config.requested_provider = Some("openai-codex".to_string());
-        config.base_url = "https://chatgpt.com/backend-api".to_string();
-
-        let runtime = build_runtime_with_codex_credentials(
-            &config,
-            false,
-            &NativePlugins::default(),
-            None,
-            None,
-            Some(pi_plugin_openai::CodexCredentials::default()),
-        )
-        .unwrap();
-
-        let model = runtime
-            .model(&ProviderId::new("openai-codex"), &ModelId::new("gpt-5.5"))
-            .unwrap();
-        assert_eq!(model.context_window, 272_000);
-        assert_eq!(runtime.agent().state().model_id.as_str(), "gpt-5.5");
-    }
-
-    #[test]
-    fn models_json_catalog_owns_the_initial_provider_and_model() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(
-            directory.path().join("models.json"),
-            r#"{
-              "providers": {
-                "catalog-provider": {
-                  "baseUrl": "https://catalog.example/v1",
-                  "api": "openai-completions",
-                  "apiKey": "test-key",
-                  "models": [
-                    { "id": "catalog-first", "name": "Catalog First" },
-                    { "id": "catalog-requested", "name": "Catalog Requested" }
-                  ]
-                }
-              }
-            }"#,
-        )
-        .unwrap();
-
-        let runtime = build_runtime(
-            &app_config(directory.path(), None),
-            true,
-            &NativePlugins::default(),
-            None,
-            None,
-        )
-        .unwrap();
-        let state = runtime.agent().state();
-
-        assert_eq!(state.provider_id.as_str(), "catalog-provider");
-        assert_eq!(state.model_id.as_str(), "catalog-first");
-    }
-
-    #[test]
-    fn requested_model_id_resolves_to_its_models_json_provider() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(
-            directory.path().join("models.json"),
-            r#"{
-              "providers": {
-                "catalog-provider": {
-                  "baseUrl": "https://catalog.example/v1",
-                  "api": "openai-completions",
-                  "apiKey": "test-key",
-                  "models": [
-                    { "id": "catalog-first" },
-                    { "id": "catalog-requested" }
-                  ]
-                }
-              }
-            }"#,
-        )
-        .unwrap();
-
-        let runtime = build_runtime(
-            &app_config(directory.path(), Some("catalog-requested")),
-            true,
-            &NativePlugins::default(),
-            None,
-            None,
-        )
-        .unwrap();
-        let state = runtime.agent().state();
-
-        assert_eq!(state.provider_id.as_str(), "catalog-provider");
-        assert_eq!(state.model_id.as_str(), "catalog-requested");
-    }
-
-    #[test]
-    fn missing_models_json_keeps_the_cli_fallback() {
-        let directory = tempfile::tempdir().unwrap();
-
-        let runtime = build_runtime_with_codex_credentials(
-            &app_config(directory.path(), None),
-            true,
-            &NativePlugins::default(),
-            None,
-            None,
-            Some(pi_plugin_openai::CodexCredentials::default()),
-        )
-        .unwrap();
-        let state = runtime.agent().state();
-
-        assert_eq!(state.provider_id.as_str(), "openai-compatible");
-        assert_eq!(state.model_id.as_str(), "gpt-4o-mini");
-    }
-
     #[tokio::test]
     async fn trusted_project_packages_prepare_transactionally_before_runtime_loading() {
         let root = tempfile::tempdir().unwrap();
@@ -2064,7 +546,9 @@ command = "fixture-command"
         let lock_path = project.join(".pi/plugins.lock");
 
         {
-            let prepared = prepare_native_packages(&config, true).await.unwrap();
+            let prepared = prepare_native_packages(&config.cwd, &config.agent_dir, true)
+                .await
+                .unwrap();
             assert!(activation.join("plugin.dylib").is_file());
             assert!(lock_path.is_file());
             let manifest = std::fs::read_to_string(activation.join("pi-plugin.toml")).unwrap();
@@ -2074,7 +558,10 @@ command = "fixture-command"
         assert!(!activation.exists());
         assert!(!lock_path.exists());
 
-        for reconciliation in prepare_native_packages(&config, true).await.unwrap() {
+        for reconciliation in prepare_native_packages(&config.cwd, &config.agent_dir, true)
+            .await
+            .unwrap()
+        {
             reconciliation.commit();
         }
         assert!(activation.join("plugin.dylib").is_file());
@@ -2107,7 +594,10 @@ command = "fixture-command"
         let mut config = app_config(&agent_dir, None);
         config.cwd = project.clone();
 
-        for reconciliation in prepare_native_packages(&config, false).await.unwrap() {
+        for reconciliation in prepare_native_packages(&config.cwd, &config.agent_dir, false)
+            .await
+            .unwrap()
+        {
             reconciliation.commit();
         }
 
@@ -2277,61 +767,5 @@ command = "fixture-command"
         drop(session);
         drop(manager);
         assert_eq!(*host.retired.lock().unwrap(), ["js-1", "js-2"]);
-    }
-
-    #[tokio::test]
-    async fn explicit_model_wins_over_the_model_saved_in_a_resumed_session() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(
-            directory.path().join("models.json"),
-            r#"{
-              "providers": {
-                "catalog-provider": {
-                  "baseUrl": "https://catalog.example/v1",
-                  "api": "openai-completions",
-                  "apiKey": "test-key",
-                  "models": [
-                    { "id": "alpha" },
-                    { "id": "beta" }
-                  ]
-                }
-              }
-            }"#,
-        )
-        .unwrap();
-        let path = directory.path().join("resume.jsonl");
-
-        let original = AgentSession::create(
-            build_runtime(
-                &app_config(directory.path(), None),
-                true,
-                &NativePlugins::default(),
-                None,
-                None,
-            )
-            .unwrap(),
-            &path,
-        )
-        .await
-        .unwrap();
-        original
-            .set_model(ProviderId::new("catalog-provider"), ModelId::new("beta"))
-            .unwrap();
-        original.log().materialize().unwrap();
-        original.shutdown().await;
-
-        let config = app_config(directory.path(), Some("alpha"));
-        let resumed = AgentSession::open_with_options(
-            build_runtime(&config, true, &NativePlugins::default(), None, None).unwrap(),
-            &path,
-            AgentSessionOptions::default().initial_model(initial_model_request(&config)),
-        )
-        .await
-        .unwrap();
-        let state = resumed.runtime().agent().state();
-
-        assert_eq!(state.provider_id.as_str(), "catalog-provider");
-        assert_eq!(state.model_id.as_str(), "alpha");
-        resumed.shutdown().await;
     }
 }

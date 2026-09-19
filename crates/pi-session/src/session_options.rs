@@ -3,10 +3,15 @@
 use std::path::PathBuf;
 
 use globset::GlobBuilder;
-use pi_core::{ModelId, ModelSpec, PluginId, ProviderId, ScopedModel, ThinkingLevel};
+use pi_core::{
+    ModelId, ModelSelection, ModelSpec, PluginId, ProviderId, ScopedModel, ThinkingLevel,
+};
 use pi_runtime::PiRuntime;
 
-use crate::{CompactionSettings, SessionContextBuildOptions, SessionModel, SessionPlugins};
+use crate::{
+    AgentSessionInitialModelSource, CompactionSettings, SessionContextBuildOptions, SessionError,
+    SessionModel, SessionPlugins,
+};
 
 #[derive(Clone, Default)]
 pub struct AgentSessionOptions {
@@ -423,6 +428,34 @@ impl InitialModelResolver {
     }
 }
 
+/// Validates an isolated session's explicit model against the configured scope.
+/// Inherited selections retain the parent's accepted model. An absent scope is
+/// unrestricted; a configured empty scope admits no explicit selection.
+pub fn validate_initial_model_scope(
+    model: &ModelSelection,
+    source: AgentSessionInitialModelSource,
+    patterns: Option<&[String]>,
+    models: &[ModelSpec],
+) -> Result<(), SessionError> {
+    if source == AgentSessionInitialModelSource::Inherited {
+        return Ok(());
+    }
+    let Some(patterns) = patterns else {
+        return Ok(());
+    };
+    let allowed = resolve_model_scope(patterns, models);
+    if allowed.iter().any(|candidate| {
+        candidate.model.provider == model.provider && candidate.model.id == model.model_id
+    }) {
+        Ok(())
+    } else {
+        Err(SessionError::Runtime(format!(
+            "isolated session model {}/{} is outside the configured model scope",
+            model.provider, model.model_id
+        )))
+    }
+}
+
 /// Resolves Pi `enabledModels`/`--models` patterns against an immutable
 /// available catalog while preserving pattern and catalog order.
 pub fn resolve_model_scope(patterns: &[String], models: &[ModelSpec]) -> Vec<ScopedModel> {
@@ -575,6 +608,108 @@ mod tests {
         assert_eq!(scoped[1].thinking_level, Some(ThinkingLevel::High));
         assert_eq!(scoped[2].model.id.as_str(), "model:exact");
         assert_eq!(scoped[2].thinking_level, None);
+    }
+
+    #[test]
+    fn initial_model_scope_preserves_inherited_selections_outside_the_catalog_and_scope() {
+        let inherited = ModelSelection {
+            provider: ProviderId::new("custom"),
+            model_id: ModelId::new("unlisted"),
+        };
+        let models = [model("catalog", "listed", "Listed")];
+        let patterns = ["catalog/*".to_string()];
+
+        for scope in [None, Some(patterns.as_slice()), Some([].as_slice())] {
+            validate_initial_model_scope(
+                &inherited,
+                AgentSessionInitialModelSource::Inherited,
+                scope,
+                &models,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn initial_model_scope_allows_explicit_selection_matching_a_scoped_catalog_model() {
+        let requested = ModelSelection {
+            provider: ProviderId::new("catalog"),
+            model_id: ModelId::new("listed"),
+        };
+        let models = [model("catalog", "listed", "Listed")];
+        for pattern in ["catalog/listed", "catalog/*:high"] {
+            validate_initial_model_scope(
+                &requested,
+                AgentSessionInitialModelSource::Requested,
+                Some(&[pattern.to_string()]),
+                &models,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn initial_model_scope_rejects_explicit_selection_outside_the_scope() {
+        let requested = ModelSelection {
+            provider: ProviderId::new("other"),
+            model_id: ModelId::new("shared"),
+        };
+        let models = [
+            model("catalog", "shared", "Shared"),
+            model("other", "shared", "Shared"),
+        ];
+
+        let error = validate_initial_model_scope(
+            &requested,
+            AgentSessionInitialModelSource::Requested,
+            Some(&["catalog/*".to_string()]),
+            &models,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SessionError::Runtime(message)
+                if message == "isolated session model other/shared is outside the configured model scope"
+        ));
+    }
+
+    #[test]
+    fn initial_model_scope_without_configuration_allows_explicit_unlisted_selection() {
+        validate_initial_model_scope(
+            &ModelSelection {
+                provider: ProviderId::new("custom"),
+                model_id: ModelId::new("unlisted"),
+            },
+            AgentSessionInitialModelSource::Requested,
+            None,
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn initial_model_scope_rejects_empty_or_unmatched_configured_scopes() {
+        let requested = ModelSelection {
+            provider: ProviderId::new("catalog"),
+            model_id: ModelId::new("listed"),
+        };
+        let models = [model("catalog", "listed", "Listed")];
+        let all_models = ["*".to_string()];
+        for (patterns, catalog) in [
+            ([].as_slice(), models.as_slice()),
+            (all_models.as_slice(), [].as_slice()),
+        ] {
+            assert!(
+                validate_initial_model_scope(
+                    &requested,
+                    AgentSessionInitialModelSource::Requested,
+                    Some(patterns),
+                    catalog,
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

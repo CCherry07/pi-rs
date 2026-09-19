@@ -85,6 +85,7 @@ pub use plugin_context::{
 pub use session_options::{
     AgentSessionOptions, AutoRetrySettings, InitialModelRequest, InitialModelResolveError,
     InitialModelSelection, SessionRuntimeInventory, resolve_model_scope,
+    validate_initial_model_scope,
 };
 pub use types::*;
 

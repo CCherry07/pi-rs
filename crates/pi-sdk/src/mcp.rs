@@ -11,14 +11,13 @@ use pi_core::{
     AgentPlugin, Command, CommandContext, CommandError, CommandOutcome, CommandSpec, NoticeLevel,
     PluginId, RegisterContext,
 };
+use pi_mcp::config::{MAX_CONFIG_BYTES, McpConfigContext, McpConfigEntry, parse_config};
 use pi_mcp::{McpServerConfig, McpToolSet, McpTransport};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{ProjectTrustEvaluation, ProjectTrustService};
 
-const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const EMPTY: &str = "{\n  \"version\": 1,\n  \"mcpServers\": {}\n}\n";
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -57,10 +56,8 @@ pub struct McpServerRow {
 }
 
 struct Entry {
-    name: String,
     scope: McpScope,
-    transport: Option<McpTransport>,
-    enabled: bool,
+    config: McpConfigEntry,
 }
 
 impl McpLibrary {
@@ -109,8 +106,8 @@ impl McpLibrary {
             }
             let path = self.path(scope)?;
             let content = read_document(&path)?.unwrap_or_else(|| EMPTY.into());
-            for entry in parse(&content, scope)? {
-                merged.insert(entry.name.clone(), entry);
+            for config in parse_config(&content)? {
+                merged.insert(config.name().to_string(), Entry { scope, config });
             }
         }
         Ok(merged.into_values().collect())
@@ -144,7 +141,7 @@ impl McpLibrary {
         content: &str,
     ) -> Result<McpDocument, String> {
         let path = self.path(scope)?;
-        parse(content, scope)?;
+        parse_config(content)?;
         let parent = path.parent().ok_or("Invalid MCP configuration path")?;
         fs::create_dir_all(parent).map_err(io_error)?;
         let mut options = OpenOptions::new();
@@ -176,9 +173,9 @@ impl McpLibrary {
         let entry = self
             .entries()?
             .into_iter()
-            .find(|entry| entry.name == name)
+            .find(|entry| entry.config.name() == name)
             .ok_or("MCP server not found")?;
-        if !entry.enabled {
+        if !entry.config.enabled() {
             return Err("Enable and save the server before testing".into());
         }
         let config = self.resolve(entry)?;
@@ -195,7 +192,7 @@ impl McpLibrary {
         let rows = entries.iter().map(Entry::row).collect();
         let configs = entries
             .into_iter()
-            .filter(|entry| entry.enabled)
+            .filter(|entry| entry.config.enabled())
             .map(|entry| self.resolve(entry))
             .collect::<Result<Vec<_>, _>>()?;
         let pool = McpToolSet::connect(configs)
@@ -209,47 +206,10 @@ impl McpLibrary {
     }
 
     fn resolve(&self, entry: Entry) -> Result<McpServerConfig, String> {
-        let mut transport = entry
-            .transport
-            .ok_or("Enabled MCP server needs a transport")?;
-        match &mut transport {
-            McpTransport::Stdio {
-                command,
-                args,
-                env,
-                cwd,
-            } => {
-                *command = crate::expand_tilde_path(&expand_env(command)?)
-                    .to_string_lossy()
-                    .into_owned();
-                for arg in args {
-                    *arg = expand_env(arg)?;
-                }
-                for value in env.values_mut() {
-                    *value = expand_env(value)?;
-                }
-                *cwd = Some(match cwd.take() {
-                    Some(path) => {
-                        let path = crate::expand_tilde_path(&expand_env(&path.to_string_lossy())?);
-                        if path.is_absolute() {
-                            path
-                        } else {
-                            self.path(entry.scope)?.parent().unwrap().join(path)
-                        }
-                    }
-                    None => self.cwd.as_ref().unwrap_or(&self.agent_dir).clone(),
-                });
-            }
-            McpTransport::Http { url, headers } => {
-                *url = expand_env(url)?;
-                for value in headers.values_mut() {
-                    *value = expand_env(value)?;
-                }
-            }
-        }
-        Ok(McpServerConfig {
-            name: entry.name,
-            transport,
+        let path = self.path(entry.scope)?;
+        entry.config.resolve(McpConfigContext {
+            config_dir: path.parent().ok_or("Invalid MCP configuration path")?,
+            default_cwd: self.cwd.as_ref().unwrap_or(&self.agent_dir),
         })
     }
 }
@@ -257,10 +217,10 @@ impl McpLibrary {
 impl Entry {
     fn row(&self) -> McpServerRow {
         McpServerRow {
-            name: self.name.clone(),
+            name: self.config.name().to_string(),
             scope: self.scope,
-            enabled: self.enabled,
-            transport: match self.transport {
+            enabled: self.config.enabled(),
+            transport: match self.config.transport() {
                 Some(McpTransport::Http { .. }) => "http",
                 Some(McpTransport::Stdio { .. }) => "stdio",
                 None => "disabled",
@@ -268,94 +228,6 @@ impl Entry {
             .into(),
         }
     }
-}
-
-fn parse(content: &str, scope: McpScope) -> Result<Vec<Entry>, String> {
-    if content.len() as u64 > MAX_CONFIG_BYTES {
-        return Err("mcp.json exceeds 1 MiB".into());
-    }
-    let value: Value = serde_json::from_str(content).map_err(|e| {
-        format!(
-            "Invalid mcp.json syntax at line {}, column {}",
-            e.line(),
-            e.column()
-        )
-    })?;
-    let object = value.as_object().ok_or("mcp.json must be an object")?;
-    if object.get("version").is_some_and(|v| v != 1) {
-        return Err("Unsupported mcp.json version (expected 1)".into());
-    }
-    let servers = object
-        .get("mcpServers")
-        .and_then(Value::as_object)
-        .ok_or("mcp.json needs an mcpServers object")?;
-    let mut entries = Vec::new();
-    for (name, value) in servers {
-        if name.trim().is_empty() || name != name.trim() {
-            return Err(
-                "MCP server names must be non-empty, without surrounding whitespace".into(),
-            );
-        }
-        let mut config = value
-            .as_object()
-            .cloned()
-            .ok_or_else(|| format!("MCP server {name} must be an object"))?;
-        let enabled = match config.remove("enabled") {
-            None => true,
-            Some(Value::Bool(value)) => value,
-            _ => return Err(format!("MCP server {name}: enabled must be boolean")),
-        };
-        // Accept the common mcpServers format without a redundant explicit type.
-        if !config.contains_key("type") {
-            if config.contains_key("command") {
-                config.insert("type".into(), json!("stdio"));
-            } else if config.contains_key("url") {
-                config.insert("type".into(), json!("http"));
-            }
-        }
-        let transport = if !enabled && !config.contains_key("type") {
-            None
-        } else {
-            if config.get("type") == Some(&json!("sse")) {
-                return Err(format!(
-                    "MCP server {name}: legacy SSE is not supported; use a Streamable HTTP endpoint"
-                ));
-            }
-            let transport: McpTransport = serde_json::from_value(Value::Object(config)).map_err(|_| format!("MCP server {name}: invalid transport fields (stdio command/args/env/cwd or http url/headers)"))?;
-            // Validate static fields without resolving environment references or executing anything.
-            match &transport {
-                McpTransport::Stdio { command, .. } if command.trim().is_empty() => {
-                    return Err(format!("MCP server {name}: command is empty"));
-                }
-                McpTransport::Http { url, headers } => {
-                    let placeholder =
-                        |value: &str| expand_with(value, |_| Ok("placeholder".into()));
-                    let checked_url = placeholder(url)?;
-                    let checked_url = if url.starts_with('$') {
-                        "https://mcp.invalid".into()
-                    } else {
-                        checked_url
-                    };
-                    let config = McpServerConfig::http(name, checked_url).headers(
-                        headers
-                            .iter()
-                            .map(|(k, v)| Ok((k.clone(), placeholder(v)?)))
-                            .collect::<Result<_, String>>()?,
-                    );
-                    pi_mcp::validate_configs(&[config]).map_err(|e| e.to_string())?;
-                }
-                _ => {}
-            }
-            Some(transport)
-        };
-        entries.push(Entry {
-            name: name.clone(),
-            scope,
-            transport,
-            enabled,
-        });
-    }
-    Ok(entries)
 }
 
 fn read_document(path: &Path) -> Result<Option<String>, String> {
@@ -381,44 +253,6 @@ fn revision(content: Option<&str>) -> String {
 }
 fn io_error(error: std::io::Error) -> String {
     format!("MCP configuration I/O failed: {}", error.kind())
-}
-
-fn expand_env(value: &str) -> Result<String, String> {
-    expand_with(value, |key| {
-        std::env::var(key)
-            .map_err(|_| format!("MCP environment variable {key} is not set or is not UTF-8"))
-    })
-}
-fn expand_with(
-    value: &str,
-    lookup: impl Fn(&str) -> Result<String, String>,
-) -> Result<String, String> {
-    let valid = |key: &str| {
-        !key.is_empty()
-            && key
-                .bytes()
-                .enumerate()
-                .all(|(i, c)| c == b'_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()))
-    };
-    if let Some(key) = value.strip_prefix('$').filter(|key| valid(key)) {
-        return lookup(key);
-    }
-    let mut result = String::new();
-    let mut rest = value;
-    while let Some((before, after)) = rest.split_once("${") {
-        result.push_str(before);
-        let (key, after) = after
-            .split_once('}')
-            .ok_or("Unclosed MCP environment reference")?;
-        let key = key.strip_prefix("env:").unwrap_or(key);
-        if !valid(key) {
-            return Err("Invalid MCP environment variable name".into());
-        }
-        result.push_str(&lookup(key)?);
-        rest = after;
-    }
-    result.push_str(rest);
-    Ok(result)
 }
 
 struct McpProductPlugin {
@@ -549,9 +383,9 @@ mod tests {
         let library = McpLibrary::new(&agent, Some(&project), true);
         let entries = library.entries().unwrap();
         assert_eq!(entries.len(), 2);
-        assert!(!entries[0].enabled);
+        assert!(!entries[0].config.enabled());
         assert!(
-            matches!(&entries[1].transport, Some(McpTransport::Http { headers, .. }) if headers.is_empty())
+            matches!(entries[1].config.transport(), Some(McpTransport::Http { headers, .. }) if headers.is_empty())
         );
         let untrusted = McpLibrary::new(&agent, Some(&project), false);
         assert!(untrusted.read(McpScope::Project).is_err());
@@ -566,6 +400,49 @@ mod tests {
         // Malformed project bytes must not affect an untrusted generation.
         fs::write(project.join(".pi/mcp.json"), "broken").unwrap();
         assert!(untrusted.entries().is_ok());
+    }
+
+    #[test]
+    fn scoped_resolution_supplies_configuration_and_session_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        let project = dir.path().join("project");
+        fs::create_dir_all(&agent).unwrap();
+        fs::create_dir_all(project.join(".pi")).unwrap();
+        fs::write(
+            agent.join("mcp.json"),
+            r#"{"mcpServers":{"global":{"command":"server","cwd":"work"},"default":{"command":"server"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join(".pi/mcp.json"),
+            r#"{"mcpServers":{"project":{"command":"server","cwd":"work"}}}"#,
+        )
+        .unwrap();
+        let library = McpLibrary::new(&agent, Some(&project), true);
+        for entry in library.entries().unwrap() {
+            let expected = match entry.config.name() {
+                "global" => agent.join("work"),
+                "project" => project.join(".pi/work"),
+                "default" => project.clone(),
+                name => panic!("unexpected entry {name}"),
+            };
+            let resolved = library.resolve(entry).unwrap();
+            assert!(
+                matches!(resolved.transport, McpTransport::Stdio { cwd: Some(cwd), .. } if cwd == expected)
+            );
+        }
+        let global = McpLibrary::new(&agent, None, false);
+        let entry = global
+            .entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.config.name() == "default")
+            .unwrap();
+        let resolved = global.resolve(entry).unwrap();
+        assert!(
+            matches!(resolved.transport, McpTransport::Stdio { cwd: Some(cwd), .. } if cwd == agent)
+        );
     }
 
     #[test]
@@ -617,34 +494,11 @@ mod tests {
             .save(McpScope::Global, &doc.revision, EMPTY)
             .unwrap();
         assert!(
-            parse(
+            parse_config(
                 r#"{"mcpServers":{"old":{"type":"sse","url":"https://example.com/sse"}}}"#,
-                McpScope::Global
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn environment_expansion_is_deferred_and_never_runs_shell_commands() {
-        let input = r#"{"mcpServers":{"remote":{"type":"http","url":"${MCP_ENDPOINT}","headers":{"Authorization":"Bearer ${env:TOKEN}"}}}}"#;
-        assert!(parse(input, McpScope::Global).is_ok());
-        let lookup = |key: &str| match key {
-            "TOKEN" => Ok("secret".into()),
-            _ => Err("missing".into()),
-        };
-        assert_eq!(
-            expand_with("Bearer ${TOKEN}", lookup).unwrap(),
-            "Bearer secret"
-        );
-        assert_eq!(expand_with("$TOKEN", lookup).unwrap(), "secret");
-        assert_eq!(expand_with("${env:TOKEN}", lookup).unwrap(), "secret");
-        assert_eq!(
-            expand_with("$(do-not-execute)", lookup).unwrap(),
-            "$(do-not-execute)"
-        );
-        assert!(expand_with("${MISSING}", lookup).is_err());
-        assert!(expand_with("${UNCLOSED", lookup).is_err());
     }
 
     #[tokio::test]

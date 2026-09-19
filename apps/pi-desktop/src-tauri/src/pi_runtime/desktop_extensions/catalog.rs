@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{ProjectTrustEvaluation, ProjectTrustService};
+use pi_sdk::{ProjectTrustEvaluation, ProjectTrustService};
 
 const MAX_RESOURCE: u64 = 16 * 1024 * 1024;
 const MAX_CATALOG: usize = 64 * 1024 * 1024;
@@ -25,7 +25,7 @@ struct Manifest {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DesktopExtensionSource {
+pub(crate) struct DesktopExtensionSource {
     pub id: String,
     pub revision: String,
     pub javascript: String,
@@ -35,7 +35,7 @@ pub struct DesktopExtensionSource {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DesktopExtensionCatalog {
+pub(crate) struct DesktopExtensionCatalog {
     pub extensions: Vec<DesktopExtensionSource>,
     pub project_trusted: bool,
     pub error: Option<String>,
@@ -43,7 +43,7 @@ pub struct DesktopExtensionCatalog {
 
 /// A failure retains the authorization result, so revocation cannot be hidden by
 /// an unrelated malformed package. No read here creates a session or grants trust.
-pub fn read_catalog(
+pub(super) fn read_catalog(
     agent_dir: &Path,
     cwd: &Path,
     trust: &ProjectTrustService,
@@ -203,9 +203,7 @@ mod tests {
         let cwd = dir.path().join("project");
         package(&agent.join("desktop-extensions/global"), "example.global");
         package(&cwd.join(".pi/desktop-extensions/local"), "example.local");
-        let (trust, _) =
-            ProjectTrustService::new(&agent, None, false, pi_settings::DefaultProjectTrust::Ask)
-                .unwrap();
+        let (trust, _) = ProjectTrustService::new(&agent, None, false, Default::default()).unwrap();
         let untrusted = read_catalog(&agent, &cwd, &trust);
         assert!(!untrusted.project_trusted);
         assert_eq!(untrusted.extensions.len(), 1);
@@ -216,16 +214,47 @@ mod tests {
             &cwd.join(".pi/desktop-extensions/collision"),
             "example.global",
         );
-        assert!(
-            read_catalog(&agent, &cwd, &trust)
-                .error
-                .unwrap()
-                .contains("duplicate")
-        );
+        assert!(read_catalog(&agent, &cwd, &trust)
+            .error
+            .unwrap()
+            .contains("duplicate"));
         trust.remember(&cwd, false).unwrap();
         let revoked = read_catalog(&agent, &cwd, &trust);
         assert!(!revoked.project_trusted);
         assert_eq!(revoked.extensions.len(), 1);
+    }
+
+    #[test]
+    fn malformed_project_is_not_read_before_trust_and_revocation_survives_global_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        let cwd = dir.path().join("project");
+        let global = agent.join("desktop-extensions/global");
+        let project = cwd.join(".pi/desktop-extensions/local");
+        package(&global, "example.global");
+        package(&project, "example.local");
+        fs::write(project.join("pi-desktop.json"), "not json").unwrap();
+        let (trust, _) = ProjectTrustService::new(&agent, None, false, Default::default()).unwrap();
+
+        let untrusted = read_catalog(&agent, &cwd, &trust);
+        assert!(!untrusted.project_trusted);
+        assert!(untrusted.error.is_none());
+        assert_eq!(untrusted.extensions.len(), 1);
+        assert!(!agent.join("trust.json").exists());
+        assert!(!agent.join("trust.json.lock").exists());
+
+        trust.remember(&cwd, true).unwrap();
+        let trusted = read_catalog(&agent, &cwd, &trust);
+        assert!(trusted.project_trusted);
+        assert!(trusted.error.is_some());
+        assert!(trusted.extensions.is_empty());
+
+        fs::write(global.join("pi-desktop.json"), "not json").unwrap();
+        trust.remember(&cwd, false).unwrap();
+        let revoked = read_catalog(&agent, &cwd, &trust);
+        assert!(!revoked.project_trusted);
+        assert!(revoked.error.is_some());
+        assert!(revoked.extensions.is_empty());
     }
 
     #[test]

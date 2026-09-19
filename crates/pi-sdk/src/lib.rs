@@ -1,16 +1,20 @@
 //! Headless Pi product integration for CLI, desktop, and embedded adapters.
 
 mod builtin_providers;
+mod configuration;
 mod credentials;
-pub mod desktop_extensions;
 mod dynamic_providers;
 mod features;
 mod host;
 pub mod mcp;
 pub mod plugins;
 mod project_trust;
+mod runtime_composition;
+mod runtime_inventory;
 mod session_factory;
 pub mod skills;
+#[cfg(test)]
+mod test_support;
 
 pub use credentials::{StoredCredential, read_credentials, read_stored_credential};
 pub use features::Features;

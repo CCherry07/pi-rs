@@ -1,6 +1,6 @@
 //! Read-only product configuration for the Desktop skill-file management seam.
 //! Does not initialize providers, sessions, native plugins or background memory work.
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use pi_memory_loader::MemoryLoader;
 use pi_plugin_memory_hermes::managed_skill_roots;
@@ -27,11 +27,6 @@ pub(crate) fn runtime_skill_options(
             trusted,
         ));
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        options
-            .additional_paths
-            .push(PathBuf::from(home).join(".agents/skills"));
-    }
     options
 }
 
@@ -53,7 +48,7 @@ pub fn desktop_skill_library(
     let settings = SettingsManager::new(agent_dir).load(&SettingsContext::new(base, trusted));
     let mut config = Config::new(base.to_path_buf(), agent_dir.to_path_buf());
     config.runtime_settings = settings.effective().clone();
-    config.settings_skill_paths = crate::session_factory::scoped_setting_paths(
+    config.settings_skill_paths = crate::configuration::scoped_setting_paths(
         &settings.global().skills,
         agent_dir,
         &settings.project().skills,
@@ -80,6 +75,32 @@ pub fn desktop_skill_library(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_options_only_add_configured_and_cross_feature_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        let agent_dir = dir.path().join("agent");
+        let mut config = Config::new(cwd.clone(), agent_dir.clone());
+        config
+            .settings_skill_paths
+            .push(cwd.join("configured-skills"));
+        config.runtime_settings.enable_skill_commands = false;
+
+        let options = runtime_skill_options(&config, false, false);
+        assert!(options.include_defaults);
+        assert!(!options.project_trusted);
+        assert!(!options.enable_commands);
+        assert_eq!(options.additional_paths, config.settings_skill_paths);
+
+        let mut expected = config.settings_skill_paths.clone();
+        expected.extend(managed_skill_roots(&agent_dir, &cwd, false));
+        assert_eq!(
+            runtime_skill_options(&config, false, true).additional_paths,
+            expected
+        );
+    }
+
     #[test]
     fn disk_view_gates_projects_and_never_initializes_memory() {
         let dir = tempfile::tempdir().unwrap();

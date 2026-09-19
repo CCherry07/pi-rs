@@ -29,6 +29,7 @@ pub struct SkillLoaderOptions {
     pub cwd: PathBuf,
     pub agent_dir: PathBuf,
     pub additional_paths: Vec<PathBuf>,
+    /// Includes project roots, agent-dir skills, and the user `~/.agents/skills` root.
     pub include_defaults: bool,
     pub enable_commands: bool,
     #[serde(default = "default_project_trusted")]
@@ -482,6 +483,26 @@ fn skill_roots(
     defaults: bool,
     project_trusted: bool,
 ) -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    skill_roots_with_home(
+        cwd,
+        agent_dir,
+        extra,
+        defaults,
+        project_trusted,
+        home.as_deref(),
+    )
+}
+
+fn skill_roots_with_home(
+    cwd: &Path,
+    agent_dir: &Path,
+    extra: &[PathBuf],
+    defaults: bool,
+    project_trusted: bool,
+    home: Option<&Path>,
+) -> Vec<PathBuf> {
+    let user_skills = home.map(|home| home.join(AGENTS_DIR_NAME).join("skills"));
     let mut roots = Vec::new();
     if defaults {
         if project_trusted {
@@ -489,7 +510,7 @@ fn skill_roots(
             if let Some(root) = project_root(cwd) {
                 roots.push(root.join(HERMES_DIR_NAME).join("skills"));
             }
-            roots.extend(ancestor_agent_skill_dirs(cwd));
+            roots.extend(ancestor_agent_skill_dirs(cwd, user_skills.as_deref()));
         }
         roots.push(agent_dir.join("skills"));
     }
@@ -500,6 +521,11 @@ fn skill_roots(
             cwd.join(path)
         }
     }));
+    // Keep the product's first-root-wins precedence: explicit and managed roots
+    // precede the user cross-tool default, which is independent of project trust.
+    if defaults {
+        roots.extend(user_skills.map(|path| cwd.join(path)));
+    }
 
     roots
 }
@@ -568,11 +594,9 @@ fn collect_skill_root(
     }
 }
 
-fn ancestor_agent_skill_dirs(cwd: &Path) -> Vec<PathBuf> {
+fn ancestor_agent_skill_dirs(cwd: &Path, user_skills: Option<&Path>) -> Vec<PathBuf> {
     let git_root = project_root(cwd);
-    let user_skills = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| absolute(&home.join(AGENTS_DIR_NAME).join("skills")));
+    let user_skills = user_skills.map(absolute);
     let mut roots = Vec::new();
     for ancestor in cwd.ancestors() {
         let skills = ancestor.join(AGENTS_DIR_NAME).join("skills");
@@ -1001,11 +1025,168 @@ mod tests {
         std::fs::write(agent_dir.join("skills/a/SKILL.md"), body).unwrap();
         std::fs::write(cwd.join(".pi/skills/b/SKILL.md"), body).unwrap();
 
-        let plugin = SkillsPlugin::load(SkillLoaderOptions::new(&cwd, &agent_dir));
+        let (skills, diagnostics) = load_skill_roots(skill_roots_with_home(
+            &cwd,
+            &agent_dir,
+            &[],
+            true,
+            true,
+            None,
+        ));
 
-        assert_eq!(plugin.skills().len(), 1);
-        assert_eq!(plugin.diagnostics().len(), 1);
-        assert_eq!(plugin.diagnostics()[0].kind, SkillDiagnosticKind::Collision);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].file_path, cwd.join(".pi/skills/b/SKILL.md"));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].kind, SkillDiagnosticKind::Collision);
+    }
+
+    #[test]
+    fn default_roots_preserve_product_order_with_user_agents_skills_last() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path().join("repo");
+        let cwd = repo.join("packages/app");
+        let agent_dir = directory.path().join("agent");
+        let home = directory.path().join("home");
+        let managed = agent_dir.join("managed/skills");
+        let extra = vec![PathBuf::from("configured-skills"), managed.clone()];
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        assert_eq!(
+            skill_roots_with_home(&cwd, &agent_dir, &extra, true, true, Some(&home)),
+            vec![
+                cwd.join(".pi/skills"),
+                repo.join(".hermes/skills"),
+                cwd.join(".agents/skills"),
+                repo.join("packages/.agents/skills"),
+                repo.join(".agents/skills"),
+                agent_dir.join("skills"),
+                cwd.join("configured-skills"),
+                managed.clone(),
+                home.join(".agents/skills"),
+            ]
+        );
+        assert_eq!(
+            skill_roots_with_home(&cwd, &agent_dir, &extra, false, true, Some(&home)),
+            vec![cwd.join("configured-skills"), managed]
+        );
+        assert_eq!(
+            skill_roots_with_home(&cwd, &agent_dir, &[], true, false, None),
+            vec![agent_dir.join("skills")]
+        );
+        assert_eq!(
+            skill_roots_with_home(&cwd, &agent_dir, &[], true, false, Some(Path::new("home"))),
+            vec![agent_dir.join("skills"), cwd.join("home/.agents/skills")]
+        );
+    }
+
+    #[test]
+    fn user_agents_default_is_trusted_even_at_home_and_respects_include_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let agent_dir = directory.path().join("agent");
+        let user_root = home.join(".agents/skills");
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        std::fs::create_dir_all(home.join(".pi/skills/broken")).unwrap();
+        std::fs::write(
+            home.join(".pi/skills/broken/SKILL.md"),
+            "invalid project skill",
+        )
+        .unwrap();
+        std::fs::create_dir_all(user_root.join("user-only")).unwrap();
+        std::fs::write(
+            user_root.join("user-only/SKILL.md"),
+            "---\nname: user-only\ndescription: User skill\n---\nbody",
+        )
+        .unwrap();
+
+        let trusted_roots = skill_roots_with_home(&home, &agent_dir, &[], true, true, Some(&home));
+        assert_eq!(
+            trusted_roots
+                .iter()
+                .filter(|root| **root == user_root)
+                .count(),
+            1
+        );
+        assert_eq!(trusted_roots.last(), Some(&user_root));
+        let untrusted_roots =
+            skill_roots_with_home(&home, &agent_dir, &[], true, false, Some(&home));
+        assert_eq!(
+            untrusted_roots,
+            vec![agent_dir.join("skills"), user_root.clone()]
+        );
+        let (skills, diagnostics) = load_skill_roots(untrusted_roots);
+        assert!(diagnostics.is_empty());
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "user-only");
+
+        for trusted in [false, true] {
+            assert!(
+                skill_roots_with_home(&home, &agent_dir, &[], false, trusted, Some(&home))
+                    .is_empty()
+            );
+            // Explicitly supplied paths remain available even when defaults are disabled.
+            assert_eq!(
+                skill_roots_with_home(
+                    &home,
+                    &agent_dir,
+                    std::slice::from_ref(&user_root),
+                    false,
+                    trusted,
+                    Some(&home)
+                ),
+                vec![user_root.clone()]
+            );
+        }
+    }
+
+    #[test]
+    fn user_agents_default_keeps_explicit_collision_winner_and_deduplicates_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path().join("project");
+        let agent_dir = directory.path().join("agent");
+        let home = directory.path().join("home");
+        let user_root = home.join(".agents/skills");
+        let explicit = directory.path().join("explicit");
+        for root in [&explicit, &user_root] {
+            std::fs::create_dir_all(root.join("shared")).unwrap();
+            std::fs::write(
+                root.join("shared/SKILL.md"),
+                "---\nname: shared\ndescription: Shared skill\n---\nbody",
+            )
+            .unwrap();
+        }
+        let extra = vec![explicit.clone(), user_root.clone()];
+        let (skills, diagnostics) = load_skill_roots(skill_roots_with_home(
+            &cwd,
+            &agent_dir,
+            &extra,
+            true,
+            false,
+            Some(&home),
+        ));
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].file_path, explicit.join("shared/SKILL.md"));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].kind, SkillDiagnosticKind::Collision);
+        assert_eq!(diagnostics[0].path, user_root.join("shared/SKILL.md"));
+
+        #[cfg(unix)]
+        {
+            let alias = directory.path().join("user-alias");
+            std::os::unix::fs::symlink(&user_root, &alias).unwrap();
+            let (skills, diagnostics) = load_skill_roots(skill_roots_with_home(
+                &cwd,
+                &agent_dir,
+                std::slice::from_ref(&alias),
+                true,
+                false,
+                Some(&home),
+            ));
+            assert_eq!(skills.len(), 1);
+            assert_eq!(skills[0].file_path, alias.join("shared/SKILL.md"));
+            assert!(diagnostics.is_empty());
+        }
     }
 
     #[test]
@@ -1119,14 +1300,18 @@ mod tests {
             "---\nname: project\ndescription: project\n---\nbody",
         )
         .unwrap();
-        let mut options = SkillLoaderOptions::new(&cwd, &agent_dir);
-        options.project_trusted = false;
+        let (skills, diagnostics) = load_skill_roots(skill_roots_with_home(
+            &cwd,
+            &agent_dir,
+            &[],
+            true,
+            false,
+            None,
+        ));
 
-        let plugin = SkillsPlugin::load(options);
-
+        assert!(diagnostics.is_empty());
         assert_eq!(
-            plugin
-                .skills()
+            skills
                 .iter()
                 .map(|skill| skill.name.as_str())
                 .collect::<Vec<_>>(),
@@ -1191,7 +1376,12 @@ mod tests {
 
         let plugin = SkillsPlugin::load(options);
 
-        assert!(!plugin.skills().iter().any(|skill| skill.name == "release"));
+        assert!(
+            !plugin
+                .skills()
+                .iter()
+                .any(|skill| skill.file_path.starts_with(&repo))
+        );
     }
 
     #[tokio::test]
