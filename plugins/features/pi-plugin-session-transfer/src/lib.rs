@@ -1,14 +1,14 @@
 #![forbid(unsafe_code)]
 
 pub mod export;
+pub mod import;
 
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 
-use self::export::{
-    export_html_file, export_jsonl_file, resolve_user_path, validate_session_import,
-};
+use self::export::{export_html_file, export_jsonl_file, resolve_user_path};
+use self::import::{import_session_file, validate_session_import};
 use async_trait::async_trait;
 use pi_core::PluginId;
 use pi_plugin::{
@@ -20,8 +20,8 @@ const DEFAULT_SHARE_VIEWER_URL: &str = "https://pi.dev/session/";
 
 /// First-party session portability commands.
 ///
-/// The plugin owns command policy and orchestration. Durable session format
-/// operations remain in `pi-session`, and confirmation rendering remains in
+/// The plugin owns portability codecs, file transactions, and command policy.
+/// V4 storage and session replacement remain in `pi-session`; confirmation rendering stays in
 /// the product frontend behind `UiContext`.
 pub struct SessionTransferPlugin {
     uploader: Arc<dyn GistUploader>,
@@ -147,7 +147,7 @@ impl Command for ImportCommand {
         let staged_source = source.clone();
         let staged_destination = destination.clone();
         let mut staged = tokio::task::spawn_blocking(move || {
-            pi_session::import_session_file(&staged_source, &staged_destination)?;
+            import_session_file(&staged_source, &staged_destination)?;
             Ok::<_, pi_session::SessionError>(StagedImport::new(staged_destination))
         })
         .await
@@ -383,6 +383,7 @@ fn viewer_url(base: &str, gist_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use pi_agent::AgentOptions;
     use pi_core::{Message, UserMessage};
@@ -390,8 +391,10 @@ mod tests {
     use pi_runtime::{PiRuntime, SystemPrompt};
     use pi_session::{
         AgentSessionOptions, MultiSessionManager, PiPluginContext, PiSession, PluginContextBinding,
-        PluginUiBridge, PreparedSessionGeneration, SessionError, SessionGenerationFactory,
-        SessionGenerationRequest, SubmitOutcome,
+        PluginUiBridge, PreparedSessionGeneration, SessionBeforeSwitchEvent,
+        SessionBeforeSwitchResult, SessionError, SessionGenerationFactory,
+        SessionGenerationRequest, SessionPluginContext, SessionShutdownEvent, SessionStartEvent,
+        SubmitOutcome,
     };
     use pi_test_support::ScriptedProviderPlugin;
 
@@ -449,6 +452,58 @@ mod tests {
         binding: PluginContextBinding,
         ui: Arc<RecordingUi>,
         uploader: Arc<RecordingUploader>,
+        lifecycle: Arc<RecordingLifecycle>,
+    }
+
+    #[derive(Default)]
+    struct RecordingLifecycle {
+        events: Mutex<Vec<String>>,
+        cancel_switch: AtomicBool,
+        fail_prepare: AtomicBool,
+    }
+
+    impl RecordingLifecycle {
+        fn record(&self, event: String) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    struct LifecyclePlugin(Arc<RecordingLifecycle>);
+
+    #[pi_plugin::plugin]
+    impl Plugin for LifecyclePlugin {
+        fn id(&self) -> PluginId {
+            PluginId::new("transfer-test-lifecycle")
+        }
+
+        async fn session_before_switch(
+            &self,
+            _context: &SessionPluginContext,
+            event: &SessionBeforeSwitchEvent,
+        ) -> Result<Option<SessionBeforeSwitchResult>, pi_session::PluginError> {
+            self.0.record(format!("before:{:?}", event.reason));
+            Ok(Some(SessionBeforeSwitchResult {
+                cancel: self.0.cancel_switch.load(Ordering::Acquire),
+            }))
+        }
+
+        async fn session_start(
+            &self,
+            _context: &SessionPluginContext,
+            event: &SessionStartEvent,
+        ) -> Result<(), pi_session::PluginError> {
+            self.0.record(format!("start:{:?}", event.reason));
+            Ok(())
+        }
+
+        async fn session_shutdown(
+            &self,
+            _context: &SessionPluginContext,
+            event: &SessionShutdownEvent,
+        ) -> Result<(), pi_session::PluginError> {
+            self.0.record(format!("shutdown:{:?}", event.reason));
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -461,12 +516,20 @@ mod tests {
             &self,
             request: SessionGenerationRequest,
         ) -> Result<PreparedSessionGeneration, SessionError> {
+            self.lifecycle
+                .record(format!("prepare:{:?}", request.reason));
+            if self.lifecycle.fail_prepare.load(Ordering::Acquire) {
+                return Err(SessionError::Runtime(
+                    "fixture preparation failed".to_string(),
+                ));
+            }
             let plugin_context = Arc::new(
                 PiPluginContext::new(PresentationMode::Tui, true, self.binding.clone())
                     .with_ui_bridge(self.ui.clone()),
             );
             let context_access: Arc<dyn PluginContext> = plugin_context.clone();
             let runtime = PiRuntime::builder()
+                .plugin(LifecyclePlugin(self.lifecycle.clone()))
                 .plugin(SessionTransferPlugin {
                     uploader: self.uploader.clone(),
                 })
@@ -524,10 +587,12 @@ mod tests {
         let binding = PluginContextBinding::new();
         let ui = Arc::new(RecordingUi::default());
         let uploader = Arc::new(RecordingUploader::default());
+        let lifecycle = Arc::new(RecordingLifecycle::default());
         let sessions = MultiSessionManager::new(TestFactory {
             binding,
             ui: ui.clone(),
             uploader: uploader.clone(),
+            lifecycle: lifecycle.clone(),
         });
         let handle = sessions
             .create_session(&workspace, session_directory.join("current.jsonl"))
@@ -598,6 +663,18 @@ mod tests {
         assert!(handle.path().starts_with(&session_directory));
         assert!(jsonl.exists(), "import keeps the portable source file");
         assert_eq!(handle.current().log().load().unwrap().messages().len(), 1);
+        assert!(current.is_closed());
+        assert_eq!(
+            *lifecycle.events.lock().unwrap(),
+            [
+                "prepare:Startup",
+                "start:Startup",
+                "before:Resume",
+                "prepare:Resume",
+                "shutdown:Resume",
+                "start:Resume"
+            ]
+        );
         {
             let requests = ui.requests.lock().unwrap();
             assert_eq!(requests.len(), 1);
@@ -606,6 +683,70 @@ mod tests {
         }
 
         sessions.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unsuccessful_import_keeps_the_source_and_current_session_and_removes_staging() {
+        for (cancel_switch, fail_prepare, invalid_source) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let session_directory = directory.path().join("sessions");
+            std::fs::create_dir(&session_directory).unwrap();
+            let source = directory.path().join("portable.jsonl");
+            if invalid_source {
+                // The header passes inspection, but the legacy file cannot be converted.
+                std::fs::write(
+                    &source,
+                    "{\"type\":\"session\",\"version\":3,\"id\":\"legacy\"}\n",
+                )
+                .unwrap();
+            } else {
+                pi_session::SessionLog::create(
+                    &source,
+                    pi_session::SessionHeader::new("portable", directory.path()),
+                )
+                .unwrap()
+                .append_message(Message::User(UserMessage::text("keep me", 1)))
+                .unwrap();
+            }
+            let original_source = std::fs::read(&source).unwrap();
+            let lifecycle = Arc::new(RecordingLifecycle::default());
+            let sessions = MultiSessionManager::new(TestFactory {
+                binding: PluginContextBinding::new(),
+                ui: Arc::new(RecordingUi::default()),
+                uploader: Arc::new(RecordingUploader::default()),
+                lifecycle: lifecycle.clone(),
+            });
+            let handle = sessions
+                .create_session(directory.path(), session_directory.join("current.jsonl"))
+                .await
+                .unwrap();
+            let current = handle.current();
+            lifecycle
+                .cancel_switch
+                .store(cancel_switch, Ordering::Release);
+            lifecycle
+                .fail_prepare
+                .store(fail_prepare, Ordering::Release);
+
+            let result = current
+                .submit(format!("/import {}", source.display()))
+                .await;
+
+            if cancel_switch {
+                assert!(matches!(result.unwrap(), SubmitOutcome::Handled));
+            } else {
+                assert!(result.is_err());
+            }
+            assert!(Arc::ptr_eq(&current, &handle.current()));
+            assert!(!current.is_closed());
+            assert_eq!(std::fs::read(&source).unwrap(), original_source);
+            assert_eq!(std::fs::read_dir(&session_directory).unwrap().count(), 0);
+            sessions.shutdown().await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -630,6 +771,7 @@ mod tests {
             binding,
             ui: Arc::new(RecordingUi::rejecting()),
             uploader: Arc::new(RecordingUploader::default()),
+            lifecycle: Arc::new(RecordingLifecycle::default()),
         });
         let handle = sessions
             .create_session(&workspace, session_directory.join("current.jsonl"))

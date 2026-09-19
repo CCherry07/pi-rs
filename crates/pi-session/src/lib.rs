@@ -56,11 +56,10 @@ pub use isolated_context::InheritedSessionContext;
 pub use isolated_session::{IsolatedSessionObservation, IsolatedSessionUsageSnapshot};
 pub use journal::{
     EffectiveLaneConfiguration, ExactSessionIdResolution, JsonlSessionRepo, LaneOperationState,
-    LaneReductionInput, LaneReductionResult, LaneState, LaneStepState, LegacySessionImportReport,
-    NewestOwnEntryState, OperationTargetState, RecordLogCorruption, RecordLogCorruptionReason,
-    RecordLogSlice, SessionFileFormat, SessionLog, TerminalFailureSource, TerminalFailureState,
-    ToolBatchCallState, ToolBatchState, aggregate_document_usage, aggregate_session_usage,
-    import_session_file, inspect_session_file, reduce_lane_state, session_entry_usage,
+    LaneReductionInput, LaneReductionResult, LaneState, LaneStepState, NewestOwnEntryState,
+    OperationTargetState, RecordLogCorruption, RecordLogCorruptionReason, RecordLogSlice,
+    SessionLog, TerminalFailureSource, TerminalFailureState, ToolBatchCallState, ToolBatchState,
+    aggregate_document_usage, aggregate_session_usage, reduce_lane_state, session_entry_usage,
     validate_record_log,
 };
 pub use multi_session_manager::{

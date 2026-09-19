@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -8,12 +8,12 @@ use pi_plugin::Plugin;
 use pi_runtime::{PiRuntime, PiRuntimeBuilder};
 use tokio::sync::watch;
 
-use crate::journal::{comparable_path, sibling_transaction_path};
+use crate::journal::comparable_path;
 use crate::{
     AgentSession, AgentSessionOptions, ForkOptions, ForkPosition, PiSession, PreparedAgentSession,
     SessionBeforeForkEvent, SessionBeforeSwitchEvent, SessionError, SessionHeader, SessionLog,
     SessionShutdownEvent, SessionShutdownReason, SessionStartEvent, SessionStartReason,
-    SessionSwitchReason, import_session_file,
+    SessionSwitchReason,
 };
 
 #[derive(Debug, Clone)]
@@ -314,10 +314,6 @@ pub(crate) enum ResolvedSessionTransition {
     Resume {
         path: PathBuf,
     },
-    Import {
-        source: PathBuf,
-        destination: PathBuf,
-    },
     Fork {
         entry_id: String,
         position: ForkPosition,
@@ -338,86 +334,6 @@ pub(crate) struct AgentSessionRuntime {
     current: watch::Sender<Arc<AgentSession>>,
     factory: Arc<dyn SessionGenerationFactory>,
     generation_overlay: SessionGenerationOverlay,
-}
-
-struct ImportedFileTransaction {
-    destination: PathBuf,
-    backup: Option<PathBuf>,
-    owns_destination: bool,
-    committed: bool,
-}
-
-impl ImportedFileTransaction {
-    fn stage(source: &Path, destination: &Path) -> Result<Self, SessionError> {
-        if comparable_path(source) == comparable_path(destination) {
-            SessionLog::open(source)?;
-            return Ok(Self {
-                destination: destination.to_path_buf(),
-                backup: None,
-                owns_destination: false,
-                committed: false,
-            });
-        }
-        if destination.is_dir() {
-            return Err(SessionError::Storage(format!(
-                "import destination is a directory: {}",
-                destination.display()
-            )));
-        }
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let temporary = sibling_transaction_path(destination, "import");
-        let backup = destination
-            .exists()
-            .then(|| sibling_transaction_path(destination, "backup"));
-        let staged = (|| {
-            // Copy current v4 files or migrate coding-agent v1-v3 into the
-            // staging path. Validation and torn-tail repair apply only to the
-            // staged file; the user's source is never mutated by import.
-            import_session_file(source, &temporary)?;
-            if let Some(backup) = &backup {
-                std::fs::rename(destination, backup)?;
-            }
-            if let Err(error) = std::fs::rename(&temporary, destination) {
-                if let Some(backup) = &backup {
-                    let _ = std::fs::rename(backup, destination);
-                }
-                return Err(error.into());
-            }
-            Ok::<(), SessionError>(())
-        })();
-        if staged.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        staged?;
-        Ok(Self {
-            destination: destination.to_path_buf(),
-            backup,
-            owns_destination: true,
-            committed: false,
-        })
-    }
-
-    fn commit(mut self) {
-        self.committed = true;
-        if let Some(backup) = &self.backup {
-            let _ = std::fs::remove_file(backup);
-        }
-    }
-}
-
-impl Drop for ImportedFileTransaction {
-    fn drop(&mut self) {
-        if self.committed || !self.owns_destination {
-            return;
-        }
-        let _ = std::fs::remove_file(&self.destination);
-        if let Some(backup) = &self.backup {
-            let _ = std::fs::rename(backup, &self.destination);
-        }
-    }
 }
 
 enum ResolvedSessionTarget {
@@ -569,8 +485,7 @@ impl AgentSessionRuntime {
         }
         match transition {
             transition @ (ResolvedSessionTransition::New { .. }
-            | ResolvedSessionTransition::Resume { .. }
-            | ResolvedSessionTransition::Import { .. }) => {
+            | ResolvedSessionTransition::Resume { .. }) => {
                 self.replace_with_switch(current, transition).await
             }
             ResolvedSessionTransition::Fork { entry_id, position } => {
@@ -580,8 +495,7 @@ impl AgentSessionRuntime {
         }
     }
 
-    /// Executes the shared Pi switch transaction for new, resume, and import.
-    /// Import keeps its staged-file guard until the replacement is published.
+    /// Executes the shared Pi switch transaction for new and resume.
     async fn replace_with_switch(
         &self,
         current: Arc<AgentSession>,
@@ -596,10 +510,6 @@ impl AgentSessionRuntime {
                 reason: SessionSwitchReason::Resume,
                 target_session_file: Some(path.clone()),
             },
-            ResolvedSessionTransition::Import { destination, .. } => SessionBeforeSwitchEvent {
-                reason: SessionSwitchReason::Resume,
-                target_session_file: Some(destination.clone()),
-            },
             ResolvedSessionTransition::Fork { .. } | ResolvedSessionTransition::Reload => {
                 unreachable!("fork and reload have dedicated replacement transactions")
             }
@@ -613,7 +523,6 @@ impl AgentSessionRuntime {
         }
 
         let previous_session_file = current.log().path().to_path_buf();
-        let mut imported = None;
         let (target, start_reason, shutdown_reason, target_session_file) = match transition {
             ResolvedSessionTransition::New {
                 cwd,
@@ -646,18 +555,6 @@ impl AgentSessionRuntime {
                     Some(path),
                 )
             }
-            ResolvedSessionTransition::Import {
-                source,
-                destination,
-            } => {
-                imported = Some(ImportedFileTransaction::stage(&source, &destination)?);
-                (
-                    AgentSessionRuntimeTarget::open(&destination),
-                    SessionStartReason::Resume,
-                    SessionShutdownReason::Resume,
-                    Some(destination),
-                )
-            }
             ResolvedSessionTransition::Fork { .. } | ResolvedSessionTransition::Reload => {
                 unreachable!("fork and reload have dedicated replacement transactions")
             }
@@ -676,9 +573,6 @@ impl AgentSessionRuntime {
             },
         )
         .await?;
-        if let Some(imported) = imported {
-            imported.commit();
-        }
         Ok(AgentSessionReplacement::Replaced)
     }
 
@@ -1374,75 +1268,6 @@ mod tests {
                 "start:Resume",
             ]
         );
-        manager.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn import_copies_a_valid_v4_session_and_uses_resume_lifecycle() {
-        let directory = tempfile::tempdir().unwrap();
-        let source_directory = tempfile::tempdir().unwrap();
-        let current_path = directory.path().join("current.jsonl");
-        let destination = directory.path().join("imported.jsonl");
-        let source = source_directory.path().join("imported.jsonl");
-        let imported_log =
-            SessionLog::create(&source, SessionHeader::new("imported", directory.path())).unwrap();
-        imported_log
-            .append_message(Message::User(UserMessage::text("portable", 1)))
-            .unwrap();
-        let factory = TestFactory::new();
-        let manager = MultiSessionManager::new(factory.clone());
-        let session = manager
-            .create_session(directory.path(), &current_path)
-            .await
-            .unwrap();
-        let current = session.current();
-
-        let outcome = session.import_session(&source).await.unwrap();
-
-        assert_eq!(outcome, AgentSessionReplacement::Replaced);
-        assert!(current.is_closed());
-        assert_eq!(session.path(), destination);
-        assert_eq!(session.current().log().header().id, "imported");
-        assert_eq!(session.current().log().load().unwrap().messages().len(), 1);
-        assert!(source.exists());
-        assert_eq!(
-            factory.events(),
-            vec![
-                "prepare:Startup",
-                "start:Startup",
-                "before:Resume",
-                "prepare:Resume",
-                "shutdown:Resume",
-                "start:Resume",
-            ]
-        );
-        manager.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn failed_import_leaves_the_source_and_current_session_unchanged() {
-        let directory = tempfile::tempdir().unwrap();
-        let source_directory = tempfile::tempdir().unwrap();
-        let current_path = directory.path().join("current.jsonl");
-        let destination = directory.path().join("legacy.jsonl");
-        let source = source_directory.path().join("legacy.jsonl");
-        let legacy = r#"{"type":"session","version":3,"id":"legacy"}
-"#;
-        std::fs::write(&source, legacy).unwrap();
-        let manager = MultiSessionManager::new(TestFactory::new());
-        let session = manager
-            .create_session(directory.path(), &current_path)
-            .await
-            .unwrap();
-        let current = session.current();
-
-        let error = session.import_session(&source).await.unwrap_err();
-
-        assert!(matches!(error, MultiSessionManagerError::Session(_)));
-        assert!(Arc::ptr_eq(&current, &session.current()));
-        assert!(!current.is_closed());
-        assert!(!destination.exists());
-        assert_eq!(std::fs::read_to_string(source).unwrap(), legacy);
         manager.shutdown().await.unwrap();
     }
 

@@ -568,7 +568,7 @@ stranded without a managed session. `PiSession` uses the same rule for replaceme
 `ManagedSessionReplacement` owns the operation and its write guard through preparation, ordered
 old-session shutdown, new-session start, and watch publication, detaching that remainder only if the
 requester is dropped. Its unresolved `SessionReplacementRequest` owns manager
-policy such as active-path checks and import destination selection, then resolves to one
+policy such as active-path checks, then resolves to one
 `ResolvedSessionTransition`. The internal runtime exposes only `transition`; the manager write guard
 serializes that call through publication, while `AgentSession::begin_replacement` excludes mutations
 of the captured session. The runtime therefore needs no second transition mutex: it captures the
@@ -578,8 +578,7 @@ not maintain a parallel closed flag.
 Runtime preparation and lifecycle failures use `SessionError` directly; manager `Closed` and
 `UnknownSession` policy is decided before crossing this seam. Dropping the requesting future after
 that point discards only its result; it cannot leave a closed old session unpublished or release
-target-path ownership early. Import destination resolution also happens inside this boundary so it
-observes the current path protected by the same guard. This is a Rust cancellation-safety guarantee
+target-path ownership early. This is a Rust cancellation-safety guarantee
 at the product-session seam, not a Pi wire or lifecycle-order divergence.
 `pi-plugin-manager::loader` discovers global manifests and trusted project manifests, resolves explicit
 `--plugin` paths, verifies a C-layout descriptor before resolving an exact-build Rust constructor,
@@ -2215,24 +2214,34 @@ Cancellation before the manager lifecycle gate is acquired performs no preparati
 acquisition, cancellation drops only the caller's result while the guarded replacement finishes
 publication. Preparation failure leaves the current session open, while a successful replacement
 closes stale `AgentSession` handles so they reject later mutations. New,
-resume, reload, fork, and import all use this transaction. Fork creates a Pi v4 branch copy before
-preparation and removes it if candidate preparation fails. Import first inspects the source as
-native v4 or Pi coding-agent v1/v2/v3. Native files are validated and copied; legacy files are
-converted into a newly created v4 destination while preserving source files, tree IDs and parents,
-timestamps, parent-session paths, custom messages, compaction context, and unknown agent-message
-extensions. v1 compaction indices become entry IDs, v2 hook messages become custom messages, and v3
-retained tails are materialized explicitly. Every line is validated before publication; a failed
-conversion or candidate generation removes the staged destination. Import deliberately uses Pi's
-resume lifecycle reasons rather than adding an import-only session hook.
+resume, reload, and fork use this transaction. Fork creates a Pi v4 branch copy before
+preparation and removes it if candidate preparation fails.
 
-`pi-session` exposes the narrow storage and migration primitives used for portability:
-`SessionLog::export_branch`, session-file inspection, and legacy import. The first-party
-`SessionTransferPlugin` owns the complete `/export`, `/import`, and `/share` policy in every product
-generation, including safe self-contained HTML serialization, destination selection, path
-expansion, and GitHub CLI/viewer-URL behavior. Import validates and stages a unique v4 destination,
-requests confirmation through the semantic `UiContext`, then reuses command-session `switch`;
-cancellation or replacement failure removes the staged file. The CLI only renders the generic
-confirmation request and never switches on those command names.
+`pi-session` owns v4 storage and exposes `SessionLog::main_branch_snapshot`, a read-only projection
+of the active branch, lane pointer, name, and labels into consistently sequenced mutations. It has
+no import-specific manager method, transition variant, destination policy, or compatibility codec.
+The first-party `SessionTransferPlugin` owns `/export`, `/import`, and `/share`, including JSONL and
+safe self-contained HTML serialization, atomic destination writes, path expansion, and GitHub
+CLI/viewer-URL behavior. JSONL export omits abandoned branches and runtime records and clears
+parent-session provenance from the exported header without changing the source log.
+
+The transfer plugin also owns session-file inspection and coding-agent v1/v2/v3 conversion. Native
+v4 files are copied and validated; legacy files are converted into a new v4 destination while
+preserving source files, tree IDs and parents, timestamps, parent-session paths, custom messages,
+compaction context, and unknown agent-message extensions. v1 compaction indices become entry IDs,
+v2 hook messages become custom messages, and v3 retained tails are materialized explicitly.
+Import checks the source format, requests confirmation through semantic `UiContext`, stages a unique
+destination, then uses the existing command-session `switch` capability. A cancelled switch or
+failed conversion/preparation removes the staged file. Import uses Pi's resume lifecycle reasons;
+the generic session runtime knows only that it is opening an existing v4 log. The CLI renders the
+generic confirmation and never switches on transfer command names.
+
+This ownership is a deliberate Rust plugin-first decomposition of Pi's
+`core/session-export.ts` and `core/agent-session-runtime.ts::importFromJsonl`. It preserves the
+existing Rust v4 wire format, lazy session materialization, and resume event ordering. Rust callers
+use `pi_plugin_session_transfer::export::export_branch` and
+`pi_plugin_session_transfer::import::import_session_file` instead of the removed `pi-session`
+portability APIs; interactive imports remain `/import` commands.
 
 ## Scheduled tasks
 

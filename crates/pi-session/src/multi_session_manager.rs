@@ -23,8 +23,7 @@ use crate::journal::comparable_path;
 use crate::{
     AgentSession, AgentSessionInitialModelSource, AgentSessionInitialState,
     AgentSessionReplacement, ForkPosition, IsolatedSessionObservation, SessionError,
-    SessionFileFormat, SessionGenerationFactory, SessionGenerationOverlay, SessionLog,
-    inspect_session_file,
+    SessionGenerationFactory, SessionGenerationOverlay, SessionLog,
 };
 #[cfg(test)]
 use crate::{PreparedSessionGeneration, SessionGenerationActivation, SessionGenerationRequest};
@@ -77,10 +76,6 @@ pub enum MultiSessionManagerError {
     UnknownSession,
     #[error("session path is already active: {0}")]
     SessionAlreadyActive(PathBuf),
-    #[error("import path has no file name: {0}")]
-    InvalidImportPath(PathBuf),
-    #[error("cannot import over the active session file: {0}")]
-    ImportWouldReplaceCurrent(PathBuf),
     #[error("invalid isolated session request: {0}")]
     InvalidIsolatedRequest(String),
 }
@@ -93,9 +88,6 @@ enum SessionReplacementRequest {
     },
     Resume {
         path: PathBuf,
-    },
-    Import {
-        source: PathBuf,
     },
     Fork {
         entry_id: String,
@@ -126,34 +118,6 @@ impl SessionReplacementRequest {
             Self::Resume { path } => {
                 manager.ensure_path_available(owner, &path)?;
                 Ok(ResolvedSessionTransition::Resume { path })
-            }
-            Self::Import { source } => {
-                let file_name = source
-                    .file_name()
-                    .ok_or_else(|| MultiSessionManagerError::InvalidImportPath(source.clone()))?;
-                let current_path = owner.path();
-                let mut destination = current_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(file_name);
-                if comparable_path(&source) == comparable_path(&destination)
-                    && matches!(
-                        inspect_session_file(&source)?,
-                        SessionFileFormat::Legacy { .. }
-                    )
-                {
-                    destination = legacy_import_destination(&destination);
-                }
-                if comparable_path(&current_path) == comparable_path(&destination) {
-                    return Err(MultiSessionManagerError::ImportWouldReplaceCurrent(
-                        destination,
-                    ));
-                }
-                manager.ensure_path_available(owner, &destination)?;
-                Ok(ResolvedSessionTransition::Import {
-                    source,
-                    destination,
-                })
             }
             Self::Fork { entry_id, position } => {
                 Ok(ResolvedSessionTransition::Fork { entry_id, position })
@@ -972,18 +936,6 @@ impl PiSession {
             .await
     }
 
-    /// Imports a v4 JSONL file, or migrates a coding-agent v1-v3 file, into the
-    /// current session directory and switches to it using resume lifecycle events.
-    pub async fn import_session(
-        &self,
-        source: impl Into<PathBuf>,
-    ) -> Result<AgentSessionReplacement, MultiSessionManagerError> {
-        self.replace(SessionReplacementRequest::Import {
-            source: source.into(),
-        })
-        .await
-    }
-
     pub async fn fork_session(
         &self,
         entry_id: impl Into<String>,
@@ -1087,18 +1039,6 @@ fn resolve_isolated_initial_state(
             .unwrap_or(parent_state.thinking_level),
         active_tools,
     })
-}
-
-fn legacy_import_destination(source: &Path) -> PathBuf {
-    let stem = source
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("session");
-    let candidate = source.with_file_name(format!("{stem}.v4.jsonl"));
-    if !candidate.exists() {
-        return candidate;
-    }
-    source.with_file_name(format!("{stem}.v4-{}.jsonl", uuid::Uuid::now_v7()))
 }
 
 fn isolated_session_path(owner: &Path) -> PathBuf {

@@ -21,7 +21,6 @@ serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true
 tokio.workspace = true
-time = { version = "0.3", features = ["formatting", "parsing"] }
 uuid = { version = "1.18.1", features = ["v7"] }
 
 [dev-dependencies]

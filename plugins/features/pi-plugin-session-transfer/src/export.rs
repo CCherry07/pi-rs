@@ -1,11 +1,11 @@
 use std::fmt::Write as _;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use pi_core::{ContentBlock, CustomMessageContent, Message};
 use pi_session::{
-    AgentMessage, AgentSession, SessionDocument, SessionEntry, SessionError, inspect_session_file,
+    AgentMessage, AgentSession, SessionDocument, SessionEntry, SessionError, SessionLog,
 };
 use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
 use serde_json::Value;
@@ -52,12 +52,6 @@ pub fn resolve_user_path(cwd: &Path, input: &str) -> PathBuf {
     }
 }
 
-pub fn validate_session_import(path: &Path) -> Result<(), String> {
-    inspect_session_file(path)
-        .map(|_| ())
-        .map_err(|error| format!("unsupported session format in {}: {error}", path.display()))
-}
-
 pub fn export_jsonl(
     session: &AgentSession,
     requested_path: Option<&str>,
@@ -71,17 +65,45 @@ pub fn export_jsonl(
         },
         |path| resolve_user_path(session.runtime().cwd(), path),
     );
-    session
-        .log()
-        .export_branch(destination)
-        .map_err(|error| error.to_string())
+    export_branch(session.log(), &destination).map_err(|error| error.to_string())
 }
 
 /// Exports the active branch from an existing materialized session file.
 pub fn export_jsonl_file(source: &Path, destination: &Path) -> Result<PathBuf, String> {
-    let (log, _) = pi_session::SessionLog::open(source).map_err(|error| error.to_string())?;
-    log.export_branch(destination)
-        .map_err(|error| error.to_string())
+    let (log, _) = SessionLog::open(source).map_err(|error| error.to_string())?;
+    export_branch(&log, destination).map_err(|error| error.to_string())
+}
+
+/// Writes the active branch as a portable v4 file, replacing its destination atomically.
+pub fn export_branch(log: &SessionLog, destination: &Path) -> Result<PathBuf, SessionError> {
+    if !log.is_materialized() {
+        return Err(SessionError::Storage(
+            "nothing to export yet; wait for the first assistant response".to_string(),
+        ));
+    }
+    if destination == log.path()
+        || std::fs::canonicalize(destination)
+            .is_ok_and(|path| std::fs::canonicalize(log.path()).is_ok_and(|source| source == path))
+    {
+        return Err(SessionError::Storage(
+            "cannot export over the active session file".to_string(),
+        ));
+    }
+    let mutations = log.main_branch_snapshot()?;
+    let mut header = log.header();
+    header.created_at = pi_utils::time::unix_timestamp_ms();
+    header.parent_session_id = None;
+    header.legacy_parent_session_path = None;
+    atomic_write_with(destination, |file| {
+        serde_json::to_writer(&mut *file, &header)?;
+        file.write_all(b"\n")?;
+        for mutation in &mutations {
+            serde_json::to_writer(&mut *file, mutation)?;
+            file.write_all(b"\n")?;
+        }
+        Ok(())
+    })?;
+    Ok(destination.to_path_buf())
 }
 
 pub fn export_html(
@@ -433,6 +455,13 @@ fn escape_html(input: &str) -> String {
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    atomic_write_with(path, |file| file.write_all(bytes))
+}
+
+fn atomic_write_with(
+    path: &Path,
+    write: impl FnOnce(&mut File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     if path.is_dir() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -451,7 +480,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             .create_new(true)
             .write(true)
             .open(&temporary)?;
-        file.write_all(bytes)?;
+        write(&mut file)?;
         file.sync_all()?;
         drop(file);
         if let Some(backup) = &backup {
@@ -496,6 +525,94 @@ mod tests {
     use super::*;
 
     #[test]
+    fn export_rejects_unmaterialized_sessions_without_creating_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.jsonl");
+        let destination = directory.path().join("portable.jsonl");
+        let log =
+            SessionLog::create_deferred(&source, SessionHeader::new("source", directory.path()))
+                .unwrap();
+        log.append_message(Message::User(UserMessage::text("pending", 1)))
+            .unwrap();
+
+        assert!(export_branch(&log, &destination).is_err());
+        assert!(!source.exists());
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn exports_only_the_active_branch_as_a_portable_v4_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("source.jsonl");
+        let export_path = directory.path().join("portable.jsonl");
+        let mut source_header = SessionHeader::new("source", directory.path());
+        source_header.parent_session_id = Some("parent-session".to_string());
+        let log = SessionLog::create(&source_path, source_header).unwrap();
+        let root = log
+            .append_message(Message::User(UserMessage::text("root", 1)))
+            .unwrap();
+        let abandoned = log
+            .append_message(Message::User(UserMessage::text("abandoned", 2)))
+            .unwrap();
+        log.branch(Some(&root)).unwrap();
+        let active = log
+            .append_message(Message::User(UserMessage::text("active", 3)))
+            .unwrap();
+        log.set_name(Some("portable name".to_string())).unwrap();
+        log.set_label(&active, Some("chosen".to_string())).unwrap();
+        std::fs::write(&export_path, "replace me").unwrap();
+
+        assert_eq!(export_branch(&log, &export_path).unwrap(), export_path);
+
+        let (_, document) = SessionLog::open(&export_path).unwrap();
+        assert_eq!(document.header.id, log.header().id);
+        assert_eq!(document.header.parent_session_id, None);
+        assert_eq!(document.name.as_deref(), Some("portable name"));
+        assert!(document.entries.iter().any(|entry| entry.id == root));
+        assert!(document.entries.iter().any(|entry| entry.id == active));
+        assert!(!document.entries.iter().any(|entry| entry.id == abandoned));
+        assert_eq!(
+            document.labels.get(&active).map(String::as_str),
+            Some("chosen")
+        );
+        assert_eq!(document.branch().unwrap().len(), 2);
+        assert!(source_path.exists());
+    }
+
+    #[test]
+    fn exports_the_active_branch_when_its_leaf_is_not_a_message() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_path = directory.path().join("source.jsonl");
+        let export_path = directory.path().join("portable.jsonl");
+        let log = SessionLog::create(&source_path, SessionHeader::new("source", directory.path()))
+            .unwrap();
+        log.append_message(Message::User(UserMessage::text("root", 1)))
+            .unwrap();
+        let custom = log
+            .append_custom_entry("fixture.metadata", Some(serde_json::json!({"kept": true})))
+            .unwrap();
+
+        assert_eq!(export_branch(&log, &export_path).unwrap(), export_path);
+
+        let (_, document) = SessionLog::open(&export_path).unwrap();
+        assert!(document.entries.iter().any(|entry| entry.id == custom));
+        assert_eq!(document.branch().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn export_rejects_the_active_session_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let log =
+            SessionLog::create(&path, SessionHeader::new("source", directory.path())).unwrap();
+
+        let error = export_branch(&log, &path).unwrap_err();
+
+        assert!(error.to_string().contains("active session file"));
+        assert!(SessionLog::open(path).is_ok());
+    }
+
+    #[test]
     fn html_export_renders_markdown_and_escapes_active_content() {
         let directory = tempfile::tempdir().unwrap();
         let log = SessionLog::create(
@@ -534,22 +651,5 @@ mod tests {
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(!html.contains("javascript:alert"));
-    }
-
-    #[test]
-    fn import_validation_accepts_legacy_and_v4_headers() {
-        let directory = tempfile::tempdir().unwrap();
-        let legacy = directory.path().join("legacy.jsonl");
-        std::fs::write(
-            &legacy,
-            r#"{"type":"session","version":3,"id":"legacy"}
-"#,
-        )
-        .unwrap();
-        let current = directory.path().join("current.jsonl");
-        SessionLog::create(&current, SessionHeader::new("current", directory.path())).unwrap();
-
-        assert!(validate_session_import(&legacy).is_ok());
-        assert!(validate_session_import(&current).is_ok());
     }
 }

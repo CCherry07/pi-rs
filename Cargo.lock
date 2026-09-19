@@ -3618,9 +3618,12 @@ dependencies = [
  "pi-runtime",
  "pi-session",
  "pi-test-support",
+ "pi-utils",
  "pulldown-cmark",
+ "serde",
  "serde_json",
  "tempfile",
+ "time",
  "tokio",
  "uuid",
 ]
@@ -3842,7 +3845,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
- "time",
  "tokio",
  "uuid",
 ]

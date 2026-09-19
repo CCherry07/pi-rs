@@ -16,7 +16,7 @@ use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::{
+use pi_session::{
     AgentMessage, BranchSummaryEntry, CompactionEntry, CustomEntry, CustomMessageEntry, HeaderKind,
     MAIN_LANE, MessageEntry, ModelChangeEntry, SESSION_SCHEMA_VERSION, SessionEntry, SessionError,
     SessionFact, SessionHeader, SessionLog, SessionMutation, SessionRecord, ThinkingLevelEntry,
@@ -25,6 +25,12 @@ use crate::{
 const LEGACY_HEADER_TYPE: &str = "session";
 const IMPORT_METADATA_KEY: &str = "piCodingAgentImport";
 const LEGACY_UNKNOWN_PREFIX: &str = "pi.coding-agent.legacy";
+
+pub fn validate_session_import(path: &Path) -> Result<(), String> {
+    inspect_session_file(path)
+        .map(|_| ())
+        .map_err(|error| format!("unsupported session format in {}: {error}", path.display()))
+}
 
 /// Session formats accepted by the import boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -670,7 +676,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{SessionContextBuildOptions, build_session_context};
+    use pi_session::{SessionContextBuildOptions, build_session_context};
 
     fn write_legacy(path: &Path, values: &[Value]) {
         let contents = values
@@ -771,5 +777,21 @@ mod tests {
 
         assert!(import_session_file(&source, &destination).is_err());
         assert!(!destination.exists());
+    }
+    #[test]
+    fn import_validation_accepts_legacy_and_v4_headers() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = directory.path().join("legacy.jsonl");
+        std::fs::write(
+            &legacy,
+            r#"{"type":"session","version":3,"id":"legacy"}
+"#,
+        )
+        .unwrap();
+        let current = directory.path().join("current.jsonl");
+        SessionLog::create(&current, SessionHeader::new("current", directory.path())).unwrap();
+
+        assert!(validate_session_import(&legacy).is_ok());
+        assert!(validate_session_import(&current).is_ok());
     }
 }

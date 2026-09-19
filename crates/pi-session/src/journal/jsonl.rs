@@ -10,7 +10,6 @@ use super::state::SessionState;
 use super::validation::{
     validate_mutation_payload, validate_new_lane_record, validate_provisioned_entry,
 };
-use super::{comparable_path, sibling_transaction_path};
 use crate::{
     AgentMessage, BranchQuery, EntryQuery, ForkOptions, JsonlSessionMetadata, LanePointer,
     LaneRecord, LaneRecordEntry, LogItem, MAIN_LANE, MessageEntry, NewLaneRecord, ProvisionedEntry,
@@ -255,75 +254,13 @@ impl SessionLog {
         self.state().has_cached_document()
     }
 
-    /// Exports the active main-lane branch as a standalone v4 JSONL session.
+    /// Captures the active main-lane branch and its name/labels as v4 mutations.
     ///
-    /// Runtime-only records and abandoned branches are intentionally omitted,
-    /// matching Pi's portable `/export <file>.jsonl` behavior. The source log
-    /// remains open and unchanged; the destination is replaced atomically.
-    pub fn export_branch(&self, path: impl Into<PathBuf>) -> Result<PathBuf, SessionError> {
-        if !self.is_materialized() {
-            return Err(SessionError::Storage(
-                "nothing to export yet; wait for the first assistant response".to_string(),
-            ));
-        }
-
-        let path = path.into();
-        if comparable_path(&path) == comparable_path(&self.inner.path) {
-            return Err(SessionError::Storage(
-                "cannot export over the active session file".to_string(),
-            ));
-        }
-        if path.is_dir() {
-            return Err(SessionError::Storage(format!(
-                "export destination is a directory: {}",
-                path.display()
-            )));
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let mutations = self.state().create_main_branch_snapshot_mutations()?;
-        let mut header = self.inner.header.clone();
-        header.created_at = now_ms();
-        header.parent_session_id = None;
-        header.legacy_parent_session_path = None;
-
-        let temporary = sibling_transaction_path(&path, "export");
-        let backup = path
-            .exists()
-            .then(|| sibling_transaction_path(&path, "backup"));
-        let result = (|| {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary)?;
-            write_json_line(&mut file, &header, 1)?;
-            for (index, mutation) in mutations.iter().enumerate() {
-                write_json_line(&mut file, mutation, index + 2)?;
-            }
-            file.sync_all()?;
-            drop(file);
-
-            if let Some(backup) = &backup {
-                std::fs::rename(&path, backup)?;
-            }
-            if let Err(error) = std::fs::rename(&temporary, &path) {
-                if let Some(backup) = &backup {
-                    let _ = std::fs::rename(backup, &path);
-                }
-                return Err(error.into());
-            }
-            if let Some(backup) = &backup {
-                let _ = std::fs::remove_file(backup);
-            }
-            Ok::<(), SessionError>(())
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        result?;
-        Ok(path)
+    /// Sequences start at one; runtime records, other lanes, and abandoned
+    /// branches are omitted. This read-only snapshot also works for an
+    /// unmaterialized log and does not select a destination or rewrite its header.
+    pub fn main_branch_snapshot(&self) -> Result<Vec<SessionMutation>, SessionError> {
+        self.state().create_main_branch_snapshot_mutations()
     }
 
     pub fn leaf_id(&self) -> Option<String> {
@@ -1462,76 +1399,6 @@ mod tests {
         let (_, document) = SessionLog::open(&path).unwrap();
         assert_eq!(document.stats.message_count, 1);
         assert_eq!(document.labels.get(&id).map(String::as_str), Some("first"));
-    }
-
-    #[test]
-    fn exports_only_the_active_branch_as_a_portable_v4_session() {
-        let directory = tempfile::tempdir().unwrap();
-        let source_path = directory.path().join("source.jsonl");
-        let export_path = directory.path().join("portable.jsonl");
-        let mut source_header = header();
-        source_header.parent_session_id = Some("parent-session".to_string());
-        let log = SessionLog::create(&source_path, source_header).unwrap();
-        let root = log
-            .append_message(Message::User(UserMessage::text("root", 1)))
-            .unwrap();
-        let abandoned = log
-            .append_message(Message::User(UserMessage::text("abandoned", 2)))
-            .unwrap();
-        log.branch(Some(&root)).unwrap();
-        let active = log
-            .append_message(Message::User(UserMessage::text("active", 3)))
-            .unwrap();
-        log.set_name(Some("portable name".to_string())).unwrap();
-        log.set_label(&active, Some("chosen".to_string())).unwrap();
-        std::fs::write(&export_path, "replace me").unwrap();
-
-        assert_eq!(log.export_branch(&export_path).unwrap(), export_path);
-
-        let (_, document) = SessionLog::open(&export_path).unwrap();
-        assert_eq!(document.header.id, log.header().id);
-        assert_eq!(document.header.parent_session_id, None);
-        assert_eq!(document.name.as_deref(), Some("portable name"));
-        assert!(document.entries.iter().any(|entry| entry.id == root));
-        assert!(document.entries.iter().any(|entry| entry.id == active));
-        assert!(!document.entries.iter().any(|entry| entry.id == abandoned));
-        assert_eq!(
-            document.labels.get(&active).map(String::as_str),
-            Some("chosen")
-        );
-        assert_eq!(document.branch().unwrap().len(), 2);
-        assert!(source_path.exists());
-    }
-
-    #[test]
-    fn exports_the_active_branch_when_its_leaf_is_not_a_message() {
-        let directory = tempfile::tempdir().unwrap();
-        let source_path = directory.path().join("source.jsonl");
-        let export_path = directory.path().join("portable.jsonl");
-        let log = SessionLog::create(&source_path, header()).unwrap();
-        log.append_message(Message::User(UserMessage::text("root", 1)))
-            .unwrap();
-        let custom = log
-            .append_custom_entry("fixture.metadata", Some(serde_json::json!({"kept": true})))
-            .unwrap();
-
-        assert_eq!(log.export_branch(&export_path).unwrap(), export_path);
-
-        let (_, document) = SessionLog::open(&export_path).unwrap();
-        assert!(document.entries.iter().any(|entry| entry.id == custom));
-        assert_eq!(document.branch().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn export_rejects_the_active_session_path() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("session.jsonl");
-        let log = SessionLog::create(&path, header()).unwrap();
-
-        let error = log.export_branch(&path).unwrap_err();
-
-        assert!(error.to_string().contains("active session file"));
-        assert!(SessionLog::open(path).is_ok());
     }
 
     #[test]
