@@ -9,7 +9,7 @@ MCP remains a deliberate Rust product extension: upstream Pi has no built-in MCP
 
 Call `McpToolSet::connect(configs)` with `McpServerConfig` values to connect stdio or
 Streamable HTTP servers and discover their tools. `McpToolSet::plugin()` returns an
-`AgentPlugin` that registers those tools only; it never reads local configuration files
+`Plugin` that registers those tools only; it never reads local configuration files
 or registers `/mcp`. This is the API used for client-supplied ACP servers.
 
 Pool clones share connection ownership. Invocation preserves structured results and
@@ -29,7 +29,7 @@ Project entries replace complete global entries by name, including disabled entr
 - `save(scope, revision, content)` validates and atomically saves with external-change checks,
   preserving unknown JSON fields supplied by the caller.
 - `test(name)` explicitly connects one saved, enabled server, reports its tools and shuts down.
-- `prepare().await` connects the enabled servers and returns an `Arc<dyn AgentPlugin>` with
+- `prepare().await` connects the enabled servers and returns an `Arc<dyn Plugin>` with
   their tools and `/mcp status|paths|test|reload` commands.
 
 Reads and saves neither connect nor construct sessions. Preparation completes before a host

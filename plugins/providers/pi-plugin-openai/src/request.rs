@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
-use pi_core::{ContentBlock, Message, ModelSpec, ProviderRequest, ThinkingLevel, ToolSpec};
+use pi_core::{ContentBlock, Message, ModelSpec, ThinkingLevel, ToolSpec};
+use pi_plugin::ProviderRequest;
 use serde::Deserialize;
 use serde_json::{Value, json};
 

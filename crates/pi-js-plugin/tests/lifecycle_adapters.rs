@@ -2,14 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use pi_core::{
-    AbortHandle, AgentSettledEvent, AssistantMessage, AssistantStream, AssistantStreamId,
-    AssistantStreamView, BeforeAgentStartEvent, BeforeProviderRequestEvent, CommandContext,
-    CommandOutcome, ContentBlock, CustomMessageContent, ImageContent, InputEvent, InputPatch,
-    InputSource, InputStreamingBehavior, Message, MessageEndEvent, MessageUpdateEvent, ModelId,
-    ModelsContextAccess, PluginContext, PluginContextEpoch, PluginContextError,
-    PluginContextHandle, PluginId, PresentationMode, ProviderId, ProviderPluginContext,
-    RegistriesBuilder, RunId, SessionContextAccess, StopReason, StreamEvent, TextContent,
-    ToolResultMessage, TurnEndEvent, TurnStartEvent, UiContextAccess, Usage, UserMessage,
+    AbortHandle, AssistantMessage, AssistantStream, AssistantStreamId, AssistantStreamView,
+    ContentBlock, CustomMessageContent, ImageContent, Message, ModelId, PluginId, ProviderId,
+    RunId, StopReason, StreamEvent, TextContent, ToolResultMessage, Usage, UserMessage,
 };
 use pi_js_plugin::{
     ExtensionContextQuery, JsAgentPluginManifest, JsCallbackDispatcher, JsCallbackError,
@@ -18,7 +13,14 @@ use pi_js_plugin::{
     JsSessionPluginManifest, JsStreamHookBatchInvocation, PluginContextScope,
     execute_context_query,
 };
-use pi_session::{
+use pi_plugin::{
+    AgentSettledEvent, BeforeAgentStartEvent, BeforeProviderRequestEvent, CommandContext,
+    CommandOutcome, InputEvent, InputPatch, InputSource, InputStreamingBehavior, MessageEndEvent,
+    MessageUpdateEvent, ModelsContextAccess, PluginContext, PluginContextEpoch, PluginContextError,
+    PluginContextHandle, PresentationMode, ProviderPluginContext, RegistriesBuilder,
+    SessionContextAccess, TurnEndEvent, TurnStartEvent, UiContextAccess,
+};
+use pi_plugin::{
     SessionBeforeSwitchEvent, SessionIdentity, SessionPluginContext, SessionStartEvent,
     SessionStartReason, SessionSwitchReason,
 };
@@ -282,7 +284,7 @@ async fn javascript_callbacks_use_the_runtime_plugin_context_epoch() {
     let epoch = PluginContextEpoch::new(plugin_access);
     let (driver, _, _) = RegistriesBuilder::new()
         .register_plugin_sets_with_context(
-            generation.agent_plugins(),
+            generation.plugins(),
             generation.provider_plugins(),
             epoch.clone(),
         )
@@ -320,7 +322,7 @@ async fn before_agent_start_exposes_pi_prompt_and_images_to_javascript() {
     let dispatcher = Arc::new(LifecycleDispatcher::default());
     let generation = generation(Arc::clone(&dispatcher));
     let (driver, _) = RegistriesBuilder::new()
-        .register_plugins(generation.agent_plugins())
+        .register_plugins(generation.plugins())
         .unwrap();
     let (_, signal) = AbortHandle::new();
 
@@ -382,17 +384,18 @@ async fn before_agent_start_exposes_pi_prompt_and_images_to_javascript() {
         "rewritten prompt"
     );
     assert!(driver.diagnostics().iter().any(|diagnostic| {
-        diagnostic.hook == "before_agent_start"
+        diagnostic.hook.as_str() == "before_agent_start"
             && diagnostic.message.contains("intentional callback failure")
     }));
 }
 
 #[tokio::test]
-async fn one_javascript_source_materializes_as_three_narrow_plugin_lifecycles() {
+async fn one_javascript_source_shares_one_plugin_across_agent_and_session_hooks() {
     let dispatcher = Arc::new(LifecycleDispatcher::default());
     let generation = generation(Arc::clone(&dispatcher));
+    assert_eq!(generation.plugins().len(), 1);
     let (driver, registries) = RegistriesBuilder::new()
-        .register_plugins(generation.agent_plugins())
+        .register_plugins(generation.plugins())
         .unwrap();
     let (abort_handle, signal) = AbortHandle::new();
 
@@ -454,7 +457,7 @@ async fn one_javascript_source_materializes_as_three_narrow_plugin_lifecycles() 
         Some(json!({ "model": "rewritten" }))
     );
 
-    generation.session_plugins()[0]
+    generation.plugins()[0]
         .session_start(
             &SessionPluginContext::unavailable_for_testing(
                 PluginId::new("extension"),
@@ -474,7 +477,7 @@ async fn one_javascript_source_materializes_as_three_narrow_plugin_lifecycles() 
         .await
         .unwrap();
 
-    let switch_result = generation.session_plugins()[0]
+    let switch_result = generation.plugins()[0]
         .session_before_switch(
             &SessionPluginContext::unavailable_for_testing(
                 PluginId::new("extension"),
@@ -523,7 +526,8 @@ async fn one_javascript_source_materializes_as_three_narrow_plugin_lifecycles() 
         json!([{"type": "image", "data": "b3JpZ2luYWw=", "mimeType": "image/png"}])
     );
     assert!(driver.diagnostics().iter().any(|diagnostic| {
-        diagnostic.hook == "input" && diagnostic.message.contains("intentional callback failure")
+        diagnostic.hook.as_str() == "input"
+            && diagnostic.message.contains("intentional callback failure")
     }));
 }
 
@@ -532,7 +536,7 @@ async fn turn_metadata_and_message_end_replacement_match_pi() {
     let dispatcher = Arc::new(LifecycleDispatcher::default());
     let generation = generation(Arc::clone(&dispatcher));
     let (driver, _) = RegistriesBuilder::new()
-        .register_plugins(generation.agent_plugins())
+        .register_plugins(generation.plugins())
         .unwrap();
     let (_, signal) = AbortHandle::new();
     let run_id = RunId::new("run");
@@ -597,7 +601,7 @@ async fn agent_settled_is_active_and_isolates_callback_failures() {
     let dispatcher = Arc::new(LifecycleDispatcher::default());
     let generation = generation(Arc::clone(&dispatcher));
     let (driver, _) = RegistriesBuilder::new()
-        .register_plugins(generation.agent_plugins())
+        .register_plugins(generation.plugins())
         .unwrap();
     let (_, signal) = AbortHandle::new();
 
@@ -617,7 +621,7 @@ async fn agent_settled_is_active_and_isolates_callback_failures() {
         .expect("later agent_settled callback should still run");
     assert_eq!(settled.payload["event"], json!({"type": "agent_settled"}));
     assert!(driver.diagnostics().iter().any(|diagnostic| {
-        diagnostic.hook == "agent_settled"
+        diagnostic.hook.as_str() == "agent_settled"
             && diagnostic.message.contains("intentional callback failure")
     }));
 }
@@ -657,7 +661,7 @@ async fn observer_hooks_share_one_generation_batch_and_one_compact_stream_encodi
     )
     .unwrap();
     let (driver, _) = RegistriesBuilder::new()
-        .register_plugins(generation.agent_plugins())
+        .register_plugins(generation.plugins())
         .unwrap();
     assert_eq!(
         driver.plugin_order(),
@@ -718,7 +722,7 @@ async fn observer_hooks_share_one_generation_batch_and_one_compact_stream_encodi
 
     assert!(driver.diagnostics().iter().any(|diagnostic| {
         diagnostic.plugin_id == PluginId::new("extension-first")
-            && diagnostic.hook == "message_update"
+            && diagnostic.hook.as_str() == "message_update"
             && diagnostic.message.contains("intentional observer failure")
     }));
 }

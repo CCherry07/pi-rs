@@ -1,9 +1,9 @@
 use super::*;
 use crate::store::{FailureOptions, MemoryTarget};
 use pi_core::{
-    EphemeralSessionStatus, Message, ResponseMetadata, StopReason, StreamEvent, ToolCall,
-    ToolCallId, ToolContext, ToolUpdateSink, Usage, UsageCost,
+    Message, ResponseMetadata, StopReason, StreamEvent, ToolCall, ToolCallId, Usage, UsageCost,
 };
+use pi_plugin::{EphemeralSessionStatus, ToolContext, ToolUpdateSink};
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::json;
 
@@ -166,7 +166,7 @@ async fn session(
         root,
         plugin,
         turns,
-        pi_core::SessionExecutionOrigin::User,
+        pi_plugin::SessionExecutionOrigin::User,
         None,
     )
     .await
@@ -174,12 +174,15 @@ async fn session(
 
 struct TestCatalog(pi_core::ModelSpec);
 
-#[pi_core::provider_plugin]
-impl pi_core::ProviderPlugin for TestCatalog {
+#[pi_plugin::provider_plugin]
+impl pi_plugin::ProviderPlugin for TestCatalog {
     fn id(&self) -> PluginId {
         PluginId::new("test-catalog")
     }
-    fn register(&self, context: &mut pi_core::ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(
+        &self,
+        context: &mut pi_plugin::ProviderRegisterContext<'_>,
+    ) -> pi_plugin::Result<()> {
         context.register_model(self.0.clone())
     }
 }
@@ -188,28 +191,28 @@ async fn session_with_setup(
     root: &Path,
     plugin: Arc<HermesMemoryPlugin>,
     turns: Vec<ScriptedTurn>,
-    origin: pi_core::SessionExecutionOrigin,
+    origin: pi_plugin::SessionExecutionOrigin,
     model: Option<pi_core::ModelSpec>,
 ) -> (
     Arc<pi_session::AgentSession>,
     Arc<pi_test_support::ScriptedProvider>,
 ) {
     use pi_session::{
-        AgentSession, AgentSessionOptions, PiPluginContext, PluginContextBinding, SessionPlugins,
+        AgentSession, AgentSessionOptions, PiPluginContext, PluginContextBinding,
         SessionStartReason,
     };
     let scripted = ScriptedProviderPlugin::scripted(turns);
     let provider = scripted.provider();
     let access = Arc::new(PiPluginContext::new(
-        pi_core::PresentationMode::Print,
+        pi_plugin::PresentationMode::Print,
         true,
         PluginContextBinding::new(),
     ));
     let builder = pi_runtime::PiRuntime::builder()
         .execution_origin(origin)
-        .agent_plugin_arc(plugin.clone())
-        .agent_plugin(pi_plugin_read::ReadPlugin)
-        .agent_plugin(pi_plugin_write::WritePlugin)
+        .plugin_arc(plugin.clone())
+        .plugin(pi_plugin_read::ReadPlugin)
+        .plugin(pi_plugin_write::WritePlugin)
         .provider_plugin(scripted)
         .plugin_context(access.clone())
         .agent_options(pi_agent::AgentOptions {
@@ -232,7 +235,7 @@ async fn session_with_setup(
         builder
     };
     let runtime = builder.build().unwrap();
-    let options = AgentSessionOptions::default().plugins(SessionPlugins::new().plugin_arc(plugin));
+    let options = AgentSessionOptions::default();
     let prepared =
         AgentSession::prepare_create_with_options(runtime, root.join("session.jsonl"), options)
             .await
@@ -293,7 +296,7 @@ async fn automatic_review_compacts_long_history_and_only_adds_parent_usage_accou
             ),
             ScriptedTurn::Text("Memory saved.".into()),
         ],
-        pi_core::SessionExecutionOrigin::User,
+        pi_plugin::SessionExecutionOrigin::User,
         Some(pi_core::ModelSpec::new(
             "scripted", "test", "Test", "scripted",
         )),
@@ -488,7 +491,7 @@ async fn subagents_receive_read_only_memory_context_without_autonomous_reviews()
         root.path(),
         plugin.clone(),
         turns,
-        pi_core::SessionExecutionOrigin::Subagent,
+        pi_plugin::SessionExecutionOrigin::Subagent,
         None,
     )
     .await;
@@ -1098,7 +1101,7 @@ async fn fork(
     root: &Path,
     plugin: Arc<HermesMemoryPlugin>,
     turns: Vec<ScriptedTurn>,
-) -> pi_core::EphemeralSessionOutcome {
+) -> pi_plugin::EphemeralSessionOutcome {
     let (runtime, _) = fork_runtime(root, plugin.clone(), turns);
     runtime
         .run_ephemeral(fork_request(&runtime, &plugin), AbortHandle::new().1)
@@ -1117,8 +1120,8 @@ fn fork_runtime(
     let scripted = ScriptedProviderPlugin::scripted(turns);
     let provider = scripted.provider();
     let runtime = pi_runtime::PiRuntime::builder()
-        .agent_plugin_arc(plugin)
-        .agent_plugin(pi_plugin_read::ReadPlugin)
+        .plugin_arc(plugin)
+        .plugin(pi_plugin_read::ReadPlugin)
         .provider_plugin(scripted)
         .agent_options(pi_agent::AgentOptions {
             cwd: root.to_path_buf(),
@@ -1141,7 +1144,7 @@ fn fork_runtime(
 fn fork_request(
     runtime: &pi_runtime::PiRuntime,
     plugin: &HermesMemoryPlugin,
-) -> pi_core::EphemeralSessionRequest {
+) -> pi_plugin::EphemeralSessionRequest {
     transport::request(
         &plugin.config,
         Arc::clone(&plugin.runs),
@@ -1245,7 +1248,7 @@ async fn review_state_is_released_on_every_exit_path_and_does_not_authorize_the_
                 terminal,
             ],
         );
-        let old_context = runtime.plugin_context_handle(pi_core::PluginContextScope::Base);
+        let old_context = runtime.plugin_context_handle(pi_plugin::PluginContextScope::Base);
         let mut request = fork_request(&runtime, &plugin);
         if mode == "timeout" {
             request.timeout = Duration::from_secs(1);
@@ -1290,7 +1293,7 @@ async fn review_state_is_released_on_every_exit_path_and_does_not_authorize_the_
         if mode == "reload" {
             assert!(matches!(
                 old_context.access_for_adapter(),
-                Err(pi_core::PluginContextError::Retired)
+                Err(pi_plugin::PluginContextError::Retired)
             ));
         }
 
@@ -1514,7 +1517,7 @@ async fn unified_memory_batches_are_atomic_and_overflow_stays_in_current_agent()
         },
     );
     let runtime = pi_runtime::PiRuntime::builder()
-        .agent_plugin_arc(plugin.clone())
+        .plugin_arc(plugin.clone())
         .provider_plugin(ScriptedProviderPlugin::scripted([]))
         .build()
         .unwrap();

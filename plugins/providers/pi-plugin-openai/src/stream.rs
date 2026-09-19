@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 
-use pi_core::{
-    ModelId, ProviderError, ResponseMetadataPatch, StopReason, StreamEvent, ToolCallId, Usage,
-};
+use pi_core::{ModelId, ResponseMetadataPatch, StopReason, StreamEvent, ToolCallId, Usage};
+use pi_plugin::ProviderError;
 use serde_json::Value;
 
 pub(crate) struct ChunkState {

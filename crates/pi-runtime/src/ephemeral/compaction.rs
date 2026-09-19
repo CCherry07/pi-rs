@@ -8,9 +8,10 @@ use std::sync::{Arc, Mutex};
 
 use pi_agent::{AgentRuntime, AgentTurnContext};
 use pi_core::{
-    AbortSignal, AgentContext, ContentBlock, CustomMessageContent, EphemeralCompactionOptions,
-    Message, ModelSelection, StopReason, ThinkingLevel, Usage, UserMessage,
+    AbortSignal, AgentContext, ContentBlock, CustomMessageContent, Message, ModelSelection,
+    StopReason, ThinkingLevel, Usage, UserMessage,
 };
+use pi_plugin::EphemeralCompactionOptions;
 
 use crate::{PiRuntime, RuntimeCompletionRequest};
 

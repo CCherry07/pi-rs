@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::config::{MAX_CONFIG_BYTES, McpConfigContext, McpConfigEntry, parse_config};
 use crate::{McpServerConfig, McpToolSet, McpTransport};
-use pi_core::AgentPlugin;
+use pi_plugin::Plugin;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -172,7 +172,7 @@ impl McpLibrary {
 
     /// Reads eligible configuration and connects before returning an immutable plugin.
     /// The host retains candidate ownership and publishes only after complete generation validation.
-    pub async fn prepare(&self) -> Result<Arc<dyn AgentPlugin>, String> {
+    pub async fn prepare(&self) -> Result<Arc<dyn Plugin>, String> {
         let entries = self.entries()?;
         let rows = entries.iter().map(Entry::row).collect();
         let configs = entries

@@ -2,9 +2,10 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use pi_core::{
-    AbortHandle, AgentPluginContext, Command, CommandContext, CommandError, CommandOutcome,
-    CommandSpec, ContextParts, Message, NoticeLevel, RegisterContext, SessionExecutionOrigin,
+use pi_core::{AbortHandle, Message};
+use pi_plugin::{
+    AgentPluginContext, Command, CommandContext, CommandError, CommandOutcome, CommandSpec,
+    ContextParts, NoticeLevel, RegisterContext, SessionExecutionOrigin,
 };
 use pi_session::SessionPluginContext;
 
@@ -154,7 +155,7 @@ pub(crate) fn register(
     store: Arc<crate::store::HermesMemoryStore>,
     config: HermesMemoryConfig,
     runs: Arc<HermesRuns>,
-) -> pi_core::Result<()> {
+) -> pi_plugin::Result<()> {
     context.register_command(Arc::new(CuratorCommand {
         store,
         config,

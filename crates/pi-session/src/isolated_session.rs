@@ -5,9 +5,12 @@ use std::sync::{Arc, Mutex, Weak};
 
 use pi_agent::AgentLoopStop;
 use pi_core::{
-    AbortHandle, AbortSignal, CustomMessageContent, CustomMessageInput, IsolatedFollowUpReceipt,
-    IsolatedMessageDelivery, IsolatedMessageReceipt, IsolatedSessionId, IsolatedSessionOutcome,
-    IsolatedSessionTurnId, Message, Usage, UsageCost, UserMessage,
+    AbortHandle, AbortSignal, CustomMessageContent, CustomMessageInput, Message, Usage, UsageCost,
+    UserMessage,
+};
+use pi_plugin::{
+    IsolatedFollowUpReceipt, IsolatedMessageDelivery, IsolatedMessageReceipt, IsolatedSessionId,
+    IsolatedSessionOutcome, IsolatedSessionTurnId,
 };
 use tokio::sync::watch;
 

@@ -9,6 +9,22 @@ import { isRecord, parseGenerationManifest, parseJson } from '../src/extension-p
 import { execCommand } from '../src/extension-runtime.js'
 import type { NativeExtensionContext } from '../src/native-binding.js'
 
+test('keeps session-only extensions in unified plugin registration order', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-unified-order-'))
+  const first = join(root, 'session.ts')
+  const second = join(root, 'agent.ts')
+  await writeFile(first, 'export default (pi: any) => { pi.on("session_start", () => {}); }')
+  await writeFile(second, 'export default (pi: any) => { pi.on("agent_start", () => {}); }')
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: { projectTrusted: true, extensionPaths: [first, second], mode: 'print' },
+  })))
+  assert.equal(manifest.agentPlugins.length, 2)
+  assert.equal(manifest.agentPlugins[0]?.id, manifest.sessionPlugins[0]?.id)
+  assert.equal(manifest.agentPlugins[1]?.hooks[0]?.name, 'agent_start')
+})
+
 test("rejects malformed host operations before dispatch", async () => {
   const host = new ExtensionHost();
   await assert.rejects(

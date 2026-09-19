@@ -9,15 +9,17 @@ mod launch_context;
 mod launch_plan;
 mod profiles;
 mod runtime;
+#[cfg(test)]
 mod session;
 mod skills;
 mod tool;
 
 use std::sync::Arc;
 
-use pi_core::{
-    AgentPlugin, AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, ContentBlock,
-    Message, PluginError, PluginId, RegisterContext,
+use pi_core::{ContentBlock, Message, PluginId};
+use pi_plugin::{
+    AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, Plugin, PluginError,
+    RegisterContext,
 };
 
 use crate::catalog::SubagentCatalog;
@@ -28,8 +30,8 @@ use crate::tool::{AgentTool, AgentToolKind};
 
 pub use crate::catalog::{SubagentCatalogError, SubagentLoaderOptions};
 pub use crate::runtime::SubagentRuntime;
-pub use crate::session::SubagentsSessionPlugin;
 pub use crate::skills::SubagentSkillPromptProjector;
+use pi_plugin::{SessionPluginContext, SessionShutdownEvent};
 
 /// First-party delegation policy layered over the product's generic isolated
 /// session capability.
@@ -71,13 +73,13 @@ impl Default for SubagentsPlugin {
     }
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for SubagentsPlugin {
+#[pi_plugin::plugin]
+impl Plugin for SubagentsPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("subagents")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         for kind in [
             AgentToolKind::Spawn,
             AgentToolKind::SendMessage,
@@ -147,20 +149,42 @@ impl AgentPlugin for SubagentsPlugin {
     async fn context(
         &self,
         context: AgentPluginContext,
-        event: pi_core::ContextEvent,
-    ) -> Result<pi_core::ContextPatch, PluginError> {
+        event: pi_plugin::ContextEvent,
+    ) -> Result<pi_plugin::ContextPatch, PluginError> {
         let session_id = context.session.id()?;
         let messages = if let Some((run_id, _)) = self.runtime.assignment_for_session(&session_id) {
             fork_context::project_inherited_messages(event.messages, &run_id)
         } else {
             event.messages
         };
-        Ok(pi_core::ContextPatch {
+        Ok(pi_plugin::ContextPatch {
             messages: Some(
                 self.runtime
                     .project_collaboration_context(&session_id, messages),
             ),
         })
+    }
+
+    async fn session_start(
+        &self,
+        context: &SessionPluginContext,
+        _event: &pi_session::SessionStartEvent,
+    ) -> Result<(), PluginError> {
+        self.runtime
+            .bind_session(context.identity().id.clone(), context.session.clone());
+        Ok(())
+    }
+
+    async fn session_shutdown(
+        &self,
+        context: &SessionPluginContext,
+        _event: &SessionShutdownEvent,
+    ) -> Result<(), PluginError> {
+        self.runtime.suspend_desktop(&context.identity().id);
+        self.runtime.close_owner(&context.identity().id);
+        self.runtime.drain_monitors(&context.identity().id).await;
+        self.runtime.forget_session(&context.identity().id);
+        Ok(())
     }
 }
 

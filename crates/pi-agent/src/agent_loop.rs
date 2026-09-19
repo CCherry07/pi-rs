@@ -6,10 +6,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::StreamExt;
 use pi_core::{
-    AbortSignal, AgentContext, AgentEvent, AssistantMessage, ContentBlock, FrozenRegistries,
-    Message, ModelId, PluginDriver, ProviderCallContext, ProviderId, ProviderPluginDriver,
-    ProviderRequest, RunId, StopReason, StreamEvent, TextContent, ThinkingBudgets, ThinkingLevel,
+    AbortSignal, AgentContext, AgentEvent, AssistantMessage, ContentBlock, Message, ModelId,
+    ProviderId, RunId, StopReason, StreamEvent, TextContent, ThinkingBudgets, ThinkingLevel,
     ToolExecutionMode, ToolResult, ToolResultMessage, Usage,
+};
+use pi_plugin::{
+    FrozenRegistries, PluginDriver, ProviderCallContext, ProviderPluginDriver, ProviderRequest,
 };
 use pi_telemetry::{
     ActiveSpan, AiOperation, AiRequestEnd, AiRequestSpan, AiRequestStart, AiStopReason, SpanStatus,

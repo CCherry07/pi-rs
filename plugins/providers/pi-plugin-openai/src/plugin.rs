@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use pi_core::{
-    ModelCost, ModelCostTier, ModelInput, ModelSpec, PluginId, Provider, ProviderError,
-    ProviderPlugin, ProviderRegisterContext,
-};
+use pi_core::{ModelCost, ModelCostTier, ModelInput, ModelSpec, PluginId};
+use pi_plugin::{Provider, ProviderError, ProviderPlugin, ProviderRegisterContext};
 use pi_provider::HttpTransport;
 
 use crate::codex::{CodexTransportOptions, OpenAiCodexProvider};
@@ -50,13 +48,13 @@ impl OpenAiCodexPlugin {
     }
 }
 
-#[pi_core::provider_plugin]
+#[pi_plugin::provider_plugin]
 impl ProviderPlugin for OpenAiCodexPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("openai-codex-provider")
     }
 
-    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_provider(self.provider.clone())?;
         for model in openai_codex_models() {
             context.register_model(model)?;
@@ -75,13 +73,13 @@ const CODEX_CONTEXT_WINDOW: u64 = 272_000;
 const CODEX_SPARK_CONTEXT_WINDOW: u64 = 128_000;
 const CODEX_MAX_TOKENS: u64 = 128_000;
 
-#[pi_core::provider_plugin]
+#[pi_plugin::provider_plugin]
 impl ProviderPlugin for OpenAiCodexCatalogPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("openai-codex-catalog")
     }
 
-    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
         for model in openai_codex_models() {
             context.register_model(model)?;
         }
@@ -249,13 +247,13 @@ impl OpenAiCompatiblePlugin {
     }
 }
 
-#[pi_core::provider_plugin]
+#[pi_plugin::provider_plugin]
 impl ProviderPlugin for OpenAiCompatiblePlugin {
     fn id(&self) -> PluginId {
         PluginId::new(format!("{}-provider", self.provider.id()))
     }
 
-    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_provider(self.provider.clone())
     }
 }
@@ -285,13 +283,13 @@ impl OpenAiPlugin {
     }
 }
 
-#[pi_core::provider_plugin]
+#[pi_plugin::provider_plugin]
 impl ProviderPlugin for OpenAiPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("openai-provider")
     }
 
-    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_provider(self.provider.clone())
     }
 }
@@ -321,7 +319,7 @@ mod tests {
         assert!(runtime.available_models().is_empty());
         assert_eq!(
             runtime.provider_statuses()[0].availability,
-            pi_core::ProviderAvailability::MissingCredentials
+            pi_plugin::ProviderAvailability::MissingCredentials
         );
     }
 

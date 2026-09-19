@@ -1,14 +1,13 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use pi_core::{
-    ContentBlock, CustomMessageContent, IsolatedSessionOutcome, IsolatedSessionRequest, Message,
-    NoticeLevel, PluginContextError, PluginId, SessionExecutionOrigin, StopReason,
+use pi_core::{ContentBlock, CustomMessageContent, Message, StopReason};
+use pi_plugin::{
+    IsolatedSessionOutcome, IsolatedSessionRequest, NoticeLevel, PluginContextError,
+    SessionExecutionOrigin,
 };
-use pi_session::{
-    SessionPlugin, SessionPluginContext, SessionPluginError, SessionShutdownEvent,
-    SessionStartEvent,
-};
+use pi_session::{PluginError, SessionPluginContext, SessionShutdownEvent, SessionStartEvent};
+
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -21,7 +20,7 @@ use crate::{
 
 /// Generation-owned resource. Factories only construct this value; session
 /// start activates it, shutdown cancels and joins it before context retirement.
-pub struct ScheduleSessionPlugin {
+pub struct Scheduler {
     options: ScheduleOptions,
     worker: Mutex<Option<Worker>>,
 }
@@ -31,7 +30,7 @@ struct Worker {
     task: JoinHandle<()>,
 }
 
-impl ScheduleSessionPlugin {
+impl Scheduler {
     pub fn new(options: ScheduleOptions) -> Self {
         Self {
             options,
@@ -40,7 +39,7 @@ impl ScheduleSessionPlugin {
     }
 }
 
-impl Drop for ScheduleSessionPlugin {
+impl Drop for Scheduler {
     fn drop(&mut self) {
         if let Some(worker) = self
             .worker
@@ -53,17 +52,12 @@ impl Drop for ScheduleSessionPlugin {
     }
 }
 
-#[pi_session::session_plugin]
-impl SessionPlugin for ScheduleSessionPlugin {
-    fn id(&self) -> PluginId {
-        PluginId::new("schedule")
-    }
-
-    async fn session_start(
+impl Scheduler {
+    pub(crate) async fn session_start(
         &self,
         context: &SessionPluginContext,
         _: &SessionStartEvent,
-    ) -> std::result::Result<(), SessionPluginError> {
+    ) -> std::result::Result<(), PluginError> {
         if context.session.execution_origin()? != SessionExecutionOrigin::User {
             return Ok(());
         }
@@ -84,11 +78,11 @@ impl SessionPlugin for ScheduleSessionPlugin {
         Ok(())
     }
 
-    async fn session_shutdown(
+    pub(crate) async fn session_shutdown(
         &self,
         _: &SessionPluginContext,
         _: &SessionShutdownEvent,
-    ) -> std::result::Result<(), SessionPluginError> {
+    ) -> std::result::Result<(), PluginError> {
         let worker = self
             .worker
             .lock()
@@ -97,7 +91,7 @@ impl SessionPlugin for ScheduleSessionPlugin {
         if let Some(worker) = worker {
             worker.stop.cancel();
             worker.task.await.map_err(|error| {
-                SessionPluginError::Failure(format!("schedule worker failed: {error}"))
+                PluginError::Failure(format!("schedule worker failed: {error}"))
             })?;
         }
         Ok(())

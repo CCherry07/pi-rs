@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use gcp_auth::TokenProvider;
-use pi_core::{
-    AbortSignal, ModelCost, ModelInput, ModelSpec, PluginId, Provider, ProviderAvailability,
-    ProviderCallContext, ProviderError, ProviderId, ProviderPlugin, ProviderRegisterContext,
-    ProviderRequest, ProviderStream,
+use pi_core::{AbortSignal, ModelCost, ModelInput, ModelSpec, PluginId, ProviderId};
+use pi_plugin::{
+    Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderPlugin,
+    ProviderRegisterContext, ProviderRequest, ProviderStream,
 };
 use pi_provider::{
     HttpTransport, ReqwestTransport, TransportError, insert_header, post_json_with_provider_hooks,
@@ -89,13 +89,13 @@ impl GoogleVertexPlugin {
     }
 }
 
-#[pi_core::provider_plugin]
+#[pi_plugin::provider_plugin]
 impl ProviderPlugin for GoogleVertexPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("google-vertex-provider")
     }
 
-    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_provider(self.provider.clone())?;
         for model in google_vertex_models() {
             context.register_model(model)?;
@@ -641,7 +641,8 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use futures::{StreamExt, stream};
-    use pi_core::{AbortHandle, ModelId, ProviderCallContext, StreamEvent, ThinkingLevel};
+    use pi_core::{AbortHandle, ModelId, StreamEvent, ThinkingLevel};
+    use pi_plugin::ProviderCallContext;
     use pi_provider::{HttpResponse, TransportError};
     use serde_json::Value;
 

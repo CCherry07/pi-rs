@@ -3,6 +3,7 @@ members = [
     "apps/pi-cli",
     "apps/pi-eval",
     "crates/pi-core",
+    "crates/pi-plugin",
     "crates/pi-media",
     "crates/pi-agent",
     "crates/pi-runtime",
@@ -15,11 +16,8 @@ members = [
     "crates/pi-settings",
     "crates/pi-sdk",
     "crates/pi-plugin-macros",
-    "crates/pi-plugin-sdk",
-    "crates/pi-plugin-loader",
     "crates/pi-memory-loader",
     "crates/pi-plugin-manager",
-    "crates/pi-plugin-tools",
     "crates/pi-js-package-manager",
     "crates/pi-js-plugin",
     "crates/pi-test-support",
@@ -67,6 +65,7 @@ license = "MIT"
 [workspace.dependencies]
 async-trait = "0.1.89"
 futures = "0.3.31"
+futures-core = "0.3.31"
 gcp_auth = "0.12.7"
 garde = { version = "0.22.0", features = ["derive"] }
 schemars = "1.2.1"
@@ -80,6 +79,7 @@ libloading = "0.8.9"
 toml = "0.8.23"
 
 pi-core = { path = "crates/pi-core" }
+pi-plugin = { path = "crates/pi-plugin" }
 pi-media = { path = "crates/pi-media" }
 pi-agent = { path = "crates/pi-agent" }
 pi-runtime = { path = "crates/pi-runtime" }
@@ -92,11 +92,8 @@ pi-shell = { path = "crates/pi-shell" }
 pi-settings = { path = "crates/pi-settings" }
 pi-sdk = { path = "crates/pi-sdk" }
 pi-plugin-macros = { path = "crates/pi-plugin-macros" }
-pi-plugin-sdk = { path = "crates/pi-plugin-sdk" }
-pi-plugin-loader = { path = "crates/pi-plugin-loader" }
 pi-memory-loader = { path = "crates/pi-memory-loader" }
 pi-plugin-manager = { path = "crates/pi-plugin-manager" }
-pi-plugin-tools = { path = "crates/pi-plugin-tools" }
 pi-js-package-manager = { path = "crates/pi-js-package-manager" }
 pi-js-plugin = { path = "crates/pi-js-plugin" }
 pi-test-support = { path = "crates/pi-test-support" }

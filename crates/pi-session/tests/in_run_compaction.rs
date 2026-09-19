@@ -6,11 +6,12 @@ use pi_core::{
     ContentBlock, Message, ModelId, PluginId, ProviderId, ResponseMetadata, StopReason,
     StreamEvent, ToolCall, Usage,
 };
+use pi_plugin::Plugin;
 use pi_runtime::{PiRuntime, SystemPrompt};
 use pi_session::{
-    AgentSession, AgentSessionOptions, CompactionEntry, CompactionSettings,
-    SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionEntry, SessionLog, SessionPlugin,
-    SessionPluginContext, SessionPluginError, SessionPlugins,
+    AgentSession, AgentSessionOptions, CompactionEntry, CompactionSettings, PluginError,
+    SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionEntry, SessionLog,
+    SessionPluginContext,
 };
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn, TestToolsPlugin};
 use serde_json::json;
@@ -47,8 +48,8 @@ fn text_turn_with_usage(text: &str, input_tokens: u64) -> ScriptedTurn {
 
 struct DeterministicCompaction;
 
-#[pi_session::session_plugin]
-impl SessionPlugin for DeterministicCompaction {
+#[pi_plugin::plugin]
+impl Plugin for DeterministicCompaction {
     fn id(&self) -> PluginId {
         PluginId::new("deterministic-compaction")
     }
@@ -57,7 +58,7 @@ impl SessionPlugin for DeterministicCompaction {
         &self,
         _context: &SessionPluginContext,
         event: &SessionBeforeCompactEvent,
-    ) -> Result<Option<SessionBeforeCompactResult>, SessionPluginError> {
+    ) -> Result<Option<SessionBeforeCompactResult>, PluginError> {
         Ok(Some(SessionBeforeCompactResult {
             cancel: false,
             compaction: Some(CompactionEntry {
@@ -111,7 +112,8 @@ async fn threshold_compaction_between_tool_turns_resumes_with_composed_turn_cont
         }
     }));
     let runtime = PiRuntime::builder()
-        .agent_plugin(TestToolsPlugin::new())
+        .plugin(TestToolsPlugin::new())
+        .plugin(DeterministicCompaction)
         .provider_plugin(provider_plugin)
         .agent_options(AgentOptions {
             provider_id: ProviderId::new("scripted"),
@@ -128,7 +130,6 @@ async fn threshold_compaction_between_tool_turns_resumes_with_composed_turn_cont
         runtime,
         &session_path,
         AgentSessionOptions::default()
-            .plugins(SessionPlugins::new().plugin(DeterministicCompaction))
             .compaction(CompactionSettings {
                 reserve_tokens: 100,
                 keep_recent_tokens: 100,
@@ -183,7 +184,7 @@ async fn failed_in_run_compaction_is_best_effort_and_does_not_stop_the_agent() {
     ]);
     let provider = provider_plugin.provider();
     let runtime = PiRuntime::builder()
-        .agent_plugin(TestToolsPlugin::new())
+        .plugin(TestToolsPlugin::new())
         .provider_plugin(provider_plugin)
         .agent_options(AgentOptions {
             provider_id: ProviderId::new("scripted"),
@@ -261,7 +262,7 @@ async fn permanent_turn_control_does_not_keep_a_dropped_session_alive() {
         }
     }));
     let runtime = PiRuntime::builder()
-        .agent_plugin(TestToolsPlugin::new())
+        .plugin(TestToolsPlugin::new())
         .provider_plugin(provider_plugin)
         .agent_options(AgentOptions {
             provider_id: ProviderId::new("scripted"),

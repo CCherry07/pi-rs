@@ -4,9 +4,12 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use pi_core::{
-    AgentPlugin, AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, CustomMessage,
-    CustomMessageContent, Message, PluginError, PluginId, RegisterContext, Tool, ToolCallId,
-    ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdateSink, UserMessage,
+    CustomMessage, CustomMessageContent, Message, PluginId, ToolCallId, ToolExecutionMode,
+    ToolResult, ToolSpec, UserMessage,
+};
+use pi_plugin::{
+    AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, Plugin, PluginError,
+    RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink,
 };
 use pi_sdk::{Config, Pi};
 use pi_session::{AgentMessage, AgentSession, PiSession, SessionGenerationOverlay};
@@ -23,13 +26,13 @@ struct HistoryPlugin {
     executions: Arc<AtomicUsize>,
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for HistoryPlugin {
+#[pi_plugin::plugin]
+impl Plugin for HistoryPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("history-fixture")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         if let Some(name) = self.version.tool_name {
             context.register_tool(Arc::new(HistoryTool {
                 name,
@@ -207,7 +210,7 @@ impl HistoryFixture {
     }
 
     fn overlay(&self) -> SessionGenerationOverlay {
-        SessionGenerationOverlay::new().with_agent_plugin({
+        SessionGenerationOverlay::new().with_plugin({
             let version = Arc::clone(&self.version);
             let executions = Arc::clone(&self.executions);
             move || {

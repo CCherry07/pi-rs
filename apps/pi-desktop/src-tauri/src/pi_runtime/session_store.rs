@@ -2,10 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use pi_core::{
-    CommandSpec, ContentBlock, IsolatedSessionId, Message, ModelId, ModelSpec, ProviderId,
-    ThinkingLevel,
-};
+use pi_core::{ContentBlock, Message, ModelId, ModelSpec, ProviderId, ThinkingLevel};
+use pi_plugin::{CommandSpec, IsolatedSessionId};
 use pi_session::{
     aggregate_document_usage, current_session_context_tokens, AgentSession,
     AgentSessionReplacement, AgentSessionSubscription, ExactSessionIdResolution, ForkPosition,

@@ -6,7 +6,8 @@ use std::time::{Duration, SystemTime};
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use pi_core::{AbortSignal, ProviderCallContext, ProviderError};
+use pi_core::AbortSignal;
+use pi_plugin::{ProviderCallContext, ProviderError};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 
@@ -488,10 +489,10 @@ mod tests {
 
     use async_trait::async_trait;
     use futures::StreamExt;
-    use pi_core::{
-        AbortSignal, AfterProviderResponseEvent, BeforeProviderHeadersEvent, ModelId, PluginError,
-        PluginId, ProviderCallContext, ProviderId, ProviderPlugin, ProviderPluginContext,
-        ProviderPluginDriver,
+    use pi_core::{AbortSignal, ModelId, PluginId, ProviderId};
+    use pi_plugin::{
+        AfterProviderResponseEvent, BeforeProviderHeadersEvent, PluginError, ProviderCallContext,
+        ProviderPlugin, ProviderPluginContext, ProviderPluginDriver,
     };
     use reqwest::header::{HeaderMap, HeaderValue};
     use serde_json::{Value, json};
@@ -534,7 +535,7 @@ mod tests {
         observations: Arc<Mutex<Vec<String>>>,
     }
 
-    #[pi_core::provider_plugin]
+    #[pi_plugin::provider_plugin]
     impl ProviderPlugin for WireObserver {
         fn id(&self) -> PluginId {
             PluginId::new("wire-observer")

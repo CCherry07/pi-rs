@@ -117,8 +117,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
-    use pi_core::{AgentPlugin, PluginId};
-    use pi_session::SessionPlugin;
+    use pi_core::PluginId;
+    use pi_plugin::Plugin;
     use serde_json::{Value, json};
 
     use super::*;
@@ -128,15 +128,8 @@ mod tests {
         id: String,
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for FakeProvider {
-        fn id(&self) -> PluginId {
-            PluginId::new("memory")
-        }
-    }
-
-    #[async_trait]
-    impl SessionPlugin for FakeProvider {
+    #[pi_plugin::plugin]
+    impl Plugin for FakeProvider {
         fn id(&self) -> PluginId {
             PluginId::new("memory")
         }

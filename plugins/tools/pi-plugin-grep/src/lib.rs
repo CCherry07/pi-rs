@@ -2,10 +2,8 @@ use async_trait::async_trait;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, sinks::Lossy};
 use ignore::{WalkBuilder, overrides::OverrideBuilder};
-use pi_core::{
-    AgentPlugin, PluginId, RegisterContext, Tool, ToolCallId, ToolContext, ToolError, ToolResult,
-    ToolSpec, ToolUpdateSink,
-};
+use pi_core::{PluginId, ToolCallId, ToolResult, ToolSpec};
+use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
 use pi_tool_support::with_prompt;
 use pi_tool_support::{
     execution, invalid, optional_positive_usize, require_str, resolve_to_cwd, spec,
@@ -23,12 +21,12 @@ const MAX_LINE_CHARS: usize = 500;
 
 pub struct GrepPlugin;
 pub struct GrepTool;
-#[pi_core::agent_plugin]
-impl AgentPlugin for GrepPlugin {
+#[pi_plugin::plugin]
+impl Plugin for GrepPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("grep-tool")
     }
-    fn register(&self, c: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, c: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         c.register_tool(Arc::new(GrepTool))
     }
 }

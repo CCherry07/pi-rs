@@ -7,7 +7,7 @@ use napi::Status;
 use napi::bindgen_prelude::{FnArgs, Promise};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
-use pi_core::{ToolUpdate, ToolUpdateSink};
+use pi_core::ToolUpdate;
 use pi_js_plugin::{
     ExtensionContextNotification, ExtensionContextQuery, ExtensionContextRequest,
     JsCallbackDispatcher, JsCallbackError, JsGenerationManifest, JsGenerationRequest,
@@ -15,6 +15,7 @@ use pi_js_plugin::{
     JsStreamHookBatchInvocation, PluginContextHandle, execute_context_notification,
     execute_context_query, execute_context_request,
 };
+use pi_plugin::ToolUpdateSink;
 use serde_json::Value;
 
 // A weak TSFN lets Node exit after `runPi()` resolves. The pending `runPi`

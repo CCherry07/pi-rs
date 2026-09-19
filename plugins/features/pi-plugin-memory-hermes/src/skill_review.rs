@@ -2,7 +2,8 @@
 use crate::curator::metadata::{self, Metadata};
 use crate::execution::HermesRunKind;
 use crate::{execution::ReviewObservations, store::HermesMemoryStore};
-use pi_core::{ToolContext, ToolError, ToolResult};
+use pi_core::ToolResult;
+use pi_plugin::{ToolContext, ToolError};
 use pi_utils::frontmatter::{FrontmatterStatus, parse_frontmatter};
 use serde::Deserialize;
 use serde_json::{Value, json};

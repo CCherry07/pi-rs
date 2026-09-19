@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::stream;
-use pi_plugin_sdk::provider::prelude::*;
+use pi_plugin::prelude::*;
 
 const PROVIDER_ID: &str = "eval-custom";
 const MODEL_ID: &str = "eval-custom-chat";
@@ -12,7 +12,7 @@ const ERROR_MESSAGE: &str = "intentional native provider fixture failure";
 #[derive(Default)]
 pub struct EvalNativeProviderPlugin;
 
-#[pi_plugin_sdk::provider]
+#[pi_plugin::native_provider]
 impl ProviderPlugin for EvalNativeProviderPlugin {
     fn register(&self, context: &mut ProviderRegisterContext<'_>) -> Result<()> {
         context.register_provider(Arc::new(EvalNativeProvider))?;

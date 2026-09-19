@@ -8,9 +8,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use pi_core::{
-    PluginId, ProviderError, ProviderId, ProviderPlugin, ProviderRegisterContext, Result,
-};
+use pi_core::{PluginId, ProviderId};
+use pi_plugin::{ProviderError, ProviderPlugin, ProviderRegisterContext, Result};
 use pi_provider::{HttpTransport, ReqwestTransport};
 
 use config::{PreparedProvider, compile_extension_provider, load_models_file};
@@ -158,7 +157,7 @@ impl ModelsPlugin {
     }
 }
 
-#[pi_core::provider_plugin]
+#[pi_plugin::provider_plugin]
 impl ProviderPlugin for ModelsPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("models")
@@ -240,7 +239,8 @@ impl PreparedProviderLayers {
 mod tests {
     use super::*;
     use pi_agent::AgentOptions;
-    use pi_core::{ModelId, ModelInput, RegistriesBuilder};
+    use pi_core::{ModelId, ModelInput};
+    use pi_plugin::RegistriesBuilder;
     use pi_plugin_anthropic::AnthropicPlugin;
     use pi_runtime::{PiRuntime, SystemPrompt};
 

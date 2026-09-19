@@ -3,20 +3,18 @@
 use std::path::PathBuf;
 
 use globset::GlobBuilder;
-use pi_core::{
-    ModelId, ModelSelection, ModelSpec, PluginId, ProviderId, ScopedModel, ThinkingLevel,
-};
+use pi_core::{ModelId, ModelSelection, ModelSpec, PluginId, ProviderId, ThinkingLevel};
+use pi_plugin::ScopedModel;
 use pi_runtime::PiRuntime;
 
 use crate::{
     AgentSessionInitialModelSource, CompactionSettings, SessionContextBuildOptions, SessionError,
-    SessionModel, SessionPlugins,
+    SessionModel,
 };
 
 #[derive(Clone, Default)]
 pub struct AgentSessionOptions {
     pub context: SessionContextBuildOptions,
-    pub plugins: SessionPlugins,
     pub compaction: CompactionSettings,
     /// Product-level model request to merge with a resumed session model.
     pub initial_model: InitialModelRequest,
@@ -68,11 +66,6 @@ impl Default for AutoRetrySettings {
 }
 
 impl AgentSessionOptions {
-    pub fn plugins(mut self, plugins: SessionPlugins) -> Self {
-        self.plugins = plugins;
-        self
-    }
-
     pub fn compaction(mut self, compaction: CompactionSettings) -> Self {
         self.compaction = compaction;
         self
@@ -716,16 +709,16 @@ mod tests {
     fn initial_model_selection_clamps_thinking_to_model_capabilities() {
         struct Catalog;
 
-        #[pi_core::provider_plugin]
-        impl pi_core::ProviderPlugin for Catalog {
+        #[pi_plugin::provider_plugin]
+        impl pi_plugin::ProviderPlugin for Catalog {
             fn id(&self) -> pi_core::PluginId {
                 pi_core::PluginId::new("thinking-catalog")
             }
 
             fn register(
                 &self,
-                context: &mut pi_core::ProviderRegisterContext<'_>,
-            ) -> pi_core::Result<()> {
+                context: &mut pi_plugin::ProviderRegisterContext<'_>,
+            ) -> pi_plugin::Result<()> {
                 let mut model = ModelSpec::new("scripted", "sparse", "Sparse", "test");
                 model.reasoning = true;
                 for level in ["minimal", "low", "medium"] {

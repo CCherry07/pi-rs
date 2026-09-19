@@ -4,12 +4,15 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_core::{
-    AbortSignal, AgentEvent, AgentPlugin, AgentPluginContext, AssistantMessage, ContentBlock,
-    Message, ModelId, PluginError, PluginId, ProviderId, ProviderPlugin, RegisterContext,
-    RegistriesBuilder, ResponseMetadata, ResponseMetadataPatch, StopReason, StreamEvent,
-    TextContent, ThinkingLevel, Tool, ToolCall, ToolCallBlock, ToolCallEvent, ToolCallId,
-    ToolCallPatch, ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolResultEvent,
-    ToolResultMessage, ToolResultPatch, ToolSpec, ToolUpdate, ToolUpdateSink, Usage, UserMessage,
+    AbortSignal, AgentEvent, AssistantMessage, ContentBlock, Message, ModelId, PluginId,
+    ProviderId, ResponseMetadata, ResponseMetadataPatch, StopReason, StreamEvent, TextContent,
+    ThinkingLevel, ToolCall, ToolCallId, ToolExecutionMode, ToolResult, ToolResultMessage,
+    ToolSpec, ToolUpdate, Usage, UserMessage,
+};
+use pi_plugin::{
+    AgentPluginContext, Plugin, PluginError, ProviderPlugin, RegisterContext, RegistriesBuilder,
+    Tool, ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolContext, ToolError, ToolResultEvent,
+    ToolResultPatch, ToolUpdateSink,
 };
 use pi_telemetry::{InMemoryTelemetrySink, SpanStatus, TelemetryContext, TelemetryRecord};
 use pi_test_support::{ScriptedProvider, ScriptedProviderPlugin, ScriptedTurn};
@@ -24,7 +27,7 @@ use crate::{
 
 fn build_agent(
     turns: impl IntoIterator<Item = ScriptedTurn>,
-    plugins: Vec<Arc<dyn AgentPlugin>>,
+    plugins: Vec<Arc<dyn Plugin>>,
     options: AgentOptions,
 ) -> (Agent, Arc<ScriptedProvider>) {
     let provider_plugin = Arc::new(ScriptedProviderPlugin::scripted(turns));
@@ -148,13 +151,13 @@ impl ToolPlugin {
     }
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for ToolPlugin {
+#[pi_plugin::plugin]
+impl Plugin for ToolPlugin {
     fn id(&self) -> PluginId {
         PluginId::new(self.id)
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         for tool in &self.tools {
             context.register_tool(Arc::clone(tool))?;
         }
@@ -283,8 +286,8 @@ impl Tool for StrictTool {
 
 struct PatchStrictArguments;
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for PatchStrictArguments {
+#[pi_plugin::plugin]
+impl Plugin for PatchStrictArguments {
     fn id(&self) -> PluginId {
         PluginId::new("patch-strict-arguments")
     }
@@ -303,8 +306,8 @@ impl AgentPlugin for PatchStrictArguments {
 
 struct BlockAllTools;
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for BlockAllTools {
+#[pi_plugin::plugin]
+impl Plugin for BlockAllTools {
     fn id(&self) -> PluginId {
         PluginId::new("block-all-tools")
     }
@@ -326,8 +329,8 @@ impl AgentPlugin for BlockAllTools {
 
 struct TerminateToolResults;
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for TerminateToolResults {
+#[pi_plugin::plugin]
+impl Plugin for TerminateToolResults {
     fn id(&self) -> PluginId {
         PluginId::new("terminate-tool-results")
     }
@@ -348,8 +351,8 @@ struct ObserveToolHookContext {
     observed: Arc<Mutex<Vec<Arc<AgentContext>>>>,
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for ObserveToolHookContext {
+#[pi_plugin::plugin]
+impl Plugin for ObserveToolHookContext {
     fn id(&self) -> PluginId {
         PluginId::new("observe-tool-hook-context")
     }

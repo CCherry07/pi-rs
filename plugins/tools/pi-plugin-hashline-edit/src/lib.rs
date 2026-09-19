@@ -4,10 +4,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use pi_core::{
-    AgentPlugin, PluginId, RegisterContext, Tool, ToolCallId, ToolContext, ToolError, ToolResult,
-    ToolSpec, ToolUpdateSink,
-};
+use pi_core::{PluginId, ToolCallId, ToolResult, ToolSpec};
+use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
 use pi_tool_support::{
     MAX_WRITE_BYTES, execution, hashline_tag, invalid, require_str, resolve_to_cwd,
     snapshot_and_atomic_replace, spec,
@@ -52,12 +50,12 @@ struct Resolved {
     lines: Vec<String>,
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for HashlineEditPlugin {
+#[pi_plugin::plugin]
+impl Plugin for HashlineEditPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("hashline-edit-tool")
     }
-    fn register(&self, c: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, c: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         c.register_tool(Arc::new(HashlineEditTool))
     }
 }

@@ -4,9 +4,10 @@ use std::sync::Arc;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
-use pi_core::{
-    AbortSignal, Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderId,
-    ProviderRequest, ProviderStream, ResponseMetadata, StreamEvent,
+use pi_core::{AbortSignal, ProviderId, ResponseMetadata, StreamEvent};
+use pi_plugin::{
+    Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderRequest,
+    ProviderStream,
 };
 use pi_provider::{
     HttpTransport, ReqwestTransport, SseDecoder, TransportError, insert_header,
@@ -250,9 +251,10 @@ fn map_transport_error(error: TransportError) -> ProviderError {
 mod tests {
     use std::sync::Mutex;
 
-    use pi_core::{
+    use pi_core::PluginId;
+    use pi_plugin::{
         AfterProviderResponseEvent, BeforeProviderHeadersEvent, BeforeProviderRequestEvent,
-        PluginError, PluginId, ProviderPlugin, ProviderPluginContext, ProviderPluginDriver,
+        PluginError, ProviderPlugin, ProviderPluginContext, ProviderPluginDriver,
     };
     use pi_provider::{HttpResponse, TransportError};
     use serde_json::{Value, json};
@@ -316,7 +318,7 @@ mod tests {
         responses: Arc<Mutex<Vec<String>>>,
     }
 
-    #[pi_core::provider_plugin]
+    #[pi_plugin::provider_plugin]
     impl ProviderPlugin for PayloadPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("payload-hook")

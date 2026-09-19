@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use pi_core::{
+use pi_core::{ToolCallId, ToolExecutionMode, ToolResult, ToolSpec};
+use pi_plugin::{
     Command, CommandContext, CommandError, CommandOutcome, CommandSpec, IsolatedSessionOptions,
-    NoticeLevel, SessionExecutionOrigin, Tool, ToolCallId, ToolContext, ToolError,
-    ToolExecutionMode, ToolResult, ToolSpec, ToolUpdateSink,
+    NoticeLevel, SessionExecutionOrigin, Tool, ToolContext, ToolError, ToolUpdateSink,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};

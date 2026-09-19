@@ -4,13 +4,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_core::{PluginContext, PresentationMode};
+
 use pi_js_package_manager::PackageManager as JsPackageManager;
 use pi_js_plugin::{JsGenerationRequest, JsPluginGeneration, JsPluginHost};
-use pi_plugin_loader::{NativePluginLoader, NativePluginLoaderOptions};
-use pi_plugin_manager::{
+use pi_plugin::{PluginContext, PresentationMode};
+use pi_plugin_manager::install::{
     InstallScope, PluginManager, PluginManagerOptions, PreparedPluginReconcile,
 };
+use pi_plugin_manager::loader::{NativePluginLoader, NativePluginLoaderOptions};
 use pi_plugin_subagents::SubagentRuntime;
 use pi_session::{
     PiPluginContext, PluginContextBinding, PluginProviderMutationAccess, PluginUiBridge,
@@ -331,7 +332,6 @@ impl SessionGenerationFactory for ProductSessionFactory {
             runtime,
             initial_model_fallback_message,
         } = built_runtime;
-        let session_plugins = components.session_plugins(&config, project_trusted);
         let session_options = session_options(
             &config.runtime_settings,
             initial_model_request(
@@ -340,7 +340,6 @@ impl SessionGenerationFactory for ProductSessionFactory {
                 &config.runtime_settings,
             ),
         )
-        .plugins(session_plugins)
         .initial_model_fallback_message(initial_model_fallback_message)
         .additional_active_tools(additional_active_tools(&runtime))
         .runtime_inventory(SessionRuntimeInventory::new(
@@ -458,7 +457,7 @@ mod tests {
 [plugin]
 id = "local-plugin"
 version = "1.0.0"
-kind = "agent"
+kind = "plugin"
 artifact = "plugin.dylib"
 
 [options]
@@ -502,18 +501,18 @@ command = "fixture-command"
         let first_id = first.id();
         let second_id = second.id();
 
-        let context = pi_core::CommandContextParts::new(
+        let context = pi_plugin::CommandContextParts::new(
             first
                 .current()
                 .runtime()
-                .plugin_context_handle(pi_core::PluginContextScope::Command),
+                .plugin_context_handle(pi_plugin::PluginContextScope::Command),
         );
         let replacement = context
             .session
-            .create(pi_core::NewSessionOptions::default())
+            .create(pi_plugin::NewSessionOptions::default())
             .await
             .unwrap();
-        let pi_core::SessionReplacement::Replaced(replacement) = replacement else {
+        let pi_plugin::SessionReplacement::Replaced(replacement) = replacement else {
             panic!("new session should replace the first managed handle");
         };
 

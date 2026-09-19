@@ -8,8 +8,8 @@ crates/pi-js-package-manager/README.md
 plugins/features/pi-plugin-mcp/README.md
 crates/pi-media/README.md
 crates/pi-plugin-manager/README.md
-crates/pi-plugin-sdk/README.md
-crates/pi-plugin-tools/README.md
+crates/pi-plugin/docs/native.md
+crates/pi-plugin-manager/docs/authoring.md
 crates/pi-sdk/README.md
 docs/architecture.md
 docs/js-extension-compatibility.md

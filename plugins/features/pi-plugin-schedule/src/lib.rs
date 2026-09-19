@@ -8,10 +8,11 @@ mod store;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use pi_core::{AgentPlugin, PluginId, RegisterContext};
+use pi_core::PluginId;
+use pi_plugin::{Plugin, RegisterContext};
 pub(crate) use pi_utils::time::unix_timestamp_ms as now_ms;
 
-pub use runtime::ScheduleSessionPlugin;
+use pi_plugin::{PluginError, SessionPluginContext, SessionShutdownEvent, SessionStartEvent};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -22,7 +23,7 @@ pub enum Error {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
-    Context(#[from] pi_core::PluginContextError),
+    Context(#[from] pi_plugin::PluginContextError),
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -59,24 +60,42 @@ impl ScheduleOptions {
 
 pub struct SchedulePlugin {
     options: ScheduleOptions,
+    scheduler: runtime::Scheduler,
 }
 
 impl SchedulePlugin {
     pub fn new(options: ScheduleOptions) -> Self {
-        Self { options }
+        Self {
+            scheduler: runtime::Scheduler::new(options.clone()),
+            options,
+        }
     }
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for SchedulePlugin {
+#[pi_plugin::plugin]
+impl Plugin for SchedulePlugin {
     fn id(&self) -> PluginId {
         PluginId::new("schedule")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_tool(Arc::new(interface::ScheduleTool::new(self.options.clone())))?;
         context.register_command(Arc::new(interface::ScheduleCommand::new(
             self.options.clone(),
         )))
+    }
+    async fn session_start(
+        &self,
+        context: &SessionPluginContext,
+        event: &SessionStartEvent,
+    ) -> std::result::Result<(), PluginError> {
+        self.scheduler.session_start(context, event).await
+    }
+    async fn session_shutdown(
+        &self,
+        context: &SessionPluginContext,
+        event: &SessionShutdownEvent,
+    ) -> std::result::Result<(), PluginError> {
+        self.scheduler.session_shutdown(context, event).await
     }
 }

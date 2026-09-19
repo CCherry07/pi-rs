@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_core::{
-    CustomMessageContent, IsolatedSessionRequest, Tool, ToolCallId, ToolContext, ToolError,
-    ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate, ToolUpdateSink,
+    CustomMessageContent, ToolCallId, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate,
 };
+use pi_plugin::{IsolatedSessionRequest, Tool, ToolContext, ToolError, ToolUpdateSink};
 use serde::Deserialize;
 use serde_json::{Value, json};
 

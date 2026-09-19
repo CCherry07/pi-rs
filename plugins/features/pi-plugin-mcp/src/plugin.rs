@@ -1,9 +1,10 @@
 //! Local MCP product plugin and management command; explicit client pools stay tool-only.
 use crate::{McpLibrary, McpScope, McpServerRow, McpToolSet};
 use async_trait::async_trait;
-use pi_core::{
-    AgentPlugin, Command, CommandContext, CommandError, CommandOutcome, CommandSpec, NoticeLevel,
-    PluginId, RegisterContext,
+use pi_core::PluginId;
+use pi_plugin::{
+    Command, CommandContext, CommandError, CommandOutcome, CommandSpec, NoticeLevel, Plugin,
+    RegisterContext,
 };
 use std::sync::Arc;
 
@@ -12,12 +13,12 @@ pub(crate) struct McpProductPlugin {
     pub(crate) rows: Vec<McpServerRow>,
     pub(crate) pool: McpToolSet,
 }
-#[pi_core::agent_plugin]
-impl AgentPlugin for McpProductPlugin {
+#[pi_plugin::plugin]
+impl Plugin for McpProductPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("mcp")
     }
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         self.pool.plugin().register(context)?;
         context.register_command(Arc::new(McpCommand {
             library: self.library.clone(),

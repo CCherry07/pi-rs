@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
-use pi_core::IsolatedSessionOptions;
+use pi_plugin::IsolatedSessionOptions;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

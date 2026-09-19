@@ -3,14 +3,14 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use pi_core::{
-    AbortHandle, ContentBlock, ModelId, ProviderId, ProviderPluginDriver, RegistriesBuilder,
-    ToolCallId, ToolContext, ToolExecutionMode, ToolUpdate, ToolUpdateSink,
+    AbortHandle, ContentBlock, ModelId, ProviderId, ToolCallId, ToolExecutionMode, ToolUpdate,
 };
 use pi_js_plugin::{
     JsAgentPluginManifest, JsCallbackDispatcher, JsCallbackError, JsGenerationManifest,
     JsHookManifest, JsInvocation, JsInvocationKind, JsPluginGeneration, JsProviderPluginManifest,
     JsToolManifest,
 };
+use pi_plugin::{ProviderPluginDriver, RegistriesBuilder, ToolContext, ToolUpdateSink};
 use serde_json::{Value, json};
 
 #[derive(Default)]
@@ -126,7 +126,7 @@ async fn manifest_tool_registers_and_dispatches_through_the_public_tool_interfac
     .unwrap();
 
     let (_, registries) = RegistriesBuilder::new()
-        .register_plugins(generation.agent_plugins())
+        .register_plugins(generation.plugins())
         .unwrap();
     let tool = registries.tool("greet").expect("registered JS tool");
     let spec = tool.spec();
@@ -251,11 +251,11 @@ async fn provider_wire_hooks_chain_mutations_and_isolate_javascript_failures() {
         .await;
 
     assert!(driver.diagnostics().iter().any(|diagnostic| {
-        diagnostic.hook == "before_provider_headers"
+        diagnostic.hook.as_str() == "before_provider_headers"
             && diagnostic.message.contains("header callback failed")
     }));
     assert!(driver.diagnostics().iter().any(|diagnostic| {
-        diagnostic.hook == "after_provider_response"
+        diagnostic.hook.as_str() == "after_provider_response"
             && diagnostic.message.contains("response callback failed")
     }));
     assert_eq!(dispatcher.invocations.lock().unwrap().len(), 5);

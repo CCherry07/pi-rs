@@ -1,7 +1,8 @@
 use std::sync::{Arc, RwLock};
 
 use pi_agent::AgentStateSnapshot;
-use pi_core::{AgentEvent, Message, NoticeLevel, ThinkingLevel, Usage};
+use pi_core::{AgentEvent, Message, ThinkingLevel, Usage};
+use pi_plugin::NoticeLevel;
 use pi_shell::{ShellResult, ShellStream};
 use tokio::sync::broadcast;
 

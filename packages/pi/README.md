@@ -404,7 +404,7 @@ pi plugin remove <plugin-id>
 
 Pass `-l` to plugin-management commands to operate on the trusted project's `.pi` configuration
 instead of the global agent directory. Repository contributors can find the native author API in
-`crates/pi-plugin-sdk/README.md` and package and registry formats in
+`crates/pi-plugin/docs/native.md` and package and registry formats in
 `crates/pi-plugin-manager/README.md`.
 
 ## Development

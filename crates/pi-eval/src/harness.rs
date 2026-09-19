@@ -1,11 +1,12 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use pi_core::{
-    AgentPlugin, AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, ContentBlock,
-    Message, PluginError, PluginId, PresentationMode, StopReason, Usage,
-};
+use pi_core::{ContentBlock, Message, PluginId, StopReason, Usage};
 use pi_js_plugin::JsPluginHost;
+use pi_plugin::{
+    AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, Plugin, PluginError,
+    PresentationMode,
+};
 use pi_sdk::{Config, Pi};
 use pi_session::{SessionGenerationOverlay, SubmitOutcome};
 use pi_utils::time::unix_timestamp_ms as now_ms;
@@ -145,9 +146,9 @@ impl PiEvalHarness {
         let mut overlay = SessionGenerationOverlay::new();
         for factory in &case.agent_plugins {
             let factory = Arc::clone(factory);
-            overlay = overlay.with_agent_plugin(move || factory());
+            overlay = overlay.with_plugin(move || factory());
         }
-        overlay = overlay.with_agent_plugin({
+        overlay = overlay.with_plugin({
             let prompt_capture = Arc::clone(&prompt_capture);
             let treatment = variant.system_prompt;
             move || {
@@ -315,8 +316,8 @@ struct EvalPromptPlugin {
     capture: Arc<Mutex<PromptCapture>>,
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for EvalPromptPlugin {
+#[pi_plugin::plugin]
+impl Plugin for EvalPromptPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("pi-eval-system-prompt")
     }

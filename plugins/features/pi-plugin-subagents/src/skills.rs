@@ -1,4 +1,5 @@
-use pi_core::{BeforeAgentStartEvent, ContentBlock, Message};
+use pi_core::{ContentBlock, Message};
+use pi_plugin::BeforeAgentStartEvent;
 use pi_plugin_skills::{
     SkillCatalog, SkillPromptProjection, SkillPromptProjector, SkillPromptSelection,
 };

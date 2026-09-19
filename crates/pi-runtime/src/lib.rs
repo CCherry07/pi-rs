@@ -10,13 +10,15 @@ use pi_agent::{
     AgentRuntime, PromptInput, StreamAssembler,
 };
 use pi_core::{
-    AbortHandle, AbortSignal, AgentPlugin, AgentSettledEvent, AssistantMessage, CommandContext,
-    CommandOutcome, CommandSpec, ContentBlock, ContextParts, ImageContent, InputEvent, InputPatch,
-    InputSource, InputStreamingBehavior, Message, ModelId, ModelSelection, ModelSpec,
-    PluginContext, PluginContextEpoch, PluginContextHandle, PluginContextScope, PluginDiagnostic,
-    PluginId, ProviderCallContext, ProviderId, ProviderPlugin, ProviderRequest, RegistriesBuilder,
-    RunId, StreamEvent, TextContent, ThinkingBudgets, ThinkingLevel, UserMessage,
-    is_retryable_provider_error_message,
+    AbortHandle, AbortSignal, AssistantMessage, ContentBlock, ImageContent, Message, ModelId,
+    ModelSelection, ModelSpec, PluginId, ProviderId, RunId, StreamEvent, TextContent,
+    ThinkingBudgets, ThinkingLevel, UserMessage,
+};
+use pi_plugin::{
+    AgentSettledEvent, CommandContext, CommandOutcome, CommandSpec, ContextParts, InputEvent,
+    InputPatch, InputSource, InputStreamingBehavior, Plugin, PluginContext, PluginContextEpoch,
+    PluginContextHandle, PluginContextScope, PluginDiagnostic, ProviderCallContext, ProviderPlugin,
+    ProviderRequest, RegistriesBuilder, is_retryable_provider_error_message,
 };
 use pi_prompt::{BuildSystemPromptOptions, build_system_prompt};
 use pi_resources::{ResourceDiagnostic, ResourceLoaderOptions, load_resources};
@@ -185,19 +187,25 @@ pub enum SystemPrompt {
     Pi(Box<BuildSystemPromptOptions>),
 }
 
-type PluginFactory = Arc<dyn Fn() -> Result<Arc<dyn AgentPlugin>, String> + Send + Sync>;
+type PluginFactory = Arc<dyn Fn() -> Result<Arc<dyn Plugin>, String> + Send + Sync>;
 type ProviderPluginFactory = Arc<dyn Fn() -> Result<Arc<dyn ProviderPlugin>, String> + Send + Sync>;
 
+type PluginPreparation = Arc<dyn Fn(u64) -> Result<Option<Arc<dyn Plugin>>, String> + Send + Sync>;
+type ProviderPluginPreparation =
+    Arc<dyn Fn(u64) -> Result<Option<Arc<dyn ProviderPlugin>>, String> + Send + Sync>;
+
 enum PluginSource {
-    Pinned(Arc<dyn AgentPlugin>),
+    Pinned(Arc<dyn Plugin>),
     Factory(PluginFactory),
+    Prepared(PluginPreparation),
 }
 
 impl PluginSource {
-    fn load(&self) -> Result<Arc<dyn AgentPlugin>, String> {
+    fn prepare(&self, generation: u64) -> Result<Option<Arc<dyn Plugin>>, String> {
         match self {
-            Self::Pinned(plugin) => Ok(Arc::clone(plugin)),
-            Self::Factory(factory) => factory(),
+            Self::Pinned(plugin) => Ok(Some(Arc::clone(plugin))),
+            Self::Factory(factory) => factory().map(Some),
+            Self::Prepared(factory) => factory(generation),
         }
     }
 }
@@ -205,13 +213,15 @@ impl PluginSource {
 enum ProviderPluginSource {
     Pinned(Arc<dyn ProviderPlugin>),
     Factory(ProviderPluginFactory),
+    Prepared(ProviderPluginPreparation),
 }
 
 impl ProviderPluginSource {
-    fn load(&self) -> Result<Arc<dyn ProviderPlugin>, String> {
+    fn prepare(&self, generation: u64) -> Result<Option<Arc<dyn ProviderPlugin>>, String> {
         match self {
-            Self::Pinned(plugin) => Ok(Arc::clone(plugin)),
-            Self::Factory(factory) => factory(),
+            Self::Pinned(plugin) => Ok(Some(Arc::clone(plugin))),
+            Self::Factory(factory) => factory().map(Some),
+            Self::Prepared(factory) => factory(generation),
         }
     }
 }
@@ -225,7 +235,7 @@ pub struct PiRuntimeBuilder {
     supplemental_diagnostics: Vec<ResourceDiagnostic>,
     completion_retry_policy: Option<CompletionRetryPolicy>,
     plugin_context: Arc<dyn PluginContext>,
-    execution_origin: pi_core::SessionExecutionOrigin,
+    execution_origin: pi_plugin::SessionExecutionOrigin,
 }
 
 impl Default for PiRuntimeBuilder {
@@ -244,34 +254,34 @@ impl PiRuntimeBuilder {
             resources: None,
             supplemental_diagnostics: Vec::new(),
             completion_retry_policy: None,
-            plugin_context: Arc::new(pi_core::UnavailablePluginContext),
-            execution_origin: pi_core::SessionExecutionOrigin::User,
+            plugin_context: Arc::new(pi_plugin::UnavailablePluginContext),
+            execution_origin: pi_plugin::SessionExecutionOrigin::User,
         }
     }
 
     /// Transient host provenance. Plugins decide which policies apply to it.
-    pub fn execution_origin(mut self, origin: pi_core::SessionExecutionOrigin) -> Self {
+    pub fn execution_origin(mut self, origin: pi_plugin::SessionExecutionOrigin) -> Self {
         self.execution_origin = origin;
         self
     }
 
-    pub fn agent_plugin(mut self, plugin: impl AgentPlugin + 'static) -> Self {
+    pub fn plugin(mut self, plugin: impl Plugin + 'static) -> Self {
         self.plugin_sources
             .push(PluginSource::Pinned(Arc::new(plugin)));
         self
     }
 
-    pub fn agent_plugin_arc(mut self, plugin: Arc<dyn AgentPlugin>) -> Self {
+    pub fn plugin_arc(mut self, plugin: Arc<dyn Plugin>) -> Self {
         self.plugin_sources.push(PluginSource::Pinned(plugin));
         self
     }
 
     /// Registers a reusable factory. A fresh plugin instance is created for
     /// the initial generation and every subsequent runtime reload.
-    pub fn agent_plugin_factory<F, P>(mut self, factory: F) -> Self
+    pub fn plugin_factory<F, P>(mut self, factory: F) -> Self
     where
         F: Fn() -> P + Send + Sync + 'static,
-        P: AgentPlugin + 'static,
+        P: Plugin + 'static,
     {
         self.plugin_sources
             .push(PluginSource::Factory(Arc::new(move || {
@@ -282,16 +292,16 @@ impl PiRuntimeBuilder {
 
     /// Registers a reusable fallible factory. Failed preparation aborts the
     /// reload before the active generation is changed.
-    pub fn try_agent_plugin_factory<F, P, E>(mut self, factory: F) -> Self
+    pub fn try_plugin_factory<F, P, E>(mut self, factory: F) -> Self
     where
         F: Fn() -> Result<P, E> + Send + Sync + 'static,
-        P: AgentPlugin + 'static,
+        P: Plugin + 'static,
         E: std::fmt::Display,
     {
         self.plugin_sources
             .push(PluginSource::Factory(Arc::new(move || {
                 factory()
-                    .map(|plugin| Arc::new(plugin) as Arc<dyn AgentPlugin>)
+                    .map(|plugin| Arc::new(plugin) as Arc<dyn Plugin>)
                     .map_err(|error| error.to_string())
             })));
         self
@@ -301,13 +311,57 @@ impl PiRuntimeBuilder {
     ///
     /// Dynamic plugin adapters use this seam to retain generation-local
     /// reconstruction without exposing the runtime's internal source type.
-    pub fn try_agent_plugin_arc_factory<F, E>(mut self, factory: F) -> Self
+    pub fn try_plugin_arc_factory<F, E>(mut self, factory: F) -> Self
     where
-        F: Fn() -> Result<Arc<dyn AgentPlugin>, E> + Send + Sync + 'static,
+        F: Fn() -> Result<Arc<dyn Plugin>, E> + Send + Sync + 'static,
         E: std::fmt::Display,
     {
         self.plugin_sources
             .push(PluginSource::Factory(Arc::new(move || {
+                factory().map_err(|error| error.to_string())
+            })));
+        self
+    }
+
+    /// Prepares typed plugin configuration once per candidate generation.
+    pub fn prepare_plugin<P>(
+        mut self,
+        context: pi_plugin::PrepareContext,
+        options: P::Options,
+    ) -> Self
+    where
+        P: Plugin + pi_plugin::PluginFactory,
+        P::Options: Clone,
+    {
+        self.plugin_sources
+            .push(PluginSource::Prepared(Arc::new(move |generation| {
+                P::prepare(&context.for_generation(generation), options.clone())
+                    .map(|plugin| plugin.map(|plugin| Arc::new(plugin) as Arc<dyn Plugin>))
+                    .map_err(|error| error.to_string())
+            })));
+        self
+    }
+
+    /// Type-erased preparation seam for optional native plugins.
+    pub fn try_prepared_plugin_arc_factory<F, E>(mut self, factory: F) -> Self
+    where
+        F: Fn() -> Result<Option<Arc<dyn Plugin>>, E> + Send + Sync + 'static,
+        E: std::fmt::Display,
+    {
+        self.plugin_sources
+            .push(PluginSource::Prepared(Arc::new(move |_| {
+                factory().map_err(|error| error.to_string())
+            })));
+        self
+    }
+
+    pub fn try_prepared_provider_plugin_arc_factory<F, E>(mut self, factory: F) -> Self
+    where
+        F: Fn() -> Result<Option<Arc<dyn ProviderPlugin>>, E> + Send + Sync + 'static,
+        E: std::fmt::Display,
+    {
+        self.provider_plugin_sources
+            .push(ProviderPluginSource::Prepared(Arc::new(move |_| {
                 factory().map_err(|error| error.to_string())
             })));
         self
@@ -359,7 +413,7 @@ impl PiRuntimeBuilder {
     /// Registers a type-erased, fallible provider plugin factory.
     ///
     /// This is the provider/catalog counterpart to
-    /// [`Self::try_agent_plugin_arc_factory`].
+    /// [`Self::try_plugin_arc_factory`].
     pub fn try_provider_plugin_arc_factory<F, E>(mut self, factory: F) -> Self
     where
         F: Fn() -> Result<Arc<dyn ProviderPlugin>, E> + Send + Sync + 'static,
@@ -455,7 +509,7 @@ struct RuntimeBlueprint {
     supplemental_diagnostics: Vec<ResourceDiagnostic>,
     completion_retry_policy: Option<CompletionRetryPolicy>,
     plugin_context: Arc<dyn PluginContext>,
-    execution_origin: pi_core::SessionExecutionOrigin,
+    execution_origin: pi_plugin::SessionExecutionOrigin,
     cwd: std::path::PathBuf,
 }
 
@@ -501,15 +555,19 @@ fn build_generation(
 
     let mut plugins = Vec::with_capacity(blueprint.plugin_sources.len());
     for (index, source) in blueprint.plugin_sources.iter().enumerate() {
-        plugins.push(source.load().map_err(|message| {
+        if let Some(plugin) = source.prepare(generation).map_err(|message| {
             RuntimeError::Build(format!("plugin source {index} failed: {message}"))
-        })?);
+        })? {
+            plugins.push(plugin);
+        }
     }
     let mut provider_plugins = Vec::with_capacity(blueprint.provider_plugin_sources.len());
     for (index, source) in blueprint.provider_plugin_sources.iter().enumerate() {
-        provider_plugins.push(source.load().map_err(|message| {
+        if let Some(plugin) = source.prepare(generation).map_err(|message| {
             RuntimeError::Build(format!("provider plugin source {index} failed: {message}"))
-        })?);
+        })? {
+            provider_plugins.push(plugin);
+        }
     }
     let plugin_context_epoch = PluginContextEpoch::new(Arc::clone(&blueprint.plugin_context));
     let (driver, provider_driver, registries) = RegistriesBuilder::new()
@@ -547,7 +605,7 @@ fn assemble_prompt(
     prompt: &mut BuildSystemPromptOptions,
     active_tools: &[String],
     cwd: &std::path::Path,
-    registries: &pi_core::FrozenRegistries,
+    registries: &pi_plugin::FrozenRegistries,
 ) -> Result<String, RuntimeError> {
     prompt.selected_tools = active_tools.to_vec();
     prompt.cwd = cwd.to_path_buf();
@@ -618,8 +676,13 @@ impl PiRuntime {
         &self.cwd
     }
 
-    pub fn execution_origin(&self) -> pi_core::SessionExecutionOrigin {
+    pub fn execution_origin(&self) -> pi_plugin::SessionExecutionOrigin {
         self.blueprint.execution_origin
+    }
+
+    /// The immutable unified plugin set used by this generation's Agent and Session hooks.
+    pub fn plugin_driver(&self) -> Arc<pi_plugin::PluginDriver> {
+        Arc::clone(self.current_generation().agent.plugins())
     }
 
     pub fn plugin_order(&self) -> Vec<PluginId> {
@@ -658,7 +721,7 @@ impl PiRuntime {
             .available_models()
     }
 
-    pub fn provider_statuses(&self) -> Vec<pi_core::ProviderStatus> {
+    pub fn provider_statuses(&self) -> Vec<pi_plugin::ProviderStatus> {
         self.current_generation()
             .agent
             .registries()
@@ -1407,16 +1470,18 @@ mod tests {
     use super::*;
     use pi_agent::{AgentEventListener, AgentOptions};
     use pi_core::{
-        AgentEndEvent, AgentEvent, AgentPlugin, AgentPluginContext, AgentStartEvent,
-        BeforeAgentStartEvent, BeforeAgentStartPatch, BeforeProviderRequestEvent, Command,
-        CommandError, ContentBlock, ContextEvent, ContextPatch, CustomMessage,
-        CustomMessageContent, InputContext, InputEvent, InputPatch, Message, MessageEndEvent,
-        MessageEndPatch, MessageStartEvent, MessageUpdateEvent, PluginError, PluginId, Provider,
-        ProviderCallContext, ProviderError, ProviderPlugin, ProviderPluginContext,
-        ProviderRegisterContext, ProviderStream, RegisterContext, ResponseMetadata, StopReason,
-        StreamEvent, TextContent, ToolCall, ToolCallBlock, ToolCallEvent, ToolCallPatch,
+        AgentEvent, ContentBlock, CustomMessage, CustomMessageContent, Message, PluginId,
+        ResponseMetadata, StopReason, StreamEvent, TextContent, ToolCall, Usage, UserMessage,
+    };
+    use pi_plugin::{
+        AgentEndEvent, AgentPluginContext, AgentStartEvent, BeforeAgentStartEvent,
+        BeforeAgentStartPatch, BeforeProviderRequestEvent, Command, CommandError, ContextEvent,
+        ContextPatch, InputContext, InputEvent, InputPatch, MessageEndEvent, MessageEndPatch,
+        MessageStartEvent, MessageUpdateEvent, Plugin, PluginError, Provider, ProviderCallContext,
+        ProviderError, ProviderPlugin, ProviderPluginContext, ProviderRegisterContext,
+        ProviderStream, RegisterContext, ToolCallBlock, ToolCallEvent, ToolCallPatch,
         ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent,
-        ToolResultPatch, TurnEndEvent, TurnStartEvent, Usage, UserMessage,
+        ToolResultPatch, TurnEndEvent, TurnStartEvent,
     };
     use pi_test_support::TestToolsPlugin;
     use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
@@ -1428,8 +1493,8 @@ mod tests {
 
     struct DuplicatePlugin;
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for DuplicatePlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for DuplicatePlugin {
         fn id(&self) -> PluginId {
             PluginId::new("duplicate")
         }
@@ -1437,8 +1502,8 @@ mod tests {
 
     struct IdOnlyPlugin(&'static str);
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for IdOnlyPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for IdOnlyPlugin {
         fn id(&self) -> PluginId {
             PluginId::new(self.0)
         }
@@ -1447,9 +1512,9 @@ mod tests {
     #[test]
     fn pinned_and_factory_sources_preserve_builder_order() {
         let runtime = PiRuntime::builder()
-            .agent_plugin(IdOnlyPlugin("first"))
-            .agent_plugin_factory(|| IdOnlyPlugin("second"))
-            .agent_plugin(IdOnlyPlugin("third"))
+            .plugin(IdOnlyPlugin("first"))
+            .plugin_factory(|| IdOnlyPlugin("second"))
+            .plugin(IdOnlyPlugin("third"))
             .build()
             .unwrap();
 
@@ -1466,8 +1531,8 @@ mod tests {
     #[test]
     fn duplicate_plugin_ids_fail_runtime_construction() {
         let error = match PiRuntime::builder()
-            .agent_plugin(DuplicatePlugin)
-            .agent_plugin(DuplicatePlugin)
+            .plugin(DuplicatePlugin)
+            .plugin(DuplicatePlugin)
             .build()
         {
             Ok(_) => panic!("duplicate plugin IDs must fail"),
@@ -1577,13 +1642,13 @@ mod tests {
         provider: Arc<HookedProvider>,
     }
 
-    #[pi_core::provider_plugin]
+    #[pi_plugin::provider_plugin]
     impl ProviderPlugin for HookedProviderPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("hook-fixture")
         }
 
-        fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+        fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
             context.register_provider(self.provider.clone())
         }
 
@@ -1598,13 +1663,13 @@ mod tests {
         }
     }
 
-    #[pi_core::provider_plugin]
+    #[pi_plugin::provider_plugin]
     impl ProviderPlugin for GenerationCatalogPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("generation-models")
         }
 
-        fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+        fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
             context.register_model(ModelSpec::new(
                 "scripted",
                 "test",
@@ -1674,13 +1739,13 @@ mod tests {
         duplicate_command: bool,
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for GenerationPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for GenerationPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("generation")
         }
 
-        fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+        fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
             context.register_command(Arc::new(GenerationCommand(self.value)))?;
             if self.duplicate_command {
                 context.register_command(Arc::new(GenerationCommand(self.value)))?;
@@ -1721,8 +1786,8 @@ mod tests {
 
     struct SuffixInputPlugin;
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for SuffixInputPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for SuffixInputPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("suffix-input")
         }
@@ -1744,8 +1809,8 @@ mod tests {
         events: Arc<Mutex<Vec<InputEvent>>>,
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for MultimodalInputPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for MultimodalInputPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("multimodal-input")
         }
@@ -1784,7 +1849,7 @@ mod tests {
         let scripted = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".to_string())]);
         let provider = scripted.provider();
         let runtime = PiRuntime::builder()
-            .agent_plugin(MultimodalInputPlugin {
+            .plugin(MultimodalInputPlugin {
                 events: Arc::clone(&events),
             })
             .provider_plugin(scripted)
@@ -1840,11 +1905,11 @@ mod tests {
         let scripted = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".to_string())]);
         let provider = scripted.provider();
         let runtime = PiRuntime::builder()
-            .agent_plugin(GenerationPlugin {
+            .plugin(GenerationPlugin {
                 value: 7,
                 duplicate_command: false,
             })
-            .agent_plugin(SuffixInputPlugin)
+            .plugin(SuffixInputPlugin)
             .provider_plugin(scripted)
             .build()
             .unwrap();
@@ -1863,11 +1928,11 @@ mod tests {
     #[tokio::test]
     async fn prepared_command_retains_the_original_input_for_product_presentation() {
         let runtime = PiRuntime::builder()
-            .agent_plugin(GenerationPlugin {
+            .plugin(GenerationPlugin {
                 value: 7,
                 duplicate_command: false,
             })
-            .agent_plugin(SuffixInputPlugin)
+            .plugin(SuffixInputPlugin)
             .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .build()
             .unwrap();
@@ -1887,11 +1952,11 @@ mod tests {
     #[tokio::test]
     async fn queued_command_retains_the_original_input_for_product_presentation() {
         let runtime = PiRuntime::builder()
-            .agent_plugin(GenerationPlugin {
+            .plugin(GenerationPlugin {
                 value: 7,
                 duplicate_command: false,
             })
-            .agent_plugin(SuffixInputPlugin)
+            .plugin(SuffixInputPlugin)
             .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .build()
             .unwrap();
@@ -1916,7 +1981,7 @@ mod tests {
         let builds_for_factory = Arc::clone(&builds);
         let runtime = PiRuntime::builder()
             .provider_plugin(ScriptedProviderPlugin::scripted([]))
-            .agent_plugin_factory(move || GenerationPlugin {
+            .plugin_factory(move || GenerationPlugin {
                 value: builds_for_factory.fetch_add(1, Ordering::SeqCst) + 1,
                 duplicate_command: false,
             })
@@ -1938,7 +2003,7 @@ mod tests {
         let builds_for_factory = Arc::clone(&builds);
         let runtime = PiRuntime::builder()
             .provider_plugin(ScriptedProviderPlugin::scripted([]))
-            .agent_plugin_factory(move || {
+            .plugin_factory(move || {
                 let value = builds_for_factory.fetch_add(1, Ordering::SeqCst) + 1;
                 GenerationPlugin {
                     value,
@@ -1961,7 +2026,7 @@ mod tests {
         let builds_for_factory = Arc::clone(&builds);
         let runtime = PiRuntime::builder()
             .provider_plugin(ScriptedProviderPlugin::scripted([]))
-            .try_agent_plugin_factory(move || {
+            .try_plugin_factory(move || {
                 let value = builds_for_factory.fetch_add(1, Ordering::SeqCst) + 1;
                 if value > 1 {
                     Err("fixture load failed")
@@ -1988,8 +2053,8 @@ mod tests {
         release: Arc<Notify>,
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for GenerationLeasePlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for GenerationLeasePlugin {
         fn id(&self) -> PluginId {
             PluginId::new("generation-lease")
         }
@@ -2031,7 +2096,7 @@ mod tests {
         let provider = scripted.provider();
         let runtime = PiRuntime::builder()
             .provider_plugin(scripted)
-            .agent_plugin_factory({
+            .plugin_factory({
                 let entered = Arc::clone(&entered);
                 let release = Arc::clone(&release);
                 move || GenerationLeasePlugin {
@@ -2074,8 +2139,8 @@ mod tests {
         inject: Option<&'static str>,
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for PromptHookPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for PromptHookPlugin {
         fn id(&self) -> PluginId {
             PluginId::new(self.id)
         }
@@ -2105,8 +2170,8 @@ mod tests {
 
     struct FailingPromptHook;
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for FailingPromptHook {
+    #[pi_plugin::plugin]
+    impl Plugin for FailingPromptHook {
         fn id(&self) -> PluginId {
             PluginId::new("failing-prompt")
         }
@@ -2127,7 +2192,7 @@ mod tests {
         let scripted = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("used".to_string())]);
         let provider = scripted.provider();
         let runtime = PiRuntime::builder()
-            .agent_plugin(FailingPromptHook)
+            .plugin(FailingPromptHook)
             .provider_plugin(scripted)
             .build()
             .unwrap();
@@ -2143,7 +2208,7 @@ mod tests {
         assert!(!state.messages.is_empty());
         assert!(runtime.plugin_diagnostics().iter().any(|diagnostic| {
             diagnostic.plugin_id == PluginId::new("failing-prompt")
-                && diagnostic.hook == "before_agent_start"
+                && diagnostic.hook.as_str() == "before_agent_start"
                 && diagnostic
                     .message
                     .contains("intentional prompt hook failure")
@@ -2154,8 +2219,8 @@ mod tests {
 
     struct WrongMessageEndRole;
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for WrongMessageEndRole {
+    #[pi_plugin::plugin]
+    impl Plugin for WrongMessageEndRole {
         fn id(&self) -> PluginId {
             PluginId::new("wrong-message-end-role")
         }
@@ -2179,8 +2244,8 @@ mod tests {
         }
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for ReplaceMessageEnd {
+    #[pi_plugin::plugin]
+    impl Plugin for ReplaceMessageEnd {
         fn id(&self) -> PluginId {
             PluginId::new("replace-message-end")
         }
@@ -2215,8 +2280,8 @@ mod tests {
             ScriptedProviderPlugin::scripted([ScriptedTurn::Text("provider original".to_string())]);
         let provider = scripted.provider();
         let runtime = PiRuntime::builder()
-            .agent_plugin(WrongMessageEndRole)
-            .agent_plugin(ReplaceMessageEnd)
+            .plugin(WrongMessageEndRole)
+            .plugin(ReplaceMessageEnd)
             .provider_plugin(scripted)
             .build()
             .unwrap();
@@ -2241,7 +2306,7 @@ mod tests {
         );
         assert!(runtime.plugin_diagnostics().iter().any(|diagnostic| {
             diagnostic.plugin_id == PluginId::new("wrong-message-end-role")
-                && diagnostic.hook == "message_end"
+                && diagnostic.hook.as_str() == "message_end"
                 && diagnostic.message.contains("same role")
         }));
     }
@@ -2254,12 +2319,12 @@ mod tests {
         ]);
         let provider = scripted.provider();
         let runtime = PiRuntime::builder()
-            .agent_plugin(PromptHookPlugin {
+            .plugin(PromptHookPlugin {
                 id: "prompt-a",
                 suffix: "|a",
                 inject: Some("injected"),
             })
-            .agent_plugin(PromptHookPlugin {
+            .plugin(PromptHookPlugin {
                 id: "prompt-b",
                 suffix: "|b",
                 inject: None,
@@ -2304,8 +2369,8 @@ mod tests {
         }
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for LifecyclePlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for LifecyclePlugin {
         fn id(&self) -> PluginId {
             PluginId::new("lifecycle")
         }
@@ -2398,8 +2463,8 @@ mod tests {
         ends: Arc<Mutex<Vec<TurnEndEvent>>>,
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for TurnMetadataPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for TurnMetadataPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("turn-metadata")
         }
@@ -2428,11 +2493,11 @@ mod tests {
         let starts = Arc::new(Mutex::new(Vec::new()));
         let ends = Arc::new(Mutex::new(Vec::new()));
         let runtime = PiRuntime::builder()
-            .agent_plugin(TurnMetadataPlugin {
+            .plugin(TurnMetadataPlugin {
                 starts: Arc::clone(&starts),
                 ends: Arc::clone(&ends),
             })
-            .agent_plugin(TestToolsPlugin::new())
+            .plugin(TestToolsPlugin::new())
             .provider_plugin(ScriptedProviderPlugin::scripted([
                 ScriptedTurn::ToolCalls(vec![ToolCall::new(
                     "echo-1",
@@ -2470,8 +2535,8 @@ mod tests {
 
     struct ContextToolHookPlugin;
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for ContextToolHookPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for ContextToolHookPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("context-tool-hooks")
         }
@@ -2525,11 +2590,11 @@ mod tests {
         ]);
         let provider = scripted.provider();
         let runtime = PiRuntime::builder()
-            .agent_plugin(LifecyclePlugin {
+            .plugin(LifecyclePlugin {
                 events: Arc::clone(&captured),
             })
-            .agent_plugin(ContextToolHookPlugin)
-            .agent_plugin(TestToolsPlugin::new())
+            .plugin(ContextToolHookPlugin)
+            .plugin(TestToolsPlugin::new())
             .provider_plugin(scripted)
             .agent_options(AgentOptions {
                 active_tools: vec!["echo".to_string()],
@@ -2581,7 +2646,7 @@ mod tests {
         ]);
         let provider = scripted_plugin.provider();
         let runtime = PiRuntime::builder()
-            .agent_plugin(test_tools.clone())
+            .plugin(test_tools.clone())
             .provider_plugin(scripted_plugin)
             .agent_options(AgentOptions {
                 active_tools: vec!["delay".to_string()],
@@ -2646,7 +2711,7 @@ mod tests {
     #[tokio::test]
     async fn max_tool_iterations_stops_with_balanced_lifecycle() {
         let runtime = PiRuntime::builder()
-            .agent_plugin(TestToolsPlugin::new())
+            .plugin(TestToolsPlugin::new())
             .provider_plugin(ScriptedProviderPlugin::scripted([
                 ScriptedTurn::ToolCalls(vec![ToolCall::new(
                     "echo-1",
@@ -2714,7 +2779,7 @@ mod tests {
     async fn sequential_tool_forces_source_order_execution() {
         let test_tools = TestToolsPlugin::new();
         let runtime = PiRuntime::builder()
-            .agent_plugin(test_tools.clone())
+            .plugin(test_tools.clone())
             .provider_plugin(ScriptedProviderPlugin::scripted([
                 ScriptedTurn::ToolCalls(vec![
                     ToolCall::new(
@@ -2789,7 +2854,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_and_failed_tools_become_error_results() {
         let runtime = PiRuntime::builder()
-            .agent_plugin(TestToolsPlugin::new())
+            .plugin(TestToolsPlugin::new())
             .provider_plugin(ScriptedProviderPlugin::scripted([
                 ScriptedTurn::ToolCalls(vec![
                     ToolCall::new("missing-1", "missing", json!({})),
@@ -2903,8 +2968,8 @@ mod tests {
 
     struct BlockEchoPlugin;
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for BlockEchoPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for BlockEchoPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("block-echo")
         }
@@ -2930,8 +2995,8 @@ mod tests {
 
     struct PatchToolResultPlugin;
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for PatchToolResultPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for PatchToolResultPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("patch-tool-result")
         }
@@ -2951,9 +3016,9 @@ mod tests {
     #[tokio::test]
     async fn plugin_can_block_tool_and_blocked_call_skips_after_hook() {
         let runtime = PiRuntime::builder()
-            .agent_plugin(TestToolsPlugin::new())
-            .agent_plugin(BlockEchoPlugin)
-            .agent_plugin(PatchToolResultPlugin)
+            .plugin(TestToolsPlugin::new())
+            .plugin(BlockEchoPlugin)
+            .plugin(PatchToolResultPlugin)
             .provider_plugin(ScriptedProviderPlugin::scripted([
                 ScriptedTurn::ToolCalls(vec![ToolCall::new(
                     "echo-1",
@@ -2989,8 +3054,8 @@ mod tests {
     #[tokio::test]
     async fn tool_result_hook_patches_executed_result() {
         let runtime = PiRuntime::builder()
-            .agent_plugin(TestToolsPlugin::new())
-            .agent_plugin(PatchToolResultPlugin)
+            .plugin(TestToolsPlugin::new())
+            .plugin(PatchToolResultPlugin)
             .provider_plugin(ScriptedProviderPlugin::scripted([
                 ScriptedTurn::ToolCalls(vec![ToolCall::new(
                     "echo-1",
@@ -3026,7 +3091,7 @@ mod tests {
     #[tokio::test]
     async fn queued_tool_update_precedes_execution_end() {
         let runtime = PiRuntime::builder()
-            .agent_plugin(TestToolsPlugin::new())
+            .plugin(TestToolsPlugin::new())
             .provider_plugin(ScriptedProviderPlugin::scripted([
                 ScriptedTurn::ToolCalls(vec![ToolCall::new("update-1", "update", json!({}))]),
                 ScriptedTurn::Text("done".to_string()),
@@ -3070,7 +3135,7 @@ mod tests {
     #[tokio::test]
     async fn aborting_running_tool_settles_batch() {
         let runtime = PiRuntime::builder()
-            .agent_plugin(TestToolsPlugin::new())
+            .plugin(TestToolsPlugin::new())
             .provider_plugin(ScriptedProviderPlugin::scripted([
                 ScriptedTurn::ToolCalls(vec![ToolCall::new("wait-1", "wait_for_abort", json!({}))]),
                 ScriptedTurn::Text("must not be requested".to_string()),
@@ -3186,8 +3251,8 @@ mod tests {
     fn active_tools_switch_rebuilds_prompt_atomically() {
         let cwd = std::env::current_dir().unwrap();
         let runtime = PiRuntime::builder()
-            .agent_plugin(pi_plugin_read::ReadPlugin)
-            .agent_plugin(pi_plugin_write::WritePlugin)
+            .plugin(pi_plugin_read::ReadPlugin)
+            .plugin(pi_plugin_write::WritePlugin)
             .agent_options(AgentOptions {
                 active_tools: vec!["read".to_string()],
                 cwd,
@@ -3225,7 +3290,7 @@ mod tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(cwd.join("AGENTS.md"), "project rules").unwrap();
         let runtime = PiRuntime::builder()
-            .agent_plugin(pi_plugin_read::ReadPlugin)
+            .plugin(pi_plugin_read::ReadPlugin)
             .agent_options(AgentOptions {
                 active_tools: vec!["read".to_string()],
                 cwd: cwd.clone(),
@@ -3293,7 +3358,7 @@ mod tests {
         assert!(matches!(completion.await, Err(RuntimeError::Aborted)));
         assert!(matches!(
             old_context.access_for_adapter(),
-            Err(pi_core::PluginContextError::Retired)
+            Err(pi_plugin::PluginContextError::Retired)
         ));
     }
 
@@ -3354,8 +3419,8 @@ mod tests {
     fn pi_prompt_collects_only_active_tool_contributions() {
         let cwd = std::env::current_dir().unwrap();
         let runtime = PiRuntime::builder()
-            .agent_plugin(pi_plugin_read::ReadPlugin)
-            .agent_plugin(pi_plugin_write::WritePlugin)
+            .plugin(pi_plugin_read::ReadPlugin)
+            .plugin(pi_plugin_write::WritePlugin)
             .agent_options(AgentOptions {
                 active_tools: vec!["read".to_string()],
                 cwd: cwd.clone(),

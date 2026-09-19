@@ -7,11 +7,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream;
 use pi_core::{
-    AbortSignal, AgentPlugin, ContentMetadata, ModelId, PluginId, Provider, ProviderCallContext,
-    ProviderError, ProviderId, ProviderPlugin, ProviderRegisterContext, ProviderRequest,
-    ProviderStream, RegisterContext, ResponseMetadata, StopReason, StreamEvent, Tool, ToolCall,
-    ToolCallId, ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdateSink,
-    Usage,
+    AbortSignal, ContentMetadata, ModelId, PluginId, ProviderId, ResponseMetadata, StopReason,
+    StreamEvent, ToolCall, ToolCallId, ToolExecutionMode, ToolResult, ToolSpec, Usage,
+};
+use pi_plugin::{
+    Plugin, Provider, ProviderCallContext, ProviderError, ProviderPlugin, ProviderRegisterContext,
+    ProviderRequest, ProviderStream, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink,
 };
 use pi_utils::time::unix_timestamp_ms as now_ms;
 use serde_json::{Value, json};
@@ -164,13 +165,13 @@ impl ScriptedProviderPlugin {
     }
 }
 
-#[pi_core::provider_plugin]
+#[pi_plugin::provider_plugin]
 impl ProviderPlugin for ScriptedProviderPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("scripted-provider")
     }
 
-    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_provider(self.provider.clone())
     }
 }
@@ -201,13 +202,13 @@ impl TestToolsPlugin {
     }
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for TestToolsPlugin {
+#[pi_plugin::plugin]
+impl Plugin for TestToolsPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("test-tools")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_tool(Arc::new(EchoTool))?;
         context.register_tool(Arc::new(DelayTool {
             completions: Arc::clone(&self.completions),

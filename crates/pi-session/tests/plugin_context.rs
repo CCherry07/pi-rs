@@ -1,8 +1,9 @@
 use std::sync::{Arc, Mutex};
 
-use pi_core::{
-    AgentPlugin, CommandContextParts, InputContext, InputEvent, InputPatch, PluginContext,
-    PluginContextScope, PluginError, PresentationMode, SessionEntryKind, Usage, UsageCost,
+use pi_core::{Usage, UsageCost};
+use pi_plugin::{
+    CommandContextParts, InputContext, InputEvent, InputPatch, Plugin, PluginContext,
+    PluginContextScope, PluginError, PresentationMode, SessionEntryKind,
 };
 use pi_runtime::PiRuntime;
 use pi_session::{
@@ -37,8 +38,8 @@ impl PluginUiBridge for RecordingUiBridge {
     }
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for NativeContextProbe {
+#[pi_plugin::plugin]
+impl Plugin for NativeContextProbe {
     fn id(&self) -> pi_core::PluginId {
         pi_core::PluginId::new("native-context-probe")
     }
@@ -72,7 +73,7 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
     let observed = Arc::new(Mutex::new(None));
     let retained = Arc::new(Mutex::new(None));
     let runtime = PiRuntime::builder()
-        .agent_plugin(NativeContextProbe {
+        .plugin(NativeContextProbe {
             observed: Arc::clone(&observed),
             retained: Arc::clone(&retained),
         })
@@ -254,10 +255,10 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
     session.shutdown().await;
     assert!(matches!(
         retained.lock().unwrap().as_ref().unwrap().ui.mode(),
-        Err(pi_core::PluginContextError::Retired)
+        Err(pi_plugin::PluginContextError::Retired)
     ));
     assert!(matches!(
         replacement_context.ui.mode(),
-        Err(pi_core::PluginContextError::Retired)
+        Err(pi_plugin::PluginContextError::Retired)
     ));
 }

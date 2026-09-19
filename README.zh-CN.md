@@ -28,7 +28,7 @@ Pi 清晰的产品理念、克制的核心设计与 extension-first 架构，正
   中文 IME、复制选择、历史记录、滚动和命令选择器。
 - **五种运行模式**：交互 TUI、`--print` 单次输出、`--json` Pi 兼容 NDJSON、
   `--mode rpc` 双向 stdin/stdout RPC，以及 `--acp` ACP stable v1。
-- **插件优先**：`AgentPlugin`、`ProviderPlugin`、`SessionPlugin` 三套窄生命周期；插件按
+- **插件优先**：`pi-plugin::Plugin` 统一 Agent 与 Session 回调，`ProviderPlugin` 保持独立；插件按
   generation 构建并原子 reload，失败时保留上一代。
 - **原生插件**：版本锁定的 Rust `cdylib` 可从全局 manifest、可信项目 manifest 或重复
   `--plugin` 路径加载；本地/HTTP/GitHub package 与静态 Registry 通过精确 lock 和内容
@@ -484,7 +484,8 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 | ------------------------------------------------ | ------------------------------------------------------------------- |
 | `apps/pi-cli`                                    | CLI、TUI 和终端生命周期 Adapter                                    |
 | `crates/pi-sdk`                                  | CLI、桌面与嵌入式 Adapter 共用的无界面产品装配                      |
-| `crates/pi-core`                                 | 强类型 contracts、registries 和插件 drivers                         |
+| `crates/pi-plugin` | 统一 Plugin 接口、准备、强类型 context、generation driver 与可选 native 导出 |
+| `crates/pi-core`                                 | 消息、模型、工具数据与会话共享 wire 类型                         |
 | `crates/pi-media`                                | 共享图片校验、缩放和格式转换                                        |
 | `crates/pi-agent`                                | Agent façade、agent loop、stream assembly 和工具调度                |
 | `crates/pi-runtime`                              | generation 构建、prompt 装配和原子 reload                           |
@@ -496,8 +497,8 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 | `crates/pi-provider`                             | Provider-neutral HTTP transport 与 SSE                              |
 | `crates/pi-prompt` / `pi-resources`              | 系统 prompt 和项目上下文发现                                        |
 | `apps/pi-cli/src/markdown`                       | TUI 所有的 Markdown 解析、streaming mend、语法高亮和 Ratatui 渲染   |
-| `crates/pi-plugin-sdk` / `pi-plugin-loader`      | 原生插件作者 interface、兼容校验、发现与 factory adapter            |
-| `crates/pi-plugin-manager`                       | Package intent/lock、静态 Registry、target 选择和 CAS 安装          |
+| `crates/pi-plugin-macros` | 静态与 native 插件过程宏 |
+| `crates/pi-plugin-manager` | Native 加载、安装与同步，以及可选的构建发布工具 |
 | `crates/pi-js-package-manager`                   | Pi 兼容的 JS/TS 发现与本地/npm/git package 管理                     |
 | `crates/pi-js-plugin` / `bindings/pi-napi`       | 强类型 JS lifecycle adapter 与 Node/NAPI 边界                       |
 | `packages/pi`                                    | Node 启动层、Pi extension 发现、Jiti loader 和 callback generations |

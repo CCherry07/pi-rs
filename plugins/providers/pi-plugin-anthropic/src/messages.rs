@@ -7,10 +7,10 @@ use std::collections::{HashMap, HashSet};
 use async_stream::stream;
 use futures::StreamExt;
 use pi_core::{
-    AbortSignal, ContentBlock, ContentMetadata, Message, ProviderError, ProviderId,
-    ProviderRequest, ProviderStream, ResponseMetadata, ResponseMetadataPatch, StopReason,
-    StreamEvent, ToolCallId, Usage,
+    AbortSignal, ContentBlock, ContentMetadata, Message, ProviderId, ResponseMetadata,
+    ResponseMetadataPatch, StopReason, StreamEvent, ToolCallId, Usage,
 };
+use pi_plugin::{ProviderError, ProviderRequest, ProviderStream};
 use pi_provider::{HttpBodyStream, SseDecoder, TransportError};
 use pi_utils::time::unix_timestamp_ms as now_ms;
 use serde::Deserialize;

@@ -8,10 +8,10 @@ use std::task::{Context, Poll};
 
 #[cfg(test)]
 use async_trait::async_trait;
-use pi_core::{
-    CustomMessageContent, CustomMessageInput, IsolatedFollowUpReceipt, IsolatedMessageReceipt,
-    IsolatedSessionId, IsolatedSessionOptions, IsolatedSessionOutcome, IsolatedSessionRequest,
-    IsolatedSessionTurnId, Message, ModelSelection, PluginContextError,
+use pi_core::{CustomMessageContent, CustomMessageInput, Message, ModelSelection};
+use pi_plugin::{
+    IsolatedFollowUpReceipt, IsolatedMessageReceipt, IsolatedSessionId, IsolatedSessionOptions,
+    IsolatedSessionOutcome, IsolatedSessionRequest, IsolatedSessionTurnId, PluginContextError,
 };
 use tokio::sync::watch;
 
@@ -664,7 +664,7 @@ impl PiSession {
         }
         let parent = self.current();
         let initial_context = match request.options.context {
-            pi_core::IsolatedContextMode::Fresh => {
+            pi_plugin::IsolatedContextMode::Fresh => {
                 if request.options.fork_point.is_some() || request.options.fork_turns.is_some() {
                     return Err(MultiSessionManagerError::InvalidIsolatedRequest(
                         "fresh context cannot use an isolated fork point or fork turn limit".into(),
@@ -672,7 +672,7 @@ impl PiSession {
                 }
                 None
             }
-            pi_core::IsolatedContextMode::Fork => {
+            pi_plugin::IsolatedContextMode::Fork => {
                 if request.options.fork_turns == Some(0) {
                     return Err(MultiSessionManagerError::InvalidIsolatedRequest(
                         "fork turn limit must be positive".into(),
@@ -704,7 +704,7 @@ impl PiSession {
                     target: AgentSessionRuntimeTarget::create(self.cwd(), path),
                     existing: ExistingSessionPolicy::Reject,
                     generation_overlay: SessionGenerationOverlay::default()
-                        .with_execution_origin(pi_core::SessionExecutionOrigin::Subagent),
+                        .with_execution_origin(pi_plugin::SessionExecutionOrigin::Subagent),
                     initial_state: Some(initial_state),
                     initial_context,
                     unclaimed: UnclaimedSessionPolicy::Close,
@@ -770,7 +770,7 @@ impl PiSession {
                     target: AgentSessionRuntimeTarget::open(&path),
                     existing: ExistingSessionPolicy::Reject,
                     generation_overlay: SessionGenerationOverlay::default()
-                        .with_execution_origin(pi_core::SessionExecutionOrigin::Subagent),
+                        .with_execution_origin(pi_plugin::SessionExecutionOrigin::Subagent),
                     initial_state: None,
                     initial_context: None,
                     unclaimed: UnclaimedSessionPolicy::Close,
@@ -872,7 +872,7 @@ impl PiSession {
             match session.enqueue_message(message.clone(), crate::QueueKind::Steer) {
                 Ok(crate::SubmitOutcome::Queued { .. }) => {
                     return Ok(IsolatedMessageReceipt {
-                        accepted_as: pi_core::IsolatedMessageDelivery::Steer,
+                        accepted_as: pi_plugin::IsolatedMessageDelivery::Steer,
                         turn_id: None,
                     });
                 }
@@ -884,7 +884,7 @@ impl PiSession {
             let _ = session.prompt(vec![message]).await;
         });
         Ok(IsolatedMessageReceipt {
-            accepted_as: pi_core::IsolatedMessageDelivery::Mailbox,
+            accepted_as: pi_plugin::IsolatedMessageDelivery::Mailbox,
             turn_id: None,
         })
     }
@@ -1211,6 +1211,7 @@ enum ExistingSessionPolicy {
 
 #[cfg(test)]
 mod tests {
+    use pi_plugin::Plugin;
     use std::sync::atomic::AtomicUsize;
 
     use pi_agent::AgentOptions;
@@ -1223,8 +1224,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        AgentSessionOptions, SessionPlugin, SessionPluginContext, SessionPluginError,
-        SessionPlugins, SessionShutdownEvent, SessionStartEvent,
+        AgentSessionOptions, PluginError, SessionPluginContext, SessionShutdownEvent,
+        SessionStartEvent,
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1282,8 +1283,8 @@ mod tests {
         }
     }
 
-    #[pi_session::session_plugin]
-    impl SessionPlugin for GatedLifecyclePlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for GatedLifecyclePlugin {
         fn id(&self) -> pi_core::PluginId {
             pi_core::PluginId::new("replacement-gate")
         }
@@ -1292,7 +1293,7 @@ mod tests {
             &self,
             _context: &SessionPluginContext,
             _event: &SessionStartEvent,
-        ) -> Result<(), SessionPluginError> {
+        ) -> Result<(), PluginError> {
             self.0.wait_at(ReplacementPause::Start).await;
             Ok(())
         }
@@ -1301,7 +1302,7 @@ mod tests {
             &self,
             _context: &SessionPluginContext,
             _event: &SessionShutdownEvent,
-        ) -> Result<(), SessionPluginError> {
+        ) -> Result<(), PluginError> {
             self.0.shutdowns.fetch_add(1, Ordering::AcqRel);
             self.0.wait_at(ReplacementPause::Shutdown).await;
             Ok(())
@@ -1325,6 +1326,7 @@ mod tests {
             let runtime = request
                 .generation_overlay
                 .apply_to(PiRuntime::builder())
+                .plugin(GatedLifecyclePlugin(self.0.clone()))
                 .provider_plugin(ScriptedProviderPlugin::scripted([]))
                 .agent_options(AgentOptions {
                     provider_id: ProviderId::new("scripted"),
@@ -1333,8 +1335,7 @@ mod tests {
                     ..AgentOptions::default()
                 })
                 .build()?;
-            let options = AgentSessionOptions::default()
-                .plugins(SessionPlugins::new().plugin(GatedLifecyclePlugin(self.0.clone())));
+            let options = AgentSessionOptions::default();
             Ok(PreparedSessionGeneration::new(runtime, options)
                 .with_activation(GatedActivation(Arc::clone(&self.0.activation_committed))))
         }
@@ -1410,7 +1411,7 @@ mod tests {
             .create_session(directory.path(), directory.path().join("child.jsonl"))
             .await
             .unwrap();
-        let id = pi_core::IsolatedSessionId::new(child.registration_id().to_string());
+        let id = pi_plugin::IsolatedSessionId::new(child.registration_id().to_string());
         let mut launch = Box::pin(manager.inner.isolated_sessions.launch(
             owner.registration_id().to_string(),
             child.clone(),
@@ -1477,16 +1478,16 @@ mod tests {
         assert!(usage.context_tokens.is_some());
         assert_eq!(
             owner.current().runtime().execution_origin(),
-            pi_core::SessionExecutionOrigin::User
+            pi_plugin::SessionExecutionOrigin::User
         );
         assert_eq!(
             child.current().runtime().execution_origin(),
-            pi_core::SessionExecutionOrigin::Subagent
+            pi_plugin::SessionExecutionOrigin::Subagent
         );
         child.reload().await.unwrap();
         assert_eq!(
             child.current().runtime().execution_origin(),
-            pi_core::SessionExecutionOrigin::Subagent
+            pi_plugin::SessionExecutionOrigin::Subagent
         );
         let grandchild_id = child
             .launch_isolated_session(IsolatedSessionRequest::new(CustomMessageContent::Text(
@@ -1505,11 +1506,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             grandchild.current().runtime().execution_origin(),
-            pi_core::SessionExecutionOrigin::Subagent
+            pi_plugin::SessionExecutionOrigin::Subagent
         );
         assert_eq!(
             owner.current().runtime().execution_origin(),
-            pi_core::SessionExecutionOrigin::User
+            pi_plugin::SessionExecutionOrigin::User
         );
         assert!(
             child
@@ -1547,7 +1548,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             message.accepted_as,
-            pi_core::IsolatedMessageDelivery::Mailbox
+            pi_plugin::IsolatedMessageDelivery::Mailbox
         );
         let custom = owner
             .send_custom_to_isolated_session(
@@ -1562,7 +1563,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             custom.accepted_as,
-            pi_core::IsolatedMessageDelivery::Mailbox
+            pi_plugin::IsolatedMessageDelivery::Mailbox
         );
         let follow_up = owner
             .follow_up_isolated_session(
@@ -1664,7 +1665,7 @@ mod tests {
             .launch_isolated_session(
                 IsolatedSessionRequest::new(CustomMessageContent::Text("child task".into()))
                     .options(IsolatedSessionOptions {
-                        context: pi_core::IsolatedContextMode::Fork,
+                        context: pi_plugin::IsolatedContextMode::Fork,
                         ..Default::default()
                     }),
             )
@@ -1697,7 +1698,7 @@ mod tests {
             .launch_isolated_session(
                 IsolatedSessionRequest::new(CustomMessageContent::Text("child task".into()))
                     .options(IsolatedSessionOptions {
-                        context: pi_core::IsolatedContextMode::Fork,
+                        context: pi_plugin::IsolatedContextMode::Fork,
                         fork_turns: Some(2),
                         ..Default::default()
                     }),
@@ -1729,12 +1730,12 @@ mod tests {
         let before_count = manager.sessions().len();
         for options in [
             IsolatedSessionOptions {
-                context: pi_core::IsolatedContextMode::Fresh,
+                context: pi_plugin::IsolatedContextMode::Fresh,
                 fork_turns: Some(1),
                 ..Default::default()
             },
             IsolatedSessionOptions {
-                context: pi_core::IsolatedContextMode::Fork,
+                context: pi_plugin::IsolatedContextMode::Fork,
                 fork_turns: Some(0),
                 ..Default::default()
             },
@@ -1787,7 +1788,7 @@ mod tests {
             .launch_isolated_session(
                 IsolatedSessionRequest::new(CustomMessageContent::Text("child task".into()))
                     .options(IsolatedSessionOptions {
-                        context: pi_core::IsolatedContextMode::Fork,
+                        context: pi_plugin::IsolatedContextMode::Fork,
                         fork_point: Some(fork_point.clone()),
                         ..Default::default()
                     }),
@@ -1820,17 +1821,17 @@ mod tests {
         );
         let before_count = manager.sessions().len();
         for (mode, source) in [
-            (pi_core::IsolatedContextMode::Fresh, fork_point.clone()),
+            (pi_plugin::IsolatedContextMode::Fresh, fork_point.clone()),
             (
-                pi_core::IsolatedContextMode::Fork,
-                pi_core::IsolatedForkPoint {
+                pi_plugin::IsolatedContextMode::Fork,
+                pi_plugin::IsolatedForkPoint {
                     parent_session_id: "foreign".into(),
                     ..fork_point.clone()
                 },
             ),
             (
-                pi_core::IsolatedContextMode::Fork,
-                pi_core::IsolatedForkPoint {
+                pi_plugin::IsolatedContextMode::Fork,
+                pi_plugin::IsolatedForkPoint {
                     parent_entry_id: "missing".into(),
                     ..fork_point
                 },
@@ -1886,7 +1887,7 @@ mod tests {
             .launch_isolated_session(
                 IsolatedSessionRequest::new(CustomMessageContent::Text("child task".into()))
                     .options(IsolatedSessionOptions {
-                        context: pi_core::IsolatedContextMode::Fork,
+                        context: pi_plugin::IsolatedContextMode::Fork,
                         active_tools: Some(Vec::new()),
                         ..Default::default()
                     }),

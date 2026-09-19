@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use pi_bench::{BenchConfig, BenchResult, BenchmarkReport, fixture_hash, measure, parameter_map};
-use pi_core::{AgentPlugin, PluginId};
+use pi_core::PluginId;
+use pi_plugin::Plugin;
 use pi_runtime::{PiRuntime, PiRuntimeBuilder};
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 
@@ -58,8 +59,8 @@ struct BenchPlugin {
     id: String,
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for BenchPlugin {
+#[pi_plugin::plugin]
+impl Plugin for BenchPlugin {
     fn id(&self) -> PluginId {
         PluginId::new(self.id.clone())
     }
@@ -73,10 +74,10 @@ fn runtime_with_factories(
     let mut builder = PiRuntimeBuilder::new();
     for index in 0..stable_count {
         let id = format!("bench-plugin-{index}");
-        builder = builder.agent_plugin_factory(move || BenchPlugin { id: id.clone() });
+        builder = builder.plugin_factory(move || BenchPlugin { id: id.clone() });
     }
     if let Some(failure) = failure {
-        builder = builder.try_agent_plugin_factory(move || {
+        builder = builder.try_plugin_factory(move || {
             if failure.load(Ordering::Acquire) {
                 Err("intentional benchmark reload failure")
             } else {

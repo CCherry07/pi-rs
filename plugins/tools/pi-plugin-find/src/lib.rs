@@ -1,10 +1,8 @@
 use async_trait::async_trait;
 use globset::{GlobBuilder, GlobMatcher};
 use ignore::WalkBuilder;
-use pi_core::{
-    AgentPlugin, PluginId, RegisterContext, Tool, ToolCallId, ToolContext, ToolError, ToolResult,
-    ToolSpec, ToolUpdateSink,
-};
+use pi_core::{PluginId, ToolCallId, ToolResult, ToolSpec};
+use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
 use pi_tool_support::with_prompt;
 use pi_tool_support::{
     execution, optional_positive_usize, require_str, resolve_to_cwd, spec, truncate_lines_by_bytes,
@@ -18,12 +16,12 @@ const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 
 pub struct FindPlugin;
 pub struct FindTool;
-#[pi_core::agent_plugin]
-impl AgentPlugin for FindPlugin {
+#[pi_plugin::plugin]
+impl Plugin for FindPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("find-tool")
     }
-    fn register(&self, c: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, c: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         c.register_tool(Arc::new(FindTool))
     }
 }

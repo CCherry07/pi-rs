@@ -237,7 +237,7 @@ export function SettingsPluginsSection({ projects, onDirtyChange, onBusyChange, 
       <div className="settings-plugins-toolbar">
         <input className="settings-input settings-plugins-search" aria-label={t("plugins.search")} placeholder={t("plugins.search")} value={query} onChange={event => setQuery(event.target.value)} />
         <select className="settings-select" aria-label={t("plugins.type")} value={kind} onChange={event => setKind(event.target.value)}>
-          <option value="">{t("plugins.allTypes")}</option><option value="agent">Agent</option><option value="provider">Provider</option><option value="session">Session</option>
+          <option value="">{t("plugins.allTypes")}</option><option value="plugin">Plugin</option><option value="provider">Provider</option>
         </select>
       </div>
       {!loading && library && rows.length === 0 && <p className="settings-empty">{t("plugins.empty")}</p>}

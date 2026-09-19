@@ -1,6 +1,7 @@
 //! One launch policy for both single children and workflow nodes. A batch pins
 //! its fork source on first use, before any child or parent continuation runs.
-use pi_core::{
+
+use pi_plugin::{
     IsolatedContextMode, IsolatedForkPoint, IsolatedSessionOptions, ToolContext, ToolError,
 };
 use serde::{Deserialize, Deserializer};
@@ -92,7 +93,8 @@ impl<'a> LaunchContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_core::{ModelsContextAccess, SessionContextAccess, UiContextAccess};
+
+    use pi_plugin::{ModelsContextAccess, SessionContextAccess, UiContextAccess};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -104,7 +106,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl SessionContextAccess for Access {
-        fn isolated_fork_point(&self) -> pi_core::PluginContextResult<Option<IsolatedForkPoint>> {
+        fn isolated_fork_point(&self) -> pi_plugin::PluginContextResult<Option<IsolatedForkPoint>> {
             let index = self.reads.fetch_add(1, Ordering::SeqCst);
             Ok(self.available.then(|| IsolatedForkPoint {
                 parent_session_id: "parent".into(),
@@ -124,7 +126,7 @@ mod tests {
                 available,
                 reads: AtomicUsize::new(0),
             });
-            let epoch = pi_core::PluginContextEpoch::new(access.clone());
+            let epoch = pi_plugin::PluginContextEpoch::new(access.clone());
             let (_, signal) = pi_core::AbortHandle::new();
             let context = ToolContext::with_plugin_context(".".into(), signal, epoch.context());
             let mut batch = LaunchContext::new(&context);

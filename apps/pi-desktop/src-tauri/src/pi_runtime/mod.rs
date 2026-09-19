@@ -14,10 +14,8 @@ use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use pi_agent::AgentStateSnapshot;
-use pi_core::{
-    ContentBlock, ImageContent, Message, ModelId, ModelSpec, PresentationMode, ProviderId,
-    ThinkingLevel,
-};
+use pi_core::{ContentBlock, ImageContent, Message, ModelId, ModelSpec, ProviderId, ThinkingLevel};
+use pi_plugin::PresentationMode;
 use pi_sdk::{Config, Pi};
 use pi_session::{
     AgentSession, AgentSessionSnapshot, BranchQuery, EntryOrder, EntryQuery,
@@ -1405,15 +1403,15 @@ mod tests {
     struct FixtureCommand(Arc<CommandFixture>, usize);
     struct FixtureCatalog(usize);
 
-    #[pi_core::provider_plugin]
-    impl pi_core::ProviderPlugin for FixtureCatalog {
+    #[pi_plugin::provider_plugin]
+    impl pi_plugin::ProviderPlugin for FixtureCatalog {
         fn id(&self) -> pi_core::PluginId {
             pi_core::PluginId::new("desktop-model-catalog")
         }
         fn register(
             &self,
-            context: &mut pi_core::ProviderRegisterContext<'_>,
-        ) -> pi_core::Result<()> {
+            context: &mut pi_plugin::ProviderRegisterContext<'_>,
+        ) -> pi_plugin::Result<()> {
             context.register_model(ModelSpec::new(
                 "scripted",
                 "desktop-test",
@@ -1423,20 +1421,20 @@ mod tests {
         }
     }
 
-    #[pi_core::agent_plugin]
-    impl pi_core::AgentPlugin for FixturePlugin {
+    #[pi_plugin::plugin]
+    impl pi_plugin::Plugin for FixturePlugin {
         fn id(&self) -> pi_core::PluginId {
             pi_core::PluginId::new("desktop-commands")
         }
-        fn register(&self, context: &mut pi_core::RegisterContext<'_>) -> pi_core::Result<()> {
+        fn register(&self, context: &mut pi_plugin::RegisterContext<'_>) -> pi_plugin::Result<()> {
             context.register_command(Arc::new(FixtureCommand(Arc::clone(&self.0), self.1)))
         }
     }
 
-    #[pi_core::__plugin_async_trait]
-    impl pi_core::Command for FixtureCommand {
-        fn spec(&self) -> pi_core::CommandSpec {
-            pi_core::CommandSpec {
+    #[pi_plugin::__plugin_async_trait]
+    impl pi_plugin::Command for FixtureCommand {
+        fn spec(&self) -> pi_plugin::CommandSpec {
+            pi_plugin::CommandSpec {
                 name: "native".into(),
                 description: format!("generation {}", self.1),
                 argument_hint: Some("[action]".into()),
@@ -1444,9 +1442,9 @@ mod tests {
         }
         async fn execute(
             &self,
-            context: pi_core::CommandContext,
+            context: pi_plugin::CommandContext,
             arguments: String,
-        ) -> Result<pi_core::CommandOutcome, pi_core::CommandError> {
+        ) -> Result<pi_plugin::CommandOutcome, pi_plugin::CommandError> {
             self.0
                 .calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1463,14 +1461,14 @@ mod tests {
                     .await?;
                 }
                 "transform" => {
-                    return Ok(pi_core::CommandOutcome::TransformInput("expanded".into()));
+                    return Ok(pi_plugin::CommandOutcome::TransformInput("expanded".into()));
                 }
-                "error" => return Err(pi_core::CommandError::Execution("fixture error".into())),
+                "error" => return Err(pi_plugin::CommandError::Execution("fixture error".into())),
                 _ => context
                     .ui
-                    .notify(pi_core::NoticeLevel::Info, "native notice")?,
+                    .notify(pi_plugin::NoticeLevel::Info, "native notice")?,
             }
-            Ok(pi_core::CommandOutcome::Handled)
+            Ok(pi_plugin::CommandOutcome::Handled)
         }
     }
 
@@ -1480,7 +1478,7 @@ mod tests {
 
     struct ScriptedFactory(Arc<CommandFixture>);
 
-    #[pi_core::__plugin_async_trait]
+    #[pi_plugin::__plugin_async_trait]
     impl pi_session::SessionGenerationFactory for ScriptedFactory {
         fn session_registered(&self, session: &pi_session::PiSession) {
             self.0.binding.bind(session.clone());
@@ -1521,8 +1519,8 @@ mod tests {
             );
             let runtime = PiRuntime::builder()
                 .plugin_context(context.clone())
-                .agent_plugin(pi_plugin_skills::SkillsPlugin::new(skills))
-                .agent_plugin(FixturePlugin(fixture, generation))
+                .plugin(pi_plugin_skills::SkillsPlugin::new(skills))
+                .plugin(FixturePlugin(fixture, generation))
                 .provider_plugin(ScriptedProviderPlugin::scripted([turn]))
                 .provider_plugin(FixtureCatalog(generation))
                 .agent_options(AgentOptions {
@@ -2213,16 +2211,16 @@ mod tests {
     async fn desktop_configuration_clamps_unsupported_thinking_like_pi() {
         struct Catalog;
 
-        #[pi_core::provider_plugin]
-        impl pi_core::ProviderPlugin for Catalog {
+        #[pi_plugin::provider_plugin]
+        impl pi_plugin::ProviderPlugin for Catalog {
             fn id(&self) -> pi_core::PluginId {
                 pi_core::PluginId::new("desktop-thinking-catalog")
             }
 
             fn register(
                 &self,
-                context: &mut pi_core::ProviderRegisterContext<'_>,
-            ) -> pi_core::Result<()> {
+                context: &mut pi_plugin::ProviderRegisterContext<'_>,
+            ) -> pi_plugin::Result<()> {
                 let mut model =
                     ModelSpec::new("scripted", "desktop-reasoning", "Reasoning", "test");
                 model.reasoning = true;
@@ -2388,7 +2386,7 @@ mod tests {
         let (key, handle) = store.handle(&parent_id).unwrap();
         assert_ne!(key, parent_id);
         let child = handle
-            .launch_isolated_session(pi_core::IsolatedSessionRequest::new(
+            .launch_isolated_session(pi_plugin::IsolatedSessionRequest::new(
                 pi_core::CustomMessageContent::Text("child".into()),
             ))
             .await
@@ -2577,11 +2575,11 @@ mod tests {
         let (_, handle) = store.handle(&parent_id).unwrap();
         let isolated_id = handle
             .launch_isolated_session(
-                pi_core::IsolatedSessionRequest::new(pi_core::CustomMessageContent::Text(
+                pi_plugin::IsolatedSessionRequest::new(pi_core::CustomMessageContent::Text(
                     "child task".into(),
                 ))
-                .options(pi_core::IsolatedSessionOptions {
-                    context: pi_core::IsolatedContextMode::Fork,
+                .options(pi_plugin::IsolatedSessionOptions {
+                    context: pi_plugin::IsolatedContextMode::Fork,
                     ..Default::default()
                 }),
             )
@@ -2706,7 +2704,7 @@ mod tests {
         let parent_id = parent.log().header().id;
         let (_, handle) = store.handle(&parent_id).unwrap();
         let child = handle
-            .launch_isolated_session(pi_core::IsolatedSessionRequest::new(
+            .launch_isolated_session(pi_plugin::IsolatedSessionRequest::new(
                 pi_core::CustomMessageContent::Text("child".into()),
             ))
             .await
@@ -2740,7 +2738,7 @@ mod tests {
         let parent_id = parent.log().header().id;
         let (_, parent_handle) = store.handle(&parent_id).unwrap();
         let child = parent_handle
-            .launch_isolated_session(pi_core::IsolatedSessionRequest::new(
+            .launch_isolated_session(pi_plugin::IsolatedSessionRequest::new(
                 pi_core::CustomMessageContent::Text("child".into()),
             ))
             .await
@@ -2755,7 +2753,7 @@ mod tests {
             .find(|session| session.id() == child_thread_id)
             .unwrap();
         let grandchild = child_handle
-            .launch_isolated_session(pi_core::IsolatedSessionRequest::new(
+            .launch_isolated_session(pi_plugin::IsolatedSessionRequest::new(
                 pi_core::CustomMessageContent::Text("grandchild".into()),
             ))
             .await

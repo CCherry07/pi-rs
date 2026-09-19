@@ -11,7 +11,6 @@ extern crate self as pi_session;
 
 #[doc(hidden)]
 pub use async_trait::async_trait as __plugin_async_trait;
-pub use pi_plugin_macros::session_plugin;
 
 mod agent_session;
 mod agent_session_runtime;
@@ -67,14 +66,13 @@ pub use journal::{
 pub use multi_session_manager::{
     MultiSessionManager, MultiSessionManagerError, PiSession, WeakPiSession,
 };
-pub use pi_core::{ForkPosition, NoticeLevel};
+pub use pi_plugin::{ForkPosition, NoticeLevel};
 pub use plugin::{
-    SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent,
+    PluginError, SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent,
     SessionBeforeForkResult, SessionBeforeSwitchEvent, SessionBeforeSwitchResult,
     SessionBeforeTreeEvent, SessionBeforeTreeResult, SessionCompactEvent,
     SessionCompactFailedEvent, SessionForkPosition, SessionHook, SessionIdentity,
-    SessionInfoChangedEvent, SessionPlugin, SessionPluginContext, SessionPluginDiagnostic,
-    SessionPluginError, SessionPlugins, SessionShutdownEvent, SessionShutdownReason,
+    SessionInfoChangedEvent, SessionPluginContext, SessionShutdownEvent, SessionShutdownReason,
     SessionStartEvent, SessionStartReason, SessionSwitchReason, SessionTreeEvent,
     SessionTreeSummary, TreePreparation,
 };

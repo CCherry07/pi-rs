@@ -13,7 +13,7 @@ const other = { id: "other", name: "Other" } as WorkspaceInfo;
 const doc: PluginLibrarySnapshot = {
   scope: "global", path: "/agent/plugins.json", lockPath: "/agent/plugins.lock", target: "host", writable: true,
   projectTrusted: false, intentCurrent: true, diagnostics: [],
-  plugins: [{ id: "example", source: "registry:example", configured: true, requestedVersion: "^1", installed: { id: "example", source: "https://example.com/release.json", version: "1.2.0", kind: "agent", target: "host", sha256: "abc123" } }],
+  plugins: [{ id: "example", source: "registry:example", configured: true, requestedVersion: "^1", installed: { id: "example", source: "https://example.com/release.json", version: "1.2.0", kind: "plugin", target: "host", sha256: "abc123" } }],
 };
 const inventory: PluginRuntimeSnapshot = { workspaceId: "project", threadId: "thread", configuredNativePluginIds: ["example"] };
 const session = (): PluginSessionContext => ({ workspaceId: "project", workspaceName: "Project", threadId: "thread", isProcessing: false, reload: vi.fn().mockResolvedValue(undefined) });

@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-use pi_core::{
-    CompactOptions, CustomMessageContent, CustomMessageInput, ForkOptions, ForkPosition, ModelId,
-    NavigateTreeOptions, NewSessionOptions, NoticeLevel, ProviderId, SendMessageOptions,
-    SendUserMessageOptions, ThinkingLevel,
+use pi_core::{CustomMessageContent, CustomMessageInput, ModelId, ProviderId, ThinkingLevel};
+use pi_plugin::{
+    CompactOptions, ForkOptions, ForkPosition, NavigateTreeOptions, NewSessionOptions, NoticeLevel,
+    SendMessageOptions, SendUserMessageOptions,
 };
-pub use pi_core::{
+pub use pi_plugin::{
     MessageDelivery, PluginContextError, PluginContextHandle, PluginContextReplacement,
     PluginContextScope, PresentationMode,
 };
@@ -392,7 +392,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use pi_core::{
+
+    use pi_plugin::{
         ModelsContextAccess, PluginContext, PluginContextEpoch, SessionContextAccess,
         UiContextAccess,
     };

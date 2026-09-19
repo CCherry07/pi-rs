@@ -4,9 +4,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use pi_agent::QueueMode;
 use pi_core::{
-    AgentPlugin, Message, ModelId, PluginId, ProviderId, RegisterContext, SessionExecutionOrigin,
-    ThinkingLevel, Tool, ToolCallId, ToolContext, ToolError, ToolExecutionMode, ToolResult,
-    ToolSpec, ToolUpdateSink, UserMessage,
+    Message, ModelId, PluginId, ProviderId, ThinkingLevel, ToolCallId, ToolExecutionMode,
+    ToolResult, ToolSpec, UserMessage,
+};
+use pi_plugin::{
+    Plugin, RegisterContext, SessionExecutionOrigin, Tool, ToolContext, ToolError, ToolUpdateSink,
 };
 use pi_sdk::{Config, Pi};
 use pi_session::{QueueKind, SessionGenerationOverlay};
@@ -217,13 +219,13 @@ async fn reload_keeps_the_explicit_model_selected_when_resuming_a_session() {
 
 struct ReloadTools(Vec<String>);
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for ReloadTools {
+#[pi_plugin::plugin]
+impl Plugin for ReloadTools {
     fn id(&self) -> PluginId {
         PluginId::new("reload-tools")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         for name in &self.0 {
             context.register_tool(Arc::new(ReloadTool(name.clone())))?;
         }
@@ -265,7 +267,7 @@ async fn assert_reload_reconciles_plugin_tools(origin: SessionExecutionOrigin) {
         let tools = Arc::new(Mutex::new(vec!["keep".to_string(), "obsolete".to_string()]));
         let overlay = SessionGenerationOverlay::new()
             .with_execution_origin(origin)
-            .with_agent_plugin({
+            .with_plugin({
                 let tools = Arc::clone(&tools);
                 move || Arc::new(ReloadTools(tools.lock().unwrap().clone()))
             });

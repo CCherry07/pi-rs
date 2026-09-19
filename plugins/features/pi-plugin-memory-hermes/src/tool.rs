@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_core::{
-    RegisterContext, Tool, ToolCallId, ToolContext, ToolError, ToolExecutionMode, ToolResult,
-    ToolSpec, ToolUpdateSink,
-};
+use pi_core::{ToolCallId, ToolExecutionMode, ToolResult, ToolSpec};
+use pi_plugin::{RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
 use serde_json::{Value, json};
 
 use crate::config::{
@@ -21,7 +19,7 @@ pub(crate) fn register(
     context: &mut RegisterContext<'_>,
     store: Arc<HermesMemoryStore>,
     runs: Arc<HermesRuns>,
-) -> pi_core::Result<()> {
+) -> pi_plugin::Result<()> {
     for operation in Operation::ALL {
         context.register_tool(Arc::new(HermesMemoryTool {
             store: Arc::clone(&store),

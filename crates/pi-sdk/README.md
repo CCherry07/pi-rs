@@ -15,7 +15,7 @@ The SDK only supplies the resolved trust decision and prepares/registers the can
 callers managing MCP files use `pi_plugin_mcp::McpLibrary` directly.
 
 ```rust
-use pi_core::PresentationMode;
+use pi_plugin::PresentationMode;
 use pi_sdk::{Pi, Config};
 
 let config = Config::new(cwd, agent_dir);
@@ -83,5 +83,5 @@ entirely, including explicit resource paths; this is a deliberate Rust SDK polic
 not Pi's automatic-discovery-only `noSkills`/`noPromptTemplates` behavior.
 AGENTS.md/CLAUDE.md and general system-prompt resources are unaffected.
 
-The crate is currently workspace-internal (`publish = false`). `pi-plugin-sdk`
+The crate is currently workspace-internal (`publish = false`). `pi-plugin`
 is the separate authoring interface for native plugins.

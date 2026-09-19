@@ -9,9 +9,12 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use pi_core::{
-    AbortSignal, ContentBlock, ContentMetadata, Message, Provider, ProviderAvailability,
-    ProviderCallContext, ProviderError, ProviderId, ProviderRequest, ProviderStream,
-    ResponseMetadata, ResponseMetadataPatch, StopReason, StreamEvent, ToolCallId, ToolSpec, Usage,
+    AbortSignal, ContentBlock, ContentMetadata, Message, ProviderId, ResponseMetadata,
+    ResponseMetadataPatch, StopReason, StreamEvent, ToolCallId, ToolSpec, Usage,
+};
+use pi_plugin::{
+    Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderRequest,
+    ProviderStream,
 };
 use pi_provider::{
     HttpBodyStream, HttpTransport, ReqwestTransport, SseDecoder, TransportError, insert_header,
@@ -899,7 +902,8 @@ fn map_transport_error(error: TransportError) -> ProviderError {
 mod tests {
     use super::*;
     use futures::stream;
-    use pi_core::{AbortHandle, ModelId, ModelSpec, ProviderRequest, ThinkingLevel, UserMessage};
+    use pi_core::{AbortHandle, ModelId, ModelSpec, ThinkingLevel, UserMessage};
+    use pi_plugin::ProviderRequest;
 
     #[test]
     fn compatible_endpoint_accepts_root_and_full_urls() {

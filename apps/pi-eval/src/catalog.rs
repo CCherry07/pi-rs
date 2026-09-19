@@ -9,15 +9,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_core::{
-    AgentPlugin, ContentBlock, DirectCompletionRequest, Message, ModelId, ModelInput,
-    ModelSelection, PluginId, ProviderId, RegisterContext, StopReason, ThinkingLevel, Tool,
-    ToolCallId, ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdateSink,
-    UserMessage,
+    ContentBlock, Message, ModelId, ModelInput, ModelSelection, PluginId, ProviderId, StopReason,
+    ThinkingLevel, ToolCallId, ToolExecutionMode, ToolResult, ToolSpec, UserMessage,
 };
 use pi_eval::{
     EvalCase, EvalComparisonDefinition, EvalGrade, EvalGrader, EvalLimits, EvalObservation,
     EvalStep, EvalSystemPrompt, EvalTranscriptEvent, EvalVariant, ExactOutputGrader,
     JsonSubmissionGrader, JsonSubmissionPlugin,
+};
+use pi_plugin::{
+    DirectCompletionRequest, Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink,
 };
 
 const SUBMIT_DOCUMENTATION_AUDIT: &str = "submit_documentation_audit";
@@ -189,7 +190,7 @@ Use grep before reading implementation files in full. When the audit is complete
         serde_json::Value::from("match"),
     ))
     .active_tools(["read", "grep", "find", "ls", SUBMIT_DOCUMENTATION_AUDIT])
-    .agent_plugin(move || plugin.clone()))
+    .plugin(move || plugin.clone()))
 }
 
 fn js_extension_case() -> EvalCase {
@@ -227,10 +228,10 @@ fn native_plugin_case() -> EvalCase {
 Before implementing, read these authoritative local guides completely:\n\
 - {}\n\
 - {}\n\n\
-Use the pi-plugin-sdk from this exact checkout at `{}`. Do not install the plugin globally and do not modify files outside `.pi/plugins/native-hello`.",
-        root.join("crates/pi-plugin-sdk/README.md").display(),
-        root.join("crates/pi-plugin-tools/README.md").display(),
-        root.join("crates/pi-plugin-sdk").display(),
+Use the pi-plugin from this exact checkout at `{}`. Do not install the plugin globally and do not modify files outside `.pi/plugins/native-hello`.",
+        root.join("crates/pi-plugin/docs/native.md").display(),
+        root.join("crates/pi-plugin-manager/docs/authoring.md").display(),
+        root.join("crates/pi-plugin").display(),
     )))
     .step(EvalStep::Reload)
     .step(EvalStep::Prompt(
@@ -243,7 +244,7 @@ Use the pi-plugin-sdk from this exact checkout at `{}`. Do not install the plugi
             "native_hello",
             "Native hello, Bob!",
         )
-        .required_source("pi_plugin_sdk"),
+        .required_source("pi_plugin"),
     )
     .active_tools(["read", "write", "edit", "bash", "grep", "find", "ls"])
     .limits(EvalLimits {
@@ -272,7 +273,7 @@ fn native_provider_plugin_case() -> EvalCase {
         expected_native_provider_probe(),
     ))
     .active_tools(["verify_native_provider"])
-    .agent_plugin(NativeProviderProbePlugin::default)
+    .plugin(NativeProviderProbePlugin::default)
 }
 
 fn expected_native_provider_probe() -> serde_json::Value {
@@ -334,7 +335,7 @@ fn model_authoring_case() -> EvalCase {
         "ls",
         "verify_fixture_model",
     ])
-    .agent_plugin(ModelProbePlugin::default)
+    .plugin(ModelProbePlugin::default)
 }
 
 const ACME_PROVIDER_ID: &str = "acme";
@@ -376,7 +377,7 @@ The provider offers one model, `{ACME_MODEL_ID}`, shown as “Acme Chat”. It a
         "ls",
         "verify_acme_provider",
     ])
-    .agent_plugin(move || plugin.clone()))
+    .plugin(move || plugin.clone()))
 }
 
 fn expected_provider_probe() -> serde_json::Value {
@@ -421,13 +422,13 @@ fn expected_model_probe() -> serde_json::Value {
 #[derive(Debug, Clone, Default)]
 struct ModelProbePlugin;
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for ModelProbePlugin {
+#[pi_plugin::plugin]
+impl Plugin for ModelProbePlugin {
     fn id(&self) -> PluginId {
         PluginId::new("pi-eval-model-probe")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_tool(Arc::new(ModelProbeTool))
     }
 }
@@ -510,13 +511,13 @@ impl Tool for ModelProbeTool {
 #[derive(Debug, Clone, Default)]
 struct NativeProviderProbePlugin;
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for NativeProviderProbePlugin {
+#[pi_plugin::plugin]
+impl Plugin for NativeProviderProbePlugin {
     fn id(&self) -> PluginId {
         PluginId::new("pi-eval-native-provider-probe")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_tool(Arc::new(NativeProviderProbeTool))
     }
 }
@@ -665,13 +666,13 @@ struct ProviderProbePlugin {
     fixture: AcmeFixtureServer,
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for ProviderProbePlugin {
+#[pi_plugin::plugin]
+impl Plugin for ProviderProbePlugin {
     fn id(&self) -> PluginId {
         PluginId::new("pi-eval-provider-probe")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_tool(Arc::new(ProviderProbeTool {
             fixture: self.fixture.clone(),
         }))

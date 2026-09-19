@@ -1,17 +1,62 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use pi_core::AgentHook;
 use pi_js_plugin::{
     JsAgentPluginManifest, JsCallbackDispatcher, JsCallbackError, JsGenerationManifest,
     JsHookManifest, JsInvocation, JsPluginGeneration, JsProviderPluginManifest,
     JsProviderRegistration,
 };
+use pi_plugin::AgentHook;
 use serde_json::Value;
 
 #[derive(Default)]
 struct RetiringDispatcher {
     retired: Mutex<Vec<String>>,
+}
+
+#[test]
+fn legacy_callback_lists_merge_without_reordering_either_hook_family() {
+    let manifest = |session_ids: &[&str]| JsGenerationManifest {
+        generation_id: "ordered".into(),
+        agent_plugins: ["shared", "agent-only"]
+            .map(|id| JsAgentPluginManifest {
+                id: id.into(),
+                tools: Vec::new(),
+                commands: Vec::new(),
+                hooks: Vec::new(),
+            })
+            .to_vec(),
+        session_plugins: session_ids
+            .iter()
+            .map(|id| pi_js_plugin::JsSessionPluginManifest {
+                id: (*id).into(),
+                hooks: Vec::new(),
+            })
+            .collect(),
+        provider_plugins: Vec::new(),
+        provider_registrations: Vec::new(),
+        diagnostics: Vec::new(),
+    };
+    let generation = JsPluginGeneration::prepare(
+        manifest(&["session-only", "shared"]),
+        Arc::new(RetiringDispatcher::default()),
+    )
+    .unwrap();
+    assert_eq!(
+        generation
+            .plugins()
+            .iter()
+            .map(|plugin| plugin.id().to_string())
+            .collect::<Vec<_>>(),
+        ["session-only", "shared", "agent-only"]
+    );
+    assert!(
+        JsPluginGeneration::prepare(
+            manifest(&["agent-only", "shared"]),
+            Arc::new(RetiringDispatcher::default()),
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -112,7 +157,7 @@ fn agent_hook_interests_are_derived_from_the_validated_manifest() {
     )
     .unwrap();
 
-    let plugin = generation.agent_plugins().remove(0);
+    let plugin = generation.plugins().remove(0);
     let interests = plugin.hook_interests();
     assert!(interests.contains(AgentHook::Input));
     assert!(!interests.contains(AgentHook::Context));
@@ -156,7 +201,7 @@ fn observer_batching_keeps_mutating_hooks_on_their_owning_plugin() {
     )
     .unwrap();
 
-    let plugins = generation.agent_plugins();
+    let plugins = generation.plugins();
     assert_eq!(plugins[0].id().as_str(), "first");
     assert!(
         plugins[0]

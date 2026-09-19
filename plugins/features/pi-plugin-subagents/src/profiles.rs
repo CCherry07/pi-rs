@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use pi_core::{IsolatedContextMode, ThinkingLevel};
+use pi_core::ThinkingLevel;
+use pi_plugin::IsolatedContextMode;
 use pi_utils::{
     frontmatter::{FrontmatterStatus, split_frontmatter},
     text::escape_xml,

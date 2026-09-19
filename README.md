@@ -32,7 +32,7 @@ behavior, and being explicit whenever the Rust product diverges.
   selectors.
 - **Five frontend modes**: interactive TUI, one-shot `--print`, Pi-compatible NDJSON with `--json`,
   bidirectional stdin/stdout RPC with `--mode rpc`, and ACP stable v1 with `--acp`.
-- **Plugin-first runtime**: narrow `AgentPlugin`, `ProviderPlugin`, and `SessionPlugin` lifecycles;
+- **Plugin-first runtime**: one `pi-plugin::Plugin` for Agent and Session callbacks, plus independent `ProviderPlugin`;
   plugins are built as immutable generations and reloaded atomically, with rollback on failure.
 - **Native plugins**: version-locked Rust `cdylib` plugins load from global manifests, trusted
   project manifests, or repeated `--plugin` paths; local/HTTP/GitHub packages and static registries
@@ -579,7 +579,8 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 | ------------------------------------------------ | ---------------------------------------------------------------------------------------- |
 | `apps/pi-cli`                                    | CLI, TUI, and terminal lifecycle Adapter                                                  |
 | `crates/pi-sdk`                                  | Shared headless product assembly for CLI, desktop, and embedded adapters                 |
-| `crates/pi-core`                                 | Strongly typed contracts, registries, and plugin drivers                                 |
+| `crates/pi-plugin` | Plugin contracts, preparation, typed contexts, generation drivers, and optional native exports |
+| `crates/pi-core`                                 | Messages, models, tool data and shared session wire values                                 |
 | `crates/pi-media`                                | Shared image validation, resizing, and format conversion                               |
 | `crates/pi-agent`                                | Agent façade, agent loop, stream assembly, and tool scheduling                           |
 | `crates/pi-runtime`                              | Generation construction, prompt assembly, and atomic reload                              |
@@ -591,8 +592,8 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 | `crates/pi-provider`                             | Provider-neutral HTTP transport and SSE                                                  |
 | `crates/pi-prompt` / `pi-resources`              | System prompt and project context discovery                                              |
 | `apps/pi-cli/src/markdown`                       | TUI-owned Markdown parsing, streaming repair, syntax highlighting, and Ratatui rendering |
-| `crates/pi-plugin-sdk` / `pi-plugin-loader`      | Native author interface, compatibility checks, discovery, and factory adapters           |
-| `crates/pi-plugin-manager`                       | Package intent/lock, static Registry resolution, target selection, and CAS installation  |
+| `crates/pi-plugin-macros` | Static/native plugin procedural macros |
+| `crates/pi-plugin-manager` | Native loading, package installation/reconciliation, and optional build/publication tools |
 | `crates/pi-js-package-manager`                   | Pi-compatible JS/TS discovery and local/npm/git package management                       |
 | `crates/pi-js-plugin` / `bindings/pi-napi`       | Typed JS lifecycle adapters and the Node/NAPI boundary                                   |
 | `packages/pi`                                    | Node launcher, Pi extension discovery, Jiti loader, and callback generations             |

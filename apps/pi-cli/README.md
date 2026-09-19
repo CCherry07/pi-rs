@@ -755,11 +755,11 @@ explicit compatibility gaps.
 
 ### Native Rust plugins
 
-Author commands scaffold all three plugin kinds, build on the current native target, and generate
+Author commands scaffold the plugin and provider kinds, build on the current native target, and generate
 verified local/remote manifests:
 
 ~~~bash
-pi plugin new hello --kind agent
+pi plugin new hello --kind plugin
 pi --cwd hello plugin package
 pi plugin verify hello/dist
 pi plugin merge bundles/mac bundles/linux --output release
@@ -768,7 +768,7 @@ pi plugin publish github --bundle release --repo OWNER/REPO --tag v0.1.0
 
 Use --sdk /path/to/pi-rs with new for a local SDK checkout. Builds default to release; --debug
 uses the dev profile and --locked requires the completed Cargo.lock. Outputs must not exist.
-See [native author tools](../../crates/pi-plugin-tools/README.md) for CI, registry metadata and
+See [native author tools](../../crates/pi-plugin-manager/docs/authoring.md) for CI, registry metadata and
 exact-build SDK compatibility. These commands do not require provider credentials.
 
 Native plugins are version-locked dynamic libraries loaded from global manifests, trusted project
@@ -787,7 +787,7 @@ pi plugin remove <plugin-id>
 
 Pass `-l` to plugin-management commands to operate on the trusted project's `.pi` configuration
 instead of the global agent directory. See
-[`crates/pi-plugin-sdk/README.md`](../../crates/pi-plugin-sdk/README.md) for the native author API and
+[`crates/pi-plugin/docs/native.md`](../../crates/pi-plugin/docs/native.md) for the native author API and
 [`crates/pi-plugin-manager/README.md`](../../crates/pi-plugin-manager/README.md) for package and
 registry formats.
 

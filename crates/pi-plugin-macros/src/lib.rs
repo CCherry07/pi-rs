@@ -41,24 +41,27 @@ impl Parse for ExportArgs {
 }
 
 #[proc_macro_attribute]
-pub fn agent(args: TokenStream, item: TokenStream) -> TokenStream {
-    export_plugin(args, item, PluginKind::Agent)
+pub fn native_plugin(args: TokenStream, item: TokenStream) -> TokenStream {
+    export_plugin(args, item, PluginKind::Plugin)
 }
 
-/// Prepares a statically linked `AgentPlugin` by deriving hook interests and
+/// Prepares a statically linked `Plugin` by deriving hook interests and
 /// expanding async callback methods.
 #[proc_macro_attribute]
-pub fn agent_plugin(args: TokenStream, item: TokenStream) -> TokenStream {
+pub fn plugin(args: TokenStream, item: TokenStream) -> TokenStream {
     let args = proc_macro2::TokenStream::from(args);
     if !args.is_empty() {
-        return syn::Error::new_spanned(args, "`agent_plugin` does not accept arguments")
+        return syn::Error::new_spanned(args, "`plugin` does not accept arguments")
             .into_compile_error()
             .into();
     }
     let mut implementation = parse_macro_input!(item as ItemImpl);
-    match inject_agent_hook_interests(&mut implementation, quote!(::pi_core)) {
+    match inject_agent_hook_interests(&mut implementation, quote!(::pi_plugin)) {
         Ok(()) => {
-            ensure_async_trait(&mut implementation, quote!(::pi_core::__plugin_async_trait));
+            ensure_async_trait(
+                &mut implementation,
+                quote!(::pi_plugin::__plugin_async_trait),
+            );
             quote!(#implementation).into()
         }
         Err(error) => error.into_compile_error().into(),
@@ -72,18 +75,7 @@ pub fn provider_plugin(args: TokenStream, item: TokenStream) -> TokenStream {
         args,
         item,
         PluginKind::Provider,
-        quote!(::pi_core::__plugin_async_trait),
-    )
-}
-
-/// Expands async callbacks for a statically linked `SessionPlugin`.
-#[proc_macro_attribute]
-pub fn session_plugin(args: TokenStream, item: TokenStream) -> TokenStream {
-    expand_static_plugin(
-        args,
-        item,
-        PluginKind::Session,
-        quote!(::pi_session::__plugin_async_trait),
+        quote!(::pi_plugin::__plugin_async_trait),
     )
 }
 
@@ -92,16 +84,10 @@ pub fn provider(args: TokenStream, item: TokenStream) -> TokenStream {
     export_plugin(args, item, PluginKind::Provider)
 }
 
-#[proc_macro_attribute]
-pub fn session(args: TokenStream, item: TokenStream) -> TokenStream {
-    export_plugin(args, item, PluginKind::Session)
-}
-
 #[derive(Clone, Copy)]
 enum PluginKind {
-    Agent,
+    Plugin,
     Provider,
-    Session,
 }
 
 fn expand_static_plugin(
@@ -151,9 +137,8 @@ fn expand_static_plugin(
 impl PluginKind {
     fn trait_name(self) -> &'static str {
         match self {
-            Self::Agent => "AgentPlugin",
+            Self::Plugin => "Plugin",
             Self::Provider => "ProviderPlugin",
-            Self::Session => "SessionPlugin",
         }
     }
 }
@@ -189,8 +174,8 @@ fn expand_export(
             format!("this macro must annotate an impl of {}", kind.trait_name()),
         ));
     }
-    if matches!(kind, PluginKind::Agent) {
-        inject_agent_hook_interests(implementation, quote!(::pi_plugin_sdk))?;
+    if matches!(kind, PluginKind::Plugin) {
+        inject_agent_hook_interests(implementation, quote!(::pi_plugin))?;
     }
     if implementation
         .items
@@ -207,62 +192,50 @@ fn expand_export(
         .id
         .map_or_else(|| quote!(env!("CARGO_PKG_NAME")), |id| quote!(#id));
     implementation.items.push(ImplItem::Fn(parse_quote! {
-        fn id(&self) -> ::pi_plugin_sdk::PluginId {
-            ::pi_plugin_sdk::PluginId::new(__PI_PLUGIN_ID)
+        fn id(&self) -> ::pi_plugin::PluginId {
+            ::pi_plugin::PluginId::new(__PI_PLUGIN_ID)
         }
     }));
 
-    ensure_async_trait(
-        implementation,
-        quote!(::pi_plugin_sdk::__plugin_async_trait),
-    );
+    ensure_async_trait(implementation, quote!(::pi_plugin::__plugin_async_trait));
 
     let self_type = &implementation.self_ty;
     let (kind_value, trait_type, constructor_name, constructor_alias) = match kind {
-        PluginKind::Agent => (
-            quote!(::pi_plugin_sdk::NativePluginKind::Agent as u32),
-            quote!(::pi_plugin_sdk::AgentPlugin),
-            Ident::new("pi_agent_plugin_create_v21", proc_macro2::Span::call_site()),
-            quote!(::pi_plugin_sdk::AgentPluginCreateV21),
+        PluginKind::Plugin => (
+            quote!(::pi_plugin::native::NativePluginKind::Plugin as u32),
+            quote!(::pi_plugin::Plugin),
+            Ident::new("pi_plugin_create_v24", proc_macro2::Span::call_site()),
+            quote!(::pi_plugin::native::PluginCreateV24),
         ),
         PluginKind::Provider => (
-            quote!(::pi_plugin_sdk::NativePluginKind::Provider as u32),
-            quote!(::pi_plugin_sdk::ProviderPlugin),
+            quote!(::pi_plugin::native::NativePluginKind::Provider as u32),
+            quote!(::pi_plugin::ProviderPlugin),
             Ident::new(
-                "pi_provider_plugin_create_v21",
+                "pi_provider_plugin_create_v24",
                 proc_macro2::Span::call_site(),
             ),
-            quote!(::pi_plugin_sdk::ProviderPluginCreateV21),
-        ),
-        PluginKind::Session => (
-            quote!(::pi_plugin_sdk::NativePluginKind::Session as u32),
-            quote!(::pi_plugin_sdk::SessionPlugin),
-            Ident::new(
-                "pi_session_plugin_create_v21",
-                proc_macro2::Span::call_site(),
-            ),
-            quote!(::pi_plugin_sdk::SessionPluginCreateV21),
+            quote!(::pi_plugin::native::ProviderPluginCreateV24),
         ),
     };
 
     let construct = if args.factory {
         quote! {
-            let options = ::pi_plugin_sdk::decode_plugin_options::<<#self_type as ::pi_plugin_sdk::NativePluginFactory>::Options>(options)?;
-            <#self_type as ::pi_plugin_sdk::NativePluginFactory>::load(context, options)
+            let options = ::pi_plugin::native::decode_plugin_options::<<#self_type as ::pi_plugin::PluginFactory>::Options>(options)?;
+            <#self_type as ::pi_plugin::PluginFactory>::prepare(context, options)
         }
     } else {
         quote! {
-            ::pi_plugin_sdk::ensure_empty_plugin_options(options)?;
-            Ok(<#self_type as ::core::default::Default>::default())
+            ::pi_plugin::native::ensure_empty_plugin_options(options)?;
+            Ok(Some(<#self_type as ::core::default::Default>::default()))
         }
     };
     let schema = if args.factory {
         quote! {
-            ::pi_plugin_sdk::plugin_options_schema::<<#self_type as ::pi_plugin_sdk::NativePluginFactory>::Options>()
+            ::pi_plugin::native::plugin_options_schema::<<#self_type as ::pi_plugin::PluginFactory>::Options>()
         }
     } else {
         quote! {
-            ::pi_plugin_sdk::empty_plugin_options_schema()
+            ::pi_plugin::native::empty_plugin_options_schema()
         }
     };
 
@@ -271,31 +244,31 @@ fn expand_export(
 
         #implementation
 
-        static __PI_PLUGIN_DESCRIPTOR_V1: ::pi_plugin_sdk::NativePluginDescriptorV1 =
-            ::pi_plugin_sdk::NativePluginDescriptorV1 {
-                abi_version: ::pi_plugin_sdk::NATIVE_PLUGIN_ABI_VERSION,
+        static __PI_PLUGIN_DESCRIPTOR_V1: ::pi_plugin::native::NativePluginDescriptorV1 =
+            ::pi_plugin::native::NativePluginDescriptorV1 {
+                abi_version: ::pi_plugin::native::NATIVE_PLUGIN_ABI_VERSION,
                 kind: #kind_value,
-                id: ::pi_plugin_sdk::NativeBytes::from_static(__PI_PLUGIN_ID.as_bytes()),
-                version: ::pi_plugin_sdk::NativeBytes::from_static(env!("CARGO_PKG_VERSION").as_bytes()),
-                build_fingerprint: ::pi_plugin_sdk::NativeBytes::from_static(::pi_plugin_sdk::BUILD_FINGERPRINT.as_bytes()),
+                id: ::pi_plugin::native::NativeBytes::from_static(__PI_PLUGIN_ID.as_bytes()),
+                version: ::pi_plugin::native::NativeBytes::from_static(env!("CARGO_PKG_VERSION").as_bytes()),
+                build_fingerprint: ::pi_plugin::native::NativeBytes::from_static(::pi_plugin::native::BUILD_FINGERPRINT.as_bytes()),
             };
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn pi_plugin_descriptor_v1() -> *const ::pi_plugin_sdk::NativePluginDescriptorV1 {
+        pub extern "C" fn pi_plugin_descriptor_v1() -> *const ::pi_plugin::native::NativePluginDescriptorV1 {
             &__PI_PLUGIN_DESCRIPTOR_V1
         }
 
         #[unsafe(no_mangle)]
         pub fn #constructor_name(
-            context: &::pi_plugin_sdk::PluginLoadContext,
-            options: &::pi_plugin_sdk::PluginOptionsValue,
-        ) -> ::core::result::Result<::std::sync::Arc<dyn #trait_type>, ::pi_plugin_sdk::PluginLoadError> {
+            context: &::pi_plugin::PrepareContext,
+            options: &::pi_plugin::native::PluginOptionsValue,
+        ) -> ::core::result::Result<Option<::std::sync::Arc<dyn #trait_type>>, ::pi_plugin::PrepareError> {
             let construct = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
                 #construct
             }));
             match construct {
-                Ok(result) => result.map(|plugin| ::std::sync::Arc::new(plugin) as ::std::sync::Arc<dyn #trait_type>),
-                Err(_) => Err(::pi_plugin_sdk::PluginLoadError::Initialization(
+                Ok(result) => result.map(|plugin| plugin.map(|plugin| ::std::sync::Arc::new(plugin) as ::std::sync::Arc<dyn #trait_type>)),
+                Err(_) => Err(::pi_plugin::PrepareError::Initialization(
                     "plugin constructor panicked".to_string(),
                 )),
             }
@@ -317,21 +290,21 @@ fn inject_agent_hook_interests(
     let Some((_, trait_path, _)) = &implementation.trait_ else {
         return Err(syn::Error::new_spanned(
             implementation,
-            "`agent_plugin` must annotate an impl of AgentPlugin",
+            "`plugin` must annotate an impl of Plugin",
         ));
     };
     if trait_path
         .segments
         .last()
-        .is_none_or(|segment| segment.ident != "AgentPlugin")
+        .is_none_or(|segment| segment.ident != "Plugin")
     {
         return Err(syn::Error::new_spanned(
             trait_path,
-            "`agent_plugin` must annotate an impl of AgentPlugin",
+            "`plugin` must annotate an impl of Plugin",
         ));
     }
     if implementation.items.iter().any(
-        |item| matches!(item, ImplItem::Fn(function) if function.sig.ident == "hook_interests"),
+        |item| matches!(item, ImplItem::Fn(function) if function.sig.ident == "hook_interests" || function.sig.ident == "session_hook_interests"),
     ) {
         return Err(syn::Error::new_spanned(
             implementation,
@@ -367,6 +340,35 @@ fn inject_agent_hook_interests(
     let hook_paths: Vec<_> = hook_variants
         .map(|variant| quote!(#contract_root::AgentHook::#variant))
         .collect();
+
+    let session_paths: Vec<_> = implementation
+        .items
+        .iter()
+        .filter_map(|item| {
+            let ImplItem::Fn(function) = item else {
+                return None;
+            };
+            let variant = match function.sig.ident.to_string().as_str() {
+                "session_start" => quote!(Start),
+                "session_info_changed" => quote!(InfoChanged),
+                "session_before_switch" => quote!(BeforeSwitch),
+                "session_before_fork" => quote!(BeforeFork),
+                "session_before_compact" => quote!(BeforeCompact),
+                "session_compact" => quote!(Compact),
+                "session_compact_failed" => quote!(CompactFailed),
+                "session_shutdown" => quote!(Shutdown),
+                "session_before_tree" => quote!(BeforeTree),
+                "session_tree" => quote!(Tree),
+                _ => return None,
+            };
+            Some(quote!(#contract_root::SessionHook::#variant))
+        })
+        .collect();
+    implementation.items.push(ImplItem::Fn(parse_quote! {
+        fn session_hook_interests(&self) -> #contract_root::SessionHookInterests {
+            #contract_root::SessionHookInterests::from_hooks(&[#(#session_paths),*])
+        }
+    }));
 
     implementation.items.push(ImplItem::Fn(parse_quote! {
         fn hook_interests(&self) -> #contract_root::AgentHookInterests {

@@ -4,12 +4,15 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_core::{
-    AbortHandle, AbortSignal, AgentContext, AgentEvent, AgentPlugin, AgentPluginContext,
-    ContentBlock, ContextEvent, ContextPatch, CustomMessage, CustomMessageContent, Message,
-    ModelId, PluginError, PluginId, ProviderId, RegisterContext, RegistriesBuilder, StopReason,
-    TextContent, ThinkingLevel, Tool, ToolCall, ToolCallEvent, ToolCallId, ToolCallPatch,
-    ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolResultEvent, ToolResultPatch,
-    ToolSpec, ToolUpdateSink, Usage, UserMessage,
+    AbortHandle, AbortSignal, AgentContext, AgentEvent, ContentBlock, CustomMessage,
+    CustomMessageContent, Message, ModelId, PluginId, ProviderId, StopReason, TextContent,
+    ThinkingLevel, ToolCall, ToolCallId, ToolExecutionMode, ToolResult, ToolSpec, Usage,
+    UserMessage,
+};
+use pi_plugin::{
+    AgentPluginContext, ContextEvent, ContextPatch, Plugin, PluginError, RegisterContext,
+    RegistriesBuilder, Tool, ToolCallEvent, ToolCallPatch, ToolContext, ToolError, ToolResultEvent,
+    ToolResultPatch, ToolUpdateSink,
 };
 use pi_telemetry::TelemetryContext;
 use serde_json::{Value, json};
@@ -209,7 +212,7 @@ impl TestLoop {
     pub fn new(
         turns: impl IntoIterator<Item = AssistantMessage>,
         tools: Vec<Arc<dyn Tool>>,
-        mut plugins: Vec<Arc<dyn AgentPlugin>>,
+        mut plugins: Vec<Arc<dyn Plugin>>,
     ) -> Self {
         let active_tools = tools.iter().map(|tool| tool.spec().name).collect();
         plugins.insert(0, Arc::new(ToolsPlugin(tools)));
@@ -308,13 +311,13 @@ impl TestLoop {
 
 struct ToolsPlugin(Vec<Arc<dyn Tool>>);
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for ToolsPlugin {
+#[pi_plugin::plugin]
+impl Plugin for ToolsPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("agent-loop-test-tools")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         for tool in &self.0 {
             context.register_tool(tool.clone())?;
         }
@@ -333,8 +336,8 @@ pub struct Hooks {
     pub after: Option<Box<AfterToolHook>>,
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for Hooks {
+#[pi_plugin::plugin]
+impl Plugin for Hooks {
     fn id(&self) -> PluginId {
         PluginId::new("agent-loop-test-hooks")
     }

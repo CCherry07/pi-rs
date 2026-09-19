@@ -206,7 +206,7 @@ background agents; native session reload retains its existing child-shutdown beh
 Backend plugins publish later status changes with the native author helper:
 
 ```rust
-use pi_plugin_sdk::desktop::WidgetPublisher;
+use pi_plugin::desktop::WidgetPublisher;
 
 let mut progress = WidgetPublisher::new("example.progress")?;
 progress.publish(&context.session, &serde_json::json!({

@@ -4,9 +4,9 @@ use crate::{
     execution::HermesRuns,
     review_plugin::HermesReviewPlugin,
 };
-use pi_core::{
-    AbortSignal, EphemeralSessionOutcome, EphemeralSessionRequest, Message, ModelsContext,
-    SessionContext, UiContext, UserMessage,
+use pi_core::{AbortSignal, Message, UserMessage};
+use pi_plugin::{
+    EphemeralSessionOutcome, EphemeralSessionRequest, ModelsContext, SessionContext, UiContext,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -184,7 +184,7 @@ pub(crate) fn finish_review_as(
     let summary = action_summary_with_mode(&outcome.messages, config.memory_notifications);
     if !summary.is_empty()
         && let Err(error) = ui.notify(
-            pi_core::NoticeLevel::Info,
+            pi_plugin::NoticeLevel::Info,
             format!(
                 "💾 {}: {summary}",
                 if task == "background_review" {
@@ -198,11 +198,12 @@ pub(crate) fn finish_review_as(
         errors.push(format!("review notification failed: {error}"));
     }
     match &outcome.status {
-        pi_core::EphemeralSessionStatus::Failed(error) => errors.push(error.clone()),
-        pi_core::EphemeralSessionStatus::TimedOut => {
+        pi_plugin::EphemeralSessionStatus::Failed(error) => errors.push(error.clone()),
+        pi_plugin::EphemeralSessionStatus::TimedOut => {
             errors.push("Review timed out; completed writes are retained.".into());
         }
-        pi_core::EphemeralSessionStatus::Completed | pi_core::EphemeralSessionStatus::Aborted => {}
+        pi_plugin::EphemeralSessionStatus::Completed
+        | pi_plugin::EphemeralSessionStatus::Aborted => {}
     }
     errors
 }
@@ -223,7 +224,7 @@ fn has_usage(usage: &pi_core::Usage) -> bool {
 
 /// Hermes ContextCompressor's default model-window profile. This is feature
 /// policy, not a memory/skill special case in the generic runtime.
-fn compaction_options(model: &pi_core::ModelSpec) -> Option<pi_core::EphemeralCompactionOptions> {
+fn compaction_options(model: &pi_core::ModelSpec) -> Option<pi_plugin::EphemeralCompactionOptions> {
     let window = model.context_window;
     if window < 2 {
         return None;
@@ -244,7 +245,7 @@ fn compaction_options(model: &pi_core::ModelSpec) -> Option<pi_core::EphemeralCo
     if threshold >= effective {
         threshold = ceiling.min(effective.saturating_sub(1)).max(1);
     }
-    Some(pi_core::EphemeralCompactionOptions {
+    Some(pi_plugin::EphemeralCompactionOptions {
         threshold_tokens: threshold.max(1),
         // The system prompt is separate from Pi's message vector. Hermes's
         // three-message protected prefix includes that system message.

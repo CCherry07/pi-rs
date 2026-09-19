@@ -775,14 +775,14 @@ impl HermesMemoryStore {
 
     pub(crate) fn index_snapshot(
         &self,
-        snapshot: &pi_core::SessionSnapshot,
+        snapshot: &pi_plugin::SessionSnapshot,
     ) -> Result<usize, StoreError> {
         self.database.index_snapshot(snapshot)
     }
 
     pub(crate) fn index_snapshot_cancellable(
         &self,
-        snapshot: &pi_core::SessionSnapshot,
+        snapshot: &pi_plugin::SessionSnapshot,
         cancellation: &[pi_core::AbortSignal],
     ) -> Result<usize, StoreError> {
         self.database

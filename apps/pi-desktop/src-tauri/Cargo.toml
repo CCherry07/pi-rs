@@ -24,6 +24,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
+pi-plugin = { path = "../../../crates/pi-plugin" }
 dotenvy = "0.15"
 tauri = { version = "2.11.5", features = ["protocol-asset", "macos-private-api", "tray-icon", "image-png"] }
 tauri-plugin-liquid-glass = "0.1"

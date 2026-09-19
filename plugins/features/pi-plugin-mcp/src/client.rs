@@ -12,9 +12,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_core::{
-    AgentPlugin, ContentBlock, ImageContent, PluginId, RegisterContext, TextContent, Tool,
-    ToolCallId, ToolContext, ToolError, ToolExecutionMode, ToolResult, ToolSpec, ToolUpdateSink,
+    ContentBlock, ImageContent, PluginId, TextContent, ToolCallId, ToolExecutionMode, ToolResult,
+    ToolSpec,
 };
+use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, ClientRequest, ContentBlock as McpContentBlock,
     ServerResult, Tool as McpToolSpec,
@@ -235,7 +236,7 @@ impl McpToolSet {
     }
 
     /// Returns a fresh plugin wrapper backed by the connected client pool.
-    pub fn plugin(&self) -> Arc<dyn AgentPlugin> {
+    pub fn plugin(&self) -> Arc<dyn Plugin> {
         Arc::new(McpToolPlugin {
             pool: Arc::clone(&self.inner),
         })
@@ -426,13 +427,13 @@ struct McpToolPlugin {
     pool: Arc<McpPool>,
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for McpToolPlugin {
+#[pi_plugin::plugin]
+impl Plugin for McpToolPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("mcp")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         for tool in &self.pool.tools {
             context.register_tool(tool.clone())?;
         }

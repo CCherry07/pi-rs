@@ -1,13 +1,15 @@
 use std::sync::{Arc, Mutex};
 
 use pi_agent::AgentOptions;
-use pi_core::{ModelId, PluginContext, PluginId, PresentationMode, ProviderId, Usage};
+use pi_core::{ModelId, PluginId, ProviderId, Usage};
+use pi_plugin::Plugin;
+use pi_plugin::{PluginContext, PresentationMode};
 use pi_runtime::PiRuntime;
 use pi_session::{
     AgentSessionOptions, LaneRecordEntry, MultiSessionManager, PiPluginContext,
-    PluginContextBinding, PreparedSessionGeneration, SessionError, SessionGenerationFactory,
-    SessionGenerationRequest, SessionLog, SessionPlugin, SessionPluginContext, SessionPluginError,
-    SessionPlugins, SessionShutdownEvent, SessionStartEvent,
+    PluginContextBinding, PluginError, PreparedSessionGeneration, SessionError,
+    SessionGenerationFactory, SessionGenerationRequest, SessionLog, SessionPluginContext,
+    SessionShutdownEvent, SessionStartEvent,
 };
 use pi_test_support::ScriptedProviderPlugin;
 use serde_json::{Value, json};
@@ -21,8 +23,8 @@ struct CheckpointFactory {
 
 struct CheckpointPlugin(CheckpointFactory);
 
-#[pi_session::session_plugin]
-impl SessionPlugin for CheckpointPlugin {
+#[pi_plugin::plugin]
+impl Plugin for CheckpointPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("checkpoint-fixture")
     }
@@ -31,7 +33,7 @@ impl SessionPlugin for CheckpointPlugin {
         &self,
         context: &SessionPluginContext,
         _event: &SessionStartEvent,
-    ) -> Result<(), SessionPluginError> {
+    ) -> Result<(), PluginError> {
         self.0
             .starts
             .lock()
@@ -44,7 +46,7 @@ impl SessionPlugin for CheckpointPlugin {
         &self,
         context: &SessionPluginContext,
         _event: &SessionShutdownEvent,
-    ) -> Result<(), SessionPluginError> {
+    ) -> Result<(), PluginError> {
         if self.0.checkpoint {
             context
                 .session
@@ -78,6 +80,7 @@ impl SessionGenerationFactory for CheckpointFactory {
             PluginContextBinding::new(),
         ));
         let runtime = PiRuntime::builder()
+            .plugin(CheckpointPlugin(self.clone()))
             .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .agent_options(AgentOptions {
                 cwd: request.cwd,
@@ -87,8 +90,7 @@ impl SessionGenerationFactory for CheckpointFactory {
             })
             .plugin_context(access.clone() as Arc<dyn PluginContext>)
             .build()?;
-        let options = AgentSessionOptions::default()
-            .plugins(SessionPlugins::new().plugin(CheckpointPlugin(self.clone())));
+        let options = AgentSessionOptions::default();
         Ok(PreparedSessionGeneration::new(runtime, options)
             .bind_session(move |session| access.bind_generation_session(session)))
     }
@@ -195,10 +197,10 @@ async fn cancelled_shutdown_retires_the_plugin_context_after_its_final_write() {
         .await
         .unwrap();
     let session = owner.current();
-    let retained = pi_core::CommandContextParts::new(
+    let retained = pi_plugin::CommandContextParts::new(
         session
             .runtime()
-            .plugin_context_handle(pi_core::PluginContextScope::Command),
+            .plugin_context_handle(pi_plugin::PluginContextScope::Command),
     );
     let shutdown = tokio::spawn({
         let manager = manager.clone();

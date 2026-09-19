@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use pi_core::{ProviderError, ProviderId};
+use pi_core::ProviderId;
+use pi_plugin::ProviderError;
 
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatibleConfig {

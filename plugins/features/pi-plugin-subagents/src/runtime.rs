@@ -5,11 +5,11 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use futures::FutureExt;
-use pi_core::{
-    ContentBlock, CustomMessageContent, CustomMessageInput, IsolatedMessageDelivery,
-    IsolatedSessionHandle, IsolatedSessionOutcome, IsolatedSessionRequest,
-    IsolatedSessionTurnHandle, Message, PluginContextHandle, SendMessageOptions, SessionContext,
-    SessionSnapshot, ToolResult, Usage,
+use pi_core::{ContentBlock, CustomMessageContent, CustomMessageInput, Message, ToolResult, Usage};
+use pi_plugin::{
+    IsolatedMessageDelivery, IsolatedSessionHandle, IsolatedSessionOutcome, IsolatedSessionRequest,
+    IsolatedSessionTurnHandle, PluginContextHandle, SendMessageOptions, SessionContext,
+    SessionSnapshot,
 };
 use pi_utils::time::unix_timestamp_ms_u64 as now_ms;
 use serde::{Deserialize, Serialize};

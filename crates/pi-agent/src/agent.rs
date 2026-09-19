@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use pi_core::{
-    AbortHandle, AssistantStream, BeforeAgentStartEvent, FrozenRegistries, Message, ModelId,
-    PluginDriver, ProviderId, ProviderPluginDriver, RunId, ThinkingBudgets, ThinkingLevel,
-    ToolCallId, ToolExecutionMode, UserMessage,
+    AbortHandle, AssistantStream, Message, ModelId, ProviderId, RunId, ThinkingBudgets,
+    ThinkingLevel, ToolCallId, ToolExecutionMode, UserMessage,
 };
+use pi_plugin::{BeforeAgentStartEvent, FrozenRegistries, PluginDriver, ProviderPluginDriver};
 use pi_telemetry::TelemetryContext;
 use pi_utils::time::unix_timestamp_ms as now_ms;
 use tokio::sync::watch;

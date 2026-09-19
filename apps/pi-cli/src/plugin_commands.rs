@@ -1,6 +1,6 @@
 use std::io::IsTerminal;
 
-use pi_plugin_manager::{InstallScope, PluginManager, PluginManagerOptions};
+use pi_plugin_manager::install::{InstallScope, PluginManager, PluginManagerOptions};
 use pi_settings::SettingsManager;
 
 use crate::config::{AppConfig, Cli, PluginCommand, PluginPublishCommand};
@@ -116,7 +116,7 @@ fn is_author_command(command: &PluginCommand) -> bool {
 }
 
 fn run_author(cwd: &std::path::Path, command: &PluginCommand) -> Result<String, String> {
-    use pi_plugin_tools::{NewOptions, PackageOptions, SdkSource};
+    use pi_plugin_manager::authoring::{NewOptions, PackageOptions, SdkSource};
     let path = |value: &std::path::Path| {
         if value.is_absolute() {
             value.to_path_buf()
@@ -147,10 +147,10 @@ fn run_author(cwd: &std::path::Path, command: &PluginCommand) -> Result<String, 
                 None => SdkSource::GitRevision(
                     sdk_rev
                         .clone()
-                        .unwrap_or_else(|| pi_plugin_tools::SOURCE_REVISION.into()),
+                        .unwrap_or_else(|| pi_plugin_manager::authoring::SOURCE_REVISION.into()),
                 ),
             };
-            pi_plugin_tools::new_plugin(&NewOptions {
+            pi_plugin_manager::authoring::new_plugin(&NewOptions {
                 destination,
                 name,
                 kind: *kind,
@@ -171,7 +171,7 @@ fn run_author(cwd: &std::path::Path, command: &PluginCommand) -> Result<String, 
             target_dir,
             locked,
             debug,
-        } => pi_plugin_tools::package(&PackageOptions {
+        } => pi_plugin_manager::authoring::package(&PackageOptions {
             manifest_path: path(manifest_path),
             output: path(output),
             target_dir: target_dir.as_deref().map(path),
@@ -181,14 +181,14 @@ fn run_author(cwd: &std::path::Path, command: &PluginCommand) -> Result<String, 
         .map(|directory| {
             format!(
                 "Packaged and host-verified {} at {}",
-                pi_plugin_tools::HOST_TARGET,
+                pi_plugin_manager::authoring::HOST_TARGET,
                 directory.display()
             )
         }),
         PluginCommand::Verify {
             path: bundle,
             integrity_only,
-        } => pi_plugin_tools::verify(&path(bundle), *integrity_only).map(|report| {
+        } => pi_plugin_manager::authoring::verify(&path(bundle), *integrity_only).map(|report| {
             format!(
                 "Verified {} {}: {} artifact checksum(s); {}",
                 report.release.id,
@@ -200,7 +200,7 @@ fn run_author(cwd: &std::path::Path, command: &PluginCommand) -> Result<String, 
                 )
             )
         }),
-        PluginCommand::Merge { bundles, output } => pi_plugin_tools::merge(
+        PluginCommand::Merge { bundles, output } => pi_plugin_manager::authoring::merge(
             &bundles
                 .iter()
                 .map(|bundle| path(bundle))
@@ -222,19 +222,23 @@ fn run_author(cwd: &std::path::Path, command: &PluginCommand) -> Result<String, 
                     tag,
                     draft,
                 },
-        } => pi_plugin_tools::publish_github(&path(bundle), repo, tag, *draft).map(|url| {
-            format!(
-                "{} {url}",
-                if *draft { "Created draft" } else { "Published" }
-            )
-        }),
+        } => pi_plugin_manager::authoring::publish_github(&path(bundle), repo, tag, *draft).map(
+            |url| {
+                format!(
+                    "{} {url}",
+                    if *draft { "Created draft" } else { "Published" }
+                )
+            },
+        ),
         PluginCommand::RegistryEntry {
             bundle,
             manifest_url,
-        } => pi_plugin_tools::registry_entry(&path(bundle), manifest_url).and_then(|value| {
-            serde_json::to_string_pretty(&value)
-                .map_err(|e| pi_plugin_tools::Error::Invalid(e.to_string()))
-        }),
+        } => pi_plugin_manager::authoring::registry_entry(&path(bundle), manifest_url).and_then(
+            |value| {
+                serde_json::to_string_pretty(&value)
+                    .map_err(|e| pi_plugin_manager::authoring::Error::Invalid(e.to_string()))
+            },
+        ),
         _ => unreachable!("only author commands reach this adapter"),
     };
     result.map_err(|e| e.to_string())

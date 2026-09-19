@@ -26,6 +26,7 @@ name = "generation_reload"
 harness = false
 
 [dependencies]
+pi-plugin.workspace = true
 pi-agent.workspace = true
 pi-core.workspace = true
 pi-runtime.workspace = true

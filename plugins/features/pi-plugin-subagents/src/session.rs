@@ -1,50 +1,5 @@
-use async_trait::async_trait;
-use pi_core::PluginId;
-use pi_session::{SessionPlugin, SessionPluginContext, SessionPluginError, SessionShutdownEvent};
-
-use crate::SubagentRuntime;
-
-/// Session-lifecycle half of the feature. Agent/tool orchestration and
-/// session cleanup remain distinct plugin systems while sharing one runtime.
-pub struct SubagentsSessionPlugin {
-    runtime: SubagentRuntime,
-}
-
-impl SubagentsSessionPlugin {
-    pub fn new(runtime: SubagentRuntime) -> Self {
-        Self { runtime }
-    }
-}
-
-#[async_trait]
-impl SessionPlugin for SubagentsSessionPlugin {
-    fn id(&self) -> PluginId {
-        PluginId::new("subagents")
-    }
-
-    async fn session_start(
-        &self,
-        context: &SessionPluginContext,
-        _event: &pi_session::SessionStartEvent,
-    ) -> Result<(), SessionPluginError> {
-        self.runtime
-            .bind_session(context.identity().id.clone(), context.session.clone());
-        Ok(())
-    }
-
-    async fn session_shutdown(
-        &self,
-        context: &SessionPluginContext,
-        _event: &SessionShutdownEvent,
-    ) -> Result<(), SessionPluginError> {
-        self.runtime.suspend_desktop(&context.identity().id);
-        self.runtime.close_owner(&context.identity().id);
-        self.runtime.drain_monitors(&context.identity().id).await;
-        self.runtime.forget_session(&context.identity().id);
-        Ok(())
-    }
-}
-
+use crate::{SubagentRuntime, SubagentsPlugin};
+use pi_plugin::{Plugin, PluginId, SessionPluginContext, SessionShutdownEvent};
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -58,7 +13,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_releases_the_owner_budget() {
         let runtime = SubagentRuntime::without_persistence_for_testing();
-        let plugin = SubagentsSessionPlugin::new(runtime.clone());
+        let plugin = SubagentsPlugin::new(runtime.clone());
         let context = SessionPluginContext::unavailable_for_testing(
             PluginId::new("subagents"),
             1,

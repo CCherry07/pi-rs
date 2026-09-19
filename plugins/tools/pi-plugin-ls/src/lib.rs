@@ -1,8 +1,6 @@
 use async_trait::async_trait;
-use pi_core::{
-    AgentPlugin, PluginId, RegisterContext, Tool, ToolCallId, ToolContext, ToolError, ToolResult,
-    ToolSpec, ToolUpdateSink,
-};
+use pi_core::{PluginId, ToolCallId, ToolResult, ToolSpec};
+use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
 use pi_tool_support::with_prompt;
 use pi_tool_support::{
     execution, optional_positive_usize, resolve_to_cwd, spec, truncate_lines_by_bytes,
@@ -15,12 +13,12 @@ const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 
 pub struct LsPlugin;
 pub struct LsTool;
-#[pi_core::agent_plugin]
-impl AgentPlugin for LsPlugin {
+#[pi_plugin::plugin]
+impl Plugin for LsPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("ls-tool")
     }
-    fn register(&self, c: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, c: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         c.register_tool(Arc::new(LsTool))
     }
 }

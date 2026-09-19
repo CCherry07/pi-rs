@@ -705,7 +705,7 @@ export class ExtensionHost {
         const imported = await jiti.import<unknown>(path, { default: true })
         const factory = parseExternal(callableSchema, imported, `Extension default export (${path})`)
         await callDynamic(factory, undefined, [api])
-        if (contribution.tools.length || contribution.commands.length || contribution.agentHooks.length) {
+        if (contribution.tools.length || contribution.commands.length || contribution.agentHooks.length || contribution.sessionHooks.length) {
           agentPlugins.push({
             id,
             tools: contribution.tools,

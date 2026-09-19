@@ -598,7 +598,7 @@ async fn generation_overlay(
     let configs = mcp_configs(servers, cwd)?;
     let tools = McpToolSet::connect(configs).await.map_err(internal_error)?;
     let overlay_tools = tools.clone();
-    let overlay = SessionGenerationOverlay::new().with_agent_plugin(move || overlay_tools.plugin());
+    let overlay = SessionGenerationOverlay::new().with_plugin(move || overlay_tools.plugin());
     Ok((overlay, Some(tools)))
 }
 

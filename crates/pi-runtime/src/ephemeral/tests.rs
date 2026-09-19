@@ -5,13 +5,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_core::{
-    AbortHandle, AbortSignal, AgentPlugin, AgentPluginContext, BeforeAgentStartEvent,
-    BeforeAgentStartPatch, BeforeProviderHeadersEvent, ContentBlock, EphemeralSessionRequest,
-    EphemeralSessionStatus, Message, ModelId, ModelSelection, PluginError, PluginId, Provider,
-    ProviderCallContext, ProviderError, ProviderId, ProviderPlugin, ProviderPluginContext,
-    ProviderRegisterContext, ProviderRequest, ProviderStream, RegisterContext, ThinkingBudgets,
-    ThinkingLevel, Tool, ToolCall, ToolCallId, ToolContext, ToolError, ToolExecutionMode,
-    ToolResult, ToolSpec, ToolUpdateSink, UserMessage,
+    AbortHandle, AbortSignal, ContentBlock, Message, ModelId, ModelSelection, PluginId, ProviderId,
+    ThinkingBudgets, ThinkingLevel, ToolCall, ToolCallId, ToolExecutionMode, ToolResult, ToolSpec,
+    UserMessage,
+};
+use pi_plugin::{
+    AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, BeforeProviderHeadersEvent,
+    EphemeralSessionRequest, EphemeralSessionStatus, Plugin, PluginError, Provider,
+    ProviderCallContext, ProviderError, ProviderPlugin, ProviderPluginContext,
+    ProviderRegisterContext, ProviderRequest, ProviderStream, RegisterContext, Tool, ToolContext,
+    ToolError, ToolUpdateSink,
 };
 use pi_test_support::{ScriptedProvider, ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::{Value, json};
@@ -78,12 +81,12 @@ struct ProbePlugin {
     hooks: Arc<AtomicUsize>,
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for ProbePlugin {
+#[pi_plugin::plugin]
+impl Plugin for ProbePlugin {
     fn id(&self) -> PluginId {
         PluginId::new("probe")
     }
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_tool(Arc::new(ProbeTool {
             name: "allowed",
             calls: Arc::clone(&self.allowed),
@@ -118,7 +121,7 @@ async fn tool_loop_is_scoped_and_does_not_emit_parent_events_or_hooks() {
     let provider = scripted.provider();
     let runtime = PiRuntime::builder()
         .provider_plugin(scripted)
-        .agent_plugin(ProbePlugin {
+        .plugin(ProbePlugin {
             allowed: allowed.clone(),
             forbidden: forbidden.clone(),
             hooks: hooks.clone(),
@@ -190,7 +193,7 @@ async fn ephemeral_session_pins_its_generation_without_blocking_reload() {
         .provider_plugin(scripted)
         .build()
         .unwrap();
-    let old_context = runtime.plugin_context_handle(pi_core::PluginContextScope::Base);
+    let old_context = runtime.plugin_context_handle(pi_plugin::PluginContextScope::Base);
     let (abort, signal) = AbortHandle::new();
     let mut run = Box::pin(runtime.run_ephemeral(request(&[]), signal));
     tokio::select! {
@@ -206,7 +209,7 @@ async fn ephemeral_session_pins_its_generation_without_blocking_reload() {
     assert_eq!(run.await.unwrap().status, EphemeralSessionStatus::Aborted);
     assert!(matches!(
         old_context.access_for_adapter(),
-        Err(pi_core::PluginContextError::Retired)
+        Err(pi_plugin::PluginContextError::Retired)
     ));
 }
 
@@ -277,7 +280,7 @@ async fn cancellation_and_timeout_return_completed_balanced_tool_receipts() {
         let provider = scripted.provider();
         let runtime = PiRuntime::builder()
             .provider_plugin(scripted)
-            .agent_plugin(ProbePlugin {
+            .plugin(ProbePlugin {
                 allowed: calls.clone(),
                 forbidden: Arc::new(AtomicUsize::new(0)),
                 hooks: Arc::new(AtomicUsize::new(0)),
@@ -415,7 +418,7 @@ fn compaction_request() -> EphemeralSessionRequest {
     let mut input = request(&[]);
     input.inherit_history = true;
     input.system_prompt = None;
-    input.compaction = Some(pi_core::EphemeralCompactionOptions {
+    input.compaction = Some(pi_plugin::EphemeralCompactionOptions {
         threshold_tokens: 1_000,
         retained_head_messages: 2,
         retained_tail_messages: 1,
@@ -683,7 +686,7 @@ async fn cancellation_and_reload_during_summary_keep_parent_generation_and_histo
             })
             .build()
             .unwrap();
-        let old_context = runtime.plugin_context_handle(pi_core::PluginContextScope::Base);
+        let old_context = runtime.plugin_context_handle(pi_plugin::PluginContextScope::Base);
         let (abort, signal) = AbortHandle::new();
         let mut request = compaction_request();
         if mode == "timeout" {
@@ -709,7 +712,7 @@ async fn cancellation_and_reload_during_summary_keep_parent_generation_and_histo
         assert_eq!(runtime.agent().state().messages, history);
         assert!(matches!(
             old_context.access_for_adapter(),
-            Err(pi_core::PluginContextError::Retired)
+            Err(pi_plugin::PluginContextError::Retired)
         ));
         assert_eq!(
             provider.observed.lock().unwrap().len(),
@@ -894,12 +897,12 @@ struct AuthPlugin {
     credential: Arc<Mutex<String>>,
 }
 
-#[pi_core::provider_plugin]
+#[pi_plugin::provider_plugin]
 impl ProviderPlugin for AuthPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("in-memory-auth-adapter")
     }
-    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_provider(self.provider.clone())
     }
     async fn before_provider_headers(

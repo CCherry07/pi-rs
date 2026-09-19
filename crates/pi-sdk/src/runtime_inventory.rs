@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use pi_core::PluginId;
 use pi_js_package_manager::ResolvedExtensionIdentity;
-use pi_plugin_loader::NativePlugins;
-use pi_plugin_manager::PreparedPluginReconcile;
+use pi_plugin_manager::install::PreparedPluginReconcile;
+use pi_plugin_manager::loader::NativePlugins;
 
 pub(crate) fn configured_native_plugin_ids(
     reconciliations: &[PreparedPluginReconcile],

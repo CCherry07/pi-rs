@@ -3,10 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use pi_core::{
-    ContentBlock, TextContent, Tool, ToolCallId, ToolContext, ToolError, ToolResult, ToolSpec,
-    ToolUpdate, ToolUpdateSink,
-};
+use pi_core::{ContentBlock, TextContent, ToolCallId, ToolResult, ToolSpec, ToolUpdate};
+use pi_plugin::{Tool, ToolContext, ToolError, ToolUpdateSink};
 use pi_shell::{MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, ShellChunk, ShellRequest, TruncatedBy};
 use serde_json::{Value, json};
 
@@ -48,23 +46,23 @@ struct ConfiguredBashTool {
     options: BashToolOptions,
 }
 
-#[pi_core::agent_plugin]
-impl pi_core::AgentPlugin for BashPlugin {
+#[pi_plugin::plugin]
+impl pi_plugin::Plugin for BashPlugin {
     fn id(&self) -> pi_core::PluginId {
         pi_core::PluginId::new("bash-tool")
     }
-    fn register(&self, context: &mut pi_core::RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut pi_plugin::RegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_tool(std::sync::Arc::new(BashTool))
     }
 }
 
-#[pi_core::agent_plugin]
-impl pi_core::AgentPlugin for ConfiguredBashPlugin {
+#[pi_plugin::plugin]
+impl pi_plugin::Plugin for ConfiguredBashPlugin {
     fn id(&self) -> pi_core::PluginId {
         pi_core::PluginId::new("bash-tool")
     }
 
-    fn register(&self, context: &mut pi_core::RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut pi_plugin::RegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_tool(std::sync::Arc::new(ConfiguredBashTool {
             options: self.options.clone(),
         }))

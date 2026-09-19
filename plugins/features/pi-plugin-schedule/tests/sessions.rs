@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_agent::AgentOptions;
-use pi_core::{ModelId, PluginContext, PresentationMode, ProviderId};
-use pi_plugin_schedule::{ScheduleOptions, SchedulePlugin, ScheduleSessionPlugin};
+use pi_core::{ModelId, ProviderId};
+use pi_plugin::{PluginContext, PresentationMode};
+use pi_plugin_schedule::{ScheduleOptions, SchedulePlugin};
 use pi_runtime::{PiRuntime, SystemPrompt};
 use pi_session::{
     AgentSessionOptions, MultiSessionManager, PiPluginContext, PiSession, PluginContextBinding,
     PreparedSessionGeneration, SessionError, SessionGenerationFactory, SessionGenerationRequest,
-    SessionPlugins,
 };
 use pi_test_support::{ScriptedProvider, ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::{Value, json};
@@ -78,7 +78,7 @@ impl SessionGenerationFactory for Factory {
             .plugin_context(access)
             .provider_plugin(provider)
             .system_prompt(SystemPrompt::Pi(Box::default()))
-            .agent_plugin_factory({
+            .plugin_factory({
                 let options = options.clone();
                 move || SchedulePlugin::new(options.clone())
             })
@@ -90,10 +90,7 @@ impl SessionGenerationFactory for Factory {
                 ..AgentOptions::default()
             });
         let runtime = request.generation_overlay.apply_to(builder).build()?;
-        let session_options = AgentSessionOptions::default().plugins(
-            SessionPlugins::new()
-                .plugin_factory(move || ScheduleSessionPlugin::new(options.clone())),
-        );
+        let session_options = AgentSessionOptions::default();
         Ok(PreparedSessionGeneration::new(runtime, session_options)
             .bind_session(move |session| context.bind_generation_session(session)))
     }

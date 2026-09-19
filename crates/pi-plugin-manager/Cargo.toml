@@ -7,24 +7,40 @@ license.workspace = true
 publish = false
 build = "build.rs"
 
+[features]
+default = ["install", "loader"]
+install = ["dep:fs2", "dep:futures", "dep:reqwest", "dep:semver", "dep:tokio", "dep:url"]
+loader = ["dep:libloading", "dep:pi-core", "dep:pi-runtime", "dep:pi-plugin", "pi-plugin/native"]
+authoring = ["install", "loader", "dep:tempfile"]
+
 [dependencies]
-fs2 = "0.4.3"
-futures.workspace = true
-reqwest = { version = "0.12.23", default-features = false, features = [
-  "json",
-  "rustls-tls",
-  "rustls-tls-native-roots",
-  "stream",
+fs2 = { version = "0.4.3", optional = true }
+futures = { workspace = true, optional = true }
+libloading = { workspace = true, optional = true }
+pi-core = { workspace = true, optional = true }
+pi-plugin = { workspace = true, optional = true }
+pi-runtime = { workspace = true, optional = true }
+reqwest = { version = "0.12.23", default-features = false, optional = true, features = [
+  "json", "rustls-tls", "rustls-tls-native-roots", "stream",
 ] }
-semver = { version = "1.0.26", features = ["serde"] }
+semver = { version = "1.0.26", features = ["serde"], optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10.9"
 thiserror.workspace = true
 toml.workspace = true
-tokio.workspace = true
-url = "2.5.8"
+tokio = { workspace = true, optional = true }
+url = { version = "2.5.8", optional = true }
+tempfile = { version = "3.21.0", optional = true }
 
 [dev-dependencies]
 tempfile = "3.21.0"
 tokio = { workspace = true, features = ["io-util", "net"] }
+
+[[test]]
+name = "native_loading"
+required-features = ["loader"]
+
+[[test]]
+name = "author_workflow"
+required-features = ["authoring"]

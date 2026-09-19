@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use config::{AppConfig, Cli, CliCommand, OutputMode};
-use pi_core::PresentationMode;
 use pi_js_package_manager::PackageManager as JsPackageManager;
 use pi_js_plugin::JsPluginHost;
+use pi_plugin::PresentationMode;
 use pi_sdk::{
     ProductSessionFactory, ProjectTrustEvaluation, ProjectTrustPromptRequest, ProjectTrustService,
 };

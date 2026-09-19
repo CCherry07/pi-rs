@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_core::{AgentPlugin, ModelSelection, ThinkingLevel};
+use pi_core::{ModelSelection, ThinkingLevel};
+use pi_plugin::Plugin;
 use pi_runtime::{PiRuntime, PiRuntimeBuilder};
 use tokio::sync::watch;
 
@@ -83,7 +84,7 @@ impl AgentSessionRuntimeTarget {
     }
 }
 
-type OverlayAgentPlugin = Arc<dyn Fn() -> Arc<dyn AgentPlugin> + Send + Sync>;
+type OverlayPluginFactory = Arc<dyn Fn() -> Arc<dyn Plugin> + Send + Sync>;
 
 /// Session-local additions layered onto every product runtime generation.
 ///
@@ -91,8 +92,8 @@ type OverlayAgentPlugin = Arc<dyn Fn() -> Arc<dyn AgentPlugin> + Send + Sync>;
 /// replacements on the live handle, but is never serialized into the v4 log.
 #[derive(Clone, Default)]
 pub struct SessionGenerationOverlay {
-    agent_plugins: Vec<OverlayAgentPlugin>,
-    execution_origin: pi_core::SessionExecutionOrigin,
+    agent_plugins: Vec<OverlayPluginFactory>,
+    execution_origin: pi_plugin::SessionExecutionOrigin,
 }
 
 impl std::fmt::Debug for SessionGenerationOverlay {
@@ -112,15 +113,15 @@ impl SessionGenerationOverlay {
 
     /// Provenance follows the live handle across replacement and reload, not
     /// the persisted parent-session pointer (a user fork is still user work).
-    pub fn with_execution_origin(mut self, origin: pi_core::SessionExecutionOrigin) -> Self {
+    pub fn with_execution_origin(mut self, origin: pi_plugin::SessionExecutionOrigin) -> Self {
         self.execution_origin = origin;
         self
     }
 
-    /// Adds one session-local agent plugin that is rebuilt for every runtime generation.
-    pub fn with_agent_plugin<F>(mut self, plugin: F) -> Self
+    /// Adds one session-local plugin that is rebuilt for every runtime generation.
+    pub fn with_plugin<F>(mut self, plugin: F) -> Self
     where
-        F: Fn() -> Arc<dyn AgentPlugin> + Send + Sync + 'static,
+        F: Fn() -> Arc<dyn Plugin> + Send + Sync + 'static,
     {
         self.agent_plugins.push(Arc::new(plugin));
         self
@@ -131,8 +132,8 @@ impl SessionGenerationOverlay {
         builder = builder.execution_origin(self.execution_origin);
         for plugin in &self.agent_plugins {
             let plugin = Arc::clone(plugin);
-            builder = builder.try_agent_plugin_arc_factory(move || {
-                Ok::<Arc<dyn AgentPlugin>, std::convert::Infallible>(plugin())
+            builder = builder.try_plugin_arc_factory(move || {
+                Ok::<Arc<dyn Plugin>, std::convert::Infallible>(plugin())
             });
         }
         builder
@@ -604,8 +605,8 @@ impl AgentSessionRuntime {
             }
         };
         let before = current
-            .session_plugin_driver()
-            .session_before_switch(&before_event)
+            .plugin_driver()
+            .session_before_switch(current.session_dispatch_context(), &before_event)
             .await;
         if before.is_some_and(|result| result.cancel) {
             return Ok(AgentSessionReplacement::Cancelled);
@@ -690,11 +691,14 @@ impl AgentSessionRuntime {
         position: ForkPosition,
     ) -> Result<AgentSessionReplacement, SessionError> {
         let before = current
-            .session_plugin_driver()
-            .session_before_fork(&SessionBeforeForkEvent {
-                entry_id: entry_id.clone(),
-                position,
-            })
+            .plugin_driver()
+            .session_before_fork(
+                current.session_dispatch_context(),
+                &SessionBeforeForkEvent {
+                    entry_id: entry_id.clone(),
+                    position,
+                },
+            )
             .await;
         if before.is_some_and(|result| result.cancel) {
             return Ok(AgentSessionReplacement::Cancelled);
@@ -891,16 +895,15 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use pi_agent::AgentOptions;
-    use pi_core::{
-        AgentPlugin, Message, ModelId, PluginId, ProviderId, RegisterContext, UserMessage,
-    };
+    use pi_core::{Message, ModelId, PluginId, ProviderId, UserMessage};
+    use pi_plugin::{Plugin, RegisterContext};
     use pi_runtime::PiRuntime;
     use pi_test_support::ScriptedProviderPlugin;
 
     use super::*;
     use crate::{
-        AgentSessionOptions, MultiSessionManager, MultiSessionManagerError, SessionPlugin,
-        SessionPluginContext, SessionPluginError, SessionPlugins,
+        AgentSessionOptions, MultiSessionManager, MultiSessionManagerError, PluginError,
+        SessionPluginContext,
     };
 
     #[derive(Clone)]
@@ -1038,13 +1041,13 @@ mod tests {
         }
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for OverlayPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for OverlayPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("session-overlay")
         }
 
-        fn register(&self, _context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+        fn register(&self, _context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
             Ok(())
         }
     }
@@ -1058,8 +1061,8 @@ mod tests {
         }
     }
 
-    #[pi_session::session_plugin]
-    impl SessionPlugin for LifecyclePlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for LifecyclePlugin {
         fn id(&self) -> PluginId {
             PluginId::new("runtime-lifecycle")
         }
@@ -1068,7 +1071,7 @@ mod tests {
             &self,
             _context: &SessionPluginContext,
             event: &SessionStartEvent,
-        ) -> Result<(), SessionPluginError> {
+        ) -> Result<(), PluginError> {
             self.record(format!("start:{:?}", event.reason));
             Ok(())
         }
@@ -1077,7 +1080,7 @@ mod tests {
             &self,
             _context: &SessionPluginContext,
             event: &SessionBeforeSwitchEvent,
-        ) -> Result<Option<crate::SessionBeforeSwitchResult>, SessionPluginError> {
+        ) -> Result<Option<crate::SessionBeforeSwitchResult>, PluginError> {
             self.record(format!("before:{:?}", event.reason));
             Ok(Some(crate::SessionBeforeSwitchResult {
                 cancel: self.cancel_switch.load(Ordering::Acquire),
@@ -1088,7 +1091,7 @@ mod tests {
             &self,
             _context: &SessionPluginContext,
             event: &SessionShutdownEvent,
-        ) -> Result<(), SessionPluginError> {
+        ) -> Result<(), PluginError> {
             self.record(format!("shutdown:{:?}", event.reason));
             Ok(())
         }
@@ -1128,22 +1131,24 @@ mod tests {
                     ..AgentOptions::default()
                 });
             builder = generation_overlay.apply_to(builder);
-            let runtime = builder.build()?;
             let plugin_events = Arc::clone(&self.events);
             let cancel_switch = Arc::clone(&self.cancel_switch);
             let fail_session_plugin_load = Arc::clone(&self.fail_session_plugin_load);
-            let options = AgentSessionOptions::default().plugins(
-                SessionPlugins::new().try_plugin_arc_factory(move || {
+            let runtime = builder
+                .try_plugin_arc_factory(move || {
                     if fail_session_plugin_load.load(Ordering::Acquire) {
                         return Err("fixture session plugin load failed");
                     }
                     Ok(Arc::new(LifecyclePlugin {
                         events: Arc::clone(&plugin_events),
                         cancel_switch: Arc::clone(&cancel_switch),
-                    }) as Arc<dyn SessionPlugin>)
-                }),
-            );
-            Ok(PreparedSessionGeneration::new(runtime, options))
+                    }) as Arc<dyn Plugin>)
+                })
+                .build()?;
+            Ok(PreparedSessionGeneration::new(
+                runtime,
+                AgentSessionOptions::default(),
+            ))
         }
     }
 
@@ -1270,7 +1275,7 @@ mod tests {
         let path = directory.path().join("first.jsonl");
         let loads = Arc::new(AtomicUsize::new(0));
         let factory_loads = Arc::clone(&loads);
-        let overlay = SessionGenerationOverlay::new().with_agent_plugin(move || {
+        let overlay = SessionGenerationOverlay::new().with_plugin(move || {
             factory_loads.fetch_add(1, Ordering::AcqRel);
             Arc::new(OverlayPlugin)
         });

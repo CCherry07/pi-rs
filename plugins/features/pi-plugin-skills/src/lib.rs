@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_core::{
-    AgentPlugin, AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, Command,
-    CommandContext, CommandError, CommandOutcome, CommandSpec, PluginError, PluginId,
-    RegisterContext,
+use pi_core::PluginId;
+use pi_plugin::{
+    AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, Command, CommandContext,
+    CommandError, CommandOutcome, CommandSpec, Plugin, PluginError, RegisterContext,
 };
 use pi_utils::{
     frontmatter::{FrontmatterStatus, parse_frontmatter},
@@ -263,7 +263,7 @@ impl SkillCatalog {
 
 /// A generation-local, immutable catalog of skills.
 ///
-/// Construct this plugin through `PiRuntimeBuilder::agent_plugin_factory` so every
+/// Construct this plugin through `PiRuntimeBuilder::plugin_factory` so every
 /// runtime reload rescans the configured roots and publishes a new catalog as
 /// part of the next runtime generation.
 pub struct SkillsPlugin {
@@ -418,13 +418,13 @@ fn render_skill_invocation(skill: &SkillInfo, arguments: &str) -> String {
     }
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for SkillsPlugin {
+#[pi_plugin::plugin]
+impl Plugin for SkillsPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("skills")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         if !self.enable_commands {
             return Ok(());
         }
@@ -774,7 +774,7 @@ mod tests {
         )
         .unwrap();
         let runtime = PiRuntime::builder()
-            .agent_plugin(
+            .plugin(
                 SkillsPlugin::from_skills([SkillInfo {
                     name: "grill-me".to_string(),
                     description: "Interview the user".to_string(),
@@ -810,7 +810,7 @@ mod tests {
             disable_model_invocation: false,
         };
         let runtime = PiRuntime::builder()
-            .agent_plugin(SkillsPlugin {
+            .plugin(SkillsPlugin {
                 catalog: SkillCatalog::from_skills([skill]),
                 enable_commands: false,
                 prompt_projector: None,
@@ -848,7 +848,7 @@ mod tests {
             disable_model_invocation: false,
         };
         let error = match PiRuntime::builder()
-            .agent_plugin(SkillsPlugin::from_skills([skill.clone(), skill]))
+            .plugin(SkillsPlugin::from_skills([skill.clone(), skill]))
             .build()
         {
             Ok(_) => panic!("duplicate skill commands must fail registration"),
@@ -1399,7 +1399,7 @@ mod tests {
         let options = SkillLoaderOptions::new(&cwd, &agent_dir);
         let runtime = PiRuntime::builder()
             .provider_plugin(ScriptedProviderPlugin::scripted([]))
-            .agent_plugin_factory(move || SkillsPlugin::load(options.clone()))
+            .plugin_factory(move || SkillsPlugin::load(options.clone()))
             .system_prompt(SystemPrompt::Pi(Box::default()))
             .build()
             .unwrap();

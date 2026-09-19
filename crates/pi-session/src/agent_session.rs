@@ -7,10 +7,10 @@ use pi_agent::{
     AgentTurnControl, AgentTurnControlError, EventError, PromptInput, QueueMode,
 };
 use pi_core::{
-    AbortHandle, AgentEvent, CommandOutcome, ContentBlock, CustomMessage, ImageContent,
-    InputStreamingBehavior, Message, ModelId, ProviderId, StopReason, ThinkingLevel, Usage,
-    UserMessage,
+    AbortHandle, AgentEvent, ContentBlock, CustomMessage, ImageContent, Message, ModelId,
+    ProviderId, StopReason, ThinkingLevel, Usage, UserMessage,
 };
+use pi_plugin::{CommandOutcome, InputStreamingBehavior, PluginDriver, SessionDispatchContext};
 use pi_runtime::{
     PiRuntime, PreparedTextSubmission, QueuedTextOutcome, RuntimeCompletionRequest,
     RuntimeRestoreState,
@@ -22,7 +22,6 @@ use pi_telemetry::{
 };
 
 use crate::event::AgentSessionEventHub;
-use crate::plugin::SessionPluginDriver;
 use crate::{
     ActiveToolsEntry, AgentMessage, AgentSessionOptions, AutoRetrySettings, BranchSummaryEntry,
     CompactionEntry, CompactionError, CompactionPreparation, CompactionSettings, CustomEntry,
@@ -161,7 +160,8 @@ pub struct AgentSession {
     log: SessionLog,
     runtime_inventory: SessionRuntimeInventory,
     context_options: SessionContextBuildOptions,
-    session_plugin_driver: Arc<SessionPluginDriver>,
+    plugin_driver: Arc<PluginDriver>,
+    session_dispatch_context: SessionDispatchContext,
     operation_gate: Arc<tokio::sync::Mutex<()>>,
     compaction_settings: Arc<RwLock<CompactionSettings>>,
     context_window: Option<u64>,
@@ -309,8 +309,8 @@ impl PreparedAgentSession {
             commit();
         }
         self.session
-            .session_plugin_driver()
-            .session_start(&event)
+            .plugin_driver()
+            .session_start(self.session.session_dispatch_context(), &event)
             .await;
         self.session
     }
@@ -385,12 +385,6 @@ impl AgentSession {
         );
         header.legacy_parent_session_path = options.parent_session_path.clone();
         runtime.agent().set_session_id(Some(header.id.clone()));
-        let identity = session_identity(&header, path.clone());
-        let session_plugin_driver = Arc::new(
-            options
-                .plugins
-                .build_with_context(identity, runtime.context_parts())?,
-        );
         let log = SessionLog::create_deferred(path, header)?;
 
         let initial_entries = vec![
@@ -411,7 +405,7 @@ impl AgentSession {
         // Preserve it even when the model is intentionally absent from the
         // catalog; catalog fallback applies only while restoring old state.
         let _ = restore_runtime_context_with_request(&runtime, &context, initial_model)?;
-        let session = Self::assemble(runtime, log, options, session_plugin_driver, Vec::new())?;
+        let session = Self::assemble(runtime, log, options, Vec::new())?;
         Ok(PreparedAgentSession {
             session,
             activation_commit: None,
@@ -472,12 +466,6 @@ impl AgentSession {
         let recovered_queue = recovery.queue;
         let header = log.header();
         runtime.agent().set_session_id(Some(header.id.clone()));
-        let identity = session_identity(&header, log.path().to_path_buf());
-        let session_plugin_driver = Arc::new(
-            options
-                .plugins
-                .build_with_context(identity, runtime.context_parts())?,
-        );
         let mut context = log.context_with_options(&options.context)?;
         let stored_model = context.model.clone();
         let stored_thinking_level = context.thinking_level.clone();
@@ -491,13 +479,7 @@ impl AgentSession {
             &context,
             options.initial_model.clone().session(context.model.clone()),
         )?;
-        let session = Self::assemble(
-            runtime,
-            log,
-            options,
-            session_plugin_driver,
-            recovered_queue,
-        )?;
+        let session = Self::assemble(runtime, log, options, recovered_queue)?;
         // Commit resolved configuration together after all initialization checks.
         // Replay must retain explicit resume overrides and new generation tools.
         let state = session.runtime.agent().state();
@@ -533,7 +515,6 @@ impl AgentSession {
         runtime: PiRuntime,
         log: SessionLog,
         options: AgentSessionOptions,
-        session_plugin_driver: Arc<SessionPluginDriver>,
         recovered_queue: Vec<PendingSessionMessage>,
     ) -> Result<Arc<Self>, SessionError> {
         let activity = Arc::new(std::sync::Mutex::new(SessionActivity {
@@ -545,12 +526,18 @@ impl AgentSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .queue_snapshot();
         let events = AgentSessionEventHub::new(runtime.agent().state(), log.name(), queue);
+        let plugin_driver = runtime.plugin_driver();
+        let session_dispatch_context = SessionDispatchContext {
+            identity: session_identity(&log.header(), log.path().to_path_buf()),
+            generation: runtime.generation(),
+        };
         let session = Arc::new(Self {
             runtime,
             log,
             runtime_inventory: options.runtime_inventory,
             context_options: options.context,
-            session_plugin_driver,
+            plugin_driver,
+            session_dispatch_context,
             operation_gate: Arc::new(tokio::sync::Mutex::new(())),
             compaction_settings: Arc::new(RwLock::new(options.compaction)),
             context_window: options.context_window,
@@ -637,7 +624,7 @@ impl AgentSession {
 
     pub(crate) fn isolated_fork_point(
         &self,
-    ) -> Result<Option<pi_core::IsolatedForkPoint>, SessionError> {
+    ) -> Result<Option<pi_plugin::IsolatedForkPoint>, SessionError> {
         if !self.log.is_materialized() {
             return Ok(None);
         }
@@ -654,7 +641,7 @@ impl AgentSession {
             })
             .flatten();
         let entries = crate::isolated_context::fork_entries(&entries, request);
-        Ok(entries.last().map(|entry| pi_core::IsolatedForkPoint {
+        Ok(entries.last().map(|entry| pi_plugin::IsolatedForkPoint {
             parent_session_id: self.log.id().to_string(),
             parent_entry_id: entry.id.clone(),
         }))
@@ -674,7 +661,7 @@ impl AgentSession {
 
     pub(crate) fn isolated_context_seed_at(
         &self,
-        fork_point: &pi_core::IsolatedForkPoint,
+        fork_point: &pi_plugin::IsolatedForkPoint,
         fork_turns: Option<usize>,
     ) -> Result<crate::isolated_context::IsolatedContextSeed, SessionError> {
         if fork_point.parent_session_id != self.log.id() {
@@ -783,8 +770,12 @@ impl AgentSession {
         self.events.publish_extension_notice(message, level);
     }
 
-    pub(crate) fn session_plugin_driver(&self) -> Arc<SessionPluginDriver> {
-        Arc::clone(&self.session_plugin_driver)
+    pub(crate) fn plugin_driver(&self) -> &PluginDriver {
+        &self.plugin_driver
+    }
+
+    pub(crate) fn session_dispatch_context(&self) -> &SessionDispatchContext {
+        &self.session_dispatch_context
     }
 
     pub async fn shutdown(&self) {
@@ -805,7 +796,9 @@ impl AgentSession {
         // Hooks may persist their final checkpoint while their context is still
         // valid. Retire it even if shutdown is cancelled while awaiting a hook.
         let _shutdown = AgentSessionShutdownGuard(self);
-        self.session_plugin_driver().session_shutdown(&event).await;
+        self.plugin_driver()
+            .session_shutdown(self.session_dispatch_context(), &event)
+            .await;
     }
 
     pub fn is_closed(&self) -> bool {
@@ -1894,10 +1887,13 @@ impl AgentSession {
         let _operation = self.operation_gate.lock().await;
         self.ensure_open()?;
         let normalized = self.set_name_locked(name)?;
-        self.session_plugin_driver()
-            .session_info_changed(&SessionInfoChangedEvent {
-                name: normalized.clone(),
-            })
+        self.plugin_driver()
+            .session_info_changed(
+                self.session_dispatch_context(),
+                &SessionInfoChangedEvent {
+                    name: normalized.clone(),
+                },
+            )
             .await;
         self.events.publish_session_info(normalized);
         Ok(())
@@ -1949,11 +1945,14 @@ impl AgentSession {
         let preparation = tree_preparation(&document, leaf_id, false)?;
         let (_, signal) = AbortHandle::new();
         let before = self
-            .session_plugin_driver()
-            .session_before_tree(&SessionBeforeTreeEvent {
-                preparation,
-                signal,
-            })
+            .plugin_driver()
+            .session_before_tree(
+                self.session_dispatch_context(),
+                &SessionBeforeTreeEvent {
+                    preparation,
+                    signal,
+                },
+            )
             .await;
         if before.as_ref().is_some_and(|result| result.cancel) {
             return Err(SessionError::Cancelled("session tree navigation"));
@@ -1970,13 +1969,16 @@ impl AgentSession {
         {
             self.log.set_label(target_id, Some(label))?;
         }
-        self.session_plugin_driver()
-            .session_tree(&SessionTreeEvent {
-                new_leaf_id: self.log.leaf_id(),
-                old_leaf_id: previous_leaf,
-                summary_entry: None,
-                from_extension: None,
-            })
+        self.plugin_driver()
+            .session_tree(
+                self.session_dispatch_context(),
+                &SessionTreeEvent {
+                    new_leaf_id: self.log.leaf_id(),
+                    old_leaf_id: previous_leaf,
+                    summary_entry: None,
+                    from_extension: None,
+                },
+            )
             .await;
         Ok(context)
     }
@@ -2005,25 +2007,31 @@ impl AgentSession {
         self.events.publish_compaction_start(reason);
         let (_, signal) = AbortHandle::new();
         let before = self
-            .session_plugin_driver()
-            .session_before_compact(&SessionBeforeCompactEvent {
-                preparation,
-                branch_entries,
-                custom_instructions: None,
-                reason,
-                will_retry: false,
-                signal,
-            })
+            .plugin_driver()
+            .session_before_compact(
+                self.session_dispatch_context(),
+                &SessionBeforeCompactEvent {
+                    preparation,
+                    branch_entries,
+                    custom_instructions: None,
+                    reason,
+                    will_retry: false,
+                    signal,
+                },
+            )
             .await;
         if before.as_ref().is_some_and(|result| result.cancel) {
-            self.session_plugin_driver()
-                .session_compact_failed(&SessionCompactFailedEvent {
-                    reason,
-                    error_message: None,
-                    aborted: true,
-                    will_retry: false,
-                    from_extension: false,
-                })
+            self.plugin_driver()
+                .session_compact_failed(
+                    self.session_dispatch_context(),
+                    &SessionCompactFailedEvent {
+                        reason,
+                        error_message: None,
+                        aborted: true,
+                        will_retry: false,
+                        from_extension: false,
+                    },
+                )
                 .await;
             self.events
                 .publish_compaction_end(reason, None, true, false, None);
@@ -2047,27 +2055,33 @@ impl AgentSession {
             Ok(record) => {
                 let id = record.id.clone();
                 self.events.publish_entry(record.clone());
-                self.session_plugin_driver()
-                    .session_compact(&SessionCompactEvent {
-                        compaction_entry: compaction.clone(),
-                        from_extension,
-                        reason,
-                        will_retry: false,
-                    })
+                self.plugin_driver()
+                    .session_compact(
+                        self.session_dispatch_context(),
+                        &SessionCompactEvent {
+                            compaction_entry: compaction.clone(),
+                            from_extension,
+                            reason,
+                            will_retry: false,
+                        },
+                    )
                     .await;
                 self.events
                     .publish_compaction_end(reason, Some(record), false, false, None);
                 Ok(id)
             }
             Err(error) => {
-                self.session_plugin_driver()
-                    .session_compact_failed(&SessionCompactFailedEvent {
-                        reason,
-                        error_message: Some(error.to_string()),
-                        aborted: false,
-                        will_retry: false,
-                        from_extension,
-                    })
+                self.plugin_driver()
+                    .session_compact_failed(
+                        self.session_dispatch_context(),
+                        &SessionCompactFailedEvent {
+                            reason,
+                            error_message: Some(error.to_string()),
+                            aborted: false,
+                            will_retry: false,
+                            from_extension,
+                        },
+                    )
                     .await;
                 self.events.publish_compaction_end(
                     reason,
@@ -2211,26 +2225,32 @@ impl AgentSession {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(abort_handle);
         let before = self
-            .session_plugin_driver()
-            .session_before_compact(&SessionBeforeCompactEvent {
-                preparation: preparation.clone(),
-                branch_entries,
-                custom_instructions: custom_instructions.clone(),
-                reason,
-                will_retry,
-                signal: signal.clone(),
-            })
+            .plugin_driver()
+            .session_before_compact(
+                self.session_dispatch_context(),
+                &SessionBeforeCompactEvent {
+                    preparation: preparation.clone(),
+                    branch_entries,
+                    custom_instructions: custom_instructions.clone(),
+                    reason,
+                    will_retry,
+                    signal: signal.clone(),
+                },
+            )
             .await;
         if signal.is_aborted() || before.as_ref().is_some_and(|result| result.cancel) {
             self.clear_compaction_abort();
-            self.session_plugin_driver()
-                .session_compact_failed(&SessionCompactFailedEvent {
-                    reason,
-                    error_message: None,
-                    aborted: true,
-                    will_retry,
-                    from_extension: false,
-                })
+            self.plugin_driver()
+                .session_compact_failed(
+                    self.session_dispatch_context(),
+                    &SessionCompactFailedEvent {
+                        reason,
+                        error_message: None,
+                        aborted: true,
+                        will_retry,
+                        from_extension: false,
+                    },
+                )
                 .await;
             self.events
                 .publish_compaction_end(reason, None, true, will_retry, None);
@@ -2260,14 +2280,17 @@ impl AgentSession {
         let compaction = match generated {
             Ok(compaction) => compaction,
             Err(error) => {
-                self.session_plugin_driver()
-                    .session_compact_failed(&SessionCompactFailedEvent {
-                        reason,
-                        error_message: Some(error.to_string()),
-                        aborted: matches!(error, SessionError::Cancelled(_)),
-                        will_retry,
-                        from_extension,
-                    })
+                self.plugin_driver()
+                    .session_compact_failed(
+                        self.session_dispatch_context(),
+                        &SessionCompactFailedEvent {
+                            reason,
+                            error_message: Some(error.to_string()),
+                            aborted: matches!(error, SessionError::Cancelled(_)),
+                            will_retry,
+                            from_extension,
+                        },
+                    )
                     .await;
                 self.events.publish_compaction_end(
                     reason,
@@ -2293,13 +2316,16 @@ impl AgentSession {
         match persisted {
             Ok((record, context)) => {
                 self.events.publish_entry(record.clone());
-                self.session_plugin_driver()
-                    .session_compact(&SessionCompactEvent {
-                        compaction_entry: compaction.clone(),
-                        from_extension,
-                        reason,
-                        will_retry,
-                    })
+                self.plugin_driver()
+                    .session_compact(
+                        self.session_dispatch_context(),
+                        &SessionCompactEvent {
+                            compaction_entry: compaction.clone(),
+                            from_extension,
+                            reason,
+                            will_retry,
+                        },
+                    )
                     .await;
                 self.events
                     .publish_compaction_end(reason, Some(record), false, will_retry, None);
@@ -2309,14 +2335,17 @@ impl AgentSession {
                 })
             }
             Err(error) => {
-                self.session_plugin_driver()
-                    .session_compact_failed(&SessionCompactFailedEvent {
-                        reason,
-                        error_message: Some(error.to_string()),
-                        aborted: false,
-                        will_retry,
-                        from_extension,
-                    })
+                self.plugin_driver()
+                    .session_compact_failed(
+                        self.session_dispatch_context(),
+                        &SessionCompactFailedEvent {
+                            reason,
+                            error_message: Some(error.to_string()),
+                            aborted: false,
+                            will_retry,
+                            from_extension,
+                        },
+                    )
                     .await;
                 self.events.publish_compaction_end(
                     reason,
@@ -2385,11 +2414,14 @@ impl AgentSession {
         let preparation = tree_preparation(&document, leaf_id, true)?;
         let (_, signal) = AbortHandle::new();
         let before = self
-            .session_plugin_driver()
-            .session_before_tree(&SessionBeforeTreeEvent {
-                preparation,
-                signal,
-            })
+            .plugin_driver()
+            .session_before_tree(
+                self.session_dispatch_context(),
+                &SessionBeforeTreeEvent {
+                    preparation,
+                    signal,
+                },
+            )
             .await;
         if before.as_ref().is_some_and(|result| result.cancel) {
             return Err(SessionError::Cancelled("session tree navigation"));
@@ -2417,13 +2449,16 @@ impl AgentSession {
         let context = self.log.context_with_options(&self.context_options)?;
         restore_runtime_context(&self.runtime, &context)?;
         self.events.publish_entry(record);
-        self.session_plugin_driver()
-            .session_tree(&SessionTreeEvent {
-                new_leaf_id: self.log.leaf_id(),
-                old_leaf_id: previous_leaf,
-                summary_entry: Some(summary),
-                from_extension: Some(from_extension),
-            })
+        self.plugin_driver()
+            .session_tree(
+                self.session_dispatch_context(),
+                &SessionTreeEvent {
+                    new_leaf_id: self.log.leaf_id(),
+                    old_leaf_id: previous_leaf,
+                    summary_entry: Some(summary),
+                    from_extension: Some(from_extension),
+                },
+            )
             .await;
         Ok(id)
     }
@@ -2701,7 +2736,7 @@ fn will_retry_after_agent_end(
                 && message
                     .error_message
                     .as_deref()
-                    .is_some_and(pi_core::is_retryable_provider_error_message),
+                    .is_some_and(pi_plugin::is_retryable_provider_error_message),
         ),
         _ => None,
     }) == Some(true)
@@ -2724,7 +2759,7 @@ fn is_retryable_assistant_outcome(outcome: &AgentLoopOutcome) -> bool {
     let Some(error) = message.error_message.as_deref() else {
         return false;
     };
-    pi_core::is_retryable_provider_error_message(error)
+    pi_plugin::is_retryable_provider_error_message(error)
 }
 
 fn branch_summary_input_messages(
@@ -3183,11 +3218,13 @@ mod tests {
     use async_trait::async_trait;
     use pi_agent::{AgentLoopStop, AgentOptions};
     use pi_core::{
-        AgentPlugin, AgentPluginContext, AgentSettledEvent, BeforeAgentStartEvent,
-        BeforeAgentStartPatch, Command, CommandContext, CommandError, CommandOutcome, CommandSpec,
-        ContentBlock, CustomMessage, CustomMessageContent, Message, MessageEndEvent,
-        MessageEndPatch, PluginError, PluginId, RegisterContext, ResponseMetadata, StreamEvent,
-        TextContent, Usage, UserMessage,
+        ContentBlock, CustomMessage, CustomMessageContent, Message, PluginId, ResponseMetadata,
+        StreamEvent, TextContent, Usage, UserMessage,
+    };
+    use pi_plugin::{
+        AgentPluginContext, AgentSettledEvent, BeforeAgentStartEvent, BeforeAgentStartPatch,
+        Command, CommandContext, CommandError, CommandOutcome, CommandSpec, MessageEndEvent,
+        MessageEndPatch, Plugin, PluginError, RegisterContext,
     };
     use pi_runtime::SystemPrompt;
     use pi_test_support::TestToolsPlugin;
@@ -3196,8 +3233,8 @@ mod tests {
     use super::*;
     use crate::{
         AgentSessionEvent, EntryOrder, EntryQuery, SUMMARIZATION_SYSTEM_PROMPT,
-        SessionBeforeCompactResult, SessionBeforeTreeResult, SessionEntryType, SessionPlugin,
-        SessionPluginContext, SessionPluginError, SessionPlugins,
+        SessionBeforeCompactResult, SessionBeforeTreeResult, SessionEntryType,
+        SessionPluginContext,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3246,8 +3283,8 @@ mod tests {
         settled: Arc<AtomicUsize>,
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for FailingAgentSettledPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for FailingAgentSettledPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("failing-agent-settled")
         }
@@ -3265,8 +3302,8 @@ mod tests {
         }
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for BlockingAgentSettledPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for BlockingAgentSettledPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("blocking-agent-settled")
         }
@@ -3282,8 +3319,8 @@ mod tests {
         }
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for CountingAgentLifecyclePlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for CountingAgentLifecyclePlugin {
         fn id(&self) -> PluginId {
             PluginId::new("counting-agent-lifecycle")
         }
@@ -3291,7 +3328,7 @@ mod tests {
         async fn agent_end(
             &self,
             _context: AgentPluginContext,
-            _event: pi_core::AgentEndEvent,
+            _event: pi_plugin::AgentEndEvent,
         ) -> Result<(), PluginError> {
             self.ends.fetch_add(1, Ordering::SeqCst);
             Ok(())
@@ -3307,8 +3344,8 @@ mod tests {
         }
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for PersistMessageEndReplacement {
+    #[pi_plugin::plugin]
+    impl Plugin for PersistMessageEndReplacement {
         fn id(&self) -> PluginId {
             PluginId::new("persist-message-end-replacement")
         }
@@ -3739,8 +3776,8 @@ mod tests {
         ));
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for BeforeStartInjectionPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for BeforeStartInjectionPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("before-start-injection")
         }
@@ -3763,13 +3800,13 @@ mod tests {
         }
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for ExpandingCommandPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for ExpandingCommandPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("expanding-command")
         }
 
-        fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+        fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
             context.register_command(Arc::new(ExpandingCommand))
         }
     }
@@ -3781,7 +3818,7 @@ mod tests {
         let scripted = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".to_string())]);
         let provider = scripted.provider();
         let runtime = PiRuntime::builder()
-            .agent_plugin(BeforeStartInjectionPlugin)
+            .plugin(BeforeStartInjectionPlugin)
             .provider_plugin(scripted)
             .agent_options(AgentOptions {
                 provider_id: ProviderId::new("scripted"),
@@ -3878,7 +3915,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
         let runtime = PiRuntime::builder()
-            .agent_plugin(PersistMessageEndReplacement)
+            .plugin(PersistMessageEndReplacement)
             .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
                 "provider assistant".to_string(),
             )]))
@@ -3917,8 +3954,8 @@ mod tests {
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let runtime = PiRuntime::builder()
-            .agent_plugin(FailingAgentSettledPlugin)
-            .agent_plugin(BlockingAgentSettledPlugin {
+            .plugin(FailingAgentSettledPlugin)
+            .plugin(BlockingAgentSettledPlugin {
                 entered: Arc::clone(&entered),
                 release: Arc::clone(&release),
             })
@@ -3965,7 +4002,7 @@ mod tests {
                 .iter()
                 .any(|diagnostic| {
                     diagnostic.plugin_id == PluginId::new("failing-agent-settled")
-                        && diagnostic.hook == "agent_settled"
+                        && diagnostic.hook.as_str() == "agent_settled"
                         && diagnostic.message.contains("intentional settled failure")
                 })
         );
@@ -3976,13 +4013,13 @@ mod tests {
     struct ExplicitCommandPlugin(Arc<AtomicUsize>);
     struct ExplicitCommand(Arc<AtomicUsize>);
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for ExplicitCommandPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for ExplicitCommandPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("explicit-command")
         }
 
-        fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+        fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
             context.register_command(Arc::new(ExplicitCommand(Arc::clone(&self.0))))
         }
     }
@@ -4013,7 +4050,7 @@ mod tests {
 
     fn explicit_command_runtime(calls: Arc<AtomicUsize>, turn: ScriptedTurn) -> PiRuntime {
         PiRuntime::builder()
-            .agent_plugin(ExplicitCommandPlugin(calls))
+            .plugin(ExplicitCommandPlugin(calls))
             .provider_plugin(ScriptedProviderPlugin::scripted([turn]))
             .agent_options(AgentOptions {
                 provider_id: ProviderId::new("scripted"),
@@ -4143,7 +4180,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
         let runtime = PiRuntime::builder()
-            .agent_plugin(ExpandingCommandPlugin)
+            .plugin(ExpandingCommandPlugin)
             .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
                 "done".to_string(),
             )]))
@@ -4178,7 +4215,7 @@ mod tests {
     async fn transformed_command_publishes_the_original_text_to_product_frontends() {
         let directory = tempfile::tempdir().unwrap();
         let runtime = PiRuntime::builder()
-            .agent_plugin(ExpandingCommandPlugin)
+            .plugin(ExpandingCommandPlugin)
             .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
                 "done".to_string(),
             )]))
@@ -4225,7 +4262,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("queued-command.jsonl");
         let runtime = PiRuntime::builder()
-            .agent_plugin(ExpandingCommandPlugin)
+            .plugin(ExpandingCommandPlugin)
             .provider_plugin(ScriptedProviderPlugin::scripted([
                 ScriptedTurn::WaitForAbort,
             ]))
@@ -4372,8 +4409,8 @@ mod tests {
         }
     }
 
-    #[pi_session::session_plugin]
-    impl SessionPlugin for LifecyclePlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for LifecyclePlugin {
         fn id(&self) -> PluginId {
             PluginId::new("lifecycle")
         }
@@ -4382,7 +4419,7 @@ mod tests {
             &self,
             context: &SessionPluginContext,
             event: &SessionStartEvent,
-        ) -> Result<(), SessionPluginError> {
+        ) -> Result<(), PluginError> {
             self.record_context(context);
             self.record(format!("start:{}:{:?}", self.value, event.reason));
             Ok(())
@@ -4392,7 +4429,7 @@ mod tests {
             &self,
             context: &SessionPluginContext,
             event: &SessionShutdownEvent,
-        ) -> Result<(), SessionPluginError> {
+        ) -> Result<(), PluginError> {
             self.record_context(context);
             self.record(format!("shutdown:{}:{:?}", self.value, event.reason));
             Ok(())
@@ -4402,7 +4439,7 @@ mod tests {
             &self,
             context: &SessionPluginContext,
             _event: &SessionBeforeTreeEvent,
-        ) -> Result<Option<SessionBeforeTreeResult>, SessionPluginError> {
+        ) -> Result<Option<SessionBeforeTreeResult>, PluginError> {
             self.record_context(context);
             self.record(format!("before_tree:{}", self.value));
             Ok(self.cancel_tree.then_some(SessionBeforeTreeResult {
@@ -4415,7 +4452,7 @@ mod tests {
             &self,
             context: &SessionPluginContext,
             event: &SessionBeforeCompactEvent,
-        ) -> Result<Option<SessionBeforeCompactResult>, SessionPluginError> {
+        ) -> Result<Option<SessionBeforeCompactResult>, PluginError> {
             self.record_context(context);
             self.record(format!("before_compact:{}", self.value));
             if !self.replace_compaction {
@@ -4438,7 +4475,7 @@ mod tests {
             &self,
             context: &SessionPluginContext,
             event: &SessionCompactEvent,
-        ) -> Result<(), SessionPluginError> {
+        ) -> Result<(), PluginError> {
             self.record_context(context);
             self.record(format!(
                 "compact:{}:{}:{}",
@@ -4874,7 +4911,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
         let runtime = PiRuntime::builder()
-            .agent_plugin(TestToolsPlugin::new())
+            .plugin(TestToolsPlugin::new())
             .provider_plugin(ScriptedProviderPlugin::scripted([
                 ScriptedTurn::Text("first answer".to_string()),
                 ScriptedTurn::Text("abandoned answer".to_string()),
@@ -4913,7 +4950,7 @@ mod tests {
 
         drop(session);
         let runtime = PiRuntime::builder()
-            .agent_plugin(TestToolsPlugin::new())
+            .plugin(TestToolsPlugin::new())
             .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .agent_options(AgentOptions {
                 active_tools: vec!["echo".to_string()],
@@ -4965,26 +5002,23 @@ mod tests {
     async fn lifecycle_hooks_can_replace_compaction_and_cancel_tree_navigation() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
-        let runtime = PiRuntime::builder()
-            .provider_plugin(ScriptedProviderPlugin::scripted([]))
-            .build()
-            .unwrap();
+        let builder = PiRuntime::builder().provider_plugin(ScriptedProviderPlugin::scripted([]));
         let contexts = Arc::new(Mutex::new(Vec::new()));
         let events = Arc::new(Mutex::new(Vec::new()));
-        let plugins = SessionPlugins::new().plugin(LifecyclePlugin {
-            value: 1,
-            contexts,
-            events: Arc::clone(&events),
-            cancel_tree: true,
-            replace_compaction: true,
-        });
-        let session = AgentSession::create_with_options(
-            runtime,
-            &path,
-            AgentSessionOptions::default().plugins(plugins),
-        )
-        .await
-        .unwrap();
+        let runtime = builder
+            .plugin(LifecyclePlugin {
+                value: 1,
+                contexts,
+                events: Arc::clone(&events),
+                cancel_tree: true,
+                replace_compaction: true,
+            })
+            .build()
+            .unwrap();
+        let session =
+            AgentSession::create_with_options(runtime, &path, AgentSessionOptions::default())
+                .await
+                .unwrap();
         let leaf = session
             .log()
             .append_message(Message::User(UserMessage::text("branch", 1)))
@@ -5028,16 +5062,16 @@ mod tests {
     async fn new_session_preserves_a_custom_model_outside_the_catalog() {
         struct Catalog;
 
-        #[pi_core::provider_plugin]
-        impl pi_core::ProviderPlugin for Catalog {
+        #[pi_plugin::provider_plugin]
+        impl pi_plugin::ProviderPlugin for Catalog {
             fn id(&self) -> pi_core::PluginId {
                 pi_core::PluginId::new("catalog")
             }
 
             fn register(
                 &self,
-                context: &mut pi_core::ProviderRegisterContext<'_>,
-            ) -> pi_core::Result<()> {
+                context: &mut pi_plugin::ProviderRegisterContext<'_>,
+            ) -> pi_plugin::Result<()> {
                 context.register_model(pi_core::ModelSpec::new(
                     "scripted",
                     "registered",
@@ -5072,16 +5106,16 @@ mod tests {
     async fn active_context_window_tracks_catalog_model_switches() {
         struct Catalog;
 
-        #[pi_core::provider_plugin]
-        impl pi_core::ProviderPlugin for Catalog {
+        #[pi_plugin::provider_plugin]
+        impl pi_plugin::ProviderPlugin for Catalog {
             fn id(&self) -> pi_core::PluginId {
                 pi_core::PluginId::new("catalog")
             }
 
             fn register(
                 &self,
-                context: &mut pi_core::ProviderRegisterContext<'_>,
-            ) -> pi_core::Result<()> {
+                context: &mut pi_plugin::ProviderRegisterContext<'_>,
+            ) -> pi_plugin::Result<()> {
                 let mut small = pi_core::ModelSpec::new("scripted", "small", "Small", "test");
                 small.context_window = 100;
                 context.register_model(small)?;
@@ -5117,16 +5151,16 @@ mod tests {
     async fn thinking_changes_and_model_switches_clamp_to_catalog_capabilities() {
         struct Catalog;
 
-        #[pi_core::provider_plugin]
-        impl pi_core::ProviderPlugin for Catalog {
+        #[pi_plugin::provider_plugin]
+        impl pi_plugin::ProviderPlugin for Catalog {
             fn id(&self) -> pi_core::PluginId {
                 pi_core::PluginId::new("thinking-catalog")
             }
 
             fn register(
                 &self,
-                context: &mut pi_core::ProviderRegisterContext<'_>,
-            ) -> pi_core::Result<()> {
+                context: &mut pi_plugin::ProviderRegisterContext<'_>,
+            ) -> pi_plugin::Result<()> {
                 let mut sparse = pi_core::ModelSpec::new("scripted", "sparse", "Sparse", "test");
                 sparse.reasoning = true;
                 sparse.thinking_level_map.insert("off".to_string(), None);
@@ -5239,16 +5273,16 @@ mod tests {
     async fn manual_compaction_uses_active_model_reasoning_and_output_limits() {
         struct LimitedCatalog;
 
-        #[pi_core::provider_plugin]
-        impl pi_core::ProviderPlugin for LimitedCatalog {
+        #[pi_plugin::provider_plugin]
+        impl pi_plugin::ProviderPlugin for LimitedCatalog {
             fn id(&self) -> pi_core::PluginId {
                 pi_core::PluginId::new("limited-catalog")
             }
 
             fn register(
                 &self,
-                context: &mut pi_core::ProviderRegisterContext<'_>,
-            ) -> pi_core::Result<()> {
+                context: &mut pi_plugin::ProviderRegisterContext<'_>,
+            ) -> pi_plugin::Result<()> {
                 let mut model = pi_core::ModelSpec::new("scripted", "limited", "Limited", "test");
                 model.reasoning = false;
                 model.max_tokens = 32;
@@ -5350,7 +5384,7 @@ mod tests {
         ]);
         let provider = provider_plugin.provider();
         let runtime = PiRuntime::builder()
-            .agent_plugin(CountingAgentLifecyclePlugin {
+            .plugin(CountingAgentLifecyclePlugin {
                 ends: Arc::clone(&agent_ends),
                 settled: Arc::clone(&agent_settled),
             })

@@ -2,7 +2,9 @@
 //! Deliberate Rust/Desktop extension, not Pi's npm/git extension manager.
 use std::path::PathBuf;
 
-use pi_plugin_manager::{InstallScope, PluginManager, PluginManagerOptions, PluginPackageRow};
+use pi_plugin_manager::install::{
+    InstallScope, PluginManager, PluginManagerOptions, PluginPackageRow,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{ProjectTrustEvaluation, ProjectTrustService};
@@ -312,7 +314,7 @@ mod tests {
         let package = dir.path().join("package");
         std::fs::create_dir(&package).unwrap();
         std::fs::write(package.join("libfixture.so"), b"not executable native code").unwrap();
-        std::fs::write(package.join("pi-plugin.toml"), "schema = 1\n[plugin]\nid = \"fixture\"\nversion = \"1.0.0\"\nkind = \"agent\"\nartifact = \"libfixture.so\"\n").unwrap();
+        std::fs::write(package.join("pi-plugin.toml"), "schema = 1\n[plugin]\nid = \"fixture\"\nversion = \"1.0.0\"\nkind = \"plugin\"\nartifact = \"libfixture.so\"\n").unwrap();
         let library = library(&dir.path().join("agent"), None);
         let installed = library
             .operate(PluginOperation::Install {

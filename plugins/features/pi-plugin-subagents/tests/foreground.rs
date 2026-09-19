@@ -3,22 +3,17 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use pi_agent::AgentOptions;
-use pi_core::{
-    ContentBlock, ModelId, ModelSpec, PluginContext, PluginId, PresentationMode, ProviderId,
-    ProviderPlugin, ProviderRegisterContext, ToolCallId, ToolResult,
-};
+use pi_core::{ContentBlock, ModelId, ModelSpec, PluginId, ProviderId, ToolCallId, ToolResult};
+use pi_plugin::{PluginContext, PresentationMode, ProviderPlugin, ProviderRegisterContext};
 use pi_plugin_find::FindPlugin;
 use pi_plugin_grep::GrepPlugin;
 use pi_plugin_ls::LsPlugin;
 use pi_plugin_read::ReadPlugin;
-use pi_plugin_subagents::{
-    SubagentLoaderOptions, SubagentRuntime, SubagentsPlugin, SubagentsSessionPlugin,
-};
+use pi_plugin_subagents::{SubagentLoaderOptions, SubagentRuntime, SubagentsPlugin};
 use pi_runtime::PiRuntime;
 use pi_session::{
     AgentSessionOptions, MultiSessionManager, PiPluginContext, PluginContextBinding,
     PreparedSessionGeneration, SessionError, SessionGenerationFactory, SessionGenerationRequest,
-    SessionPlugins,
 };
 use pi_test_support::{ScriptedProvider, ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::{Value, json};
@@ -27,13 +22,13 @@ type RecordedProviders = Arc<Mutex<Vec<(usize, Arc<ScriptedProvider>)>>>;
 
 struct TestModelCatalogPlugin;
 
-#[pi_core::provider_plugin]
+#[pi_plugin::provider_plugin]
 impl ProviderPlugin for TestModelCatalogPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("test-model-catalog")
     }
 
-    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
         let mut model = ModelSpec::new("scripted", "test", "Test", "scripted");
         model.reasoning = true;
         context.register_model(model)
@@ -144,11 +139,11 @@ impl SessionGenerationFactory for TestFactory {
             .plugin_context(context_access)
             .provider_plugin(provider_plugin)
             .provider_plugin(TestModelCatalogPlugin)
-            .agent_plugin(subagents)
-            .agent_plugin(ReadPlugin)
-            .agent_plugin(GrepPlugin)
-            .agent_plugin(FindPlugin)
-            .agent_plugin(LsPlugin)
+            .plugin(subagents)
+            .plugin(ReadPlugin)
+            .plugin(GrepPlugin)
+            .plugin(FindPlugin)
+            .plugin(LsPlugin)
             .agent_options(AgentOptions {
                 provider_id,
                 model_id,
@@ -158,9 +153,7 @@ impl SessionGenerationFactory for TestFactory {
                 ..AgentOptions::default()
             })
             .build()?;
-        let options = AgentSessionOptions::default().plugins(
-            SessionPlugins::new().plugin(SubagentsSessionPlugin::new(self.subagents.clone())),
-        );
+        let options = AgentSessionOptions::default();
         Ok(PreparedSessionGeneration::new(runtime, options)
             .bind_session(move |session| plugin_context.bind_generation_session(session)))
     }
@@ -176,7 +169,7 @@ async fn invoke(root: &pi_session::PiSession, name: &str, input: Value) -> pi_co
         .tool(name)
         .unwrap_or_else(|| panic!("missing tool {name}"));
     let (_, signal) = pi_core::AbortHandle::new();
-    let context = pi_core::ToolContext::with_plugin_context(
+    let context = pi_plugin::ToolContext::with_plugin_context(
         root.cwd(),
         signal,
         session.runtime().context_parts(),
@@ -187,7 +180,7 @@ async fn invoke(root: &pi_session::PiSession, name: &str, input: Value) -> pi_co
             context,
             ToolCallId::new(format!("test-{name}")),
             input,
-            pi_core::ToolUpdateSink::channel().0,
+            pi_plugin::ToolUpdateSink::channel().0,
         ),
     )
     .await
@@ -1284,7 +1277,7 @@ async fn process_restart_interrupts_running_turn_but_replays_queued_launches_onl
 #[test]
 fn old_workflow_and_supervisor_tools_are_not_registered() {
     let runtime = PiRuntime::builder()
-        .agent_plugin(SubagentsPlugin::default())
+        .plugin(SubagentsPlugin::default())
         .build()
         .unwrap();
     for old in [

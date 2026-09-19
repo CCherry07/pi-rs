@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
-use pi_core::{IsolatedSessionOptions, ModelSelection, ModelSpec, ToolContext, ToolError};
+use pi_core::{ModelSelection, ModelSpec};
+use pi_plugin::{IsolatedSessionOptions, ToolContext, ToolError};
 
 use crate::profiles::SubagentProfile;
 

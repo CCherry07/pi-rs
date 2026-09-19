@@ -10,6 +10,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
+pi-plugin.workspace = true
 async-trait.workspace = true
 dotenvy.workspace = true
 napi = { version = "=3.12.2", default-features = false, features = ["napi4", "tokio_rt"] }

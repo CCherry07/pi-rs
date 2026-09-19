@@ -1,6 +1,7 @@
 //! Bounded pre-compaction/session-close preservation through the same Agent fork.
 use crate::{config::HermesMemoryConfig, execution::HermesRuns};
-use pi_core::{AbortHandle, AbortSignal, SessionSnapshot};
+use pi_core::{AbortHandle, AbortSignal};
+use pi_plugin::SessionSnapshot;
 use pi_session::SessionPluginContext;
 use std::{sync::Arc, time::Duration};
 
@@ -38,7 +39,7 @@ pub(crate) async fn flush_if_due(
     };
     for error in errors {
         let _ = context.ui.notify(
-            pi_core::NoticeLevel::Warning,
+            pi_plugin::NoticeLevel::Warning,
             format!("⚠️ Memory review: {error}"),
         );
     }

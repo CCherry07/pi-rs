@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
-use pi_core::{AbortSignal, ContentBlock, Message, SessionEntryKind, SessionSnapshot};
+use pi_core::{AbortSignal, ContentBlock, Message};
+use pi_plugin::{SessionEntryKind, SessionSnapshot};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;

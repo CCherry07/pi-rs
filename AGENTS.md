@@ -12,9 +12,9 @@ claiming Pi compatibility; do not implement from memory or from an older Pi shap
 
 ## Current baseline
 
-- A generation-based runtime registers agent/tool/command, provider/catalog, and session plugin
-  systems and rebuilds factory-backed plugins on reload.
-- Version-locked native agent/provider/session plugins are exported through `pi-plugin-sdk`, loaded
+- A generation-based runtime registers unified Agent/Session plugins and independent provider/catalog
+  plugins and rebuilds factory-backed plugins on reload.
+- Version-locked native Plugin/ProviderPlugin implementations are exported through `pi-plugin`, loaded
   from manifests or explicit paths, and adapted into those same generation factories.
 - Skills, `models.json`, project resources, OpenAI-compatible routing, production filesystem/shell
   tools, and deterministic scripted-provider test support are integrated.
@@ -35,7 +35,7 @@ claiming Pi compatibility; do not implement from memory or from an older Pi shap
 - **CLI/TUI changes:** read [`apps/pi-cli/README.md`](apps/pi-cli/README.md) and the focused tests in
   `apps/pi-cli/src/tui.rs` before changing terminal modes, input behavior, commands, transcript
   rendering, scrolling, selection, or status presentation.
-- **Native plugins:** read [`crates/pi-plugin-sdk/README.md`](crates/pi-plugin-sdk/README.md) before
+- **Native plugins:** read [`crates/pi-plugin/docs/native.md`](crates/pi-plugin/docs/native.md) before
   changing export macros, descriptors, manifests, compatibility checks, discovery, or library
   lifetime.
 - **Historical status:** treat `docs/incomplete-handoff.md` as a historical snapshot. Derive current
@@ -45,7 +45,8 @@ claiming Pi compatibility; do not implement from memory or from an older Pi shap
 
 ### Boundaries
 
-- Dependencies point inward. `pi-core` owns contracts, not product policy, filesystem discovery,
+- Dependencies point inward. `pi-core` owns foundational values; `pi-plugin` owns executable
+  contracts, not product policy, filesystem discovery,
   vendor routing, session storage, or terminal rendering.
 - Terminal ownership stays in `apps/pi-cli`. Reusable crates may expose semantic data and product
   events, but terminal setup, alternate-screen control, Ratatui widgets, input decoding, and visual
@@ -55,15 +56,16 @@ claiming Pi compatibility; do not implement from memory or from an older Pi shap
 
 ### Plugins and reload
 
-- Keep agent/tool/command plugins (`AgentPlugin`), provider/catalog plugins (`ProviderPlugin`), and
-  session lifecycle extensions (`SessionPlugin`) as distinct systems with narrow drivers.
+- Use one `pi-plugin::Plugin` instance for Agent/tool/command and Session lifecycle callbacks.
+  Keep provider/catalog plugins (`ProviderPlugin`) independent. The same `PluginDriver` directly
+  dispatches both callback families, with Session metadata supplied as context parameters.
 - Registration happens while building a generation. Registries are immutable after publication,
   duplicate identities fail construction, and hooks run in registration order.
 - Every product plugin must be reloadable through a factory-backed next generation. Prepare and
   validate the complete generation before swapping it; a failed reload keeps the previous
   generation intact. Never mutate live registries in place.
 - Native dynamic-library loading stays behind the existing fallible generation factory seams. A
-  dynamic library exports exactly one agent, provider, or session plugin; package metadata and
+  dynamic library exports exactly one unified Plugin or ProviderPlugin; package metadata and
   pinned-library lifetime remain loader concerns rather than a fourth lifecycle.
 - Provider plugins own provider implementations, routing overlays, and their model catalog entries.
   Keep the frozen `ModelRuntime` as the generation-local query surface; do not reintroduce a

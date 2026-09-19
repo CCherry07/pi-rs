@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pi_core::{AbortSignal, ProviderError};
+use pi_core::AbortSignal;
+use pi_plugin::ProviderError;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 

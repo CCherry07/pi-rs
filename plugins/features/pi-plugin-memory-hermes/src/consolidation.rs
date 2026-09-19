@@ -4,7 +4,8 @@ use crate::{
     execution::HermesRuns,
     store::{HermesMemoryStore, MemoryResult, MemoryTarget},
 };
-use pi_core::{AbortHandle, CommandContext, EphemeralSessionStatus};
+use pi_core::AbortHandle;
+use pi_plugin::{CommandContext, EphemeralSessionStatus};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

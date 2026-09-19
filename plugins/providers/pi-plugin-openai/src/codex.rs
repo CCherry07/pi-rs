@@ -8,9 +8,10 @@ use crate::responses::{input_items, stream as responses_stream, tools as respons
 use async_trait::async_trait;
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
-use pi_core::{
-    AbortSignal, Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderId,
-    ProviderRequest, ProviderStream,
+use pi_core::{AbortSignal, ProviderId};
+use pi_plugin::{
+    Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderRequest,
+    ProviderStream,
 };
 use pi_provider::{
     HttpBodyStream, HttpTransport, ReqwestTransport, TransportError, insert_header,

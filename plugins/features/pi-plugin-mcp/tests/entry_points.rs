@@ -1,6 +1,6 @@
 use std::fs;
 
-use pi_core::RegistriesBuilder;
+use pi_plugin::RegistriesBuilder;
 use pi_plugin_mcp::{McpLibrary, McpScope, McpToolSet};
 
 #[tokio::test]

@@ -4,31 +4,31 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use pi_agent::AgentOptions;
-use pi_core::{ModelId, PluginContext, ProviderId};
+use pi_core::{ModelId, ProviderId};
 use pi_js_plugin::JsPluginGeneration;
 use pi_memory_loader::{MemoryLoader, MemoryLoaderOptions, PreparedMemoryProvider};
+use pi_plugin::PluginContext;
 use pi_plugin_bash::{BashToolOptions, ConfiguredBashPlugin};
 use pi_plugin_edit::EditPlugin;
 use pi_plugin_find::FindPlugin;
 use pi_plugin_grep::GrepPlugin;
 use pi_plugin_hashline_edit::HashlineEditPlugin;
-use pi_plugin_loader::NativePlugins;
 use pi_plugin_ls::LsPlugin;
+use pi_plugin_manager::loader::NativePlugins;
 use pi_plugin_memory_hermes::{HermesMemoryProviderFactory, managed_skill_roots};
 use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
 use pi_plugin_prompts::{PromptTemplateLoaderOptions, PromptTemplatesPlugin};
 use pi_plugin_read::ConfiguredReadPlugin;
-use pi_plugin_schedule::{ScheduleOptions, SchedulePlugin, ScheduleSessionPlugin};
+use pi_plugin_schedule::{ScheduleOptions, SchedulePlugin};
 use pi_plugin_session_transfer::SessionTransferPlugin;
 use pi_plugin_skills::SkillsPlugin;
 use pi_plugin_subagents::{
     SubagentLoaderOptions, SubagentRuntime, SubagentSkillPromptProjector, SubagentsPlugin,
-    SubagentsSessionPlugin,
 };
 use pi_plugin_write::WritePlugin;
 use pi_resources::ResourceLoaderOptions;
 use pi_runtime::{CompletionRetryPolicy, PiRuntime, RuntimeError, SystemPrompt};
-use pi_session::{SessionGenerationOverlay, SessionPlugins};
+use pi_session::SessionGenerationOverlay;
 
 use crate::builtin_providers::BuiltinProviderSet;
 use crate::configuration::{
@@ -57,12 +57,12 @@ const BUILTIN_TOOL_NAMES: [&str; 17] = [
     "schedule",
 ];
 
-/// Borrowed, already-prepared components shared by runtime and session registration.
+/// Borrowed, already-prepared components for unified runtime registration.
 /// Configuration, runtime capabilities and activation guards are deliberately separate.
 pub(crate) struct GenerationComponents<'a> {
     pub(crate) native: &'a NativePlugins,
     pub(crate) javascript: Option<&'a JsPluginGeneration>,
-    pub(crate) mcp: Option<&'a Arc<dyn pi_core::AgentPlugin>>,
+    pub(crate) mcp: Option<&'a Arc<dyn pi_plugin::Plugin>>,
     pub(crate) memory: Option<&'a PreparedMemoryProvider>,
     pub(crate) subagents: &'a SubagentRuntime,
 }
@@ -140,28 +140,28 @@ impl GenerationComponents<'_> {
             move || ModelsPlugin::load_with_transport(model_options.clone(), Arc::clone(&transport))
         });
         if config.features.prompt_templates {
-            builder = builder.agent_plugin_factory({
+            builder = builder.plugin_factory({
                 let prompt_template_options = prompt_template_options.clone();
                 move || PromptTemplatesPlugin::load(prompt_template_options.clone())
             });
         }
         let builder = match self.memory {
             Some(memory) => {
-                let plugin = memory.agent_plugin();
-                builder.try_agent_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)))
+                let plugin = memory.plugin();
+                builder.try_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)))
             }
             None => builder,
         };
         let mut builder = builder;
         if config.features.subagents {
-            builder = builder.try_agent_plugin_factory({
+            builder = builder.try_plugin_factory({
                 let subagents = self.subagents.clone();
                 let subagent_options = subagent_options.clone();
                 move || SubagentsPlugin::load(subagents.clone(), subagent_options.clone())
             });
         }
         if config.features.skills {
-            builder = builder.agent_plugin_factory({
+            builder = builder.plugin_factory({
                 let skill_options = skill_options.clone();
                 let skill_activity_observer = skill_activity_observer.clone();
                 move || {
@@ -177,35 +177,34 @@ impl GenerationComponents<'_> {
             });
         }
         if config.features.session_transfer {
-            builder = builder.agent_plugin_factory(SessionTransferPlugin::default);
+            builder = builder.plugin_factory(SessionTransferPlugin::default);
         }
         if config.features.schedule {
-            builder = builder.agent_plugin_factory({
+            builder = builder.plugin_factory({
                 let options = ScheduleOptions::new(&config.cwd, &config.agent_dir, project_trusted);
                 move || SchedulePlugin::new(options.clone())
             });
         }
         let builder = builder
-            .agent_plugin_factory({
+            .plugin_factory({
                 let auto_resize_images = config.runtime_settings.images.auto_resize;
                 move || ConfiguredReadPlugin::new(auto_resize_images)
             })
-            .agent_plugin_factory(|| GrepPlugin)
-            .agent_plugin_factory(|| FindPlugin)
-            .agent_plugin_factory(|| LsPlugin)
-            .agent_plugin_factory(|| WritePlugin)
-            .agent_plugin_factory(|| EditPlugin)
-            .agent_plugin_factory(|| HashlineEditPlugin)
-            .agent_plugin_factory(move || ConfiguredBashPlugin::new(bash_options.clone()));
+            .plugin_factory(|| GrepPlugin)
+            .plugin_factory(|| FindPlugin)
+            .plugin_factory(|| LsPlugin)
+            .plugin_factory(|| WritePlugin)
+            .plugin_factory(|| EditPlugin)
+            .plugin_factory(|| HashlineEditPlugin)
+            .plugin_factory(move || ConfiguredBashPlugin::new(bash_options.clone()));
         let mut builder = self.native.apply_runtime(builder);
         if let Some(plugin) = self.mcp {
             let plugin = Arc::clone(plugin);
-            builder =
-                builder.try_agent_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)));
+            builder = builder.try_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)));
         }
         if let Some(js_generation) = self.javascript {
-            for plugin in js_generation.agent_plugins() {
-                builder = builder.try_agent_plugin_arc_factory({
+            for plugin in js_generation.plugins() {
+                builder = builder.try_plugin_arc_factory({
                     let plugin = Arc::clone(&plugin);
                     move || Ok::<_, String>(Arc::clone(&plugin))
                 });
@@ -285,35 +284,6 @@ impl GenerationComponents<'_> {
             initial_model_fallback_message: selection.fallback_message,
         })
     }
-
-    /// Session registrations mirror the runtime feature selection but keep their own lifecycle.
-    pub(crate) fn session_plugins(&self, config: &Config, project_trusted: bool) -> SessionPlugins {
-        let mut plugins = SessionPlugins::new();
-        if let Some(memory) = self.memory {
-            let plugin = memory.session_plugin();
-            plugins = plugins.try_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)));
-        }
-        if config.features.subagents {
-            plugins = plugins.plugin_factory({
-                let subagents = self.subagents.clone();
-                move || SubagentsSessionPlugin::new(subagents.clone())
-            });
-        }
-        if config.features.schedule {
-            let options = ScheduleOptions::new(&config.cwd, &config.agent_dir, project_trusted);
-            plugins = plugins.plugin_factory(move || ScheduleSessionPlugin::new(options.clone()));
-        }
-        let mut plugins = self.native.apply_session(plugins);
-        if let Some(generation) = self.javascript {
-            for plugin in generation.session_plugins() {
-                plugins = plugins.try_plugin_arc_factory({
-                    let plugin = Arc::clone(&plugin);
-                    move || Ok::<_, String>(Arc::clone(&plugin))
-                });
-            }
-        }
-        plugins
-    }
 }
 
 /// Product extension activation policy; managed children retain their tool ceiling.
@@ -322,7 +292,7 @@ pub(crate) fn additional_active_tools(runtime: &PiRuntime) -> Vec<String> {
         .active_tools()
         .into_iter()
         .filter(|name| {
-            runtime.execution_origin() == pi_core::SessionExecutionOrigin::User
+            runtime.execution_origin() == pi_plugin::SessionExecutionOrigin::User
                 && !BUILTIN_TOOL_NAMES.contains(&name.as_str())
         })
         .collect()
@@ -389,7 +359,7 @@ mod tests {
         .build_runtime(
             config,
             project_trusted,
-            Arc::new(pi_core::UnavailablePluginContext),
+            Arc::new(pi_plugin::UnavailablePluginContext),
             &SessionGenerationOverlay::default(),
             dynamic_providers,
             BuiltinProviderSet::prepare_for_test(config, codex_credentials, None)?,
@@ -422,7 +392,7 @@ mod tests {
         .build_runtime(
             config,
             false,
-            Arc::new(pi_core::UnavailablePluginContext),
+            Arc::new(pi_plugin::UnavailablePluginContext),
             &SessionGenerationOverlay::default(),
             None,
             BuiltinProviderSet::prepare_for_test(
@@ -457,7 +427,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-                let provider = Arc::downgrade(&memory.agent_plugin());
+                let provider = Arc::downgrade(&memory.plugin());
                 let components = GenerationComponents {
                     native: &NativePlugins::default(),
                     javascript: None,
@@ -469,7 +439,7 @@ mod tests {
                     .build_runtime(
                         &config,
                         false,
-                        Arc::new(pi_core::UnavailablePluginContext),
+                        Arc::new(pi_plugin::UnavailablePluginContext),
                         &SessionGenerationOverlay::default(),
                         None,
                         BuiltinProviderSet::prepare_for_test(
@@ -481,8 +451,8 @@ mod tests {
                     )
                     .unwrap()
                     .runtime;
-                let session_plugins = components.session_plugins(&config, false);
-                // Only the two registration paths retain the prepared provider after this block.
+                let session_plugins = runtime.plugin_driver();
+                // The runtime and this view retain the same driver and prepared provider.
                 (runtime, session_plugins, provider)
             };
             assert!(provider.upgrade().is_some());

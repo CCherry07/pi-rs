@@ -1,6 +1,7 @@
 //! Regressions for the Rust callback and runtime-generation handoff.
 
-use pi_core::{AbortHandle, ProviderError, RegistriesBuilder, ResponseMetadata};
+use pi_core::{AbortHandle, ResponseMetadata};
+use pi_plugin::{ProviderError, RegistriesBuilder};
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 
 use super::*;

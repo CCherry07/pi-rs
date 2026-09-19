@@ -2977,6 +2977,7 @@ dependencies = [
  "async-trait",
  "futures",
  "pi-core",
+ "pi-plugin",
  "pi-telemetry",
  "pi-test-support",
  "pi-utils",
@@ -2991,6 +2992,7 @@ version = "0.8.3"
 dependencies = [
  "pi-agent",
  "pi-core",
+ "pi-plugin",
  "pi-runtime",
  "pi-session",
  "pi-test-support",
@@ -3018,6 +3020,7 @@ dependencies = [
  "pi-js-package-manager",
  "pi-js-plugin",
  "pi-media",
+ "pi-plugin",
  "pi-plugin-anthropic",
  "pi-plugin-copilot",
  "pi-plugin-manager",
@@ -3026,7 +3029,6 @@ dependencies = [
  "pi-plugin-openrouter",
  "pi-plugin-session-transfer",
  "pi-plugin-skills",
- "pi-plugin-tools",
  "pi-plugin-xai",
  "pi-rpc",
  "pi-runtime",
@@ -3056,12 +3058,10 @@ dependencies = [
 name = "pi-core"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "futures",
- "pi-plugin-macros",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-util",
 ]
@@ -3074,6 +3074,7 @@ dependencies = [
  "axum",
  "pi-core",
  "pi-js-plugin",
+ "pi-plugin",
  "pi-sdk",
  "pi-session",
  "pi-utils",
@@ -3097,6 +3098,7 @@ dependencies = [
  "pi-core",
  "pi-eval",
  "pi-js-plugin",
+ "pi-plugin",
  "pi-sdk",
  "serde_json",
  "tempfile",
@@ -3132,7 +3134,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "pi-core",
- "pi-session",
+ "pi-plugin",
  "pi-utils",
  "serde",
  "serde_json",
@@ -3157,7 +3159,7 @@ version = "0.8.3"
 dependencies = [
  "async-trait",
  "pi-core",
- "pi-session",
+ "pi-plugin",
  "serde",
  "serde_json",
  "tempfile",
@@ -3178,8 +3180,25 @@ dependencies = [
  "pi-core",
  "pi-eval-cli",
  "pi-js-plugin",
+ "pi-plugin",
  "serde",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "pi-plugin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "futures-core",
+ "pi-core",
+ "pi-plugin-macros",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
  "tokio",
 ]
 
@@ -3192,6 +3211,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "pi-core",
+ "pi-plugin",
  "pi-provider",
  "pi-utils",
  "rand 0.8.7",
@@ -3209,6 +3229,7 @@ dependencies = [
  "async-trait",
  "futures",
  "pi-core",
+ "pi-plugin",
  "pi-plugin-openai",
  "pi-provider",
  "serde_json",
@@ -3221,6 +3242,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "pi-core",
+ "pi-plugin",
  "pi-shell",
  "pi-tool-support",
  "serde_json",
@@ -3241,6 +3263,7 @@ dependencies = [
  "hmac",
  "percent-encoding",
  "pi-core",
+ "pi-plugin",
  "pi-provider",
  "pi-utils",
  "serde",
@@ -3259,6 +3282,7 @@ dependencies = [
  "async-trait",
  "futures",
  "pi-core",
+ "pi-plugin",
  "pi-plugin-anthropic",
  "pi-plugin-openai",
  "pi-provider",
@@ -3274,6 +3298,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "pi-core",
+ "pi-plugin",
  "pi-tool-support",
  "serde",
  "serde_json",
@@ -3291,6 +3316,7 @@ dependencies = [
  "globset",
  "ignore",
  "pi-core",
+ "pi-plugin",
  "pi-tool-support",
  "serde_json",
  "tempfile",
@@ -3306,6 +3332,7 @@ dependencies = [
  "futures",
  "gcp_auth",
  "pi-core",
+ "pi-plugin",
  "pi-provider",
  "pi-utils",
  "serde_json",
@@ -3321,6 +3348,7 @@ dependencies = [
  "grep-searcher",
  "ignore",
  "pi-core",
+ "pi-plugin",
  "pi-tool-support",
  "serde_json",
  "tempfile",
@@ -3333,6 +3361,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "pi-core",
+ "pi-plugin",
  "pi-tool-support",
  "regex",
  "serde",
@@ -3342,28 +3371,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "pi-plugin-loader"
-version = "0.1.0"
-dependencies = [
- "libloading 0.8.9",
- "pi-core",
- "pi-plugin-sdk",
- "pi-runtime",
- "pi-session",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.20",
- "toml",
-]
-
-[[package]]
 name = "pi-plugin-ls"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "pi-core",
+ "pi-plugin",
  "pi-tool-support",
  "serde_json",
  "tempfile",
@@ -3385,6 +3398,10 @@ version = "0.1.0"
 dependencies = [
  "fs2",
  "futures",
+ "libloading 0.8.9",
+ "pi-core",
+ "pi-plugin",
+ "pi-runtime",
  "reqwest 0.12.28",
  "semver",
  "serde",
@@ -3406,6 +3423,7 @@ dependencies = [
  "fs2",
  "http",
  "pi-core",
+ "pi-plugin",
  "rmcp",
  "rustls",
  "serde",
@@ -3428,6 +3446,7 @@ dependencies = [
  "pi-agent",
  "pi-core",
  "pi-memory-loader",
+ "pi-plugin",
  "pi-plugin-read",
  "pi-plugin-skills",
  "pi-plugin-write",
@@ -3458,6 +3477,7 @@ dependencies = [
  "async-trait",
  "futures",
  "pi-core",
+ "pi-plugin",
  "pi-provider",
  "pi-utils",
  "serde_json",
@@ -3473,6 +3493,7 @@ dependencies = [
  "garde",
  "pi-agent",
  "pi-core",
+ "pi-plugin",
  "pi-plugin-anthropic",
  "pi-plugin-azure-openai",
  "pi-plugin-bedrock",
@@ -3500,6 +3521,7 @@ dependencies = [
  "futures",
  "pi-agent",
  "pi-core",
+ "pi-plugin",
  "pi-provider",
  "pi-runtime",
  "pi-utils",
@@ -3518,6 +3540,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "pi-core",
+ "pi-plugin",
  "pi-plugin-openai",
  "pi-provider",
  "rand 0.8.7",
@@ -3534,6 +3557,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "pi-core",
+ "pi-plugin",
  "pi-runtime",
  "pi-test-support",
  "pi-utils",
@@ -3551,6 +3575,7 @@ dependencies = [
  "image",
  "pi-core",
  "pi-media",
+ "pi-plugin",
  "pi-tool-support",
  "serde_json",
  "tempfile",
@@ -3568,6 +3593,7 @@ dependencies = [
  "fs2",
  "pi-agent",
  "pi-core",
+ "pi-plugin",
  "pi-runtime",
  "pi-session",
  "pi-test-support",
@@ -3582,26 +3608,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "pi-plugin-sdk"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "pi-core",
- "pi-plugin-macros",
- "pi-session",
- "schemars 1.2.2",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "pi-plugin-session-transfer"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "pi-agent",
  "pi-core",
+ "pi-plugin",
  "pi-runtime",
  "pi-session",
  "pi-test-support",
@@ -3618,6 +3631,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "pi-core",
+ "pi-plugin",
  "pi-runtime",
  "pi-test-support",
  "pi-utils",
@@ -3637,11 +3651,11 @@ dependencies = [
  "futures",
  "pi-agent",
  "pi-core",
+ "pi-plugin",
  "pi-plugin-find",
  "pi-plugin-grep",
  "pi-plugin-ls",
  "pi-plugin-read",
- "pi-plugin-sdk",
  "pi-plugin-skills",
  "pi-runtime",
  "pi-session",
@@ -3656,29 +3670,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "pi-plugin-tools"
-version = "0.1.0"
-dependencies = [
- "pi-plugin-loader",
- "pi-plugin-manager",
- "pi-plugin-sdk",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "toml",
- "url",
-]
-
-[[package]]
 name = "pi-plugin-write"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "pi-core",
+ "pi-plugin",
  "pi-tool-support",
  "serde_json",
  "tempfile",
@@ -3693,6 +3690,7 @@ dependencies = [
  "async-trait",
  "futures",
  "pi-core",
+ "pi-plugin",
  "pi-plugin-openai",
  "pi-provider",
  "pi-utils",
@@ -3719,6 +3717,7 @@ dependencies = [
  "futures",
  "httpdate",
  "pi-core",
+ "pi-plugin",
  "reqwest 0.12.28",
  "serde_json",
  "thiserror 2.0.20",
@@ -3757,6 +3756,7 @@ dependencies = [
  "futures",
  "pi-agent",
  "pi-core",
+ "pi-plugin",
  "pi-plugin-read",
  "pi-plugin-write",
  "pi-prompt",
@@ -3782,6 +3782,7 @@ dependencies = [
  "pi-js-package-manager",
  "pi-js-plugin",
  "pi-memory-loader",
+ "pi-plugin",
  "pi-plugin-anthropic",
  "pi-plugin-azure-openai",
  "pi-plugin-bash",
@@ -3792,7 +3793,6 @@ dependencies = [
  "pi-plugin-google",
  "pi-plugin-grep",
  "pi-plugin-hashline-edit",
- "pi-plugin-loader",
  "pi-plugin-ls",
  "pi-plugin-manager",
  "pi-plugin-mcp",
@@ -3831,6 +3831,7 @@ dependencies = [
  "globset",
  "pi-agent",
  "pi-core",
+ "pi-plugin",
  "pi-plugin-macros",
  "pi-runtime",
  "pi-shell",
@@ -3883,6 +3884,7 @@ dependencies = [
  "async-trait",
  "futures",
  "pi-core",
+ "pi-plugin",
  "pi-utils",
  "serde_json",
  "tokio",
@@ -3893,6 +3895,7 @@ name = "pi-tool-support"
 version = "0.1.0"
 dependencies = [
  "pi-core",
+ "pi-plugin",
  "serde_json",
  "tempfile",
  "unicode-normalization",

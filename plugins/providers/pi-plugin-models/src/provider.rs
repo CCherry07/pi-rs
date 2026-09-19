@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use pi_core::{
-    AbortSignal, ModelCost, ModelId, Provider, ProviderAvailability, ProviderCallContext,
-    ProviderError, ProviderId, ProviderRequest, ProviderStream, StreamEvent,
+use pi_core::{AbortSignal, ModelCost, ModelId, ProviderId, StreamEvent};
+use pi_plugin::{
+    Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderRequest,
+    ProviderStream,
 };
 use pi_plugin_anthropic::{
     ANTHROPIC_MESSAGES_API, AnthropicCompatibleConfig, AnthropicCompatibleProvider,

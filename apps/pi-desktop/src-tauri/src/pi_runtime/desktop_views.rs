@@ -378,7 +378,7 @@ mod tests {
         let parent_id = parent.log().header().id;
         let (_, handle) = store.handle(&parent_id).unwrap();
         let isolated = handle
-            .launch_isolated_session(pi_core::IsolatedSessionRequest::new(
+            .launch_isolated_session(pi_plugin::IsolatedSessionRequest::new(
                 pi_core::CustomMessageContent::Text("A generic plugin task".into()),
             ))
             .await

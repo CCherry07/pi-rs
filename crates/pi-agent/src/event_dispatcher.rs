@@ -3,10 +3,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
-use pi_core::{
-    AbortSignal, AgentEndEvent, AgentEvent, AgentStartEvent, Message, MessageEndEvent,
-    MessageStartEvent, MessageUpdateEvent, PluginDriver, RunId, StopReason, ToolExecutionEndEvent,
-    ToolExecutionStartEvent, ToolExecutionUpdateEvent, TurnEndEvent, TurnStartEvent,
+use pi_core::{AbortSignal, AgentEvent, Message, RunId, StopReason};
+use pi_plugin::{
+    AgentEndEvent, AgentStartEvent, MessageEndEvent, MessageStartEvent, MessageUpdateEvent,
+    PluginDriver, ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent,
+    TurnEndEvent, TurnStartEvent,
 };
 use pi_utils::time::unix_timestamp_ms as now_ms;
 

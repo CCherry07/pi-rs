@@ -5,10 +5,10 @@ use std::task::Poll;
 use std::time::Duration;
 
 use pi_agent::AgentOptions;
-use pi_core::{
-    AgentPlugin, AgentPluginContext, AgentSettledEvent, BeforeAgentStartEvent,
-    BeforeAgentStartPatch, CustomMessageContent, IsolatedSessionRequest, ModelId, PluginError,
-    PluginId, ProviderId,
+use pi_core::{CustomMessageContent, ModelId, PluginId, ProviderId};
+use pi_plugin::{
+    AgentPluginContext, AgentSettledEvent, BeforeAgentStartEvent, BeforeAgentStartPatch,
+    IsolatedSessionRequest, Plugin, PluginError,
 };
 use pi_runtime::PiRuntime;
 use pi_session::{
@@ -44,8 +44,8 @@ struct PrepareGate {
     release: Arc<Notify>,
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for LifecycleProbe {
+#[pi_plugin::plugin]
+impl Plugin for LifecycleProbe {
     fn id(&self) -> PluginId {
         PluginId::new("isolated-lifecycle-probe")
     }
@@ -103,7 +103,7 @@ fn manager_with_prepare_gate(
                 .provider_plugin(ScriptedProviderPlugin::scripted([
                     ScriptedTurn::WaitForAbort,
                 ]))
-                .agent_plugin(probe)
+                .plugin(probe)
                 .agent_options(AgentOptions {
                     provider_id: ProviderId::new("scripted"),
                     model_id: ModelId::new("test"),

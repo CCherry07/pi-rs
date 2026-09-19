@@ -18,10 +18,12 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use pi_core::{
-    AbortSignal, ContentBlock, Message, PluginId, Provider, ProviderAvailability,
-    ProviderCallContext, ProviderError, ProviderId, ProviderPlugin, ProviderRegisterContext,
-    ProviderRequest, ProviderStream, ResponseMetadata, ResponseMetadataPatch, StopReason,
-    StreamEvent, ThinkingLevel, ToolCallId, Usage,
+    AbortSignal, ContentBlock, Message, PluginId, ProviderId, ResponseMetadata,
+    ResponseMetadataPatch, StopReason, StreamEvent, ThinkingLevel, ToolCallId, Usage,
+};
+use pi_plugin::{
+    Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderPlugin,
+    ProviderRegisterContext, ProviderRequest, ProviderStream,
 };
 use pi_provider::{
     HttpBodyStream, HttpTransport, ReqwestTransport, SseDecoder, TransportError, insert_header,
@@ -75,13 +77,13 @@ impl GooglePlugin {
     }
 }
 
-#[pi_core::provider_plugin]
+#[pi_plugin::provider_plugin]
 impl ProviderPlugin for GooglePlugin {
     fn id(&self) -> PluginId {
         PluginId::new("google-provider")
     }
 
-    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_provider(self.provider.clone())?;
         for model in google_models() {
             context.register_model(model)?;

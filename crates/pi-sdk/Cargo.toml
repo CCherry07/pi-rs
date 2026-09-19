@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+pi-plugin.workspace = true
 async-trait.workspace = true
 fs2 = "0.4.3"
 pi-agent.workspace = true
@@ -25,7 +26,6 @@ pi-plugin-find.workspace = true
 pi-plugin-google.workspace = true
 pi-plugin-grep.workspace = true
 pi-plugin-hashline-edit.workspace = true
-pi-plugin-loader.workspace = true
 pi-plugin-ls.workspace = true
 pi-plugin-manager.workspace = true
 pi-plugin-memory-hermes.workspace = true

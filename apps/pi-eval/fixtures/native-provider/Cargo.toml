@@ -12,4 +12,4 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 futures = "0.3.31"
-pi-plugin-sdk = { path = "../../../../crates/pi-plugin-sdk", features = ["provider"] }
+pi-plugin = { path = "../../../../crates/pi-plugin", features = ["native"] }

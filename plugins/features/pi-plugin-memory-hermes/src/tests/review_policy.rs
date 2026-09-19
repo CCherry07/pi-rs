@@ -4,7 +4,7 @@
 
 use super::*;
 
-fn final_user_prompt(request: &pi_core::ProviderRequest) -> String {
+fn final_user_prompt(request: &pi_plugin::ProviderRequest) -> String {
     let Some(Message::User(review)) = request.messages.last() else {
         panic!("the private review must append a user request");
     };

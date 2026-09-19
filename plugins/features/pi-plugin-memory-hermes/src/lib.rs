@@ -28,19 +28,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use pi_core::{
-    AbortHandle, AgentEndEvent, AgentPlugin, AgentPluginContext, AgentSettledEvent,
-    AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch, MessageEndEvent,
-    MessageEndPatch, NoticeLevel, PluginError, PluginId, RegisterContext, RunId, ToolCallBlock,
-    ToolCallEvent, ToolCallPatch, TurnEndEvent,
-};
+use pi_core::{AbortHandle, PluginId, RunId};
 use pi_memory_loader::{
     MemoryProviderConfig, MemoryProviderFactory, MemoryProviderInitializeContext,
     MemoryProviderInitializeError, MemoryProviderPlugin,
 };
+use pi_plugin::{
+    AgentEndEvent, AgentPluginContext, AgentSettledEvent, AgentStartEvent, BeforeAgentStartEvent,
+    BeforeAgentStartPatch, MessageEndEvent, MessageEndPatch, NoticeLevel, Plugin, PluginError,
+    RegisterContext, ToolCallBlock, ToolCallEvent, ToolCallPatch, TurnEndEvent,
+};
 use pi_session::{
-    SessionBeforeCompactEvent, SessionPlugin, SessionPluginContext, SessionPluginError,
-    SessionShutdownEvent, SessionShutdownReason, SessionStartEvent,
+    SessionBeforeCompactEvent, SessionPluginContext, SessionShutdownEvent, SessionShutdownReason,
+    SessionStartEvent,
 };
 
 use crate::config::HermesMemoryConfig;
@@ -165,13 +165,13 @@ impl MemoryProviderPlugin for HermesMemoryPlugin {
     }
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for HermesMemoryPlugin {
+#[pi_plugin::plugin]
+impl Plugin for HermesMemoryPlugin {
     fn id(&self) -> PluginId {
         PluginId::new(HERMES_MEMORY_PLUGIN_ID)
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         curator::register(
             context,
             self.store.clone(),
@@ -194,7 +194,7 @@ impl AgentPlugin for HermesMemoryPlugin {
         _: AgentStartEvent,
     ) -> Result<(), PluginError> {
         let activity = if context.session.execution_origin().ok()
-            == Some(pi_core::SessionExecutionOrigin::User)
+            == Some(pi_plugin::SessionExecutionOrigin::User)
         {
             self.store
                 .curator_targets(context.cwd())
@@ -271,7 +271,7 @@ impl AgentPlugin for HermesMemoryPlugin {
             .map_err(|error| hook_error(self, "before_agent_start", error))?;
         let mut addition = self.store.legacy_global_context();
         if !addition.is_empty()
-            && context.session.execution_origin()? == pi_core::SessionExecutionOrigin::Subagent
+            && context.session.execution_origin()? == pi_plugin::SessionExecutionOrigin::Subagent
         {
             addition.push_str(
                 "\n\nThis inherited memory context is read-only in this subagent. Durable memory changes belong to the parent session.",
@@ -293,7 +293,7 @@ impl AgentPlugin for HermesMemoryPlugin {
         event: ToolCallEvent,
     ) -> Result<ToolCallPatch, PluginError> {
         if event.tool_call.name == "memory"
-            && context.session.execution_origin()? == pi_core::SessionExecutionOrigin::Subagent
+            && context.session.execution_origin()? == pi_plugin::SessionExecutionOrigin::Subagent
         {
             return Ok(ToolCallPatch {
                 arguments: None,
@@ -309,8 +309,8 @@ impl AgentPlugin for HermesMemoryPlugin {
     async fn tool_result(
         &self,
         context: AgentPluginContext,
-        event: pi_core::ToolResultEvent,
-    ) -> Result<pi_core::ToolResultPatch, PluginError> {
+        event: pi_plugin::ToolResultEvent,
+    ) -> Result<pi_plugin::ToolResultPatch, PluginError> {
         if !event.result.is_error
             && matches!(event.tool_call.name.as_str(), "read" | "read_file")
             && let Some(path) = event
@@ -323,7 +323,7 @@ impl AgentPlugin for HermesMemoryPlugin {
                 curator::observe_read(&target.root, &path);
             }
         }
-        Ok(pi_core::ToolResultPatch::default())
+        Ok(pi_plugin::ToolResultPatch::default())
     }
 
     async fn message_end(
@@ -333,7 +333,7 @@ impl AgentPlugin for HermesMemoryPlugin {
     ) -> Result<MessageEndPatch, PluginError> {
         let session_id = context.session.id()?;
         if matches!(event.message, pi_core::Message::User(_))
-            && context.session.execution_origin()? == pi_core::SessionExecutionOrigin::User
+            && context.session.execution_origin()? == pi_plugin::SessionExecutionOrigin::User
         {
             let mut activities = self
                 .activity
@@ -365,7 +365,7 @@ impl AgentPlugin for HermesMemoryPlugin {
         context: AgentPluginContext,
         event: TurnEndEvent,
     ) -> Result<(), PluginError> {
-        if context.session.execution_origin()? != pi_core::SessionExecutionOrigin::User {
+        if context.session.execution_origin()? != pi_plugin::SessionExecutionOrigin::User {
             return Ok(());
         }
         let mut activities = self
@@ -402,7 +402,7 @@ impl AgentPlugin for HermesMemoryPlugin {
         context: AgentPluginContext,
         _: AgentSettledEvent,
     ) -> Result<(), PluginError> {
-        if context.session.execution_origin()? != pi_core::SessionExecutionOrigin::User {
+        if context.session.execution_origin()? != pi_plugin::SessionExecutionOrigin::User {
             return Ok(());
         }
         let active = context.session.active_tools()?;
@@ -454,6 +454,166 @@ impl AgentPlugin for HermesMemoryPlugin {
                 }
             }
         });
+        Ok(())
+    }
+
+    async fn session_start(
+        &self,
+        context: &SessionPluginContext,
+        _event: &SessionStartEvent,
+    ) -> Result<(), PluginError> {
+        if !self.config_warning_emitted.swap(true, Ordering::Relaxed)
+            && let Some(warning) = self.config.consolidation_timeout_warning()
+        {
+            let _ = context.ui.notify(NoticeLevel::Warning, warning);
+        }
+        self.store
+            .start_session(&context.identity().cwd)
+            .map_err(session_error)?;
+        if self.config.curator.enabled
+            && context.session.execution_origin()? == pi_plugin::SessionExecutionOrigin::User
+        {
+            let mut worker = self
+                .curator_worker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if worker.is_none() {
+                *worker = Some(curator::start_worker(
+                    self.store.curator_targets(&context.identity().cwd),
+                    self.config.clone(),
+                    self.runs.clone(),
+                    context.clone(),
+                ));
+            }
+        }
+        let user_turn_count = context
+            .session
+            .snapshot()
+            .map(|snapshot| {
+                snapshot
+                    .branch()
+                    .iter()
+                    .filter(|entry| {
+                        entry
+                            .raw()
+                            .get("message")
+                            .and_then(|m| m.get("role"))
+                            .and_then(serde_json::Value::as_str)
+                            == Some("user")
+                    })
+                    .count() as u64
+            })
+            .unwrap_or(0);
+        let turns_since_review = if self.config.nudge_interval > 0 {
+            user_turn_count % self.config.nudge_interval
+        } else {
+            0
+        };
+        self.activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                context.identity().id.clone(),
+                SessionActivity {
+                    user_turn_count,
+                    turns_since_review,
+                    ..SessionActivity::default()
+                },
+            );
+        if context.session.execution_origin()? == pi_plugin::SessionExecutionOrigin::User {
+            self.schedule_backfill(context);
+        }
+        Ok(())
+    }
+
+    async fn session_before_compact(
+        &self,
+        context: &SessionPluginContext,
+        event: &SessionBeforeCompactEvent,
+    ) -> Result<Option<pi_session::SessionBeforeCompactResult>, PluginError> {
+        if let Some(worker) = self
+            .curator_worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            worker.cancel_run();
+        }
+        tokio::join!(
+            self.cancel_review(&context.identity().id),
+            stop_background_task(&self.live_index, Duration::from_secs(5)),
+            stop_background_task(&self.backfill, Duration::from_secs(5)),
+        );
+        if self.config.flush_on_compact
+            && context.session.execution_origin().map_err(session_error)?
+                == pi_plugin::SessionExecutionOrigin::User
+        {
+            let user_turns = self.user_turns(&context.identity().id);
+            if let Ok(snapshot) = context.session.snapshot() {
+                flush::flush_if_due(
+                    context,
+                    &snapshot,
+                    Arc::clone(&self.runs),
+                    &self.config,
+                    user_turns,
+                    Some(event.signal.clone()),
+                    Duration::from_secs(30),
+                )
+                .await;
+            }
+        }
+        Ok(None)
+    }
+
+    async fn session_shutdown(
+        &self,
+        context: &SessionPluginContext,
+        event: &SessionShutdownEvent,
+    ) -> Result<(), PluginError> {
+        let worker = self
+            .curator_worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(worker) = worker {
+            worker.shutdown().await;
+        }
+        tokio::join!(
+            self.cancel_review(&context.identity().id),
+            stop_background_task(&self.live_index, Duration::from_secs(5)),
+            stop_background_task(&self.backfill, Duration::from_secs(5)),
+        );
+        if self.config.flush_on_shutdown
+            && event.reason != SessionShutdownReason::Reload
+            && context.session.execution_origin().map_err(session_error)?
+                == pi_plugin::SessionExecutionOrigin::User
+        {
+            let user_turns = self.user_turns(&context.identity().id);
+            if let Ok(snapshot) = context.session.snapshot() {
+                flush::flush_if_due(
+                    context,
+                    &snapshot,
+                    Arc::clone(&self.runs),
+                    &self.config,
+                    user_turns,
+                    None,
+                    Duration::from_secs(10),
+                )
+                .await;
+            }
+        }
+        if let Ok(snapshot) = context.session.snapshot() {
+            let _ = self.store.index_snapshot(&snapshot);
+        }
+        let _ = self.store.checkpoint();
+        self.activity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&context.identity().id);
+        self.foreground_runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, run| run.session_id.as_deref() != Some(context.identity().id.as_str()));
         Ok(())
     }
 }
@@ -595,181 +755,14 @@ impl HermesMemoryPlugin {
 }
 
 fn hook_error(
-    plugin: &impl AgentPlugin,
+    plugin: &impl Plugin,
     hook: &'static str,
     error: impl std::fmt::Display,
 ) -> PluginError {
     PluginError::Hook {
-        plugin_id: AgentPlugin::id(plugin),
+        plugin_id: Plugin::id(plugin),
         hook,
         message: error.to_string(),
-    }
-}
-
-#[async_trait]
-impl SessionPlugin for HermesMemoryPlugin {
-    fn id(&self) -> PluginId {
-        PluginId::new(HERMES_MEMORY_PLUGIN_ID)
-    }
-
-    async fn session_start(
-        &self,
-        context: &SessionPluginContext,
-        _event: &SessionStartEvent,
-    ) -> Result<(), SessionPluginError> {
-        if !self.config_warning_emitted.swap(true, Ordering::Relaxed)
-            && let Some(warning) = self.config.consolidation_timeout_warning()
-        {
-            let _ = context.ui.notify(NoticeLevel::Warning, warning);
-        }
-        self.store
-            .start_session(&context.identity().cwd)
-            .map_err(session_error)?;
-        if self.config.curator.enabled
-            && context.session.execution_origin()? == pi_core::SessionExecutionOrigin::User
-        {
-            let mut worker = self
-                .curator_worker
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if worker.is_none() {
-                *worker = Some(curator::start_worker(
-                    self.store.curator_targets(&context.identity().cwd),
-                    self.config.clone(),
-                    self.runs.clone(),
-                    context.clone(),
-                ));
-            }
-        }
-        let user_turn_count = context
-            .session
-            .snapshot()
-            .map(|snapshot| {
-                snapshot
-                    .branch()
-                    .iter()
-                    .filter(|entry| {
-                        entry
-                            .raw()
-                            .get("message")
-                            .and_then(|m| m.get("role"))
-                            .and_then(serde_json::Value::as_str)
-                            == Some("user")
-                    })
-                    .count() as u64
-            })
-            .unwrap_or(0);
-        let turns_since_review = if self.config.nudge_interval > 0 {
-            user_turn_count % self.config.nudge_interval
-        } else {
-            0
-        };
-        self.activity
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                context.identity().id.clone(),
-                SessionActivity {
-                    user_turn_count,
-                    turns_since_review,
-                    ..SessionActivity::default()
-                },
-            );
-        if context.session.execution_origin()? == pi_core::SessionExecutionOrigin::User {
-            self.schedule_backfill(context);
-        }
-        Ok(())
-    }
-
-    async fn session_before_compact(
-        &self,
-        context: &SessionPluginContext,
-        event: &SessionBeforeCompactEvent,
-    ) -> Result<Option<pi_session::SessionBeforeCompactResult>, SessionPluginError> {
-        if let Some(worker) = self
-            .curator_worker
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-        {
-            worker.cancel_run();
-        }
-        tokio::join!(
-            self.cancel_review(&context.identity().id),
-            stop_background_task(&self.live_index, Duration::from_secs(5)),
-            stop_background_task(&self.backfill, Duration::from_secs(5)),
-        );
-        if self.config.flush_on_compact
-            && context.session.execution_origin().map_err(session_error)?
-                == pi_core::SessionExecutionOrigin::User
-        {
-            let user_turns = self.user_turns(&context.identity().id);
-            if let Ok(snapshot) = context.session.snapshot() {
-                flush::flush_if_due(
-                    context,
-                    &snapshot,
-                    Arc::clone(&self.runs),
-                    &self.config,
-                    user_turns,
-                    Some(event.signal.clone()),
-                    Duration::from_secs(30),
-                )
-                .await;
-            }
-        }
-        Ok(None)
-    }
-
-    async fn session_shutdown(
-        &self,
-        context: &SessionPluginContext,
-        event: &SessionShutdownEvent,
-    ) -> Result<(), SessionPluginError> {
-        let worker = self
-            .curator_worker
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(worker) = worker {
-            worker.shutdown().await;
-        }
-        tokio::join!(
-            self.cancel_review(&context.identity().id),
-            stop_background_task(&self.live_index, Duration::from_secs(5)),
-            stop_background_task(&self.backfill, Duration::from_secs(5)),
-        );
-        if self.config.flush_on_shutdown
-            && event.reason != SessionShutdownReason::Reload
-            && context.session.execution_origin().map_err(session_error)?
-                == pi_core::SessionExecutionOrigin::User
-        {
-            let user_turns = self.user_turns(&context.identity().id);
-            if let Ok(snapshot) = context.session.snapshot() {
-                flush::flush_if_due(
-                    context,
-                    &snapshot,
-                    Arc::clone(&self.runs),
-                    &self.config,
-                    user_turns,
-                    None,
-                    Duration::from_secs(10),
-                )
-                .await;
-            }
-        }
-        if let Ok(snapshot) = context.session.snapshot() {
-            let _ = self.store.index_snapshot(&snapshot);
-        }
-        let _ = self.store.checkpoint();
-        self.activity
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&context.identity().id);
-        self.foreground_runs
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|_, run| run.session_id.as_deref() != Some(context.identity().id.as_str()));
-        Ok(())
     }
 }
 
@@ -797,8 +790,8 @@ async fn stop_background_task(slot: &Mutex<Option<BackgroundTask>>, timeout: Dur
     }
 }
 
-fn session_error(error: impl std::fmt::Display) -> SessionPluginError {
-    SessionPluginError::Failure(error.to_string())
+fn session_error(error: impl std::fmt::Display) -> PluginError {
+    PluginError::Failure(error.to_string())
 }
 
 #[cfg(test)]

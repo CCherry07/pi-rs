@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_core::{
-    AgentPlugin, Command, CommandContext, CommandError, CommandOutcome, CommandSpec, PluginId,
-    RegisterContext,
+use pi_core::PluginId;
+use pi_plugin::{
+    Command, CommandContext, CommandError, CommandOutcome, CommandSpec, Plugin, RegisterContext,
 };
 use pi_utils::{frontmatter::parse_frontmatter, path::absolute_from_current_dir as absolute};
 use serde::{Deserialize, Serialize};
@@ -255,13 +255,13 @@ impl Command for PromptTemplateCommand {
     }
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for PromptTemplatesPlugin {
+#[pi_plugin::plugin]
+impl Plugin for PromptTemplatesPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("prompt-templates")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         for template in &self.templates {
             context.register_command(Arc::new(PromptTemplateCommand {
                 template: template.clone(),
@@ -763,7 +763,7 @@ mod tests {
         };
         let runtime = pi_runtime::PiRuntime::builder()
             .provider_plugin(ScriptedProviderPlugin::scripted([]))
-            .agent_plugin(PromptTemplatesPlugin::from_templates([template]))
+            .plugin(PromptTemplatesPlugin::from_templates([template]))
             .build()
             .unwrap();
 

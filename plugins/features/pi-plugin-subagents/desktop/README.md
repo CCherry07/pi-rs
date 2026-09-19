@@ -21,7 +21,7 @@ resolves source-checkout author types from the host; the generated JavaScript us
 runtime and SDK without importing host application internals.
 
 The Rust plugin publishes `pi.ui.widget` custom entries through
-`pi_plugin_sdk::desktop::WidgetPublisher`, using key `subagents.tasks`. Its version 1
+`pi_plugin::desktop::WidgetPublisher`, using key `subagents.tasks`. Its version 1
 value contains `runtimeId`, `ownerSessionId`, a map of minimal task snapshots keyed by exact
 `agentId`, and `liveAgentIds`. Each task contains its profile, an original assignment preview, actual runtime
 state, opaque session reference and token total. Full child transcripts stay in their sessions.

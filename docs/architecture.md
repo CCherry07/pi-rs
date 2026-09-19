@@ -22,8 +22,9 @@ product seam.
 ## Workspace
 
 ```text
-crates/pi-core                  contracts, plugin-facing product capabilities, registries, plugin drivers,
-                                ModelRuntime
+crates/pi-core                  messages, models, tool data and shared Pi v4 wire values
+crates/pi-plugin                Plugin/ProviderPlugin contracts, prepare factories, capabilities,
+                                registries, drivers and ModelRuntime
 crates/pi-agent                 Agent façade, AgentLoop, StreamAssembler, ToolScheduler
 crates/pi-runtime               plugin registration and Agent construction
 crates/pi-provider              vendor-neutral HTTP transport and SSE framing
@@ -31,7 +32,7 @@ crates/pi-media                 multimodal byte processing; image detection, con
 crates/pi-prompt                pure Pi-style system prompt assembly
 crates/pi-resources             generic system/append prompts and project context discovery
 crates/pi-utils                 policy-free shared mechanics, namespaced by concept
-crates/pi-session               Pi v4 storage/runtime plus plugin contracts under plugin/ and types/
+crates/pi-session               Pi v4 storage/runtime; re-exports shared lifecycle and wire values
 crates/pi-settings              current-format settings documents, snapshots, and safe writes
 crates/pi-sdk                   headless product composition shared by CLI, desktop, and embedded adapters
 crates/pi-telemetry             typed Pi AI/harness span schemas and sink adapters
@@ -42,14 +43,11 @@ crates/pi-rpc                   Pi JSON projector and stdin/stdout RPC adapter
 crates/pi-acp                   official stable-v1 ACP adapter and ACP session policy
 apps/pi-desktop                experimental Tauri/React shell with a Pi-to-thread event Adapter
 apps/pi-cli/src/markdown       TUI-owned Markdown parsing, streaming repair, highlighting, and Ratatui rendering
-crates/pi-plugin-sdk            native plugin author interface and descriptor types
 crates/pi-plugin-macros         static plugin preparation, agent hook-interest derivation, and native exports
-crates/pi-plugin-loader         manifest discovery, compatibility checks, and factory adapters
 crates/pi-memory-loader         memory.json loading and provider construction Interface
-crates/pi-plugin-manager        package intent/lock, Registry resolution, CAS, and activation
-crates/pi-plugin-tools          native author scaffolding, Cargo builds, release verification and publication
+crates/pi-plugin-manager        native loading, installation/reconciliation, and optional authoring tools
 crates/pi-js-package-manager     Pi-compatible JS discovery and npm/git orchestration
-crates/pi-js-plugin             JS wire DTOs plus three Rust lifecycle adapters
+crates/pi-js-plugin             JS wire DTOs plus unified Plugin and independent ProviderPlugin adapters
 bindings/pi-napi                NAPI-RS boundary between Node callbacks and the Rust product
 packages/pi                     Node launcher, jiti extension loader, and callback host
 crates/pi-test-support          deterministic scripted providers and tools for tests
@@ -82,46 +80,47 @@ apps/pi-cli/src/tui.rs           terminal project-trust prompt Adapter
 Dependencies point inward:
 
 ```text
-pi-agent             -> pi-core
-pi-provider          -> pi-core
+pi-plugin            -> pi-core + pi-plugin-macros
+pi-agent             -> pi-core + pi-plugin
+pi-provider          -> pi-core + pi-plugin
 pi-media             -> pi-core + image codecs
 pi-prompt            -> standard library only
 pi-resources         -> pi-prompt
 pi-utils             -> standard library; serde + YAML decoding behind its `frontmatter` feature
-pi-session           -> pi-core + pi-runtime
+pi-session           -> pi-core + pi-plugin + pi-runtime
 pi-settings          -> serde JSON + filesystem persistence only
 pi-sdk               -> pi-session + pi-settings + pi-runtime + product providers, tools, resources,
                         memory, skills, subagents, and plugin loaders
 pi-rpc               -> pi-agent + pi-core + pi-session
-pi-plugin-mcp        -> pi-core + rmcp + filesystem configuration persistence
+pi-plugin-mcp        -> pi-core + pi-plugin + rmcp + filesystem configuration persistence
 pi-acp               -> pi-agent + pi-core + pi-plugin-mcp + pi-session + official ACP SDK
-pi-plugin-openai     -> pi-core + pi-provider
-pi-plugin-anthropic  -> pi-core + pi-provider
-pi-plugin-xai        -> pi-core + pi-provider + pi-plugin-openai::responses
-pi-plugin-google     -> pi-core + pi-provider
-pi-tool-support      -> pi-core
-production tools     -> pi-core + pi-tool-support
+pi-plugin-openai     -> pi-core + pi-plugin + pi-provider
+pi-plugin-anthropic  -> pi-core + pi-plugin + pi-provider
+pi-plugin-xai        -> pi-core + pi-plugin + pi-provider + pi-plugin-openai::responses
+pi-plugin-google     -> pi-core + pi-plugin + pi-provider
+pi-tool-support      -> pi-core + pi-plugin
+production tools     -> pi-core + pi-plugin + pi-tool-support
 pi-plugin-read       -> pi-media (shared image normalization)
 plugins/features/pi-plugin-skills
-                     -> pi-core (skill discovery, prompt contribution, explicit invocation)
-pi-memory-loader     -> pi-core + pi-session
+                     -> pi-core + pi-plugin (skill discovery, prompt contribution, explicit invocation)
+pi-memory-loader     -> pi-core + pi-plugin
                         (provider selection, opaque configuration, and construction)
 plugins/features/pi-plugin-memory-hermes
                      -> pi-memory-loader + filesystem locking
                         (default bounded, file-backed curated memory provider)
 plugins/providers/pi-plugin-models
-                     -> pi-core + pi-plugin-openai (credential-blind catalog and routing)
-other plugins/*      -> pi-core
-pi-runtime           -> pi-core + pi-agent + pi-prompt
+                     -> pi-core + pi-plugin + pi-plugin-openai (credential-blind catalog and routing)
+other plugins/*      -> pi-core + pi-plugin
+pi-runtime           -> pi-core + pi-plugin + pi-agent + pi-prompt
 apps/pi-cli          -> pi-sdk + pi-rpc + pi-acp + terminal and Markdown adapters
                         + pi-media (attachments) + pi-tool-support (Pi read-path semantics)
 apps/pi-desktop      -> pi-sdk + pi-session + Tauri
-pi-plugin-manager    -> HTTP + filesystem package source adapters
-pi-plugin-tools      -> pi-plugin-manager release format + pi-plugin-loader + Cargo/GitHub CLI adapters
+pi-plugin-manager    -> pi-plugin (native) + pi-runtime + dynamic loading, HTTP/filesystem installation
+                        + optional Cargo/GitHub authoring tools
 pi-js-package-manager -> filesystem + npm/git process adapters (no Node dependency)
-pi-js-plugin         -> pi-core + pi-session (no Node or terminal dependency)
-pi-bench             -> pi-agent + pi-runtime + pi-session + pi-core + pi-test-support (test-only)
-crates/pi-eval       -> pi-sdk + pi-session + pi-core + pi-js-plugin
+pi-js-plugin         -> pi-core + pi-plugin (no Node or terminal dependency)
+pi-bench             -> pi-agent + pi-runtime + pi-session + pi-core + pi-plugin + pi-test-support (test-only)
+crates/pi-eval       -> pi-sdk + pi-session + pi-core + pi-plugin + pi-js-plugin
 apps/pi-eval         -> pi-eval + pi-sdk + pi-js-plugin
 bindings/pi-napi     -> pi-js-plugin + apps/pi-cli + apps/pi-eval + NAPI-RS
 packages/pi          -> Node + jiti + platform pi-napi artifact
@@ -192,7 +191,7 @@ and Rust to compete for raw mode, stdout, editor state, or transcript projection
 
 `pi-eval` is an outer product-quality Module, not a production dependency of the runtime. Its harness
 enters through `pi-sdk::Pi`, creates isolated workspace/agent/session directories, and may accept the
-same `JsPluginHost` capability as other embedded Adapters. Case-local Rust `AgentPlugin` factories are
+same `JsPluginHost` capability as other embedded Adapters. Case-local Rust `Plugin` factories are
 applied with `SessionGenerationOverlay`, so structured submission tools and prompt treatments are rebuilt
 on reload but never serialized. Real native plugin evaluation stays on the product loader path: explicit
 libraries/manifests flow through `Config::native_plugins`, while trusted project manifests under
@@ -230,10 +229,10 @@ not depend on `pi-sdk::Config`. In particular, the composition layer retains the
 package/provider activation transaction rather than splitting commits across domain loaders.
 Inside the SDK, private `session_factory` owns generation preparation, trust-before-discovery,
 context binding and `PreparedProductActivation`; `runtime_composition` owns first-party selection,
-ordered agent/provider/session registrations, cross-plugin wiring and active-tool policy.
+ordered Plugin/ProviderPlugin registrations, cross-plugin wiring and active-tool policy.
 Its private borrowed `GenerationComponents` view contains only already-prepared native, JavaScript,
-MCP, memory and subagent components. Runtime and session registration use the same view, retaining
-the same memory provider through their ordinary factory seams. Runtime context is required (tests
+MCP, memory and subagent components. Unified registration retains one memory provider instance
+for both callback families through the ordinary factory seam. Runtime context is required (tests
 supply an explicitly unavailable context); overlays, dynamic catalog candidates, settings and
 activation guards are not component fields. `BuiltinProviderSet` prepares the shared HTTP transport
 before reading credentials, retaining error precedence, and supplies it to both built-ins and
@@ -400,7 +399,7 @@ Asynchronous UI state reuses the existing session custom-entry seam: `pi.ui.widg
 latest state; durable record sequence numbers order snapshot/live merges and tombstones. The host
 forwards generic `thread/widgetUpdated` events. Plugins own schemas, coalescing, historical migration
 and business interpretation; executable React and transient component state are never persisted.
-The Rust author interface `pi_plugin_sdk::desktop::WidgetPublisher` owns key/size validation,
+The Rust author interface `pi_plugin::desktop::WidgetPublisher` owns key/size validation,
 duplicate suppression, tombstones and the entry envelope; a plugin-owned projection Module still
 decides what to publish and how restored history relates to current executable ownership.
 Subagents publish bounded task snapshots independently of the already-completed spawn tool. On
@@ -457,11 +456,11 @@ configuration files or plugin ID conventions.
 
 ## Plugin-first rules
 
-1. Tools and commands are registered through `AgentPlugin`. `ProviderPlugin` contributes provider implementations, routing overlays, model catalog entries, and provider request hooks. Agent code has no provider/tool name switches.
-2. Agent plugin hooks, provider plugin registration, and provider request hooks each execute in builder order. There is no numeric priority. Statically linked Rust plugin impls use one lifecycle attribute—`#[pi_core::agent_plugin]`, `#[pi_core::provider_plugin]`, or `#[pi_session::session_plugin]`—which expands async callbacks without a companion `#[async_trait]`. The agent attribute also derives hook interests. Native plugins get the corresponding behavior from `#[pi_plugin_sdk::{agent,provider,session}]`, while JavaScript agent adapters derive interests from the validated `pi.on(...)` manifest. `PluginDriver` snapshots an immutable per-hook route when a generation is built. Registration still visits every agent plugin; runtime hooks visit only their exact route, with no catch-all interest or `ALL` fallback.
+1. Tools and commands are registered through `Plugin`. `ProviderPlugin` contributes provider implementations, routing overlays, model catalog entries, and provider request hooks. Agent code has no provider/tool name switches.
+2. Agent plugin hooks, provider plugin registration, and provider request hooks each execute in builder order. There is no numeric priority. Statically linked Rust plugin impls use one lifecycle attribute—`#[pi_plugin::plugin]` or `#[pi_plugin::provider_plugin]`—which expands async callbacks without a companion `#[async_trait]`. The agent attribute also derives hook interests. Native plugins get the corresponding behavior from `#[pi_plugin::native_plugin]` / `#[pi_plugin::native_provider]`, while JavaScript agent adapters derive interests from the validated `pi.on(...)` manifest. `PluginDriver` snapshots an immutable per-hook route when a generation is built. Registration still visits every agent plugin; runtime hooks visit only their exact route, with no catch-all interest or `ALL` fallback.
 3. Duplicate IDs are rejected within each plugin system; duplicate tool, command, provider, or model IDs fail runtime construction.
 4. Registries are mutable only during registration and frozen before Agent construction.
-5. `tool_call` runs in order after prepared provider arguments are validated, chains argument patches without revalidation (matching Pi), and lets the first block decision win. It is the intentional fail-closed exception: a hook error fails that tool call. Every typed `AgentPlugin` callback receives the same `Arc<AgentContext>` snapshot for the batch, including the current system prompt, transcript with the requesting assistant message, and active-tool names. The JavaScript extension Adapter projects Pi's narrower extension event and does not serialize this native context into Node.
+5. `tool_call` runs in order after prepared provider arguments are validated, chains argument patches without revalidation (matching Pi), and lets the first block decision win. It is the intentional fail-closed exception: a hook error fails that tool call. Every typed `Plugin` callback receives the same `Arc<AgentContext>` snapshot for the batch, including the current system prompt, transcript with the requesting assistant message, and active-tool names. The JavaScript extension Adapter projects Pi's narrower extension event and does not serialize this native context into Node.
 6. `input` receives text, images, source, and optional streaming behavior. Text/image replacements chain in registration order, `Handled` stops the submission, and a hook error is recorded as a generation-local plugin diagnostic before later hooks continue.
 7. `before_agent_start` runs once per prompt/continue invocation in registration order; prompt replacements chain and injected messages are accumulated for that run only. Hook errors are diagnosed and skipped without discarding earlier replacements.
 8. `context` runs before every provider request and chains message replacements without mutating the persisted transcript. Hook errors are diagnosed and later hooks still run.
@@ -472,13 +471,65 @@ configuration files or plugin ID conventions.
 13. `before_provider_request` runs after a concrete provider has serialized its final wire payload and before transport. Replacements chain in provider-plugin order; hook errors are diagnosed and skipped so later provider hooks still receive the last valid payload.
 14. Built-in HTTP providers cross the shared `post_json_with_provider_hooks` Interface after assembling their final headers. `before_provider_headers` chains a header map in provider-plugin order, preserves `null` deletion tombstones until all hooks finish, and only then produces transport-ready strings. `after_provider_response` observes status and decoded response headers before the body stream can be consumed. Both hooks isolate failures as diagnostics and continue in registration order.
 
+## Unified plugin ownership and preparation
+
+This is a deliberate Rust API change, preserving Pi hook semantics and Pi v4 storage. `pi-plugin`
+owns the single `Plugin` interface for Agent/tool/command and Session callbacks. `ProviderPlugin`
+remains independent. A generation rejects duplicate Plugin IDs across both callback families.
+Executable Tool/Command/Provider contracts, capability contexts, registries, drivers and ModelRuntime
+live with these interfaces. `pi-core` retains foundational values and `session` wire DTOs. Neither
+crate depends on Agent, Runtime, Session, SDK or loaders; outward runtimes implement capabilities.
+
+Agent, Session and Provider hooks return `PluginError`; Session has no separate error or diagnostic type.
+`PluginDiagnostic.hook` is a typed `PluginHook` covering Agent, Session and Provider hooks, with
+custom names retained for plugin-owned background operations. Its wire representation remains a
+hook-name string. Optional `generation` metadata is populated for Session and Provider callbacks;
+Agent/Input callbacks have no generation number in their dispatch arguments and leave it absent.
+Observer dispatch shares small private macros; patch chaining and cancellation remain explicit.
+Production `pi-plugin` uses `futures-core::Stream` and Tokio channels only. Test executors/runtime
+features are development dependencies; `pi-core` uses `tokio-util` for cancellation and no longer
+pulls in the full futures facade. `pi-plugin` explicitly reexports its foundational core API so new
+core types do not silently enlarge the plugin surface.
+
+`PluginFactory::prepare(&PrepareContext, Options) -> Result<Option<Self>, PrepareError>` is a
+construction contract, separate from the object-safe Plugin interface. `prepare_plugin` runs it
+once per candidate runtime generation; ordinary closure factories remain available. `None` disables
+the instance. No `new()` is required. Native macros use the same factory with `factory`, or construct
+`Default` for configuration-free plugins. Native option types additionally implement JsonSchema.
+
+Plugins own reading and validating their config files. Recommended precedence is explicit optional
+overrides, plugin file, then defaults; the framework imposes no product settings schema. A factory
+may retain caches outside generation instances and reuse expensive resources after comparing all
+relevant inputs (effective config, code/resource content, paths and trust). Equal settings alone do
+not skip generation validation or justify reusing mutable session state. Preparation must not
+activate background work or mutate live registries; activation remains session_start and cleanup
+remains session_shutdown/Drop. Failed candidates are dropped without touching the live generation.
+
+Native ABI 24 exports only `Plugin` (kind 1) or `ProviderPlugin` (kind 2), using
+`pi_plugin_create_v24` / `pi_provider_plugin_create_v24`. Manifest kinds are `plugin` / `provider`.
+ABI 23 and older libraries are rejected before resolving constructors and must be rebuilt.
+`pi-plugin` is the single author-facing crate. Its default API covers static plugins, and its
+`native` feature enables `pi_plugin::native` descriptors/options, schema support and native export
+macros (`#[pi_plugin::native_plugin]` / `#[pi_plugin::native_provider]`). The feature pins the JSON
+map representation crossing the ABI. Ordinary builds avoid schema dependencies and ABI source
+fingerprinting. Only the audited native module permits unsafe code; plugin contracts remain safe.
+`pi-plugin-macros` remains a separate proc-macro crate and is reexported by `pi-plugin`.
+
+`pi-plugin-manager` owns `loader`, `install`, and `authoring` modules. Default features enable
+loading and installation; optional authoring adds scaffold/build/package/publish operations.
+Loading depends outward on `pi-runtime` to adapt generation factories, so it cannot live inside
+`pi-plugin`. Installation can be built independently of native loading, and loader-only builds
+avoid HTTP installation dependencies. These are packaging boundaries, not new lifecycles;
+manifest/lock formats, project trust, immutable generations, transactional activation and pinned
+library lifetime retain their existing semantics.
+
 ## Runtime generations and reload
 
 `PiRuntime` keeps a reusable blueprint and publishes immutable runtime generations. A generation contains the agent and provider plugin drivers, the frozen `ModelRuntime`/registries, and the assembled base prompt that must move together. Agent plugins may contribute tools, commands, input processing, and lifecycle hooks; provider plugins have a narrow surface for provider/catalog registration and provider request lifecycle hooks.
 
 `reload()` prepares the complete next generation off to the side, validates it against the current provider and active-tool selection, waits for the active run to settle, and then swaps one `Arc<AgentRuntime>`. A failed factory, duplicate registration, or incompatible provider/tool selection leaves the prior generation untouched. Each agent run captures one generation before invoking hooks or resolving providers and tools, so a run cannot observe a mixture of old and new plugin state. Hook-interest routes are rebuilt with the candidate generation and never mutated after publication.
 
-Use `agent_plugin_factory` / `try_agent_plugin_factory` for reloadable agent plugins and `provider_plugin_factory` / `try_provider_plugin_factory` for providers, catalogs, routing overlays, and request hooks. Their pinned `agent_plugin` / `provider_plugin` and `*_arc` forms intentionally reuse an instance, primarily for stateless plugins and externally observed fixtures. `pi-plugin-loader` adapts version-locked dynamic libraries through the existing type-erased fallible factory seams and never mutates live registries in place.
+Use `plugin_factory` / `try_plugin_factory` for reloadable agent plugins and `provider_plugin_factory` / `try_provider_plugin_factory` for providers, catalogs, routing overlays, and request hooks. Their pinned `plugin` / `provider_plugin` and `*_arc` forms intentionally reuse an instance, primarily for stateless plugins and externally observed fixtures. `pi-plugin-manager::loader` adapts version-locked dynamic libraries through the existing type-erased fallible factory seams and never mutates live registries in place.
 
 Whole-session product reload preserves the current selected model, including explicitly selected
 models absent from the catalog, instead of reapplying startup CLI model arguments. Restored tool
@@ -492,8 +543,10 @@ changes are appended together using existing v4 configuration entries. This Rust
 adaptation keeps subsequent reload and context replay consistent without materializing an unsaved
 session. Ordinary resume still gives an explicit model request priority over the saved model.
 
-Product wiring installs agent, provider, and session plugins through their three independent factory
-seams. Each `PiSession` uses `AgentSessionRuntime` for cross-system atomicity. The injected
+Product wiring installs one unified Plugin set and an independent ProviderPlugin set through
+the runtime generation builder. AgentSession retains the exact same PluginDriver and supplies
+Session identity and generation through `SessionDispatchContext` on each dispatch. It has no separate
+driver, plugin registration or construction surface. Each `PiSession` uses `AgentSessionRuntime` for cross-system atomicity. The injected
 `SessionGenerationFactory` receives only resolved generation context—cwd, journal path, start reason,
 reload model, optional fresh-session state, and the transient overlay—and returns a
 `PreparedSessionGeneration` containing `PiRuntime`, session options, and staged product activation.
@@ -528,9 +581,9 @@ that point discards only its result; it cannot leave a closed old session unpubl
 target-path ownership early. Import destination resolution also happens inside this boundary so it
 observes the current path protected by the same guard. This is a Rust cancellation-safety guarantee
 at the product-session seam, not a Pi wire or lifecycle-order divergence.
-`pi-plugin-loader` discovers global manifests and trusted project manifests, resolves explicit
+`pi-plugin-manager::loader` discovers global manifests and trusted project manifests, resolves explicit
 `--plugin` paths, verifies a C-layout descriptor before resolving an exact-build Rust constructor,
-and partitions packages into separately ordered agent, provider, and session factories. It snapshots
+and partitions packages into unified plugin factories and independent provider factories. It snapshots
 each dynamic library by content hash before loading, so rebuilt artifacts receive a distinct path
 while unchanged content reuses one process-pinned handle. Libraries remain pinned for the process
 lifetime because plugin code may retain worker threads. Package metadata and artifact lifetime are
@@ -543,20 +596,20 @@ Agent-plugin attachments. ABI 14 added optional detached compaction to
 `SessionContext::run_ephemeral`, typed execution origin inspection, and typed tool state (now
 removed from core). ABI 13 added inherited effective
 prompt/history, optional bounded history replay, per-invocation tool observations, and aggregate
-input budgets to the ABI 12 ephemeral entry. `pi-core` owns the request/outcome contract, `pi-runtime` executes the
+input budgets to the ABI 12 ephemeral entry. `pi-plugin` owns the request/outcome contract, `pi-runtime` executes the
 normal Agent loop, and `PiPluginContext` forwards without the multi-session manager or parent
 operation/reload gate. The call pins a generation and reuses providers and request-time auth.
 Model/thinking default to the parent. All parent-active schemas remain advertised; only the
 requested subset may prepare arguments or execute. Tools receive the same run identity as plugin
 hooks, but no parent-session/model-control/UI capabilities. Core stores no plugin state or tool
-observations. `EphemeralSessionRequest.plugins` explicitly attaches private `AgentPlugin`
+observations. `EphemeralSessionRequest.plugins` explicitly attaches private `Plugin`
 instances without a separate hook allowlist. The ordinary Agent driver awaits interested plugins
 in registration order, including prompt/context, Agent/turn/message, and tool hooks. Prompt and
 context patches affect only the private Agent. Tool blocking, initial argument validation, and result
 patching remain intact. Duplicate IDs fail before the provider runs. Private plugin registration
 is not invoked, so published generation registries remain immutable. This is reuse of the existing
-AgentPlugin driver, not a fourth plugin lifecycle. Parent agent/session hooks do not run. The bare
-Agent entry does not run the product `input` pipeline or emit `agent_settled` or `SessionPlugin`
+Plugin driver, without another plugin lifecycle. Parent agent/session hooks do not run. The bare
+Agent entry does not run the product `input` pipeline or emit `agent_settled` or Session
 lifecycle events. This is a capability boundary, not a sandbox for trusted native code.
 
 The fork has no SessionLog, managed handle, frontend forwarding, or external worker. Completion,
@@ -605,7 +658,7 @@ not mutate the parent transcript or emit agent lifecycle events. Command callbac
 session/model capabilities for replacement, navigation, reload, and selection. Tool argument
 preparation and execution receive the same
 generation-bound `ToolContext`, so validation shims cannot escape the product capability lifetime.
-The `plugin::capabilities` module in `pi-core` owns only dependency-inward domain interfaces,
+The `plugin::capabilities` module in `pi-plugin` owns only dependency-inward domain interfaces,
 typed capabilities, and `PluginContextEpoch`. `SessionContextAccess`, `ModelsContextAccess`, and
 `UiContextAccess` keep the internal seam aligned with the public capability fields;
 `PluginContext` is only their aggregate marker. `PluginContextHandle` enforces generation and
@@ -618,7 +671,7 @@ active-tool, tool-catalogue, and command-catalogue reads in addition to coherent
 Successful create, fork, switch, and reload operations resolve a fresh
 `ReplacedSessionContext` from the newly active runtime generation rather than rebinding the old
 capability. ABI 4 added
-`ProviderPlugin` header/response lifecycle hooks, ABI 3 added the required `AgentPlugin`
+`ProviderPlugin` header/response lifecycle hooks, ABI 3 added the required `Plugin`
 hook-interest contract, and ABI 2 added the `AgentContext`/`added_tool_names` surface. The native
 agent export macro derives its contract from the callback methods in the annotated impl, so authors
 do not maintain a second hook list. The loader reads the stable C descriptor first and rejects older
@@ -702,7 +755,7 @@ SHA-256 establishes content integrity, not publisher identity.
 
 ## Native plugin authoring
 
-Native plugin authoring is an outer Module at pi-plugin-tools, exposed through the CLI's
+Native plugin authoring is an outer Module at pi-plugin-manager::authoring, exposed through the CLI's
 plugin new/package/verify/merge/publish/registry-entry commands. This is a deliberate Rust product
 extension to Pi's npm/git author workflow. Cargo metadata and compiler messages locate the
 cdylib, while the existing loader owns descriptor/ABI/fingerprint checks. Packaging generates
@@ -881,7 +934,7 @@ callback object advances to that handle before JavaScript runs `setup` or `withS
 the `reload` Promise resolves; unrelated retained contexts from the retired generation still fail
 with `Retired`.
 
-The callback contract and generation epoch live in `pi-core`; the real product implementation lives
+The callback contract and generation epoch live in `pi-plugin`; the real product implementation lives
 in `pi-session`. `PiPluginContext` is constructed by the app composition root for native-only
 and JavaScript-enabled runs alike, and invokes `AgentSession`, `PiSession`, and `PiRuntime` directly.
 Rust callbacks call its typed interface.
@@ -894,7 +947,7 @@ That core contract reuses the owning semantic types instead of maintaining adapt
 `CustomMessageContent`/`CustomMessageInput` come from the message Module, `ToolExecutionMode` from
 the tool Module, and `PresentationMode` plus `ForkPosition` are the canonical cross-layer contract
 types consumed by JavaScript hosting and session storage. Adapter-only JavaScript operation DTOs
-remain in `pi-js-plugin`; they are not exported by `pi-core` or used by native plugins.
+remain in `pi-js-plugin`; they are not exported by `pi-plugin` or used by native plugins.
 
 Node builds Pi's lazy `ExtensionContext` and `ExtensionCommandContext` facades over that native
 capability. Ordinary hooks and tools receive only base context operations. Registered commands also
@@ -966,8 +1019,10 @@ failure preserves the published generation. As in current Pi, successful npm/git
 are durable package-manager side effects and are not rolled back if later extension import or
 runtime validation fails.
 
-One JavaScript source may contribute to all three systems, but the manifest partitions it into
-separate agent, provider, and session plugin adapters. No `PluginBundle` is reintroduced. Manifest
+One JavaScript source may contribute Agent, Session and Provider hooks. For wire compatibility
+the manifest retains its callback lists, but Agent and Session lists with the same identity become
+one Rust Plugin instance. The Node host includes session-only sources in the ordered plugin list.
+Provider adapters remain independent. No `PluginBundle` is introduced. Manifest
 validation rejects unknown hooks, duplicate lifecycle IDs, duplicate callback IDs, invalid tool
 schemas, and later ordinary registry collisions before a candidate is published. Tool prompt
 metadata and execution mode become ordinary `ToolSpec` fields; hook replacement and cancellation
@@ -1246,12 +1301,11 @@ and TUI without transport policy in either frontend.
 
 - `Provider`: accepts semantic `ProviderRequest` data plus a generation-local `ProviderCallContext`, invokes wire hooks when its final payload exists, and returns `Stream<Item = Result<StreamEvent, ProviderError>>`.
 - `Tool`: publishes `ToolSpec` and executes validated JSON arguments with an `AbortSignal` and `ToolUpdateSink`.
-- `AgentPlugin`: registers tools/commands and participates in input, lifecycle, context, and tool hooks; its required hook-interest value is macro- or manifest-derived rather than author-maintained.
+- `Plugin`: registers tools/commands and participates in input, lifecycle, context, and tool hooks; its required hook-interest value is macro- or manifest-derived rather than author-maintained.
 - `ProviderPlugin`: registers providers, routing overlays, and model metadata and may implement `before_provider_request` without implementing a provider.
-- `SessionPlugin`: participates only in session lifecycle hooks and is rebuilt by `SessionPlugins`.
-- `PluginDriver`: is the only component that invokes plugin hooks.
+- `PluginDriver`: owns the unified plugin set, invokes Agent and Session hooks, and retains their diagnostics.
 - `ProviderPluginDriver`: validates, registers, and invokes the ordered provider plugin set for one runtime generation.
-- `SessionPluginDriver`: validates and invokes the ordered session plugin set for one session generation.
+- `SessionDispatchContext`: carries Session identity and generation into a hook dispatch; capabilities come from the PluginDriver's context epoch.
 - `ModelRuntime`: is the immutable, generation-local model catalog and provider resolver.
 - `TelemetryContext`: starts schema-typed spans through an injected sink; the no-op and in-memory
   sinks are adapters, not alternate event systems.
@@ -1560,27 +1614,25 @@ unmodified raw response body. The shared layer does not infer vendor JSON schema
 body length, or discard unknown response fields, and Provider Adapters do not independently
 flatten HTTP failures.
 
-Session extensions use a third, session-owned lifecycle system. `SessionPlugin` mirrors Pi's ten
-`session_*` extension hooks: start, info change, before switch/fork/compact/tree, compact success or
-failure, shutdown, and tree completion. Every callback receives the plugin ID, session ID, JSONL
-path, cwd, parent session ID, and active plugin generation. Observer failures are isolated into
-`SessionPluginDiagnostic`; `before_*` hooks run in registration order, the last non-empty result
-wins, and the first cancellation short-circuits, matching Pi's extension runner.
+The unified `Plugin` interface includes Pi's ten `session_*` extension hooks: start, info
+change, before switch/fork/compact/tree, compact success or failure, shutdown, and tree completion.
+Agent hooks and Session hooks run on one instance with one ID, prepared and registered once per
+generation. Callback contexts remain domain-specific. Session observer failures are isolated into
+`PluginDiagnostic`; before-hook results chain in registration order, the last non-empty
+result wins, and the first cancellation short-circuits, matching Pi's extension runner.
 
-`SessionPluginDriver` is the immutable, generation-local hook executor, parallel to `PluginDriver`
-and `ProviderPluginDriver`. Each `AgentSession` owns exactly one direct
-`Arc<SessionPluginDriver>` for its lifetime. The generation factory owns the reloadable
-`SessionPlugins` source blueprint and supplies a newly built driver while preparing the complete
-replacement session; neither the driver nor the live session retains a second reload seam.
+`AgentSession` retains the runtime's `Arc<PluginDriver>` and directly invokes its `session_*`
+methods. Session identity and generation are immutable data supplied through `SessionDispatchContext`;
+the driver builds callback contexts from that metadata and its generation-bound capability epoch.
+Agent and Session failures share one ordered `PluginDiagnostic` sink, exposed through
+`diagnostics` and `take_diagnostics`. `PiRuntime::plugin_diagnostics` includes that sink together
+with the independent Provider driver's diagnostics. There is no separate Session driver or dispatch wrapper.
+`AgentSessionOptions` configures session policy, not plugin sources.
+The complete replacement generation is prepared before the old generation receives
+`session_shutdown(reload)`. Preparation failure leaves the old generation running; successful
+activation emits shutdown on the old instances, start on the new instances, then publishes the
+replacement. Registries remain immutable and there is no in-place Session-only reload.
 
-`SessionContextBuildOptions` remains ordinary session projection configuration rather than a
-plugin-registration surface. `AgentSessionOptions` independently combines it with the prepared
-generation's `SessionPlugins`. Factory-backed session plugins are rebuilt only through whole-session
-product reload. The complete next generation is prepared before the old generation receives
-`session_shutdown(reload)`; a load failure therefore leaves the old generation running. A
-successful reload commits the new generation and emits `session_start(reload)`. There is no
-in-place session-driver swap that could reload one plugin system without its agent, provider,
-catalog, resource, and product-state peers.
 During shutdown, ordinary session mutations are blocked while still-valid plugin contexts may
 append their final custom state entries and usage. Context retirement happens after shutdown hooks,
 including on cancellation; repeated shutdown cannot run those hooks again. This matches current
@@ -1872,14 +1924,12 @@ existing files under `<agent-dir>/memory`; the product simply no longer reads th
 Memory providers do not add a fourth plugin Driver. `pi-memory-loader` is a host-side construction crate that
 owns `MemoryLoader`. The Loader reads `<agent-dir>/memory.json`, selects exactly one registered
 `MemoryProviderFactory`, and awaits provider initialization before the candidate generation is
-published. The resulting `Arc<dyn MemoryProviderPlugin>` is projected directly into the existing
-`AgentPlugin` and `SessionPlugin` Drivers, so one provider instance and its state are shared by both
-systems without a forwarding Adapter, separate lease object, or memory-specific Driver.
+published. The resulting `Arc<dyn MemoryProviderPlugin>` is registered once in the unified PluginDriver. Agent and Session callbacks share that
+instance without a forwarding adapter or memory-specific driver.
 
-`MemoryProviderPlugin` is a marker Interface extending the ordinary `AgentPlugin` and
-`SessionPlugin` Interfaces. It adds only the provider identity used by `memory.json`; it does not
+`MemoryProviderPlugin` is a marker Interface extending the ordinary `Plugin` interface. It adds only the provider identity used by `memory.json`; it does not
 copy their hooks into a parallel lifecycle contract. A provider declares its tools, commands,
-agent hooks, and session hooks directly through those existing plugin traits. There is no parallel
+agent hooks, and session hooks directly through that existing plugin trait. There is no parallel
 `capabilities` declaration or generic `MemoryLifecycleTask` event envelope to keep in sync.
 
 There is no provider-neutral record, storage, retrieval, or session-index Interface. Provider
@@ -2188,9 +2238,9 @@ confirmation request and never switches on those command names.
 
 `pi-plugin-schedule` is a first-party feature over the same managed isolated-session capability.
 `SchedulePlugin` registers the typed `schedule` tool and `/schedule` command;
-`ScheduleSessionPlugin` owns a cancellable, generation-local worker activated only by
-`session_start` and joined during `session_shutdown`. Both use independent factory registrations
-in `pi-sdk`. Factories never start timers or open task storage. Failed preparation keeps the old
+The same `SchedulePlugin` owns a cancellable, generation-local worker activated only by
+`session_start` and joined during `session_shutdown`. A single factory registration in `pi-sdk`
+supplies both callback families. Factories never start timers or open task storage. Failed preparation keeps the old
 worker; successful reload cancels/records active work before retiring its context and starts a
 fresh worker in the new `session_start`. Child launch waits for the manager's registration gate.
 There is no scheduler binary, fourth plugin lifecycle, OS cron

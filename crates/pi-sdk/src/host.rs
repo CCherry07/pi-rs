@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use pi_core::PresentationMode;
 use pi_js_plugin::JsPluginHost;
+use pi_plugin::PresentationMode;
 use pi_session::{MultiSessionManager, PluginContextBinding, PluginUiBridge};
 use pi_settings::{SettingsContext, SettingsManager};
 use tokio::sync::mpsc;

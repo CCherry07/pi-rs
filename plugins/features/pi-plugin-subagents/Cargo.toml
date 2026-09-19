@@ -7,10 +7,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+pi-plugin.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 pi-core.workspace = true
-pi-plugin-sdk.workspace = true
 pi-plugin-skills.workspace = true
 pi-session.workspace = true
 pi-utils = { workspace = true, features = ["frontmatter"] }

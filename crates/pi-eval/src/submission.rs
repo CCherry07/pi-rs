@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_core::{
-    AgentPlugin, PluginId, RegisterContext, Tool, ToolCallId, ToolContext, ToolError,
-    ToolExecutionMode, ToolResult, ToolSpec, ToolUpdateSink,
-};
+use pi_core::{PluginId, ToolCallId, ToolExecutionMode, ToolResult, ToolSpec};
+use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
 use serde_json::Value;
 
 use crate::{EvalGrade, EvalGrader, EvalObservation, EvalTranscriptEvent};
@@ -40,13 +38,13 @@ impl JsonSubmissionPlugin {
     }
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for JsonSubmissionPlugin {
+#[pi_plugin::plugin]
+impl Plugin for JsonSubmissionPlugin {
     fn id(&self) -> PluginId {
         PluginId::new(format!("pi-eval-submit-{}", self.tool.name))
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_tool(Arc::new(self.tool.clone()))
     }
 }

@@ -2,14 +2,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pi_core::AgentPlugin;
+use pi_plugin::Plugin;
 use serde::{Deserialize, Serialize};
 
 use crate::EvalGrader;
 
 pub const EVAL_RUN_SCHEMA_VERSION: u32 = 1;
 
-pub type EvalAgentPluginFactory = Arc<dyn Fn() -> Arc<dyn AgentPlugin> + Send + Sync + 'static>;
+pub type EvalAgentPluginFactory = Arc<dyn Fn() -> Arc<dyn Plugin> + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum EvalSystemPrompt {
@@ -165,19 +165,19 @@ impl EvalCase {
         self
     }
 
-    pub fn agent_plugin<F, P>(mut self, factory: F) -> Self
+    pub fn plugin<F, P>(mut self, factory: F) -> Self
     where
         F: Fn() -> P + Send + Sync + 'static,
-        P: AgentPlugin + 'static,
+        P: Plugin + 'static,
     {
         self.agent_plugins
             .push(Arc::new(move || Arc::new(factory())));
         self
     }
 
-    pub fn agent_plugin_arc<F>(mut self, factory: F) -> Self
+    pub fn plugin_arc<F>(mut self, factory: F) -> Self
     where
-        F: Fn() -> Arc<dyn AgentPlugin> + Send + Sync + 'static,
+        F: Fn() -> Arc<dyn Plugin> + Send + Sync + 'static,
     {
         self.agent_plugins.push(Arc::new(factory));
         self

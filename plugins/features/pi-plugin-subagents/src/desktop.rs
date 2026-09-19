@@ -4,11 +4,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_core::{
+
+use pi_plugin::desktop::WidgetPublisher;
+use pi_plugin::{
     Command, CommandContext, CommandError, CommandOutcome, CommandSpec, NoticeLevel,
     RegisterContext, SessionContext,
 };
-use pi_plugin_sdk::desktop::WidgetPublisher;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -161,7 +162,8 @@ impl DesktopState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_core::{
+
+    use pi_plugin::{
         ModelsContextAccess, PluginContextEpoch, PluginContextResult, SessionContextAccess,
         UiContextAccess,
     };
@@ -302,7 +304,7 @@ struct SubagentCommand {
 pub(crate) fn register_commands(
     context: &mut RegisterContext<'_>,
     runtime: &SubagentRuntime,
-) -> pi_core::Result<()> {
+) -> pi_plugin::Result<()> {
     for action in [Action::Interrupt, Action::FollowUp] {
         context.register_command(Arc::new(SubagentCommand {
             runtime: runtime.clone(),

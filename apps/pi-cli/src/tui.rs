@@ -18,10 +18,10 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use pi_agent::AgentLoopStop;
 use pi_core::{
-    AgentEvent, CommandSpec, ContentBlock, Message, ModelId, ModelSpec, ProviderId, StopReason,
-    StreamEvent, ThinkingLevel, ToolCallId, UiMultiSelectAction, UiMultiSelectOption,
-    UiMultiSelectResponse,
+    AgentEvent, ContentBlock, Message, ModelId, ModelSpec, ProviderId, StopReason, StreamEvent,
+    ThinkingLevel, ToolCallId,
 };
+use pi_plugin::{CommandSpec, UiMultiSelectAction, UiMultiSelectOption, UiMultiSelectResponse};
 use pi_session::{
     AgentSession, AgentSessionEvent, AgentSessionSnapshot, EntryOrder, EntryQuery, ForkPosition,
     PiSession, QueueSnapshot, SessionEntry, SessionInput, SessionRuntimeInventory,
@@ -2425,7 +2425,7 @@ mod tests {
         let (response, decision) = tokio::sync::oneshot::channel();
         app.update(AppMessage::MultiSelectionRequested(
             PluginMultiSelectionRequest {
-                request: pi_core::UiMultiSelectRequest {
+                request: pi_plugin::UiMultiSelectRequest {
                     title: "Pi Hermes Memory — Procedural Skills".to_string(),
                     options: vec![
                         UiMultiSelectOption {
@@ -4730,7 +4730,7 @@ mod tests {
                 )
                 .unwrap(),
             )
-            .agent_plugin(pi_plugin_skills::SkillsPlugin::from_skills([
+            .plugin(pi_plugin_skills::SkillsPlugin::from_skills([
                 pi_plugin_skills::SkillInfo {
                     name: "runtime-skill".to_string(),
                     description: "Loaded by the active runtime".to_string(),

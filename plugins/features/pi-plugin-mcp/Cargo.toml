@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+pi-plugin.workspace = true
 async-trait.workspace = true
 fs2 = "0.4.3"
 pi-core.workspace = true

@@ -3,9 +3,12 @@ use std::sync::Arc;
 
 use futures::stream::{FuturesUnordered, StreamExt};
 use pi_core::{
-    AbortSignal, AgentContext, AgentEvent, AssistantMessage, FrozenRegistries, Message,
-    PluginDriver, RunId, Tool, ToolCall, ToolCallEvent, ToolContext, ToolExecutionMode, ToolResult,
-    ToolResultEvent, ToolResultMessage, ToolUpdateSink,
+    AbortSignal, AgentContext, AgentEvent, AssistantMessage, Message, RunId, ToolCall,
+    ToolExecutionMode, ToolResult, ToolResultMessage,
+};
+use pi_plugin::{
+    FrozenRegistries, PluginDriver, Tool, ToolCallEvent, ToolContext, ToolResultEvent,
+    ToolUpdateSink,
 };
 
 use crate::AgentEventSink;
@@ -547,10 +550,10 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use pi_core::{
-        AbortHandle, AgentPlugin, AgentPluginContext, ModelId, PluginError, PluginId, ProviderId,
-        RegisterContext, RegistriesBuilder, StopReason, ToolCallEvent, ToolError, ToolResultEvent,
-        ToolResultPatch, ToolSpec, Usage,
+    use pi_core::{AbortHandle, ModelId, PluginId, ProviderId, StopReason, ToolSpec, Usage};
+    use pi_plugin::{
+        AgentPluginContext, Plugin, PluginError, RegisterContext, RegistriesBuilder, ToolCallEvent,
+        ToolError, ToolResultEvent, ToolResultPatch,
     };
 
     use super::*;
@@ -635,13 +638,13 @@ mod tests {
         }
     }
 
-    #[pi_core::agent_plugin]
-    impl AgentPlugin for RecordingPlugin {
+    #[pi_plugin::plugin]
+    impl Plugin for RecordingPlugin {
         fn id(&self) -> PluginId {
             PluginId::new("recording")
         }
 
-        fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+        fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
             for tool in &self.tools {
                 context.register_tool(Arc::clone(tool))?;
             }
@@ -652,7 +655,7 @@ mod tests {
             &self,
             _context: AgentPluginContext,
             event: ToolCallEvent,
-        ) -> Result<pi_core::ToolCallPatch, PluginError> {
+        ) -> Result<pi_plugin::ToolCallPatch, PluginError> {
             if let Some(observed) = &self.observed_contexts {
                 observed.lock().unwrap().push(Arc::clone(&event.context));
             }
@@ -660,7 +663,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("prepare:{}", event.tool_call.id));
-            Ok(pi_core::ToolCallPatch::default())
+            Ok(pi_plugin::ToolCallPatch::default())
         }
 
         async fn tool_result(
@@ -761,7 +764,7 @@ mod tests {
                 added_tool_names: None,
             }),
         ];
-        let plugins: Vec<Arc<dyn AgentPlugin>> = vec![Arc::new(RecordingPlugin {
+        let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(RecordingPlugin {
             tools,
             log: Arc::clone(&log),
             patched_added_tool_names: None,
@@ -869,7 +872,7 @@ mod tests {
             log: Arc::clone(&log),
             added_tool_names: Some(vec!["from-tool".to_string()]),
         })];
-        let plugins: Vec<Arc<dyn AgentPlugin>> = vec![Arc::new(RecordingPlugin {
+        let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(RecordingPlugin {
             tools,
             log: Arc::clone(&log),
             patched_added_tool_names: Some(vec![
@@ -934,7 +937,7 @@ mod tests {
                 log: Arc::clone(&log),
             }),
         ];
-        let plugins: Vec<Arc<dyn AgentPlugin>> = vec![Arc::new(RecordingPlugin {
+        let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(RecordingPlugin {
             tools,
             log: Arc::clone(&log),
             patched_added_tool_names: None,

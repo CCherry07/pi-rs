@@ -41,7 +41,7 @@ deletion tombstones remain visible to later hooks and are removed only when the 
 the transport seam. Response observers run for successful and error HTTP statuses before any
 provider parses or buffers the body.
 
-Native `AgentPlugin` tool hooks receive an `Arc<AgentContext>` batch snapshot. The JavaScript
+Native `Plugin` tool hooks receive an `Arc<AgentContext>` batch snapshot. The JavaScript
 Adapter intentionally does not add that field to extension events because current Pi extension
 `tool_call` / `tool_result` payloads expose only call/result data; the full context belongs to Pi's
 lower-level before/after-tool callback contract.

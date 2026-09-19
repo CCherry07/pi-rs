@@ -1,6 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
-use pi_core::{ToolError, ToolExecutionMode, ToolSpec};
+use pi_core::{ToolExecutionMode, ToolSpec};
+use pi_plugin::ToolError;
 use serde_json::{Value, json};
 use unicode_normalization::UnicodeNormalization as _;
 

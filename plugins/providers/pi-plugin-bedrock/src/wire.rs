@@ -4,10 +4,11 @@ use async_stream::stream;
 use base64::Engine;
 use futures::StreamExt;
 use pi_core::{
-    AbortSignal, ContentBlock, ContentMetadata, Message, ModelCost, ModelSpec, ProviderError,
-    ProviderId, ProviderRequest, ProviderStream, ResponseMetadata, ResponseMetadataPatch,
-    StopReason, StreamEvent, ThinkingLevel, ToolCallId, Usage,
+    AbortSignal, ContentBlock, ContentMetadata, Message, ModelCost, ModelSpec, ProviderId,
+    ResponseMetadata, ResponseMetadataPatch, StopReason, StreamEvent, ThinkingLevel, ToolCallId,
+    Usage,
 };
+use pi_plugin::{ProviderError, ProviderRequest, ProviderStream};
 use pi_utils::time::unix_timestamp_ms as now_ms;
 use serde_json::{Map, Value, json};
 

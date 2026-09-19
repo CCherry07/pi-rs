@@ -1,7 +1,8 @@
 use super::*;
-use pi_core::{
+use pi_core::RunId;
+use pi_plugin::{
     AgentEndEvent, AgentSettledEvent, AgentStartEvent, ContextEvent, ContextPatch, InputContext,
-    InputEvent, InputPatch, RunId, ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolResultEvent,
+    InputEvent, InputPatch, ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolResultEvent,
     ToolResultPatch, TurnEndEvent, TurnStartEvent,
 };
 
@@ -72,13 +73,13 @@ impl Tool for HookTool {
 
 struct ParentPlugin(Arc<Trace>);
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for ParentPlugin {
+#[pi_plugin::plugin]
+impl Plugin for ParentPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("parent-tool-hooks")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         for name in ["allowed", "forbidden"] {
             context.register_tool(Arc::new(HookTool {
                 name,
@@ -115,13 +116,13 @@ impl AgentPlugin for ParentPlugin {
 
 struct PrivatePlugin(Arc<Trace>);
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for PrivatePlugin {
+#[pi_plugin::plugin]
+impl Plugin for PrivatePlugin {
     fn id(&self) -> PluginId {
         PluginId::new("private-tool-hooks")
     }
 
-    fn register(&self, _: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, _: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         panic!("private hook attachments must not mutate generation registries")
     }
 
@@ -197,13 +198,13 @@ impl LifecyclePlugin {
     }
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for LifecyclePlugin {
+#[pi_plugin::plugin]
+impl Plugin for LifecyclePlugin {
     fn id(&self) -> PluginId {
         PluginId::new(self.name)
     }
 
-    fn register(&self, _: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, _: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         panic!("private hook attachments must not mutate generation registries")
     }
 
@@ -293,7 +294,7 @@ async fn private_plugins_receive_normal_agent_hooks_in_order_without_parent_or_s
     let history = vec![Message::User(UserMessage::text("parent history", 0))];
     let runtime = PiRuntime::builder()
         .provider_plugin(scripted)
-        .agent_plugin(ParentPlugin(trace.clone()))
+        .plugin(ParentPlugin(trace.clone()))
         .agent_options(AgentOptions {
             active_tools: vec!["allowed".into(), "forbidden".into()],
             system_prompt: "Parent instructions".into(),
@@ -382,7 +383,7 @@ async fn explicit_tool_hooks_share_execution_identity_and_preserve_guards_and_in
     let provider = scripted.provider();
     let runtime = PiRuntime::builder()
         .provider_plugin(scripted)
-        .agent_plugin(ParentPlugin(trace.clone()))
+        .plugin(ParentPlugin(trace.clone()))
         .agent_options(AgentOptions {
             active_tools: vec!["allowed".into(), "forbidden".into()],
             ..AgentOptions::default()
@@ -492,8 +493,8 @@ struct LifetimePlugin {
     _lifetime: Arc<()>,
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for LifetimePlugin {
+#[pi_plugin::plugin]
+impl Plugin for LifetimePlugin {
     fn id(&self) -> PluginId {
         PluginId::new("private-lifetime")
     }
@@ -519,7 +520,7 @@ async fn private_plugins_drop_on_all_exit_paths_and_do_not_pin_retired_generatio
             .provider_plugin(scripted)
             .build()
             .unwrap();
-        let old_context = runtime.plugin_context_handle(pi_core::PluginContextScope::Base);
+        let old_context = runtime.plugin_context_handle(pi_plugin::PluginContextScope::Base);
         let lifetime = Arc::new(());
         let weak = Arc::downgrade(&lifetime);
         let mut input = request(&[]);
@@ -571,7 +572,7 @@ async fn private_plugins_drop_on_all_exit_paths_and_do_not_pin_retired_generatio
         if mode == "reload" {
             assert!(matches!(
                 old_context.access_for_adapter(),
-                Err(pi_core::PluginContextError::Retired)
+                Err(pi_plugin::PluginContextError::Retired)
             ));
         }
     }

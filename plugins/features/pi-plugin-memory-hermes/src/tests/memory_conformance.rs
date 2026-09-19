@@ -17,9 +17,9 @@ fn memory_file(root: &Path, name: &str) -> PathBuf {
     root.join("agent").join("pi-hermes-memory").join(name)
 }
 
-fn registered_memory_tool(plugin: Arc<HermesMemoryPlugin>) -> Arc<dyn pi_core::Tool> {
+fn registered_memory_tool(plugin: Arc<HermesMemoryPlugin>) -> Arc<dyn pi_plugin::Tool> {
     let runtime = pi_runtime::PiRuntime::builder()
-        .agent_plugin_arc(plugin)
+        .plugin_arc(plugin)
         .provider_plugin(ScriptedProviderPlugin::scripted([]))
         .build()
         .unwrap();
@@ -33,7 +33,7 @@ fn registered_memory_tool(plugin: Arc<HermesMemoryPlugin>) -> Arc<dyn pi_core::T
 
 async fn execute_memory_tool(
     root: &Path,
-    tool: &Arc<dyn pi_core::Tool>,
+    tool: &Arc<dyn pi_plugin::Tool>,
     input: serde_json::Value,
 ) -> pi_core::ToolResult {
     tool.execute(

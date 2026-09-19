@@ -233,9 +233,9 @@ pub(crate) enum PluginCommand {
         /// Plugin/crate name (defaults to the destination directory name).
         #[arg(long)]
         name: Option<String>,
-        #[arg(long, default_value = "agent")]
-        kind: pi_plugin_tools::PluginKind,
-        /// Local pi-rs checkout or pi-plugin-sdk crate.
+        #[arg(long, default_value = "plugin")]
+        kind: pi_plugin_manager::authoring::PluginKind,
+        /// Local pi-rs checkout or pi-plugin crate.
         #[arg(long, conflicts_with = "sdk_rev")]
         sdk: Option<PathBuf>,
         /// Exact SDK commit; defaults to the commit used to build this host.
@@ -608,7 +608,7 @@ mod tests {
             new.command,
             Some(CliCommand::Plugin {
                 command: PluginCommand::New {
-                    kind: pi_plugin_tools::PluginKind::Provider,
+                    kind: pi_plugin_manager::authoring::PluginKind::Provider,
                     ..
                 }
             })

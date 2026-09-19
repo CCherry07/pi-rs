@@ -3,11 +3,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_core::{
-    AgentPlugin, ContentBlock, PluginId, RegisterContext, Tool, ToolCallId, ToolContext, ToolError,
-    ToolResult, ToolSpec, ToolUpdateSink,
-};
+use pi_core::{ContentBlock, PluginId, ToolCallId, ToolResult, ToolSpec};
 use pi_media::image::{ImagePolicy, detect_mime_type, process_image};
+use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
 use pi_tool_support::{
     execution, hashline_tag, optional_positive_usize, require_str, resolve_read_path, spec,
     with_prompt,
@@ -34,23 +32,23 @@ struct ConfiguredReadTool {
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const MAX_OUTPUT_LINES: usize = 2_000;
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for ReadPlugin {
+#[pi_plugin::plugin]
+impl Plugin for ReadPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("read")
     }
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_tool(Arc::new(ReadTool))
     }
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for ConfiguredReadPlugin {
+#[pi_plugin::plugin]
+impl Plugin for ConfiguredReadPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("read")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_tool(Arc::new(ConfiguredReadTool {
             auto_resize_images: self.auto_resize_images,
         }))

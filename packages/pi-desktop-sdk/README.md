@@ -5,8 +5,8 @@ tool/custom-message registration, common presentation components, session previe
 of existing registered commands. Business state and commands remain with the plugin that owns them.
 
 This is an intentional desktop product extension to Pi's `renderCall` / `renderResult` and widget
-model. It does not change native plugin ABI, session message format or the runtime's three plugin
-lifecycles. Desktop view generations load separately from native runtime generations.
+model. It does not change native plugin ABI, session message format or the runtime's Plugin and ProviderPlugin
+interfaces. Desktop view generations load separately from native runtime generations.
 
 ## Write a view
 

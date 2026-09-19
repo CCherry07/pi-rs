@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use pi_core::{
+
+use pi_plugin::{
     Command, CommandContext, CommandError, CommandOutcome, CommandSpec, ContextParts, NoticeLevel,
     RegisterContext, UiMultiSelectAction, UiMultiSelectOption, UiMultiSelectRequest,
 };
@@ -23,7 +24,7 @@ pub(crate) fn register(
     runs: Arc<HermesRuns>,
     config: HermesMemoryConfig,
     activity: Arc<Mutex<HashMap<String, SessionActivity>>>,
-) -> pi_core::Result<()> {
+) -> pi_plugin::Result<()> {
     let mut kinds = vec![
         Kind::Consolidate,
         Kind::IndexSessions,
@@ -306,7 +307,7 @@ impl Command for HermesCommand {
                 if !snapshot
                     .branch()
                     .iter()
-                    .any(|entry| entry.kind() == &pi_core::SessionEntryKind::Message)
+                    .any(|entry| entry.kind() == &pi_plugin::SessionEntryKind::Message)
                 {
                     notify(
                         &context,

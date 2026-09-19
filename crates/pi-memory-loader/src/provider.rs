@@ -2,8 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_core::AgentPlugin;
-use pi_session::SessionPlugin;
+use pi_plugin::Plugin;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use thiserror::Error;
@@ -128,9 +127,8 @@ pub type MemoryProviderInitializeError = Box<dyn std::error::Error + Send + Sync
 /// Agent and Session plugin systems.
 ///
 /// This marker Interface adds only the provider identity used by
-/// `memory.json`. Lifecycle behavior comes from the ordinary `AgentPlugin` and
-/// `SessionPlugin` Interfaces; it is not mirrored here.
-pub trait MemoryProviderPlugin: AgentPlugin + SessionPlugin {
+/// `memory.json`. Lifecycle behavior comes from the ordinary `Plugin` interface; it is not mirrored here.
+pub trait MemoryProviderPlugin: Plugin {
     fn memory_provider_id(&self) -> &str;
 }
 
@@ -161,11 +159,7 @@ impl PreparedMemoryProvider {
         self.provider.memory_provider_id()
     }
 
-    pub fn agent_plugin(&self) -> Arc<dyn AgentPlugin> {
-        self.provider.clone()
-    }
-
-    pub fn session_plugin(&self) -> Arc<dyn SessionPlugin> {
+    pub fn plugin(&self) -> Arc<dyn Plugin> {
         self.provider.clone()
     }
 }

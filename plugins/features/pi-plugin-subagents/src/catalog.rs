@@ -249,7 +249,7 @@ struct AgentFrontmatter {
     model: Option<String>,
     thinking: Option<ThinkingSetting>,
     #[serde(default)]
-    default_context: pi_core::IsolatedContextMode,
+    default_context: pi_plugin::IsolatedContextMode,
     #[serde(default)]
     inherit_skills: bool,
     #[serde(default)]

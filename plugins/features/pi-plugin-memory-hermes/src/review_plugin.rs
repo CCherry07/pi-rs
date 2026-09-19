@@ -1,9 +1,10 @@
 //! Internal hook-only plugin: construct a fresh instance for every review.
 use std::sync::{Arc, Mutex};
 
-use pi_core::{
-    AgentPlugin, AgentPluginContext, PluginError, PluginId, ToolCallEvent, ToolCallPatch,
-    ToolResultEvent, ToolResultPatch,
+use pi_core::PluginId;
+use pi_plugin::{
+    AgentPluginContext, Plugin, PluginError, ToolCallEvent, ToolCallPatch, ToolResultEvent,
+    ToolResultPatch,
 };
 
 use crate::execution::{HermesRunLease, HermesRunState, HermesRuns};
@@ -66,8 +67,8 @@ impl HermesReviewPlugin {
     }
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for HermesReviewPlugin {
+#[pi_plugin::plugin]
+impl Plugin for HermesReviewPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("memory-hermes-review")
     }
@@ -102,7 +103,8 @@ impl AgentPlugin for HermesReviewPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_core::{AbortHandle, AgentHook, AgentHookInterests, RunId};
+    use pi_core::{AbortHandle, RunId};
+    use pi_plugin::{AgentHook, AgentHookInterests};
 
     #[test]
     fn review_plugin_only_intercepts_tools_and_cannot_be_reused_for_another_run() {

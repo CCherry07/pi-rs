@@ -3,9 +3,9 @@ use std::future::Future;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use pi_core::{
-    AbortSignal, AssistantMessage, FrozenRegistries, Message, ProviderCallContext, ProviderError,
-    ProviderId, ProviderRequest, ProviderStream,
+use pi_core::{AbortSignal, AssistantMessage, Message, ProviderId};
+use pi_plugin::{
+    FrozenRegistries, ProviderCallContext, ProviderError, ProviderRequest, ProviderStream,
 };
 
 type ConvertFn = dyn Fn(Vec<Message>) -> BoxFuture<'static, Vec<Message>> + Send + Sync;

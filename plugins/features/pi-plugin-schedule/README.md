@@ -100,8 +100,8 @@ upstream Pi has no built-in cron contract to conform to.
 
 ## Embed
 
-Construct `ScheduleOptions::new(cwd, agent_dir, project_trusted)` and register independent factories
-for `SchedulePlugin` (agent lifecycle) and `ScheduleSessionPlugin` (session lifecycle). Use the
+Construct `ScheduleOptions::new(cwd, agent_dir, project_trusted)` and register one factory
+for `SchedulePlugin`, which owns tools, commands and its session worker. Use the
 existing generation-bound `PiPluginContext` and `MultiSessionManager`; no fourth plugin lifecycle
 or generic runtime scheduling policy is needed. The CLI, Node host, RPC, and desktop obtain this
 wiring through `pi-sdk`.

@@ -6,9 +6,9 @@ use pi_agent::{
     Agent, AgentLoopStop, AgentLoopTurnUpdate, AgentOptions, AgentRuntime, AgentTurnContext,
     FnTurnControl,
 };
-use pi_core::{
-    AbortSignal, EphemeralSessionOutcome, EphemeralSessionRequest, EphemeralSessionStatus, Message,
-    ModelSelection, PluginDriver, Usage, UsageCost,
+use pi_core::{AbortSignal, Message, ModelSelection, Usage, UsageCost};
+use pi_plugin::{
+    EphemeralSessionOutcome, EphemeralSessionRequest, EphemeralSessionStatus, PluginDriver,
 };
 
 use crate::{PiRuntime, RuntimeError};

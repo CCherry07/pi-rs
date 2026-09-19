@@ -4,14 +4,16 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use async_trait::async_trait;
 use pi_core::{
-    AbortSignal, AssistantMessage, CompactOptions, ContentBlock, CustomMessage,
-    CustomMessageContent, CustomMessageInput, DirectCompletionRequest, ForkOptions,
-    IsolatedFollowUpReceipt, IsolatedMessageReceipt, IsolatedSessionId, IsolatedSessionOutcome,
-    IsolatedSessionRequest, IsolatedSessionTurnId, Message, MessageDelivery, ModelId,
-    ModelsContextAccess, NavigateTreeOptions, NewSessionOptions, NoticeLevel, PluginContextError,
-    PluginContextReplacement, PluginContextScope, PresentationMode, ProviderId, SendMessageOptions,
-    SendUserMessageOptions, SessionContextAccess, SessionEntryKind, SessionEntryView,
-    SessionSnapshot, ThinkingLevel, UiContextAccess, Usage, UserMessage,
+    AbortSignal, AssistantMessage, ContentBlock, CustomMessage, CustomMessageContent,
+    CustomMessageInput, Message, ModelId, ProviderId, ThinkingLevel, Usage, UserMessage,
+};
+use pi_plugin::{
+    CompactOptions, DirectCompletionRequest, ForkOptions, IsolatedFollowUpReceipt,
+    IsolatedMessageReceipt, IsolatedSessionId, IsolatedSessionOutcome, IsolatedSessionRequest,
+    IsolatedSessionTurnId, MessageDelivery, ModelsContextAccess, NavigateTreeOptions,
+    NewSessionOptions, NoticeLevel, PluginContextError, PluginContextReplacement,
+    PluginContextScope, PresentationMode, SendMessageOptions, SendUserMessageOptions,
+    SessionContextAccess, SessionEntryKind, SessionEntryView, SessionSnapshot, UiContextAccess,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -50,8 +52,8 @@ pub trait PluginUiBridge: Send + Sync {
 
     async fn multi_select(
         &self,
-        _request: pi_core::UiMultiSelectRequest,
-    ) -> Result<Option<pi_core::UiMultiSelectResponse>, String> {
+        _request: pi_plugin::UiMultiSelectRequest,
+    ) -> Result<Option<pi_plugin::UiMultiSelectResponse>, String> {
         Err("interactive multi-selection is unavailable".to_string())
     }
 }
@@ -304,8 +306,8 @@ impl UiContextAccess for PiPluginContext {
 
     async fn ui_multi_select(
         &self,
-        request: pi_core::UiMultiSelectRequest,
-    ) -> Result<Option<pi_core::UiMultiSelectResponse>, PluginContextError> {
+        request: pi_plugin::UiMultiSelectRequest,
+    ) -> Result<Option<pi_plugin::UiMultiSelectResponse>, PluginContextError> {
         if !matches!(self.mode, PresentationMode::Tui) {
             return Ok(None);
         }
@@ -329,7 +331,7 @@ impl ModelsContextAccess for PiPluginContext {
         Ok(session.runtime().model(&provider_id, &model_id))
     }
 
-    fn scoped_models(&self) -> Result<Vec<pi_core::ScopedModel>, PluginContextError> {
+    fn scoped_models(&self) -> Result<Vec<pi_plugin::ScopedModel>, PluginContextError> {
         Ok(crate::resolve_model_scope(
             &self.model_scope_patterns,
             &self.session()?.runtime().available_models(),
@@ -400,16 +402,16 @@ impl ModelsContextAccess for PiPluginContext {
 
 #[async_trait]
 impl SessionContextAccess for PiPluginContext {
-    fn execution_origin(&self) -> Result<pi_core::SessionExecutionOrigin, PluginContextError> {
+    fn execution_origin(&self) -> Result<pi_plugin::SessionExecutionOrigin, PluginContextError> {
         Ok(self.session()?.runtime().execution_origin())
     }
 
     async fn run_ephemeral(
         &self,
         _scope: PluginContextScope,
-        request: pi_core::EphemeralSessionRequest,
+        request: pi_plugin::EphemeralSessionRequest,
         signal: AbortSignal,
-    ) -> Result<pi_core::EphemeralSessionOutcome, PluginContextError> {
+    ) -> Result<pi_plugin::EphemeralSessionOutcome, PluginContextError> {
         self.session()?
             .runtime()
             .run_ephemeral(request, signal)
@@ -502,7 +504,7 @@ impl SessionContextAccess for PiPluginContext {
         Ok(self.session()?.has_pending_messages())
     }
 
-    fn context_usage(&self) -> Result<Option<pi_core::ContextUsage>, PluginContextError> {
+    fn context_usage(&self) -> Result<Option<pi_plugin::ContextUsage>, PluginContextError> {
         let session = self.session()?;
         let Some(context_window) = session.active_context_window() else {
             return Ok(None);
@@ -524,7 +526,7 @@ impl SessionContextAccess for PiPluginContext {
                 tokens as f64 / context_window as f64 * 100.0
             }
         });
-        Ok(Some(pi_core::ContextUsage {
+        Ok(Some(pi_plugin::ContextUsage {
             tokens,
             context_window,
             percent,
@@ -655,7 +657,7 @@ impl SessionContextAccess for PiPluginContext {
         Ok(self.session()?.runtime().tool_specs())
     }
 
-    fn commands(&self) -> Result<Vec<pi_core::CommandSpec>, PluginContextError> {
+    fn commands(&self) -> Result<Vec<pi_plugin::CommandSpec>, PluginContextError> {
         Ok(self.session()?.runtime().command_specs())
     }
 
@@ -732,8 +734,11 @@ impl SessionContextAccess for PiPluginContext {
             .map_err(context_failed)?;
         self.runtime.spawn(async move {
             session
-                .session_plugin_driver()
-                .session_info_changed(&crate::SessionInfoChangedEvent { name })
+                .plugin_driver()
+                .session_info_changed(
+                    session.session_dispatch_context(),
+                    &crate::SessionInfoChangedEvent { name },
+                )
                 .await;
         });
         Ok(())
@@ -821,7 +826,7 @@ impl SessionContextAccess for PiPluginContext {
 
     fn isolated_fork_point(
         &self,
-    ) -> Result<Option<pi_core::IsolatedForkPoint>, PluginContextError> {
+    ) -> Result<Option<pi_plugin::IsolatedForkPoint>, PluginContextError> {
         self.session()?
             .isolated_fork_point()
             .map_err(context_failed)

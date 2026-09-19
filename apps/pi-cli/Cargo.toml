@@ -11,6 +11,7 @@ name = "pi"
 path = "src/main.rs"
 
 [dependencies]
+pi-plugin.workspace = true
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control", "image-data"] }
 async-trait.workspace = true
 base64 = "0.22"
@@ -26,8 +27,7 @@ pi-rpc.workspace = true
 pi-core.workspace = true
 pi-media.workspace = true
 pi-tool-support.workspace = true
-pi-plugin-manager.workspace = true
-pi-plugin-tools.workspace = true
+pi-plugin-manager = { workspace = true, features = ["authoring"] }
 pi-js-package-manager.workspace = true
 pi-js-plugin.workspace = true
 pi-runtime.workspace = true

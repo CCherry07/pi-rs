@@ -15,9 +15,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use pi_core::{
-    Tool, ToolCall, ToolCallBlock, ToolCallId, ToolCallPatch, ToolContext, ToolError,
-    ToolResultPatch, ToolSpec, ToolUpdateSink, UsageCost,
+use pi_core::{ToolCall, ToolCallId, ToolSpec, UsageCost};
+use pi_plugin::{
+    Tool, ToolCallBlock, ToolCallPatch, ToolContext, ToolError, ToolResultPatch, ToolUpdateSink,
 };
 use serde_json::{Value, json};
 

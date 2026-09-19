@@ -3,7 +3,8 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use pi_core::{AbortHandle, BeforeAgentStartEvent, RunId};
+use pi_core::{AbortHandle, RunId};
+use pi_plugin::BeforeAgentStartEvent;
 use pi_sdk::{Config, Features, Pi};
 use pi_session::{AgentSession, PiSession};
 

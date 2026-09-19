@@ -14,9 +14,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-use pi_core::{
-    AbortSignal, PluginId, Provider, ProviderAvailability, ProviderCallContext, ProviderError,
-    ProviderId, ProviderPlugin, ProviderRegisterContext, ProviderRequest, ProviderStream,
+use pi_core::{AbortSignal, PluginId, ProviderId};
+use pi_plugin::{
+    Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderPlugin,
+    ProviderRegisterContext, ProviderRequest, ProviderStream,
 };
 use pi_provider::{
     HttpTransport, ReqwestTransport, TransportError, insert_header, read_error_response,
@@ -89,13 +90,13 @@ impl AmazonBedrockPlugin {
     }
 }
 
-#[pi_core::provider_plugin]
+#[pi_plugin::provider_plugin]
 impl ProviderPlugin for AmazonBedrockPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("amazon-bedrock-provider")
     }
 
-    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_provider(self.provider.clone())?;
         for model in amazon_bedrock_models() {
             context.register_model(model)?;

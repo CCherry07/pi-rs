@@ -10,9 +10,10 @@ use self::export::{
     export_html_file, export_jsonl_file, resolve_user_path, validate_session_import,
 };
 use async_trait::async_trait;
-use pi_core::{
-    AgentPlugin, Command, CommandContext, CommandError, CommandOutcome, CommandSpec, NoticeLevel,
-    PluginId, RegisterContext, SessionReplacement,
+use pi_core::PluginId;
+use pi_plugin::{
+    Command, CommandContext, CommandError, CommandOutcome, CommandSpec, NoticeLevel, Plugin,
+    RegisterContext, SessionReplacement,
 };
 
 const DEFAULT_SHARE_VIEWER_URL: &str = "https://pi.dev/session/";
@@ -34,13 +35,13 @@ impl Default for SessionTransferPlugin {
     }
 }
 
-#[pi_core::agent_plugin]
-impl AgentPlugin for SessionTransferPlugin {
+#[pi_plugin::plugin]
+impl Plugin for SessionTransferPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("session-transfer")
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_command(Arc::new(ExportCommand))?;
         context.register_command(Arc::new(ImportCommand))?;
         context.register_command(Arc::new(ShareCommand {
@@ -384,7 +385,8 @@ mod tests {
     use std::sync::Mutex;
 
     use pi_agent::AgentOptions;
-    use pi_core::{Message, PluginContext, PresentationMode, UserMessage};
+    use pi_core::{Message, UserMessage};
+    use pi_plugin::{PluginContext, PresentationMode};
     use pi_runtime::{PiRuntime, SystemPrompt};
     use pi_session::{
         AgentSessionOptions, MultiSessionManager, PiPluginContext, PiSession, PluginContextBinding,
@@ -465,7 +467,7 @@ mod tests {
             );
             let context_access: Arc<dyn PluginContext> = plugin_context.clone();
             let runtime = PiRuntime::builder()
-                .agent_plugin(SessionTransferPlugin {
+                .plugin(SessionTransferPlugin {
                     uploader: self.uploader.clone(),
                 })
                 .provider_plugin(ScriptedProviderPlugin::scripted([]))

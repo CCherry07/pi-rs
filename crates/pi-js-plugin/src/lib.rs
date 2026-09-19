@@ -7,28 +7,30 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use pi_core::session::CompactionEntry;
 use pi_core::{
-    AbortSignal, AfterProviderResponseEvent, AgentEndEvent, AgentHook, AgentHookInterests,
-    AgentPlugin, AgentPluginContext, AgentSettledEvent, AgentStartEvent, AssistantMessage,
-    AssistantStreamId, BeforeAgentStartEvent, BeforeAgentStartPatch, BeforeProviderHeadersEvent,
-    BeforeProviderRequestEvent, Command, CommandContext, CommandError, CommandOutcome, CommandSpec,
-    ContentBlock, ContextEvent, ContextPatch, CustomMessage, CustomMessageContent, ImageContent,
-    InputContext, InputEvent, InputPatch, InputSource, InputStreamingBehavior, Message,
-    MessageEndEvent, MessageEndPatch, MessageStartEvent, MessageUpdateEvent, PluginError, PluginId,
-    ProviderPlugin, ProviderPluginContext, RegisterContext, RunId, StreamEvent, Tool,
-    ToolCallEvent, ToolCallId, ToolCallPatch, ToolContext, ToolError, ToolExecutionEndEvent,
-    ToolExecutionMode, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResult,
-    ToolResultEvent, ToolResultPatch, ToolSpec, ToolUpdateSink, TurnEndEvent, TurnStartEvent,
-    Usage,
+    AbortSignal, AssistantMessage, AssistantStreamId, ContentBlock, CustomMessage,
+    CustomMessageContent, ImageContent, Message, PluginId, RunId, StreamEvent, ToolCallId,
+    ToolExecutionMode, ToolResult, ToolSpec, Usage,
 };
-use pi_session::{
-    CompactionEntry, SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent,
+use pi_plugin::{
+    AfterProviderResponseEvent, AgentEndEvent, AgentHook, AgentHookInterests, AgentPluginContext,
+    AgentSettledEvent, AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch,
+    BeforeProviderHeadersEvent, BeforeProviderRequestEvent, Command, CommandContext, CommandError,
+    CommandOutcome, CommandSpec, ContextEvent, ContextPatch, InputContext, InputEvent, InputPatch,
+    InputSource, InputStreamingBehavior, MessageEndEvent, MessageEndPatch, MessageStartEvent,
+    MessageUpdateEvent, Plugin, PluginError, ProviderPlugin, ProviderPluginContext,
+    RegisterContext, Tool, ToolCallEvent, ToolCallPatch, ToolContext, ToolError,
+    ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent,
+    ToolResultPatch, ToolUpdateSink, TurnEndEvent, TurnStartEvent,
+};
+use pi_plugin::{
+    SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent,
     SessionBeforeForkResult, SessionBeforeSwitchEvent, SessionBeforeSwitchResult,
     SessionBeforeTreeEvent, SessionBeforeTreeResult, SessionCompactEvent,
-    SessionCompactFailedEvent, SessionForkPosition, SessionInfoChangedEvent, SessionPlugin,
-    SessionPluginContext, SessionPluginError, SessionShutdownEvent, SessionShutdownReason,
-    SessionStartEvent, SessionStartReason, SessionSwitchReason, SessionTreeEvent,
-    SessionTreeSummary,
+    SessionCompactFailedEvent, SessionForkPosition, SessionInfoChangedEvent, SessionPluginContext,
+    SessionShutdownEvent, SessionShutdownReason, SessionStartEvent, SessionStartReason,
+    SessionSwitchReason, SessionTreeEvent, SessionTreeSummary,
 };
 use pi_utils::time::unix_timestamp_ms as now_ms;
 use serde::{Deserialize, Serialize};
@@ -124,7 +126,8 @@ pub enum JsHostOperation {
 mod wire_tests {
     use std::sync::Arc;
 
-    use pi_core::{AgentHook, PresentationMode, StreamEvent, ToolExecutionMode};
+    use pi_core::{StreamEvent, ToolExecutionMode};
+    use pi_plugin::{AgentHook, PresentationMode};
     use serde_json::json;
 
     use super::{
@@ -481,10 +484,9 @@ pub enum JsPluginError {
 }
 
 pub struct JsPluginGeneration {
-    agent_plugins: Vec<Arc<dyn AgentPlugin>>,
+    plugins: Vec<Arc<dyn Plugin>>,
     provider_plugins: Vec<Arc<dyn ProviderPlugin>>,
     provider_registrations: Vec<JsProviderRegistration>,
-    session_plugins: Vec<Arc<dyn SessionPlugin>>,
     diagnostics: Vec<JsExtensionDiagnostic>,
 }
 
@@ -540,6 +542,34 @@ impl JsPluginGeneration {
                 })
                 .collect::<Vec<_>>(),
         );
+        let mut agent_plugins = agent_plugins;
+        let mut session_hooks = std::collections::HashMap::new();
+        let mut session_position = 0;
+        for session in session_plugins {
+            if let Some(index) = agent_plugins
+                .iter()
+                .position(|agent| agent.id == session.id)
+            {
+                if index < session_position {
+                    return Err(JsPluginError::InvalidManifest(
+                        "Agent and Session plugin orders conflict".into(),
+                    ));
+                }
+                session_position = index + 1;
+            } else {
+                agent_plugins.insert(
+                    session_position,
+                    JsAgentPluginManifest {
+                        id: session.id.clone(),
+                        tools: Vec::new(),
+                        commands: Vec::new(),
+                        hooks: Vec::new(),
+                    },
+                );
+                session_position += 1;
+            }
+            session_hooks.insert(session.id, session.hooks);
+        }
         let agent_plugins = agent_plugins
             .into_iter()
             .enumerate()
@@ -550,6 +580,7 @@ impl JsPluginGeneration {
                     commands,
                     hooks,
                 } = plugin;
+                let session_hooks = session_hooks.remove(&id).unwrap_or_default();
                 let plugin_id = PluginId::new(id);
                 let tools = tools
                     .into_iter()
@@ -573,14 +604,15 @@ impl JsPluginGeneration {
                 if index == 0 {
                     hooks.extend(generation_observer_hooks.take().unwrap_or_default());
                 }
-                Arc::new(JsAgentPlugin {
+                Arc::new(JsPlugin {
                     id: plugin_id,
+                    session_hooks,
                     tools,
                     commands,
                     hooks,
                     lease: Arc::clone(&lease),
                     active_streams: Mutex::new(HashMap::new()),
-                }) as Arc<dyn AgentPlugin>
+                }) as Arc<dyn Plugin>
             })
             .collect();
         let provider_plugins = provider_plugins
@@ -593,28 +625,17 @@ impl JsPluginGeneration {
                 }) as Arc<dyn ProviderPlugin>
             })
             .collect();
-        let session_plugins = session_plugins
-            .into_iter()
-            .map(|plugin| {
-                Arc::new(JsSessionPlugin {
-                    id: PluginId::new(plugin.id),
-                    hooks: plugin.hooks,
-                    lease: Arc::clone(&lease),
-                }) as Arc<dyn SessionPlugin>
-            })
-            .collect();
 
         Ok(Self {
-            agent_plugins,
+            plugins: agent_plugins,
             provider_plugins,
             provider_registrations,
-            session_plugins,
             diagnostics,
         })
     }
 
-    pub fn agent_plugins(&self) -> Vec<Arc<dyn AgentPlugin>> {
-        self.agent_plugins.clone()
+    pub fn plugins(&self) -> Vec<Arc<dyn Plugin>> {
+        self.plugins.clone()
     }
 
     pub fn provider_plugins(&self) -> Vec<Arc<dyn ProviderPlugin>> {
@@ -623,10 +644,6 @@ impl JsPluginGeneration {
 
     pub fn provider_registrations(&self) -> &[JsProviderRegistration] {
         &self.provider_registrations
-    }
-
-    pub fn session_plugins(&self) -> Vec<Arc<dyn SessionPlugin>> {
-        self.session_plugins.clone()
     }
 
     pub fn diagnostics(&self) -> &[JsExtensionDiagnostic] {
@@ -1078,11 +1095,12 @@ impl Drop for JsGenerationLease {
     }
 }
 
-struct JsAgentPlugin {
+struct JsPlugin {
     id: PluginId,
     tools: Vec<Arc<dyn Tool>>,
     commands: Vec<Arc<dyn Command>>,
     hooks: Vec<JsAgentHook>,
+    session_hooks: Vec<JsHookManifest>,
     lease: Arc<JsGenerationLease>,
     active_streams: Mutex<HashMap<RunId, ActiveJsStream>>,
 }
@@ -1099,7 +1117,7 @@ struct JsAgentHook {
     callback_id: String,
 }
 
-impl JsAgentPlugin {
+impl JsPlugin {
     fn hook_callbacks<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a JsAgentHook> {
         self.hooks.iter().filter(move |hook| hook.name == name)
     }
@@ -1447,9 +1465,20 @@ fn same_message_role(left: &Message, right: &Message) -> bool {
 }
 
 #[async_trait]
-impl AgentPlugin for JsAgentPlugin {
+impl Plugin for JsPlugin {
     fn id(&self) -> PluginId {
         self.id.clone()
+    }
+
+    fn session_hook_interests(&self) -> pi_plugin::SessionHookInterests {
+        let hooks: Vec<_> = self
+            .session_hooks
+            .iter()
+            .map(|hook| {
+                pi_plugin::SessionHook::from_name(&hook.name).expect("validated session hook")
+            })
+            .collect();
+        pi_plugin::SessionHookInterests::from_hooks(&hooks)
     }
 
     fn hook_interests(&self) -> AgentHookInterests {
@@ -1467,7 +1496,7 @@ impl AgentPlugin for JsAgentPlugin {
         AgentHookInterests::from_hooks(&hooks)
     }
 
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         for tool in &self.tools {
             context.register_tool(Arc::clone(tool))?;
         }
@@ -1901,7 +1930,7 @@ impl AgentPlugin for JsAgentPlugin {
             if result.get("block").and_then(Value::as_bool) == Some(true) {
                 return Ok(ToolCallPatch {
                     arguments: Some(arguments),
-                    block: Some(pi_core::ToolCallBlock {
+                    block: Some(pi_plugin::ToolCallBlock {
                         reason: result
                             .get("reason")
                             .and_then(Value::as_str)
@@ -1971,6 +2000,260 @@ impl AgentPlugin for JsAgentPlugin {
             aggregate.merge(&parsed);
         }
         Ok(aggregate.into_core())
+    }
+
+    async fn session_start(
+        &self,
+        context: &SessionPluginContext,
+        event: &SessionStartEvent,
+    ) -> Result<(), PluginError> {
+        self.session_notify(
+            "session_start",
+            context,
+            json!({
+                "type": "session_start",
+                "reason": session_start_reason(event.reason),
+                "previousSessionFile": event.previous_session_file,
+            }),
+        )
+        .await
+    }
+
+    async fn session_info_changed(
+        &self,
+        context: &SessionPluginContext,
+        event: &SessionInfoChangedEvent,
+    ) -> Result<(), PluginError> {
+        self.session_notify(
+            "session_info_changed",
+            context,
+            json!({ "type": "session_info_changed", "name": event.name }),
+        )
+        .await
+    }
+
+    async fn session_before_switch(
+        &self,
+        context: &SessionPluginContext,
+        event: &SessionBeforeSwitchEvent,
+    ) -> Result<Option<SessionBeforeSwitchResult>, PluginError> {
+        let result = self
+            .session_invoke(
+                "session_before_switch",
+                context,
+                json!({
+                    "type": "session_before_switch",
+                    "reason": session_switch_reason(event.reason),
+                    "targetSessionFile": event.target_session_file,
+                }),
+                None,
+            )
+            .await?;
+        if result.is_null() {
+            return Ok(None);
+        }
+        let result = serde_json::from_value::<JsSessionBeforeSwitchResult>(result)
+            .map_err(invalid_session_result)?;
+        Ok(Some(SessionBeforeSwitchResult {
+            cancel: result.cancel,
+        }))
+    }
+
+    async fn session_before_fork(
+        &self,
+        context: &SessionPluginContext,
+        event: &SessionBeforeForkEvent,
+    ) -> Result<Option<SessionBeforeForkResult>, PluginError> {
+        let result = self
+            .session_invoke(
+                "session_before_fork",
+                context,
+                json!({
+                    "type": "session_before_fork",
+                    "entryId": event.entry_id,
+                    "position": session_fork_position(event.position),
+                }),
+                None,
+            )
+            .await?;
+        if result.is_null() {
+            return Ok(None);
+        }
+        let result = serde_json::from_value::<JsSessionBeforeForkResult>(result)
+            .map_err(invalid_session_result)?;
+        Ok(Some(SessionBeforeForkResult {
+            cancel: result.cancel,
+            skip_conversation_restore: result.skip_conversation_restore,
+        }))
+    }
+
+    async fn session_before_compact(
+        &self,
+        context: &SessionPluginContext,
+        event: &SessionBeforeCompactEvent,
+    ) -> Result<Option<SessionBeforeCompactResult>, PluginError> {
+        let preparation = &event.preparation;
+        let result = self
+            .session_invoke(
+                "session_before_compact",
+                context,
+                json!({
+                    "type": "session_before_compact",
+                    "preparation": {
+                        "messagesToSummarize": preparation.messages_to_summarize,
+                        "turnPrefixMessages": preparation.turn_prefix_messages,
+                        "retainedTail": preparation.retained_tail,
+                        "isSplitTurn": preparation.is_split_turn,
+                        "tokensBefore": preparation.tokens_before,
+                        "previousSummary": preparation.previous_summary,
+                        "fileOps": {
+                            "read": sorted_strings(&preparation.file_ops.read),
+                            "written": sorted_strings(&preparation.file_ops.written),
+                            "edited": sorted_strings(&preparation.file_ops.edited),
+                        },
+                        "settings": preparation.settings,
+                    },
+                    "branchEntries": event.branch_entries,
+                    "customInstructions": event.custom_instructions,
+                    "reason": event.reason,
+                    "willRetry": event.will_retry,
+                }),
+                Some(&event.signal),
+            )
+            .await?;
+        if result.is_null() {
+            return Ok(None);
+        }
+        let result = serde_json::from_value::<JsSessionBeforeCompactResult>(result)
+            .map_err(invalid_session_result)?;
+        Ok(Some(SessionBeforeCompactResult {
+            cancel: result.cancel,
+            compaction: result.compaction.map(|compaction| CompactionEntry {
+                summary: compaction.summary,
+                retained_tail: preparation.retained_tail.clone(),
+                tokens_before: compaction.tokens_before,
+                details: compaction.details,
+                usage: compaction.usage,
+            }),
+        }))
+    }
+
+    async fn session_compact(
+        &self,
+        context: &SessionPluginContext,
+        event: &SessionCompactEvent,
+    ) -> Result<(), PluginError> {
+        self.session_notify(
+            "session_compact",
+            context,
+            json!({
+                "type": "session_compact",
+                "compactionEntry": event.compaction_entry,
+                "fromExtension": event.from_extension,
+                "reason": event.reason,
+                "willRetry": event.will_retry,
+            }),
+        )
+        .await
+    }
+
+    async fn session_compact_failed(
+        &self,
+        context: &SessionPluginContext,
+        event: &SessionCompactFailedEvent,
+    ) -> Result<(), PluginError> {
+        self.session_notify(
+            "session_compact_failed",
+            context,
+            json!({
+                "type": "session_compact_failed",
+                "reason": event.reason,
+                "errorMessage": event.error_message,
+                "aborted": event.aborted,
+                "willRetry": event.will_retry,
+                "fromExtension": event.from_extension,
+            }),
+        )
+        .await
+    }
+
+    async fn session_shutdown(
+        &self,
+        context: &SessionPluginContext,
+        event: &SessionShutdownEvent,
+    ) -> Result<(), PluginError> {
+        self.session_notify(
+            "session_shutdown",
+            context,
+            json!({
+                "type": "session_shutdown",
+                "reason": session_shutdown_reason(event.reason),
+                "targetSessionFile": event.target_session_file,
+            }),
+        )
+        .await
+    }
+
+    async fn session_before_tree(
+        &self,
+        context: &SessionPluginContext,
+        event: &SessionBeforeTreeEvent,
+    ) -> Result<Option<SessionBeforeTreeResult>, PluginError> {
+        let result = self
+            .session_invoke(
+                "session_before_tree",
+                context,
+                json!({
+                    "type": "session_before_tree",
+                    "preparation": {
+                        "targetId": event.preparation.target_id,
+                        "oldLeafId": event.preparation.old_leaf_id,
+                        "commonAncestorId": event.preparation.common_ancestor_id,
+                        "entriesToSummarize": event.preparation.entries_to_summarize,
+                        "userWantsSummary": event.preparation.user_wants_summary,
+                        "customInstructions": event.preparation.custom_instructions,
+                        "replaceInstructions": event.preparation.replace_instructions,
+                        "label": event.preparation.label,
+                    },
+                }),
+                Some(&event.signal),
+            )
+            .await?;
+        if result.is_null() {
+            return Ok(None);
+        }
+        let result = serde_json::from_value::<JsSessionBeforeTreeResult>(result)
+            .map_err(invalid_session_result)?;
+        Ok(Some(SessionBeforeTreeResult {
+            cancel: result.cancel,
+            summary: result.summary.map(|summary| SessionTreeSummary {
+                summary: summary.summary,
+                details: summary.details,
+                usage: summary.usage,
+            }),
+            custom_instructions: result.custom_instructions,
+            replace_instructions: result.replace_instructions,
+            label: result.label,
+        }))
+    }
+
+    async fn session_tree(
+        &self,
+        context: &SessionPluginContext,
+        event: &SessionTreeEvent,
+    ) -> Result<(), PluginError> {
+        self.session_notify(
+            "session_tree",
+            context,
+            json!({
+                "type": "session_tree",
+                "newLeafId": event.new_leaf_id,
+                "oldLeafId": event.old_leaf_id,
+                "summaryEntry": event.summary_entry,
+                "fromExtension": event.from_extension,
+            }),
+        )
+        .await
     }
 }
 
@@ -2055,7 +2338,7 @@ struct JsProviderPlugin {
     lease: Arc<JsGenerationLease>,
 }
 
-#[pi_core::provider_plugin]
+#[pi_plugin::provider_plugin]
 impl ProviderPlugin for JsProviderPlugin {
     fn id(&self) -> PluginId {
         self.id.clone()
@@ -2219,22 +2502,16 @@ fn report_provider_invoke_error(
     context.report_hook_error(hook, message);
 }
 
-struct JsSessionPlugin {
-    id: PluginId,
-    hooks: Vec<JsHookManifest>,
-    lease: Arc<JsGenerationLease>,
-}
-
-impl JsSessionPlugin {
-    async fn invoke(
+impl JsPlugin {
+    async fn session_invoke(
         &self,
         name: &'static str,
         context: &SessionPluginContext,
         event: Value,
         signal: Option<&AbortSignal>,
-    ) -> Result<Value, SessionPluginError> {
+    ) -> Result<Value, PluginError> {
         let mut last = Value::Null;
-        for hook in self.hooks.iter().filter(|hook| hook.name == name) {
+        for hook in self.session_hooks.iter().filter(|hook| hook.name == name) {
             let result = self
                 .lease
                 .invoke(
@@ -2250,7 +2527,7 @@ impl JsSessionPlugin {
                 )
                 .await
                 .map_err(|error| {
-                    SessionPluginError::Failure(match error {
+                    PluginError::Failure(match error {
                         JsInvokeError::Aborted => "JavaScript session hook was aborted".to_string(),
                         JsInvokeError::Callback(error) => error.to_string(),
                     })
@@ -2266,13 +2543,15 @@ impl JsSessionPlugin {
         Ok(last)
     }
 
-    async fn notify(
+    async fn session_notify(
         &self,
         name: &'static str,
         context: &SessionPluginContext,
         event: Value,
-    ) -> Result<(), SessionPluginError> {
-        self.invoke(name, context, event, None).await.map(drop)
+    ) -> Result<(), PluginError> {
+        self.session_invoke(name, context, event, None)
+            .await
+            .map(drop)
     }
 }
 
@@ -2351,269 +2630,8 @@ struct JsSessionTreeSummary {
     usage: Option<Usage>,
 }
 
-#[pi_session::session_plugin]
-impl SessionPlugin for JsSessionPlugin {
-    fn id(&self) -> PluginId {
-        self.id.clone()
-    }
-
-    async fn session_start(
-        &self,
-        context: &SessionPluginContext,
-        event: &SessionStartEvent,
-    ) -> Result<(), SessionPluginError> {
-        self.notify(
-            "session_start",
-            context,
-            json!({
-                "type": "session_start",
-                "reason": session_start_reason(event.reason),
-                "previousSessionFile": event.previous_session_file,
-            }),
-        )
-        .await
-    }
-
-    async fn session_info_changed(
-        &self,
-        context: &SessionPluginContext,
-        event: &SessionInfoChangedEvent,
-    ) -> Result<(), SessionPluginError> {
-        self.notify(
-            "session_info_changed",
-            context,
-            json!({ "type": "session_info_changed", "name": event.name }),
-        )
-        .await
-    }
-
-    async fn session_before_switch(
-        &self,
-        context: &SessionPluginContext,
-        event: &SessionBeforeSwitchEvent,
-    ) -> Result<Option<SessionBeforeSwitchResult>, SessionPluginError> {
-        let result = self
-            .invoke(
-                "session_before_switch",
-                context,
-                json!({
-                    "type": "session_before_switch",
-                    "reason": session_switch_reason(event.reason),
-                    "targetSessionFile": event.target_session_file,
-                }),
-                None,
-            )
-            .await?;
-        if result.is_null() {
-            return Ok(None);
-        }
-        let result = serde_json::from_value::<JsSessionBeforeSwitchResult>(result)
-            .map_err(invalid_session_result)?;
-        Ok(Some(SessionBeforeSwitchResult {
-            cancel: result.cancel,
-        }))
-    }
-
-    async fn session_before_fork(
-        &self,
-        context: &SessionPluginContext,
-        event: &SessionBeforeForkEvent,
-    ) -> Result<Option<SessionBeforeForkResult>, SessionPluginError> {
-        let result = self
-            .invoke(
-                "session_before_fork",
-                context,
-                json!({
-                    "type": "session_before_fork",
-                    "entryId": event.entry_id,
-                    "position": session_fork_position(event.position),
-                }),
-                None,
-            )
-            .await?;
-        if result.is_null() {
-            return Ok(None);
-        }
-        let result = serde_json::from_value::<JsSessionBeforeForkResult>(result)
-            .map_err(invalid_session_result)?;
-        Ok(Some(SessionBeforeForkResult {
-            cancel: result.cancel,
-            skip_conversation_restore: result.skip_conversation_restore,
-        }))
-    }
-
-    async fn session_before_compact(
-        &self,
-        context: &SessionPluginContext,
-        event: &SessionBeforeCompactEvent,
-    ) -> Result<Option<SessionBeforeCompactResult>, SessionPluginError> {
-        let preparation = &event.preparation;
-        let result = self
-            .invoke(
-                "session_before_compact",
-                context,
-                json!({
-                    "type": "session_before_compact",
-                    "preparation": {
-                        "messagesToSummarize": preparation.messages_to_summarize,
-                        "turnPrefixMessages": preparation.turn_prefix_messages,
-                        "retainedTail": preparation.retained_tail,
-                        "isSplitTurn": preparation.is_split_turn,
-                        "tokensBefore": preparation.tokens_before,
-                        "previousSummary": preparation.previous_summary,
-                        "fileOps": {
-                            "read": sorted_strings(&preparation.file_ops.read),
-                            "written": sorted_strings(&preparation.file_ops.written),
-                            "edited": sorted_strings(&preparation.file_ops.edited),
-                        },
-                        "settings": preparation.settings,
-                    },
-                    "branchEntries": event.branch_entries,
-                    "customInstructions": event.custom_instructions,
-                    "reason": event.reason,
-                    "willRetry": event.will_retry,
-                }),
-                Some(&event.signal),
-            )
-            .await?;
-        if result.is_null() {
-            return Ok(None);
-        }
-        let result = serde_json::from_value::<JsSessionBeforeCompactResult>(result)
-            .map_err(invalid_session_result)?;
-        Ok(Some(SessionBeforeCompactResult {
-            cancel: result.cancel,
-            compaction: result.compaction.map(|compaction| CompactionEntry {
-                summary: compaction.summary,
-                retained_tail: preparation.retained_tail.clone(),
-                tokens_before: compaction.tokens_before,
-                details: compaction.details,
-                usage: compaction.usage,
-            }),
-        }))
-    }
-
-    async fn session_compact(
-        &self,
-        context: &SessionPluginContext,
-        event: &SessionCompactEvent,
-    ) -> Result<(), SessionPluginError> {
-        self.notify(
-            "session_compact",
-            context,
-            json!({
-                "type": "session_compact",
-                "compactionEntry": event.compaction_entry,
-                "fromExtension": event.from_extension,
-                "reason": event.reason,
-                "willRetry": event.will_retry,
-            }),
-        )
-        .await
-    }
-
-    async fn session_compact_failed(
-        &self,
-        context: &SessionPluginContext,
-        event: &SessionCompactFailedEvent,
-    ) -> Result<(), SessionPluginError> {
-        self.notify(
-            "session_compact_failed",
-            context,
-            json!({
-                "type": "session_compact_failed",
-                "reason": event.reason,
-                "errorMessage": event.error_message,
-                "aborted": event.aborted,
-                "willRetry": event.will_retry,
-                "fromExtension": event.from_extension,
-            }),
-        )
-        .await
-    }
-
-    async fn session_shutdown(
-        &self,
-        context: &SessionPluginContext,
-        event: &SessionShutdownEvent,
-    ) -> Result<(), SessionPluginError> {
-        self.notify(
-            "session_shutdown",
-            context,
-            json!({
-                "type": "session_shutdown",
-                "reason": session_shutdown_reason(event.reason),
-                "targetSessionFile": event.target_session_file,
-            }),
-        )
-        .await
-    }
-
-    async fn session_before_tree(
-        &self,
-        context: &SessionPluginContext,
-        event: &SessionBeforeTreeEvent,
-    ) -> Result<Option<SessionBeforeTreeResult>, SessionPluginError> {
-        let result = self
-            .invoke(
-                "session_before_tree",
-                context,
-                json!({
-                    "type": "session_before_tree",
-                    "preparation": {
-                        "targetId": event.preparation.target_id,
-                        "oldLeafId": event.preparation.old_leaf_id,
-                        "commonAncestorId": event.preparation.common_ancestor_id,
-                        "entriesToSummarize": event.preparation.entries_to_summarize,
-                        "userWantsSummary": event.preparation.user_wants_summary,
-                        "customInstructions": event.preparation.custom_instructions,
-                        "replaceInstructions": event.preparation.replace_instructions,
-                        "label": event.preparation.label,
-                    },
-                }),
-                Some(&event.signal),
-            )
-            .await?;
-        if result.is_null() {
-            return Ok(None);
-        }
-        let result = serde_json::from_value::<JsSessionBeforeTreeResult>(result)
-            .map_err(invalid_session_result)?;
-        Ok(Some(SessionBeforeTreeResult {
-            cancel: result.cancel,
-            summary: result.summary.map(|summary| SessionTreeSummary {
-                summary: summary.summary,
-                details: summary.details,
-                usage: summary.usage,
-            }),
-            custom_instructions: result.custom_instructions,
-            replace_instructions: result.replace_instructions,
-            label: result.label,
-        }))
-    }
-
-    async fn session_tree(
-        &self,
-        context: &SessionPluginContext,
-        event: &SessionTreeEvent,
-    ) -> Result<(), SessionPluginError> {
-        self.notify(
-            "session_tree",
-            context,
-            json!({
-                "type": "session_tree",
-                "newLeafId": event.new_leaf_id,
-                "oldLeafId": event.old_leaf_id,
-                "summaryEntry": event.summary_entry,
-                "fromExtension": event.from_extension,
-            }),
-        )
-        .await
-    }
-}
-
-fn invalid_session_result(error: serde_json::Error) -> SessionPluginError {
-    SessionPluginError::Failure(format!("invalid JavaScript session hook result: {error}"))
+fn invalid_session_result(error: serde_json::Error) -> PluginError {
+    PluginError::Failure(format!("invalid JavaScript session hook result: {error}"))
 }
 
 fn sorted_strings(values: &HashSet<String>) -> Vec<&str> {

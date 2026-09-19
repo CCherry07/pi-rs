@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use pi_core::{UiMultiSelectRequest, UiMultiSelectResponse};
+
+use pi_plugin::{UiMultiSelectRequest, UiMultiSelectResponse};
 use pi_session::PluginUiBridge;
 use tokio::sync::{mpsc, oneshot};
 

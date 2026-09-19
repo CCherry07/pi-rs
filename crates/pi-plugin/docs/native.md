@@ -1,0 +1,365 @@
+# Native plugins with pi-plugin
+
+Author-facing interface for version-locked native `pi-rs` plugins.
+
+## Create a plugin / 创建插件
+
+The CLI can scaffold, build, verify and publish native plugins:
+
+~~~bash
+pi plugin new hello --kind plugin
+pi --cwd hello plugin package
+pi plugin verify hello/dist
+pi plugin install ./hello/dist
+~~~
+
+For an unreleased working checkout, add --sdk /path/to/pi-rs to new and run the pi binary built
+from that same checkout. The scaffold pins its Rust toolchain and seeds Cargo.lock; commit the
+completed lock after the first build and use package --locked in CI. See the
+[author tools guide](../../pi-plugin-manager/docs/authoring.md) for provider templates, options,
+multi-platform release workflows, GitHub publication and static registry fragments.
+
+One crate exports exactly one plugin kind. Build both `cdylib` for loading and `rlib` for tests:
+
+```toml
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pi-plugin = { path = "/path/to/pi-rs/crates/pi-plugin", features = ["native"] }
+```
+
+The SDK is currently consumed from the workspace (or a pinned Git revision). Independent crates.io
+publication is not available: the current fingerprint consumes the full workspace source/lock
+layout. Host and plugin must use the same SDK build fingerprint; a matching SDK semver alone does
+not establish native compatibility.
+
+无配置插件实现 `Default`，作者不需要写 native constructor 或 `id()`：
+
+```rust
+use pi_plugin::prelude::*;
+
+#[derive(Default)]
+pub struct HelloPlugin;
+
+#[pi_plugin::native_plugin]
+impl Plugin for HelloPlugin {
+    fn register(&self, context: &mut RegisterContext<'_>) -> Result<()> {
+        // context.register_tool(...)
+        Ok(())
+    }
+}
+```
+
+## Runtime context / 运行时上下文
+
+Native callbacks receive Pi plugin capabilities directly on their context. There is no `pi()`
+accessor and plugins never retain or lock the concrete `AgentSession`. The host PluginContext is
+implemented by `pi-session` against `AgentSession` / `PiSession` / `PiRuntime`; the native path does
+not use the JavaScript `query` / `notify` / `request` wire protocol:
+
+```rust
+#[pi_plugin::native_plugin]
+impl Plugin for HelloPlugin {
+    async fn before_agent_start(
+        &self,
+        context: AgentPluginContext,
+        event: BeforeAgentStartEvent,
+    ) -> std::result::Result<BeforeAgentStartPatch, PluginError> {
+        let model = context.models.current()?;
+        let session = context.session.snapshot()?;
+        let trusted = context.session.is_project_trusted()?;
+
+        context.ui.notify(
+            NoticeLevel::Info,
+            format!("model={model:?}, session={:?}, trusted={trusted}", session.name()),
+        )?;
+
+        Ok(BeforeAgentStartPatch {
+            system_prompt: Some(event.system_prompt),
+            ..BeforeAgentStartPatch::default()
+        })
+    }
+}
+```
+
+`AgentPluginContext`, `InputContext`, `ToolContext`, `ProviderPluginContext`, and
+`SessionPluginContext` expose three explicit capability fields: `session`, `models`, and `ui`.
+There is no implicit `Deref` or generic `runtime` bucket. Session identity and live state,
+model-catalogue queries, and semantic product interaction therefore remain visibly separate at call
+sites. Their existing callback metadata such as plugin ID, run ID, provider/model ID, tool-call ID,
+and session identity remains available through read-only accessors such as `plugin_id()`,
+`run_id()`, `cwd()`, and `signal()`. `context.session.snapshot()` captures identity, entries, the
+current branch, leaf, and labels in one coherent read; each entry has typed metadata and retains its
+complete Pi wire value through `raw()`. `context.cwd()` is the callback execution directory;
+`context.session.cwd()?` is the directory recorded by the active session. Standalone tool and
+command tests use `ToolContext::standalone(...)` / `CommandContext::standalone(...)`, making the
+absence of session, model, and presentation capabilities explicit.
+Session contexts also expose typed `active_tools()`, `tools()`, and `commands()` reads. Async
+`context.ui.confirm(title, message)` requests a semantic yes/no decision from an interactive
+frontend and resolves to `false` in non-interactive product modes; the frontend retains all
+terminal ownership.
+
+`context.session.execution_origin()?` distinguishes `SessionExecutionOrigin::User` from a managed
+`Subagent`. The origin survives live generation replacement and nested delegation but is not a
+session wire field. Feature plugins use it for their own background-work policy; ordinary tools
+remain available. `ToolContext::run_id()` exposes the same `RunId` seen by the Agent's hooks,
+including argument preparation and execution; standalone tool contexts return `None`. Invocation
+state and observations belong to plugins, not a core type-erased state bag. Foreground plugins can
+own state between `agent_start` and `agent_end`; ephemeral callers attach fresh tool-hook-only
+plugin instances to own their private state through completion or cancellation.
+
+`context.session.record_usage(usage, details)` attributes detached provider work to the parent
+session without adding a message or context entry. The host persists it as an explicit signed
+usage adjustment; `details` should identify the task so accounting consumers can distinguish the
+source. It remains available while an awaited shutdown hook is finishing and retires with the
+generation.
+
+`context.session.complete(DirectCompletionRequest { ... }, signal).await` runs one isolated,
+tool-free provider completion using the active session model and request-time credentials. It does
+not append messages, emit agent lifecycle events, or share the main agent's tool loop. Plugins must
+keep this work bounded and supply their own cancellation signal. For side work requiring tools,
+use the ephemeral Agent entry instead.
+`Tool::prepare_arguments(&ToolContext, ...)` and `Tool::execute(ToolContext, ...)` observe the same
+runtime generation, including retirement; argument compatibility shims can therefore use the same
+typed product capabilities as execution without a separate adapter context.
+
+Registered commands receive the stronger `CommandContext`; session replacement and navigation are
+unavailable on ordinary hooks and tools:
+
+```rust
+match context.session.create(NewSessionOptions::default()).await? {
+    SessionReplacement::Cancelled => {}
+    SessionReplacement::Replaced(session) => {
+        session
+            .send_user_message(
+                CustomMessageContent::Text("Continue here".to_string()),
+                SendUserMessageOptions::default(),
+            )
+            .await?;
+    }
+}
+```
+
+## Desktop presentation state / 桌面展示状态
+
+Backend plugins can publish a bounded, durable JSON value for a separately packaged React view.
+`WidgetPublisher` owns the `pi.ui.widget` entry envelope, namespaced-key and 256 KiB checks,
+successful-write duplicate suppression, and null tombstones. The plugin owns the value schema and
+any history/current-runtime merge policy:
+
+```rust
+use pi_plugin::desktop::WidgetPublisher;
+
+let mut progress = WidgetPublisher::new("example.progress")?;
+progress.publish(&context.session, &serde_json::json!({"completed": 3, "total": 5}))?;
+progress.remove(&context.session)?;
+```
+
+Keep one publisher per key and session. A publisher intentionally does not recover business state
+or authorize commands; React packages decode values through `@pi-rs/desktop-sdk`, and registered
+native commands remain the executable interface.
+
+Contexts are generation-bound capabilities. A context retained after its runtime generation is
+replaced returns `PluginContextError::Retired`; it never follows a stale native plugin into a
+new generation. A successful `new_session`, `fork`, or `switch_session` carries a
+`ReplacedSessionContext` bound to the replacement generation, while `reload` returns that fresh
+context directly. Use the returned value for every follow-up operation. UI access is semantic
+(`notify`) and never exposes terminal or Ratatui ownership to a plugin.
+
+The plugin macro derives the exact hook-interest set from the callback methods present in the impl.
+Authors do not declare a parallel list and there is no catch-all `ALL` mode. A registration-only
+plugin therefore participates in `register()` but receives no runtime hook calls. Statically linked
+plugins inside a host use `#[pi_plugin::plugin]` for the same derivation without exporting a
+dynamic-library descriptor or constructor. That same attribute covers Session hooks;
+static provider plugins use `#[pi_plugin::provider_plugin]`. These lifecycle attributes all
+expand async callback methods, so plugin impls do not need a separate `#[async_trait]` attribute.
+Lower-level async traits such as `Tool`, `Command`, and `Provider` still use `#[async_trait]` when
+implemented directly.
+
+Use `#[pi_plugin::native_provider]` with the `native` feature or
+`#[pi_plugin::native_plugin]` with the `native` feature for Agent and Session hooks. The macro must
+annotate the matching trait impl. Each macro also supplies its async-trait expansion, and a dynamic
+library may contain only one export macro. A Plugin implementation can define both Agent and Session hooks;
+register it once. See [pi-plugin](../README.md) for shared ownership and preparation.
+
+## Fallible/configured construction / 配置与可失败初始化
+
+Only configured plugins implement the additional factory interface:
+
+```rust
+use pi_plugin::prelude::*;
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Options {
+    base_url: String,
+}
+
+struct AcmePlugin {
+    options: Options,
+}
+
+impl PluginFactory for AcmePlugin {
+    type Options = Options;
+
+    fn prepare(
+        _context: &PrepareContext,
+        options: Self::Options,
+    ) -> PrepareResult<Option<Self>> {
+        Ok(Some(Self { options }))
+    }
+}
+
+#[pi_plugin::native_provider(factory)]
+impl ProviderPlugin for AcmePlugin {}
+```
+
+`PrepareContext` exposes the active cwd, immutable package directory, persistent per-plugin data
+directory, disposable cache directory, load scope, and generation. It deliberately omits terminal
+state, mutable registries, sessions, provider credentials, and product configuration.
+
+## Local loading / 本地加载
+
+Build the crate, then pass the dynamic library directly while developing:
+
+```bash
+cargo build
+cargo run -p pi-cli -- --plugin target/debug/libhello.dylib
+```
+
+`--plugin` may be repeated and also accepts a `pi-plugin.toml` path or its containing directory.
+The platform suffix is `.so` on Linux and `.dll` on Windows.
+
+Installed global manifests are discovered below `<agent-dir>/plugins`. Trusted project manifests
+are discovered below `<project>/.pi/plugins`; an untrusted project plugin file is never opened.
+
+```toml
+schema = 1
+
+[plugin]
+id = "hello"
+version = "0.1.0"
+kind = "plugin"
+artifact = "libhello.dylib"
+
+[options]
+# Plugin-specific typed options
+```
+
+The manifest identity must match the binary descriptor. Artifacts must remain inside their package
+directory. Duplicate IDs fail within each plugin kind.
+
+## Compatibility and reload / 兼容与重载
+
+The export macro emits a C-layout descriptor containing ABI version, plugin kind, identity,
+version, and a fingerprint derived from the core/plugin/macro sources, workspace lockfile,
+Rust compiler, target, panic strategy, target features, and encoded Rust flags. The host checks that
+descriptor before resolving a Rust-ABI trait-object constructor. The SDK prelude exposes lifecycle
+contracts from `pi-plugin` and durable wire types from `pi-core::session`; native authors do not
+need the `pi-session` runtime crate. Native libraries are
+trusted in-process code and are intentionally never unloaded during the process lifetime. Before
+loading, the host snapshots each artifact below `<agent-dir>/cache/plugins/artifacts/<sha256>`;
+unchanged content reuses one pinned handle, while a rebuilt artifact gets a new load path on reload.
+The SDK also pins the `serde_json::Value` map representation used by constructor options, so feature
+unification in a host workspace cannot silently change that Rust-ABI type's layout.
+
+The current contract is native ABI **24**. ABI 24 moves native contracts into `pi-plugin` and
+consolidates host services in `pi-plugin-manager`. ABI 23 unifies callback errors as `PluginError` and
+uses typed `PluginHook` diagnostics with optional generation metadata. ABI 22 unifies Agent and Session callbacks under one Plugin, moves preparation
+to pi-plugin and permits disabled instances. ABI 21 added
+`IsolatedSessionOptions::fork_turns`, which limits a fork to the most recent complete
+user-originated turns while preserving tool-call/result grouping. `None` keeps the complete
+effective fork; a positive value keeps that many turns. The host rejects zero and any turn limit
+paired with fresh context. ABI 20 adds persistent managed-isolated-session turns,
+non-starting message delivery, queued follow-ups, and turn-specific wait/abort handles. ABI 19 adds
+`SessionContext::isolated_fork_point()` and `IsolatedSessionOptions.fork_point`.
+An `IsolatedForkPoint { parent_session_id, parent_entry_id }` identifies the persisted caller's
+branch before its active tool batch and lets deferred
+forks use that same prefix even after the parent continues or compacts. The host rejects foreign
+parent sessions, missing entries, and fork points supplied with fresh context. Capturing an
+unsaved or empty branch returns `None`; the feature decides whether to require fork or prefer fresh.
+ABI 18 adds aggregate `usage` to
+`IsolatedSessionOutcome`, so managed child sessions can report and attribute their complete billed
+usage. ABI 17 adds `IsolatedSessionOptions.context` with
+`IsolatedContextMode::{Fresh, Fork}`. Omission preserves fresh-session behavior; fork initializes
+an independent child from the persisted caller's effective branch before its active tool batch. Ancestor
+history survives reload without importing ancestor configuration or billed usage. This does not
+copy the workspace or inherit the parent's assembled system prompt.
+ABI 16 adds aggregate `usage` and `api_calls` to
+`EphemeralSessionOutcome` plus `SessionContext::record_usage` for parent-session attribution. ABI 15 replaces core tool-run state with `ToolContext::run_id()`
+and adds explicit `EphemeralSessionRequest.plugins` attachments. ABI 14 added `EphemeralCompactionOptions`, execution-origin
+inspection, and typed invocation-private tool state (removed in ABI 15). ABI 13 extended the ephemeral Agent entry
+introduced in ABI 12 with inherited effective prompt/history, optional history-tail digest,
+invocation-local tool observations and aggregate input-token budgets. Advertised schemas remain those of the
+parent's active tools; `tools` is an execution allowlist enforced before preparation and execution.
+Model/thinking default to the parent. Provider instances, routing and request-time auth are reused.
+
+No parent agent/session hooks, UI, model-control or child-launch capabilities are given to tools;
+history is copied, never appended to the parent. There is no managed-session entry or JSONL file.
+`plugins` accepts invocation-private `Plugin` instances using the ordinary Agent hook driver.
+Duplicate IDs fail before provider execution. Their `register` methods are not invoked:
+registrations come from the immutable parent generation. The driver awaits interested plugins
+in registration order, including prompt/context, Agent/turn/message, and tool hooks. Prompt and
+context patches affect only the private Agent. This structured-prompt entry does not run the
+product `input` pipeline or emit `agent_settled` or `Plugin` lifecycle events.
+Normal tool blocking, initial argument validation, and result patches remain intact;
+hook-replaced arguments execute without revalidation, matching Pi.
+Use an empty vector when no private hooks are needed. Stateful plugins must be constructed fresh
+for each invocation, not reused by cloning a request. The runtime releases its private plugin
+instances on all exit paths; use plugin-owned RAII for cleanup, since cancellation or dropping
+the future can bypass `agent_end`. Cleanup must not spawn detached work.
+Set a positive `timeout` and `max_tool_iterations`; awaiting returns an `EphemeralSessionOutcome`
+with completion, abort, timeout, or failure status, aggregate usage from every completed assistant,
+metered tool, and detached compaction call, and the number of provider calls represented by the
+outcome. Cancellation and dropping the future abort the
+temporary Agent; completed tool side effects are not rolled back. The entry works inside awaited
+shutdown hooks without the session-manager lock. Use launch/wait/abort for ordinary managed
+subagents. Rebuild native plugins for the new exact-build context layout.
+
+Set `EphemeralSessionRequest.compaction` to `Some(EphemeralCompactionOptions { ... })` to compact
+only the private fork between completed tool iterations. Supply a positive pressure threshold,
+tail token budget, and summary output budget, plus protected head/tail message counts. The first
+provider replay remains untouched. Tool-free summaries reuse the pinned generation/provider/auth,
+preserve tool-call/result groups and the current request, and count input/cache usage against the
+same review budget. Summary requests use model-aware input estimates and output caps. Cancellation, timeout,
+empty/invalid/truncated summaries, and dropping the future cannot mutate the parent or create
+session records. `None` disables detached compaction; compaction policy is caller-owned.
+
+ABI 11 added tool-free direct completion to
+`SessionContext`. ABI 10 adds inherited model, thinking, and active-tool selection to fresh
+isolated sessions. ABI 9 added fresh isolated-session launch, wait, and abort to
+`SessionContext`. ABI 8 added async semantic confirmation to `UiContext`.
+Each `message_update` carries a constant-size shared
+`AssistantStream` handle and the current `StreamEvent` delta. Native hooks call `snapshot()` only
+when they need cumulative content; cloning the event no longer clones the accumulated message.
+Completed `turn_end` assistant messages remain shared.
+ABI 6 shared one immutable cumulative partial instead of deep-cloning it per plugin.
+Native hooks normally match on `event.update()`; `event.snapshot()` materializes the cumulative
+assistant message only for hooks that need it.
+ABI 7 also made command-session reload return the fresh `ReplacedSessionContext` instead of
+silently retiring the caller with no continuation handle.
+ABI 5 added the generation-bound Pi product context shared by agent, tool preparation/execution,
+command, provider, and session callbacks. ABI 4 added provider header/response hooks,
+ABI 3 added macro-derived agent hook interests, and ABI 2 added the shared `AgentContext` /
+`added_tool_names` surface. Older artifacts are rejected before any Rust-ABI constructor is
+resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 24 constructors use the
+`pi_plugin_create_v24` / `pi_provider_plugin_create_v24` symbols. Rebuild every native plugin against the
+current SDK after upgrading the host.
+
+Every factory call creates a fresh instance. Runtime and session reload continue to use the existing
+fallible generation factories: a constructor, registration, or validation failure leaves the active
+generation unchanged.
+
+`pi-plugin-manager` adds local and HTTP/GitHub Release installation, static Registry resolution,
+exact target selection, dependency locking, SHA-256 verification, and a content-addressed package
+store. See [plugin manager](../../pi-plugin-manager/README.md) for the release and
+Registry formats. Publisher signatures, Git repository sources, OCI artifacts, update, rollback,
+and store garbage collection remain later distribution milestones.

@@ -3,10 +3,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use axum::response::IntoResponse;
-use pi_core::{
-    AbortHandle, ContentBlock, CustomMessage, CustomMessageContent, TextContent, ToolContext,
-    ToolUpdateSink,
-};
+use pi_core::{AbortHandle, ContentBlock, CustomMessage, CustomMessageContent, TextContent};
+use pi_plugin::{ToolContext, ToolUpdateSink};
 use pi_sdk::{Config, Pi};
 use pi_session::PiSession;
 use serde_json::{Value, json};

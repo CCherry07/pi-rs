@@ -672,7 +672,7 @@ fn tool_result_text(result: &ToolResult) -> String {
     content_text(&result.content)
 }
 
-fn notice_params(thread_id: &str, message: &str, level: pi_core::NoticeLevel) -> Value {
+fn notice_params(thread_id: &str, message: &str, level: pi_plugin::NoticeLevel) -> Value {
     json!({ "threadId": thread_id, "message": message, "level": level })
 }
 
@@ -1536,7 +1536,7 @@ mod tests {
         let params = notice_params(
             "thread",
             "Native command output",
-            pi_core::NoticeLevel::Warning,
+            pi_plugin::NoticeLevel::Warning,
         );
         assert_eq!(params["threadId"], "thread");
         assert_eq!(params["level"], "warning");

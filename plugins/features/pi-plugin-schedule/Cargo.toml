@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+pi-plugin.workspace = true
 async-trait.workspace = true
 chrono = "0.4.42"
 chrono-tz = "0.10.4"

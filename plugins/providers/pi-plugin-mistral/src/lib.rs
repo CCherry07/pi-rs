@@ -13,10 +13,12 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use pi_core::{
-    AbortSignal, ContentBlock, Message, ModelInput, PluginId, Provider, ProviderAvailability,
-    ProviderCallContext, ProviderError, ProviderId, ProviderPlugin, ProviderRegisterContext,
-    ProviderRequest, ProviderStream, ResponseMetadata, ResponseMetadataPatch, StopReason,
-    StreamEvent, ThinkingLevel, ToolCallId, Usage,
+    AbortSignal, ContentBlock, Message, ModelInput, PluginId, ProviderId, ResponseMetadata,
+    ResponseMetadataPatch, StopReason, StreamEvent, ThinkingLevel, ToolCallId, Usage,
+};
+use pi_plugin::{
+    Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderPlugin,
+    ProviderRegisterContext, ProviderRequest, ProviderStream,
 };
 use pi_provider::{
     HttpTransport, ReqwestTransport, SseDecoder, TransportError, insert_header,
@@ -69,13 +71,13 @@ impl MistralPlugin {
     }
 }
 
-#[pi_core::provider_plugin]
+#[pi_plugin::provider_plugin]
 impl ProviderPlugin for MistralPlugin {
     fn id(&self) -> PluginId {
         PluginId::new("mistral-provider")
     }
 
-    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_core::Result<()> {
+    fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_provider(self.provider.clone())?;
         for model in mistral_models() {
             context.register_model(model)?;
@@ -911,7 +913,8 @@ mod tests {
     use std::sync::Mutex;
 
     use futures::{StreamExt, stream};
-    use pi_core::{AbortHandle, ModelId, ModelSpec, ProviderCallContext, ToolSpec};
+    use pi_core::{AbortHandle, ModelId, ModelSpec, ToolSpec};
+    use pi_plugin::ProviderCallContext;
     use pi_provider::{HttpResponse, TransportError};
 
     use super::*;
