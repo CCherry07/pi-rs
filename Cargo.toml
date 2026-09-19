@@ -28,7 +28,7 @@ members = [
     "crates/pi-telemetry",
     "crates/pi-rpc",
     "crates/pi-acp",
-    "crates/pi-mcp",
+    "plugins/features/pi-plugin-mcp",
     "bindings/pi-napi",
     "plugins/features/pi-plugin-prompts",
     "plugins/features/pi-plugin-skills",
@@ -104,7 +104,7 @@ pi-eval = { path = "crates/pi-eval" }
 pi-telemetry = { path = "crates/pi-telemetry" }
 pi-rpc = { path = "crates/pi-rpc" }
 pi-acp = { path = "crates/pi-acp" }
-pi-mcp = { path = "crates/pi-mcp" }
+pi-plugin-mcp = { path = "plugins/features/pi-plugin-mcp" }
 pi-plugin-prompts = { path = "plugins/features/pi-plugin-prompts" }
 pi-plugin-skills = { path = "plugins/features/pi-plugin-skills" }
 pi-plugin-session-transfer = { path = "plugins/features/pi-plugin-session-transfer" }

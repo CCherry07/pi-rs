@@ -10,6 +10,9 @@ and transactional generation activation—not ownership of each component's impl
 Domain configuration and validation stay with the corresponding crates, whose APIs accept
 their own typed inputs rather than `pi_sdk::Config`. It does not own terminal, Tauri, RPC,
 or other presentation behavior; Desktop extension package discovery lives in the Desktop app.
+MCP client, local configuration management and `/mcp` commands live together in `pi-plugin-mcp`.
+The SDK only supplies the resolved trust decision and prepares/registers the candidate plugin;
+callers managing MCP files use `pi_plugin_mcp::McpLibrary` directly.
 
 ```rust
 use pi_core::PresentationMode;

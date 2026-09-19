@@ -6,17 +6,13 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use pi_core::{
-    AgentPlugin, Command, CommandContext, CommandError, CommandOutcome, CommandSpec, NoticeLevel,
-    PluginId, RegisterContext,
-};
-use pi_mcp::config::{MAX_CONFIG_BYTES, McpConfigContext, McpConfigEntry, parse_config};
-use pi_mcp::{McpServerConfig, McpToolSet, McpTransport};
+use crate::config::{MAX_CONFIG_BYTES, McpConfigContext, McpConfigEntry, parse_config};
+use crate::{McpServerConfig, McpToolSet, McpTransport};
+use pi_core::AgentPlugin;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{ProjectTrustEvaluation, ProjectTrustService};
+use crate::plugin::McpProductPlugin;
 
 const EMPTY: &str = "{\n  \"version\": 1,\n  \"mcpServers\": {}\n}\n";
 
@@ -61,6 +57,8 @@ struct Entry {
 }
 
 impl McpLibrary {
+    /// Opens a scoped disk view using the host's already-resolved project trust decision.
+    /// Construction does not read configuration, connect servers or create files.
     pub fn new(agent_dir: &Path, cwd: Option<&Path>, trusted: bool) -> Self {
         Self {
             agent_dir: agent_dir.into(),
@@ -69,22 +67,7 @@ impl McpLibrary {
         }
     }
 
-    pub fn for_desktop(
-        agent_dir: &Path,
-        cwd: Option<&Path>,
-        trust: &ProjectTrustService,
-    ) -> Result<Self, String> {
-        let trusted = match cwd {
-            Some(cwd) => matches!(
-                trust.evaluate(cwd).map_err(|e| e.to_string())?,
-                ProjectTrustEvaluation::Known(true)
-            ),
-            None => false,
-        };
-        Ok(Self::new(agent_dir, cwd, trusted))
-    }
-
-    fn path(&self, scope: McpScope) -> Result<PathBuf, String> {
+    pub(crate) fn path(&self, scope: McpScope) -> Result<PathBuf, String> {
         match scope {
             McpScope::Global => Ok(self.agent_dir.join("mcp.json")),
             McpScope::Project if !self.trusted => {
@@ -187,7 +170,9 @@ impl McpLibrary {
         Ok(names)
     }
 
-    pub(crate) async fn prepare(&self) -> Result<Arc<dyn AgentPlugin>, String> {
+    /// Reads eligible configuration and connects before returning an immutable plugin.
+    /// The host retains candidate ownership and publishes only after complete generation validation.
+    pub async fn prepare(&self) -> Result<Arc<dyn AgentPlugin>, String> {
         let entries = self.entries()?;
         let rows = entries.iter().map(Entry::row).collect();
         let configs = entries
@@ -253,118 +238,6 @@ fn revision(content: Option<&str>) -> String {
 }
 fn io_error(error: std::io::Error) -> String {
     format!("MCP configuration I/O failed: {}", error.kind())
-}
-
-struct McpProductPlugin {
-    library: McpLibrary,
-    rows: Vec<McpServerRow>,
-    pool: McpToolSet,
-}
-#[pi_core::agent_plugin]
-impl AgentPlugin for McpProductPlugin {
-    fn id(&self) -> PluginId {
-        PluginId::new("mcp")
-    }
-    fn register(&self, context: &mut RegisterContext<'_>) -> pi_core::Result<()> {
-        self.pool.plugin().register(context)?;
-        context.register_command(Arc::new(McpCommand {
-            library: self.library.clone(),
-            rows: self.rows.clone(),
-            pool: self.pool.clone(),
-        }))
-    }
-}
-struct McpCommand {
-    library: McpLibrary,
-    rows: Vec<McpServerRow>,
-    pool: McpToolSet,
-}
-#[async_trait]
-impl Command for McpCommand {
-    fn spec(&self) -> CommandSpec {
-        CommandSpec {
-            name: "mcp".into(),
-            description: "Inspect MCP servers, test connections or reload configuration".into(),
-            argument_hint: Some("[status|paths|test <name>|reload]".into()),
-        }
-    }
-    async fn execute(
-        &self,
-        context: CommandContext,
-        arguments: String,
-    ) -> Result<CommandOutcome, CommandError> {
-        let arguments = arguments.trim();
-        let output = match arguments {
-            "reload" => {
-                let replacement = context.session.reload().await?;
-                replacement
-                    .ui
-                    .notify(NoticeLevel::Info, "MCP configuration reloaded")?;
-                return Ok(CommandOutcome::Handled);
-            }
-            "paths" => format!(
-                "Global: {}\nProject: {}\nEdit mcp.json, then /mcp reload. Project entries replace global entries by name.",
-                self.library
-                    .path(McpScope::Global)
-                    .map_err(CommandError::Execution)?
-                    .display(),
-                self.library
-                    .path(McpScope::Project)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|e| e)
-            ),
-            "" | "status" => {
-                let tools = self.pool.tools();
-                let rows = self
-                    .rows
-                    .iter()
-                    .map(|row| {
-                        format!(
-                            "{} · {} · {:?} · {}",
-                            row.name,
-                            row.transport,
-                            row.scope,
-                            if row.enabled {
-                                format!(
-                                    "{} tools discovered",
-                                    tools.iter().filter(|t| t.server_name == row.name).count()
-                                )
-                            } else {
-                                "disabled".into()
-                            }
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                format!(
-                    "MCP generation snapshot\n{}\n/mcp paths · /mcp test <name> · /mcp reload",
-                    if rows.is_empty() {
-                        "No configured servers"
-                    } else {
-                        &rows
-                    }
-                )
-            }
-            _ if arguments.starts_with("test ") => {
-                let names = tokio::select! {
-                    result = self.library.test(arguments[5..].trim()) => result.map_err(CommandError::Execution)?,
-                    () = context.signal().wait() => return Err(CommandError::Aborted),
-                };
-                format!(
-                    "MCP connection succeeded: {} tools\n{}",
-                    names.len(),
-                    names.join("\n")
-                )
-            }
-            _ => {
-                return Err(CommandError::InvalidArguments(
-                    "Use /mcp [status|paths|test <name>|reload]".into(),
-                ));
-            }
-        };
-        context.ui.notify(NoticeLevel::Info, output)?;
-        Ok(CommandOutcome::Handled)
-    }
 }
 
 #[cfg(test)]
@@ -499,63 +372,5 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[tokio::test]
-    async fn invalid_reload_keeps_previous_generation_and_acp_mode_skips_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let agent = dir.path().join("agent");
-        let project = dir.path().join("project");
-        fs::create_dir_all(&agent).unwrap();
-        fs::create_dir_all(&project).unwrap();
-        fs::write(
-            agent.join("memory.json"),
-            r#"{"version":1,"enabled":false}"#,
-        )
-        .unwrap();
-        let mut config = crate::Config::new(project.clone(), agent.clone());
-        config.discover_extensions = false;
-        config.trust_override = Some(false);
-        let pi = crate::Pi::builder(config.clone()).build().unwrap();
-        let session = pi
-            .sessions()
-            .create_session(&project, agent.join("test.jsonl"))
-            .await
-            .unwrap();
-        assert!(
-            session
-                .current()
-                .runtime()
-                .command_specs()
-                .iter()
-                .any(|spec| spec.name == "mcp")
-        );
-        let before = session.current();
-        before.submit("/mcp paths").await.unwrap();
-        fs::write(agent.join("mcp.json"), "invalid").unwrap();
-        assert!(session.reload().await.is_err());
-        assert!(Arc::ptr_eq(&before, &session.current()));
-        assert!(!agent.join("test.jsonl").exists());
-        fs::write(agent.join("mcp.json"), EMPTY).unwrap();
-        session.current().submit("/mcp reload").await.unwrap();
-        assert!(!Arc::ptr_eq(&before, &session.current()));
-        assert!(!agent.join("test.jsonl").exists());
-        fs::write(agent.join("mcp.json"), "invalid").unwrap();
-        config.load_mcp_config = false;
-        let isolated = crate::Pi::builder(config).build().unwrap();
-        let acp = isolated
-            .sessions()
-            .create_session(&project, agent.join("acp.jsonl"))
-            .await
-            .unwrap();
-        assert!(
-            !acp.current()
-                .runtime()
-                .command_specs()
-                .iter()
-                .any(|spec| spec.name == "mcp")
-        );
-        pi.sessions().shutdown().await.unwrap();
-        isolated.sessions().shutdown().await.unwrap();
     }
 }

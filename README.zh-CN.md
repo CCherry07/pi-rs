@@ -490,7 +490,8 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 | `crates/pi-runtime`                              | generation 构建、prompt 装配和原子 reload                           |
 | `crates/pi-session`                              | Pi v4 JSONL、树/分支、压缩、恢复 reducer 和 session runtime         |
 | `crates/pi-rpc`                                  | Pi JSON 投影与 stdin/stdout RPC                                     |
-| `crates/pi-acp` / `pi-mcp`                      | ACP stable-v1 会话与协议无关的 MCP client/工具集成                  |
+| `crates/pi-acp`                                | ACP stable-v1 会话适配器                                          |
+| `plugins/features/pi-plugin-mcp`               | MCP 客户端与工具、本地配置管理和 `/mcp` 命令                       |
 | `crates/pi-telemetry`                            | 强类型 Provider/harness span schema 与 sink adapter                 |
 | `crates/pi-provider`                             | Provider-neutral HTTP transport 与 SSE                              |
 | `crates/pi-prompt` / `pi-resources`              | 系统 prompt 和项目上下文发现                                        |

@@ -1,13 +1,9 @@
-#![forbid(unsafe_code)]
-
 //! Protocol-neutral MCP client integration for Pi runtime generations.
 //!
-//! This crate owns MCP transports, discovery, invocation, and cleanup. It has
+//! This module owns MCP transports, discovery, invocation, and cleanup. It has
 //! no knowledge of ACP or Pi session persistence; callers adapt their wire
 //! configuration into [`McpServerConfig`] and inject [`McpToolSet::plugin`]
 //! through their own generation seam.
-
-pub mod config;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;

@@ -185,10 +185,14 @@ impl SessionGenerationFactory for ProductSessionFactory {
         apply_settings(&mut config, &settings);
         let local_mcp = if config.load_mcp_config {
             Some(
-                crate::mcp::McpLibrary::new(&config.agent_dir, Some(&config.cwd), project_trusted)
-                    .prepare()
-                    .await
-                    .map_err(SessionError::Runtime)?,
+                pi_plugin_mcp::McpLibrary::new(
+                    &config.agent_dir,
+                    Some(&config.cwd),
+                    project_trusted,
+                )
+                .prepare()
+                .await
+                .map_err(SessionError::Runtime)?,
             )
         } else {
             None

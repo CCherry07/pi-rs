@@ -585,7 +585,8 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 | `crates/pi-runtime`                              | Generation construction, prompt assembly, and atomic reload                              |
 | `crates/pi-session`                              | Pi v4 JSONL, tree/branch state, compaction, recovery reducer, and session runtime        |
 | `crates/pi-rpc`                                  | Pi JSON projection and stdin/stdout RPC                                                   |
-| `crates/pi-acp` / `pi-mcp`                      | ACP stable-v1 sessions and protocol-neutral MCP client/tool integration                  |
+| `crates/pi-acp`                                | ACP stable-v1 session adapter                                                          |
+| `plugins/features/pi-plugin-mcp`               | MCP client/tools, local configuration management and `/mcp` commands                    |
 | `crates/pi-telemetry`                            | Typed provider/harness span schemas and sink adapters                                    |
 | `crates/pi-provider`                             | Provider-neutral HTTP transport and SSE                                                  |
 | `crates/pi-prompt` / `pi-resources`              | System prompt and project context discovery                                              |

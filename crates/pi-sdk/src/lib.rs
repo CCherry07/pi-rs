@@ -6,7 +6,6 @@ mod credentials;
 mod dynamic_providers;
 mod features;
 mod host;
-pub mod mcp;
 pub mod plugins;
 mod project_trust;
 mod runtime_composition;

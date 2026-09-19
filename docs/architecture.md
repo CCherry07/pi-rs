@@ -39,7 +39,6 @@ crates/pi-eval                  model-backed eval cases, product harness, native
                                 artifacts and paired comparison data
 crates/pi-bench                 deterministic, test-only performance workloads and provenance-rich JSON reports
 crates/pi-rpc                   Pi JSON projector and stdin/stdout RPC adapter
-crates/pi-mcp                   protocol-neutral MCP client, tool projection, and process ownership
 crates/pi-acp                   official stable-v1 ACP adapter and ACP session policy
 apps/pi-desktop                experimental Tauri/React shell with a Pi-to-thread event Adapter
 apps/pi-cli/src/markdown       TUI-owned Markdown parsing, streaming repair, highlighting, and Ratatui rendering
@@ -60,6 +59,8 @@ plugins/providers/pi-plugin-anthropic     Anthropic Messages, Claude Code mode, 
 plugins/providers/pi-plugin-xai           xAI Responses provider and Grok catalog
 plugins/providers/pi-plugin-google        Google Generative AI provider and Gemini catalog
 plugins/providers/pi-plugin-models        models.json catalog, routing, and request-time config
+plugins/features/pi-plugin-mcp
+                                MCP client/transports, tool projection, local config management and /mcp
 plugins/features/pi-plugin-{prompts,skills}
                                 generation-local prompt-template and skill discovery/commands
 plugins/features/pi-plugin-session-transfer
@@ -92,8 +93,8 @@ pi-settings          -> serde JSON + filesystem persistence only
 pi-sdk               -> pi-session + pi-settings + pi-runtime + product providers, tools, resources,
                         memory, skills, subagents, and plugin loaders
 pi-rpc               -> pi-agent + pi-core + pi-session
-pi-mcp               -> pi-core + rmcp
-pi-acp               -> pi-agent + pi-core + pi-mcp + pi-session + official ACP SDK
+pi-plugin-mcp        -> pi-core + rmcp + filesystem configuration persistence
+pi-acp               -> pi-agent + pi-core + pi-plugin-mcp + pi-session + official ACP SDK
 pi-plugin-openai     -> pi-core + pi-provider
 pi-plugin-anthropic  -> pi-core + pi-provider
 pi-plugin-xai        -> pi-core + pi-provider + pi-plugin-openai::responses
@@ -426,10 +427,11 @@ narrow injected HTML-export callback.
 stable-v1 schema and maps ACP connection/session capability negotiation onto
 `MultiSessionManager`/`PiSession`. Its multi-session ownership, asynchronous prompt responders,
 cancel notifications, transcript replay, and model/thinking configuration stay independent of Pi
-RPC commands and wire types. `pi-mcp` is deeper and protocol-neutral: it owns stdio MCP process
-lifetime, Streamable HTTP (JSON/SSE responses), discovery, qualified tool names, invocation,
-result projection, and cancellation. ACP
-converts per-session `mcpServers` into `pi-mcp` configuration and injects the resulting plugin by a
+RPC commands and wire types. `pi-plugin-mcp` owns MCP as one feature crate. Its private client
+module owns stdio process lifetime, Streamable HTTP (JSON/SSE responses), discovery, qualified tool
+names, invocation, result projection, and cancellation. ACP uses its explicit-server
+`McpToolSet` interface: it converts per-session `mcpServers` into `McpServerConfig` and injects the
+resulting tool-only plugin by a
 `SessionGenerationOverlay`. The overlay also carries typed `SessionExecutionOrigin` provenance
 (`User` or `Subagent`). Both are carried across live new/resume/fork/reload generation replacement
 but are never serialized; reopening a session requires the caller to provide its transient
@@ -1180,13 +1182,16 @@ registers the plugin factory in each generation.
 ## MCP configuration and generation ownership
 
 MCP is a deliberate Rust product extension: `legacy/pi/packages/coding-agent/README.md`
-explicitly excludes built-in MCP. `pi-mcp::config` owns document parsing, static transport
-validation, environment-reference syntax and connection-time transport/path resolution behind
-validated entries and an explicit configuration-directory/default-cwd context. It does not discover
-files, decide trust or scope precedence, persist documents, or create sessions.
-`pi-sdk::mcp::McpLibrary` owns independent `<agent-dir>/mcp.json` and `<cwd>/.pi/mcp.json` files,
-scoped merging, trust checks, revision-safe management and product command registration;
-MCP does not live in `settings.json`.
+explicitly excludes built-in MCP. The complete implementation lives in
+`plugins/features/pi-plugin-mcp`, with client, config, library and product-plugin modules rather
+than a separate `pi-mcp` crate or an SDK implementation. `pi-plugin-mcp::config` owns document
+parsing, static transport validation, environment-reference syntax and connection-time path
+resolution behind validated entries and an explicit configuration-directory/default-cwd context.
+`pi_plugin_mcp::McpLibrary` owns independent `<agent-dir>/mcp.json` and `<cwd>/.pi/mcp.json` files,
+scoped merging, revision-safe management and preparation of tools plus `/mcp` commands. It consumes
+a host-resolved trust decision and enforces it before project reads/writes; it has no dependency on
+`pi-sdk`, `pi-acp`, `pi-session`, or terminal/frontend types. The Desktop adapter resolves shared
+project trust and calls that library directly. MCP does not live in `settings.json`.
 Documents contain `version: 1` and `mcpServers`, keyed by server name. Each entry has
 `type: "stdio"` (command, args, env, cwd) or `type: "http"` (url, headers), and optional
 `enabled` (default true). Missing type is inferred from command/url for common MCP configs.
@@ -1204,8 +1209,9 @@ surfaces omit header, argument and URL values. HTTP redirects are disabled by th
 Child stderr is discarded rather than written outside the frontend renderer.
 
 `ProductSessionFactory` reloads files after trust resolution and prepares a fresh connected pool
-for every candidate product generation. The immutable MCP plugin owns discovered tools plus the
-registered `/mcp` command. Connection, discovery, registration or configuration failure rejects
+for every candidate product generation. The immutable local-library MCP plugin owns discovered tools plus the
+registered `/mcp` command. Explicit `McpToolSet` callers such as ACP instead receive tools only and
+never trigger local-file discovery or command registration. Connection, discovery, registration or configuration failure rejects
 the candidate without swapping the current generation. Pool ownership is reference-counted;
 retiring the last generation owner cancels its transports and child processes. Each server has
 30-second connection and discovery bounds. Request cancellation uses the SDK's negotiated
@@ -1217,9 +1223,12 @@ explicitly rejected; OAuth browser/discovery flows are not implemented (static/e
 headers are supported). `pi-acp` advertises HTTP but not legacy SSE and converts client-supplied
 headers without local environment expansion. The CLI ACP host sets `load_mcp_config = false`,
 including for empty client server lists; embedded ACP hosts must do the same. ACP overlays remain
-transient and never enter Pi v4 storage.
+transient and never enter Pi v4 storage. This consolidation does not add an MCP feature switch:
+`load_mcp_config` still controls only local discovery, and ACP capability negotiation and
+client-provided server handling remain unchanged. A shared enable/disable capability policy is a
+separate change, not implied by depending on a plugin crate.
 Some deployed legacy servers return an uncorrelated error to the modern `server/discover` probe
-(DeepWiki uses the fixed id `server-error`). If automatic lifecycle negotiation fails, `pi-mcp`
+(DeepWiki uses the fixed id `server-error`). If automatic lifecycle negotiation fails, `pi-plugin-mcp`
 opens one fresh transport and attempts the stable `initialize` lifecycle. It never retries on the
 same ambiguous transport, and startup remains bounded by the existing connection timeout.
 This integration exposes MCP tools; resource/prompt browsers, sampling and elicitation UI remain

@@ -11,9 +11,10 @@ Implemented protocol surface:
 - streamed assistant text/thought and tool-call updates;
 - image, resource-link, and embedded text context prompts;
 - model and thinking-level session configuration options;
-- per-session stdio MCP servers through `pi-mcp`.
+- per-session stdio and Streamable HTTP MCP servers through `pi-plugin-mcp`'s explicit-client API.
 
 Each ACP session is backed by `MultiSessionManager` / `PiSession`. Durable conversation state stays
-in Pi v4 JSONL; MCP transports and the generation overlay are session-local and transient. HTTP/SSE
-MCP, additional workspace directories, audio prompts, and JavaScript extensions in ACP mode are not
+in Pi v4 JSONL; MCP transports and the generation overlay are session-local and transient. The explicit-client API
+does not load local `mcp.json` files or register `/mcp` management commands. Legacy HTTP+SSE MCP,
+additional workspace directories, audio prompts, and JavaScript extensions in ACP mode are not
 advertised.

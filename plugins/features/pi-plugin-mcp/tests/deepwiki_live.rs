@@ -1,7 +1,7 @@
 //! Opt-in compatibility smoke test for a public Streamable HTTP server.
 //! Kept ignored so the deterministic workspace suite never depends on a network service.
 
-use pi_mcp::{McpServerConfig, McpToolSet};
+use pi_plugin_mcp::{McpServerConfig, McpToolSet};
 
 #[tokio::test]
 #[ignore = "requires public network access"]

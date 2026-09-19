@@ -4046,6 +4046,7 @@ dependencies = [
  "objc2-foundation",
  "pi-agent",
  "pi-core",
+ "pi-plugin-mcp",
  "pi-plugin-skills",
  "pi-runtime",
  "pi-sdk",
@@ -4107,22 +4108,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "uuid",
-]
-
-[[package]]
-name = "pi-mcp"
-version = "0.8.3"
-dependencies = [
- "async-trait",
- "http",
- "pi-core",
- "rmcp",
- "rustls",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "url",
 ]
 
 [[package]]
@@ -4347,6 +4332,25 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml 0.8.23",
+ "url",
+]
+
+[[package]]
+name = "pi-plugin-mcp"
+version = "0.8.3"
+dependencies = [
+ "async-trait",
+ "fs2",
+ "http",
+ "pi-core",
+ "rmcp",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
  "url",
 ]
 
@@ -4637,7 +4641,6 @@ dependencies = [
  "pi-core",
  "pi-js-package-manager",
  "pi-js-plugin",
- "pi-mcp",
  "pi-memory-loader",
  "pi-plugin-anthropic",
  "pi-plugin-azure-openai",
@@ -4652,6 +4655,7 @@ dependencies = [
  "pi-plugin-loader",
  "pi-plugin-ls",
  "pi-plugin-manager",
+ "pi-plugin-mcp",
  "pi-plugin-memory-hermes",
  "pi-plugin-mistral",
  "pi-plugin-models",
@@ -4672,7 +4676,6 @@ dependencies = [
  "pi-settings",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

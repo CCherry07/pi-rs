@@ -4,7 +4,7 @@
 //!
 //! The adapter owns ACP connection/session policy and delegates durable
 //! conversation state to [`pi_session`]. Per-session MCP servers are adapted
-//! through [`pi_mcp`] and injected with a transient generation overlay.
+//! through [`pi_plugin_mcp`] and injected with a transient generation overlay.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -21,7 +21,7 @@ use pi_core::{
     AgentEvent, ContentBlock as PiContentBlock, Message, ModelId, ProviderId, StreamEvent,
     TextContent as PiTextContent, ThinkingLevel, UserMessage,
 };
-use pi_mcp::{McpServerConfig, McpToolSet};
+use pi_plugin_mcp::{McpServerConfig, McpToolSet};
 use pi_session::{
     AgentSessionEvent, MultiSessionManager, PiSession, SessionEntry, SessionGenerationOverlay,
     SessionHeader,

@@ -1,5 +1,5 @@
 [package]
-name = "pi-mcp"
+name = "pi-plugin-mcp"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,10 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+fs2 = "0.4.3"
 pi-core.workspace = true
+sha2 = "0.10"
+tempfile = "3.21.0"
 # 3.3's concurrent HTTP worker can cancel a POST before response headers arrive.
 rmcp = { version = "=3.3.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
 # Match the existing provider transports; do not enable two competing rustls defaults.

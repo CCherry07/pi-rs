@@ -259,8 +259,8 @@ mod tests {
         fn new() -> Self {
             let root = std::path::absolute(std::env::temp_dir()).unwrap();
             Self {
-                config_dir: root.join("pi-mcp-configuration"),
-                default_cwd: root.join("pi-mcp-session"),
+                config_dir: root.join("pi-plugin-mcp-configuration"),
+                default_cwd: root.join("pi-plugin-mcp-session"),
             }
         }
 
