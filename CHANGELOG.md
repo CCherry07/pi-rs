@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.0](https://github.com/CCherry07/pi-rs/compare/v0.8.3...v1.0.0) (2026-09-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* unify agent/session plugins and consolidate native tooling
+
+### Features
+
+* **sdk:** add runtime feature flags and rename ProductConfig to Config ([650c6c9](https://github.com/CCherry07/pi-rs/commit/650c6c9e573ce5815874a2bd31b93c01171ef37c))
+
+
+### Code Refactoring
+
+* unify agent/session plugins and consolidate native tooling ([13667a4](https://github.com/CCherry07/pi-rs/commit/13667a4ea04283d3fd2f2177feb374f2c5560d9c))
+
 ## [0.8.3](https://github.com/CCherry07/pi-rs/compare/v0.8.2...v0.8.3) (2026-09-16)
 
 
