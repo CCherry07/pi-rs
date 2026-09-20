@@ -267,6 +267,13 @@ export function createExtensionContext(
   } as Record<string, unknown>
 
   Object.defineProperties(context, {
+    workspace: {
+      enumerable: true,
+      get: () => query({ type: "workspace" }, z.unknown(), () => options.payload.workspace ?? ({
+        roots: [{ id: "primary", name: "primary", path: fallbackCwd, ownership: { kind: "external" } }],
+        primaryRoot: "primary", executionDir: fallbackCwd,
+      })),
+    },
     cwd: {
       enumerable: true,
       get: () => query({ type: 'cwd' }, stringSchema, () => fallbackCwd),

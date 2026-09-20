@@ -3,6 +3,7 @@ use crate::Config;
 
 pub(crate) fn app_config(agent_dir: &std::path::Path, model: Option<&str>) -> Config {
     Config {
+        workspace: None,
         features: crate::Features::default(),
         cwd: agent_dir.to_path_buf(),
         agent_dir: agent_dir.to_path_buf(),

@@ -9,6 +9,14 @@ export function useWorkspaceDraft(
   onDebug?: (entry: DebugEntry) => void,
 ) {
   const [draft, setDraft] = useState<{ workspaceId: string; commands: RuntimeCommand[] } | null>(null);
+  const [projectRevision, setProjectRevision] = useState(0);
+  useEffect(() => {
+    const changed = (event: Event) => {
+      if ((event as CustomEvent<string>).detail === workspaceId) setProjectRevision(value => value + 1);
+    };
+    window.addEventListener("pi-project-changed", changed);
+    return () => window.removeEventListener("pi-project-changed", changed);
+  }, [workspaceId]);
   const request = useRef(0);
   const reloadRequest = useRef(0);
   useEffect(() => {
@@ -29,7 +37,7 @@ export function useWorkspaceDraft(
     });
     const invalidate = () => { ++request.current; };
     return () => { disposed = true; invalidate(); };
-  }, [workspaceId, activeThreadId, onDebug]);
+  }, [workspaceId, activeThreadId, onDebug, projectRevision]);
   const reload = useCallback(async () => {
     if (!workspaceId || activeThreadId) return;
     const id = request.current;

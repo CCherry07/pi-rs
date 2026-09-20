@@ -19,7 +19,8 @@ use crate::{
 #[derive(Debug, Clone)]
 pub(crate) enum AgentSessionRuntimeTarget {
     Create {
-        cwd: PathBuf,
+        workspace: pi_core::WorkspaceSnapshot,
+        metadata: Option<serde_json::Map<String, serde_json::Value>>,
         path: PathBuf,
         parent_session: Option<PathBuf>,
         session_id: Option<String>,
@@ -35,7 +36,8 @@ pub(crate) enum AgentSessionRuntimeTarget {
 impl AgentSessionRuntimeTarget {
     pub(crate) fn create(cwd: impl Into<PathBuf>, path: impl Into<PathBuf>) -> Self {
         Self::Create {
-            cwd: cwd.into(),
+            workspace: pi_core::WorkspaceSpec::from_cwd(cwd).snapshot(),
+            metadata: None,
             path: path.into(),
             parent_session: None,
             session_id: None,
@@ -48,7 +50,8 @@ impl AgentSessionRuntimeTarget {
         session_id: impl Into<String>,
     ) -> Self {
         Self::Create {
-            cwd: cwd.into(),
+            workspace: pi_core::WorkspaceSpec::from_cwd(cwd).snapshot(),
+            metadata: None,
             path: path.into(),
             parent_session: None,
             session_id: Some(session_id.into()),
@@ -61,11 +64,29 @@ impl AgentSessionRuntimeTarget {
         parent_session: impl Into<PathBuf>,
     ) -> Self {
         Self::Create {
-            cwd: cwd.into(),
+            workspace: pi_core::WorkspaceSpec::from_cwd(cwd).snapshot(),
+            metadata: None,
             path: path.into(),
             parent_session: Some(parent_session.into()),
             session_id: None,
         }
+    }
+
+    pub(crate) fn with_workspace(
+        mut self,
+        workspace: pi_core::WorkspaceSpec,
+        metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Self {
+        if let Self::Create {
+            workspace: saved,
+            metadata: extra,
+            ..
+        } = &mut self
+        {
+            *saved = workspace.snapshot();
+            *extra = metadata;
+        }
+        self
     }
 
     pub(crate) fn open(path: impl Into<PathBuf>) -> Self {
@@ -142,6 +163,8 @@ impl SessionGenerationOverlay {
 
 #[derive(Debug, Clone)]
 pub struct SessionGenerationRequest {
+    pub workspace: pi_core::WorkspaceSnapshot,
+    /// Compatibility projection of workspace.cwd(); factories should use the full workspace.
     pub cwd: PathBuf,
     pub session_path: PathBuf,
     pub reason: SessionStartReason,
@@ -341,6 +364,7 @@ enum ResolvedSessionTarget {
         path: PathBuf,
         parent_session: Option<PathBuf>,
         session_id: Option<String>,
+        metadata: Option<serde_json::Map<String, serde_json::Value>>,
     },
     Existing {
         log: SessionLog,
@@ -361,13 +385,15 @@ impl ResolvedSessionTarget {
         }
         match target {
             AgentSessionRuntimeTarget::Create {
-                cwd,
+                workspace,
+                metadata,
                 path,
                 parent_session,
                 session_id,
             } => {
                 let request = SessionGenerationRequest {
-                    cwd,
+                    cwd: workspace.cwd().to_path_buf(),
+                    workspace,
                     session_path: path.clone(),
                     reason,
                     generation_overlay,
@@ -379,6 +405,7 @@ impl ResolvedSessionTarget {
                         path,
                         parent_session,
                         session_id,
+                        metadata,
                     },
                     request,
                 ))
@@ -400,6 +427,7 @@ impl ResolvedSessionTarget {
     ) -> Result<(Self, SessionGenerationRequest), SessionError> {
         let reload_model = reload_model(&log, reason)?;
         let request = SessionGenerationRequest {
+            workspace: log.header().workspace()?.snapshot(),
             cwd: log.header().cwd.clone(),
             session_path: log.path().to_path_buf(),
             reason,
@@ -529,11 +557,20 @@ impl AgentSessionRuntime {
                 path,
                 parent_session,
             } => {
+                let inherit_workspace = cwd == current.runtime().cwd();
                 let target = match parent_session {
                     Some(parent) => {
                         AgentSessionRuntimeTarget::create_with_parent(cwd, &path, parent)
                     }
                     None => AgentSessionRuntimeTarget::create(cwd, &path),
+                };
+                let target = if inherit_workspace {
+                    target.with_workspace(
+                        current.runtime().workspace().spec().clone(),
+                        current.log().header().metadata,
+                    )
+                } else {
+                    target
                 };
                 (
                     target,
@@ -608,6 +645,7 @@ impl AgentSessionRuntime {
             .unwrap_or_else(|| std::path::Path::new("."))
             .join(format!("{id}.jsonl"));
         let mut header = SessionHeader::new(id, source.cwd);
+        header.metadata = source.metadata;
         header.parent_session_id = Some(source.id);
         let fork = current.log().fork(
             &path,
@@ -731,6 +769,7 @@ impl AgentSessionRuntime {
             generation_overlay,
             initial_state.clone(),
         )?;
+        let expected_workspace = request.workspace.clone();
         let generation = factory.prepare_generation(request).await?;
         let PreparedSessionGeneration {
             runtime,
@@ -738,6 +777,15 @@ impl AgentSessionRuntime {
             session_bindings,
             activations,
         } = generation;
+
+        if runtime.workspace() != &expected_workspace {
+            return Err(PreparedSessionGeneration::rollback(
+                activations,
+                SessionError::Runtime(
+                    "generation factory did not preserve requested workspace".into(),
+                ),
+            ));
+        }
 
         if let Some(initial_state) = initial_state
             && let Err(error) = initial_state.apply_to(&runtime)
@@ -750,9 +798,11 @@ impl AgentSessionRuntime {
                 path,
                 parent_session,
                 session_id,
+                metadata,
             } => {
                 options.parent_session_path = parent_session;
                 options.session_id = session_id;
+                options.header_metadata = metadata;
                 AgentSession::prepare_create_with_options(runtime, path, options).await
             }
             ResolvedSessionTarget::Existing { log } => {

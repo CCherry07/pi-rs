@@ -1,5 +1,5 @@
 //! Desktop buttons enter the same registered-command/input pipeline as the composer.
-use super::{ensure_forwarder, workspace_path, PiRuntimeState};
+use super::{ensure_forwarder, PiRuntimeState};
 use crate::state::AppState;
 use pi_session::AgentSession;
 use serde_json::{json, Value};
@@ -72,7 +72,9 @@ pub(crate) async fn pi_desktop_command(
     pi: State<'_, PiRuntimeState>,
     app: AppHandle,
 ) -> Result<Value, String> {
-    let cwd = workspace_path(&state, &workspace_id).await?;
+    let cwd = pi
+        .execution_directory(&state, &workspace_id, Some(&thread_id))
+        .await?;
     let (_, handle) = pi
         .store
         .handle(&thread_id)

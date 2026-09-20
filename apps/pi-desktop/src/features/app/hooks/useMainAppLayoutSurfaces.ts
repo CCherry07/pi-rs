@@ -520,6 +520,7 @@ function buildPrimarySurface({
 function buildGitSurface({
   appSettings,
   activeWorkspace,
+  activeThreadId,
   gitState,
   composerWorkspaceState,
   promptActions,
@@ -536,6 +537,7 @@ function buildGitSurface({
     fileTreeProps: activeWorkspace
       ? {
           workspaceId: activeWorkspace.id,
+          threadId: activeThreadId,
           workspacePath: activeWorkspace.path,
           files: composerWorkspaceState.files,
           modifiedFiles: [

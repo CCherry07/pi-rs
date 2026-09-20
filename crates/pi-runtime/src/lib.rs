@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+use pi_core::{WorkspaceSnapshot, WorkspaceSpec};
 
 mod ephemeral;
 
@@ -190,9 +191,13 @@ pub enum SystemPrompt {
 type PluginFactory = Arc<dyn Fn() -> Result<Arc<dyn Plugin>, String> + Send + Sync>;
 type ProviderPluginFactory = Arc<dyn Fn() -> Result<Arc<dyn ProviderPlugin>, String> + Send + Sync>;
 
-type PluginPreparation = Arc<dyn Fn(u64) -> Result<Option<Arc<dyn Plugin>>, String> + Send + Sync>;
-type ProviderPluginPreparation =
-    Arc<dyn Fn(u64) -> Result<Option<Arc<dyn ProviderPlugin>>, String> + Send + Sync>;
+type PluginPreparation =
+    Arc<dyn Fn(u64, &WorkspaceSnapshot) -> Result<Option<Arc<dyn Plugin>>, String> + Send + Sync>;
+type ProviderPluginPreparation = Arc<
+    dyn Fn(u64, &WorkspaceSnapshot) -> Result<Option<Arc<dyn ProviderPlugin>>, String>
+        + Send
+        + Sync,
+>;
 
 enum PluginSource {
     Pinned(Arc<dyn Plugin>),
@@ -201,11 +206,15 @@ enum PluginSource {
 }
 
 impl PluginSource {
-    fn prepare(&self, generation: u64) -> Result<Option<Arc<dyn Plugin>>, String> {
+    fn prepare(
+        &self,
+        generation: u64,
+        workspace: &WorkspaceSnapshot,
+    ) -> Result<Option<Arc<dyn Plugin>>, String> {
         match self {
             Self::Pinned(plugin) => Ok(Some(Arc::clone(plugin))),
             Self::Factory(factory) => factory().map(Some),
-            Self::Prepared(factory) => factory(generation),
+            Self::Prepared(factory) => factory(generation, workspace),
         }
     }
 }
@@ -217,11 +226,15 @@ enum ProviderPluginSource {
 }
 
 impl ProviderPluginSource {
-    fn prepare(&self, generation: u64) -> Result<Option<Arc<dyn ProviderPlugin>>, String> {
+    fn prepare(
+        &self,
+        generation: u64,
+        workspace: &WorkspaceSnapshot,
+    ) -> Result<Option<Arc<dyn ProviderPlugin>>, String> {
         match self {
             Self::Pinned(plugin) => Ok(Some(Arc::clone(plugin))),
             Self::Factory(factory) => factory().map(Some),
-            Self::Prepared(factory) => factory(generation),
+            Self::Prepared(factory) => factory(generation, workspace),
         }
     }
 }
@@ -230,6 +243,7 @@ pub struct PiRuntimeBuilder {
     plugin_sources: Vec<PluginSource>,
     provider_plugin_sources: Vec<ProviderPluginSource>,
     agent_options: AgentOptions,
+    workspace: Option<WorkspaceSnapshot>,
     system_prompt: Option<SystemPrompt>,
     resources: Option<ResourceLoaderOptions>,
     supplemental_diagnostics: Vec<ResourceDiagnostic>,
@@ -250,6 +264,7 @@ impl PiRuntimeBuilder {
             plugin_sources: Vec::new(),
             provider_plugin_sources: Vec::new(),
             agent_options: AgentOptions::default(),
+            workspace: None,
             system_prompt: None,
             resources: None,
             supplemental_diagnostics: Vec::new(),
@@ -333,12 +348,18 @@ impl PiRuntimeBuilder {
         P: Plugin + pi_plugin::PluginFactory,
         P::Options: Clone,
     {
-        self.plugin_sources
-            .push(PluginSource::Prepared(Arc::new(move |generation| {
-                P::prepare(&context.for_generation(generation), options.clone())
-                    .map(|plugin| plugin.map(|plugin| Arc::new(plugin) as Arc<dyn Plugin>))
-                    .map_err(|error| error.to_string())
-            })));
+        self.plugin_sources.push(PluginSource::Prepared(Arc::new(
+            move |generation, workspace| {
+                P::prepare(
+                    &context
+                        .for_generation(generation)
+                        .with_workspace(workspace.clone()),
+                    options.clone(),
+                )
+                .map(|plugin| plugin.map(|plugin| Arc::new(plugin) as Arc<dyn Plugin>))
+                .map_err(|error| error.to_string())
+            },
+        )));
         self
     }
 
@@ -349,7 +370,7 @@ impl PiRuntimeBuilder {
         E: std::fmt::Display,
     {
         self.plugin_sources
-            .push(PluginSource::Prepared(Arc::new(move |_| {
+            .push(PluginSource::Prepared(Arc::new(move |_, _| {
                 factory().map_err(|error| error.to_string())
             })));
         self
@@ -361,9 +382,37 @@ impl PiRuntimeBuilder {
         E: std::fmt::Display,
     {
         self.provider_plugin_sources
-            .push(ProviderPluginSource::Prepared(Arc::new(move |_| {
+            .push(ProviderPluginSource::Prepared(Arc::new(move |_, _| {
                 factory().map_err(|error| error.to_string())
             })));
+        self
+    }
+
+    /// Preparation seam for adapters that need the complete candidate environment.
+    pub fn try_prepared_plugin_workspace_factory<F, E>(mut self, factory: F) -> Self
+    where
+        F: Fn(&WorkspaceSnapshot) -> Result<Option<Arc<dyn Plugin>>, E> + Send + Sync + 'static,
+        E: std::fmt::Display,
+    {
+        self.plugin_sources
+            .push(PluginSource::Prepared(Arc::new(move |_, workspace| {
+                factory(workspace).map_err(|error| error.to_string())
+            })));
+        self
+    }
+
+    pub fn try_prepared_provider_workspace_factory<F, E>(mut self, factory: F) -> Self
+    where
+        F: Fn(&WorkspaceSnapshot) -> Result<Option<Arc<dyn ProviderPlugin>>, E>
+            + Send
+            + Sync
+            + 'static,
+        E: std::fmt::Display,
+    {
+        self.provider_plugin_sources
+            .push(ProviderPluginSource::Prepared(Arc::new(
+                move |_, workspace| factory(workspace).map_err(|error| error.to_string()),
+            )));
         self
     }
 
@@ -469,8 +518,17 @@ impl PiRuntimeBuilder {
         self
     }
 
+    /// Sets the complete execution environment; cwd options become its compatibility projection.
+    pub fn workspace(mut self, workspace: impl Into<WorkspaceSnapshot>) -> Self {
+        self.workspace = Some(workspace.into());
+        self
+    }
+
     pub fn build(mut self) -> Result<PiRuntime, RuntimeError> {
-        let cwd = self.agent_options.cwd.clone();
+        let workspace = self
+            .workspace
+            .unwrap_or_else(|| WorkspaceSpec::from_cwd(&self.agent_options.cwd).snapshot());
+        self.agent_options.cwd = workspace.cwd().to_path_buf();
         let blueprint = Arc::new(RuntimeBlueprint {
             plugin_sources: self.plugin_sources,
             provider_plugin_sources: self.provider_plugin_sources,
@@ -481,7 +539,7 @@ impl PiRuntimeBuilder {
             completion_retry_policy: self.completion_retry_policy,
             plugin_context: self.plugin_context,
             execution_origin: self.execution_origin,
-            cwd: cwd.clone(),
+            workspace: workspace.clone(),
         });
         let generation = Arc::new(build_generation(
             &blueprint,
@@ -492,7 +550,7 @@ impl PiRuntimeBuilder {
         let agent = Agent::with_runtime(self.agent_options, Arc::clone(&generation.agent));
         Ok(PiRuntime {
             agent,
-            cwd: Arc::new(cwd),
+            workspace,
             blueprint,
             generation: Arc::new(RwLock::new(generation)),
             reload_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -510,7 +568,7 @@ struct RuntimeBlueprint {
     completion_retry_policy: Option<CompletionRetryPolicy>,
     plugin_context: Arc<dyn PluginContext>,
     execution_origin: pi_plugin::SessionExecutionOrigin,
-    cwd: std::path::PathBuf,
+    workspace: WorkspaceSnapshot,
 }
 
 struct RuntimeGeneration {
@@ -542,7 +600,7 @@ fn build_generation(
                     .to_string(),
             ));
         }
-        resources.cwd = blueprint.cwd.clone();
+        resources.cwd = blueprint.workspace.cwd().to_path_buf();
         let loaded = load_resources(&resources);
         diagnostics.extend(loaded.diagnostics.clone());
         let prompt = system_prompt.get_or_insert_with(|| SystemPrompt::Pi(Box::default()));
@@ -555,21 +613,32 @@ fn build_generation(
 
     let mut plugins = Vec::with_capacity(blueprint.plugin_sources.len());
     for (index, source) in blueprint.plugin_sources.iter().enumerate() {
-        if let Some(plugin) = source.prepare(generation).map_err(|message| {
-            RuntimeError::Build(format!("plugin source {index} failed: {message}"))
-        })? {
+        if let Some(plugin) =
+            source
+                .prepare(generation, &blueprint.workspace)
+                .map_err(|message| {
+                    RuntimeError::Build(format!("plugin source {index} failed: {message}"))
+                })?
+        {
             plugins.push(plugin);
         }
     }
     let mut provider_plugins = Vec::with_capacity(blueprint.provider_plugin_sources.len());
     for (index, source) in blueprint.provider_plugin_sources.iter().enumerate() {
-        if let Some(plugin) = source.prepare(generation).map_err(|message| {
-            RuntimeError::Build(format!("provider plugin source {index} failed: {message}"))
-        })? {
+        if let Some(plugin) =
+            source
+                .prepare(generation, &blueprint.workspace)
+                .map_err(|message| {
+                    RuntimeError::Build(format!("provider plugin source {index} failed: {message}"))
+                })?
+        {
             provider_plugins.push(plugin);
         }
     }
-    let plugin_context_epoch = PluginContextEpoch::new(Arc::clone(&blueprint.plugin_context));
+    let plugin_context_epoch = PluginContextEpoch::with_workspace(
+        Arc::clone(&blueprint.plugin_context),
+        Some(blueprint.workspace.clone()),
+    );
     let (driver, provider_driver, registries) = RegistriesBuilder::new()
         .register_plugin_sets_with_context(plugins, provider_plugins, plugin_context_epoch.clone())
         .map_err(|error| RuntimeError::Build(error.to_string()))?;
@@ -580,8 +649,12 @@ fn build_generation(
     let (assembled_prompt, prompt_options) = match system_prompt {
         Some(SystemPrompt::Final(prompt)) => (prompt, None),
         Some(SystemPrompt::Pi(mut prompt)) => {
-            let assembled =
-                assemble_prompt(&mut prompt, active_tools, &blueprint.cwd, &registries)?;
+            let assembled = assemble_prompt(
+                &mut prompt,
+                active_tools,
+                blueprint.workspace.cwd(),
+                &registries,
+            )?;
             (assembled, Some(*prompt))
         }
         None => (blueprint.fallback_system_prompt.clone(), None),
@@ -657,7 +730,7 @@ fn completion_result_is_retryable(result: &Result<AssistantMessage, RuntimeError
 #[derive(Clone)]
 pub struct PiRuntime {
     agent: Agent,
-    cwd: Arc<std::path::PathBuf>,
+    workspace: WorkspaceSnapshot,
     blueprint: Arc<RuntimeBlueprint>,
     generation: Arc<RwLock<Arc<RuntimeGeneration>>>,
     reload_lock: Arc<tokio::sync::Mutex<()>>,
@@ -672,8 +745,12 @@ impl PiRuntime {
         &self.agent
     }
 
+    pub fn workspace(&self) -> &WorkspaceSnapshot {
+        &self.workspace
+    }
+
     pub fn cwd(&self) -> &std::path::Path {
-        &self.cwd
+        self.workspace.cwd()
     }
 
     pub fn execution_origin(&self) -> pi_plugin::SessionExecutionOrigin {

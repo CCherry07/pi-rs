@@ -19,6 +19,8 @@ pub(crate) struct Job {
     pub id: String,
     pub name: String,
     pub cwd: PathBuf,
+    #[serde(default)]
+    pub workspace: Option<pi_core::WorkspaceSpec>,
     pub prompt: String,
     pub schedule: Schedule,
     pub options: IsolatedSessionOptions,
@@ -169,7 +171,17 @@ impl Store {
         })
     }
 
+    #[cfg(test)]
     pub fn claim(&self, cwd: &Path, now: i64) -> Result<Option<Claim>> {
+        self.claim_workspace(&pi_core::WorkspaceSpec::from_cwd(cwd), now)
+    }
+
+    pub fn claim_workspace(
+        &self,
+        workspace: &pi_core::WorkspaceSpec,
+        now: i64,
+    ) -> Result<Option<Claim>> {
+        let cwd = workspace.cwd();
         if !self.root.join("jobs.json").exists() {
             return Ok(None);
         }
@@ -190,7 +202,16 @@ impl Store {
                 }
             }
             let mut candidates = (0..db.jobs.len())
-                .filter(|index| db.jobs[*index].cwd == cwd)
+                .filter(|index| {
+                    let job = &db.jobs[*index];
+                    job.cwd == cwd
+                        && job
+                            .workspace
+                            .as_ref()
+                            .cloned()
+                            .unwrap_or_else(|| pi_core::WorkspaceSpec::from_cwd(&job.cwd))
+                            == *workspace
+                })
                 .collect::<Vec<_>>();
             candidates.sort_by_key(|index| {
                 let job = &db.jobs[*index];
@@ -380,6 +401,7 @@ mod tests {
             id: Uuid::now_v7().to_string(),
             name: "check".into(),
             cwd: cwd.into(),
+            workspace: None,
             prompt: "check".into(),
             schedule: Schedule::Interval { milliseconds: 1000 },
             options: IsolatedSessionOptions::default(),
@@ -391,6 +413,42 @@ mod tests {
             runs: 0,
             notify: true,
         }
+    }
+
+    #[test]
+    fn jobs_with_the_same_cwd_require_the_saved_workspace_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::new(directory.path().join("schedule"));
+        let workspace = |shared: &str| {
+            pi_core::WorkspaceSpec::new(
+                vec![
+                    pi_core::WorkspaceRoot::external("primary", "primary", directory.path()),
+                    pi_core::WorkspaceRoot::external(
+                        "shared",
+                        "shared",
+                        directory.path().join(shared),
+                    ),
+                ],
+                pi_core::WorkspaceRootId::new("primary"),
+                directory.path(),
+            )
+            .unwrap()
+        };
+        let saved = workspace("a");
+        let mut scheduled = job(directory.path());
+        scheduled.workspace = Some(saved.clone());
+        let id = scheduled.id.clone();
+        store.create(scheduled).unwrap();
+        assert!(
+            store
+                .claim_workspace(&workspace("b"), 1000)
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.claim(directory.path(), 1000).unwrap().is_none());
+        let claim = store.claim_workspace(&saved, 1000).unwrap().unwrap();
+        assert_eq!(claim.job.id, id);
+        assert_eq!(claim.job.workspace.as_ref(), Some(&saved));
     }
 
     #[test]

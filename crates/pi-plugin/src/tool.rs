@@ -28,7 +28,7 @@ impl ToolUpdateSink {
 
 #[derive(Clone)]
 pub struct ToolContext {
-    cwd: PathBuf,
+    workspace: crate::WorkspaceSnapshot,
     abort_signal: AbortSignal,
     pub session: SessionContext,
     pub models: ModelsContext,
@@ -52,7 +52,7 @@ impl ToolContext {
         context: ContextParts,
     ) -> Self {
         Self {
-            cwd,
+            workspace: context.workspace_or_cwd(&cwd),
             abort_signal,
             session: context.session,
             models: context.models,
@@ -61,8 +61,12 @@ impl ToolContext {
         }
     }
 
+    pub fn workspace(&self) -> &crate::WorkspaceSnapshot {
+        &self.workspace
+    }
+
     pub fn cwd(&self) -> &std::path::Path {
-        &self.cwd
+        self.workspace.cwd()
     }
 
     pub fn signal(&self) -> &AbortSignal {

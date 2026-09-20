@@ -140,6 +140,17 @@
     "testNotification": "Test notification"
   },
   "projects": {
+    "roots": {
+      "description": "New conversations use these directories. Existing conversations keep their saved directories.",
+      "primary": "Primary",
+      "count_one": "{{count}} directory",
+      "count_other": "{{count}} directories",
+      "makePrimary": "Set as primary",
+      "selectPrimary": "Use {{name}} as primary directory",
+      "removeNamed": "Remove {{name}} association",
+      "remove": "Remove association",
+      "add": "Add directory"
+    },
     "title": "Projects",
     "subtitle": "Group related workspaces and reorder projects within each group.",
     "groups": {

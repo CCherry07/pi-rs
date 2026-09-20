@@ -30,8 +30,8 @@ use crate::backend::events::PiEvent;
 use crate::state::AppState;
 
 use session_store::{
-    content_text, document_token_usage, token_usage, SessionModelCatalog, SessionStore,
-    SessionSummary, SessionTokenUsage, StoredIsolatedSession,
+    content_text, document_token_usage, token_usage, SessionModelCatalog, SessionScope,
+    SessionStore, SessionSummary, SessionTokenUsage, StoredIsolatedSession,
 };
 
 pub(crate) struct PiRuntimeState {
@@ -99,12 +99,17 @@ pub(crate) async fn pi_start_thread(
     pi: State<'_, PiRuntimeState>,
     app: AppHandle,
 ) -> Result<Value, String> {
-    let cwd = workspace_path(&state, &workspace_id).await?;
     if prepare_only.unwrap_or(false) {
-        let session = pi.store.prepare_thread(&cwd).await?;
+        let session = pi
+            .store
+            .prepare_scoped(SessionScope::project(&state.project(&workspace_id).await?)?)
+            .await?;
         return Ok(json!({ "thread": thread_from_session(&session) }));
     }
-    let session = pi.store.start_thread(&cwd).await?;
+    let session = pi
+        .store
+        .start_scoped(SessionScope::project(&state.project(&workspace_id).await?)?)
+        .await?;
     ensure_forwarder(&app, &pi, &workspace_id, session.log().header().id.clone()).await?;
     let thread = thread_from_session(&session);
     emit(
@@ -227,8 +232,10 @@ pub(crate) async fn pi_list_threads(
     state: State<'_, AppState>,
     pi: State<'_, PiRuntimeState>,
 ) -> Result<Value, String> {
-    let cwd = workspace_path(&state, &workspace_id).await?;
-    let mut sessions = pi.store.list(&cwd)?;
+    let project = state.project(&workspace_id).await?;
+    let mut sessions = pi
+        .store
+        .list_project(&project, &state.projects().await?, false)?;
     if let Some(limit) = limit {
         sessions.truncate(limit as usize);
     }
@@ -247,8 +254,10 @@ pub(crate) async fn pi_list_archived_threads(
     state: State<'_, AppState>,
     pi: State<'_, PiRuntimeState>,
 ) -> Result<Value, String> {
-    let cwd = workspace_path(&state, &workspace_id).await?;
-    let mut sessions = pi.store.list_archived(&cwd)?;
+    let project = state.project(&workspace_id).await?;
+    let mut sessions = pi
+        .store
+        .list_project(&project, &state.projects().await?, true)?;
     if let Some(limit) = limit {
         sessions.truncate(limit as usize);
     }
@@ -338,8 +347,9 @@ pub(crate) async fn pi_reload_thread(
         ensure_forwarder(&app, &pi, &workspace_id, thread_id).await?;
         session
     } else {
-        let cwd = workspace_path(&state, &workspace_id).await?;
-        pi.store.reload_prepared(&cwd).await?
+        pi.store
+            .reload_scoped(SessionScope::project(&state.project(&workspace_id).await?)?)
+            .await?
     };
     Ok(json!({ "thread": thread_from_session(&session) }))
 }
@@ -471,13 +481,23 @@ pub(crate) async fn pi_model_list(
     state: State<'_, AppState>,
     pi: State<'_, PiRuntimeState>,
 ) -> Result<Value, String> {
-    let cwd = workspace_path(&state, &workspace_id).await?;
+    let scope = if thread_id.is_some() {
+        SessionScope::directory(
+            &pi.execution_directory(&state, &workspace_id, thread_id.as_deref())
+                .await?,
+        )?
+    } else {
+        SessionScope::project(&state.project(&workspace_id).await?)?
+    };
     let SessionModelCatalog {
         models,
         selected_provider,
         selected_model,
         selected_thinking,
-    } = pi.store.model_catalog(&cwd, thread_id.as_deref()).await?;
+    } = pi
+        .store
+        .model_catalog_scoped(scope, thread_id.as_deref())
+        .await?;
     Ok(json!({
         "data": models.iter().map(|model| json!({
             "id": format!("{}/{}", model.provider, model.id),
@@ -502,14 +522,12 @@ pub(crate) async fn pi_skills_list(
 ) -> Result<Value, String> {
     let commands = match thread_id {
         Some(id) => pi.store.command_catalog(&id).await?,
-        None => {
-            let cwd = workspace_path(&state, &workspace_id).await?;
-            pi.store
-                .prepare_thread(&cwd)
-                .await?
-                .runtime()
-                .command_specs()
-        }
+        None => pi
+            .store
+            .prepare_scoped(SessionScope::project(&state.project(&workspace_id).await?)?)
+            .await?
+            .runtime()
+            .command_specs(),
     };
     let skills = commands
         .into_iter()
@@ -549,19 +567,34 @@ pub(crate) async fn run_background_prompt(
     prompt: String,
     model: Option<&str>,
 ) -> Result<String, String> {
-    let cwd = workspace_path(state, workspace_id).await?;
-    run_background_prompt_in_cwd(pi, &cwd, prompt, model).await
+    let session = pi
+        .store
+        .create_scoped(SessionScope::project(&state.project(workspace_id).await?)?)
+        .await?;
+    run_background_session(pi, session, prompt, model).await
 }
 
+#[cfg(test)]
 async fn run_background_prompt_in_cwd(
     pi: &PiRuntimeState,
     cwd: &Path,
     prompt: String,
     model: Option<&str>,
 ) -> Result<String, String> {
-    let session = pi.store.create(cwd).await?;
-    let session_id = session.log().header().id.clone();
+    let session = pi
+        .store
+        .create_scoped(SessionScope::directory(cwd)?)
+        .await?;
+    run_background_session(pi, session, prompt, model).await
+}
 
+async fn run_background_session(
+    pi: &PiRuntimeState,
+    session: Arc<AgentSession>,
+    prompt: String,
+    model: Option<&str>,
+) -> Result<String, String> {
+    let session_id = session.log().header().id.clone();
     let result = async {
         if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
             set_session_model(&session, model)?;
@@ -720,13 +753,12 @@ async fn ensure_forwarder(
 }
 
 async fn workspace_path(state: &AppState, workspace_id: &str) -> Result<PathBuf, String> {
-    state
-        .workspaces
-        .lock()
-        .await
-        .get(workspace_id)
-        .map(|entry| PathBuf::from(&entry.path))
-        .ok_or_else(|| format!("workspace not found: {workspace_id}"))
+    Ok(state
+        .project(workspace_id)
+        .await?
+        .spec()?
+        .cwd()
+        .to_path_buf())
 }
 
 fn summary_thread(summary: &SessionSummary) -> Value {
@@ -1518,6 +1550,7 @@ mod tests {
                 pi_session::SessionRuntimeInventory::new([], fixture.native_inventory.clone()),
             );
             let runtime = PiRuntime::builder()
+                .workspace(request.workspace.clone())
                 .plugin_context(context.clone())
                 .plugin(pi_plugin_skills::SkillsPlugin::new(skills))
                 .plugin(FixturePlugin(fixture, generation))
@@ -1579,6 +1612,79 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn project_listing_preserves_legacy_sessions_after_primary_changes_without_guessing() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(directory.path()).unwrap();
+        let agent_dir = directory.path().join("agent");
+        let store = scripted_store(agent_dir.clone());
+        SessionLog::create(
+            agent_dir.join("sessions/legacy.jsonl"),
+            SessionHeader::new("legacy", cwd.clone()),
+        )
+        .unwrap();
+        let mut project = pi_sdk::projects::Project::single_root("first", "first", &cwd);
+        project.roots.push(pi_core::WorkspaceRoot::external(
+            "next",
+            "next",
+            cwd.join("next"),
+        ));
+        project.primary_root = pi_core::WorkspaceRootId::new("next");
+        let mut projects = vec![project.clone()];
+        assert_eq!(
+            store.list_project(&project, &projects, false).unwrap()[0].id,
+            "legacy"
+        );
+
+        projects.push(pi_sdk::projects::Project::single_root(
+            "second", "second", &cwd,
+        ));
+        assert!(store
+            .list_project(&project, &projects, false)
+            .unwrap()
+            .is_empty());
+        let mut header = SessionHeader::new("associated", cwd);
+        header.metadata = Some(project.session_metadata());
+        SessionLog::create(agent_dir.join("sessions/associated.jsonl"), header).unwrap();
+        let listed = store.list_project(&project, &projects, false).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "associated");
+    }
+
+    #[tokio::test]
+    async fn project_drafts_are_isolated_and_refresh_without_replacing_started_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let store = scripted_store(root.path().join("agent"));
+        let mut first = pi_sdk::projects::Project::single_root("first", "first", root.path());
+        let second = pi_sdk::projects::Project::single_root("second", "second", root.path());
+        let a = store
+            .prepare_scoped(SessionScope::project(&first).unwrap())
+            .await
+            .unwrap();
+        let b = store
+            .prepare_scoped(SessionScope::project(&second).unwrap())
+            .await
+            .unwrap();
+        assert_ne!(a.log().header().id, b.log().header().id);
+        first.roots.push(pi_core::WorkspaceRoot::external(
+            "shared",
+            "shared",
+            root.path(),
+        ));
+        store.refresh_project_draft(&first).await.unwrap();
+        assert!(a.is_closed());
+        let started = store
+            .start_scoped(SessionScope::project(&first).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(started.runtime().workspace().roots().len(), 2);
+        first.roots.pop();
+        store.refresh_project_draft(&first).await.unwrap();
+        assert_eq!(started.runtime().workspace().roots().len(), 2);
+        assert!(!started.log().path().exists());
+        // Handles remain owned by the store until the test runtime is dropped.
     }
 
     #[tokio::test]
@@ -2977,5 +3083,47 @@ mod tests {
         assert!(!session_path.exists());
         assert!(!archived_path.exists());
         assert!(store.list(directory.path()).unwrap().is_empty());
+    }
+}
+
+impl PiRuntimeState {
+    pub(crate) async fn refresh_project_draft(
+        &self,
+        project: &pi_sdk::projects::Project,
+    ) -> Result<(), String> {
+        self.store.refresh_project_draft(project).await
+    }
+}
+
+impl PiRuntimeState {
+    pub(crate) async fn execution_directory(
+        &self,
+        state: &AppState,
+        project_id: &str,
+        thread_id: Option<&str>,
+    ) -> Result<PathBuf, String> {
+        let project = state.project(project_id).await?;
+        if let Some(id) = thread_id {
+            let document = self.store.document(id)?;
+            let matches =
+                match pi_sdk::projects::session_project_id(document.header.metadata.as_ref()) {
+                    Some(saved) => saved == project_id,
+                    None => {
+                        let candidates = state.projects().await?;
+                        pi_sdk::projects::project_for_legacy_cwd(&candidates, &document.header.cwd)
+                            .is_some_and(|candidate| candidate.id == project_id)
+                    }
+                };
+            if !matches {
+                return Err("Selected thread does not belong to project".into());
+            }
+            return Ok(document
+                .header
+                .workspace()
+                .map_err(|error| error.to_string())?
+                .cwd()
+                .to_path_buf());
+        }
+        Ok(project.spec()?.cwd().to_path_buf())
     }
 }

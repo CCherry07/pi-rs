@@ -63,8 +63,14 @@ impl PiRuntime {
         // Explicit private attachments use the ordinary Agent hook driver.
         // Parent hooks are not inherited, and register() is not invoked:
         // registrations stay in the immutable parent generation.
-        let plugins = PluginDriver::new(request.plugins)
-            .map_err(|error| RuntimeError::Build(error.to_string()))?;
+        let plugins = PluginDriver::new_with_context(
+            request.plugins,
+            pi_plugin::PluginContextEpoch::with_workspace(
+                Arc::new(pi_plugin::UnavailablePluginContext),
+                Some(self.workspace().clone()),
+            ),
+        )
+        .map_err(|error| RuntimeError::Build(error.to_string()))?;
         // No reload or session-manager mutex: callers may already hold one in
         // an awaited lifecycle hook. This lease keeps auth adapters alive.
         let generation = self.current_generation();

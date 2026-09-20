@@ -140,6 +140,17 @@
     "testNotification": "测试通知"
   },
   "projects": {
+    "roots": {
+      "description": "新会话使用这些目录，已有会话保留创建时的目录配置。",
+      "primary": "主目录",
+      "count_one": "{{count}} 个目录",
+      "count_other": "{{count}} 个目录",
+      "makePrimary": "设为主目录",
+      "selectPrimary": "将 {{name}} 设为主目录",
+      "removeNamed": "移除 {{name}} 的目录关联",
+      "remove": "移除关联",
+      "add": "添加目录"
+    },
     "title": "项目",
     "subtitle": "将相关工作区分组，并调整各组内项目的顺序。",
     "groups": {

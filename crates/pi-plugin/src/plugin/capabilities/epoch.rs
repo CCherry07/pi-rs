@@ -11,6 +11,7 @@ use super::{
 struct PluginContextEpochInner {
     active: AtomicBool,
     access: Arc<dyn PluginContext>,
+    workspace: Option<crate::WorkspaceSnapshot>,
 }
 
 /// Generation-owned lifetime guard shared by native and JavaScript contexts.
@@ -21,10 +22,18 @@ pub struct PluginContextEpoch {
 
 impl PluginContextEpoch {
     pub fn new(access: Arc<dyn PluginContext>) -> Self {
+        Self::with_workspace(access, None)
+    }
+
+    pub fn with_workspace(
+        access: Arc<dyn PluginContext>,
+        workspace: Option<crate::WorkspaceSnapshot>,
+    ) -> Self {
         Self {
             inner: Arc::new(PluginContextEpochInner {
                 active: AtomicBool::new(true),
                 access,
+                workspace,
             }),
         }
     }
@@ -79,6 +88,10 @@ impl PluginContextHandle {
     #[doc(hidden)]
     pub fn access_for_adapter(&self) -> PluginContextResult<Arc<dyn PluginContext>> {
         self.access()
+    }
+
+    pub fn workspace(&self) -> Option<&crate::WorkspaceSnapshot> {
+        self.epoch.inner.workspace.as_ref()
     }
 
     pub fn scope(&self) -> PluginContextScope {

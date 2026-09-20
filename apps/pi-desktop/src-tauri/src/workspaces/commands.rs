@@ -26,35 +26,43 @@ use crate::utils::normalize_windows_namespace_path;
 pub(crate) async fn read_workspace_file(
     workspace_id: String,
     path: String,
+    thread_id: Option<String>,
     state: State<'_, AppState>,
+    pi: State<'_, crate::pi_runtime::PiRuntimeState>,
 ) -> Result<WorkspaceFileResponse, String> {
-    workspaces_core::read_workspace_file_core(
-        &state.workspaces,
-        &workspace_id,
-        &path,
-        read_workspace_file_inner,
-    )
-    .await
+    let root = pi
+        .execution_directory(&state, &workspace_id, thread_id.as_deref())
+        .await?;
+    read_workspace_file_inner(&root, &path)
 }
 
 #[tauri::command]
 pub(crate) async fn list_workspaces(
     state: State<'_, AppState>,
 ) -> Result<Vec<WorkspaceInfo>, String> {
+    let projects = state.projects().await?;
     let workspaces = state.workspaces.lock().await;
-    Ok(workspaces
+    workspaces
         .values()
         .cloned()
-        .map(|entry| WorkspaceInfo {
-            id: entry.id,
-            name: entry.name,
-            path: entry.path,
-            kind: entry.kind,
-            parent_id: entry.parent_id,
-            worktree: entry.worktree,
-            settings: entry.settings,
+        .map(|entry| {
+            let project = projects
+                .iter()
+                .find(|project| project.id == entry.id)
+                .ok_or_else(|| format!("unknown project: {}", entry.id))?;
+            WorkspaceInfo {
+                project: None,
+                id: entry.id,
+                name: entry.name,
+                path: entry.path,
+                kind: entry.kind,
+                parent_id: entry.parent_id,
+                worktree: entry.worktree,
+                settings: entry.settings,
+            }
+            .with_project(project.clone())
         })
-        .collect())
+        .collect()
 }
 
 #[tauri::command]
@@ -95,15 +103,18 @@ pub(crate) async fn add_workspace(
             &workspaces.values().cloned().collect::<Vec<_>>(),
         )?;
     }
-    Ok(WorkspaceInfo {
-        id: entry.id,
-        name: entry.name,
-        path: entry.path,
-        kind: entry.kind,
-        parent_id: entry.parent_id,
-        worktree: entry.worktree,
-        settings: entry.settings,
-    })
+    state
+        .project_info(WorkspaceInfo {
+            project: None,
+            id: entry.id,
+            name: entry.name,
+            path: entry.path,
+            kind: entry.kind,
+            parent_id: entry.parent_id,
+            worktree: entry.worktree,
+            settings: entry.settings,
+        })
+        .await
 }
 
 #[tauri::command]
@@ -113,14 +124,15 @@ pub(crate) async fn add_workspace_from_git_url(
     target_folder_name: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceInfo, String> {
-    workspaces_core::add_workspace_from_git_url_core(
+    let info = workspaces_core::add_workspace_from_git_url_core(
         url,
         destination_path,
         target_folder_name,
         &state.workspaces,
         &state.storage_path,
     )
-    .await
+    .await?;
+    state.project_info(info).await
 }
 
 #[tauri::command]
@@ -130,14 +142,15 @@ pub(crate) async fn add_clone(
     copies_folder: String,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceInfo, String> {
-    workspaces_core::add_clone_core(
+    let info = workspaces_core::add_clone_core(
         source_workspace_id,
         copy_name,
         copies_folder,
         &state.workspaces,
         &state.storage_path,
     )
-    .await
+    .await?;
+    state.project_info(info).await
 }
 
 #[tauri::command]
@@ -155,7 +168,7 @@ pub(crate) async fn add_worktree(
         .app_data_dir()
         .map_err(|err| format!("Failed to resolve app data dir: {err}"))?;
 
-    workspaces_core::add_worktree_core(
+    let info = workspaces_core::add_worktree_core(
         parent_id,
         branch,
         name,
@@ -178,7 +191,8 @@ pub(crate) async fn add_worktree(
             })
         },
     )
-    .await
+    .await?;
+    state.project_info(info).await
 }
 
 #[tauri::command]
@@ -209,24 +223,9 @@ pub(crate) async fn worktree_setup_mark_ran(
 
 #[tauri::command]
 pub(crate) async fn remove_workspace(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    workspaces_core::remove_workspace_core(
-        id,
-        &state.workspaces,
-        &state.storage_path,
-        |root, args| {
-            workspaces_core::run_git_command_unit(root, args, |repo, args_owned| {
-                run_git_command_owned(repo, args_owned)
-            })
-        },
-        is_missing_worktree_error,
-        |path| {
-            std::fs::remove_dir_all(path)
-                .map_err(|err| format!("Failed to remove worktree folder: {err}"))
-        },
-        true,
-        true,
-    )
-    .await
+    workspaces_core::remove_workspace_core(id.clone(), &state.workspaces, &state.storage_path)
+        .await?;
+    state.project_store().remove(&id)
 }
 
 #[tauri::command]
@@ -261,7 +260,16 @@ pub(crate) async fn rename_worktree(
         .app_data_dir()
         .map_err(|err| format!("Failed to resolve app data dir: {err}"))?;
 
-    workspaces_core::rename_worktree_core(
+    let mut project = state.project(&id).await?;
+    let old_path = state
+        .workspaces
+        .lock()
+        .await
+        .get(&id)
+        .ok_or("workspace not found")?
+        .path
+        .clone();
+    let result = workspaces_core::rename_worktree_core(
         id,
         branch,
         &data_dir,
@@ -286,7 +294,15 @@ pub(crate) async fn rename_worktree(
             })
         },
     )
-    .await
+    .await?;
+    for root in &mut project.roots {
+        if root.path == PathBuf::from(&old_path) {
+            root.path = PathBuf::from(&result.path);
+        }
+    }
+    project.name = result.name.clone();
+    state.project_store().upsert(project.clone())?;
+    result.with_project(project)
 }
 
 #[tauri::command]
@@ -346,7 +362,7 @@ pub(crate) async fn update_workspace_settings(
     settings: WorkspaceSettings,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceInfo, String> {
-    workspaces_core::update_workspace_settings_core(
+    let info = workspaces_core::update_workspace_settings_core(
         id,
         settings,
         &state.workspaces,
@@ -355,18 +371,21 @@ pub(crate) async fn update_workspace_settings(
             apply_workspace_settings_update(workspaces, workspace_id, next_settings)
         },
     )
-    .await
+    .await?;
+    state.project_info(info).await
 }
 
 #[tauri::command]
 pub(crate) async fn list_workspace_files(
     workspace_id: String,
+    thread_id: Option<String>,
     state: State<'_, AppState>,
+    pi: State<'_, crate::pi_runtime::PiRuntimeState>,
 ) -> Result<Vec<String>, String> {
-    workspaces_core::list_workspace_files_core(&state.workspaces, &workspace_id, |root| {
-        list_workspace_files_inner(root, usize::MAX)
-    })
-    .await
+    let root = pi
+        .execution_directory(&state, &workspace_id, thread_id.as_deref())
+        .await?;
+    Ok(list_workspace_files_inner(&root, usize::MAX))
 }
 
 #[tauri::command]
@@ -395,4 +414,29 @@ pub(crate) async fn get_open_app_icon(app_name: String) -> Result<Option<String>
     {
         workspaces_core::get_open_app_icon_core(app_name, |_name| None).await
     }
+}
+
+#[tauri::command]
+pub(crate) async fn get_workspace_project(
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<pi_sdk::projects::Project, String> {
+    state.project(&workspace_id).await
+}
+
+#[tauri::command]
+pub(crate) async fn update_workspace_project(
+    project: pi_sdk::projects::Project,
+    state: State<'_, AppState>,
+    pi: State<'_, crate::pi_runtime::PiRuntimeState>,
+) -> Result<pi_sdk::projects::Project, String> {
+    let previous = state.project(&project.id).await?;
+    project.resolve()?;
+    // Refresh only an unclaimed draft; settled sessions keep their saved scope.
+    pi.refresh_project_draft(&project).await?;
+    if let Err(error) = state.project_store().upsert(project.clone()) {
+        let _ = pi.refresh_project_draft(&previous).await;
+        return Err(error);
+    }
+    Ok(project)
 }

@@ -95,6 +95,12 @@ export function useWorkspaces(options: UseWorkspacesOptions = {}): UseWorkspaces
   });
 
   useEffect(() => {
+    const refresh = () => { void refreshWorkspaces(); };
+    window.addEventListener("pi-project-changed", refresh);
+    return () => window.removeEventListener("pi-project-changed", refresh);
+  }, [refreshWorkspaces]);
+
+  useEffect(() => {
     void refreshWorkspaces();
   }, [refreshWorkspaces]);
 

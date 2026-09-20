@@ -58,6 +58,11 @@ impl Plugin for HelloPlugin {
 
 ## Runtime context / 运行时上下文
 
+Execution contexts and `PrepareContext` expose `workspace()` as an immutable multi-root view.
+`cwd()` is its execution-directory projection. Supplemental roots do not change relative path
+resolution or automatically merge resources. Rebuild native plugins against this SDK: the existing
+exact-build fingerprint rejects artifacts with the previous context layout.
+
 Native callbacks receive Pi plugin capabilities directly on their context. There is no `pi()`
 accessor and plugins never retain or lock the concrete `AgentSession`. The host PluginContext is
 implemented by `pi-session` against `AgentSession` / `PiSession` / `PiRuntime`; the native path does

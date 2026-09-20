@@ -38,6 +38,8 @@ pub struct Config {
     /// First-party runtime features; defaults to all enabled.
     pub features: Features,
     pub cwd: PathBuf,
+    /// Complete environment for direct runtime composition; managed sessions supply their own saved spec.
+    pub workspace: Option<pi_core::WorkspaceSnapshot>,
     pub agent_dir: PathBuf,
     pub session_path: PathBuf,
     pub model: Option<String>,
@@ -79,6 +81,7 @@ impl Config {
             .join(format!("{}.jsonl", uuid::Uuid::now_v7()));
         Self {
             features: Features::default(),
+            workspace: None,
             cwd,
             agent_dir,
             session_path,
@@ -149,3 +152,6 @@ pub(crate) fn expand_tilde_path(path: &str) -> PathBuf {
     }
     PathBuf::from(path)
 }
+
+pub mod projects;
+mod workspace_prompt;

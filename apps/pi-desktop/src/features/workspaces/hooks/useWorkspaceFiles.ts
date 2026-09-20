@@ -4,6 +4,7 @@ import { getWorkspaceFiles } from "../../../services/tauri";
 
 type UseWorkspaceFilesOptions = {
   activeWorkspace: WorkspaceInfo | null;
+  threadId?: string | null;
   onDebug?: (entry: DebugEntry) => void;
   enabled?: boolean;
   pollingEnabled?: boolean;
@@ -26,6 +27,7 @@ function areStringArraysEqual(a: string[], b: string[]) {
 
 export function useWorkspaceFiles({
   activeWorkspace,
+  threadId,
   onDebug,
   enabled = true,
   pollingEnabled,
@@ -42,6 +44,9 @@ export function useWorkspaceFiles({
   const LARGE_REFRESH_INTERVAL_MS = 60000;
   const LARGE_FILE_COUNT = 20000;
   const workspaceId = activeWorkspace?.id ?? null;
+  const scopeKey = `${workspaceId}:${threadId ?? activeWorkspace?.path ?? ""}`;
+  const activeScope = useRef(scopeKey);
+  activeScope.current = scopeKey;
   const isEnabled = enabled;
   const isPollingEnabled = pollingEnabled ?? isEnabled;
 
@@ -49,11 +54,12 @@ export function useWorkspaceFiles({
     if (!workspaceId || !isEnabled) {
       return;
     }
-    if (inFlight.current === workspaceId) {
+    if (inFlight.current === scopeKey) {
       return;
     }
-    inFlight.current = workspaceId;
+    inFlight.current = scopeKey;
     const requestWorkspaceId = workspaceId;
+    const requestScope = scopeKey;
     setIsLoading(true);
     onDebug?.({
       id: `${Date.now()}-client-files-list`,
@@ -63,7 +69,7 @@ export function useWorkspaceFiles({
       payload: { workspaceId: requestWorkspaceId },
     });
     try {
-      const response = await getWorkspaceFiles(requestWorkspaceId);
+      const response = await getWorkspaceFiles(requestWorkspaceId, threadId);
       onDebug?.({
         id: `${Date.now()}-server-files-list`,
         timestamp: Date.now(),
@@ -71,10 +77,10 @@ export function useWorkspaceFiles({
         label: "files/list response",
         payload: response,
       });
-      if (requestWorkspaceId === workspaceId) {
+      if (requestScope === activeScope.current) {
         const nextFiles = Array.isArray(response) ? response : [];
         setFiles((prev) => (areStringArraysEqual(prev, nextFiles) ? prev : nextFiles));
-        lastFetchedWorkspaceId.current = requestWorkspaceId;
+        lastFetchedWorkspaceId.current = requestScope;
       }
     } catch (error) {
       onDebug?.({
@@ -85,18 +91,18 @@ export function useWorkspaceFiles({
         payload: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      if (inFlight.current === requestWorkspaceId) {
+      if (inFlight.current === requestScope) {
         inFlight.current = null;
         setIsLoading(false);
       }
     }
-  }, [isEnabled, onDebug, workspaceId]);
+  }, [isEnabled, onDebug, workspaceId, threadId, scopeKey]);
 
   useEffect(() => {
     setFiles([]);
     lastFetchedWorkspaceId.current = null;
     inFlight.current = null;
-  }, [workspaceId]);
+  }, [scopeKey]);
 
   useEffect(() => {
     setIsLoading(Boolean(workspaceId && isEnabled));
@@ -116,11 +122,11 @@ export function useWorkspaceFiles({
     if (!workspaceId || !isEnabled) {
       return;
     }
-    if (lastFetchedWorkspaceId.current === workspaceId && files.length > 0) {
+    if (lastFetchedWorkspaceId.current === scopeKey && files.length > 0) {
       return;
     }
     refreshFiles();
-  }, [files.length, isEnabled, refreshFiles, workspaceId]);
+  }, [files.length, isEnabled, refreshFiles, workspaceId, scopeKey]);
 
   useEffect(() => {
     if (!workspaceId || !isPollingEnabled || !isDocumentVisible) {

@@ -47,7 +47,15 @@ export type WorktreeInfo = {
   branch: string;
 };
 
+export type ProjectDefinition = {
+  id: string;
+  name: string;
+  roots: Array<{ id: string; name: string; path: string; ownership: { kind: "external" } | { kind: "managedWorktree"; sourceRoot: string } }>;
+  primaryRoot: string;
+};
+
 export type WorkspaceInfo = {
+  project?: ProjectDefinition | null;
   id: string;
   name: string;
   path: string;

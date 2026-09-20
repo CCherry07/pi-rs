@@ -964,6 +964,14 @@ macro_rules! impl_session_context {
                 self.handle.clone()
             }
 
+            pub fn workspace(&self) -> PluginContextResult<crate::WorkspaceSnapshot> {
+                let access = self.handle.access()?;
+                match self.handle.workspace() {
+                    Some(workspace) => Ok(workspace.clone()),
+                    None => Ok(crate::WorkspaceSpec::from_cwd(access.cwd()?).snapshot()),
+                }
+            }
+
             pub fn cwd(&self) -> PluginContextResult<PathBuf> {
                 self.handle.access()?.session_cwd()
             }

@@ -958,6 +958,7 @@ fn validate_ambiguous_optional_fields(
 }
 
 pub(crate) fn validate_header(header: &SessionHeader) -> Result<(), SessionError> {
+    header.workspace()?;
     if header.version != SESSION_SCHEMA_VERSION {
         return Err(SessionError::UnsupportedSchema(header.version));
     }

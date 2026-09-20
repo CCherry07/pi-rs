@@ -185,7 +185,7 @@ impl Tool for ScheduleTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "schedule".into(), label: "Scheduled tasks".into(),
-            description: "Manage persistent scheduled prompts. Jobs run in fresh isolated sessions while a primary Pi session in the same cwd is open and idle. Actions: create, list, pause, resume, remove, run_now, history. run_now queues an asynchronous run. Scope defaults to global; project requires trust. Creating a job snapshots the current model, thinking and active tools.".into(),
+            description: "Manage persistent scheduled prompts. Jobs run in fresh isolated sessions while a primary Pi session with the same workspace roots and execution directory is open and idle. Actions: create, list, pause, resume, remove, run_now, history. run_now queues an asynchronous run. Scope defaults to global; project requires trust. Creating a job snapshots the current workspace, model, thinking and active tools.".into(),
             parameters: tool_parameters(),
             execution_mode: ToolExecutionMode::Sequential,
             prompt_snippet: Some("Schedule future or recurring work with the schedule tool.".into()),
@@ -221,9 +221,14 @@ impl Tool for ScheduleTool {
         } else {
             IsolatedSessionOptions::default()
         };
-        let result = manage(self.options.clone(), request, selections)
-            .await
-            .map_err(|error| ToolError::Execution(error.to_string()))?;
+        let result = manage(
+            self.options.clone(),
+            request,
+            selections,
+            context.workspace().spec().clone(),
+        )
+        .await
+        .map_err(|error| ToolError::Execution(error.to_string()))?;
         let mut output =
             ToolResult::text(serde_json::to_string_pretty(&result).unwrap_or_default());
         output.details = Some(result);
@@ -276,9 +281,14 @@ impl Command for ScheduleCommand {
         } else {
             IsolatedSessionOptions::default()
         };
-        let result = manage(self.options.clone(), request, selections)
-            .await
-            .map_err(|error| CommandError::Execution(error.to_string()))?;
+        let result = manage(
+            self.options.clone(),
+            request,
+            selections,
+            context.workspace().spec().clone(),
+        )
+        .await
+        .map_err(|error| CommandError::Execution(error.to_string()))?;
         context.ui.notify(
             NoticeLevel::Info,
             serde_json::to_string_pretty(&result).unwrap_or_default(),
@@ -332,6 +342,7 @@ async fn manage(
     options: ScheduleOptions,
     request: Request,
     selections: IsolatedSessionOptions,
+    workspace: pi_core::WorkspaceSpec,
 ) -> Result<Value> {
     tokio::task::spawn_blocking(move || {
         let store = options.store(request.scope)?;
@@ -353,6 +364,7 @@ async fn manage(
                     id: uuid::Uuid::now_v7().to_string(),
                     name,
                     cwd: options.cwd,
+                    workspace: Some(workspace),
                     prompt,
                     schedule,
                     options: selections,

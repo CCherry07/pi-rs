@@ -167,6 +167,8 @@ pub(crate) struct WorkspaceEntry {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct WorkspaceInfo {
+    #[serde(default)]
+    pub(crate) project: Option<pi_sdk::projects::Project>,
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) path: String,
@@ -178,6 +180,20 @@ pub(crate) struct WorkspaceInfo {
     pub(crate) worktree: Option<WorktreeInfo>,
     #[serde(default)]
     pub(crate) settings: WorkspaceSettings,
+}
+
+impl WorkspaceInfo {
+    pub(crate) fn with_project(
+        mut self,
+        project: pi_sdk::projects::Project,
+    ) -> Result<Self, String> {
+        if self.id != project.id {
+            return Err("Project does not match workspace entry".into());
+        }
+        self.path = project.spec()?.cwd().to_string_lossy().into_owned();
+        self.project = Some(project);
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

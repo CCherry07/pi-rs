@@ -275,6 +275,27 @@ impl MultiSessionManager {
         .await
     }
 
+    /// Creates a session from a resolved environment, with optional product metadata.
+    pub async fn create_session_with_workspace(
+        &self,
+        workspace: pi_core::WorkspaceSpec,
+        path: impl Into<PathBuf>,
+        session_id: Option<String>,
+        metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<PiSession, MultiSessionManagerError> {
+        let mut target = AgentSessionRuntimeTarget::create(workspace.cwd(), path)
+            .with_workspace(workspace, metadata);
+        if let AgentSessionRuntimeTarget::Create { session_id: id, .. } = &mut target {
+            *id = session_id;
+        }
+        self.acquire(
+            target,
+            ExistingSessionPolicy::Reject,
+            SessionGenerationOverlay::default(),
+        )
+        .await
+    }
+
     pub async fn create_session_with_id(
         &self,
         cwd: impl Into<PathBuf>,
@@ -665,7 +686,10 @@ impl PiSession {
             .acquire_with_guard(
                 operation,
                 SessionAcquisition {
-                    target: AgentSessionRuntimeTarget::create(self.cwd(), path),
+                    target: AgentSessionRuntimeTarget::create(self.cwd(), path).with_workspace(
+                        parent.runtime().workspace().spec().clone(),
+                        parent.log().header().metadata,
+                    ),
                     existing: ExistingSessionPolicy::Reject,
                     generation_overlay: SessionGenerationOverlay::default()
                         .with_execution_origin(pi_plugin::SessionExecutionOrigin::Subagent),

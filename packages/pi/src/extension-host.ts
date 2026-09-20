@@ -86,7 +86,7 @@ const toolInvocationPayloadSchema = z.looseObject({
   context: extensionContextInputSchema.extend({ toolCallId: z.string() }),
   input: z.unknown(),
 })
-const toolPreparationPayloadSchema = z.looseObject({ input: z.unknown() })
+const toolPreparationPayloadSchema = z.looseObject({ input: z.unknown(), context: extensionContextInputSchema.default({}) })
 const commandInvocationPayloadSchema = z.looseObject({
   context: extensionContextInputSchema,
   arguments: z.string(),
@@ -243,7 +243,7 @@ interface ToolDefinition {
   promptSnippet?: string
   promptGuidelines?: string[]
   executionMode?: ToolExecutionMode
-  prepareArguments?(input: unknown): unknown
+  prepareArguments?(input: unknown, context?: ExtensionContext): unknown
   execute(toolCallId: string, input: unknown, signal: AbortSignal, update: ((result: unknown) => void) | undefined, context: ExtensionContext): unknown | Promise<unknown>
 }
 
@@ -282,6 +282,7 @@ interface GenerationState {
   events: ExtensionEventBus
   mode: HostMode
   projectTrusted: boolean
+  workspace?: unknown
   runtime: ExtensionRuntime
   flagValues: Map<string, boolean | string | undefined>
   registeredFlags: Map<string, 'boolean' | 'string'>
@@ -672,6 +673,7 @@ export class ExtensionHost {
       events: createExtensionEventBus(),
       mode: request.mode,
       projectTrusted: request.projectTrusted,
+      workspace: request.workspace,
       runtime,
       flagValues: new Map(Object.entries(request.flagValues)),
       registeredFlags: new Map(),
@@ -769,13 +771,13 @@ export class ExtensionHost {
           ? undefined
           : `${pluginId}:tool:${definition.name}:prepareArguments`
         if (prepareCallbackId !== undefined) {
-          this.#registerCallback(state, prepareCallbackId, async invocation => {
+          this.#registerCallback(state, prepareCallbackId, async (invocation, signal, nativeContext) => {
             const payload = parseExternal(
               toolPreparationPayloadSchema,
               invocation.payload,
               `JavaScript tool ${definition.name} preparation payload`,
             )
-            return definition.prepareArguments?.(payload.input)
+            return definition.prepareArguments?.(payload.input, this.#extensionContext(payload.context, generationId, signal, nativeContext, false))
           })
         }
         this.#registerCallback(state, callbackId, async (invocation, signal, nativeContext) => {
@@ -1012,7 +1014,7 @@ export class ExtensionHost {
     const parsedContext = extensionContextInputSchema.parse(context)
     const state = this.#requireGeneration(generationId)
     const contextFacade = createExtensionContext({
-      payload: { ...context, ...parsedContext },
+      payload: { workspace: state.workspace, ...context, ...parsedContext },
       nativeContext,
       mode: state.mode,
       projectTrusted: state.projectTrusted,

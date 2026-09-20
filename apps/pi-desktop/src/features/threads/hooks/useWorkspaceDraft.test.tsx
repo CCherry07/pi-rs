@@ -19,6 +19,17 @@ describe("workspace draft", () => {
     vi.mocked(reloadThread).mockResolvedValue({ thread: { id: "draft", commands } });
   });
 
+  it("refreshes the matching project draft after directory edits", async () => {
+    const { result } = renderHook(() => useWorkspaceDraft("workspace", null));
+    await waitFor(() => expect(result.current.commands).toEqual(commands));
+    vi.mocked(prepareThread).mockResolvedValueOnce({ thread: { id: "replacement", commands: [{ name: "changed", description: "New root resources" }] } });
+    act(() => { window.dispatchEvent(new CustomEvent("pi-project-changed", { detail: "different" })); });
+    expect(prepareThread).toHaveBeenCalledTimes(1);
+    act(() => { window.dispatchEvent(new CustomEvent("pi-project-changed", { detail: "workspace" })); });
+    await waitFor(() => expect(result.current.commands[0]?.name).toBe("changed"));
+    expect(reloadThread).not.toHaveBeenCalled();
+  });
+
   it("loads plugin commands and skills before a thread is selected", async () => {
     const { result } = renderHook(() => useWorkspaceDraft("workspace", null), { wrapper: StrictMode });
     await waitFor(() => expect(result.current.commands).toEqual(commands));

@@ -21,6 +21,59 @@ product seam.
 
 ## Workspace
 
+The product execution model is `Project → WorkspaceSpec → Session → Generation`.
+`pi-core` owns validated `WorkspaceRootId`, `WorkspaceRoot`, `WorkspaceSpec`, and immutable,
+shared `WorkspaceSnapshot` values. A spec contains multiple named roots, a primary-root reference,
+and an execution directory within that primary root. Root provenance describes externally managed
+directories or managed worktrees; it never grants permission to delete them. Workspace is a value,
+with no independent ID, registry, handoff lifecycle, or automatic worktree cleanup.
+
+`pi-sdk::projects` owns stable Project identities, root configuration, filesystem resolution, and a
+versioned `projects.json` store. Store transactions reread under a cross-process OS lock and use
+atomic replacement; corruption and unsupported versions are errors. Project edits affect newly
+created sessions. Standalone cwd entry points remain single-root adapters and need no Project.
+Native v4 headers retain `cwd` as a compatibility projection and store the complete versioned spec
+in `metadata["pi-rs.workspace"]`; optional `metadata["pi-rs.project"]` records the Project ID.
+Only missing workspace metadata falls back to cwd. Invalid metadata or a mismatched execution
+directory is rejected. Resume, fork, and native export/import retain the saved environment even
+after the Project has been edited or removed. Lazy first-assistant persistence is unchanged.
+
+Generation requests carry a WorkspaceSnapshot and factories must preserve it. Runtime preparation,
+plugin capabilities, tool argument preparation/execution, provider callbacks, and session callbacks
+share that snapshot through the existing generation context. Their `workspace()` views are read-only
+and their `cwd()` accessors derive from the same description. AgentLoop and ToolScheduler propagate
+the existing context parts, including this snapshot. Native factories receive the complete workspace
+through the existing fallible preparation seam; exact-build fingerprint checks require rebuilding
+native plugins after this contract change. Library pinning and manifest/ABI verification policy are
+unchanged. JavaScript callbacks and context queries expose the same serialized environment.
+
+Ordinary reload rebuilds resources from the session's saved spec. Managed isolated sessions and
+ephemeral Agents inherit it; same-directory new-session replacements retain it, while an explicit
+different cwd creates a single-root environment. Schedules save their workspace and only claim work
+from a session with that environment. SDK's factory-backed workspace prompt plugin describes all
+roots to the model through `before_agent_start`, without mutating reusable base prompts.
+Settings, context, skills, MCP, and native plugin discovery still start at the execution directory;
+supplemental roots do not merge resources automatically. Relative tool paths resolve only from that
+directory. Absolute, home-relative, and parent-relative tool paths remain permitted by existing Pi
+path rules and OS permissions; roots are not a filesystem sandbox. Snapshots freeze descriptions,
+not file contents.
+
+Desktop migrates legacy one-path records to SDK Projects while preserving IDs and UI settings.
+Its Projects settings editor adds/removes directory associations and selects a primary root.
+Worktree project adapters replace the actual Git source root, retain all other roots, make the
+worktree the child's primary root, and record its provenance. Desktop's existing Git association
+continues to select that source repository even when the parent Project's primary root changes.
+Removing a Project association preserves directory contents and detaches child UI records; the
+explicit worktree-delete operation continues to own physical deletion. Draft sessions are keyed by
+Project identity, refreshed transactionally when roots change, and claimed under the same lock.
+Composer text is independent of that refresh. Session listings use saved Project associations;
+legacy cwd matching requires an exact match to a root of only one Project, including supplemental
+roots after a primary-root change. File browsing, terminal startup, and session
+inspection resolve existing conversations from their saved environment.
+
+This is a deliberate Rust product extension. The current local TypeScript Pi session manager uses
+v3 headers without this metadata extension; the Pi-compatible v3 RPC projection remains unchanged.
+
 ```text
 crates/pi-core                  messages, models, tool data and shared Pi v4 wire values
 crates/pi-plugin                Plugin/ProviderPlugin contracts, prepare factories, capabilities,
@@ -2257,7 +2310,8 @@ installation, or scheduling policy in `pi-core`/`pi-session`.
 
 Task definitions and execution records live together in the plugin-owned, versioned
 `<agent-dir>/schedule/jobs.json` or trusted `<cwd>/.pi/schedule/jobs.json`. Project trust gates all
-project schedule reads and writes. Global jobs still match the currently open session cwd.
+project schedule reads and writes. Job listing and management remain cwd-scoped; dispatch requires
+the currently open session's complete workspace to match the saved workspace.
 One-shots, fixed intervals, and five-field cron with explicit IANA timezones are durable;
 an idle primary session claims due work, while isolated origins cannot manage schedules or start
 workers. Creation snapshots model/thinking/tools; request-time credentials and the host's current

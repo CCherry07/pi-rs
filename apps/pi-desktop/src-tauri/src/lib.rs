@@ -89,7 +89,7 @@ pub fn run() {
                 // PathResolver. Locale settings can only be read during setup.
                 app.set_menu(menu::build_menu(app.handle())?)?;
             }
-            let state = state::AppState::load(app.handle());
+            let state = state::AppState::load(app.handle()).map_err(std::io::Error::other)?;
             app.manage(state);
             app.manage(pi_runtime::create_state().map_err(std::io::Error::other)?);
             #[cfg(target_os = "macos")]
@@ -133,6 +133,8 @@ pub fn run() {
             menu::menu_set_locale,
             tray::set_tray_recent_threads,
             workspaces::list_workspaces,
+            workspaces::get_workspace_project,
+            workspaces::update_workspace_project,
             workspaces::is_workspace_path_dir,
             workspaces::add_workspace,
             workspaces::add_workspace_from_git_url,

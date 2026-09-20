@@ -37,6 +37,7 @@ type FileTreeNode = {
 
 type FileTreePanelProps = {
   workspaceId: string;
+  threadId?: string | null;
   workspacePath: string;
   files: string[];
   modifiedFiles: string[];
@@ -163,6 +164,7 @@ function isImagePath(path: string) {
 
 export function FileTreePanel({
   workspaceId,
+  threadId,
   workspacePath,
   files,
   modifiedFiles,
@@ -275,7 +277,7 @@ export function FileTreePanel({
     setIsDragSelecting(false);
     dragAnchorLineRef.current = null;
     dragMovedRef.current = false;
-  }, [workspaceId]);
+  }, [workspaceId, threadId]);
 
   const closePreview = useCallback(() => {
     setPreviewPath(null);
@@ -392,7 +394,7 @@ export function FileTreePanel({
     }
     setPreviewLoading(true);
     setPreviewError(null);
-    readWorkspaceFile(workspaceId, previewPath)
+    readWorkspaceFile(workspaceId, previewPath, threadId)
       .then((response) => {
         if (cancelled) {
           return;
@@ -414,7 +416,7 @@ export function FileTreePanel({
     return () => {
       cancelled = true;
     };
-  }, [previewKind, previewPath, workspaceId]);
+  }, [previewKind, previewPath, workspaceId, threadId]);
 
   const flatNodes = useMemo(() => {
     const rows: FileTreeRowEntry[] = [];

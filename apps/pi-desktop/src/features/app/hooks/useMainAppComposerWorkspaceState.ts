@@ -138,6 +138,7 @@ export function useMainAppComposerWorkspaceState({
   const { files, isLoading: isFilesLoading, setFileAutocompleteActive } =
     useWorkspaceFileListing({
       activeWorkspace,
+      threadId: activeThreadId,
       activeWorkspaceId,
       filePanelMode,
       isCompact,

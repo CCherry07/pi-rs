@@ -11,12 +11,35 @@ use pi_session::{
     SessionEntry, SessionLog,
 };
 
+pub(crate) struct SessionScope {
+    key: String,
+    workspace: pi_core::WorkspaceSpec,
+    metadata: Option<serde_json::Map<String, serde_json::Value>>,
+}
+impl SessionScope {
+    pub(crate) fn project(project: &pi_sdk::projects::Project) -> Result<Self, String> {
+        Ok(Self {
+            key: format!("project:{}", project.id),
+            workspace: project.resolve()?,
+            metadata: Some(project.session_metadata()),
+        })
+    }
+    pub(crate) fn directory(path: &Path) -> Result<Self, String> {
+        let path = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
+        Ok(Self {
+            key: format!("cwd:{}", path.display()),
+            workspace: pi_core::WorkspaceSpec::from_cwd(path),
+            metadata: None,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct SessionStore {
     manager: MultiSessionManager,
     agent_dir: PathBuf,
     sessions: Arc<RwLock<HashMap<String, PiSession>>>,
-    drafts: Arc<tokio::sync::Mutex<HashMap<PathBuf, PiSession>>>,
+    drafts: Arc<tokio::sync::Mutex<HashMap<String, PiSession>>>,
     open_gate: Arc<tokio::sync::Mutex<()>>,
     observed_isolated: Arc<RwLock<HashMap<String, ObservedIsolatedSession>>>,
 }
@@ -154,6 +177,7 @@ pub(crate) struct SessionModelCatalog {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SessionSummary {
+    pub(crate) project_id: Option<String>,
     pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) cwd: PathBuf,
@@ -174,32 +198,78 @@ impl SessionStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn create(&self, cwd: &Path) -> Result<Arc<AgentSession>, String> {
-        Ok(self.create_handle(cwd).await?.current())
+        self.create_scoped(SessionScope::directory(cwd)?).await
     }
 
-    // Preparation is idempotent per workspace. The eventual user thread claims
-    // this same generation, so displayed commands and command execution agree.
+    pub(crate) async fn create_scoped(
+        &self,
+        scope: SessionScope,
+    ) -> Result<Arc<AgentSession>, String> {
+        Ok(self.create_handle(&scope).await?.current())
+    }
+
+    #[cfg(test)]
     pub(crate) async fn prepare_thread(&self, cwd: &Path) -> Result<Arc<AgentSession>, String> {
-        Ok(self.prepare_handle(cwd).await?.current())
+        self.prepare_scoped(SessionScope::directory(cwd)?).await
     }
 
-    async fn prepare_handle(&self, cwd: &Path) -> Result<PiSession, String> {
-        let cwd = std::fs::canonicalize(cwd)
-            .map_err(|error| format!("cannot access workspace {}: {error}", cwd.display()))?;
+    pub(crate) async fn prepare_scoped(
+        &self,
+        scope: SessionScope,
+    ) -> Result<Arc<AgentSession>, String> {
         let mut drafts = self.drafts.lock().await;
-        if let Some(session) = drafts.get(&cwd) {
-            return Ok(session.clone());
-        }
-        let session = self.create_handle(&cwd).await?;
-        drafts.insert(cwd, session.clone());
-        Ok(session)
+        self.prepare_locked(scope, &mut drafts).await
     }
 
-    pub(crate) async fn reload_prepared(&self, cwd: &Path) -> Result<Arc<AgentSession>, String> {
-        let session = self.prepare_handle(cwd).await?;
-        session.reload().await.map_err(|error| error.to_string())?;
+    async fn prepare_locked(
+        &self,
+        scope: SessionScope,
+        drafts: &mut HashMap<String, PiSession>,
+    ) -> Result<Arc<AgentSession>, String> {
+        if let Some(session) = drafts.get(&scope.key) {
+            if session.current().runtime().workspace().spec() == &scope.workspace {
+                return Ok(session.current());
+            }
+        }
+        // Prepare first; failure retains the previous usable draft.
+        let session = self.create_handle(&scope).await?;
+        if let Some(previous) = drafts.insert(scope.key, session.clone()) {
+            self.manager
+                .close_session(&previous)
+                .await
+                .map_err(|error| error.to_string())?;
+            self.sessions
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|_, handle| handle.id() != previous.id());
+        }
         Ok(session.current())
+    }
+
+    pub(crate) async fn refresh_project_draft(
+        &self,
+        project: &pi_sdk::projects::Project,
+    ) -> Result<(), String> {
+        let key = format!("project:{}", project.id);
+        if self.drafts.lock().await.contains_key(&key) {
+            self.prepare_scoped(SessionScope::project(project)?).await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn reload_prepared(&self, cwd: &Path) -> Result<Arc<AgentSession>, String> {
+        self.reload_scoped(SessionScope::directory(cwd)?).await
+    }
+
+    pub(crate) async fn reload_scoped(
+        &self,
+        scope: SessionScope,
+    ) -> Result<Arc<AgentSession>, String> {
+        let current = self.prepare_scoped(scope).await?;
+        self.reload(&current.log().header().id).await
     }
 
     pub(crate) async fn reload(&self, id: &str) -> Result<Arc<AgentSession>, String> {
@@ -211,35 +281,40 @@ impl SessionStore {
         Ok(session.current())
     }
 
+    #[cfg(test)]
     pub(crate) async fn start_thread(&self, cwd: &Path) -> Result<Arc<AgentSession>, String> {
-        let cwd = std::fs::canonicalize(cwd)
-            .map_err(|error| format!("cannot access workspace {}: {error}", cwd.display()))?;
-        let mut drafts = self.drafts.lock().await;
-        if let Some(session) = drafts.remove(&cwd) {
-            return Ok(session.current());
-        }
-        self.create(&cwd).await
+        self.start_scoped(SessionScope::directory(cwd)?).await
     }
 
-    async fn create_handle(&self, cwd: &Path) -> Result<PiSession, String> {
-        let cwd = std::fs::canonicalize(cwd)
-            .map_err(|error| format!("cannot access workspace {}: {error}", cwd.display()))?;
-        if !cwd.is_dir() {
-            return Err(format!("workspace is not a directory: {}", cwd.display()));
-        }
+    pub(crate) async fn start_scoped(
+        &self,
+        scope: SessionScope,
+    ) -> Result<Arc<AgentSession>, String> {
+        let mut drafts = self.drafts.lock().await;
+        let current = self.prepare_locked(scope, &mut drafts).await?;
+        drafts.retain(|_, session| session.id() != current.log().header().id);
+        Ok(current)
+    }
+
+    async fn create_handle(&self, scope: &SessionScope) -> Result<PiSession, String> {
         let session_id = uuid::Uuid::now_v7().to_string();
         let path = match JsonlSessionRepo::new(self.agent_dir.join("sessions"))
-            .resolve_exact_id(&cwd, &session_id)
+            .resolve_exact_id(scope.workspace.cwd(), &session_id)
             .map_err(|error| error.to_string())?
         {
             ExactSessionIdResolution::New { path, .. } => path,
             ExactSessionIdResolution::Existing(_) => {
-                return Err(format!("generated duplicate Pi session id: {session_id}"));
+                return Err(format!("generated duplicate Pi session id: {session_id}"))
             }
         };
         let session = self
             .manager
-            .create_session_with_id(cwd, path, session_id)
+            .create_session_with_workspace(
+                scope.workspace.clone(),
+                path,
+                Some(session_id),
+                scope.metadata.clone(),
+            )
             .await
             .map_err(|error| error.to_string())?;
         self.sessions
@@ -296,9 +371,19 @@ impl SessionStore {
             .ok_or_else(|| format!("unknown Pi session: {id}"))
     }
 
+    #[cfg(test)]
     pub(crate) async fn model_catalog(
         &self,
         cwd: &Path,
+        thread_id: Option<&str>,
+    ) -> Result<SessionModelCatalog, String> {
+        self.model_catalog_scoped(SessionScope::directory(cwd)?, thread_id)
+            .await
+    }
+
+    pub(crate) async fn model_catalog_scoped(
+        &self,
+        scope: SessionScope,
         thread_id: Option<&str>,
     ) -> Result<SessionModelCatalog, String> {
         let session = match thread_id {
@@ -310,15 +395,19 @@ impl SessionStore {
                     .handle(id)
                     .ok_or_else(|| format!("Pi session is not open: {id}"))?;
                 let session = handle.current();
-                let cwd = std::fs::canonicalize(cwd).map_err(|error| error.to_string())?;
-                let session_cwd = std::fs::canonicalize(session.runtime().cwd())
-                    .map_err(|error| error.to_string())?;
-                if session.log().header().id != id || session_cwd != cwd {
+                let header = session.log().header();
+                let project_id = pi_sdk::projects::session_project_id(header.metadata.as_ref());
+                let expected = pi_sdk::projects::session_project_id(scope.metadata.as_ref());
+                let matches_scope = match (project_id, expected) {
+                    (Some(actual), Some(expected)) => actual == expected,
+                    _ => session.runtime().cwd() == scope.workspace.cwd(),
+                };
+                if header.id != id || !matches_scope {
                     return Err("Selected thread does not belong to the selected workspace".into());
                 }
                 session
             }
-            None => self.prepare_thread(cwd).await?,
+            None => self.prepare_scoped(scope).await?,
         };
         let state = session.runtime().agent().state();
         let catalog = SessionModelCatalog {
@@ -634,10 +723,39 @@ impl SessionStore {
         Err("Related session owner is outside the current session tree".into())
     }
 
+    pub(crate) fn list_project(
+        &self,
+        project: &pi_sdk::projects::Project,
+        projects: &[pi_sdk::projects::Project],
+        archived: bool,
+    ) -> Result<Vec<SessionSummary>, String> {
+        let mut summaries = Vec::new();
+        for path in session_files(&self.agent_dir.join("sessions"))? {
+            if path_is_archived(&path) != archived {
+                continue;
+            }
+            let Ok(summary) = session_summary(&path) else {
+                continue;
+            };
+            let belongs = match &summary.project_id {
+                Some(id) => id == &project.id,
+                None => pi_sdk::projects::project_for_legacy_cwd(projects, &summary.cwd)
+                    .is_some_and(|candidate| candidate.id == project.id),
+            };
+            if belongs {
+                summaries.push(summary);
+            }
+        }
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at_ms));
+        Ok(summaries)
+    }
+
+    #[cfg(test)]
     pub(crate) fn list(&self, cwd: &Path) -> Result<Vec<SessionSummary>, String> {
         self.list_by_archive_state(cwd, false)
     }
 
+    #[cfg(test)]
     pub(crate) fn list_archived(&self, cwd: &Path) -> Result<Vec<SessionSummary>, String> {
         self.list_by_archive_state(cwd, true)
     }
@@ -647,6 +765,7 @@ impl SessionStore {
         session_summary(&path)
     }
 
+    #[cfg(test)]
     fn list_by_archive_state(
         &self,
         cwd: &Path,
@@ -723,6 +842,8 @@ fn session_summary(path: &Path) -> Result<SessionSummary, String> {
     let title = document.name.unwrap_or_else(|| first_user_title(&messages));
     let message_count = messages.len();
     Ok(SessionSummary {
+        project_id: pi_sdk::projects::session_project_id(document.header.metadata.as_ref())
+            .map(str::to_string),
         id,
         title,
         cwd: document.header.cwd,

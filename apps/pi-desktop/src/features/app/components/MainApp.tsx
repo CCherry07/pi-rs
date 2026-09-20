@@ -642,6 +642,7 @@ export default function MainApp() {
     restartTerminalSession,
     requestTerminalFocus,
   } = useTerminalController({
+    threadId: activeThreadId,
     activeWorkspaceId,
     activeWorkspace,
     terminalOpen,

@@ -16,7 +16,7 @@ pub struct CommandSpec {
 
 #[derive(Clone)]
 pub struct CommandContext {
-    cwd: PathBuf,
+    workspace: crate::WorkspaceSnapshot,
     abort_signal: AbortSignal,
     pub session: CommandSessionContext,
     pub models: CommandModelsContext,
@@ -39,7 +39,7 @@ impl CommandContext {
         context: CommandContextParts,
     ) -> Self {
         Self {
-            cwd,
+            workspace: context.workspace_or_cwd(&cwd),
             abort_signal,
             session: context.session,
             models: context.models,
@@ -47,8 +47,12 @@ impl CommandContext {
         }
     }
 
+    pub fn workspace(&self) -> &crate::WorkspaceSnapshot {
+        &self.workspace
+    }
+
     pub fn cwd(&self) -> &std::path::Path {
-        &self.cwd
+        self.workspace.cwd()
     }
 
     pub fn signal(&self) -> &AbortSignal {

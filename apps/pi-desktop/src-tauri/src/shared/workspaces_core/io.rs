@@ -1,16 +1,10 @@
-use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
-
-use tokio::sync::Mutex;
 
 use crate::shared::process_core::tokio_command;
 #[cfg(target_os = "windows")]
 use crate::shared::process_core::{build_cmd_c_command, resolve_windows_executable};
-use crate::types::WorkspaceEntry;
 use crate::utils::normalize_windows_namespace_path;
-
-use super::helpers::resolve_workspace_root;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LineAwareLaunchStrategy {
@@ -331,31 +325,6 @@ where
     let _ = app_name;
     let _ = icon_loader;
     Ok(None)
-}
-
-pub(crate) async fn list_workspace_files_core<F>(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: &str,
-    list_files: F,
-) -> Result<Vec<String>, String>
-where
-    F: Fn(&PathBuf) -> Vec<String>,
-{
-    let root = resolve_workspace_root(workspaces, workspace_id).await?;
-    Ok(list_files(&root))
-}
-
-pub(crate) async fn read_workspace_file_core<F, T>(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: &str,
-    path: &str,
-    read_file: F,
-) -> Result<T, String>
-where
-    F: Fn(&Path, &str) -> Result<T, String>,
-{
-    let root = resolve_workspace_root(workspaces, workspace_id).await?;
-    read_file(&root, path)
 }
 
 #[cfg(test)]

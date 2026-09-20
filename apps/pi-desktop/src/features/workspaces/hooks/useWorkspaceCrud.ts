@@ -377,12 +377,6 @@ export function useWorkspaceCrud({
 
   const removeWorkspace = useCallback(
     async (workspaceId: string) => {
-      const childIds = new Set(
-        workspaces
-          .filter((entry) => entry.parentId === workspaceId)
-          .map((entry) => entry.id),
-      );
-
       onDebug?.({
         id: `${Date.now()}-client-remove-workspace`,
         timestamp: Date.now(),
@@ -393,13 +387,10 @@ export function useWorkspaceCrud({
       try {
         await removeWorkspaceService(workspaceId);
         setWorkspaces((prev) =>
-          prev.filter(
-            (entry) =>
-              entry.id !== workspaceId && entry.parentId !== workspaceId,
-          ),
+          prev.filter(entry => entry.id !== workspaceId).map(entry => entry.parentId === workspaceId ? { ...entry, parentId: null } : entry),
         );
         setActiveWorkspaceId((prev) =>
-          prev && (prev === workspaceId || childIds.has(prev)) ? null : prev,
+          prev === workspaceId ? null : prev,
         );
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -413,7 +404,7 @@ export function useWorkspaceCrud({
         throw error;
       }
     },
-    [onDebug, setActiveWorkspaceId, setWorkspaces, workspaces],
+    [onDebug, setActiveWorkspaceId, setWorkspaces],
   );
 
   return {

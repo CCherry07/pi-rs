@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::future::Future;
 use std::path::{Component, Path, PathBuf};
 
 use tokio::sync::Mutex;
@@ -118,6 +117,7 @@ pub(crate) async fn add_clone_core(
     }
 
     Ok(WorkspaceInfo {
+        project: None,
         id: entry.id,
         name: entry.name,
         path: entry.path,
@@ -244,6 +244,7 @@ pub(crate) async fn add_workspace_from_git_url_core(
     }
 
     Ok(WorkspaceInfo {
+        project: None,
         id: entry.id,
         name: entry.name,
         path: entry.path,
@@ -254,112 +255,22 @@ pub(crate) async fn add_workspace_from_git_url_core(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn remove_workspace_core<FRunGit, FutRunGit, FIsMissing, FRemoveDirAll>(
+/// Unregisters a project; actual worktree deletion is a separate operation.
+pub(crate) async fn remove_workspace_core(
     id: String,
     workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
     storage_path: &PathBuf,
-    run_git_command: FRunGit,
-    is_missing_worktree_error: FIsMissing,
-    remove_dir_all: FRemoveDirAll,
-    require_all_children_removed_to_remove_parent: bool,
-    continue_on_child_error: bool,
-) -> Result<(), String>
-where
-    FRunGit: Fn(&PathBuf, &[&str]) -> FutRunGit,
-    FutRunGit: Future<Output = Result<(), String>>,
-    FIsMissing: Fn(&str) -> bool,
-    FRemoveDirAll: Fn(&PathBuf) -> Result<(), String>,
-{
-    let (entry, child_worktrees) = {
-        let workspaces = workspaces.lock().await;
-        let entry = workspaces
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| "workspace not found".to_string())?;
-        if entry.kind.is_worktree() {
-            return Err("Use remove_worktree for worktree agents.".to_string());
+) -> Result<(), String> {
+    let mut current = workspaces.lock().await;
+    let mut next = current.clone();
+    next.remove(&id).ok_or("workspace not found")?;
+    for entry in next.values_mut() {
+        if entry.parent_id.as_deref() == Some(&id) {
+            entry.parent_id = None;
         }
-        let children = workspaces
-            .values()
-            .filter(|workspace| workspace.parent_id.as_deref() == Some(&id))
-            .cloned()
-            .collect::<Vec<_>>();
-        (entry, children)
-    };
-
-    let repo_path = PathBuf::from(&entry.path);
-    let repo_path_exists = repo_path.is_dir();
-    let mut removed_child_ids = Vec::new();
-    let mut failures: Vec<(String, String)> = Vec::new();
-
-    for child in &child_worktrees {
-        let child_path = PathBuf::from(&child.path);
-        if child_path.exists() {
-            if !repo_path_exists {
-                if let Err(fs_error) = remove_dir_all(&child_path) {
-                    if continue_on_child_error {
-                        failures.push((child.id.clone(), fs_error));
-                        continue;
-                    }
-                    return Err(fs_error);
-                }
-            } else if let Err(error) =
-                run_git_command(&repo_path, &["worktree", "remove", "--force", &child.path]).await
-            {
-                if is_missing_worktree_error(&error) {
-                    if child_path.exists() {
-                        if let Err(fs_error) = remove_dir_all(&child_path) {
-                            if continue_on_child_error {
-                                failures.push((child.id.clone(), fs_error));
-                                continue;
-                            }
-                            return Err(fs_error);
-                        }
-                    }
-                } else {
-                    if continue_on_child_error {
-                        failures.push((child.id.clone(), error));
-                        continue;
-                    }
-                    return Err(error);
-                }
-            }
-        }
-        removed_child_ids.push(child.id.clone());
     }
-
-    if repo_path_exists {
-        let _ = run_git_command(&repo_path, &["worktree", "prune", "--expire", "now"]).await;
-    }
-
-    let mut ids_to_remove = removed_child_ids;
-    if failures.is_empty() || !require_all_children_removed_to_remove_parent {
-        ids_to_remove.push(id.clone());
-    }
-
-    {
-        let mut workspaces = workspaces.lock().await;
-        for workspace_id in ids_to_remove {
-            workspaces.remove(&workspace_id);
-        }
-        let list: Vec<_> = workspaces.values().cloned().collect();
-        write_workspaces(storage_path, &list)?;
-    }
-
-    if failures.is_empty() {
-        return Ok(());
-    }
-
-    if require_all_children_removed_to_remove_parent {
-        let mut message =
-            "Failed to remove one or more worktrees; parent workspace was not removed.".to_string();
-        for (child_id, error) in failures {
-            message.push_str(&format!("\n- {child_id}: {error}"));
-        }
-        return Err(message);
-    }
-
+    write_workspaces(storage_path, &next.values().cloned().collect::<Vec<_>>())?;
+    *current = next;
     Ok(())
 }
 
@@ -425,6 +336,7 @@ where
     };
     write_workspaces(storage_path, &list)?;
     Ok(WorkspaceInfo {
+        project: None,
         id: entry_snapshot.id,
         name: entry_snapshot.name,
         path: entry_snapshot.path,

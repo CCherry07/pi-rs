@@ -10,7 +10,9 @@ pub use pi_core::{
     ModelCost, ModelCostTier, ModelId, ModelInput, ModelSelection, ModelSpec, PluginId, ProviderId,
     ResponseMetadata, ResponseMetadataPatch, RunId, StopReason, StreamEvent, TextContent,
     ThinkingBudgets, ThinkingContent, ThinkingLevel, ToolCall, ToolCallId, ToolExecutionMode,
-    ToolResult, ToolResultMessage, ToolSpec, ToolUpdate, Usage, UsageCost, UserMessage, session,
+    ToolResult, ToolResultMessage, ToolSpec, ToolUpdate, Usage, UsageCost, UserMessage,
+    WorkspaceError, WorkspaceRoot, WorkspaceRootId, WorkspaceRootOwnership, WorkspaceSnapshot,
+    WorkspaceSpec, session,
 };
 mod command;
 mod error;

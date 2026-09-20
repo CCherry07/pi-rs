@@ -58,6 +58,7 @@ impl<T> PluginContext for T where
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct ContextParts {
+    workspace: Option<crate::WorkspaceSnapshot>,
     pub session: SessionContext,
     pub models: ModelsContext,
     pub ui: UiContext,
@@ -66,10 +67,17 @@ pub struct ContextParts {
 impl ContextParts {
     pub fn new(handle: PluginContextHandle) -> Self {
         Self {
+            workspace: handle.workspace().cloned(),
             session: SessionContext::from_handle(handle.clone()),
             models: ModelsContext::from_handle(handle.clone()),
             ui: UiContext::new(handle),
         }
+    }
+
+    pub fn workspace_or_cwd(&self, cwd: &std::path::Path) -> crate::WorkspaceSnapshot {
+        self.workspace
+            .clone()
+            .unwrap_or_else(|| crate::WorkspaceSpec::from_cwd(cwd).snapshot())
     }
 
     pub fn unavailable() -> Self {
@@ -81,6 +89,7 @@ impl ContextParts {
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct CommandContextParts {
+    workspace: Option<crate::WorkspaceSnapshot>,
     pub session: CommandSessionContext,
     pub models: CommandModelsContext,
     pub ui: UiContext,
@@ -89,10 +98,17 @@ pub struct CommandContextParts {
 impl CommandContextParts {
     pub fn new(handle: PluginContextHandle) -> Self {
         Self {
+            workspace: handle.workspace().cloned(),
             session: CommandSessionContext::from_handle(handle.clone()),
             models: CommandModelsContext::from_handle(handle.clone()),
             ui: UiContext::new(handle),
         }
+    }
+
+    pub fn workspace_or_cwd(&self, cwd: &std::path::Path) -> crate::WorkspaceSnapshot {
+        self.workspace
+            .clone()
+            .unwrap_or_else(|| crate::WorkspaceSpec::from_cwd(cwd).snapshot())
     }
 
     pub fn unavailable() -> Self {

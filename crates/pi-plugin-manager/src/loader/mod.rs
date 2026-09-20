@@ -221,11 +221,15 @@ impl NativePlugins {
     pub fn apply_runtime(&self, mut builder: PiRuntimeBuilder) -> PiRuntimeBuilder {
         for factory in &self.plugins {
             let factory = factory.clone();
-            builder = builder.try_prepared_plugin_arc_factory(move || factory.create());
+            builder = builder.try_prepared_plugin_workspace_factory(move |workspace| {
+                factory.create_in(workspace)
+            });
         }
         for factory in &self.provider {
             let factory = factory.clone();
-            builder = builder.try_prepared_provider_plugin_arc_factory(move || factory.create());
+            builder = builder.try_prepared_provider_workspace_factory(move |workspace| {
+                factory.create_in(workspace)
+            });
         }
         builder
     }
@@ -270,11 +274,20 @@ impl NativePluginFactory {
     }
 
     pub fn create(&self) -> Result<Option<Arc<dyn Plugin>>, NativePluginError> {
-        (self.create)(&self.common.context(), &self.common.options).map_err(|error| {
-            NativePluginError::Initialization {
-                id: self.common.descriptor.id.clone(),
-                message: error.to_string(),
-            }
+        self.create_in(self.common.context.workspace())
+    }
+
+    pub fn create_in(
+        &self,
+        workspace: &pi_plugin::WorkspaceSnapshot,
+    ) -> Result<Option<Arc<dyn Plugin>>, NativePluginError> {
+        (self.create)(
+            &self.common.context().with_workspace(workspace.clone()),
+            &self.common.options,
+        )
+        .map_err(|error| NativePluginError::Initialization {
+            id: self.common.descriptor.id.clone(),
+            message: error.to_string(),
         })
     }
 }
@@ -291,11 +304,20 @@ impl NativeProviderPluginFactory {
     }
 
     pub fn create(&self) -> Result<Option<Arc<dyn ProviderPlugin>>, NativePluginError> {
-        (self.create)(&self.common.context(), &self.common.options).map_err(|error| {
-            NativePluginError::Initialization {
-                id: self.common.descriptor.id.clone(),
-                message: error.to_string(),
-            }
+        self.create_in(self.common.context.workspace())
+    }
+
+    pub fn create_in(
+        &self,
+        workspace: &pi_plugin::WorkspaceSnapshot,
+    ) -> Result<Option<Arc<dyn ProviderPlugin>>, NativePluginError> {
+        (self.create)(
+            &self.common.context().with_workspace(workspace.clone()),
+            &self.common.options,
+        )
+        .map_err(|error| NativePluginError::Initialization {
+            id: self.common.descriptor.id.clone(),
+            message: error.to_string(),
         })
     }
 }

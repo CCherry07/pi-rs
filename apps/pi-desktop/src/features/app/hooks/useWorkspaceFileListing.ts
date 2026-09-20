@@ -8,6 +8,7 @@ type TabletTabKey = "chat" | "git" | "log";
 
 type UseWorkspaceFileListingArgs = {
   activeWorkspace: WorkspaceInfo | null;
+  threadId?: string | null;
   activeWorkspaceId: string | null;
   filePanelMode: FilePanelMode;
   isCompact: boolean;
@@ -27,6 +28,7 @@ type UseWorkspaceFileListingResult = {
 
 export function useWorkspaceFileListing({
   activeWorkspace,
+  threadId,
   activeWorkspaceId,
   filePanelMode,
   isCompact,
@@ -60,6 +62,7 @@ export function useWorkspaceFileListing({
 
   const { files, isLoading } = useWorkspaceFiles({
     activeWorkspace,
+    threadId,
     onDebug,
     enabled: shouldFetchFiles,
     pollingEnabled: filePanelVisible,

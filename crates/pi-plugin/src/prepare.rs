@@ -10,7 +10,7 @@ pub enum PluginScope {
 
 #[derive(Debug, Clone)]
 pub struct PrepareContext {
-    cwd: PathBuf,
+    workspace: crate::WorkspaceSnapshot,
     package_dir: PathBuf,
     data_dir: PathBuf,
     cache_dir: PathBuf,
@@ -28,7 +28,7 @@ impl PrepareContext {
         generation: u64,
     ) -> Self {
         Self {
-            cwd: cwd.into(),
+            workspace: crate::WorkspaceSpec::from_cwd(cwd).snapshot(),
             package_dir: package_dir.into(),
             data_dir: data_dir.into(),
             cache_dir: cache_dir.into(),
@@ -37,8 +37,17 @@ impl PrepareContext {
         }
     }
 
+    pub fn with_workspace(mut self, workspace: crate::WorkspaceSnapshot) -> Self {
+        self.workspace = workspace;
+        self
+    }
+
+    pub fn workspace(&self) -> &crate::WorkspaceSnapshot {
+        &self.workspace
+    }
+
     pub fn cwd(&self) -> &Path {
-        &self.cwd
+        self.workspace.cwd()
     }
 
     pub fn package_dir(&self) -> &Path {

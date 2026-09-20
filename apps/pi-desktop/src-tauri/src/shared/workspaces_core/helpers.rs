@@ -1,9 +1,5 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use tokio::sync::Mutex;
-
-use crate::types::WorkspaceEntry;
 use crate::utils::normalize_windows_namespace_path;
 
 pub(crate) const WORKTREE_SETUP_MARKERS_DIR: &str = "worktree-setup";
@@ -82,18 +78,6 @@ pub(crate) fn normalize_workspace_path_input(path: &str) -> PathBuf {
 
 pub(crate) fn workspace_path_to_string(path: &Path) -> String {
     normalize_windows_namespace_path(&path.to_string_lossy())
-}
-
-pub(super) async fn resolve_workspace_root(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: &str,
-) -> Result<PathBuf, String> {
-    let workspaces = workspaces.lock().await;
-    let entry = workspaces
-        .get(workspace_id)
-        .cloned()
-        .ok_or_else(|| "workspace not found".to_string())?;
-    Ok(PathBuf::from(entry.path))
 }
 
 #[cfg(test)]

@@ -4526,9 +4526,12 @@ dependencies = [
  "pi-core",
  "pi-plugin",
  "pi-session",
+ "pi-utils",
  "pulldown-cmark",
+ "serde",
  "serde_json",
  "tempfile",
+ "time",
  "tokio",
  "uuid",
 ]
@@ -4713,7 +4716,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "time",
  "tokio",
  "uuid",
 ]

@@ -1,3 +1,4 @@
+import { ProjectRootsEditor } from "./ProjectRootsEditor";
 import ChevronDown from "lucide-react/dist/esm/icons/chevron-down";
 import ChevronUp from "lucide-react/dist/esm/icons/chevron-up";
 import Trash2 from "lucide-react/dist/esm/icons/trash-2";
@@ -196,7 +197,7 @@ export function SettingsProjectsSection({
       </div>
       <SettingsSubsection
         title={t("projects.projectList.title")}
-        subtitle={t("projects.projectList.subtitle")}
+        subtitle={t("projects.roots.description")}
       />
       <div className="settings-projects">
         {groupedWorkspaces.map((group) => (
@@ -210,53 +211,63 @@ export function SettingsProjectsSection({
                 : "";
               return (
                 <div key={workspace.id} className="settings-project-row">
-                  <div className="settings-project-info">
-                    <div className="settings-project-name">{workspace.name}</div>
-                    <div className="settings-project-path">{workspace.path}</div>
+                  <div className="settings-project-header">
+                    <div className="settings-project-info">
+                      <div className="settings-project-name" title={workspace.name}>
+                        {workspace.name}
+                      </div>
+                      {workspace.project && (
+                        <span className="settings-project-count">
+                          {t("projects.roots.count", { count: workspace.project.roots.length })}
+                        </span>
+                      )}
+                    </div>
+                    <div className="settings-project-actions">
+                      <select
+                        className="settings-select settings-select--compact"
+                        aria-label={t("projects.groups.title")}
+                        value={groupValue}
+                        onChange={(event) => {
+                          const nextGroupId = event.target.value || null;
+                          void onAssignWorkspaceGroup(workspace.id, nextGroupId);
+                        }}
+                      >
+                        <option value="">{ungroupedLabel}</option>
+                        {workspaceGroups.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className="ghost icon-button"
+                        onClick={() => onMoveWorkspace(workspace.id, "up")}
+                        disabled={index === 0}
+                        aria-label={t("projects.projectList.moveUp")}
+                      >
+                        <ChevronUp aria-hidden />
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost icon-button"
+                        onClick={() => onMoveWorkspace(workspace.id, "down")}
+                        disabled={index === group.workspaces.length - 1}
+                        aria-label={t("projects.projectList.moveDown")}
+                      >
+                        <ChevronDown aria-hidden />
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost icon-button"
+                        onClick={() => onDeleteWorkspace(workspace.id)}
+                        aria-label={t("projects.projectList.delete")}
+                      >
+                        <Trash2 aria-hidden />
+                      </button>
+                    </div>
                   </div>
-                  <div className="settings-project-actions">
-                    <select
-                      className="settings-select settings-select--compact"
-                      value={groupValue}
-                      onChange={(event) => {
-                        const nextGroupId = event.target.value || null;
-                        void onAssignWorkspaceGroup(workspace.id, nextGroupId);
-                      }}
-                    >
-                      <option value="">{ungroupedLabel}</option>
-                      {workspaceGroups.map((entry) => (
-                        <option key={entry.id} value={entry.id}>
-                          {entry.name}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      className="ghost icon-button"
-                      onClick={() => onMoveWorkspace(workspace.id, "up")}
-                      disabled={index === 0}
-                      aria-label={t("projects.projectList.moveUp")}
-                    >
-                      <ChevronUp aria-hidden />
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost icon-button"
-                      onClick={() => onMoveWorkspace(workspace.id, "down")}
-                      disabled={index === group.workspaces.length - 1}
-                      aria-label={t("projects.projectList.moveDown")}
-                    >
-                      <ChevronDown aria-hidden />
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost icon-button"
-                      onClick={() => onDeleteWorkspace(workspace.id)}
-                      aria-label={t("projects.projectList.delete")}
-                    >
-                      <Trash2 aria-hidden />
-                    </button>
-                  </div>
+                  <ProjectRootsEditor workspace={workspace} />
                 </div>
               );
             })}

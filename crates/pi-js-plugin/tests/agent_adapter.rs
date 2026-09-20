@@ -163,14 +163,18 @@ async fn manifest_tool_registers_and_dispatches_through_the_public_tool_interfac
     let invocations = dispatcher.invocations.lock().unwrap();
     assert_eq!(invocations.len(), 2);
     assert_eq!(invocations[0].kind, JsInvocationKind::ToolPrepareArguments);
-    assert_eq!(invocations[0].payload, json!({"input": {"name": "Alice"}}));
+    assert_eq!(
+        invocations[0].payload,
+        json!({"input": {"name": "Alice"}, "context": {"cwd":"/workspace", "workspace": pi_core::WorkspaceSpec::from_cwd("/workspace")}})
+    );
     assert_eq!(invocations[1].generation_id, "js-7");
     assert_eq!(invocations[1].callback_id, "example:tool:greet");
     assert_eq!(invocations[1].kind, JsInvocationKind::Tool);
     assert_eq!(
         invocations[1].payload,
         json!({
-            "context": {"cwd": "/workspace", "toolCallId": "call-1"},
+            "context": {"cwd": "/workspace",
+                "workspace": pi_core::WorkspaceSpec::from_cwd("/workspace"), "toolCallId": "call-1"},
             "input": {"name": "ALICE"}
         })
     );

@@ -62,7 +62,9 @@ pub(crate) async fn pi_plugins_runtime(
     state: State<'_, AppState>,
     pi: State<'_, PiRuntimeState>,
 ) -> Result<PluginRuntimeSnapshot, String> {
-    let cwd = workspace_path(&state, &workspace_id).await?;
+    let cwd = pi
+        .execution_directory(&state, &workspace_id, Some(&thread_id))
+        .await?;
     let store = pi.store.clone();
     tokio::task::spawn_blocking(move || {
         let ids = store.existing_native_plugin_ids(&cwd, &thread_id)?;

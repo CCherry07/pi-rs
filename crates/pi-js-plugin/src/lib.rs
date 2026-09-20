@@ -87,6 +87,8 @@ pub struct JsGenerationRequest {
     pub extension_paths: Vec<String>,
     pub mode: PresentationMode,
     pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<pi_core::WorkspaceSpec>,
     #[serde(default)]
     pub flag_values: std::collections::BTreeMap<String, Value>,
 }
@@ -209,6 +211,7 @@ mod wire_tests {
                 extension_paths: vec!["/extensions/example.ts".to_string()],
                 mode: PresentationMode::Print,
                 cwd: "/workspace".to_string(),
+                workspace: None,
                 flag_values: std::collections::BTreeMap::from([(
                     "fixture".to_string(),
                     json!(true),
@@ -1327,6 +1330,7 @@ fn agent_plugin_context_value(context: &AgentPluginContext) -> Value {
         "pluginId": context.plugin_id().as_str(),
         "runId": context.run_id().as_str(),
         "cwd": context.cwd().to_string_lossy(),
+        "workspace": context.workspace().spec(),
     })
 }
 
@@ -1517,6 +1521,7 @@ impl Plugin for JsPlugin {
         let context_value = json!({
             "pluginId": context.plugin_id().as_str(),
             "cwd": context.cwd().to_string_lossy(),
+            "workspace": context.workspace().spec(),
         });
         for hook in self.hook_callbacks("input") {
             let mut event_value = json!({
@@ -2312,7 +2317,7 @@ impl Command for JsCommand {
                 &self.callback_id,
                 JsInvocationKind::Command,
                 json!({
-                    "context": { "cwd": context.cwd().to_string_lossy() },
+                    "context": { "cwd": context.cwd().to_string_lossy(), "workspace": context.workspace().spec() },
                     "arguments": arguments,
                 }),
                 context.plugin_context_handle(),
@@ -2369,6 +2374,7 @@ impl ProviderPlugin for JsProviderPlugin {
                             "providerId": context.provider_id().as_str(),
                             "modelId": context.model_id().as_str(),
                             "cwd": context.cwd().to_string_lossy(),
+                            "workspace": context.workspace().spec(),
                         },
                         "event": {
                             "type": "before_provider_request",
@@ -2487,6 +2493,7 @@ fn provider_hook_context(context: &ProviderPluginContext) -> Value {
         "providerId": context.provider_id().as_str(),
         "modelId": context.model_id().as_str(),
         "cwd": context.cwd().to_string_lossy(),
+        "workspace": context.workspace().spec(),
     })
 }
 
@@ -2564,6 +2571,7 @@ fn session_context_value(context: &SessionPluginContext) -> Value {
             "id": identity.id,
             "path": identity.path,
             "cwd": identity.cwd,
+            "workspace": context.workspace().spec(),
             "parentSessionId": identity.parent_session_id,
         },
     })
@@ -2798,7 +2806,7 @@ impl Tool for JsTool {
             .invoke(
                 callback_id,
                 JsInvocationKind::ToolPrepareArguments,
-                json!({ "input": input }),
+                json!({ "input": input, "context": { "cwd": context.cwd(), "workspace": context.workspace().spec() } }),
                 context.plugin_context_handle(),
                 None,
             )
@@ -2823,6 +2831,7 @@ impl Tool for JsTool {
                 json!({
                 "context": {
                     "cwd": context.cwd().to_string_lossy(),
+                    "workspace": context.workspace().spec(),
                     "toolCallId": tool_call_id.as_str(),
                 },
                 "input": input,

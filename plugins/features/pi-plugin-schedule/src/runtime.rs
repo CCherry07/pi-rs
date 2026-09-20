@@ -143,10 +143,11 @@ async fn tick(
         }
         let store = options.store(scope)?;
         let work_store = store.clone();
-        let cwd = options.cwd.clone();
-        let claim = tokio::task::spawn_blocking(move || work_store.claim(&cwd, now_ms()))
-            .await
-            .map_err(|error| Error::Invalid(format!("schedule claim failed: {error}")))??;
+        let workspace = context.workspace().spec().clone();
+        let claim =
+            tokio::task::spawn_blocking(move || work_store.claim_workspace(&workspace, now_ms()))
+                .await
+                .map_err(|error| Error::Invalid(format!("schedule claim failed: {error}")))??;
         if let Some(claim) = claim {
             execute(store, claim, context, stop).await?;
             // At most one job per store per tick; project schedules cannot

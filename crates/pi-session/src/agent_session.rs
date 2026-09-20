@@ -383,6 +383,8 @@ impl AgentSession {
                 .unwrap_or_else(|| next_unique_id("session")),
             runtime.cwd(),
         );
+        header.metadata = options.header_metadata.clone();
+        header.set_workspace(runtime.workspace().spec())?;
         header.legacy_parent_session_path = options.parent_session_path.clone();
         runtime.agent().set_session_id(Some(header.id.clone()));
         let log = SessionLog::create_deferred(path, header)?;
@@ -452,6 +454,11 @@ impl AgentSession {
         log: SessionLog,
         mut options: AgentSessionOptions,
     ) -> Result<PreparedAgentSession, SessionError> {
+        if log.header().workspace()? != *runtime.workspace().spec() {
+            return Err(SessionError::Runtime(
+                "runtime workspace differs from saved session workspace".into(),
+            ));
+        }
         default_configure_session_message_conversion(&runtime)?;
         let agent_state = runtime.agent().state();
         let recovery_defaults = crate::EffectiveLaneConfiguration {
@@ -3375,7 +3382,15 @@ mod tests {
     }
 
     fn scripted_runtime(turns: impl IntoIterator<Item = ScriptedTurn>) -> PiRuntime {
+        scripted_runtime_in(turns, std::path::Path::new("."))
+    }
+
+    fn scripted_runtime_in(
+        turns: impl IntoIterator<Item = ScriptedTurn>,
+        cwd: &std::path::Path,
+    ) -> PiRuntime {
         PiRuntime::builder()
+            .workspace(pi_core::WorkspaceSpec::from_cwd(cwd))
             .provider_plugin(ScriptedProviderPlugin::scripted(turns))
             .agent_options(AgentOptions {
                 provider_id: ProviderId::new("scripted"),
@@ -3391,7 +3406,7 @@ mod tests {
     async fn settled_open_does_not_materialize_full_document() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settled-session.jsonl");
-        let runtime = scripted_runtime([]);
+        let runtime = scripted_runtime_in([], directory.path());
         let state = runtime.agent().state();
         let log = SessionLog::create(
             &path,
@@ -4843,7 +4858,7 @@ mod tests {
         .unwrap();
         drop(log);
 
-        let reopened = AgentSession::open(scripted_runtime([]), &path)
+        let reopened = AgentSession::open(scripted_runtime_in([], directory.path()), &path)
             .await
             .unwrap();
         assert_eq!(
@@ -4882,7 +4897,7 @@ mod tests {
         reopened.shutdown().await;
         drop(reopened);
 
-        let reopened_again = AgentSession::open(scripted_runtime([]), &path)
+        let reopened_again = AgentSession::open(scripted_runtime_in([], directory.path()), &path)
             .await
             .unwrap();
         assert_eq!(

@@ -156,16 +156,23 @@ impl SessionGenerationFactory for ProductSessionFactory {
     ) -> Result<PreparedSessionGeneration, SessionError> {
         let SessionGenerationRequest {
             cwd,
+            workspace,
             session_path: path,
             reason,
             generation_overlay,
             initial_state,
             reload_model,
         } = request;
+        if workspace.cwd() != cwd {
+            return Err(SessionError::Runtime(
+                "generation cwd disagrees with workspace".into(),
+            ));
+        }
         let reloading = reason == pi_session::SessionStartReason::Reload;
         let dynamic_provider_preparation = self.dynamic_providers.begin_preparation();
         let mut config = self.config.clone();
         config.cwd = cwd;
+        config.workspace = Some(workspace);
         if reloading {
             // Startup CLI selections must not overwrite later model changes.
             // Treat the settled live selection as explicit during reload so
@@ -268,6 +275,10 @@ impl SessionGenerationFactory for ProductSessionFactory {
                         .collect(),
                     mode: self.presentation_mode,
                     cwd: config.cwd.display().to_string(),
+                    workspace: config
+                        .workspace
+                        .as_ref()
+                        .map(|workspace| workspace.spec().clone()),
                     flag_values: config.extension_flag_values.clone(),
                 })
                 .await
@@ -648,6 +659,7 @@ command = "fixture-command"
         let session_path = agent_dir.join("activation.jsonl");
         let prepared = factory
             .prepare_generation(SessionGenerationRequest {
+                workspace: pi_core::WorkspaceSpec::from_cwd(&project).snapshot(),
                 cwd: project.clone(),
                 session_path: session_path.clone(),
                 reason: pi_session::SessionStartReason::Startup,

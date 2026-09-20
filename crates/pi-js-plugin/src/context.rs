@@ -23,6 +23,7 @@ pub enum ExtensionContextQuery {
     Mode,
     HasUi,
     Cwd,
+    Workspace,
     IsProjectTrusted,
     Model,
     ScopedModels,
@@ -168,6 +169,12 @@ pub fn execute_context_query(
         ExtensionContextQuery::Mode => value(access.mode()?),
         ExtensionContextQuery::HasUi => value(access.has_ui()?),
         ExtensionContextQuery::Cwd => value(access.cwd()?),
+        ExtensionContextQuery::Workspace => value(
+            context
+                .workspace()
+                .map(|workspace| workspace.spec().clone())
+                .unwrap_or(pi_core::WorkspaceSpec::from_cwd(access.cwd()?)),
+        ),
         ExtensionContextQuery::IsProjectTrusted => value(access.is_project_trusted()?),
         ExtensionContextQuery::Model => value(access.model()?),
         ExtensionContextQuery::ScopedModels => value(access.scoped_models()?),

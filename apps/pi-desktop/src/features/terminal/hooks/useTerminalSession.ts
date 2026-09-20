@@ -22,6 +22,7 @@ const MAX_BUFFER_CHARS = 200_000;
 
 type UseTerminalSessionOptions = {
   activeWorkspace: WorkspaceInfo | null;
+  threadId?: string | null;
   activeTerminalId: string | null;
   isVisible: boolean;
   focusRequestVersion: number;
@@ -114,12 +115,14 @@ function getTerminalAppearance(container: HTMLElement | null): TerminalAppearanc
 
 export function useTerminalSession({
   activeWorkspace,
-  activeTerminalId,
+  activeTerminalId: selectedTerminalId,
+  threadId,
   isVisible,
   focusRequestVersion,
   onDebug,
   onSessionExit,
 }: UseTerminalSessionOptions): TerminalSessionState {
+  const activeTerminalId = selectedTerminalId && threadId ? `${threadId}:${selectedTerminalId}` : selectedTerminalId;
   const { t } = useTranslation("app");
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -336,7 +339,7 @@ export function useTerminalSession({
       setStatus("connecting");
       setMessage(t("terminal.starting"));
       if (!openedSessionsRef.current.has(key)) {
-        await openTerminalSession(activeWorkspace.id, activeTerminalId, cols, rows);
+        await openTerminalSession(activeWorkspace.id, activeTerminalId, cols, rows, threadId);
         openedSessionsRef.current.add(key);
       }
       setStatus("ready");
@@ -358,6 +361,7 @@ export function useTerminalSession({
     });
   }, [
     activeTerminalId,
+    threadId,
     activeWorkspace,
     isVisible,
     onDebug,

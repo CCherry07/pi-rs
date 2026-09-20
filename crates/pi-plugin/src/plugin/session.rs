@@ -35,6 +35,7 @@ pub struct SessionPluginContext {
     plugin_id: PluginId,
     generation: u64,
     identity: SessionIdentity,
+    workspace: crate::WorkspaceSnapshot,
     pub session: PluginSessionContext,
     pub models: ModelsContext,
     pub ui: UiContext,
@@ -72,6 +73,7 @@ impl SessionPluginContext {
         Self {
             plugin_id,
             generation,
+            workspace: context.workspace_or_cwd(&session.cwd),
             identity: session,
             session: context.session,
             models: context.models,
@@ -87,6 +89,14 @@ impl SessionPluginContext {
         self.generation
     }
 
+    pub fn workspace(&self) -> &crate::WorkspaceSnapshot {
+        &self.workspace
+    }
+
+    pub fn cwd(&self) -> &std::path::Path {
+        self.workspace.cwd()
+    }
+
     pub fn identity(&self) -> &SessionIdentity {
         &self.identity
     }
@@ -100,6 +110,7 @@ impl SessionPluginContext {
         Self {
             plugin_id,
             generation,
+            workspace: context.workspace_or_cwd(&identity.cwd),
             identity,
             session: context.session,
             models: context.models,

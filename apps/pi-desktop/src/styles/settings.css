@@ -724,40 +724,295 @@
 }
 
 .settings-project-row {
+  container-type: inline-size;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 14px;
+  flex-direction: column;
+  min-width: 0;
   border-radius: 12px;
   background: var(--surface-card);
   border: 1px solid var(--border-muted);
 }
 
-.settings-project-info {
+.settings-project-header {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-muted);
+}
+
+.settings-project-info {
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
   min-width: 0;
 }
 
 .settings-project-name {
+  min-width: 0;
   font-size: 13px;
   font-weight: 600;
   color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.settings-project-path {
+.settings-project-count {
+  flex-shrink: 0;
   font-size: 11px;
+  color: var(--text-faint);
+}
+
+.settings-project-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 3px;
+}
+
+.settings-project-actions .settings-select {
+  max-width: 130px;
+  height: 28px;
+  padding: 3px 7px;
+  margin-right: 5px;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 11px;
+  color: var(--text-subtle);
+}
+
+.settings-project-actions .icon-button {
+  width: 26px;
+  height: 26px;
+  padding: 5px;
+  border-color: transparent;
+  border-radius: 6px;
+  color: var(--text-subtle);
+}
+
+.settings-project-actions .icon-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.settings-project-actions .icon-button:hover:not(:disabled) {
+  color: var(--text-strong);
+  background: var(--surface-hover);
+}
+
+.settings-project-actions .icon-button:disabled {
+  opacity: 0.3;
+}
+
+.settings-project-roots {
+  min-width: 0;
+}
+
+.settings-project-root-list {
+  padding: 4px 6px;
+}
+
+.settings-project-root {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding-right: 6px;
+  border-radius: 7px;
+}
+
+.settings-project-root:hover,
+.settings-project-root:focus-within {
+  background: var(--surface-hover);
+}
+
+.settings-project-root-choice {
+  position: relative;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.settings-project-root-choice:has(input:disabled) {
+  cursor: default;
+}
+
+.settings-project-root-choice:has(input:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.settings-project-root-radio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.settings-project-root-icon {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  color: var(--text-faint);
+}
+
+.settings-project-root-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.settings-project-root-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-project-root-name {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settings-project-root-path {
+  display: block;
+  font-size: 11px;
+  line-height: 1.4;
   color: var(--text-subtle);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.settings-project-actions {
+.settings-project-root-badge {
   display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 3px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-active);
+  color: var(--text-accent);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.settings-project-root-badge svg {
+  width: 10px;
+  height: 10px;
+}
+
+.settings-project-root-action {
+  flex-shrink: 0;
+  color: var(--text-subtle);
+  font-size: 11px;
+  opacity: 0;
+}
+
+.settings-project-root-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  padding: 5px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  opacity: 0;
+}
+
+.settings-project-root-remove svg {
+  width: 14px;
+  height: 14px;
+}
+
+.settings-project-root:hover .settings-project-root-action,
+.settings-project-root:focus-within .settings-project-root-action,
+.settings-project-root:hover .settings-project-root-remove,
+.settings-project-root:focus-within .settings-project-root-remove {
+  opacity: 1;
+}
+
+.settings-project-root-remove:hover:not(:disabled) {
+  color: var(--text-danger);
+  background: var(--surface-control-hover);
+}
+
+.settings-project-roots-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 6px;
+  padding: 4px 14px 10px;
+}
+
+.settings-project-add-root {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
+  margin-left: -6px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-subtle);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.settings-project-add-root svg {
+  width: 13px;
+  height: 13px;
+}
+
+.settings-project-add-root:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-strong);
+}
+
+.settings-project-roots .settings-group-error {
+  overflow-wrap: anywhere;
+}
+
+@container (max-width: 480px) {
+  .settings-project-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .settings-project-info {
+    flex-basis: 100%;
+  }
+
+  .settings-project-root-action {
+    display: none;
+  }
+}
+
+@media (hover: none) {
+  .settings-project-root-remove {
+    opacity: 1;
+  }
 }
 
 .settings-archived-toolbar {

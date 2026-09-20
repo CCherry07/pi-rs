@@ -48,6 +48,35 @@ impl Pi {
         &self.agent_dir
     }
 
+    pub fn projects(&self) -> crate::projects::ProjectStore {
+        crate::projects::ProjectStore::new(&self.agent_dir)
+    }
+
+    pub async fn create_project_session(
+        &self,
+        project_id: &str,
+    ) -> Result<pi_session::PiSession, String> {
+        let project = self.projects().get(project_id)?;
+        let workspace = project.resolve()?;
+        let id = uuid::Uuid::now_v7().to_string();
+        let path = match pi_session::JsonlSessionRepo::new(self.agent_dir.join("sessions"))
+            .resolve_exact_id(workspace.cwd(), &id)
+            .map_err(|error| error.to_string())?
+        {
+            pi_session::ExactSessionIdResolution::New { path, .. } => path,
+            _ => return Err("new session identity already exists".into()),
+        };
+        self.sessions
+            .create_session_with_workspace(
+                workspace,
+                path,
+                Some(id),
+                Some(project.session_metadata()),
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     pub fn project_trust(&self) -> &ProjectTrustService {
         &self.project_trust
     }
@@ -199,6 +228,52 @@ mod tests {
                 .any(|command| command.name.contains("desktop-probe"))
         );
         assert!(!handle.path().exists());
+        host.sessions().shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    async fn project_edits_apply_only_to_new_sessions_and_resume_needs_no_project_record() {
+        let root = tempfile::tempdir().unwrap();
+        let primary = root.path().join("primary");
+        let shared = root.path().join("shared");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(shared.join(".pi/skills/shared-only")).unwrap();
+        std::fs::write(
+            shared.join(".pi/skills/shared-only/SKILL.md"),
+            "---\nname: shared-only\ndescription: supplemental root resource\n---\nDo not merge",
+        )
+        .unwrap();
+        let host = Pi::builder(config(&primary, &root.path().join("agent")))
+            .build()
+            .unwrap();
+        let mut project = crate::projects::Project::single_root("project-id", "project", &primary);
+        project.roots.push(pi_core::WorkspaceRoot::external(
+            "shared", "shared", &shared,
+        ));
+        host.projects().upsert(project.clone()).unwrap();
+        let first = host.create_project_session(&project.id).await.unwrap();
+        let first_spec = first.current().runtime().workspace().spec().clone();
+        assert_eq!(first_spec.roots().len(), 2);
+        assert!(!first.path().exists());
+        assert!(
+            !first
+                .current()
+                .runtime()
+                .command_specs()
+                .iter()
+                .any(|command| command.name.contains("shared-only"))
+        );
+        project.roots.pop();
+        host.projects().upsert(project.clone()).unwrap();
+        first.reload().await.unwrap();
+        assert_eq!(first.current().runtime().workspace().spec(), &first_spec);
+        let second = host.create_project_session(&project.id).await.unwrap();
+        assert_eq!(second.current().runtime().workspace().roots().len(), 1);
+        first.current().log().materialize().unwrap();
+        let path = first.path();
+        host.sessions().close_session(&first).await.unwrap();
+        host.projects().remove(&project.id).unwrap();
+        let resumed = host.sessions().open_session(path).await.unwrap();
+        assert_eq!(resumed.current().runtime().workspace().spec(), &first_spec);
         host.sessions().shutdown().await.unwrap();
     }
 }

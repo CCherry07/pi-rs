@@ -10,6 +10,7 @@ const generationRequestSchema = z.strictObject({
   extensionPaths: z.array(z.string()),
   mode: hostModeSchema,
   cwd: z.string().default(process.cwd()),
+  workspace: z.unknown().optional(),
   flagValues: z.record(z.string(), z.union([z.boolean(), z.string()])).default({}),
 })
 

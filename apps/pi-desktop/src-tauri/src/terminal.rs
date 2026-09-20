@@ -1,5 +1,4 @@
 use std::io::{Read, Write};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -184,23 +183,14 @@ fn spawn_terminal_reader(
     });
 }
 
-async fn get_workspace_path(
-    workspace_id: &str,
-    state: &State<'_, AppState>,
-) -> Result<PathBuf, String> {
-    let workspaces = state.workspaces.lock().await;
-    let entry = workspaces
-        .get(workspace_id)
-        .ok_or_else(|| "Unknown workspace".to_string())?;
-    Ok(PathBuf::from(&entry.path))
-}
-
 #[tauri::command]
 pub(crate) async fn terminal_open(
     workspace_id: String,
     terminal_id: String,
     cols: u16,
     rows: u16,
+    thread_id: Option<String>,
+    pi: State<'_, crate::pi_runtime::PiRuntimeState>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<TerminalSessionInfo, String> {
@@ -217,7 +207,9 @@ pub(crate) async fn terminal_open(
         }
     }
 
-    let cwd = get_workspace_path(&workspace_id, &state).await?;
+    let cwd = pi
+        .execution_directory(&state, &workspace_id, thread_id.as_deref())
+        .await?;
     let pty_system = native_pty_system();
     let size = PtySize {
         rows: rows.max(2),

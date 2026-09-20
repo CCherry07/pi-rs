@@ -38,6 +38,7 @@ fn workspace_with_id_and_kind(
         (None, None)
     };
     WorkspaceInfo {
+        project: None,
         id: id.to_string(),
         name: name.to_string(),
         path: "/tmp".to_string(),
@@ -628,24 +629,14 @@ fn remove_workspace_succeeds_when_parent_repo_folder_is_missing() {
         ]));
         let storage_path = temp_dir.join("workspaces.json");
 
-        remove_workspace_core(
-            parent.id.clone(),
-            &workspaces,
-            &storage_path,
-            |_root, _args| async move {
-                panic!("git should not run when parent repo folder is missing");
-            },
-            |_error| false,
-            |path| std::fs::remove_dir_all(path).map_err(|err| err.to_string()),
-            true,
-            true,
-        )
-        .await
-        .expect("remove workspace");
+        remove_workspace_core(parent.id.clone(), &workspaces, &storage_path)
+            .await
+            .expect("remove workspace");
 
-        assert!(!child_path.exists());
+        assert!(child_path.exists());
         let workspaces_guard = workspaces.lock().await;
-        assert!(workspaces_guard.is_empty());
+        assert!(!workspaces_guard.contains_key(&parent.id));
+        assert!(workspaces_guard.get(&child.id).unwrap().parent_id.is_none());
     });
 }
 
@@ -701,4 +692,52 @@ fn remove_worktree_succeeds_when_parent_repo_folder_is_missing() {
         assert!(workspaces_guard.contains_key(&parent.id));
         assert!(!workspaces_guard.contains_key(&child.id));
     });
+}
+
+#[tokio::test]
+async fn settings_response_keeps_current_project_roots_and_legacy_git_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let original = directory.path().join("original");
+    let current = directory.path().join("current");
+    let entry = WorkspaceEntry {
+        id: "project".into(),
+        name: "Project".into(),
+        path: original.to_string_lossy().into_owned(),
+        kind: Default::default(),
+        parent_id: None,
+        worktree: None,
+        settings: Default::default(),
+    };
+    let state = crate::state::AppState {
+        workspaces: Mutex::new(HashMap::from([(entry.id.clone(), entry)])),
+        terminal_sessions: Default::default(),
+        storage_path: directory.path().join("workspaces.json"),
+        settings_path: directory.path().join("settings.json"),
+        app_settings: Default::default(),
+        dictation: Mutex::new(crate::dictation::DictationState::default()),
+    };
+    let mut project = state.project("project").await.unwrap();
+    project.roots.push(pi_core::WorkspaceRoot::external(
+        "current", "current", &current,
+    ));
+    project.primary_root = pi_core::WorkspaceRootId::new("current");
+    state.project_store().upsert(project.clone()).unwrap();
+    let info = crate::shared::workspaces_core::update_workspace_settings_core(
+        "project".into(),
+        crate::types::WorkspaceSettings {
+            group_id: Some("group".into()),
+            ..Default::default()
+        },
+        &state.workspaces,
+        &state.storage_path,
+        crate::workspaces::settings::apply_workspace_settings_update,
+    )
+    .await
+    .unwrap();
+    let info = state.project_info(info).await.unwrap();
+    assert_eq!(std::path::PathBuf::from(&info.path), current);
+    assert_eq!(info.project, Some(project));
+    assert_eq!(info.settings.group_id.as_deref(), Some("group"));
+    let saved = read_workspaces(&state.storage_path).unwrap();
+    assert_eq!(std::path::PathBuf::from(&saved["project"].path), original);
 }

@@ -125,7 +125,9 @@ pub(crate) async fn pi_observe_desktop_session(
     app: AppHandle,
 ) -> Result<Value, String> {
     validate_reference(&reference)?;
-    let cwd = super::workspace_path(&state, &workspace_id).await?;
+    let cwd = pi
+        .execution_directory(&state, &workspace_id, Some(&thread_id))
+        .await?;
     validate_workspace(&pi.store.document(&thread_id)?, &cwd)?;
     let resolved = resolve_related_session(&pi.store, &thread_id, &reference)?;
     if let Some(live) = resolved.live {
@@ -221,7 +223,9 @@ pub(crate) async fn pi_get_desktop_widgets(
     pi: State<'_, PiRuntimeState>,
     app: AppHandle,
 ) -> Result<DesktopWidgets, String> {
-    let cwd = super::workspace_path(&state, &workspace_id).await?;
+    let cwd = pi
+        .execution_directory(&state, &workspace_id, Some(&thread_id))
+        .await?;
     let document = pi.store.document(&thread_id)?;
     validate_workspace(&document, &cwd)?;
     if pi.store.handle(&thread_id).is_some() {

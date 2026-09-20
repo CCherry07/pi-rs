@@ -20,7 +20,7 @@ pub struct ProviderPluginContext {
     generation: u64,
     provider_id: ProviderId,
     model_id: ModelId,
-    cwd: PathBuf,
+    workspace: crate::WorkspaceSnapshot,
     abort_signal: AbortSignal,
     pub session: SessionContext,
     pub models: ModelsContext,
@@ -45,7 +45,7 @@ impl ProviderPluginContext {
             generation,
             provider_id,
             model_id,
-            cwd,
+            workspace: context.workspace_or_cwd(&cwd),
             abort_signal,
             session: context.session,
             models: context.models,
@@ -70,8 +70,12 @@ impl ProviderPluginContext {
         &self.model_id
     }
 
+    pub fn workspace(&self) -> &crate::WorkspaceSnapshot {
+        &self.workspace
+    }
+
     pub fn cwd(&self) -> &std::path::Path {
-        &self.cwd
+        self.workspace.cwd()
     }
 
     pub fn signal(&self) -> &AbortSignal {
@@ -305,7 +309,7 @@ impl ProviderPluginDriver {
                         generation,
                         provider_id: provider_id.clone(),
                         model_id: model_id.clone(),
-                        cwd: cwd.to_path_buf(),
+                        workspace: context.workspace_or_cwd(cwd),
                         abort_signal: signal.clone(),
                         session: context.session,
                         models: context.models,
@@ -361,7 +365,7 @@ impl ProviderPluginDriver {
                         generation,
                         provider_id: provider_id.clone(),
                         model_id: model_id.clone(),
-                        cwd: cwd.to_path_buf(),
+                        workspace: context.workspace_or_cwd(cwd),
                         abort_signal: signal.clone(),
                         session: context.session,
                         models: context.models,
@@ -409,7 +413,7 @@ impl ProviderPluginDriver {
                         generation,
                         provider_id: provider_id.clone(),
                         model_id: model_id.clone(),
-                        cwd: cwd.to_path_buf(),
+                        workspace: context.workspace_or_cwd(cwd),
                         abort_signal: signal.clone(),
                         session: context.session,
                         models: context.models,

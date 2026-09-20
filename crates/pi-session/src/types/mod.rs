@@ -100,6 +100,50 @@ pub struct SessionHeader {
 }
 
 impl SessionHeader {
+    /// Reads a full saved workspace, falling back only when metadata is absent.
+    pub fn workspace(&self) -> Result<pi_core::WorkspaceSpec, crate::SessionError> {
+        let Some(value) = self
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("pi-rs.workspace"))
+        else {
+            return Ok(pi_core::WorkspaceSpec::from_cwd(&self.cwd));
+        };
+        if value.get("schemaVersion").and_then(Value::as_u64) != Some(1) {
+            return Err(crate::SessionError::InvalidPayload(
+                "unsupported workspace schemaVersion".into(),
+            ));
+        }
+        let spec: pi_core::WorkspaceSpec =
+            serde_json::from_value(value.clone()).map_err(|error| {
+                crate::SessionError::InvalidPayload(format!("invalid workspace metadata: {error}"))
+            })?;
+        if spec.cwd() != self.cwd {
+            return Err(crate::SessionError::InvalidPayload(
+                "workspace executionDir disagrees with session cwd".into(),
+            ));
+        }
+        Ok(spec)
+    }
+
+    pub fn set_workspace(
+        &mut self,
+        workspace: &pi_core::WorkspaceSpec,
+    ) -> Result<(), crate::SessionError> {
+        if workspace.cwd() != self.cwd {
+            return Err(crate::SessionError::InvalidPayload(
+                "workspace executionDir disagrees with session cwd".into(),
+            ));
+        }
+        let mut value = serde_json::to_value(workspace)
+            .map_err(|error| crate::SessionError::InvalidPayload(error.to_string()))?;
+        value["schemaVersion"] = Value::from(1);
+        self.metadata
+            .get_or_insert_with(Map::new)
+            .insert("pi-rs.workspace".into(), value);
+        Ok(())
+    }
+
     pub fn new(id: impl Into<String>, cwd: impl Into<PathBuf>) -> Self {
         Self {
             kind: HeaderKind::Header,

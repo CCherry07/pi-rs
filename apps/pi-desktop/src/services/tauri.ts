@@ -729,15 +729,17 @@ export async function setNativeUiLocale(locale: "en" | "zh-CN"): Promise<void> {
   }
 }
 
-export async function getWorkspaceFiles(workspaceId: string) {
-  return invoke<string[]>("list_workspace_files", { workspaceId });
+export async function getWorkspaceFiles(workspaceId: string, threadId?: string | null) {
+  return invoke<string[]>("list_workspace_files", { workspaceId, ...(threadId ? { threadId } : {}) });
 }
 
 export async function readWorkspaceFile(
   workspaceId: string,
   path: string,
+  threadId?: string | null,
 ): Promise<{ content: string; truncated: boolean }> {
   return invoke<{ content: string; truncated: boolean }>("read_workspace_file", {
+    ...(threadId ? { threadId } : {}),
     workspaceId,
     path,
   });
@@ -826,8 +828,9 @@ export async function openTerminalSession(
   terminalId: string,
   cols: number,
   rows: number,
+  threadId?: string | null,
 ): Promise<{ id: string }> {
-  return invoke("terminal_open", { workspaceId, terminalId, cols, rows });
+  return invoke("terminal_open", { workspaceId, terminalId, cols, rows, ...(threadId ? { threadId } : {}) });
 }
 
 export async function writeTerminalSession(
@@ -997,4 +1000,14 @@ export async function sendNotification(
   }
 
   await attemptFallback();
+}
+
+export async function getWorkspaceProject(workspaceId: string): Promise<import("@/types").ProjectDefinition> {
+  return invoke("get_workspace_project", { workspaceId });
+}
+
+export async function updateWorkspaceProject(project: import("@/types").ProjectDefinition): Promise<import("@/types").ProjectDefinition> {
+  const result = await invoke<import("@/types").ProjectDefinition>("update_workspace_project", { project });
+  window.dispatchEvent(new CustomEvent("pi-project-changed", { detail: project.id }));
+  return result;
 }

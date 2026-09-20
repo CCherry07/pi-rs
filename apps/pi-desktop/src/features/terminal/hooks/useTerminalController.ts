@@ -8,6 +8,7 @@ import { useTerminalTabs } from "./useTerminalTabs";
 type UseTerminalControllerOptions = {
   activeWorkspaceId: string | null;
   activeWorkspace: WorkspaceInfo | null;
+  threadId?: string | null;
   terminalOpen: boolean;
   onCloseTerminalPanel?: () => void;
   onDebug: (entry: DebugEntry) => void;
@@ -16,6 +17,7 @@ type UseTerminalControllerOptions = {
 export function useTerminalController({
   activeWorkspaceId,
   activeWorkspace,
+  threadId,
   terminalOpen,
   onCloseTerminalPanel,
   onDebug,
@@ -33,7 +35,8 @@ export function useTerminalController({
   }, []);
 
   const handleTerminalClose = useCallback(
-    async (workspaceId: string, terminalId: string) => {
+    async (workspaceId: string, tabId: string) => {
+      const terminalId = threadId ? `${threadId}:${tabId}` : tabId;
       cleanupTerminalRef.current?.(workspaceId, terminalId);
       try {
         await closeTerminalSession(workspaceId, terminalId);
@@ -44,7 +47,7 @@ export function useTerminalController({
         onDebug(buildErrorDebugEntry("terminal close error", error));
       }
     },
-    [onDebug, shouldIgnoreTerminalCloseError],
+    [onDebug, shouldIgnoreTerminalCloseError, threadId],
   );
 
   const {
@@ -68,11 +71,14 @@ export function useTerminalController({
 
   const terminalState = useTerminalSession({
     activeWorkspace,
+    threadId,
     activeTerminalId,
     isVisible: terminalOpen,
     focusRequestVersion,
     onDebug,
-    onSessionExit: (workspaceId, terminalId) => {
+    onSessionExit: (workspaceId, executionId) => {
+      const prefix = threadId ? `${threadId}:` : "";
+      const terminalId = prefix && executionId.startsWith(prefix) ? executionId.slice(prefix.length) : executionId;
       const shouldClosePanel =
         workspaceId === activeWorkspaceId &&
         terminalTabs.length === 1 &&
@@ -123,7 +129,8 @@ export function useTerminalController({
   );
 
   const restartTerminalSession = useCallback(
-    async (workspaceId: string, terminalId: string) => {
+    async (workspaceId: string, tabId: string) => {
+      const terminalId = threadId ? `${threadId}:${tabId}` : tabId;
       cleanupTerminalRef.current?.(workspaceId, terminalId);
       try {
         await closeTerminalSession(workspaceId, terminalId);
@@ -134,7 +141,7 @@ export function useTerminalController({
         }
       }
     },
-    [onDebug, shouldIgnoreTerminalCloseError],
+    [onDebug, shouldIgnoreTerminalCloseError, threadId],
   );
 
   return {

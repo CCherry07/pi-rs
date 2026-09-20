@@ -217,6 +217,13 @@ impl GenerationComponents<'_> {
             }
         }
         builder = overlay.apply_to(builder);
+        let workspace = config
+            .workspace
+            .clone()
+            .unwrap_or_else(|| pi_core::WorkspaceSpec::from_cwd(&config.cwd).snapshot());
+        builder = builder
+            .workspace(workspace)
+            .plugin_factory(|| crate::workspace_prompt::WorkspacePromptPlugin);
 
         let mut resources = ResourceLoaderOptions::new(&config.cwd, &config.agent_dir);
         resources.project_trusted = project_trusted;

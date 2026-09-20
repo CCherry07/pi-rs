@@ -218,6 +218,7 @@ where
     }
 
     Ok(WorkspaceInfo {
+        project: None,
         id: entry.id,
         name: entry.name,
         path: entry.path,
@@ -468,6 +469,7 @@ where
     }
 
     Ok(WorkspaceInfo {
+        project: None,
         id: entry_snapshot.id,
         name: entry_snapshot.name,
         path: entry_snapshot.path,

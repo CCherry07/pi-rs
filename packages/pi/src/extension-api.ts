@@ -41,7 +41,12 @@ export interface PiModelRegistry {
 }
 
 export interface PiExtensionContext extends Record<string, unknown> {
-  cwd: string;
+  readonly cwd: string;
+  readonly workspace: {
+    readonly roots: readonly { readonly id: string; readonly name: string; readonly path: string; readonly ownership: { readonly kind: "external" } | { readonly kind: "managedWorktree"; readonly sourceRoot: string } }[];
+    readonly primaryRoot: string;
+    readonly executionDir: string;
+  };
   hasUI: false;
   mode: HostMode;
   signal: AbortSignal;
@@ -112,7 +117,7 @@ export interface PiToolDefinition<TInput = Record<string, unknown>> {
   promptSnippet?: string;
   promptGuidelines?: string[];
   executionMode?: ToolExecutionMode;
-  prepareArguments?(input: TInput): TInput | Promise<TInput>;
+  prepareArguments?(input: TInput, context?: PiExtensionContext): TInput | Promise<TInput>;
   execute(
     toolCallId: string,
     input: TInput,

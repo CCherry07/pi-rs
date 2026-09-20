@@ -10,6 +10,7 @@ pub mod session;
 mod stream;
 mod tool;
 mod usage;
+mod workspace;
 pub use abort::{AbortError, AbortHandle, AbortSignal};
 pub use agent_context::AgentContext;
 pub use assistant_stream::{AssistantStream, AssistantStreamId, AssistantStreamView};
@@ -27,3 +28,7 @@ pub use model::{
 pub use stream::{ContentMetadata, ResponseMetadataPatch, StreamEvent};
 pub use tool::{ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate};
 pub use usage::{Usage, UsageCost};
+pub use workspace::{
+    WorkspaceError, WorkspaceRoot, WorkspaceRootId, WorkspaceRootOwnership, WorkspaceSnapshot,
+    WorkspaceSpec,
+};

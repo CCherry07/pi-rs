@@ -67,13 +67,7 @@ export function useWorkspaceDialogs() {
     async (workspaces: WorkspaceInfo[], workspaceId: string) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
       const workspaceName = workspace?.name || t("workspaceDialogs.thisWorkspace");
-      const worktreeCount = workspaces.filter(
-        (entry) => entry.parentId === workspaceId,
-      ).length;
-      const detail =
-        worktreeCount > 0
-          ? `\n\n${t("workspaceDialogs.deleteChildren", { count: worktreeCount })}`
-          : "";
+      const detail = `\n\n${t("workspaceDialogs.keepDirectories", { defaultValue: "Directory contents and worktrees will be kept." })}`;
 
       return ask(
         t("workspaceDialogs.deleteWorkspaceQuestion", {

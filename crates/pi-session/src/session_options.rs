@@ -35,6 +35,8 @@ pub struct AgentSessionOptions {
     pub parent_session_path: Option<PathBuf>,
     /// Exact adapter-provided ID for a new session.
     pub session_id: Option<String>,
+    /// Extra metadata for a new header; workspace metadata is supplied by the runtime.
+    pub header_metadata: Option<serde_json::Map<String, serde_json::Value>>,
     /// Generation-local defaults for shell shorthand execution. Explicit
     /// per-call shell paths still take precedence.
     pub shell_path: Option<PathBuf>,

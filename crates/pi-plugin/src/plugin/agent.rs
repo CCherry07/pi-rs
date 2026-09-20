@@ -22,7 +22,7 @@ use crate::{
 pub struct AgentPluginContext {
     plugin_id: PluginId,
     run_id: RunId,
-    cwd: PathBuf,
+    workspace: crate::WorkspaceSnapshot,
     abort_signal: AbortSignal,
     pub session: SessionContext,
     pub models: ModelsContext,
@@ -42,7 +42,7 @@ impl AgentPluginContext {
         Self {
             plugin_id,
             run_id,
-            cwd,
+            workspace: context.workspace_or_cwd(&cwd),
             abort_signal,
             session: context.session,
             models: context.models,
@@ -59,8 +59,12 @@ impl AgentPluginContext {
         &self.run_id
     }
 
+    pub fn workspace(&self) -> &crate::WorkspaceSnapshot {
+        &self.workspace
+    }
+
     pub fn cwd(&self) -> &std::path::Path {
-        &self.cwd
+        self.workspace.cwd()
     }
 
     pub fn signal(&self) -> &AbortSignal {
@@ -90,7 +94,7 @@ impl AgentPluginContext {
 #[derive(Clone)]
 pub struct InputContext {
     plugin_id: PluginId,
-    cwd: PathBuf,
+    workspace: crate::WorkspaceSnapshot,
     abort_signal: AbortSignal,
     pub session: SessionContext,
     pub models: ModelsContext,
@@ -103,8 +107,12 @@ impl InputContext {
         &self.plugin_id
     }
 
+    pub fn workspace(&self) -> &crate::WorkspaceSnapshot {
+        &self.workspace
+    }
+
     pub fn cwd(&self) -> &std::path::Path {
-        &self.cwd
+        self.workspace.cwd()
     }
 
     pub fn signal(&self) -> &AbortSignal {
@@ -804,7 +812,7 @@ impl PluginDriver {
         AgentPluginContext {
             plugin_id: registered.id.clone(),
             run_id: run_id.clone(),
-            cwd: cwd.to_path_buf(),
+            workspace: context.workspace_or_cwd(cwd),
             abort_signal: signal.clone(),
             session: context.session,
             models: context.models,
@@ -836,7 +844,7 @@ impl PluginDriver {
             let context = self.context_parts();
             let context = InputContext {
                 plugin_id: registered.id.clone(),
-                cwd: cwd.to_path_buf(),
+                workspace: context.workspace_or_cwd(cwd),
                 abort_signal: signal.clone(),
                 session: context.session,
                 models: context.models,
