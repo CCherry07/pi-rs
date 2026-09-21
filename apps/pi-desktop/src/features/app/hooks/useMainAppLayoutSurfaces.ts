@@ -538,8 +538,10 @@ function buildGitSurface({
       ? {
           workspaceId: activeWorkspace.id,
           threadId: activeThreadId,
-          workspacePath: activeWorkspace.path,
-          files: composerWorkspaceState.files,
+          listing: composerWorkspaceState.fileListing,
+          error: composerWorkspaceState.filesError,
+          onRefresh: composerWorkspaceState.refreshFiles,
+          modifiedRoot: gitState.gitStatus.repoRoot ?? null,
           modifiedFiles: [
             ...new Set([
               ...gitState.gitStatus.stagedFiles.map((file) => file.path),

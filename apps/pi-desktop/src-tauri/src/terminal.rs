@@ -184,6 +184,7 @@ fn spawn_terminal_reader(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri keeps command arguments and injected state separate.
 pub(crate) async fn terminal_open(
     workspace_id: String,
     terminal_id: String,

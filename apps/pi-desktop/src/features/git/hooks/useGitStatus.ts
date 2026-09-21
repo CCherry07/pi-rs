@@ -3,6 +3,7 @@ import type { GitFileStatus, WorkspaceInfo } from "../../../types";
 import { getGitStatus } from "../../../services/tauri";
 
 type GitStatusState = {
+  repoRoot?: string;
   branchName: string;
   files: GitFileStatus[];
   stagedFiles: GitFileStatus[];

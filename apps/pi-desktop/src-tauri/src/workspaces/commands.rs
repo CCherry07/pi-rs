@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
-use super::files::{list_workspace_files_inner, read_workspace_file_inner, WorkspaceFileResponse};
+use super::files::{
+    list_workspace_files_inner, read_workspace_file_inner, WorkspaceFileListing,
+    WorkspaceFileResponse,
+};
 use super::git::{
     git_branch_exists, git_find_remote_for_branch, git_remote_branch_exists, git_remote_exists,
     is_missing_worktree_error, run_git_command_owned, unique_branch_name,
@@ -26,14 +29,19 @@ use crate::utils::normalize_windows_namespace_path;
 pub(crate) async fn read_workspace_file(
     workspace_id: String,
     path: String,
+    root_id: Option<String>,
     thread_id: Option<String>,
     state: State<'_, AppState>,
     pi: State<'_, crate::pi_runtime::PiRuntimeState>,
 ) -> Result<WorkspaceFileResponse, String> {
-    let root = pi
-        .execution_directory(&state, &workspace_id, thread_id.as_deref())
+    let workspace = pi
+        .workspace_spec(&state, &workspace_id, thread_id.as_deref())
         .await?;
-    read_workspace_file_inner(&root, &path)
+    tauri::async_runtime::spawn_blocking(move || {
+        read_workspace_file_inner(&workspace, root_id.as_deref(), &path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -296,7 +304,7 @@ pub(crate) async fn rename_worktree(
     )
     .await?;
     for root in &mut project.roots {
-        if root.path == PathBuf::from(&old_path) {
+        if root.path == std::path::Path::new(&old_path) {
             root.path = PathBuf::from(&result.path);
         }
     }
@@ -381,11 +389,13 @@ pub(crate) async fn list_workspace_files(
     thread_id: Option<String>,
     state: State<'_, AppState>,
     pi: State<'_, crate::pi_runtime::PiRuntimeState>,
-) -> Result<Vec<String>, String> {
-    let root = pi
-        .execution_directory(&state, &workspace_id, thread_id.as_deref())
+) -> Result<WorkspaceFileListing, String> {
+    let workspace = pi
+        .workspace_spec(&state, &workspace_id, thread_id.as_deref())
         .await?;
-    Ok(list_workspace_files_inner(&root, usize::MAX))
+    tauri::async_runtime::spawn_blocking(move || list_workspace_files_inner(workspace))
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

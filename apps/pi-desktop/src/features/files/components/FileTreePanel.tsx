@@ -21,10 +21,11 @@ import {
   PanelSearchField,
 } from "../../design-system/components/panel/PanelPrimitives";
 import { readWorkspaceFile } from "../../../services/tauri";
-import type { OpenAppTarget } from "../../../types";
+import type { OpenAppTarget, WorkspaceFileListing, WorkspaceRoot } from "../../../types";
 import { useDebouncedValue } from "../../../hooks/useDebouncedValue";
 import { languageFromPath } from "../../../utils/syntax";
-import { joinWorkspacePath, revealInFileManagerLabel } from "../../../utils/platformPaths";
+import { revealInFileManagerLabel } from "../../../utils/platformPaths";
+import { fileMentionText, workspaceFilePath } from "../workspaceFiles";
 import { getFileTypeIconUrl } from "../../../utils/fileTypeIcons";
 import { FilePreviewPopover } from "./FilePreviewPopover";
 
@@ -38,8 +39,10 @@ type FileTreeNode = {
 type FileTreePanelProps = {
   workspaceId: string;
   threadId?: string | null;
-  workspacePath: string;
-  files: string[];
+  listing: WorkspaceFileListing | null;
+  error: string | null;
+  onRefresh: () => void;
+  modifiedRoot: string | null;
   modifiedFiles: string[];
   isLoading: boolean;
   filePanelMode: PanelTabId;
@@ -162,11 +165,29 @@ function isImagePath(path: string) {
   return imageExtensions.has(ext);
 }
 
-export function FileTreePanel({
+export function FileTreePanel(props: FileTreePanelProps) {
+  const scope = JSON.stringify([props.workspaceId, props.threadId, props.listing?.workspace]);
+  const [selection, setSelection] = useState<{ scope: string; rootId: string } | null>(null);
+  const workspace = props.listing?.workspace;
+  const rootId = selection?.scope === scope ? selection.rootId : workspace?.primaryRoot;
+  const root = workspace?.roots.find((entry) => entry.id === rootId) ?? workspace?.roots[0] ?? null;
+  return <RootFileTreePanel
+    key={JSON.stringify([scope, root?.id])}
+    {...props}
+    root={root}
+    onSelectRoot={(id) => setSelection({ scope, rootId: id })}
+  />;
+}
+
+function RootFileTreePanel({
   workspaceId,
   threadId,
-  workspacePath,
-  files,
+  listing,
+  root,
+  onSelectRoot,
+  error,
+  onRefresh,
+  modifiedRoot,
   modifiedFiles,
   isLoading,
   filePanelMode,
@@ -177,8 +198,12 @@ export function FileTreePanel({
   openAppIconById,
   selectedOpenAppId,
   onSelectOpenAppId,
-}: FileTreePanelProps) {
+}: FileTreePanelProps & { root: WorkspaceRoot | null; onSelectRoot: (id: string) => void }) {
   const { t } = useTranslation("git");
+  const files = useMemo(() => listing?.files.filter((file) => file.rootId === root?.id).map((file) => file.path) ?? [], [listing, root]);
+  const rootError = error ?? listing?.errors.find((entry) => entry.rootId === root?.id)?.message;
+  const mentionPath = useCallback((path: string) => root && listing
+    ? fileMentionText(listing.workspace, root, path) : path, [root, listing]);
   const [filterMode, setFilterMode] = useState<"all" | "modified">("all");
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
@@ -205,7 +230,9 @@ export function FileTreePanel({
   const listRef = useRef<HTMLDivElement | null>(null);
   const debouncedQuery = useDebouncedValue(query, 150);
   const normalizedQuery = debouncedQuery.trim().toLowerCase();
-  const modifiedPathSet = useMemo(() => new Set(modifiedFiles), [modifiedFiles]);
+  const modifiedPathSet = useMemo(() => new Set(modifiedRoot
+    ? modifiedFiles.map((path) => workspaceFilePath({ path: modifiedRoot }, path))
+    : []), [modifiedFiles, modifiedRoot]);
   const fileEntries = useMemo(
     () =>
       files.map((path) => ({
@@ -218,9 +245,9 @@ export function FileTreePanel({
   const sourceEntries = useMemo(
     () =>
       filterMode === "modified"
-        ? fileEntries.filter((entry) => modifiedPathSet.has(entry.path))
+        ? fileEntries.filter((entry) => root && modifiedPathSet.has(workspaceFilePath(root, entry.path)))
         : fileEntries,
-    [fileEntries, filterMode, modifiedPathSet],
+    [fileEntries, filterMode, modifiedPathSet, root],
   );
   const previewKind = useMemo(
     () => (previewPath && isImagePath(previewPath) ? "image" : "text"),
@@ -336,9 +363,9 @@ export function FileTreePanel({
 
   const resolvePath = useCallback(
     (relativePath: string) => {
-      return joinWorkspacePath(workspacePath, relativePath);
+      return root ? workspaceFilePath(root, relativePath) : "";
     },
-    [workspacePath],
+    [root],
   );
 
   const previewImageSrc = useMemo(() => {
@@ -379,7 +406,7 @@ export function FileTreePanel({
   }, []);
 
   useEffect(() => {
-    if (!previewPath) {
+    if (!previewPath || !root) {
       return;
     }
     let cancelled = false;
@@ -394,7 +421,7 @@ export function FileTreePanel({
     }
     setPreviewLoading(true);
     setPreviewError(null);
-    readWorkspaceFile(workspaceId, previewPath, threadId)
+    readWorkspaceFile(workspaceId, { rootId: root.id, path: previewPath }, threadId)
       .then((response) => {
         if (cancelled) {
           return;
@@ -416,7 +443,7 @@ export function FileTreePanel({
     return () => {
       cancelled = true;
     };
-  }, [previewKind, previewPath, workspaceId, threadId]);
+  }, [previewKind, previewPath, workspaceId, threadId, root]);
 
   const flatNodes = useMemo(() => {
     const rows: FileTreeRowEntry[] = [];
@@ -540,7 +567,7 @@ export function FileTreePanel({
     const start = previewSelection.start + 1;
     const end = previewSelection.end + 1;
     const rangeLabel = start === end ? `L${start}` : `L${start}-L${end}`;
-    const snippet = `${previewPath}:${rangeLabel}\n${fence}\n${selected.join("\n")}\n\`\`\``;
+    const snippet = `${mentionPath(previewPath)}:${rangeLabel}\n${fence}\n${selected.join("\n")}\n\`\`\``;
     onInsertText(snippet);
     closePreview();
   }, [
@@ -550,6 +577,7 @@ export function FileTreePanel({
     previewPath,
     previewSelection,
     onInsertText,
+    mentionPath,
     closePreview,
   ]);
 
@@ -566,7 +594,7 @@ export function FileTreePanel({
               if (!canInsertText) {
                 return;
               }
-              onInsertText?.(relativePath);
+              onInsertText?.(mentionPath(relativePath));
             },
           }),
           await MenuItem.new({
@@ -581,7 +609,7 @@ export function FileTreePanel({
       const position = new LogicalPosition(event.clientX, event.clientY);
       await menu.popup(position, window);
     },
-    [canInsertText, onInsertText, resolvePath, t],
+    [canInsertText, onInsertText, mentionPath, resolvePath, t],
   );
 
   const renderRow = (entry: FileTreeRowEntry) => {
@@ -637,7 +665,7 @@ export function FileTreePanel({
               if (!canInsertText) {
                 return;
               }
-              onInsertText?.(node.path);
+              onInsertText?.(mentionPath(node.path));
             }}
             disabled={!canInsertText}
             aria-label={t("files.mentionNamed", { name: node.name })}
@@ -712,6 +740,28 @@ export function FileTreePanel({
         />
       }
     >
+      {listing && root && (
+        <div className="file-tree-root">
+          {listing.workspace.roots.length > 1 ? (
+            <select className="file-tree-root-select" aria-label={t("files.directory")}
+              value={root.id} onChange={(event) => onSelectRoot(event.target.value)}>
+              {listing.workspace.roots.map((entry) => (
+                <option key={entry.id} value={entry.id}>{entry.name} — {entry.path}</option>
+              ))}
+            </select>
+          ) : <span className="file-tree-root-name">{root.name}</span>}
+          <span className="file-tree-root-path" title={root.path}>{root.path}</span>
+          {listing.workspace.roots.length > 1 || root.path !== listing.workspace.executionDir ? (
+            <span className="file-tree-root-path" title={listing.workspace.executionDir}>
+              {t("files.workingDirectory", { path: listing.workspace.executionDir })}
+            </span>
+          ) : null}
+        </div>
+      )}
+      {rootError && <div className="file-tree-error" role="alert">
+        <span>{rootError}</span>
+        <button className="ghost" type="button" onClick={onRefresh}>{t("files.retry")}</button>
+      </div>}
       <div
         className="file-tree-list"
         ref={listRef}
@@ -770,7 +820,7 @@ export function FileTreePanel({
       {previewPath && previewAnchor
         ? createPortal(
             <FilePreviewPopover
-              path={previewPath}
+              path={listing && listing.workspace.roots.length > 1 ? `${root?.name}/${previewPath}` : previewPath}
               absolutePath={resolvePath(previewPath)}
               content={previewContent}
               truncated={previewTruncated}

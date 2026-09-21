@@ -50,8 +50,11 @@ unchanged. JavaScript callbacks and context queries expose the same serialized e
 Ordinary reload rebuilds resources from the session's saved spec. Managed isolated sessions and
 ephemeral Agents inherit it; same-directory new-session replacements retain it, while an explicit
 different cwd creates a single-root environment. Schedules save their workspace and only claim work
-from a session with that environment. SDK's factory-backed workspace prompt plugin describes all
-roots to the model through `before_agent_start`, without mutating reusable base prompts.
+from a session with that environment. For multi-root sessions, SDK's factory-backed workspace
+prompt plugin contributes only the working directory, root names and paths, and the relative-path
+rule through `before_agent_start`, without mutating reusable base prompts. Values are quoted;
+root identities, ownership, resource-loading policy, and filesystem-permission claims are omitted.
+The complete WorkspaceSpec remains available to the runtime and plugins.
 Settings, context, skills, MCP, and native plugin discovery still start at the execution directory;
 supplemental roots do not merge resources automatically. Relative tool paths resolve only from that
 directory. Absolute, home-relative, and parent-relative tool paths remain permitted by existing Pi
@@ -70,6 +73,16 @@ Composer text is independent of that refresh. Session listings use saved Project
 legacy cwd matching requires an exact match to a root of only one Project, including supplemental
 roots after a primary-root change. File browsing, terminal startup, and session
 inspection resolve existing conversations from their saved environment.
+
+Desktop file listings return that complete environment plus root-relative file references
+(`rootId`, `path`). The file panel selects a root, while completion searches all roots and
+labels each multi-root result with its directory name. Mentions and snippets use absolute paths
+for multi-root sessions or when execution is below the root; single-root cwd-relative mentions
+retain their existing form. File previews resolve root IDs against the selected session's saved
+spec, and file-list caches discard responses from previous selections. Missing or unreadable
+roots report scan errors while available roots remain browsable. Desktop preview containment is
+unchanged and does not change agent filesystem-tool permissions. Git status includes its actual
+repository directory so modified-file filtering never matches another root by relative path alone.
 
 This is a deliberate Rust product extension. The current local TypeScript Pi session manager uses
 v3 headers without this metadata extension; the Pi-compatible v3 RPC projection remains unchanged.

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { DebugEntry, WorkspaceInfo } from "../../../types";
+import type { DebugEntry, FileMention, WorkspaceFileListing, WorkspaceInfo } from "../../../types";
 import { useWorkspaceFiles } from "../../workspaces/hooks/useWorkspaceFiles";
 
 type FilePanelMode = "git" | "files" | "prompts";
@@ -21,7 +21,10 @@ type UseWorkspaceFileListingArgs = {
 };
 
 type UseWorkspaceFileListingResult = {
-  files: string[];
+  files: FileMention[];
+  listing: WorkspaceFileListing | null;
+  error: string | null;
+  refreshFiles: () => Promise<void>;
   isLoading: boolean;
   setFileAutocompleteActive: (active: boolean) => void;
 };
@@ -60,7 +63,7 @@ export function useWorkspaceFileListing({
     }
   }, [hasComposerSurface]);
 
-  const { files, isLoading } = useWorkspaceFiles({
+  const { files, listing, error, refreshFiles, isLoading } = useWorkspaceFiles({
     activeWorkspace,
     threadId,
     onDebug,
@@ -68,5 +71,5 @@ export function useWorkspaceFileListing({
     pollingEnabled: filePanelVisible,
   });
 
-  return { files, isLoading, setFileAutocompleteActive };
+  return { files, listing, error, refreshFiles, isLoading, setFileAutocompleteActive };
 }

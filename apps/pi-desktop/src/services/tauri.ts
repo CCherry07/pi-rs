@@ -438,6 +438,7 @@ export async function steerTurn(
 }
 
 export async function getGitStatus(workspace_id: string): Promise<{
+  repoRoot?: string;
   branchName: string;
   files: GitFileStatus[];
   stagedFiles: GitFileStatus[];
@@ -730,18 +731,19 @@ export async function setNativeUiLocale(locale: "en" | "zh-CN"): Promise<void> {
 }
 
 export async function getWorkspaceFiles(workspaceId: string, threadId?: string | null) {
-  return invoke<string[]>("list_workspace_files", { workspaceId, ...(threadId ? { threadId } : {}) });
+  return invoke<import("../types").WorkspaceFileListing>("list_workspace_files", { workspaceId, ...(threadId ? { threadId } : {}) });
 }
 
 export async function readWorkspaceFile(
   workspaceId: string,
-  path: string,
+  file: import("../types").WorkspaceFileRef,
   threadId?: string | null,
 ): Promise<{ content: string; truncated: boolean }> {
   return invoke<{ content: string; truncated: boolean }>("read_workspace_file", {
     ...(threadId ? { threadId } : {}),
     workspaceId,
-    path,
+    rootId: file.rootId,
+    path: file.path,
   });
 }
 

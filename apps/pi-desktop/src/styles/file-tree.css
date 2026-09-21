@@ -2,6 +2,47 @@
   gap: 10px;
 }
 
+.file-tree-root {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.file-tree-root-select {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-control);
+  color: var(--text-emphasis);
+  font: inherit;
+  font-size: 12px;
+}
+
+.file-tree-root-name {
+  color: var(--text-emphasis);
+  font-size: 12px;
+}
+
+.file-tree-root-path {
+  color: var(--text-faint);
+  font-size: 11px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.file-tree-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  color: var(--text-emphasis);
+}
+
 .file-tree-count {
   font-size: 11px;
   color: var(--text-faint);

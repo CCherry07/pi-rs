@@ -11,6 +11,7 @@ import type {
   ComposerSendIntent,
   ComposerEditorSettings,
   CustomPromptOption,
+  FileMention,
   DictationTranscript,
   FollowUpMessageBehavior,
   QueuedMessage,
@@ -59,7 +60,7 @@ type ComposerProps = {
   skills: { name: string; description?: string }[];
   runtimeCommands?: import("../../../utils/desktopCommands").RuntimeCommand[];
   prompts: CustomPromptOption[];
-  files: string[];
+  files: FileMention[];
   tokenUsage?: ThreadTokenUsage | null;
   queuedMessages?: QueuedMessage[];
   queuePausedReason?: string | null;

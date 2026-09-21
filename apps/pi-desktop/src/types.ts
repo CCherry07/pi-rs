@@ -47,10 +47,38 @@ export type WorktreeInfo = {
   branch: string;
 };
 
+export type WorkspaceRoot = {
+  id: string;
+  name: string;
+  path: string;
+  ownership: { kind: "external" } | { kind: "managedWorktree"; sourceRoot: string };
+};
+
+export type WorkspaceSpec = {
+  roots: WorkspaceRoot[];
+  primaryRoot: string;
+  executionDir: string;
+};
+
+export type WorkspaceFileRef = { rootId: string; path: string };
+
+export type WorkspaceFileListing = {
+  workspace: WorkspaceSpec;
+  files: WorkspaceFileRef[];
+  errors: Array<{ rootId: string; message: string }>;
+};
+
+export type FileMention = {
+  id: string;
+  label: string;
+  description?: string;
+  insertText: string;
+};
+
 export type ProjectDefinition = {
   id: string;
   name: string;
-  roots: Array<{ id: string; name: string; path: string; ownership: { kind: "external" } | { kind: "managedWorktree"; sourceRoot: string } }>;
+  roots: WorkspaceRoot[];
   primaryRoot: string;
 };
 

@@ -2,7 +2,7 @@ import { useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { AutocompleteItem } from "./useComposerAutocomplete";
 import { useComposerAutocomplete } from "./useComposerAutocomplete";
-import type { CustomPromptOption } from "../../../types";
+import type { CustomPromptOption, FileMention } from "../../../types";
 import {
   buildPromptInsertText,
   findNextPromptArgCursor,
@@ -20,7 +20,7 @@ type UseComposerAutocompleteStateArgs = {
   skills: Skill[];
   runtimeCommands?: RuntimeCommand[];
   prompts: CustomPromptOption[];
-  files: string[];
+  files: FileMention[];
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   setText: (next: string) => void;
   setSelectionStart: (next: number | null) => void;
@@ -113,10 +113,8 @@ export function useComposerAutocompleteState({
         ? (() => {
             const query = getFileTriggerQuery(text, selectionStart) ?? "";
             const limited = query ? files : files.slice(0, MAX_FILE_SUGGESTIONS);
-            return limited.map((path) => ({
-              id: path,
-              label: path,
-              insertText: path,
+            return limited.map((file) => ({
+              ...file,
               group: "Files" as const,
             }));
           })()

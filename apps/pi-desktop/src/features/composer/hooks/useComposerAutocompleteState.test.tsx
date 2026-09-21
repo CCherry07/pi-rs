@@ -1,11 +1,13 @@
 /** @vitest-environment jsdom */
 import { createRef } from "react";
-import { renderHook } from "@testing-library/react";
+import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { useComposerAutocompleteState } from "./useComposerAutocompleteState";
+import type { FileMention } from "../../../types";
 
 function renderAutocomplete(text: string, options?: {
-  files?: string[];
+  files?: FileMention[];
+  setText?: (text: string) => void;
   runtimeCommands?: import("../../../utils/desktopCommands").RuntimeCommand[];
   skills?: Array<{ name: string; description: string }>;
 }) {
@@ -25,7 +27,7 @@ function renderAutocomplete(text: string, options?: {
       prompts: [],
       files: options?.files ?? [],
       textareaRef,
-      setText: vi.fn(),
+      setText: options?.setText ?? vi.fn(),
       setSelectionStart: vi.fn(),
     }),
   );
@@ -47,7 +49,7 @@ describe("useComposerAutocompleteState", () => {
   it("suggests a file even if it is already mentioned earlier", () => {
     const { result } = renderAutocomplete(
       "Please review @src/App.tsx and also @",
-      { files: ["src/App.tsx", "src/main.tsx"] },
+      { files: ["src/App.tsx", "src/main.tsx"].map((path) => ({ id: path, label: path, insertText: path })) },
     );
 
     expect(result.current.autocompleteMatches.map((item) => item.label)).toContain(
@@ -57,7 +59,7 @@ describe("useComposerAutocompleteState", () => {
 
   it("marks root-level file suggestions as Files", () => {
     const { result } = renderAutocomplete("@", {
-      files: ["AGENTS.md", "src/main.tsx"],
+      files: ["AGENTS.md", "src/main.tsx"].map((path) => ({ id: path, label: path, insertText: path })),
     });
 
     expect(
@@ -73,6 +75,18 @@ describe("useComposerAutocompleteState", () => {
       "compact",
       "reload",
     ]);
+  });
+
+  it("distinguishes matching files from different roots and inserts the selected path", () => {
+    const setText = vi.fn();
+    const { result } = renderAutocomplete("Review @index", { setText, files: [
+      { id: "app-index", label: "app/src/index.ts", insertText: "/repos/app/src/index.ts", description: "/repos/app" },
+      { id: "shared-index", label: "shared/src/index.ts", insertText: "/repos/shared/src/index.ts", description: "/repos/shared" },
+    ] });
+    expect(result.current.autocompleteMatches).toHaveLength(2);
+    const shared = result.current.autocompleteMatches.find((item) => item.id === "shared-index")!;
+    act(() => result.current.applyAutocomplete(shared));
+    expect(setText).toHaveBeenCalledWith("Review /repos/shared/src/index.ts ");
   });
 
   it("includes skills in slash completion using Pi skill commands", () => {

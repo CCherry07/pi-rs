@@ -1,5 +1,8 @@
 {
   "files": {
+    "directory": "Directory",
+    "workingDirectory": "Working directory: {{path}}",
+    "retry": "Retry",
     "lines": "Lines {{start}}–{{end}}",
     "imagePreview": "Image preview",
     "noSelection": "No selection",

@@ -1405,6 +1405,58 @@ fn emit(app: &AppHandle, workspace_id: &str, method: &str, params: Value) {
     );
 }
 
+impl PiRuntimeState {
+    pub(crate) async fn refresh_project_draft(
+        &self,
+        project: &pi_sdk::projects::Project,
+    ) -> Result<(), String> {
+        self.store.refresh_project_draft(project).await
+    }
+}
+
+impl PiRuntimeState {
+    pub(crate) async fn execution_directory(
+        &self,
+        state: &AppState,
+        project_id: &str,
+        thread_id: Option<&str>,
+    ) -> Result<PathBuf, String> {
+        Ok(self
+            .workspace_spec(state, project_id, thread_id)
+            .await?
+            .cwd()
+            .to_path_buf())
+    }
+
+    pub(crate) async fn workspace_spec(
+        &self,
+        state: &AppState,
+        project_id: &str,
+        thread_id: Option<&str>,
+    ) -> Result<pi_core::WorkspaceSpec, String> {
+        if let Some(id) = thread_id {
+            let document = self.store.document(id)?;
+            let matches =
+                match pi_sdk::projects::session_project_id(document.header.metadata.as_ref()) {
+                    Some(saved) => saved == project_id,
+                    None => {
+                        let candidates = state.projects().await?;
+                        pi_sdk::projects::project_for_legacy_cwd(&candidates, &document.header.cwd)
+                            .is_some_and(|candidate| candidate.id == project_id)
+                    }
+                };
+            if !matches {
+                return Err("Selected thread does not belong to project".into());
+            }
+            return document
+                .header
+                .workspace()
+                .map_err(|error| error.to_string());
+        }
+        state.project(project_id).await?.spec()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::sync::Mutex;
@@ -1651,6 +1703,88 @@ mod tests {
         let listed = store.list_project(&project, &projects, false).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "associated");
+    }
+
+    #[tokio::test]
+    async fn file_environment_uses_saved_roots_after_project_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let agent_dir = base.join("agent");
+        for name in ["app", "shared", "replacement"] {
+            std::fs::create_dir_all(base.join(name)).unwrap();
+            std::fs::write(base.join(name).join("same.txt"), name).unwrap();
+        }
+        let pi = PiRuntimeState {
+            store: scripted_store(agent_dir.clone()),
+            info: PiDesktopInfo {
+                agent_dir: agent_dir.clone(),
+                provider: "scripted".into(),
+                model: "desktop-test".into(),
+                ready: true,
+                reason: None,
+            },
+            forwarders: Default::default(),
+            project_trust: pi_sdk::ProjectTrustService::new(
+                &agent_dir,
+                None,
+                false,
+                Default::default(),
+            )
+            .unwrap()
+            .0,
+            skill_mutation_gate: Default::default(),
+            desktop_command_scopes: Default::default(),
+        };
+        let entry = crate::types::WorkspaceEntry {
+            id: "project".into(),
+            name: "Project".into(),
+            path: base.join("app").to_string_lossy().into_owned(),
+            kind: Default::default(),
+            parent_id: None,
+            worktree: None,
+            settings: Default::default(),
+        };
+        let state = AppState {
+            workspaces: tokio::sync::Mutex::new(HashMap::from([(entry.id.clone(), entry)])),
+            terminal_sessions: Default::default(),
+            storage_path: base.join("workspaces.json"),
+            settings_path: base.join("settings.json"),
+            app_settings: Default::default(),
+            dictation: Default::default(),
+        };
+        let mut project = state.project("project").await.unwrap();
+        project.roots.push(pi_core::WorkspaceRoot::external(
+            "shared",
+            "shared",
+            base.join("shared"),
+        ));
+        state.project_store().upsert(project.clone()).unwrap();
+        let session = pi
+            .store
+            .start_scoped(SessionScope::project(&project).unwrap())
+            .await
+            .unwrap();
+        let id = session.log().header().id.clone();
+        project.roots[1].path = base.join("replacement");
+        state.project_store().upsert(project).unwrap();
+        let saved = pi
+            .workspace_spec(&state, "project", Some(&id))
+            .await
+            .unwrap();
+        let draft = pi.workspace_spec(&state, "project", None).await.unwrap();
+        assert_eq!(saved.roots()[1].path, base.join("shared"));
+        assert_eq!(draft.roots()[1].path, base.join("replacement"));
+        let listing = crate::workspaces::files::list_workspace_files_inner(saved.clone());
+        assert_eq!(listing.files.len(), 2);
+        let response =
+            crate::workspaces::files::read_workspace_file_inner(&saved, Some("shared"), "same.txt")
+                .unwrap();
+        assert_eq!(serde_json::to_value(response).unwrap()["content"], "shared");
+        assert!(pi
+            .workspace_spec(&state, "another-project", Some(&id))
+            .await
+            .is_err());
+        assert!(!session.log().path().exists());
     }
 
     #[tokio::test]
@@ -3083,47 +3217,5 @@ mod tests {
         assert!(!session_path.exists());
         assert!(!archived_path.exists());
         assert!(store.list(directory.path()).unwrap().is_empty());
-    }
-}
-
-impl PiRuntimeState {
-    pub(crate) async fn refresh_project_draft(
-        &self,
-        project: &pi_sdk::projects::Project,
-    ) -> Result<(), String> {
-        self.store.refresh_project_draft(project).await
-    }
-}
-
-impl PiRuntimeState {
-    pub(crate) async fn execution_directory(
-        &self,
-        state: &AppState,
-        project_id: &str,
-        thread_id: Option<&str>,
-    ) -> Result<PathBuf, String> {
-        let project = state.project(project_id).await?;
-        if let Some(id) = thread_id {
-            let document = self.store.document(id)?;
-            let matches =
-                match pi_sdk::projects::session_project_id(document.header.metadata.as_ref()) {
-                    Some(saved) => saved == project_id,
-                    None => {
-                        let candidates = state.projects().await?;
-                        pi_sdk::projects::project_for_legacy_cwd(&candidates, &document.header.cwd)
-                            .is_some_and(|candidate| candidate.id == project_id)
-                    }
-                };
-            if !matches {
-                return Err("Selected thread does not belong to project".into());
-            }
-            return Ok(document
-                .header
-                .workspace()
-                .map_err(|error| error.to_string())?
-                .cwd()
-                .to_path_buf());
-        }
-        Ok(project.spec()?.cwd().to_path_buf())
     }
 }

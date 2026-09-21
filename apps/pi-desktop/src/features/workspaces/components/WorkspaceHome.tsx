@@ -10,6 +10,7 @@ import { useTranslation } from "react-i18next";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type {
   CustomPromptOption,
+  FileMention,
   DictationSessionState,
   DictationTranscript,
   ModelOption,
@@ -67,7 +68,7 @@ type WorkspaceHomeProps = {
   skills: SkillOption[];
   runtimeCommands?: import("../../../utils/desktopCommands").RuntimeCommand[];
   prompts: CustomPromptOption[];
-  files: string[];
+  files: FileMention[];
   dictationEnabled: boolean;
   dictationState: DictationSessionState;
   dictationLevel: number;

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DebugEntry, WorkspaceInfo } from "../../../types";
+import type { DebugEntry, WorkspaceFileListing, WorkspaceInfo } from "../../../types";
 import { getWorkspaceFiles } from "../../../services/tauri";
+import { workspaceFileMentions } from "../../files/workspaceFiles";
 
 type UseWorkspaceFilesOptions = {
   activeWorkspace: WorkspaceInfo | null;
@@ -10,21 +11,6 @@ type UseWorkspaceFilesOptions = {
   pollingEnabled?: boolean;
 };
 
-function areStringArraysEqual(a: string[], b: string[]) {
-  if (a === b) {
-    return true;
-  }
-  if (a.length !== b.length) {
-    return false;
-  }
-  for (let index = 0; index < a.length; index += 1) {
-    if (a[index] !== b[index]) {
-      return false;
-    }
-  }
-  return true;
-}
-
 export function useWorkspaceFiles({
   activeWorkspace,
   threadId,
@@ -32,35 +18,48 @@ export function useWorkspaceFiles({
   enabled = true,
   pollingEnabled,
 }: UseWorkspaceFilesOptions) {
-  const [files, setFiles] = useState<string[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  const [result, setResult] = useState<{
+    scope: string;
+    listing: WorkspaceFileListing | null;
+    error: string | null;
+  } | null>(null);
+  const [pending, setPending] = useState<{ scope: string } | null>(null);
   const [isDocumentVisible, setIsDocumentVisible] = useState(
     () => document.visibilityState !== "hidden",
   );
   const lastFetchedWorkspaceId = useRef<string | null>(null);
-  const inFlight = useRef<string | null>(null);
+  const inFlight = useRef<{ scope: string } | null>(null);
 
   const REFRESH_INTERVAL_MS = 30000;
   const LARGE_REFRESH_INTERVAL_MS = 60000;
   const LARGE_FILE_COUNT = 20000;
   const workspaceId = activeWorkspace?.id ?? null;
-  const scopeKey = `${workspaceId}:${threadId ?? activeWorkspace?.path ?? ""}`;
+  const scopeKey = JSON.stringify([
+    workspaceId,
+    threadId ?? null,
+    threadId ? null : activeWorkspace?.project ?? activeWorkspace?.path,
+  ]);
+  const listing = result?.scope === scopeKey ? result.listing : null;
+  const error = result?.scope === scopeKey ? result.error : null;
+  const fileCount = listing?.files.length ?? 0;
   const activeScope = useRef(scopeKey);
   activeScope.current = scopeKey;
   const isEnabled = enabled;
+  const isLoading = isEnabled && pending?.scope === scopeKey;
   const isPollingEnabled = pollingEnabled ?? isEnabled;
 
   const refreshFiles = useCallback(async () => {
     if (!workspaceId || !isEnabled) {
       return;
     }
-    if (inFlight.current === scopeKey) {
+    if (inFlight.current?.scope === scopeKey) {
       return;
     }
-    inFlight.current = scopeKey;
+    const request = { scope: scopeKey };
+    inFlight.current = request;
     const requestWorkspaceId = workspaceId;
     const requestScope = scopeKey;
-    setIsLoading(true);
+    setPending(request);
     onDebug?.({
       id: `${Date.now()}-client-files-list`,
       timestamp: Date.now(),
@@ -77,12 +76,16 @@ export function useWorkspaceFiles({
         label: "files/list response",
         payload: response,
       });
-      if (requestScope === activeScope.current) {
-        const nextFiles = Array.isArray(response) ? response : [];
-        setFiles((prev) => (areStringArraysEqual(prev, nextFiles) ? prev : nextFiles));
+      if (requestScope === activeScope.current && inFlight.current === request) {
+        setResult((prev) => prev?.scope === requestScope && !prev.error &&
+          JSON.stringify(prev.listing) === JSON.stringify(response)
+          ? prev : { scope: requestScope, listing: response, error: null });
         lastFetchedWorkspaceId.current = requestScope;
       }
     } catch (error) {
+      if (requestScope === activeScope.current && inFlight.current === request) {
+        setResult({ scope: requestScope, listing: null, error: String(error) });
+      }
       onDebug?.({
         id: `${Date.now()}-client-files-list-error`,
         timestamp: Date.now(),
@@ -91,22 +94,19 @@ export function useWorkspaceFiles({
         payload: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      if (inFlight.current === requestScope) {
+      if (inFlight.current === request) {
         inFlight.current = null;
-        setIsLoading(false);
+        setPending(null);
       }
     }
   }, [isEnabled, onDebug, workspaceId, threadId, scopeKey]);
 
   useEffect(() => {
-    setFiles([]);
+    setResult(null);
     lastFetchedWorkspaceId.current = null;
     inFlight.current = null;
+    setPending(null);
   }, [scopeKey]);
-
-  useEffect(() => {
-    setIsLoading(Boolean(workspaceId && isEnabled));
-  }, [isEnabled, workspaceId]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -122,18 +122,18 @@ export function useWorkspaceFiles({
     if (!workspaceId || !isEnabled) {
       return;
     }
-    if (lastFetchedWorkspaceId.current === scopeKey && files.length > 0) {
+    if (lastFetchedWorkspaceId.current === scopeKey) {
       return;
     }
     refreshFiles();
-  }, [files.length, isEnabled, refreshFiles, workspaceId, scopeKey]);
+  }, [isEnabled, refreshFiles, workspaceId, scopeKey]);
 
   useEffect(() => {
     if (!workspaceId || !isPollingEnabled || !isDocumentVisible) {
       return;
     }
     const refreshInterval =
-      files.length > LARGE_FILE_COUNT ? LARGE_REFRESH_INTERVAL_MS : REFRESH_INTERVAL_MS;
+      fileCount > LARGE_FILE_COUNT ? LARGE_REFRESH_INTERVAL_MS : REFRESH_INTERVAL_MS;
 
     const interval = window.setInterval(() => {
       // Skip if tab is hidden
@@ -146,12 +146,14 @@ export function useWorkspaceFiles({
     return () => {
       window.clearInterval(interval);
     };
-  }, [files.length, isDocumentVisible, isPollingEnabled, refreshFiles, workspaceId]);
+  }, [fileCount, isDocumentVisible, isPollingEnabled, refreshFiles, workspaceId]);
 
-  const fileOptions = useMemo(() => files.filter(Boolean), [files]);
+  const fileOptions = useMemo(() => listing ? workspaceFileMentions(listing) : [], [listing]);
 
   return {
     files: fileOptions,
+    listing,
+    error,
     isLoading,
     refreshFiles,
   };

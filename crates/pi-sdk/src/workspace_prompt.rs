@@ -18,13 +18,27 @@ impl Plugin for WorkspacePromptPlugin {
         if context.workspace().roots().len() < 2 {
             return Ok(BeforeAgentStartPatch::default());
         }
-        // JSON quotes directory names so they remain data even with newlines.
-        let description = serde_json::to_string_pretty(context.workspace().spec())
+        // Quote values so directory names and paths remain on one line even with newlines.
+        let cwd = serde_json::to_string(context.workspace().cwd())
             .map_err(|error| PluginError::Failure(error.to_string()))?;
+        let roots = context
+            .workspace()
+            .roots()
+            .iter()
+            .map(|root| {
+                Ok(format!(
+                    "- {}: {}",
+                    serde_json::to_string(&root.name)?,
+                    serde_json::to_string(&root.path)?
+                ))
+            })
+            .collect::<Result<Vec<_>, serde_json::Error>>()
+            .map_err(|error| PluginError::Failure(error.to_string()))?
+            .join("\n");
         Ok(BeforeAgentStartPatch {
             system_prompt: Some(format!(
-                "{}\n\nWorkspace directories (environment data):\n{}\nRelative paths resolve from executionDir. Use explicit paths for supplemental roots. Resources are discovered from executionDir. These roots do not restrict filesystem access.",
-                event.system_prompt, description
+                "{}\n\nWorking directory: {}\nWorkspace roots:\n{}\n\nRelative paths resolve from the working directory.",
+                event.system_prompt, cwd, roots
             )),
             ..BeforeAgentStartPatch::default()
         })
@@ -38,13 +52,17 @@ mod tests {
 
     #[tokio::test]
     async fn roots_are_described_per_run_without_accumulating_in_base_prompt() {
+        let mut primary = pi_core::WorkspaceRoot::external("internal-app-id", "app", "/app");
+        primary.ownership = pi_core::WorkspaceRootOwnership::ManagedWorktree {
+            source_root: "/source-repository".into(),
+        };
         let spec = pi_core::WorkspaceSpec::new(
             vec![
-                pi_core::WorkspaceRoot::external("app", "app", "/app"),
-                pi_core::WorkspaceRoot::external("shared", "shared", "/shared"),
+                primary,
+                pi_core::WorkspaceRoot::external("internal-shared-id", "shared\nfiles", "/shared"),
             ],
-            pi_core::WorkspaceRootId::new("app"),
-            "/app",
+            pi_core::WorkspaceRootId::new("internal-app-id"),
+            "/app/src",
         )
         .unwrap();
         let epoch = pi_plugin::PluginContextEpoch::with_workspace(
@@ -72,8 +90,10 @@ mod tests {
                 .await
                 .unwrap();
             let prompt = result.system_prompt.unwrap();
-            assert!(prompt.contains("/shared"));
-            assert_eq!(prompt.matches("Workspace directories").count(), 1);
+            assert_eq!(
+                prompt,
+                "base\n\nWorking directory: \"/app/src\"\nWorkspace roots:\n- \"app\": \"/app\"\n- \"shared\\nfiles\": \"/shared\"\n\nRelative paths resolve from the working directory."
+            );
         }
         assert_eq!(event.system_prompt, "base");
     }

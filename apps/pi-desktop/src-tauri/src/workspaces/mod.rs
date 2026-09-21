@@ -1,5 +1,5 @@
 mod commands;
-mod files;
+pub(crate) mod files;
 mod git;
 mod macos;
 mod settings;

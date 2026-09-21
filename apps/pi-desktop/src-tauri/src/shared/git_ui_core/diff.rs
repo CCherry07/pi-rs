@@ -454,6 +454,7 @@ pub(super) async fn get_git_status_inner(
 
     Ok(json!({
         "branchName": branch_name,
+        "repoRoot": repo.workdir().unwrap_or(&repo_root),
         "files": files,
         "stagedFiles": staged_files,
         "unstagedFiles": unstaged_files,

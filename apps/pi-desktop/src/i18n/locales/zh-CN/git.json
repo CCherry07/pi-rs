@@ -1,5 +1,8 @@
 {
   "files": {
+    "directory": "目录",
+    "workingDirectory": "执行目录：{{path}}",
+    "retry": "重试",
     "lines": "第 {{start}}–{{end}} 行",
     "imagePreview": "图片预览",
     "noSelection": "未选择",

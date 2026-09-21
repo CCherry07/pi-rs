@@ -135,7 +135,7 @@ export function useMainAppComposerWorkspaceState({
       ? centerMode === "chat" || centerMode === "diff"
       : (isTablet ? tabletTab : activeTab) === "chat") && !showWorkspaceHome;
 
-  const { files, isLoading: isFilesLoading, setFileAutocompleteActive } =
+  const { files, listing: fileListing, error: filesError, refreshFiles, isLoading: isFilesLoading, setFileAutocompleteActive } =
     useWorkspaceFileListing({
       activeWorkspace,
       threadId: activeThreadId,
@@ -262,6 +262,9 @@ export function useMainAppComposerWorkspaceState({
     showWorkspaceHome,
     showComposer,
     files,
+    fileListing,
+    filesError,
+    refreshFiles,
     isFilesLoading,
     setFileAutocompleteActive,
     canInterrupt,
