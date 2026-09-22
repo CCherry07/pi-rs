@@ -5,6 +5,10 @@ import type { BranchInfo } from "../../../types";
 import { ModalShell } from "../../design-system/components/modal/ModalShell";
 import { BranchList } from "../../git/components/BranchList";
 import { filterBranches } from "../../git/utils/branchSearch";
+import type { GitInventory } from "../../git/gitContext";
+import type { WorktreePlanPreview } from "../../../services/tauri";
+import type { WorktreeCheckoutChoice } from "../hooks/useWorktreePrompt";
+import { ManagedWorktreeRecovery } from "./ManagedWorktreeRecovery";
 
 type WorktreePromptProps = {
   workspaceName: string;
@@ -24,6 +28,15 @@ type WorktreePromptProps = {
   onConfirm: () => void;
   isBusy?: boolean;
   isSavingScript?: boolean;
+  inventory?: GitInventory | null;
+  checkouts?: WorktreeCheckoutChoice[];
+  executionRootId?: string | null;
+  plan?: WorktreePlanPreview | null;
+  isLoading?: boolean;
+  isPreparing?: boolean;
+  onReview?: () => void;
+  onCheckoutChange?: (key: string, patch: Partial<Pick<WorktreeCheckoutChoice, "selected" | "branch" | "startPoint">>) => void;
+  onExecutionRootChange?: (rootId: string | null) => void;
 };
 
 export function WorktreePrompt({
@@ -44,19 +57,48 @@ export function WorktreePrompt({
   onConfirm,
   isBusy = false,
   isSavingScript = false,
+  inventory,
+  checkouts = [],
+  executionRootId = null,
+  plan,
+  isLoading = false,
+  isPreparing = false,
+  onReview,
+  onCheckoutChange,
+  onExecutionRootChange,
 }: WorktreePromptProps) {
   const { t } = useTranslation(["workspaces", "common"]);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const previewRef = useRef<HTMLElement | null>(null);
   const branchContainerRef = useRef<HTMLDivElement | null>(null);
   const branchListRef = useRef<HTMLDivElement | null>(null);
   const [branchMenuOpen, setBranchMenuOpen] = useState(false);
   const [selectedBranchIndex, setSelectedBranchIndex] = useState(0);
   const [didNavigateBranches, setDidNavigateBranches] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(Boolean(setupScript.trim()));
+  const hasMultipleCheckouts = checkouts.length > 1;
+  const canReview = checkouts.some((choice) => choice.selected) && checkouts
+    .filter((choice) => choice.selected).every((choice) => choice.branch.trim() && choice.startPoint.trim());
+  const handleSubmit = () => {
+    if (isBusy || isLoading || isPreparing) return;
+    if (onReview && !plan) {
+      if (canReview) onReview();
+    } else {
+      onConfirm();
+    }
+  };
 
   useEffect(() => {
     inputRef.current?.focus();
     inputRef.current?.select();
   }, []);
+
+  const planId = plan?.id;
+  useEffect(() => {
+    if (!planId) return;
+    previewRef.current?.scrollIntoView?.({ block: "start" });
+    previewRef.current?.focus({ preventScroll: true });
+  }, [planId]);
 
   const filteredBranches = useMemo(() => {
     const query = !branchWasEdited && branchMenuOpen ? "" : branch;
@@ -126,6 +168,7 @@ export function WorktreePrompt({
         ref={inputRef}
         className="ds-modal-input worktree-modal-input"
         value={name}
+        disabled={isBusy}
         placeholder={t("workspaces:worktree.optional")}
         onChange={(event) => onNameChange(event.target.value)}
         onKeyDown={(event) => {
@@ -137,23 +180,25 @@ export function WorktreePrompt({
           }
           if (event.key === "Enter" && !isBusy) {
             event.preventDefault();
-            onConfirm();
+            handleSubmit();
           }
         }}
       />
+      {!hasMultipleCheckouts && <>
       <label className="ds-modal-label worktree-modal-label" htmlFor="worktree-branch">
         {t("workspaces:worktree.branch")}
       </label>
       <div
         className="worktree-modal-branch"
         ref={branchContainerRef}
-        onFocusCapture={() => setBranchMenuOpen(true)}
+        onFocusCapture={() => setBranchMenuOpen(branchSuggestions.length > 0)}
         onBlurCapture={handleBranchContainerBlur}
       >
         <input
           id="worktree-branch"
           className="ds-modal-input worktree-modal-input"
           value={branch}
+          disabled={isBusy}
           onChange={(event) => {
             setDidNavigateBranches(false);
             onChange(event.target.value);
@@ -170,7 +215,7 @@ export function WorktreePrompt({
             if (!branchMenuOpen || filteredBranches.length === 0) {
               if (event.key === "Enter" && !isBusy) {
                 event.preventDefault();
-                onConfirm();
+                handleSubmit();
               }
               if (event.key === "ArrowDown") {
                 setBranchMenuOpen(true);
@@ -202,7 +247,7 @@ export function WorktreePrompt({
                 }
               }
               if (!isBusy) {
-                onConfirm();
+                handleSubmit();
               }
             }
           }}
@@ -231,35 +276,102 @@ export function WorktreePrompt({
           />
         )}
       </div>
-      <div className="worktree-modal-checkbox-row">
-        <input
-          id="worktree-copy-agents"
-          type="checkbox"
-          className="worktree-modal-checkbox-input"
-          checked={copyAgentsMd}
-          disabled={isBusy}
-          onChange={(event) => onCopyAgentsMdChange(event.target.checked)}
-        />
-        <label className="worktree-modal-checkbox-label" htmlFor="worktree-copy-agents">
-          {t("workspaces:worktree.copyAgents")}
-        </label>
-      </div>
-      <div className="ds-modal-divider worktree-modal-divider" />
-      <div className="worktree-modal-section-title">{t("workspaces:worktree.setupScript")}</div>
-      <div className="worktree-modal-hint">
-        {t("workspaces:worktree.setupHelp")}
-      </div>
-      <textarea
-        id="worktree-setup-script"
-        className="ds-modal-textarea worktree-modal-textarea"
-        value={setupScript}
-        onChange={(event) => onSetupScriptChange(event.target.value)}
-        placeholder="pnpm install"
-        rows={4}
-        disabled={isBusy || isSavingScript}
-      />
+      </>}
+      {isLoading && <div className="worktree-modal-hint" role="status">{t("workspaces:worktree.loadingRepositories")}</div>}
+      {inventory && <>
+        {hasMultipleCheckouts && <div className="worktree-modal-section-title">{t("workspaces:worktree.repositories")}</div>}
+        {checkouts.map((choice, index) => (
+          <div className="worktree-modal-checkout" key={choice.checkout.key}>
+            {hasMultipleCheckouts ? <label className="worktree-modal-checkout-heading">
+              <input type="checkbox" checked={choice.selected} disabled={isBusy}
+                onChange={(event) => onCheckoutChange?.(choice.checkout.key, { selected: event.target.checked })} />
+              <span>{choice.checkout.workdir}</span>
+            </label> : <div className="worktree-modal-checkout-heading">{choice.checkout.workdir}</div>}
+            {choice.selected && <div className="worktree-modal-checkout-fields">
+              {hasMultipleCheckouts && <label className="ds-modal-label">
+                {t("workspaces:worktree.branch")}
+                <input className="ds-modal-input" value={choice.branch} disabled={isBusy}
+                  aria-label={t("workspaces:worktree.repositoryBranch", { repository: choice.checkout.workdir })}
+                  onChange={(event) => onCheckoutChange?.(choice.checkout.key, { branch: event.target.value })} />
+              </label>}
+              <label className="ds-modal-label">
+                {t("workspaces:worktree.startPoint")}
+                <input className="ds-modal-input" value={choice.startPoint} disabled={isBusy}
+                  list={`worktree-refs-${index}`}
+                  aria-label={t("workspaces:worktree.repositoryStartPoint", { repository: choice.checkout.workdir })}
+                  onChange={(event) => onCheckoutChange?.(choice.checkout.key, { startPoint: event.target.value })} />
+                <datalist id={`worktree-refs-${index}`}>
+                  <option value="HEAD" />
+                  {choice.branches.map((item) => <option key={item.name} value={item.name} />)}
+                </datalist>
+              </label>
+            </div>}
+          </div>
+        ))}
+        {!checkouts.length && <div className="worktree-modal-hint">{t("workspaces:worktree.noRepositories")}</div>}
+        {inventory.workspace.roots.length > 1 && <>
+          <label className="ds-modal-label" htmlFor="worktree-execution-root">{t("workspaces:worktree.executionRoot")}</label>
+          <select id="worktree-execution-root" className="ds-modal-input" value={executionRootId ?? ""}
+            disabled={isBusy} onChange={(event) => onExecutionRootChange?.(event.target.value || null)}>
+            <option value="">{t("workspaces:worktree.preserveExecution", { path: inventory.workspace.executionDir })}</option>
+            {inventory.workspace.roots.map((root) => <option key={root.id} value={root.id}>{root.name} · {root.path}</option>)}
+          </select>
+        </>}
+      </>}
+      {plan && <section ref={previewRef} tabIndex={-1} className="worktree-modal-preview" aria-label={t("workspaces:worktree.preview")}>
+        <div className="worktree-modal-section-title">{t("workspaces:worktree.preview")}</div>
+        <dl className="worktree-modal-mapping">
+          {plan.workspace.roots.map((root) => {
+            const source = plan.source.roots.find((entry) => entry.id === root.id);
+            return <div key={root.id}>
+              <dt>{root.name}</dt>
+              <dd>{source?.path}</dd>
+              <dd>{source?.path === root.path ? t("workspaces:worktree.keptExternal") : `→ ${root.path}`}</dd>
+            </div>;
+          })}
+        </dl>
+        <div className="worktree-modal-hint">{t("workspaces:worktree.executionDirectory")}</div>
+        <code>{plan.workspace.executionDir}</code>
+        {plan.checkouts.map((checkout) => <div className="worktree-modal-hint" key={checkout.destination}>
+          {checkout.branch} · {checkout.startOid.slice(0, 12)}
+        </div>)}
+        {plan.warnings.map((warning, index) => <div className="worktree-modal-hint" key={index}>{warning}</div>)}
+      </section>}
+      <details className="worktree-modal-options" open={optionsOpen}
+        onToggle={(event) => setOptionsOpen(event.currentTarget.open)}>
+        <summary>{t("workspaces:worktree.additionalOptions")}</summary>
+        <div className="worktree-modal-options-content">
+          <div className="worktree-modal-checkbox-row">
+            <input
+              id="worktree-copy-agents"
+              type="checkbox"
+              className="worktree-modal-checkbox-input"
+              checked={copyAgentsMd}
+              disabled={isBusy}
+              onChange={(event) => onCopyAgentsMdChange(event.target.checked)}
+            />
+            <label className="worktree-modal-checkbox-label" htmlFor="worktree-copy-agents">
+              {t("workspaces:worktree.copyAgents")}
+            </label>
+          </div>
+          <label className="worktree-modal-section-title" htmlFor="worktree-setup-script">{t("workspaces:worktree.setupScript")}</label>
+          <div className="worktree-modal-hint">
+            {t("workspaces:worktree.setupHelp")}
+          </div>
+          <textarea
+            id="worktree-setup-script"
+            className="ds-modal-textarea worktree-modal-textarea"
+            value={setupScript}
+            onChange={(event) => onSetupScriptChange(event.target.value)}
+            placeholder="pnpm install"
+            rows={4}
+            disabled={isBusy || isSavingScript}
+          />
+        </div>
+      </details>
       {scriptError && <div className="ds-modal-error worktree-modal-error">{scriptError}</div>}
       {error && <div className="ds-modal-error worktree-modal-error">{error}</div>}
+      <ManagedWorktreeRecovery disabled={isBusy || isPreparing} refreshKey={error} />
       <div className="ds-modal-actions worktree-modal-actions">
         <button
           className="ghost ds-modal-button worktree-modal-button"
@@ -271,11 +383,11 @@ export function WorktreePrompt({
         </button>
         <button
           className="primary ds-modal-button worktree-modal-button"
-          onClick={onConfirm}
+          onClick={handleSubmit}
           type="button"
-          disabled={isBusy || branch.trim().length === 0}
+          disabled={isBusy || isLoading || isPreparing || (onReview ? !canReview : branch.trim().length === 0)}
         >
-          {t("common:actions.create")}
+          {isPreparing ? t("workspaces:worktree.preparing") : onReview && !plan ? t("workspaces:worktree.review") : t("common:actions.create")}
         </button>
       </div>
     </ModalShell>

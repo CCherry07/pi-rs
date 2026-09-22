@@ -1,3 +1,4 @@
+import { gitScopeKey } from "../../git/gitContext";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ConversationItem,
@@ -14,6 +15,7 @@ import { buildPerFileThreadDiffs } from "../../git/utils/perFileThreadDiffs";
 
 export function useGitPanelController({
   activeWorkspace,
+  projectWorkspace = activeWorkspace,
   activeItems,
   gitDiffPreloadEnabled,
   gitDiffIgnoreWhitespaceChanges,
@@ -28,6 +30,7 @@ export function useGitPanelController({
   prDiffsError,
 }: {
   activeWorkspace: WorkspaceInfo | null;
+  projectWorkspace?: WorkspaceInfo | null;
   activeItems: ConversationItem[];
   gitDiffPreloadEnabled: boolean;
   gitDiffIgnoreWhitespaceChanges: boolean;
@@ -41,6 +44,9 @@ export function useGitPanelController({
   prDiffsLoading: boolean;
   prDiffsError: string | null;
 }) {
+  const gitScope = gitScopeKey(activeWorkspace);
+  const scopeRef = useRef(gitScope);
+  scopeRef.current = gitScope;
   const [centerMode, setCenterMode] = useState<"chat" | "diff">("chat");
   const [selectedDiffPath, setSelectedDiffPath] = useState<string | null>(null);
   const [diffScrollRequestId, setDiffScrollRequestId] = useState(0);
@@ -59,6 +65,14 @@ export function useGitPanelController({
   );
   const [diffSource, setDiffSource] = useState<GitDiffSource>("local");
 
+
+  useEffect(() => {
+    setSelectedDiffPath(null);
+    setSelectedCommitSha(null);
+    setSelectedPullRequest(null);
+    setDiffSource("local");
+    pendingDiffScrollRef.current = false;
+  }, [gitScope]);
   const { groups: perFileDiffGroups, viewerEntries: perFileDiffs } = useMemo(
     () => buildPerFileThreadDiffs(activeItems),
     [activeItems],
@@ -68,16 +82,16 @@ export function useGitPanelController({
     activeWorkspace,
   );
   const gitStatusRefreshTimeoutRef = useRef<number | null>(null);
-  const activeWorkspaceIdRef = useRef<string | null>(activeWorkspace?.id ?? null);
-  const activeWorkspaceRef = useRef(activeWorkspace);
+  const activeWorkspaceIdRef = useRef<string | null>(projectWorkspace?.id ?? null);
+  const activeWorkspaceRef = useRef(projectWorkspace);
 
   useEffect(() => {
-    activeWorkspaceIdRef.current = activeWorkspace?.id ?? null;
-  }, [activeWorkspace?.id]);
+    activeWorkspaceIdRef.current = projectWorkspace?.id ?? null;
+  }, [projectWorkspace?.id]);
 
   useEffect(() => {
-    activeWorkspaceRef.current = activeWorkspace;
-  }, [activeWorkspace]);
+    activeWorkspaceRef.current = projectWorkspace;
+  }, [projectWorkspace]);
 
   useEffect(() => {
     return () => {
@@ -88,7 +102,7 @@ export function useGitPanelController({
   }, []);
 
   const queueGitStatusRefresh = useCallback(() => {
-    const workspaceId = activeWorkspaceIdRef.current;
+    const workspaceId = scopeRef.current;
     if (!workspaceId) {
       return;
     }
@@ -97,7 +111,7 @@ export function useGitPanelController({
     }
     gitStatusRefreshTimeoutRef.current = window.setTimeout(() => {
       gitStatusRefreshTimeoutRef.current = null;
-      if (activeWorkspaceIdRef.current !== workspaceId) {
+      if (scopeRef.current !== workspaceId) {
         return;
       }
       refreshGitStatus();
@@ -112,7 +126,7 @@ export function useGitPanelController({
   const shouldPreloadDiffs = Boolean(
     gitDiffPreloadEnabled &&
       activeWorkspace &&
-      !preloadedWorkspaceIdsRef.current.has(activeWorkspace.id),
+      !preloadedWorkspaceIdsRef.current.has(gitScope!),
   );
   const shouldLoadSelectedLocalDiff =
     centerMode === "diff" && Boolean(selectedDiffPath);
@@ -148,14 +162,8 @@ export function useGitPanelController({
     if (!isDiffLoading && !diffError && gitDiffs.length === 0) {
       return;
     }
-    preloadedWorkspaceIdsRef.current.add(activeWorkspace.id);
-  }, [
-    activeWorkspace,
-    diffError,
-    gitDiffs.length,
-    isDiffLoading,
-    shouldPreloadDiffs,
-  ]);
+    preloadedWorkspaceIdsRef.current.add(gitScope!);
+  }, [activeWorkspace, diffError, gitDiffs.length, gitScope, isDiffLoading, shouldPreloadDiffs]);
 
   const {
     entries: gitLogEntries,

@@ -147,6 +147,34 @@
   height: 100% !important;
 }
 
+/* xterm owns the slider geometry; keep its drag target while painting a slim thumb. */
+@media (forced-colors: none) {
+  .terminal-surface .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
+    background: transparent;
+  }
+
+  .terminal-surface .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: 50%;
+    width: calc(var(--ds-scrollbar-size) - 4px);
+    border-radius: 999px;
+    background: var(--ds-scrollbar-thumb);
+    transform: translateX(-50%);
+    pointer-events: none;
+  }
+
+  .terminal-surface .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider:hover::after {
+    background: var(--ds-scrollbar-thumb-hover);
+  }
+
+  .terminal-surface .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider.active::after {
+    background: var(--ds-scrollbar-thumb-active);
+  }
+}
+
 .terminal-surface .composition-view {
   background: var(--terminal-background);
   color: var(--terminal-foreground);

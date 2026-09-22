@@ -2,15 +2,10 @@ import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import type { WorkspaceInfo } from "../../../types";
-import { pickWorkspacePaths } from "../../../services/tauri";
 import type { AddWorkspacesFromPathsResult } from "../../workspaces/hooks/useWorkspaceCrud";
 
 export function useWorkspaceDialogs() {
   const { t } = useTranslation(["app", "common", "workspaces"]);
-
-  const requestWorkspacePaths = useCallback(async () => {
-    return pickWorkspacePaths();
-  }, []);
 
   const showAddWorkspacesResult = useCallback(
     async (result: AddWorkspacesFromPathsResult) => {
@@ -114,9 +109,10 @@ export function useWorkspaceDialogs() {
   );
 
   const showWorktreeRemovalError = useCallback(
-    async (error: unknown) => {
+    async (error: unknown, managed = false) => {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      await message(errorMessage, {
+      const recoveryHelp = managed ? `\n\n${t("workspaces:worktree.recoveryHelp")}` : "";
+      await message(`${errorMessage}${recoveryHelp}`, {
         title: t("workspaceDialogs.deleteWorktreeFailed"),
         kind: "error",
       });
@@ -125,7 +121,6 @@ export function useWorkspaceDialogs() {
   );
 
   return {
-    requestWorkspacePaths,
     showAddWorkspacesResult,
     confirmWorkspaceRemoval,
     confirmWorktreeRemoval,

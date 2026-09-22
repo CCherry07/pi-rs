@@ -1,4 +1,8 @@
 {
+  "repositories": {
+    "label": "Repository",
+    "unavailable": "Selected repository is unavailable. Refresh or select another repository."
+  },
   "files": {
     "directory": "Directory",
     "workingDirectory": "Working directory: {{path}}",
@@ -183,7 +187,8 @@
     "applyWorktree": "Apply worktree changes",
     "stageAll": "Stage All Changes",
     "unstageAll": "Unstage All Changes",
-    "discardAll": "Discard All Changes"
+    "discardAll": "Discard All Changes",
+    "previewWorktreeDelivery": "Preview worktree delivery"
   },
   "viewer": {
     "loading": "Loading diff...",

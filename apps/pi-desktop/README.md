@@ -81,6 +81,44 @@ frontend commands such as `/reload` are not implicitly registered here; a native
 use the runtime reload/navigation capabilities. Project native plugins still use shared Pi
 project trust; desktop presentation packages consume that same decision.
 
+## Adding a workspace
+
+**Add workspace** opens a creation panel. Add one or more directories, keep the name suggested
+from the first directory or enter your own, and select the primary directory. Creating saves
+one Local workspace containing all selected directories. The primary directory is the default
+working directory for new conversations; ordinary folders are supported alongside Git repositories.
+To change the name, directories, or primary directory, right-click the workspace in the sidebar
+and choose **Edit workspace**. Directory editing is also available in **Settings → Projects**.
+Saving preserves the Project identity, and existing conversations retain their saved environment.
+Dropping multiple folders into the app still imports them as separate workspaces.
+
+## Worktrees
+
+Worktrees provide an independent development directory for a task.
+
+The header's **Local / Worktree** badge shows the current execution environment. Click it to
+view or copy the saved working directory. Selecting another repository in the Git panel does not
+change this directory.
+
+The basic workflow is:
+
+1. Open **New worktree**, or select **Worktree** when starting a run from the project home.
+2. Keep the generated branch name or enter a new one. Choose a starting ref (default: `HEAD`),
+   review the destination, and create the worktree. The source repository needs an initial commit.
+3. Start a conversation in the created worktree. Reopening that saved conversation retains its
+   working directory; file browsing, terminal startup, and Git use the same saved environment.
+4. Review changes and commit or push with the existing Git controls. Merging back is optional.
+5. Delete the worktree manually when finished. Ordinary deletion refuses tracked, untracked, or
+   ignored local changes. Cleanup keeps the Git branch and leaves shared source directories intact.
+
+For projects with multiple repositories, select the repositories to isolate. Unselected roots keep
+their original paths. Creation uses committed files; uncommitted source changes are not copied.
+**Additional options** contains optional `AGENTS.md` copying and the existing setup script.
+Removing a project association alone does not delete its directories.
+
+This workflow is the current product scope. Session handoff, automatic cleanup, deleted-worktree
+snapshots, and remote environment management are outside it.
+
 ## Configuration
 
 ```bash

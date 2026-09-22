@@ -22,12 +22,13 @@ export function WorktreeCard({
   onToggleWorkspaceCollapse,
   children,
 }: WorktreeCardProps) {
-  const { t } = useTranslation("app");
+  const { t } = useTranslation(["app", "workspaces"]);
   const worktreeCollapsed = worktree.settings.sidebarCollapsed;
   const worktreeBranch = worktree.worktree?.branch ?? "";
   const worktreeLabel = worktree.name?.trim() || worktreeBranch;
-  const worktreeMeta =
-    worktreeBranch && worktreeBranch !== worktreeLabel ? worktreeBranch : null;
+  const worktreeMeta = worktree.worktree?.managed && worktree.worktree.checkoutCount
+    ? t("workspaces:worktree.repositoryCount", { count: worktree.worktree.checkoutCount })
+    : worktreeBranch && worktreeBranch !== worktreeLabel ? worktreeBranch : null;
   const contentCollapsedClass = worktreeCollapsed ? " collapsed" : "";
 
   return (

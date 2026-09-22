@@ -12,6 +12,11 @@
   --ds-text-subtle: var(--text-subtle);
   --ds-text-faint: var(--text-faint);
 
+  --ds-scrollbar-size: 8px;
+  --ds-scrollbar-thumb: color-mix(in srgb, var(--text-faint) 60%, transparent);
+  --ds-scrollbar-thumb-hover: var(--text-faint);
+  --ds-scrollbar-thumb-active: var(--text-subtle);
+
   --ds-modal-backdrop: rgba(6, 8, 12, 0.55);
   --ds-modal-card-bg: var(--ds-surface-card);
   --ds-modal-card-border: var(--ds-border-strong);

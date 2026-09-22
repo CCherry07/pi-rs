@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useGitOperationScope, useGitScopedState } from "./useGitOperationScope";
+import { gitRequestFor, gitScopeKey } from "../gitContext";
+import { useCallback, useEffect, useRef } from "react";
 import type { GitCommitDiff, WorkspaceInfo } from "../../../types";
 import { getGitCommitDiff } from "../../../services/tauri";
 
@@ -20,25 +22,28 @@ export function useGitCommitDiffs(
   enabled: boolean,
   ignoreWhitespaceChanges: boolean,
 ) {
-  const [state, setState] = useState<CommitDiffState>(emptyState);
+  const scope = useGitOperationScope(activeWorkspace);
+  const [state, setState] = useGitScopedState<CommitDiffState>(scope, emptyState);
   const requestIdRef = useRef(0);
-  const workspaceIdRef = useRef<string | null>(activeWorkspace?.id ?? null);
+  const workspaceIdRef = useRef<string | null>(gitScopeKey(activeWorkspace));
   const shaRef = useRef<string | null>(sha ?? null);
   const ignoreWhitespaceChangesRef = useRef(ignoreWhitespaceChanges);
 
   const refresh = useCallback(async () => {
+    if (!scope.isCurrent()) return;
     if (!activeWorkspace || !sha) {
       setState(emptyState);
       return;
     }
-    const workspaceId = activeWorkspace.id;
+    const workspaceId = gitScopeKey(activeWorkspace)!;
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
     setState((prev) => ({ ...prev, isLoading: true, error: null }));
     try {
-      const diffs = await getGitCommitDiff(workspaceId, sha);
+      const diffs = await getGitCommitDiff(gitRequestFor(activeWorkspace), sha);
       if (
-        requestIdRef.current !== requestId ||
+        !scope.isCurrent() ||
+          requestIdRef.current !== requestId ||
         workspaceIdRef.current !== workspaceId ||
         shaRef.current !== sha ||
         ignoreWhitespaceChangesRef.current !== ignoreWhitespaceChanges
@@ -49,7 +54,8 @@ export function useGitCommitDiffs(
     } catch (error) {
       console.error("Failed to load git commit diff", error);
       if (
-        requestIdRef.current !== requestId ||
+        !scope.isCurrent() ||
+          requestIdRef.current !== requestId ||
         workspaceIdRef.current !== workspaceId ||
         shaRef.current !== sha ||
         ignoreWhitespaceChangesRef.current !== ignoreWhitespaceChanges
@@ -62,16 +68,16 @@ export function useGitCommitDiffs(
         error: error instanceof Error ? error.message : String(error),
       });
     }
-  }, [activeWorkspace, ignoreWhitespaceChanges, sha]);
+  }, [activeWorkspace, ignoreWhitespaceChanges, scope, setState, sha]);
 
   useEffect(() => {
-    const workspaceId = activeWorkspace?.id ?? null;
+    const workspaceId = gitScopeKey(activeWorkspace);
     if (workspaceIdRef.current !== workspaceId) {
       workspaceIdRef.current = workspaceId;
       requestIdRef.current += 1;
       setState(emptyState);
     }
-  }, [activeWorkspace?.id]);
+  }, [activeWorkspace, setState]);
 
   useEffect(() => {
     if (shaRef.current !== sha) {
@@ -79,7 +85,7 @@ export function useGitCommitDiffs(
       requestIdRef.current += 1;
       setState(emptyState);
     }
-  }, [sha]);
+  }, [setState, sha]);
 
   useEffect(() => {
     if (ignoreWhitespaceChangesRef.current !== ignoreWhitespaceChanges) {
@@ -87,7 +93,7 @@ export function useGitCommitDiffs(
       requestIdRef.current += 1;
       setState(emptyState);
     }
-  }, [ignoreWhitespaceChanges]);
+  }, [ignoreWhitespaceChanges, setState]);
 
   useEffect(() => {
     if (!enabled) {

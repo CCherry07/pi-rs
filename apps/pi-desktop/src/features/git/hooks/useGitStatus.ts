@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useGitOperationScope, useGitScopedState } from "./useGitOperationScope";
+import { gitRequestFor, gitScopeKey } from "../gitContext";
+import { useCallback, useEffect, useRef } from "react";
 import type { GitFileStatus, WorkspaceInfo } from "../../../types";
 import { getGitStatus } from "../../../services/tauri";
 
@@ -25,11 +27,12 @@ const emptyStatus: GitStatusState = {
 
 const REFRESH_INTERVAL_MS = 3000;
 export function useGitStatus(activeWorkspace: WorkspaceInfo | null) {
-  const [status, setStatus] = useState<GitStatusState>(emptyStatus);
+  const scope = useGitOperationScope(activeWorkspace);
+  const [status, setStatus] = useGitScopedState<GitStatusState>(scope, emptyStatus);
   const requestIdRef = useRef(0);
-  const workspaceIdRef = useRef<string | null>(activeWorkspace?.id ?? null);
+  const workspaceIdRef = useRef<string | null>(gitScopeKey(activeWorkspace));
   const cachedStatusRef = useRef<Map<string, GitStatusState>>(new Map());
-  const workspaceId = activeWorkspace?.id ?? null;
+  const workspaceId = gitScopeKey(activeWorkspace);
 
   const resolveBranchName = useCallback(
     (incoming: string | undefined, cached: GitStatusState | undefined) => {
@@ -46,15 +49,17 @@ export function useGitStatus(activeWorkspace: WorkspaceInfo | null) {
   );
 
   const refresh = useCallback(() => {
+    if (!scope.isCurrent()) return;
     if (!workspaceId) {
       setStatus(emptyStatus);
       return;
     }
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
-    return getGitStatus(workspaceId)
+    return getGitStatus(gitRequestFor(activeWorkspace))
       .then((data) => {
         if (
+          !scope.isCurrent() ||
           requestIdRef.current !== requestId ||
           workspaceIdRef.current !== workspaceId
         ) {
@@ -73,6 +78,7 @@ export function useGitStatus(activeWorkspace: WorkspaceInfo | null) {
       .catch((err) => {
         console.error("Failed to load git status", err);
         if (
+          !scope.isCurrent() ||
           requestIdRef.current !== requestId ||
           workspaceIdRef.current !== workspaceId
         ) {
@@ -85,7 +91,7 @@ export function useGitStatus(activeWorkspace: WorkspaceInfo | null) {
           : { ...emptyStatus, branchName: "unknown", error: message };
         setStatus(nextStatus);
       });
-  }, [resolveBranchName, workspaceId]);
+  }, [scope, workspaceId, activeWorkspace, setStatus, resolveBranchName]);
 
   useEffect(() => {
     if (workspaceIdRef.current !== workspaceId) {
@@ -98,7 +104,7 @@ export function useGitStatus(activeWorkspace: WorkspaceInfo | null) {
       const cached = cachedStatusRef.current.get(workspaceId);
       setStatus(cached ?? emptyStatus);
     }
-  }, [workspaceId]);
+  }, [activeWorkspace, setStatus, workspaceId]);
 
   useEffect(() => {
     if (!workspaceId) {
@@ -116,7 +122,7 @@ export function useGitStatus(activeWorkspace: WorkspaceInfo | null) {
     return () => {
       window.clearInterval(interval);
     };
-  }, [refresh, workspaceId]);
+  }, [refresh, activeWorkspace, workspaceId, setStatus]);
 
   return { status, refresh };
 }

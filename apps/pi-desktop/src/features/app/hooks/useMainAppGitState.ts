@@ -4,16 +4,16 @@ import type { ConversationItem, DebugEntry, WorkspaceInfo } from "@/types";
 import { useGitPanelController } from "@app/hooks/useGitPanelController";
 import { useGitHubPanelController } from "@app/hooks/useGitHubPanelController";
 import { useGitCommitController } from "@app/hooks/useGitCommitController";
-import { useGitRootSelection } from "@app/hooks/useGitRootSelection";
+import { useGitCheckouts } from "@/features/git/hooks/useGitCheckouts";
+import { gitScopeKey, isManagedGitCheckout } from "@/features/git/gitContext";
+import { useWorktreeDelivery } from "@/features/workspaces/hooks/useWorktreeDelivery";
 import { useGitRemote } from "@/features/git/hooks/useGitRemote";
-import { useGitRepoScan } from "@/features/git/hooks/useGitRepoScan";
 import { useGitActions } from "@/features/git/hooks/useGitActions";
 import { useGitBranches } from "@/features/git/hooks/useGitBranches";
 import { useSyncSelectedDiffPath } from "@app/hooks/useSyncSelectedDiffPath";
 
 type UseMainAppGitStateOptions = {
   activeWorkspace: WorkspaceInfo | null;
-  activeWorkspaceId: string | null;
   activeItems: ConversationItem[];
   activeTab: "home" | "projects" | "chat" | "git" | "log";
   tabletTab: "chat" | "git" | "log";
@@ -26,7 +26,7 @@ type UseMainAppGitStateOptions = {
     splitChatDiffView: boolean;
   };
   addDebugEntry: (entry: DebugEntry) => void;
-  updateWorkspaceSettings: Parameters<typeof useGitRootSelection>[0]["updateWorkspaceSettings"];
+  activeThreadId: string | null;
   commitMessageModelId: string | null;
 };
 
@@ -76,7 +76,7 @@ function useMainAppGitBranchActions({
   refreshGitLog: () => void;
   currentBranch: string | null;
 }) {
-  const { branches, checkoutBranch, checkoutPullRequest, createBranch } = useGitBranches({
+  const { branches, refreshBranches, checkoutBranch, checkoutPullRequest, createBranch } = useGitBranches({
     activeWorkspace,
     onDebug: addDebugEntry,
   });
@@ -116,8 +116,9 @@ function useMainAppGitBranchActions({
 
   return {
     branches,
+    refreshBranches,
     currentBranch,
-    isBranchSwitcherEnabled: Boolean(activeWorkspace) && activeWorkspace?.kind !== "worktree",
+    isBranchSwitcherEnabled: Boolean(activeWorkspace) && !isManagedGitCheckout(activeWorkspace),
     handleCheckoutBranch,
     handleCheckoutPullRequest,
     handleCreateBranch,
@@ -125,8 +126,7 @@ function useMainAppGitBranchActions({
 }
 
 export function useMainAppGitState({
-  activeWorkspace,
-  activeWorkspaceId,
+  activeWorkspace: projectWorkspace,
   activeItems,
   activeTab,
   tabletTab,
@@ -135,9 +135,12 @@ export function useMainAppGitState({
   setActiveTab,
   appSettings,
   addDebugEntry,
-  updateWorkspaceSettings,
+  activeThreadId,
   commitMessageModelId,
 }: UseMainAppGitStateOptions) {
+  const repositories = useGitCheckouts(projectWorkspace, activeThreadId);
+  const activeWorkspace = repositories.gitWorkspace;
+  const scopeKey = gitScopeKey(activeWorkspace);
   const alertError = useCallback((error: unknown) => {
     alert(error instanceof Error ? error.message : String(error));
   }, []);
@@ -166,19 +169,17 @@ export function useMainAppGitState({
 
   useEffect(() => {
     resetGitHubPanelState();
-  }, [activeWorkspaceId, resetGitHubPanelState]);
+  }, [scopeKey, resetGitHubPanelState]);
 
   const { remote: gitRemoteUrl, refresh: refreshGitRemote } = useGitRemote(activeWorkspace);
-  const {
-    repos: gitRootCandidates,
-    isLoading: gitRootScanLoading,
-    error: gitRootScanError,
-    depth: gitRootScanDepth,
-    hasScanned: gitRootScanHasScanned,
-    scan: scanGitRoots,
-    setDepth: setGitRootScanDepth,
-    clear: clearGitRootCandidates,
-  } = useGitRepoScan(activeWorkspace);
+  const gitRootCandidates = repositories.options.map((option) => option.label);
+  const gitRootScanLoading = repositories.isLoading;
+  const gitRootScanError = repositories.error;
+  const gitRootScanDepth = repositories.depth;
+  const gitRootScanHasScanned = repositories.hasScanned;
+  const scanGitRoots = repositories.scan;
+  const setGitRootScanDepth = repositories.setDepth;
+  const clearGitRootCandidates = repositories.refresh;
 
   const {
     centerMode,
@@ -227,6 +228,7 @@ export function useMainAppGitState({
     activeWorkspaceRef,
   } = useGitPanelController({
     activeWorkspace,
+    projectWorkspace,
     activeItems,
     gitDiffPreloadEnabled: appSettings.preloadGitDiffs,
     gitDiffIgnoreWhitespaceChanges: appSettings.gitDiffIgnoreWhitespaceChanges,
@@ -249,6 +251,7 @@ export function useMainAppGitState({
 
   const {
     branches,
+    refreshBranches,
     currentBranch,
     isBranchSwitcherEnabled,
     handleCheckoutBranch,
@@ -261,6 +264,14 @@ export function useMainAppGitState({
     refreshGitLog,
     currentBranch: gitStatus.branchName ?? null,
   });
+
+  const refreshDeliveryGitData = useCallback(() => {
+    refreshGitStatus();
+    refreshGitDiffs();
+    refreshGitLog();
+    void refreshBranches();
+  }, [refreshBranches, refreshGitDiffs, refreshGitLog, refreshGitStatus]);
+  const worktreeDelivery = useWorktreeDelivery(projectWorkspace, activeThreadId, scopeKey, refreshDeliveryGitData);
 
   const {
     applyWorktreeChanges: handleApplyWorktreeChanges,
@@ -284,12 +295,11 @@ export function useMainAppGitState({
     onError: alertError,
   });
 
-  const { activeGitRoot, handleSetGitRoot, handlePickGitRoot } = useGitRootSelection({
-    activeWorkspace,
-    updateWorkspaceSettings,
-    clearGitRootCandidates,
-    refreshGitStatus,
-  });
+  const activeGitRoot = repositories.workdir;
+  const handleSetGitRoot = (path: string | null) => {
+    const option = repositories.options.find((option) => option.label === path) ?? repositories.options[0];
+    if (option) repositories.select(option.value);
+  };
 
   const fileStatus = buildGitStatusText(gitStatus);
 
@@ -328,15 +338,17 @@ export function useMainAppGitState({
     onSync: handleSync,
   } = useGitCommitController({
     activeWorkspace,
-    activeWorkspaceId,
-    activeWorkspaceIdRef,
-    commitMessageModelId,
+      commitMessageModelId,
     gitStatus,
     refreshGitStatus,
     refreshGitLog,
   });
 
   return {
+    gitWorkspace: activeWorkspace,
+    repositories,
+    worktreeDelivery,
+    canApplyWorktree: isManagedGitCheckout(activeWorkspace),
     activeWorkspaceRef,
     activeWorkspaceIdRef,
     queueGitStatusRefresh,
@@ -428,7 +440,6 @@ export function useMainAppGitState({
     worktreeApplySuccess,
     activeGitRoot,
     handleSetGitRoot,
-    handlePickGitRoot,
     fileStatus,
     commitMessage,
     commitMessageLoading,

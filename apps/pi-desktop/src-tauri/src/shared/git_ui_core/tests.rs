@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,7 +6,7 @@ use serde_json::Value;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 
-use crate::types::{AppSettings, WorkspaceEntry, WorkspaceKind, WorkspaceSettings};
+use crate::types::AppSettings;
 
 use super::commands;
 use super::diff;
@@ -140,22 +139,9 @@ fn get_git_status_omits_global_ignored_paths() {
     fs::create_dir_all(ignored_path.parent().expect("parent")).expect("create ignored dir");
     fs::write(&ignored_path, "ignored\n").expect("write ignored file");
 
-    let workspace = WorkspaceEntry {
-        id: "w1".to_string(),
-        name: "w1".to_string(),
-        path: root.to_string_lossy().to_string(),
-        kind: WorkspaceKind::Main,
-        parent_id: None,
-        worktree: None,
-        settings: WorkspaceSettings::default(),
-    };
-    let mut entries = HashMap::new();
-    entries.insert("w1".to_string(), workspace);
-    let workspaces = Mutex::new(entries);
-
     let runtime = Runtime::new().expect("create tokio runtime");
     let status = runtime
-        .block_on(diff::get_git_status_inner(&workspaces, "w1".to_string()))
+        .block_on(diff::get_git_status_inner(root.clone()))
         .expect("get git status");
 
     let has_ignored = status
@@ -197,27 +183,11 @@ fn get_git_diffs_omits_global_ignored_paths() {
     fs::create_dir_all(ignored_path.parent().expect("parent")).expect("create ignored dir");
     fs::write(&ignored_path, "ignored\n").expect("write ignored file");
 
-    let workspace = WorkspaceEntry {
-        id: "w1".to_string(),
-        name: "w1".to_string(),
-        path: root.to_string_lossy().to_string(),
-        kind: WorkspaceKind::Main,
-        parent_id: None,
-        worktree: None,
-        settings: WorkspaceSettings::default(),
-    };
-    let mut entries = HashMap::new();
-    entries.insert("w1".to_string(), workspace);
-    let workspaces = Mutex::new(entries);
     let app_settings = Mutex::new(AppSettings::default());
 
     let runtime = Runtime::new().expect("create tokio runtime");
     let diffs = runtime
-        .block_on(diff::get_git_diffs_inner(
-            &workspaces,
-            &app_settings,
-            "w1".to_string(),
-        ))
+        .block_on(diff::get_git_diffs_inner(root.clone(), &app_settings))
         .expect("get git diffs");
 
     let has_ignored = diffs

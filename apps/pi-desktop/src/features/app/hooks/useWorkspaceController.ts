@@ -3,6 +3,7 @@ import { useWorkspaces } from "../../workspaces/hooks/useWorkspaces";
 import type { AppSettings, WorkspaceInfo } from "../../../types";
 import type { DebugEntry } from "../../../types";
 import { useWorkspaceDialogs } from "./useWorkspaceDialogs";
+import { useWorkspaceProjectPrompt } from "../../workspaces/hooks/useWorkspaceProjectPrompt";
 
 type WorkspaceControllerOptions = {
   appSettings: AppSettings;
@@ -29,7 +30,6 @@ export function useWorkspaceController({
   } = workspaceCore;
 
   const {
-    requestWorkspacePaths,
     showAddWorkspacesResult,
     confirmWorkspaceRemoval,
     confirmWorktreeRemoval,
@@ -54,14 +54,10 @@ export function useWorkspaceController({
     [runAddWorkspacesFromPaths],
   );
 
-  const addWorkspace = useCallback(async (): Promise<WorkspaceInfo | null> => {
-    const paths = await requestWorkspacePaths();
-    if (paths.length === 0) {
-      return null;
-    }
-    const result = await runAddWorkspacesFromPaths(paths);
-    return result.firstAdded;
-  }, [requestWorkspacePaths, runAddWorkspacesFromPaths]);
+  const workspaceProjectPrompt = useWorkspaceProjectPrompt({
+    onSubmit: workspaceCore.createWorkspaceProject,
+    onUpdate: workspaceCore.updateWorkspaceProject,
+  });
 
   const removeWorkspace = useCallback(
     async (workspaceId: string) => {
@@ -87,7 +83,7 @@ export function useWorkspaceController({
       try {
         await removeWorktreeCore(workspaceId);
       } catch (error) {
-        await showWorktreeRemovalError(error);
+        await showWorktreeRemovalError(error, Boolean(workspaces.find((entry) => entry.id === workspaceId)?.worktree?.managed));
       }
     },
     [confirmWorktreeRemoval, removeWorktreeCore, showWorktreeRemovalError, workspaces],
@@ -95,7 +91,9 @@ export function useWorkspaceController({
 
   return {
     ...workspaceCore,
-    addWorkspace,
+    addWorkspace: workspaceProjectPrompt.request,
+    editWorkspace: workspaceProjectPrompt.edit,
+    workspaceProjectPrompt,
     addWorkspacesFromPaths,
     removeWorkspace,
     removeWorktree,

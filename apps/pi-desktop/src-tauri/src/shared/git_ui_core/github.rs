@@ -1,18 +1,14 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use git2::Repository;
-use tokio::sync::Mutex;
 
-use crate::git_utils::{parse_github_repo, resolve_git_root};
+use crate::git_utils::parse_github_repo;
 use crate::shared::process_core::tokio_command;
 use crate::types::{
     GitHubIssue, GitHubIssuesResponse, GitHubPullRequest, GitHubPullRequestComment,
-    GitHubPullRequestDiff, GitHubPullRequestsResponse, WorkspaceEntry,
+    GitHubPullRequestDiff, GitHubPullRequestsResponse,
 };
 use crate::utils::normalize_git_path;
-
-use super::context::workspace_entry_for_id;
 
 fn github_repo_from_path(path: &Path) -> Result<String, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
@@ -140,13 +136,10 @@ fn command_failure_detail(stdout: &[u8], stderr: &[u8], fallback: &str) -> Strin
     }
 }
 
-pub(super) async fn checkout_github_pull_request_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
+pub(crate) async fn checkout_github_pull_request_inner(
+    repo_root: PathBuf,
     pr_number: u64,
 ) -> Result<(), String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
     let pr_number_text = pr_number.to_string();
 
     let output = tokio_command("gh")
@@ -167,12 +160,9 @@ pub(super) async fn checkout_github_pull_request_inner(
     Ok(())
 }
 
-pub(super) async fn get_github_issues_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
+pub(crate) async fn get_github_issues_inner(
+    repo_root: PathBuf,
 ) -> Result<GitHubIssuesResponse, String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
     let repo_name = github_repo_from_path(&repo_root)?;
 
     let output = tokio_command("gh")
@@ -224,12 +214,9 @@ pub(super) async fn get_github_issues_inner(
     Ok(GitHubIssuesResponse { total, issues })
 }
 
-pub(super) async fn get_github_pull_requests_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
+pub(crate) async fn get_github_pull_requests_inner(
+    repo_root: PathBuf,
 ) -> Result<GitHubPullRequestsResponse, String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
     let repo_name = github_repo_from_path(&repo_root)?;
 
     let output = tokio_command("gh")
@@ -286,13 +273,10 @@ pub(super) async fn get_github_pull_requests_inner(
     })
 }
 
-pub(super) async fn get_github_pull_request_diff_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
+pub(crate) async fn get_github_pull_request_diff_inner(
+    repo_root: PathBuf,
     pr_number: u64,
 ) -> Result<Vec<GitHubPullRequestDiff>, String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
     let repo_name = github_repo_from_path(&repo_root)?;
 
     let output = tokio_command("gh")
@@ -322,13 +306,10 @@ pub(super) async fn get_github_pull_request_diff_inner(
     Ok(parse_pr_diff(&diff_text))
 }
 
-pub(super) async fn get_github_pull_request_comments_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
+pub(crate) async fn get_github_pull_request_comments_inner(
+    repo_root: PathBuf,
     pr_number: u64,
 ) -> Result<Vec<GitHubPullRequestComment>, String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
     let repo_name = github_repo_from_path(&repo_root)?;
 
     let comments_endpoint = format!("/repos/{repo_name}/issues/{pr_number}/comments?per_page=30");

@@ -1,4 +1,8 @@
 {
+  "repositories": {
+    "label": "仓库",
+    "unavailable": "选中的仓库不可用，请重新扫描或选择其他仓库。"
+  },
   "files": {
     "directory": "目录",
     "workingDirectory": "执行目录：{{path}}",
@@ -183,7 +187,8 @@
     "applyWorktree": "应用工作树更改",
     "stageAll": "暂存所有更改",
     "unstageAll": "取消暂存所有更改",
-    "discardAll": "丢弃所有更改"
+    "discardAll": "丢弃所有更改",
+    "previewWorktreeDelivery": "预览工作树交付"
   },
   "viewer": {
     "loading": "正在加载差异...",

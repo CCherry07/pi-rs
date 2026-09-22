@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useState, type RefObject } from "react";
+import { gitRequestFor } from "../../git/gitContext";
+import { useGitOperationScope, useGitScopedState } from "../../git/hooks/useGitOperationScope";
+import { useCallback, useMemo, useRef } from "react";
 import type { WorkspaceInfo } from "../../../types";
 import {
   commitGit,
@@ -9,15 +11,12 @@ import {
   stageGitAll,
   syncGit,
 } from "../../../services/tauri";
-import { shouldApplyCommitMessage } from "../../../utils/commitMessage";
 import { useGitStatus } from "../../git/hooks/useGitStatus";
 
 type GitStatusState = ReturnType<typeof useGitStatus>["status"];
 
 type GitCommitControllerOptions = {
   activeWorkspace: WorkspaceInfo | null;
-  activeWorkspaceId: string | null;
-  activeWorkspaceIdRef: RefObject<string | null>;
   commitMessageModelId: string | null;
   gitStatus: GitStatusState;
   refreshGitStatus: () => void;
@@ -52,28 +51,28 @@ type GitCommitController = {
 
 export function useGitCommitController({
   activeWorkspace,
-  activeWorkspaceId,
-  activeWorkspaceIdRef,
   commitMessageModelId,
   gitStatus,
   refreshGitStatus,
   refreshGitLog,
 }: GitCommitControllerOptions): GitCommitController {
-  const [commitMessage, setCommitMessage] = useState("");
-  const [commitMessageLoading, setCommitMessageLoading] = useState(false);
-  const [commitMessageError, setCommitMessageError] = useState<string | null>(
+  const messageRevision = useRef(0);
+  const scope = useGitOperationScope(activeWorkspace);
+  const [commitMessage, setCommitMessage] = useGitScopedState(scope, "");
+  const [commitMessageLoading, setCommitMessageLoading] = useGitScopedState(scope, false);
+  const [commitMessageError, setCommitMessageError] = useGitScopedState<string | null>(scope,
     null,
   );
-  const [commitLoading, setCommitLoading] = useState(false);
-  const [pullLoading, setPullLoading] = useState(false);
-  const [fetchLoading, setFetchLoading] = useState(false);
-  const [pushLoading, setPushLoading] = useState(false);
-  const [syncLoading, setSyncLoading] = useState(false);
-  const [commitError, setCommitError] = useState<string | null>(null);
-  const [pullError, setPullError] = useState<string | null>(null);
-  const [fetchError, setFetchError] = useState<string | null>(null);
-  const [pushError, setPushError] = useState<string | null>(null);
-  const [syncError, setSyncError] = useState<string | null>(null);
+  const [commitLoading, setCommitLoading] = useGitScopedState(scope, false);
+  const [pullLoading, setPullLoading] = useGitScopedState(scope, false);
+  const [fetchLoading, setFetchLoading] = useGitScopedState(scope, false);
+  const [pushLoading, setPushLoading] = useGitScopedState(scope, false);
+  const [syncLoading, setSyncLoading] = useGitScopedState(scope, false);
+  const [commitError, setCommitError] = useGitScopedState<string | null>(scope, null);
+  const [pullError, setPullError] = useGitScopedState<string | null>(scope, null);
+  const [fetchError, setFetchError] = useGitScopedState<string | null>(scope, null);
+  const [pushError, setPushError] = useGitScopedState<string | null>(scope, null);
+  const [syncError, setSyncError] = useGitScopedState<string | null>(scope, null);
 
   const hasWorktreeChanges = useMemo(() => {
     const hasStagedChanges = gitStatus.stagedFiles.length > 0;
@@ -87,45 +86,42 @@ export function useGitCommitController({
     if (!activeWorkspace || hasStagedChanges || !hasUnstagedChanges) {
       return;
     }
-    await stageGitAll(activeWorkspace.id);
+    await stageGitAll(gitRequestFor(activeWorkspace));
   }, [activeWorkspace, gitStatus.stagedFiles.length, gitStatus.unstagedFiles.length]);
 
   const handleCommitMessageChange = useCallback((value: string) => {
+    messageRevision.current += 1;
     setCommitMessage(value);
-  }, []);
+  }, [setCommitMessage]);
 
   const handleGenerateCommitMessage = useCallback(async () => {
     if (!activeWorkspace || commitMessageLoading) {
       return;
     }
-    const workspaceId = activeWorkspace.id;
+    const request = gitRequestFor(activeWorkspace);
+    const revision = messageRevision.current;
     setCommitMessageLoading(true);
     setCommitMessageError(null);
     try {
-      const message = await generateCommitMessage(workspaceId, commitMessageModelId);
-      if (!shouldApplyCommitMessage(activeWorkspaceIdRef.current, workspaceId)) {
+      const message = await generateCommitMessage(request, commitMessageModelId);
+      if (!scope.isCurrent()) {
         return;
       }
-      setCommitMessage(message);
+      if (revision === messageRevision.current) setCommitMessage(message);
     } catch (error) {
-      if (!shouldApplyCommitMessage(activeWorkspaceIdRef.current, workspaceId)) {
+      if (!scope.isCurrent()) {
         return;
       }
       setCommitMessageError(
         error instanceof Error ? error.message : String(error),
       );
     } finally {
-      if (shouldApplyCommitMessage(activeWorkspaceIdRef.current, workspaceId)) {
+      if (scope.isCurrent()) {
         setCommitMessageLoading(false);
       }
     }
-  }, [activeWorkspace, commitMessageLoading, activeWorkspaceIdRef, commitMessageModelId]);
+  }, [activeWorkspace, commitMessageLoading, setCommitMessageLoading, setCommitMessageError, commitMessageModelId, scope, setCommitMessage]);
 
-  useEffect(() => {
-    setCommitMessage("");
-    setCommitMessageError(null);
-    setCommitMessageLoading(false);
-  }, [activeWorkspaceId]);
 
   const handleCommit = useCallback(async () => {
     if (
@@ -140,7 +136,7 @@ export function useGitCommitController({
     setCommitError(null);
     try {
       await ensureStagedForCommit();
-      await commitGit(activeWorkspace.id, commitMessage.trim());
+      await commitGit(gitRequestFor(activeWorkspace), commitMessage.trim());
       setCommitMessage("");
       refreshGitStatus();
       refreshGitLog?.();
@@ -149,15 +145,7 @@ export function useGitCommitController({
     } finally {
       setCommitLoading(false);
     }
-  }, [
-    activeWorkspace,
-    commitLoading,
-    commitMessage,
-    ensureStagedForCommit,
-    hasWorktreeChanges,
-    refreshGitLog,
-    refreshGitStatus,
-  ]);
+  }, [activeWorkspace, commitLoading, commitMessage, ensureStagedForCommit, hasWorktreeChanges, refreshGitLog, refreshGitStatus, setCommitError, setCommitLoading, setCommitMessage]);
 
   const handleCommitAndPush = useCallback(async () => {
     if (
@@ -176,11 +164,11 @@ export function useGitCommitController({
     setPushError(null);
     try {
       await ensureStagedForCommit();
-      await commitGit(activeWorkspace.id, commitMessage.trim());
+      await commitGit(gitRequestFor(activeWorkspace), commitMessage.trim());
       commitSucceeded = true;
       setCommitMessage("");
       setCommitLoading(false);
-      await pushGit(activeWorkspace.id);
+      await pushGit(gitRequestFor(activeWorkspace));
       refreshGitStatus();
       refreshGitLog?.();
     } catch (error) {
@@ -194,16 +182,7 @@ export function useGitCommitController({
       setCommitLoading(false);
       setPushLoading(false);
     }
-  }, [
-    activeWorkspace,
-    commitLoading,
-    pushLoading,
-    commitMessage,
-    ensureStagedForCommit,
-    hasWorktreeChanges,
-    refreshGitLog,
-    refreshGitStatus,
-  ]);
+  }, [activeWorkspace, commitLoading, pushLoading, commitMessage, hasWorktreeChanges, setCommitLoading, setPushLoading, setCommitError, setPushError, ensureStagedForCommit, setCommitMessage, refreshGitStatus, refreshGitLog]);
 
   const handleCommitAndSync = useCallback(async () => {
     if (
@@ -222,11 +201,11 @@ export function useGitCommitController({
     setSyncError(null);
     try {
       await ensureStagedForCommit();
-      await commitGit(activeWorkspace.id, commitMessage.trim());
+      await commitGit(gitRequestFor(activeWorkspace), commitMessage.trim());
       commitSucceeded = true;
       setCommitMessage("");
       setCommitLoading(false);
-      await syncGit(activeWorkspace.id);
+      await syncGit(gitRequestFor(activeWorkspace));
       refreshGitStatus();
       refreshGitLog?.();
     } catch (error) {
@@ -240,16 +219,7 @@ export function useGitCommitController({
       setCommitLoading(false);
       setSyncLoading(false);
     }
-  }, [
-    activeWorkspace,
-    commitLoading,
-    syncLoading,
-    commitMessage,
-    ensureStagedForCommit,
-    hasWorktreeChanges,
-    refreshGitLog,
-    refreshGitStatus,
-  ]);
+  }, [activeWorkspace, commitLoading, syncLoading, commitMessage, hasWorktreeChanges, setCommitLoading, setSyncLoading, setCommitError, setSyncError, ensureStagedForCommit, setCommitMessage, refreshGitStatus, refreshGitLog]);
 
   const handlePull = useCallback(async () => {
     if (!activeWorkspace || pullLoading) {
@@ -258,7 +228,7 @@ export function useGitCommitController({
     setPullLoading(true);
     setPullError(null);
     try {
-      await pullGit(activeWorkspace.id);
+      await pullGit(gitRequestFor(activeWorkspace));
       setPushError(null);
       refreshGitStatus();
       refreshGitLog?.();
@@ -267,7 +237,7 @@ export function useGitCommitController({
     } finally {
       setPullLoading(false);
     }
-  }, [activeWorkspace, pullLoading, refreshGitLog, refreshGitStatus]);
+  }, [activeWorkspace, pullLoading, refreshGitLog, refreshGitStatus, setPullError, setPullLoading, setPushError]);
 
   const handlePush = useCallback(async () => {
     if (!activeWorkspace || pushLoading) {
@@ -276,7 +246,7 @@ export function useGitCommitController({
     setPushLoading(true);
     setPushError(null);
     try {
-      await pushGit(activeWorkspace.id);
+      await pushGit(gitRequestFor(activeWorkspace));
       setPullError(null);
       refreshGitStatus();
       refreshGitLog?.();
@@ -285,7 +255,7 @@ export function useGitCommitController({
     } finally {
       setPushLoading(false);
     }
-  }, [activeWorkspace, pushLoading, refreshGitLog, refreshGitStatus]);
+  }, [activeWorkspace, pushLoading, refreshGitLog, refreshGitStatus, setPullError, setPushError, setPushLoading]);
 
   const handleFetch = useCallback(async () => {
     if (!activeWorkspace || fetchLoading) {
@@ -294,7 +264,7 @@ export function useGitCommitController({
     setFetchLoading(true);
     setFetchError(null);
     try {
-      await fetchGit(activeWorkspace.id);
+      await fetchGit(gitRequestFor(activeWorkspace));
       refreshGitStatus();
       refreshGitLog?.();
     } catch (error) {
@@ -302,7 +272,7 @@ export function useGitCommitController({
     } finally {
       setFetchLoading(false);
     }
-  }, [activeWorkspace, fetchLoading, refreshGitLog, refreshGitStatus]);
+  }, [activeWorkspace, fetchLoading, refreshGitLog, refreshGitStatus, setFetchError, setFetchLoading]);
 
   const handleSync = useCallback(async () => {
     if (!activeWorkspace || syncLoading) {
@@ -311,7 +281,7 @@ export function useGitCommitController({
     setSyncLoading(true);
     setSyncError(null);
     try {
-      await syncGit(activeWorkspace.id);
+      await syncGit(gitRequestFor(activeWorkspace));
       setPullError(null);
       setPushError(null);
       setSyncError(null);
@@ -322,7 +292,7 @@ export function useGitCommitController({
     } finally {
       setSyncLoading(false);
     }
-  }, [activeWorkspace, refreshGitLog, refreshGitStatus, syncLoading]);
+  }, [activeWorkspace, refreshGitLog, refreshGitStatus, setPullError, setPushError, setSyncError, setSyncLoading, syncLoading]);
 
   return {
     commitMessage,

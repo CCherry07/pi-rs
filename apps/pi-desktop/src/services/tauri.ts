@@ -1,3 +1,4 @@
+import { gitRequestArgs, type GitRequest, type GitInventory, type GitTarget } from "@/features/git/gitContext";
 import { invoke } from "@tauri-apps/api/core";
 import type { DesktopSessionRef } from "@pi-rs/desktop-sdk";
 import type { DesktopExtensionCatalog } from "../features/extensions/types";
@@ -58,7 +59,7 @@ export function saveMcpConfig(workspaceId: string | null, scope: McpScope, revis
 export function testMcpConnection(workspaceId: string | null, name: string): Promise<string[]> {
   return invoke("pi_mcp_test", { workspaceId, name });
 }
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import type { Options as NotificationOptions } from "@tauri-apps/plugin-notification";
 import i18n from "../i18n";
 import type {
@@ -68,6 +69,8 @@ import type {
   TrayRecentThreadEntry,
   WorkspaceInfo,
   WorkspaceSettings,
+  WorkspaceSpec,
+  WorkspaceRoot,
 } from "../types";
 import type {
   GitFileDiff,
@@ -210,6 +213,16 @@ export async function addWorkspace(path: string): Promise<WorkspaceInfo> {
   return invoke<WorkspaceInfo>("add_workspace", { path });
 }
 
+export type CreateWorkspaceProjectInput = {
+  name: string;
+  paths: string[];
+  primaryPath: string;
+};
+
+export async function createWorkspaceProject(input: CreateWorkspaceProjectInput): Promise<WorkspaceInfo> {
+  return invoke<WorkspaceInfo>("create_workspace_project", { ...input });
+}
+
 export async function addWorkspaceFromGitUrl(
   url: string,
   destinationPath: string,
@@ -238,13 +251,168 @@ export async function addClone(
   });
 }
 
-export async function addWorktree(
-  parentId: string,
-  branch: string,
-  name: string | null,
-  copyAgentsMd = true,
-): Promise<WorkspaceInfo> {
-  return invoke<WorkspaceInfo>("add_worktree", { parentId, branch, name, copyAgentsMd });
+export type WorktreePlanRequest = {
+  parentId: string;
+  threadId?: string | null;
+  name: string;
+  copyAgentsMd: boolean;
+  executionRootId: string | null;
+  checkouts: Array<{
+    target: Extract<GitTarget, { kind: "checkout" }>;
+    branch: string;
+    startPoint: string;
+  }>;
+};
+
+export type WorktreePlanPreview = {
+  id: string;
+  parentId: string;
+  name: string;
+  source: WorkspaceSpec;
+  workspace: WorkspaceSpec;
+  checkouts: Array<{
+    sourceWorkdir: string;
+    destination: string;
+    branch: string;
+    startOid: string;
+    rootIds: string[];
+  }>;
+  warnings: string[];
+};
+
+export function prepareWorktreePlan(request: WorktreePlanRequest): Promise<WorktreePlanPreview> {
+  return invoke("prepare_worktree_plan", { request });
+}
+
+function notifyWorktreeGroupsChanged() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("pi-worktree-groups-changed"));
+}
+
+export async function executeWorktreePlan(planId: string): Promise<WorkspaceInfo> {
+  try {
+    return await invoke("create_worktree_plan", { planId });
+  } finally {
+    notifyWorktreeGroupsChanged();
+  }
+}
+
+export function cancelWorktreePlan(planId: string): Promise<void> {
+  return invoke("discard_worktree_plan", { planId });
+}
+
+export type ManagedWorktreeSummary = {
+  id: string;
+  name: string;
+  status: "prepared" | "creating" | "ready" | "cleanupRequired" | "removing";
+  errors: string[];
+  memberCount: number;
+};
+
+export function listManagedWorktrees(): Promise<ManagedWorktreeSummary[]> {
+  return invoke("list_managed_worktrees");
+}
+
+export type DeliveryChange = { path: string; indexStatus: string; worktreeStatus: string };
+export type DeliveryCheckout = {
+  key: string;
+  workdir: string;
+  originWorkdir: string;
+  rootIds: string[];
+  createdBranch: string;
+  startOid: string;
+  head: { oid: string; branch: string | null } | null;
+  changes: DeliveryChange[];
+  changesTruncated: boolean;
+  targetBranches: { name: string; oid: string }[];
+  defaultTargetBranch: string | null;
+  warnings: string[];
+  error: string | null;
+};
+export type DeliveryOverview = {
+  workspaceId: string;
+  name: string;
+  checkouts: DeliveryCheckout[];
+  sharedRoots: WorkspaceRoot[];
+  attempts: DeliveryAttempt[];
+};
+export type DeliveryExecutionRequest = {
+  attemptId: string;
+  checkoutKey: string;
+  targetBranch: string;
+  sourceOid: string;
+  targetOid: string;
+};
+export type DeliveryAttempt = {
+  id: string;
+  checkoutKey: string;
+  sourceOid: string;
+  targetOid: string;
+  targetBranch: string;
+  resultOid: string | null;
+  status: "preparing" | "applying" | "completed" | "unchanged" | "readyToFinish" | "needsAttention";
+  createdAt: string;
+  updatedAt: string;
+  error: string | null;
+};
+export type MergeComparison = {
+  sourceOid: string;
+  targetOid: string;
+  mergeBaseOids: string[];
+  ahead: number;
+  behind: number;
+  kind: "upToDate" | "fastForward" | "mergeable" | "conflicts" | "unrelated" | "unsupported";
+  commits: { oid: string; summary: string }[];
+  commitsTruncated: boolean;
+  files: { path: string; status: string; oldPath: string | null }[];
+  filesTruncated: boolean;
+  conflicts: string[];
+  warnings: string[];
+};
+export type DeliveryPreview = {
+  workspaceId: string;
+  checkoutKey: string;
+  sourceWorkdir: string;
+  targetWorkdir: string;
+  source: { oid: string; branch: string | null };
+  target: { oid: string; branch: string };
+  sourceChanges: DeliveryChange[];
+  targetChanges: DeliveryChange[];
+  sourceChangesTruncated: boolean;
+  targetChangesTruncated: boolean;
+  comparison: MergeComparison;
+  blockers: string[];
+  warnings: string[];
+};
+
+export function getWorktreeDelivery(workspaceId: string, threadId: string | null): Promise<DeliveryOverview> {
+  return invoke("get_worktree_delivery", { workspaceId, threadId });
+}
+
+export function previewWorktreeDelivery(
+  workspaceId: string,
+  threadId: string | null,
+  checkoutKey: string,
+  targetBranch: string,
+): Promise<DeliveryPreview> {
+  return invoke("preview_worktree_delivery", { workspaceId, threadId, checkoutKey, targetBranch });
+}
+
+export function executeWorktreeDelivery(
+  workspaceId: string, threadId: string | null, request: DeliveryExecutionRequest,
+): Promise<DeliveryAttempt> {
+  return invoke("execute_worktree_delivery", { workspaceId, threadId, request });
+}
+
+export function inspectWorktreeDeliveryAttempt(
+  workspaceId: string, threadId: string | null, attemptId: string,
+): Promise<DeliveryAttempt> {
+  return invoke("inspect_worktree_delivery_attempt", { workspaceId, threadId, attemptId });
+}
+
+export function finishWorktreeDeliveryAttempt(
+  workspaceId: string, threadId: string | null, attemptId: string,
+): Promise<DeliveryAttempt> {
+  return invoke("finish_worktree_delivery_attempt", { workspaceId, threadId, attemptId });
 }
 
 export type WorktreeSetupStatus = {
@@ -273,8 +441,21 @@ export async function removeWorkspace(id: string): Promise<void> {
   return invoke("remove_workspace", { id });
 }
 
-export async function removeWorktree(id: string): Promise<void> {
-  return invoke("remove_worktree", { id });
+export async function removeWorktree(id: string, force?: boolean): Promise<void> {
+  try {
+    return await invoke("remove_worktree", force === undefined ? { id } : { id, force });
+  } finally {
+    notifyWorktreeGroupsChanged();
+  }
+}
+
+export function confirmWorktreeDiscard(name: string): Promise<boolean> {
+  return ask(i18n.t("worktree.discardConfirm", { ns: "workspaces", name }), {
+    title: i18n.t("worktree.discardTitle", { ns: "workspaces" }),
+    kind: "warning",
+    okLabel: i18n.t("worktree.discardAndCleanup", { ns: "workspaces" }),
+    cancelLabel: i18n.t("actions.cancel", { ns: "common" }),
+  });
 }
 
 export async function renameWorktree(
@@ -437,7 +618,7 @@ export async function steerTurn(
   return invoke("pi_turn_steer", payload);
 }
 
-export async function getGitStatus(workspace_id: string): Promise<{
+export async function getGitStatus(request: GitRequest): Promise<{
   repoRoot?: string;
   branchName: string;
   files: GitFileStatus[];
@@ -446,20 +627,20 @@ export async function getGitStatus(workspace_id: string): Promise<{
   totalAdditions: number;
   totalDeletions: number;
 }> {
-  return invoke("get_git_status", { workspaceId: workspace_id });
+  return invoke("get_git_status", { ...gitRequestArgs(request) });
 }
 
 export type InitGitRepoResponse =
-  | { status: "initialized"; commitError?: string }
-  | { status: "already_initialized" }
+  | { status: "initialized"; commitError?: string; target?: GitTarget }
+  | { status: "already_initialized"; target?: GitTarget }
   | { status: "needs_confirmation"; entryCount: number };
 
 export async function initGitRepo(
-  workspaceId: string,
+  request: GitRequest,
   branch: string,
   force = false,
 ): Promise<InitGitRepoResponse> {
-  return invoke<InitGitRepoResponse>("init_git_repo", { workspaceId, branch, force });
+  return invoke<InitGitRepoResponse>("init_git_repo", { ...gitRequestArgs(request), branch, force });
 }
 
 export type CreateGitHubRepoResponse =
@@ -473,131 +654,124 @@ export type CreateGitHubRepoResponse =
     };
 
 export async function createGitHubRepo(
-  workspaceId: string,
+  request: GitRequest,
   repo: string,
   visibility: "private" | "public",
   branch?: string | null,
 ): Promise<CreateGitHubRepoResponse> {
   return invoke<CreateGitHubRepoResponse>("create_github_repo", {
-    workspaceId,
+    ...gitRequestArgs(request),
     repo,
     visibility,
     branch,
   });
 }
 
-export async function listGitRoots(
-  workspace_id: string,
-  depth: number,
-): Promise<string[]> {
-  return invoke("list_git_roots", { workspaceId: workspace_id, depth });
-}
-
 export async function getGitDiffs(
-  workspace_id: string,
+  request: GitRequest,
 ): Promise<GitFileDiff[]> {
-  return invoke("get_git_diffs", { workspaceId: workspace_id });
+  return invoke("get_git_diffs", { ...gitRequestArgs(request) });
 }
 
 export async function getGitLog(
-  workspace_id: string,
+  request: GitRequest,
   limit = 40,
 ): Promise<GitLogResponse> {
-  return invoke("get_git_log", { workspaceId: workspace_id, limit });
+  return invoke("get_git_log", { ...gitRequestArgs(request), limit });
 }
 
 export async function getGitCommitDiff(
-  workspace_id: string,
+  request: GitRequest,
   sha: string,
 ): Promise<GitCommitDiff[]> {
-  return invoke("get_git_commit_diff", { workspaceId: workspace_id, sha });
+  return invoke("get_git_commit_diff", { ...gitRequestArgs(request), sha });
 }
 
-export async function getGitRemote(workspace_id: string): Promise<string | null> {
-  return invoke("get_git_remote", { workspaceId: workspace_id });
+export async function getGitRemote(request: GitRequest): Promise<string | null> {
+  return invoke("get_git_remote", { ...gitRequestArgs(request) });
 }
 
-export async function stageGitFile(workspaceId: string, path: string) {
-  return invoke("stage_git_file", { workspaceId, path });
+export async function stageGitFile(request: GitRequest, path: string) {
+  return invoke("stage_git_file", { ...gitRequestArgs(request), path });
 }
 
-export async function stageGitAll(workspaceId: string): Promise<void> {
-  return invoke("stage_git_all", { workspaceId });
+export async function stageGitAll(request: GitRequest): Promise<void> {
+  return invoke("stage_git_all", { ...gitRequestArgs(request) });
 }
 
-export async function unstageGitFile(workspaceId: string, path: string) {
-  return invoke("unstage_git_file", { workspaceId, path });
+export async function unstageGitFile(request: GitRequest, path: string) {
+  return invoke("unstage_git_file", { ...gitRequestArgs(request), path });
 }
 
-export async function revertGitFile(workspaceId: string, path: string) {
-  return invoke("revert_git_file", { workspaceId, path });
+export async function revertGitFile(request: GitRequest, path: string) {
+  return invoke("revert_git_file", { ...gitRequestArgs(request), path });
 }
 
-export async function revertGitAll(workspaceId: string) {
-  return invoke("revert_git_all", { workspaceId });
+export async function revertGitAll(request: GitRequest) {
+  return invoke("revert_git_all", { ...gitRequestArgs(request) });
 }
 
 export async function commitGit(
-  workspaceId: string,
+  request: GitRequest,
   message: string,
 ): Promise<void> {
-  return invoke("commit_git", { workspaceId, message });
+  return invoke("commit_git", { ...gitRequestArgs(request), message });
 }
 
-export async function pushGit(workspaceId: string): Promise<void> {
-  return invoke("push_git", { workspaceId });
+export async function pushGit(request: GitRequest): Promise<void> {
+  return invoke("push_git", { ...gitRequestArgs(request) });
 }
 
-export async function pullGit(workspaceId: string): Promise<void> {
-  return invoke("pull_git", { workspaceId });
+export async function pullGit(request: GitRequest): Promise<void> {
+  return invoke("pull_git", { ...gitRequestArgs(request) });
 }
 
-export async function fetchGit(workspaceId: string): Promise<void> {
-  return invoke("fetch_git", { workspaceId });
+export async function fetchGit(request: GitRequest): Promise<void> {
+  return invoke("fetch_git", { ...gitRequestArgs(request) });
 }
 
-export async function syncGit(workspaceId: string): Promise<void> {
-  return invoke("sync_git", { workspaceId });
+export async function syncGit(request: GitRequest): Promise<void> {
+  return invoke("sync_git", { ...gitRequestArgs(request) });
 }
 
 export async function getGitHubIssues(
-  workspace_id: string,
+  request: GitRequest,
 ): Promise<GitHubIssuesResponse> {
-  return invoke("get_github_issues", { workspaceId: workspace_id });
+  return invoke("get_github_issues", { ...gitRequestArgs(request) });
 }
 
 export async function getGitHubPullRequests(
-  workspace_id: string,
+  request: GitRequest,
 ): Promise<GitHubPullRequestsResponse> {
-  return invoke("get_github_pull_requests", { workspaceId: workspace_id });
+  return invoke("get_github_pull_requests", { ...gitRequestArgs(request) });
 }
 
 export async function getGitHubPullRequestDiff(
-  workspace_id: string,
+  request: GitRequest,
   prNumber: number,
 ): Promise<GitHubPullRequestDiff[]> {
   return invoke("get_github_pull_request_diff", {
-    workspaceId: workspace_id,
+    ...gitRequestArgs(request),
     prNumber,
   });
 }
 
 export async function getGitHubPullRequestComments(
-  workspace_id: string,
+  request: GitRequest,
   prNumber: number,
 ): Promise<GitHubPullRequestComment[]> {
   return invoke("get_github_pull_request_comments", {
-    workspaceId: workspace_id,
+    ...gitRequestArgs(request),
     prNumber,
   });
 }
 
 export async function checkoutGitHubPullRequest(
-  workspace_id: string,
+  request: GitRequest,
   prNumber: number,
 ): Promise<void> {
   return invoke("checkout_github_pull_request", {
-    workspaceId: workspace_id,
+    ...gitRequestArgs(request),
     prNumber,
   });
 }
@@ -755,16 +929,16 @@ export async function writeAgentMd(workspaceId: string, content: string): Promis
   return fileWrite("workspace", "agents", content, workspaceId);
 }
 
-export async function listGitBranches(workspaceId: string) {
-  return invoke<any>("list_git_branches", { workspaceId });
+export async function listGitBranches(request: GitRequest) {
+  return invoke<any>("list_git_branches", { ...gitRequestArgs(request) });
 }
 
-export async function checkoutGitBranch(workspaceId: string, name: string) {
-  return invoke("checkout_git_branch", { workspaceId, name });
+export async function checkoutGitBranch(request: GitRequest, name: string) {
+  return invoke("checkout_git_branch", { ...gitRequestArgs(request), name });
 }
 
-export async function createGitBranch(workspaceId: string, name: string) {
-  return invoke("create_git_branch", { workspaceId, name });
+export async function createGitBranch(request: GitRequest, name: string) {
+  return invoke("create_git_branch", { ...gitRequestArgs(request), name });
 }
 
 function withModelId(modelId?: string | null) {
@@ -918,10 +1092,10 @@ export async function setTrayRecentThreads(entries: TrayRecentThreadEntry[]) {
 }
 
 export async function generateCommitMessage(
-  workspaceId: string,
+  request: GitRequest,
   commitMessageModelId: string | null,
 ): Promise<string> {
-  return invoke("generate_commit_message", { workspaceId, commitMessageModelId });
+  return invoke("generate_commit_message", { ...gitRequestArgs(request), commitMessageModelId });
 }
 
 export type AppBuildType = "debug" | "release";
@@ -1012,4 +1186,8 @@ export async function updateWorkspaceProject(project: import("@/types").ProjectD
   const result = await invoke<import("@/types").ProjectDefinition>("update_workspace_project", { project });
   window.dispatchEvent(new CustomEvent("pi-project-changed", { detail: project.id }));
   return result;
+}
+
+export async function listGitCheckouts(workspaceId: string, threadId: string | null, depth?: number): Promise<GitInventory> {
+  return invoke("list_git_checkouts", { workspaceId, threadId, depth });
 }

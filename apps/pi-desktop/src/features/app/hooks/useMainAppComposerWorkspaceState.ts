@@ -63,7 +63,7 @@ type UseMainAppComposerWorkspaceStateArgs = {
     workspaceHomeTextareaRef: RefObject<HTMLTextAreaElement | null>;
   };
   actions: {
-    addWorktreeAgent: Parameters<typeof useWorkspaceHome>[0]["addWorktreeAgent"];
+    requestWorktree: Parameters<typeof useWorkspaceHome>[0]["requestWorktree"];
     startThreadForWorkspace: Parameters<typeof useWorkspaceHome>[0]["startThreadForWorkspace"];
     sendUserMessage: Parameters<typeof useComposerController>[0]["sendUserMessage"];
     sendUserMessageToThread: Parameters<typeof useWorkspaceHome>[0]["sendUserMessageToThread"];
@@ -72,7 +72,6 @@ type UseMainAppComposerWorkspaceStateArgs = {
     >;
     startCompact: Parameters<typeof useComposerController>[0]["startCompact"];
     startReload: Parameters<typeof useComposerController>[0]["startReload"];
-    handleWorktreeCreated?: Parameters<typeof useWorkspaceHome>[0]["onWorktreeCreated"];
     addDebugEntry: (entry: DebugEntry) => void;
   };
 };
@@ -117,14 +116,13 @@ export function useMainAppComposerWorkspaceState({
   } = models;
   const { composerInputRef, workspaceHomeTextareaRef } = refs;
   const {
-    addWorktreeAgent,
+    requestWorktree,
     startThreadForWorkspace,
     sendUserMessage,
     sendUserMessageToThread,
     seedThreadRunParams,
     startCompact,
     startReload,
-    handleWorktreeCreated,
     addDebugEntry,
   } = actions;
   const showWorkspaceHome = Boolean(
@@ -206,11 +204,10 @@ export function useMainAppComposerWorkspaceState({
     effort: resolvedEffort,
     serviceTier: selectedServiceTier,
     seedThreadRunParams,
-    addWorktreeAgent,
+    requestWorktree,
     startThreadForWorkspace,
     sendUserMessageToThread,
     reloadWorkspace: () => startReload("/reload"),
-    onWorktreeCreated: handleWorktreeCreated,
   });
 
   const canInsertComposerText = showWorkspaceHome

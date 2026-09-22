@@ -31,6 +31,7 @@ fn workspace_with_id_and_kind(
         (
             Some("parent".to_string()),
             Some(WorktreeInfo {
+                managed: false,
                 branch: name.to_string(),
             }),
         )
@@ -290,6 +291,7 @@ fn rename_worktree_preserves_custom_name() {
             kind: WorkspaceKind::Worktree,
             parent_id: Some(parent.id.clone()),
             worktree: Some(WorktreeInfo {
+                managed: false,
                 branch: "feature/old".to_string(),
             }),
             settings: WorkspaceSettings::default(),
@@ -356,6 +358,7 @@ fn rename_worktree_updates_name_when_unmodified() {
             kind: WorkspaceKind::Worktree,
             parent_id: Some(parent.id.clone()),
             worktree: Some(WorktreeInfo {
+                managed: false,
                 branch: "feature/old".to_string(),
             }),
             settings: WorkspaceSettings::default(),
@@ -422,6 +425,7 @@ fn rename_worktree_validates_worktree_root_before_branch_rename() {
             kind: WorkspaceKind::Worktree,
             parent_id: Some(parent.id.clone()),
             worktree: Some(WorktreeInfo {
+                managed: false,
                 branch: "feature/old".to_string(),
             }),
             settings: WorkspaceSettings::default(),
@@ -546,6 +550,7 @@ fn rename_worktree_ignores_namespace_only_difference_in_worktree_root() {
             kind: WorkspaceKind::Worktree,
             parent_id: Some(parent.id.clone()),
             worktree: Some(WorktreeInfo {
+                managed: false,
                 branch: "feature/new".to_string(),
             }),
             settings: WorkspaceSettings::default(),
@@ -619,6 +624,7 @@ fn remove_workspace_succeeds_when_parent_repo_folder_is_missing() {
             kind: WorkspaceKind::Worktree,
             parent_id: Some(parent.id.clone()),
             worktree: Some(WorktreeInfo {
+                managed: false,
                 branch: "feature-a".to_string(),
             }),
             settings: WorkspaceSettings::default(),
@@ -664,6 +670,7 @@ fn remove_worktree_succeeds_when_parent_repo_folder_is_missing() {
             kind: WorkspaceKind::Worktree,
             parent_id: Some(parent.id.clone()),
             worktree: Some(WorktreeInfo {
+                managed: false,
                 branch: "feature-b".to_string(),
             }),
             settings: WorkspaceSettings::default(),
@@ -695,7 +702,7 @@ fn remove_worktree_succeeds_when_parent_repo_folder_is_missing() {
 }
 
 #[tokio::test]
-async fn settings_response_keeps_current_project_roots_and_legacy_git_path() {
+async fn settings_response_keeps_current_project_name_roots_and_legacy_git_path() {
     let directory = tempfile::tempdir().unwrap();
     let original = directory.path().join("original");
     let current = directory.path().join("current");
@@ -717,6 +724,7 @@ async fn settings_response_keeps_current_project_roots_and_legacy_git_path() {
         dictation: Mutex::new(crate::dictation::DictationState::default()),
     };
     let mut project = state.project("project").await.unwrap();
+    project.name = "Edited project".into();
     project.roots.push(pi_core::WorkspaceRoot::external(
         "current", "current", &current,
     ));
@@ -735,9 +743,11 @@ async fn settings_response_keeps_current_project_roots_and_legacy_git_path() {
     .await
     .unwrap();
     let info = state.project_info(info).await.unwrap();
+    assert_eq!(info.name, "Edited project");
     assert_eq!(std::path::PathBuf::from(&info.path), current);
     assert_eq!(info.project, Some(project));
     assert_eq!(info.settings.group_id.as_deref(), Some("group"));
     let saved = read_workspaces(&state.storage_path).unwrap();
+    assert_eq!(saved["project"].name, "Project");
     assert_eq!(std::path::PathBuf::from(&saved["project"].path), original);
 }

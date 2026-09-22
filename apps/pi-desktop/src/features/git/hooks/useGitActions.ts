@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { gitRequestFor, gitScopeKey, isManagedGitCheckout, type GitRequest } from "../gitContext";
+import { useGitOperationScope, useGitScopedState } from "./useGitOperationScope";
+import { useCallback, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
@@ -21,7 +23,7 @@ type UseGitActionsOptions = {
   onError?: (error: unknown) => void;
 };
 
-export type InitGitRepoOutcome = "initialized" | "cancelled" | "failed";
+export type InitGitRepoOutcome = "initialized" | "cancelled" | "failed" | { status: "initialized"; request: GitRequest };
 
 export function useGitActions({
   activeWorkspace,
@@ -30,20 +32,21 @@ export function useGitActions({
   onClearGitRootCandidates,
   onError,
 }: UseGitActionsOptions) {
+  const scope = useGitOperationScope(activeWorkspace);
   const { t } = useTranslation(["git", "common"]);
-  const [worktreeApplyError, setWorktreeApplyError] = useState<string | null>(null);
-  const [worktreeApplyLoading, setWorktreeApplyLoading] = useState(false);
-  const [worktreeApplySuccess, setWorktreeApplySuccess] = useState(false);
-  const [initGitRepoLoading, setInitGitRepoLoading] = useState(false);
-  const [createGitHubRepoLoading, setCreateGitHubRepoLoading] = useState(false);
+  const [worktreeApplyError, setWorktreeApplyError] = useGitScopedState<string | null>(scope, null);
+  const [worktreeApplyLoading, setWorktreeApplyLoading] = useGitScopedState(scope, false);
+  const [worktreeApplySuccess, setWorktreeApplySuccess] = useGitScopedState(scope, false);
+  const [initGitRepoLoading, setInitGitRepoLoading] = useGitScopedState(scope, false);
+  const [createGitHubRepoLoading, setCreateGitHubRepoLoading] = useGitScopedState(scope, false);
   const worktreeApplyTimerRef = useRef<number | null>(null);
-  const workspaceIdRef = useRef<string | null>(activeWorkspace?.id ?? null);
-  const workspaceId = activeWorkspace?.id ?? null;
-  const isWorktree = activeWorkspace?.kind === "worktree";
+  const workspaceIdRef = useRef<string | null>(gitScopeKey(activeWorkspace));
+  const workspaceId = gitScopeKey(activeWorkspace);
+  const isWorktree = isManagedGitCheckout(activeWorkspace);
 
   useEffect(() => {
     workspaceIdRef.current = workspaceId;
-  }, [workspaceId]);
+  }, [workspaceId, activeWorkspace]);
 
   useEffect(() => {
     setWorktreeApplyError(null);
@@ -55,7 +58,7 @@ export function useGitActions({
       window.clearTimeout(worktreeApplyTimerRef.current);
       worktreeApplyTimerRef.current = null;
     }
-  }, [workspaceId]);
+  }, [workspaceId, activeWorkspace, setWorktreeApplyError, setWorktreeApplyLoading, setWorktreeApplySuccess, setInitGitRepoLoading, setCreateGitHubRepoLoading]);
 
   const refreshGitData = useCallback(() => {
     onRefreshGitStatus();
@@ -69,7 +72,7 @@ export function useGitActions({
       }
       const actionWorkspaceId = workspaceId;
       try {
-        await stageGitFileService(actionWorkspaceId, path);
+        await stageGitFileService(gitRequestFor(activeWorkspace), path);
       } catch (error) {
         onError?.(error);
       } finally {
@@ -78,7 +81,7 @@ export function useGitActions({
         }
       }
     },
-    [onError, refreshGitData, workspaceId],
+    [onError, refreshGitData, workspaceId, activeWorkspace],
   );
 
   const stageGitAll = useCallback(async () => {
@@ -87,7 +90,7 @@ export function useGitActions({
     }
     const actionWorkspaceId = workspaceId;
     try {
-      await stageGitAllService(actionWorkspaceId);
+      await stageGitAllService(gitRequestFor(activeWorkspace));
     } catch (error) {
       onError?.(error);
     } finally {
@@ -95,7 +98,7 @@ export function useGitActions({
         refreshGitData();
       }
     }
-  }, [onError, refreshGitData, workspaceId]);
+  }, [onError, refreshGitData, workspaceId, activeWorkspace]);
 
   const unstageGitFile = useCallback(
     async (path: string) => {
@@ -104,7 +107,7 @@ export function useGitActions({
       }
       const actionWorkspaceId = workspaceId;
       try {
-        await unstageGitFileService(actionWorkspaceId, path);
+        await unstageGitFileService(gitRequestFor(activeWorkspace), path);
       } catch (error) {
         onError?.(error);
       } finally {
@@ -113,7 +116,7 @@ export function useGitActions({
         }
       }
     },
-    [onError, refreshGitData, workspaceId],
+    [onError, refreshGitData, workspaceId, activeWorkspace],
   );
 
   const revertGitFile = useCallback(
@@ -123,7 +126,7 @@ export function useGitActions({
       }
       const actionWorkspaceId = workspaceId;
       try {
-        await revertGitFileService(actionWorkspaceId, path);
+        await revertGitFileService(gitRequestFor(activeWorkspace), path);
       } catch (error) {
         onError?.(error);
       } finally {
@@ -132,7 +135,7 @@ export function useGitActions({
         }
       }
     },
-    [onError, refreshGitData, workspaceId],
+    [onError, refreshGitData, workspaceId, activeWorkspace],
   );
 
   const revertAllGitChanges = useCallback(async () => {
@@ -147,12 +150,12 @@ export function useGitActions({
       return;
     }
     try {
-      await revertGitAll(workspaceId);
+      await revertGitAll(gitRequestFor(activeWorkspace));
       refreshGitData();
     } catch (error) {
       onError?.(error);
     }
-  }, [onError, refreshGitData, t, workspaceId]);
+  }, [onError, refreshGitData, t, workspaceId, activeWorkspace]);
 
   const applyWorktreeChanges = useCallback(async () => {
     if (!workspaceId || !isWorktree) {
@@ -163,7 +166,7 @@ export function useGitActions({
     setWorktreeApplySuccess(false);
     setWorktreeApplyLoading(true);
     try {
-      await applyWorktreeChangesService(applyWorkspaceId);
+      await applyWorktreeChangesService(activeWorkspace!.id);
       if (workspaceIdRef.current !== applyWorkspaceId) {
         return;
       }
@@ -190,7 +193,7 @@ export function useGitActions({
         setWorktreeApplyLoading(false);
       }
     }
-  }, [isWorktree, workspaceId]);
+  }, [workspaceId, isWorktree, setWorktreeApplyError, setWorktreeApplySuccess, setWorktreeApplyLoading, activeWorkspace]);
 
   const initGitRepo = useCallback(async (branch: string): Promise<InitGitRepoOutcome> => {
     if (!workspaceId) {
@@ -198,11 +201,16 @@ export function useGitActions({
     }
     const actionWorkspaceId = workspaceId;
     setInitGitRepoLoading(true);
+    const request = gitRequestFor(activeWorkspace);
+    let initializedRequest: GitRequest | null = null;
     let shouldRefresh = false;
     let outcome: InitGitRepoOutcome = "failed";
     let commitError: string | null = null;
     try {
-      const response = await initGitRepoService(actionWorkspaceId, branch, false);
+      const response = await initGitRepoService(gitRequestFor(activeWorkspace), branch, false);
+      if (response.status !== "needs_confirmation" && response.target && typeof request !== "string") {
+        initializedRequest = { ...request, target: response.target };
+      }
       if (workspaceIdRef.current !== actionWorkspaceId) {
         return "cancelled";
       }
@@ -226,7 +234,10 @@ export function useGitActions({
           return "cancelled";
         }
 
-        const forced = await initGitRepoService(actionWorkspaceId, branch, true);
+        const forced = await initGitRepoService(gitRequestFor(activeWorkspace), branch, true);
+        if (forced.status !== "needs_confirmation" && forced.target && typeof request !== "string") {
+          initializedRequest = { ...request, target: forced.target };
+        }
         shouldRefresh = forced.status === "initialized" || forced.status === "already_initialized";
         if (forced.status === "initialized") {
           commitError = forced.commitError ?? null;
@@ -259,14 +270,15 @@ export function useGitActions({
         }
       }
     }
-    return outcome;
-  }, [onClearGitRootCandidates, onError, refreshGitData, t, workspaceId]);
+    return outcome === "initialized" && initializedRequest ? { status: "initialized", request: initializedRequest } : outcome;
+  }, [workspaceId, setInitGitRepoLoading, activeWorkspace, t, onError, onClearGitRootCandidates, refreshGitData]);
 
   const createGitHubRepo = useCallback(
     async (
       repo: string,
       visibility: "private" | "public",
       branch: string,
+      initializedRequest?: GitRequest,
     ): Promise<{ ok: true } | { ok: false; error: string }> => {
       if (!workspaceId) {
         return { ok: false, error: t("initialize.noWorkspace") };
@@ -276,12 +288,12 @@ export function useGitActions({
       setCreateGitHubRepoLoading(true);
       try {
         const response = await createGitHubRepoService(
-          actionWorkspaceId,
+          initializedRequest ?? gitRequestFor(activeWorkspace),
           repo,
           visibility,
           branch,
         );
-        if (workspaceIdRef.current !== actionWorkspaceId) {
+        if (!initializedRequest && workspaceIdRef.current !== actionWorkspaceId) {
           return { ok: false, error: t("initialize.workspaceChanged") };
         }
 
@@ -302,7 +314,7 @@ export function useGitActions({
           parts.length > 0 ? parts.join("\n\n") : t("initialize.remoteIncomplete");
         return { ok: false, error: errorMessage };
       } catch (error) {
-        if (workspaceIdRef.current !== actionWorkspaceId) {
+        if (!initializedRequest && workspaceIdRef.current !== actionWorkspaceId) {
           return { ok: false, error: t("initialize.workspaceChanged") };
         }
         return {
@@ -315,7 +327,7 @@ export function useGitActions({
         }
       }
     },
-    [t, workspaceId],
+    [workspaceId, setCreateGitHubRepoLoading, t, activeWorkspace],
   );
 
   return {

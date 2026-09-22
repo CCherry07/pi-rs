@@ -1,6 +1,6 @@
+import { gitLocationKey, type GitRequest, type GitWorkspace } from "../gitContext";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { WorkspaceInfo } from "../../../types";
 import { validateBranchName } from "../utils/branchValidation";
 import type { InitGitRepoOutcome } from "./useGitActions";
 
@@ -21,12 +21,13 @@ export function useInitGitRepoPrompt({
   refreshGitRemote,
   isBusy,
 }: {
-  activeWorkspace: WorkspaceInfo | null;
+  activeWorkspace: GitWorkspace | null;
   initGitRepo: (branch: string) => Promise<InitGitRepoOutcome>;
   createGitHubRepo: (
     repo: string,
     visibility: "private" | "public",
     branch: string,
+    initializedRequest?: GitRequest,
   ) => Promise<
     | { ok: true }
     | { ok: false; error: string }
@@ -35,6 +36,7 @@ export function useInitGitRepoPrompt({
   isBusy: boolean;
 }) {
   const { t } = useTranslation("git");
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [initGitRepoPrompt, setInitGitRepoPrompt] =
     useState<InitGitRepoPromptState | null>(null);
 
@@ -42,23 +44,23 @@ export function useInitGitRepoPrompt({
     if (!initGitRepoPrompt) {
       return;
     }
-    const activeId = activeWorkspace?.id ?? null;
+    const activeId = gitLocationKey(activeWorkspace);
     if (!activeId || activeId !== initGitRepoPrompt.workspaceId) {
       setInitGitRepoPrompt(null);
     }
-  }, [activeWorkspace?.id, initGitRepoPrompt]);
+  }, [activeWorkspace, initGitRepoPrompt]);
 
   const openInitGitRepoPrompt = useCallback(() => {
     if (!activeWorkspace) {
       return;
     }
 
-    const path = (activeWorkspace.path ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+    const path = (activeWorkspace.gitWorkdir ?? activeWorkspace.path ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
     const parts = path.split("/");
     const suggestedRepoName = parts[parts.length - 1] ?? "";
 
     setInitGitRepoPrompt({
-      workspaceId: activeWorkspace.id,
+      workspaceId: gitLocationKey(activeWorkspace)!,
       workspaceName: activeWorkspace.name,
       branch: "main",
       createRemote: true,
@@ -117,14 +119,14 @@ export function useInitGitRepoPrompt({
   }, []);
 
   const handleInitGitRepoPromptCancel = useCallback(() => {
-    if (isBusy) {
+    if (isBusy || isSubmitting) {
       return;
     }
     setInitGitRepoPrompt(null);
-  }, [isBusy]);
+  }, [isBusy, isSubmitting]);
 
   const handleInitGitRepoPromptConfirm = useCallback(async () => {
-    if (isBusy) {
+    if (isBusy || isSubmitting) {
       return;
     }
     const prompt = initGitRepoPrompt;
@@ -172,49 +174,47 @@ export function useInitGitRepoPrompt({
     }
 
     // The init action is workspace-scoped; if the active workspace changed, bail.
-    if (!activeWorkspace || activeWorkspace.id !== prompt.workspaceId) {
+    if (!activeWorkspace || gitLocationKey(activeWorkspace) !== prompt.workspaceId) {
       setInitGitRepoPrompt(null);
       return;
     }
 
     setInitGitRepoPrompt((prev) => (prev ? { ...prev, error: null } : prev));
 
-    const initOutcome = await initGitRepo(trimmedBranch);
-    if (initOutcome === "cancelled") {
-      return;
-    }
+    setIsSubmitting(true);
+    try {
+      const initOutcome = await initGitRepo(trimmedBranch);
+      if (initOutcome === "cancelled") {
+        return;
+      }
 
-    if (initOutcome !== "initialized") {
-      setInitGitRepoPrompt((prev) =>
-        prev ? { ...prev, error: prev.error ?? t("initialize.failed") } : prev,
-      );
-      return;
-    }
-
-    if (prompt.createRemote) {
-      const visibility = prompt.isPrivate ? "private" : "public";
-      const remoteResult = await createGitHubRepo(trimmedRepo, visibility, trimmedBranch);
-      if (!remoteResult.ok) {
+      if (typeof initOutcome === "string" && initOutcome !== "initialized") {
         setInitGitRepoPrompt((prev) =>
-          prev ? { ...prev, error: remoteResult.error } : prev,
+          prev ? { ...prev, error: prev.error ?? t("initialize.failed") } : prev,
         );
         return;
       }
-      refreshGitRemote();
-    }
 
-    setInitGitRepoPrompt(null);
-  }, [
-    activeWorkspace,
-    createGitHubRepo,
-    initGitRepo,
-    initGitRepoPrompt,
-    isBusy,
-    refreshGitRemote,
-    t,
-  ]);
+      if (prompt.createRemote) {
+        const visibility = prompt.isPrivate ? "private" : "public";
+        const remoteResult = await createGitHubRepo(trimmedRepo, visibility, trimmedBranch, typeof initOutcome === "object" ? initOutcome.request : undefined);
+        if (!remoteResult.ok) {
+          setInitGitRepoPrompt((prev) =>
+            prev ? { ...prev, error: remoteResult.error } : prev,
+          );
+          return;
+        }
+        refreshGitRemote();
+      }
+
+      setInitGitRepoPrompt(null);
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [activeWorkspace, createGitHubRepo, initGitRepo, initGitRepoPrompt, isBusy, isSubmitting, refreshGitRemote, t]);
 
   return {
+    isSubmitting,
     initGitRepoPrompt,
     openInitGitRepoPrompt,
     handleInitGitRepoPromptBranchChange,

@@ -70,7 +70,7 @@ export function useRenameWorktreePrompt({
       return;
     }
     const workspace = workspaces.find((entry) => entry.id === renamePrompt.workspaceId);
-    if (!workspace || (workspace.kind ?? "main") !== "worktree") {
+    if (!workspace || (workspace.kind ?? "main") !== "worktree" || workspace.worktree?.managed) {
       setRenamePrompt(null);
       return;
     }
@@ -94,7 +94,7 @@ export function useRenameWorktreePrompt({
   const openRenamePrompt = useCallback(
     (workspaceId: string) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
-      if (!workspace || (workspace.kind ?? "main") !== "worktree") {
+      if (!workspace || (workspace.kind ?? "main") !== "worktree" || workspace.worktree?.managed) {
         return;
       }
       const currentName = workspace.worktree?.branch ?? workspace.name;

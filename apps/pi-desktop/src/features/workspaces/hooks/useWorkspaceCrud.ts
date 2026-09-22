@@ -2,15 +2,18 @@ import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import * as Sentry from "@sentry/react";
-import type { DebugEntry, WorkspaceInfo, WorkspaceSettings } from "../../../types";
+import type { DebugEntry, ProjectDefinition, WorkspaceInfo, WorkspaceSettings } from "../../../types";
 import { normalizeRootPath } from "../../threads/utils/threadNormalize";
 import {
   addWorkspace as addWorkspaceService,
+  createWorkspaceProject as createWorkspaceProjectService,
+  type CreateWorkspaceProjectInput,
   addWorkspaceFromGitUrl as addWorkspaceFromGitUrlService,
   isWorkspacePathDir as isWorkspacePathDirService,
   listWorkspaces,
   removeWorkspace as removeWorkspaceService,
   updateWorkspaceSettings as updateWorkspaceSettingsService,
+  updateWorkspaceProject as updateWorkspaceProjectService,
 } from "../../../services/tauri";
 
 type UseWorkspaceCrudOptions = {
@@ -156,6 +159,30 @@ export function useWorkspaceCrud({
     },
     [onDebug, setActiveWorkspaceId, setWorkspaces],
   );
+
+  const createWorkspaceProject = useCallback(
+    async (input: CreateWorkspaceProjectInput) => {
+      const workspace = await createWorkspaceProjectService(input);
+      setWorkspaces((prev) => [...prev, workspace]);
+      setActiveWorkspaceId(workspace.id);
+      Sentry.metrics.count("workspace_added", 1, {
+        attributes: {
+          workspace_id: workspace.id,
+          workspace_kind: workspace.kind ?? "main",
+        },
+      });
+      return workspace;
+    },
+    [setActiveWorkspaceId, setWorkspaces],
+  );
+
+  const updateWorkspaceProject = useCallback(async (project: ProjectDefinition) => {
+    const saved = await updateWorkspaceProjectService(project);
+    const primary = saved.roots.find((root) => root.id === saved.primaryRoot);
+    setWorkspaces((prev) => prev.map((workspace) => workspace.id === saved.id
+      ? { ...workspace, name: saved.name, path: saved.executionDir ?? primary?.path ?? workspace.path, project: saved }
+      : workspace));
+  }, [setWorkspaces]);
 
   const addWorkspaceFromGitUrl = useCallback(
     async (
@@ -409,6 +436,8 @@ export function useWorkspaceCrud({
 
   return {
     addWorkspaceFromPath,
+    createWorkspaceProject,
+    updateWorkspaceProject,
     addWorkspaceFromGitUrl,
     addWorkspacesFromPaths,
     filterWorkspacePaths,

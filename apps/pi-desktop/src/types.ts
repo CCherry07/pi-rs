@@ -45,6 +45,8 @@ export type WorkspaceKind = "main" | "worktree";
 
 export type WorktreeInfo = {
   branch: string;
+  managed?: boolean;
+  checkoutCount?: number;
 };
 
 export type WorkspaceRoot = {
@@ -80,6 +82,7 @@ export type ProjectDefinition = {
   name: string;
   roots: WorkspaceRoot[];
   primaryRoot: string;
+  executionDir?: string | null;
 };
 
 export type WorkspaceInfo = {

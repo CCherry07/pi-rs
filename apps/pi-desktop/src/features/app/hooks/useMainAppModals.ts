@@ -1,4 +1,5 @@
-import { useMemo } from "react";
+import type { GitWorkspace, GitRequest } from "../../git/gitContext";
+import { useCallback, useMemo, useRef } from "react";
 import type { ComponentType } from "react";
 import type {
   AppSettings,
@@ -36,22 +37,26 @@ type UseMainAppModalsArgs = {
     renameThread: (workspaceId: string, threadId: string, name: string) => void;
   };
   git: {
+    workspace: GitWorkspace | null;
+    worktreeDelivery: AppModalsProps["worktreeDelivery"];
     checkoutBranch: (name: string) => Promise<void>;
     initGitRepo: (branch: string) => Promise<InitGitRepoOutcome>;
     createGitHubRepo: (
       repo: string,
       visibility: "private" | "public",
       branch: string,
+      initializedRequest?: GitRequest,
     ) => Promise<{ ok: true } | { ok: false; error: string }>;
     refreshGitRemote: () => void;
     initGitRepoLoading: boolean;
     createGitHubRepoLoading: boolean;
   };
   workspacePrompts: {
+    workspaceProjectPrompt: AppModalsProps["workspaceProjectPrompt"];
     addWorktreeAgent: (
       workspace: WorkspaceInfo,
       branch: string,
-      options?: { displayName?: string | null; copyAgentsMd?: boolean },
+      options: { displayName?: string | null; copyAgentsMd?: boolean; activate?: boolean; planId: string },
     ) => Promise<WorkspaceInfo | null>;
     addCloneAgent: (
       workspace: WorkspaceInfo,
@@ -126,6 +131,7 @@ type UseMainAppModalsResult = {
     openRenamePrompt: (workspaceId: string, threadId: string) => void;
     openInitGitRepoPrompt: () => void;
     openWorktreePrompt: (workspace: WorkspaceInfo) => void;
+    requestWorktree: ReturnType<typeof useWorktreePrompt>["requestWorktree"];
     openClonePrompt: (workspace: WorkspaceInfo) => void;
     openWorkspaceFromUrlPrompt: () => void;
     openBranchSwitcher: () => void;
@@ -184,6 +190,7 @@ function buildSettingsViewProps({
 }
 
 type BuildAppModalsPropsArgs = {
+  workspaceProjectPrompt: AppModalsProps["workspaceProjectPrompt"];
   renamePrompt: AppModalsProps["renamePrompt"];
   onRenamePromptChange: (value: string) => void;
   onRenamePromptCancel: () => void;
@@ -203,6 +210,8 @@ type BuildAppModalsPropsArgs = {
   onWorktreeSetupScriptChange: (value: string) => void;
   onWorktreePromptCancel: () => void;
   onWorktreePromptConfirm: () => void;
+  worktreePlanning: AppModalsProps["worktreePlanning"];
+  worktreeDelivery: AppModalsProps["worktreeDelivery"];
   clonePrompt: AppModalsProps["clonePrompt"];
   onClonePromptCopyNameChange: (value: string) => void;
   onClonePromptChooseCopiesFolder: () => void;
@@ -238,6 +247,7 @@ type BuildAppModalsPropsArgs = {
 };
 
 function buildAppModalsProps({
+  workspaceProjectPrompt,
   renamePrompt,
   onRenamePromptChange,
   onRenamePromptCancel,
@@ -257,6 +267,8 @@ function buildAppModalsProps({
   onWorktreeSetupScriptChange,
   onWorktreePromptCancel,
   onWorktreePromptConfirm,
+  worktreePlanning,
+  worktreeDelivery,
   clonePrompt,
   onClonePromptCopyNameChange,
   onClonePromptChooseCopiesFolder,
@@ -279,6 +291,7 @@ function buildAppModalsProps({
   settingsViewProps,
 }: BuildAppModalsPropsArgs): AppModalsProps {
   return {
+    workspaceProjectPrompt,
     renamePrompt,
     onRenamePromptChange,
     onRenamePromptCancel,
@@ -298,6 +311,8 @@ function buildAppModalsProps({
     onWorktreeSetupScriptChange,
     onWorktreePromptCancel,
     onWorktreePromptConfirm,
+    worktreePlanning,
+    worktreeDelivery,
     clonePrompt,
     onClonePromptCopyNameChange,
     onClonePromptChooseCopiesFolder,
@@ -367,6 +382,7 @@ export function useMainAppModals({
 
   const {
     initGitRepoPrompt,
+    isSubmitting: initGitRepoSubmitting,
     openInitGitRepoPrompt,
     handleInitGitRepoPromptBranchChange,
     handleInitGitRepoPromptCreateRemoteChange,
@@ -375,7 +391,7 @@ export function useMainAppModals({
     handleInitGitRepoPromptCancel,
     handleInitGitRepoPromptConfirm,
   } = useInitGitRepoPrompt({
-    activeWorkspace,
+    activeWorkspace: git.workspace,
     initGitRepo: git.initGitRepo,
     createGitHubRepo: git.createGitHubRepo,
     refreshGitRemote: git.refreshGitRemote,
@@ -384,8 +400,12 @@ export function useMainAppModals({
 
   const {
     worktreePrompt,
-    openPrompt: openWorktreePrompt,
+    openPrompt: openWorktreePromptForWorkspace,
+    requestWorktree,
     confirmPrompt: confirmWorktreePrompt,
+    reviewPrompt: reviewWorktreePrompt,
+    updateCheckout: updateWorktreeCheckout,
+    updateExecutionRoot: updateWorktreeExecutionRoot,
     cancelPrompt: cancelWorktreePrompt,
     updateName: updateWorktreeName,
     updateBranch: updateWorktreeBranch,
@@ -399,6 +419,15 @@ export function useMainAppModals({
     onCompactActivate: workspacePrompts.onCompactActivate,
     onError: (message) => workspacePrompts.onWorkspacePromptError(message, "worktree"),
   });
+  const currentWorkspaces = useRef(workspaces);
+  currentWorkspaces.current = workspaces;
+  const requestWorktreeForRun = useCallback((workspace: WorkspaceInfo, branch: string) => {
+    return requestWorktree(currentWorkspaces.current.find((entry) => entry.id === workspace.id) ?? workspace, branch);
+  }, [requestWorktree]);
+  const openWorktreePrompt = useCallback((workspace: WorkspaceInfo) => {
+    openWorktreePromptForWorkspace(workspace, workspace.id === git.workspace?.id
+      ? git.workspace.gitRequest?.threadId ?? null : null);
+  }, [git.workspace, openWorktreePromptForWorkspace]);
 
   const {
     clonePrompt,
@@ -432,12 +461,13 @@ export function useMainAppModals({
   const appModalsProps = useMemo<AppModalsProps>(
     () =>
       buildAppModalsProps({
+        workspaceProjectPrompt: workspacePrompts.workspaceProjectPrompt,
         renamePrompt,
         onRenamePromptChange: handleRenamePromptChange,
         onRenamePromptCancel: handleRenamePromptCancel,
         onRenamePromptConfirm: handleRenamePromptConfirm,
         initGitRepoPrompt,
-        initGitRepoPromptBusy: git.initGitRepoLoading || git.createGitHubRepoLoading,
+        initGitRepoPromptBusy: initGitRepoSubmitting || git.initGitRepoLoading || git.createGitHubRepoLoading,
         onInitGitRepoPromptBranchChange: handleInitGitRepoPromptBranchChange,
         onInitGitRepoPromptCreateRemoteChange:
           handleInitGitRepoPromptCreateRemoteChange,
@@ -452,6 +482,12 @@ export function useMainAppModals({
         onWorktreeSetupScriptChange: updateWorktreeSetupScript,
         onWorktreePromptCancel: cancelWorktreePrompt,
         onWorktreePromptConfirm: confirmWorktreePrompt,
+        worktreeDelivery: git.worktreeDelivery,
+        worktreePlanning: {
+          reviewPrompt: reviewWorktreePrompt,
+          updateCheckout: updateWorktreeCheckout,
+          updateExecutionRoot: updateWorktreeExecutionRoot,
+        },
         clonePrompt,
         onClonePromptCopyNameChange: updateCloneCopyName,
         onClonePromptChooseCopiesFolder: chooseCloneCopiesFolder,
@@ -486,9 +522,14 @@ export function useMainAppModals({
       closeSettings,
       confirmClonePrompt,
       confirmWorktreePrompt,
+      reviewWorktreePrompt,
+      updateWorktreeCheckout,
+      updateWorktreeExecutionRoot,
       currentBranch,
+      git.worktreeDelivery,
       git.createGitHubRepoLoading,
       git.initGitRepoLoading,
+      initGitRepoSubmitting,
       handleBranchSelect,
       handleInitGitRepoPromptBranchChange,
       handleInitGitRepoPromptCancel,
@@ -525,6 +566,7 @@ export function useMainAppModals({
       openRenamePrompt,
       openInitGitRepoPrompt,
       openWorktreePrompt,
+      requestWorktree: requestWorktreeForRun,
       openClonePrompt,
       openWorkspaceFromUrlPrompt: workspacePrompts.openWorkspaceFromUrlPrompt,
       openBranchSwitcher,

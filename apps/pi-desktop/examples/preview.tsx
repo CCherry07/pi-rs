@@ -7,6 +7,7 @@ import source from "../../../plugins/features/pi-plugin-subagents/desktop/dist/i
 import css from "../../../plugins/features/pi-plugin-subagents/desktop/dist/style.css?raw";
 import "../src/styles/base.css";
 import "../src/styles/ds-tokens.css";
+import "../src/styles/ds-scrollbars.css";
 import "../src/styles/desktop-extensions.css";
 const catalog = async () => ({ extensions: [{ id: "pi.subagents", revision: "preview", javascript: source, css }], projectTrusted: false });
 function Preview() {

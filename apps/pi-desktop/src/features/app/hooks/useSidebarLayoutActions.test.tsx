@@ -30,6 +30,7 @@ describe("useSidebarLayoutActions", () => {
       removeImagesForThread: vi.fn(),
       refreshThread: vi.fn(async () => {}),
       handleRenameThread: vi.fn(),
+      editWorkspace: vi.fn(),
       removeWorkspace: vi.fn(async () => {}),
       removeWorktree: vi.fn(async () => {}),
       loadOlderThreadsForWorkspace: vi.fn(async () => {}),
@@ -50,6 +51,7 @@ describe("useSidebarLayoutActions", () => {
       onSelectWorkspace: result.current.onSelectWorkspace,
       onSelectThread: result.current.onSelectThread,
       onDeleteThread: result.current.onDeleteThread,
+      onEditWorkspace: result.current.onEditWorkspace,
       onLoadOlderThreads: result.current.onLoadOlderThreads,
     };
 
@@ -58,6 +60,7 @@ describe("useSidebarLayoutActions", () => {
     expect(result.current.onSelectWorkspace).toBe(firstRefs.onSelectWorkspace);
     expect(result.current.onSelectThread).toBe(firstRefs.onSelectThread);
     expect(result.current.onDeleteThread).toBe(firstRefs.onDeleteThread);
+    expect(result.current.onEditWorkspace).toBe(firstRefs.onEditWorkspace);
     expect(result.current.onLoadOlderThreads).toBe(firstRefs.onLoadOlderThreads);
   });
 
@@ -84,6 +87,7 @@ describe("useSidebarLayoutActions", () => {
         removeImagesForThread: vi.fn(),
         refreshThread: vi.fn(async () => {}),
         handleRenameThread: vi.fn(),
+        editWorkspace: vi.fn(),
         removeWorkspace: vi.fn(async () => {}),
         removeWorktree: vi.fn(async () => {}),
         loadOlderThreadsForWorkspace: vi.fn(async () => {}),
@@ -102,4 +106,45 @@ describe("useSidebarLayoutActions", () => {
     expect(setActiveThreadId).toHaveBeenCalledWith(null, "ws-1");
   });
 
+  it("opens editing for the clicked workspace without changing the active workspace or thread", () => {
+    const editWorkspace = vi.fn();
+    const selectWorkspace = vi.fn();
+    const setActiveThreadId = vi.fn();
+    const exitDiffView = vi.fn();
+    const clearDraftState = vi.fn();
+    const resetPullRequestSelection = vi.fn();
+    const clearDraftStateIfDifferentWorkspace = vi.fn();
+    const { result } = renderHook(() => useSidebarLayoutActions({
+      openSettings: vi.fn(),
+      resetPullRequestSelection,
+      clearDraftState,
+      clearDraftStateIfDifferentWorkspace,
+      selectHome: vi.fn(),
+      exitDiffView,
+      selectWorkspace,
+      setActiveThreadId,
+      workspacesById: new Map([[workspace.id, workspace]]),
+      updateWorkspaceSettings: vi.fn(async () => workspace),
+      removeThread: vi.fn(),
+      clearDraftForThread: vi.fn(),
+      removeImagesForThread: vi.fn(),
+      refreshThread: vi.fn(async () => {}),
+      handleRenameThread: vi.fn(),
+      editWorkspace,
+      removeWorkspace: vi.fn(async () => {}),
+      removeWorktree: vi.fn(async () => {}),
+      loadOlderThreadsForWorkspace: vi.fn(async () => {}),
+      listThreadsForWorkspace: vi.fn(async () => {}),
+    }));
+
+    act(() => { result.current.onEditWorkspace("ws-1"); });
+
+    expect(editWorkspace).toHaveBeenCalledExactlyOnceWith("ws-1");
+    expect(selectWorkspace).not.toHaveBeenCalled();
+    expect(setActiveThreadId).not.toHaveBeenCalled();
+    expect(exitDiffView).not.toHaveBeenCalled();
+    expect(clearDraftState).not.toHaveBeenCalled();
+    expect(clearDraftStateIfDifferentWorkspace).not.toHaveBeenCalled();
+    expect(resetPullRequestSelection).not.toHaveBeenCalled();
+  });
 });

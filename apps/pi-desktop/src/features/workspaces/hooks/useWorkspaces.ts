@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AppSettings,
   DebugEntry,
+  ProjectDefinition,
   WorkspaceGroup,
   WorkspaceInfo,
   WorkspaceSettings,
@@ -20,6 +21,7 @@ import {
 } from "./useWorkspaceCrud";
 import { useWorkspaceGroupOps } from "./useWorkspaceGroupOps";
 import { useWorktreeOps } from "./useWorktreeOps";
+import type { CreateWorkspaceProjectInput } from "../../../services/tauri";
 
 export type UseWorkspacesOptions = {
   onDebug?: (entry: DebugEntry) => void;
@@ -37,6 +39,8 @@ export type UseWorkspacesResult = {
   activeWorkspaceId: string | null;
   setActiveWorkspaceId: (workspaceId: string | null) => void;
   addWorkspaceFromPath: (path: string, options?: { activate?: boolean }) => Promise<WorkspaceInfo | null>;
+  createWorkspaceProject: (input: CreateWorkspaceProjectInput) => Promise<WorkspaceInfo>;
+  updateWorkspaceProject: (project: ProjectDefinition) => Promise<void>;
   addWorkspaceFromGitUrl: (
     url: string,
     destinationPath: string,
@@ -49,10 +53,11 @@ export type UseWorkspacesResult = {
   addWorktreeAgent: (
     parent: WorkspaceInfo,
     branch: string,
-    options?: {
+    options: {
       activate?: boolean;
       displayName?: string | null;
       copyAgentsMd?: boolean;
+      planId: string;
     },
   ) => Promise<WorkspaceInfo | null>;
   updateWorkspaceSettings: (workspaceId: string, patch: Partial<WorkspaceSettings>) => Promise<WorkspaceInfo>;
@@ -79,6 +84,8 @@ export function useWorkspaces(options: UseWorkspacesOptions = {}): UseWorkspaces
 
   const {
     addWorkspaceFromPath,
+    createWorkspaceProject,
+    updateWorkspaceProject,
     addWorkspaceFromGitUrl,
     addWorkspacesFromPaths,
     filterWorkspacePaths,
@@ -178,6 +185,8 @@ export function useWorkspaces(options: UseWorkspacesOptions = {}): UseWorkspaces
     activeWorkspaceId,
     setActiveWorkspaceId,
     addWorkspaceFromPath,
+    createWorkspaceProject,
+    updateWorkspaceProject,
     addWorkspaceFromGitUrl,
     addWorkspacesFromPaths,
     filterWorkspacePaths,

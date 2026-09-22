@@ -1,0 +1,211 @@
+.worktree-delivery-modal .ds-modal-card {
+  width: min(800px, calc(100vw - 40px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 20px;
+  border-radius: 16px;
+}
+
+.delivery-dialog-content,
+.delivery-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.delivery-heading,
+.delivery-toolbar,
+.delivery-target-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.delivery-heading .ds-modal-title,
+.delivery-section h3,
+.delivery-preview h3 {
+  margin: 0;
+}
+
+.delivery-hint {
+  color: var(--ds-text-subtle);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.delivery-repositories {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px;
+}
+
+.delivery-repository {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid var(--ds-border-subtle);
+  border-radius: 10px;
+  background: var(--ds-surface-muted);
+  color: var(--ds-text-subtle);
+  text-align: left;
+  font-size: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.delivery-repository.selected {
+  border-color: var(--text-accent);
+  color: var(--ds-text-strong);
+}
+
+.delivery-paths {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.delivery-paths dt {
+  color: var(--ds-text-subtle);
+  margin-bottom: 5px;
+}
+
+.delivery-paths dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.delivery-paths code {
+  font-size: 11px;
+}
+
+.delivery-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.delivery-section h3,
+.delivery-preview h3 {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.delivery-file-list,
+.delivery-commits {
+  max-height: 200px;
+  overflow: auto;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 12px;
+}
+
+.delivery-file-list li,
+.delivery-commits li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  overflow-wrap: anywhere;
+}
+
+.delivery-file-status,
+.delivery-commits code {
+  flex-shrink: 0;
+  white-space: pre;
+}
+
+.delivery-target-row > label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.delivery-target-row {
+  align-items: flex-end;
+}
+
+.delivery-preview {
+  padding: 14px;
+  border: 1px solid var(--ds-border-subtle);
+  border-radius: 10px;
+  scroll-margin-top: 12px;
+}
+
+.delivery-comparison-kind {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.delivery-blockers {
+  color: var(--text-error);
+  font-size: 12px;
+}
+
+.delivery-shared-roots {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.delivery-execute,
+.delivery-attempt {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  min-width: 0;
+}
+
+.delivery-execute > button {
+  align-self: flex-start;
+}
+
+.delivery-execute p,
+.delivery-attempt p {
+  margin: 0;
+}
+
+.delivery-attempt {
+  border: 1px solid var(--ds-border-subtle);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.delivery-attempt-heading,
+.delivery-attempt-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.delivery-attempt-heading {
+  justify-content: space-between;
+}
+
+@media (max-width: 600px) {
+  .worktree-delivery-modal .ds-modal-card {
+    padding: 14px;
+  }
+
+  .delivery-paths,
+  .delivery-repositories {
+    grid-template-columns: 1fr;
+  }
+
+  .delivery-target-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

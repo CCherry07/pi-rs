@@ -126,6 +126,7 @@ type SidebarProps = {
   isThreadPinned: (workspaceId: string, threadId: string) => boolean;
   getPinTimestamp: (workspaceId: string, threadId: string) => number | null;
   onRenameThread: (workspaceId: string, threadId: string) => void;
+  onEditWorkspace: (workspaceId: string) => void;
   onDeleteWorkspace: (workspaceId: string) => void;
   onDeleteWorktree: (workspaceId: string) => void;
   onLoadOlderThreads: (workspaceId: string) => void;
@@ -178,6 +179,7 @@ export const Sidebar = memo(function Sidebar({
   isThreadPinned,
   getPinTimestamp,
   onRenameThread,
+  onEditWorkspace,
   onDeleteWorkspace,
   onDeleteWorktree,
   onLoadOlderThreads,
@@ -224,6 +226,7 @@ export const Sidebar = memo(function Sidebar({
       isThreadPinned,
       onRenameThread,
       onReloadWorkspaceThreads,
+      onEditWorkspace,
       onDeleteWorkspace,
       onDeleteWorktree,
     });

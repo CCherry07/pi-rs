@@ -1370,3 +1370,33 @@
   background: var(--cm-surface-panel-hover);
   border-radius: 9px;
 }
+
+.git-checkout-selector {
+  display: grid;
+  gap: 8px;
+  padding: 8px 0;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.git-checkout-choice,
+.git-checkout-scan {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.git-checkout-choice select {
+  flex: 1;
+  min-width: 0;
+  color: inherit;
+  background: var(--surface-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 5px;
+}
+
+.git-checkout-scan {
+  justify-content: flex-end;
+}

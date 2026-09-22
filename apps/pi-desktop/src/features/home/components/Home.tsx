@@ -2,6 +2,7 @@ import { useTranslation } from 'react-i18next'
 import { HomeActions } from './HomeActions'
 import { HomeLatestAgentsSection } from './HomeLatestAgentsSection'
 import type { LatestAgentRun } from '../homeTypes'
+import { ManagedWorktreeRecovery } from '../../workspaces/components/ManagedWorktreeRecovery'
 
 type HomeProps = {
   onAddWorkspace: () => void
@@ -21,6 +22,7 @@ export function Home({ onAddWorkspace, onAddWorkspaceFromUrl, latestAgentRuns, i
       </div>
       <HomeLatestAgentsSection latestAgentRuns={latestAgentRuns} isLoadingLatestAgents={isLoadingLatestAgents} onSelectThread={onSelectThread} />
       <HomeActions onAddWorkspace={onAddWorkspace} onAddWorkspaceFromUrl={onAddWorkspaceFromUrl} />
+      <ManagedWorktreeRecovery />
     </div>
   )
 }

@@ -87,7 +87,7 @@ pub(crate) async fn add_worktree_core<
     data_dir: &Path,
     workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
     app_settings: &Mutex<AppSettings>,
-    storage_path: &PathBuf,
+    storage_path: &Path,
     sanitize_worktree_name: FSanitize,
     unique_worktree_path: FUniquePath,
     git_branch_exists: FBranchExists,
@@ -201,7 +201,10 @@ where
         path: stored_worktree_path,
         kind: WorkspaceKind::Worktree,
         parent_id: Some(parent_entry.id.clone()),
-        worktree: Some(WorktreeInfo { branch }),
+        worktree: Some(WorktreeInfo {
+            branch,
+            managed: false,
+        }),
         settings: WorkspaceSettings {
             worktree_setup_script: normalize_setup_script(
                 parent_entry.settings.worktree_setup_script.clone(),
@@ -232,7 +235,7 @@ where
 pub(crate) async fn remove_worktree_core<FRunGit, FutRunGit, FIsMissing, FRemoveDirAll>(
     id: String,
     workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    storage_path: &PathBuf,
+    storage_path: &Path,
     run_git_command: FRunGit,
     is_missing_worktree_error: FIsMissing,
     remove_dir_all: FRemoveDirAll,
@@ -314,7 +317,7 @@ pub(crate) async fn rename_worktree_core<
     data_dir: &Path,
     workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
     app_settings: &Mutex<AppSettings>,
-    storage_path: &PathBuf,
+    storage_path: &Path,
     resolve_git_root: FResolveGitRoot,
     unique_branch_name: FUniqueBranch,
     sanitize_worktree_name: FSanitize,
@@ -427,6 +430,7 @@ where
                 None => {
                     entry.worktree = Some(WorktreeInfo {
                         branch: final_branch.clone(),
+                        managed: false,
                     });
                 }
             }

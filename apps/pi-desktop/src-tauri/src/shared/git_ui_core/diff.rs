@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -9,14 +9,10 @@ use git2::{DiffOptions, Repository, Status, StatusOptions};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use crate::git_utils::{
-    diff_patch_to_string, diff_stats_for_path, image_mime_type, resolve_git_root,
-};
+use crate::git_utils::{diff_patch_to_string, diff_stats_for_path, image_mime_type};
 use crate::shared::process_core::std_command;
-use crate::types::{AppSettings, GitCommitDiff, GitFileDiff, GitFileStatus, WorkspaceEntry};
+use crate::types::{AppSettings, GitCommitDiff, GitFileDiff, GitFileStatus};
 use crate::utils::{git_env_path, normalize_git_path, resolve_git_binary};
-
-use super::context::workspace_entry_for_id;
 
 const INDEX_SKIP_WORKTREE_FLAG: u16 = 0x4000;
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
@@ -296,7 +292,7 @@ fn build_combined_diff(repo: &Repository, diff: &git2::Diff) -> String {
     combined_diff
 }
 
-pub(super) fn collect_workspace_diff(repo_root: &Path) -> Result<String, String> {
+pub(crate) fn collect_workspace_diff(repo_root: &Path) -> Result<String, String> {
     let repo = Repository::open(repo_root).map_err(|e| e.to_string())?;
     let head_tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
 
@@ -331,12 +327,7 @@ pub(super) fn collect_workspace_diff(repo_root: &Path) -> Result<String, String>
     Ok(build_combined_diff(&repo, &diff))
 }
 
-pub(super) async fn get_git_status_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
-) -> Result<Value, String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
+pub(crate) async fn get_git_status_inner(repo_root: PathBuf) -> Result<Value, String> {
     let repo = Repository::open(&repo_root).map_err(|e| e.to_string())?;
 
     let branch_name = repo
@@ -463,13 +454,10 @@ pub(super) async fn get_git_status_inner(
     }))
 }
 
-pub(super) async fn get_git_diffs_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
+pub(crate) async fn get_git_diffs_inner(
+    repo_root: PathBuf,
     app_settings: &Mutex<AppSettings>,
-    workspace_id: String,
 ) -> Result<Vec<GitFileDiff>, String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
     let ignore_whitespace_changes = {
         let settings = app_settings.lock().await;
         settings.git_diff_ignore_whitespace_changes
@@ -616,20 +604,16 @@ pub(super) async fn get_git_diffs_inner(
     .map_err(|e| e.to_string())?
 }
 
-pub(super) async fn get_git_commit_diff_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
+pub(crate) async fn get_git_commit_diff_inner(
+    repo_root: PathBuf,
     app_settings: &Mutex<AppSettings>,
-    workspace_id: String,
     sha: String,
 ) -> Result<Vec<GitCommitDiff>, String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-
     let ignore_whitespace_changes = {
         let settings = app_settings.lock().await;
         settings.git_diff_ignore_whitespace_changes
     };
 
-    let repo_root = resolve_git_root(&entry)?;
     let repo = Repository::open(&repo_root).map_err(|e| e.to_string())?;
     let oid = git2::Oid::from_str(&sha).map_err(|e| e.to_string())?;
     let commit = repo.find_commit(oid).map_err(|e| e.to_string())?;

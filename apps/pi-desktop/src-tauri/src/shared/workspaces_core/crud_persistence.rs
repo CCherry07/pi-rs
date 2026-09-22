@@ -16,7 +16,7 @@ pub(crate) async fn add_clone_core(
     copy_name: String,
     copies_folder: String,
     workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    storage_path: &PathBuf,
+    storage_path: &Path,
 ) -> Result<WorkspaceInfo, String> {
     let copy_name = copy_name.trim().to_string();
     if copy_name.is_empty() {
@@ -170,7 +170,7 @@ pub(crate) async fn add_workspace_from_git_url_core(
     destination_path: String,
     target_folder_name: Option<String>,
     workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    storage_path: &PathBuf,
+    storage_path: &Path,
 ) -> Result<WorkspaceInfo, String> {
     let url = url.trim().to_string();
     if url.is_empty() {
@@ -259,7 +259,7 @@ pub(crate) async fn add_workspace_from_git_url_core(
 pub(crate) async fn remove_workspace_core(
     id: String,
     workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    storage_path: &PathBuf,
+    storage_path: &Path,
 ) -> Result<(), String> {
     let mut current = workspaces.lock().await;
     let mut next = current.clone();
@@ -278,7 +278,7 @@ pub(crate) async fn update_workspace_settings_core<FApplySettings>(
     id: String,
     mut settings: WorkspaceSettings,
     workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    storage_path: &PathBuf,
+    storage_path: &Path,
     apply_settings_update: FApplySettings,
 ) -> Result<WorkspaceInfo, String>
 where

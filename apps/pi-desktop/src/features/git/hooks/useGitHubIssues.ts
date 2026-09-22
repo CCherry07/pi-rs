@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useGitOperationScope, useGitScopedState } from "./useGitOperationScope";
+import { gitRequestFor, gitScopeKey } from "../gitContext";
+import { useCallback, useEffect, useRef } from "react";
 import type { GitHubIssue, WorkspaceInfo } from "../../../types";
 import { getGitHubIssues } from "../../../services/tauri";
 
@@ -20,23 +22,26 @@ export function useGitHubIssues(
   activeWorkspace: WorkspaceInfo | null,
   enabled: boolean,
 ) {
-  const [state, setState] = useState<GitHubIssuesState>(emptyState);
+  const scope = useGitOperationScope(activeWorkspace);
+  const [state, setState] = useGitScopedState<GitHubIssuesState>(scope, emptyState);
   const requestIdRef = useRef(0);
-  const workspaceIdRef = useRef<string | null>(activeWorkspace?.id ?? null);
+  const workspaceIdRef = useRef<string | null>(gitScopeKey(activeWorkspace));
 
   const refresh = useCallback(async () => {
+    if (!scope.isCurrent()) return;
     if (!activeWorkspace) {
       setState(emptyState);
       return;
     }
-    const workspaceId = activeWorkspace.id;
+    const workspaceId = gitScopeKey(activeWorkspace)!;
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
     setState((prev) => ({ ...prev, isLoading: true, error: null }));
     try {
-      const response = await getGitHubIssues(workspaceId);
+      const response = await getGitHubIssues(gitRequestFor(activeWorkspace));
       if (
-        requestIdRef.current !== requestId ||
+        !scope.isCurrent() ||
+          requestIdRef.current !== requestId ||
         workspaceIdRef.current !== workspaceId
       ) {
         return;
@@ -50,7 +55,8 @@ export function useGitHubIssues(
     } catch (error) {
       console.error("Failed to load GitHub issues", error);
       if (
-        requestIdRef.current !== requestId ||
+        !scope.isCurrent() ||
+          requestIdRef.current !== requestId ||
         workspaceIdRef.current !== workspaceId
       ) {
         return;
@@ -62,16 +68,16 @@ export function useGitHubIssues(
         error: error instanceof Error ? error.message : String(error),
       });
     }
-  }, [activeWorkspace]);
+  }, [activeWorkspace, scope, setState]);
 
   useEffect(() => {
-    const workspaceId = activeWorkspace?.id ?? null;
+    const workspaceId = gitScopeKey(activeWorkspace);
     if (workspaceIdRef.current !== workspaceId) {
       workspaceIdRef.current = workspaceId;
       requestIdRef.current += 1;
       setState(emptyState);
     }
-  }, [activeWorkspace?.id]);
+  }, [activeWorkspace, setState]);
 
   useEffect(() => {
     if (!enabled) {

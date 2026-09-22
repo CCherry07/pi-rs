@@ -47,6 +47,12 @@ import type { GitPanelMode } from "../types";
 import type { PerFileDiffGroup } from "../utils/perFileThreadDiffs";
 
 type GitDiffPanelProps = {
+  onOpenWorktreeDelivery?: () => void;
+  repositoryOptions?: { value: string; label: string }[];
+  selectedRepository?: string;
+  onSelectRepository?: (value: string) => void;
+  repositoryScope?: string;
+
   workspaceId?: string | null;
   workspacePath?: string | null;
   mode: GitPanelMode;
@@ -147,6 +153,8 @@ type GitDiffPanelProps = {
 };
 
 export function GitDiffPanel({
+  onOpenWorktreeDelivery,
+  repositoryOptions, selectedRepository, onSelectRepository, repositoryScope,
   workspaceId = null,
   workspacePath = null,
   mode,
@@ -241,6 +249,7 @@ export function GitDiffPanel({
     handleFileClick,
     handleDiffListClick,
     selectOnlyFile,
+    clearSelection,
   } = useDiffFileSelection({
     stagedFiles,
     unstagedFiles,
@@ -512,20 +521,7 @@ export function GitDiffPanel({
       const position = new LogicalPosition(event.clientX, event.clientY);
       await menu.popup(position, window);
     },
-    [
-      selectedFiles,
-      selectOnlyFile,
-      stagedFiles,
-      unstagedFiles,
-      onUnstageFile,
-      onStageFile,
-      onRevertFile,
-      discardFiles,
-      gitRoot,
-      gitRootCandidates,
-      workspacePath,
-      t,
-    ],
+    [selectedFiles, selectOnlyFile, stagedFiles, unstagedFiles, onUnstageFile, onStageFile, onRevertFile, discardFiles, gitRoot, gitRootCandidates, workspacePath, t],
   );
 
   const logCountLabel = logTotal
@@ -553,14 +549,15 @@ export function GitDiffPanel({
       ? `${logSyncLabel} · ${fileStatus}`
       : fileStatus;
   const hasGitRoot = Boolean(gitRoot && gitRoot.trim());
-  const showGitRootPanel =
+  const showGitRootPanel = repositoryOptions ? (isMissingRepo(error) || Boolean(gitRootScanError)) :
     isMissingRepo(error) ||
     gitRootScanLoading ||
     gitRootScanHasScanned ||
     Boolean(gitRootScanError) ||
     gitRootCandidates.length > 0;
   const normalizedGitRoot = normalizeRootPath(gitRoot);
-  const errorScope = `${workspaceId ?? "no-workspace"}:${normalizedGitRoot || "no-git-root"}:${mode}`;
+  useEffect(() => { clearSelection(); }, [repositoryScope, clearSelection]);
+  const errorScope = `${repositoryScope ?? workspaceId ?? "no-workspace"}:${normalizedGitRoot || "no-git-root"}:${mode}`;
   const hasAnyChanges = stagedFiles.length > 0 || unstagedFiles.length > 0;
   const showApplyWorktree = mode === "diff" && Boolean(onApplyWorktreeChanges) && hasAnyChanges;
   const canGenerateCommitMessage = hasAnyChanges;
@@ -691,13 +688,37 @@ export function GitDiffPanel({
           fetchLoading={fetchLoading}
         />
 
-        <GitRootCurrentPath
+        {onOpenWorktreeDelivery && <button className="ghost git-root-button" type="button" onClick={onOpenWorktreeDelivery}>
+          {t("actions.previewWorktreeDelivery")}
+        </button>}
+
+        {repositoryOptions ? (
+          <div className="git-checkout-selector">
+            <label className="git-checkout-choice">
+              <span>{t("repositories.label")}</span>
+              <select aria-label={t("repositories.label")} title={gitRoot ?? undefined} value={selectedRepository} onChange={(event) => onSelectRepository?.(event.target.value)}>
+                {!selectedRepository ? <option value="">{t("root.chooseRepository")}</option> : null}
+                {repositoryOptions.map((option) => <option key={option.value} value={option.value}>{getFileName(option.label)} — {option.label}</option>)}
+              </select>
+            </label>
+            <div className="git-checkout-scan">
+              <label className="git-root-depth">
+                <span>{t("root.depth")}</span>
+                <select className="git-root-select" aria-label={t("root.depth")} value={gitRootScanDepth} onChange={(event) => onGitRootScanDepthChange?.(Number(event.target.value))}>
+                  {[1, 2, 3, 4, 5, 6].map((depth) => <option key={depth} value={depth}>{depth}</option>)}
+                </select>
+              </label>
+              <button className="ghost git-root-button" type="button" onClick={onScanGitRoots} disabled={gitRootScanLoading}>{gitRootScanLoading ? t("root.scanning") : t("root.scan")}</button>
+            </div>
+          </div>
+        ) : null}
+        {!repositoryOptions ? <GitRootCurrentPath
           mode={mode}
           hasGitRoot={hasGitRoot}
           gitRoot={gitRoot}
           onScanGitRoots={onScanGitRoots}
           gitRootScanLoading={gitRootScanLoading}
-        />
+        /> : null}
       </div>
 
       {mode === "diff" ? (
@@ -712,10 +733,10 @@ export function GitDiffPanel({
           onInitGitRepo={onInitGitRepo}
           initGitRepoLoading={initGitRepoLoading}
           hasGitRoot={hasGitRoot}
-          onClearGitRoot={onClearGitRoot}
+          onClearGitRoot={repositoryOptions ? undefined : onClearGitRoot}
           gitRootScanError={gitRootScanError}
           gitRootScanHasScanned={gitRootScanHasScanned}
-          gitRootCandidates={gitRootCandidates}
+          gitRootCandidates={repositoryOptions ? [] : gitRootCandidates}
           gitRoot={gitRoot}
           onSelectGitRoot={onSelectGitRoot}
           showGenerateCommitMessage={showGenerateCommitMessage}

@@ -16,6 +16,7 @@ type SidebarMenuHandlers = {
   isThreadPinned: (workspaceId: string, threadId: string) => boolean;
   onRenameThread: (workspaceId: string, threadId: string) => void;
   onReloadWorkspaceThreads: (workspaceId: string) => void;
+  onEditWorkspace: (workspaceId: string) => void;
   onDeleteWorkspace: (workspaceId: string) => void;
   onDeleteWorktree: (workspaceId: string) => void;
 };
@@ -28,6 +29,7 @@ export function useSidebarMenus({
   isThreadPinned,
   onRenameThread,
   onReloadWorkspaceThreads,
+  onEditWorkspace,
   onDeleteWorkspace,
   onDeleteWorktree,
 }: SidebarMenuHandlers) {
@@ -100,6 +102,10 @@ export function useSidebarMenus({
     async (event: MouseEvent, workspaceId: string) => {
       event.preventDefault();
       event.stopPropagation();
+      const editItem = await MenuItem.new({
+        text: t("sidebar.menu.editWorkspace"),
+        action: () => onEditWorkspace(workspaceId),
+      });
       const reloadItem = await MenuItem.new({
         text: t("sidebar.menu.reload"),
         action: () => onReloadWorkspaceThreads(workspaceId),
@@ -108,12 +114,12 @@ export function useSidebarMenus({
         text: t("sidebar.menu.delete"),
         action: () => onDeleteWorkspace(workspaceId),
       });
-      const menu = await Menu.new({ items: [reloadItem, deleteItem] });
+      const menu = await Menu.new({ items: [editItem, reloadItem, deleteItem] });
       const window = getCurrentWindow();
       const position = new LogicalPosition(event.clientX, event.clientY);
       await menu.popup(position, window);
     },
-    [onReloadWorkspaceThreads, onDeleteWorkspace, t],
+    [onEditWorkspace, onReloadWorkspaceThreads, onDeleteWorkspace, t],
   );
 
   const showWorktreeMenu = useCallback(
@@ -169,6 +175,10 @@ export function useSidebarMenus({
       event.preventDefault();
       event.stopPropagation();
       const fileManagerLabel = fileManagerName();
+      const editItem = await MenuItem.new({
+        text: t("sidebar.menu.editWorkspace"),
+        action: () => onEditWorkspace(clone.id),
+      });
       const reloadItem = await MenuItem.new({
         text: t("sidebar.menu.reload"),
         action: () => onReloadWorkspaceThreads(clone.id),
@@ -204,12 +214,12 @@ export function useSidebarMenus({
         text: t("sidebar.menu.deleteClone"),
         action: () => onDeleteWorkspace(clone.id),
       });
-      const menu = await Menu.new({ items: [reloadItem, revealItem, deleteItem] });
+      const menu = await Menu.new({ items: [editItem, reloadItem, revealItem, deleteItem] });
       const window = getCurrentWindow();
       const position = new LogicalPosition(event.clientX, event.clientY);
       await menu.popup(position, window);
     },
-    [onReloadWorkspaceThreads, onDeleteWorkspace, t],
+    [onEditWorkspace, onReloadWorkspaceThreads, onDeleteWorkspace, t],
   );
 
   return { showThreadMenu, showWorkspaceMenu, showWorktreeMenu, showCloneMenu };

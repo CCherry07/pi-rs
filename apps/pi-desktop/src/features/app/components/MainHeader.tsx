@@ -19,9 +19,14 @@ import { LaunchScriptButton } from "./LaunchScriptButton";
 import { LaunchScriptEntryButton } from "./LaunchScriptEntryButton";
 import type { WorkspaceLaunchScriptsState } from "../hooks/useWorkspaceLaunchScripts";
 import { useMenuController } from "../hooks/useMenuController";
+import { WorkspaceEnvironmentBadge } from "./WorkspaceEnvironmentBadge";
+import type { GitInventory } from "../../git/gitContext";
 
 type MainHeaderProps = {
   workspace: WorkspaceInfo;
+  workspaceInventory?: GitInventory | null;
+  workspaceError?: string | null;
+  onRefreshWorkspace?: () => void | Promise<unknown>;
   parentName?: string | null;
   worktreeLabel?: string | null;
   disableBranchMenu?: boolean;
@@ -75,6 +80,9 @@ type MainHeaderProps = {
 
 export function MainHeader({
   workspace,
+  workspaceInventory = null,
+  workspaceError = null,
+  onRefreshWorkspace,
   parentName = null,
   worktreeLabel = null,
   disableBranchMenu = false,
@@ -203,6 +211,12 @@ export function MainHeader({
   return (
     <header className="main-header" data-tauri-drag-region>
       <div className="workspace-header">
+        <WorkspaceEnvironmentBadge
+          key={JSON.stringify([workspace.id, workspaceInventory?.workspace])}
+          inventory={workspaceInventory}
+          error={workspaceError}
+          onRefresh={onRefreshWorkspace}
+        />
         <div className="workspace-title-line">
           <span className="workspace-title">
             {parentName ? parentName : workspace.name}

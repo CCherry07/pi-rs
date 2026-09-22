@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useGitOperationScope, useGitScopedState } from "./useGitOperationScope";
+import { gitRequestFor, gitScopeKey } from "../gitContext";
+import { useCallback, useEffect, useRef } from "react";
 import type { GitHubPullRequestDiff, WorkspaceInfo } from "../../../types";
 import { getGitHubPullRequestDiff } from "../../../services/tauri";
 
@@ -19,24 +21,27 @@ export function useGitHubPullRequestDiffs(
   prNumber: number | null,
   enabled: boolean,
 ) {
-  const [state, setState] = useState<PullRequestDiffState>(emptyState);
+  const scope = useGitOperationScope(activeWorkspace);
+  const [state, setState] = useGitScopedState<PullRequestDiffState>(scope, emptyState);
   const requestIdRef = useRef(0);
-  const workspaceIdRef = useRef<string | null>(activeWorkspace?.id ?? null);
+  const workspaceIdRef = useRef<string | null>(gitScopeKey(activeWorkspace));
   const prNumberRef = useRef<number | null>(prNumber ?? null);
 
   const refresh = useCallback(async () => {
+    if (!scope.isCurrent()) return;
     if (!activeWorkspace || !prNumber) {
       setState(emptyState);
       return;
     }
-    const workspaceId = activeWorkspace.id;
+    const workspaceId = gitScopeKey(activeWorkspace)!;
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
     setState((prev) => ({ ...prev, isLoading: true, error: null }));
     try {
-      const diffs = await getGitHubPullRequestDiff(workspaceId, prNumber);
+      const diffs = await getGitHubPullRequestDiff(gitRequestFor(activeWorkspace), prNumber);
       if (
-        requestIdRef.current !== requestId ||
+        !scope.isCurrent() ||
+          requestIdRef.current !== requestId ||
         workspaceIdRef.current !== workspaceId ||
         prNumberRef.current !== prNumber
       ) {
@@ -46,7 +51,8 @@ export function useGitHubPullRequestDiffs(
     } catch (error) {
       console.error("Failed to load GitHub pull request diff", error);
       if (
-        requestIdRef.current !== requestId ||
+        !scope.isCurrent() ||
+          requestIdRef.current !== requestId ||
         workspaceIdRef.current !== workspaceId ||
         prNumberRef.current !== prNumber
       ) {
@@ -58,16 +64,16 @@ export function useGitHubPullRequestDiffs(
         error: error instanceof Error ? error.message : String(error),
       });
     }
-  }, [activeWorkspace, prNumber]);
+  }, [activeWorkspace, prNumber, scope, setState]);
 
   useEffect(() => {
-    const workspaceId = activeWorkspace?.id ?? null;
+    const workspaceId = gitScopeKey(activeWorkspace);
     if (workspaceIdRef.current !== workspaceId) {
       workspaceIdRef.current = workspaceId;
       requestIdRef.current += 1;
       setState(emptyState);
     }
-  }, [activeWorkspace?.id]);
+  }, [activeWorkspace, setState]);
 
   useEffect(() => {
     if (prNumberRef.current !== prNumber) {
@@ -75,7 +81,7 @@ export function useGitHubPullRequestDiffs(
       requestIdRef.current += 1;
       setState(emptyState);
     }
-  }, [prNumber]);
+  }, [prNumber, setState]);
 
   useEffect(() => {
     if (!enabled) {

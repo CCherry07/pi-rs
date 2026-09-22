@@ -26,10 +26,12 @@ The product execution model is `Project → WorkspaceSpec → Session → Genera
 shared `WorkspaceSnapshot` values. A spec contains multiple named roots, a primary-root reference,
 and an execution directory within that primary root. Root provenance describes externally managed
 directories or managed worktrees; it never grants permission to delete them. Workspace is a value,
-with no independent ID, registry, handoff lifecycle, or automatic worktree cleanup.
+with no independent ID, registry, handoff lifecycle, or automatic worktree cleanup. Desktop records
+ownership of created worktrees separately from these execution values.
 
 `pi-sdk::projects` owns stable Project identities, root configuration, filesystem resolution, and a
-versioned `projects.json` store. Store transactions reread under a cross-process OS lock and use
+versioned `projects.json` store. An optional `executionDir` retains a working directory below the
+primary root; older records still execute at that root. Store transactions reread under a cross-process OS lock and use
 atomic replacement; corruption and unsupported versions are errors. Project edits affect newly
 created sessions. Standalone cwd entry points remain single-root adapters and need no Project.
 Native v4 headers retain `cwd` as a compatibility projection and store the complete versioned spec
@@ -62,7 +64,14 @@ path rules and OS permissions; roots are not a filesystem sandbox. Snapshots fre
 not file contents.
 
 Desktop migrates legacy one-path records to SDK Projects while preserving IDs and UI settings.
-Its Projects settings editor adds/removes directory associations and selects a primary root.
+Its Add workspace panel creates one Local Project from a name, one or more directories, and a
+primary directory. Native creation validates and canonicalizes every directory, deduplicates aliases,
+and persists the complete Project before publishing its UI association; an association write failure
+rolls back the unpublished Project. This deliberately extends Pi's cwd-only creation entry point.
+The sidebar's Edit workspace panel updates that same Project; existing roots retain their IDs and
+provenance, and changing the primary root resets the default execution directory to that root.
+UI names are projected from the authoritative Project. The Projects settings editor also
+adds/removes directory associations and selects a primary root.
 Worktree project adapters replace the actual Git source root, retain all other roots, make the
 worktree the child's primary root, and record its provenance. Desktop's existing Git association
 continues to select that source repository even when the parent Project's primary root changes.
@@ -83,6 +92,104 @@ spec, and file-list caches discard responses from previous selections. Missing o
 roots report scan errors while available roots remain browsable. Desktop preview containment is
 unchanged and does not change agent filesystem-tool permissions. Git status includes its actual
 repository directory so modified-file filtering never matches another root by relative path alone.
+
+Desktop Git inventory also resolves the selected conversation's saved spec. Each checkout exposes
+its canonical workdir, per-worktree git directory, common directory, and associated root IDs.
+Multiple roots in one checkout share an inventory entry; linked worktrees remain distinct even when
+they share a common directory. Containing repositories are discovered automatically; nested
+repositories require an explicit depth-limited scan. Unavailable roots report individual errors.
+Legacy `gitRoot` may seed the initial selection only when it belongs to this environment.
+
+Git selection is view state and never edits Project roots, execution cwd, or `gitRoot`. Git and
+GitHub IPC requests carry a session and explicit checkout target; native resolution validates that
+target against the saved spec and current Git metadata before passing a fixed workdir to Git
+mechanics. Unqualified legacy requests reject ambiguous multi-checkout environments. Initialization
+uses a root identity and rejects a root that has since become a checkout until inventory refresh.
+Commit-message generation runs in the selected checkout. UI caches include the environment and
+checkout, and per-visit tokens discard results after selection changes, including A→B→A. Multi-step
+commit/push operations retain their captured target while their UI updates expire on a new visit.
+The legacy worktree apply action is exposed only on the legacy child Project's own checkout.
+
+Desktop managed worktree creation prepares a durable native plan before changing Git. The preview
+captures the source session's WorkspaceSpec, actual checkout membership, new branches, pinned commit
+IDs, destination paths, and resulting roots. Roots within one checkout share one new worktree;
+separate linked worktrees remain separate members even when they share a Git common directory.
+`pi-sdk::projects::realize_worktrees` preserves root identities and checkout-relative offsets,
+including an execution directory below a root. Unselected roots keep their original paths. When
+the source cwd is not selected, an explicit execution root is required. Nested repositories must
+be explicit Project roots before isolation; lexical containment alone never relocates a root.
+The mapped directories must exist in the chosen commits. Source uncommitted changes are not copied.
+
+The Desktop `worktree_groups` module owns a versioned journal in `managed-worktrees/<project-id>.json`.
+This is a resource ownership record, not a second Workspace registry. Preparation writes only
+metadata. Execution loads that record under a nonblocking OS lock, revalidates the source and
+destinations, and journals each member before creating it. The child SDK Project and UI association
+are published after all members exist. The source setup script is captured at preparation; optional
+AGENTS.md copying does not overwrite tracked destination files. This new creation flow requires
+new branches; linked members in the same repository require different branches. Branches survive
+worktree cleanup, including failed creation, so commits remain recoverable.
+The operation guard explicitly unlocks on drop, so descriptors inherited during concurrent process
+launch cannot prolong a finished operation's lock.
+
+Interrupted creation and cleanup remain listed across restarts. Cleanup validates all member
+identities, Git registrations, locks, and tracked/untracked/ignored changes before deleting any
+member. An explicit discard action may remove changed files, but cannot bypass identity or lock
+checks. Deletion uses the recorded Git common directories and works without the parent Project;
+it never infers ownership from root provenance, deletes shared roots, or falls back to recursive
+directory removal. Progress is persisted so partial cleanup can be retried. Removing a Project
+association alone retains the journal and filesystem contents; unresolved delivery attempts must
+first be resolved so their recovery entry point remains available. Managed groups do not use legacy
+whole-workspace branch rename or apply actions; checkout-scoped Git operations remain available.
+
+Managed worktree delivery has a read-only overview and commit merge preview. Its checkout identities
+come from the group's ownership journal and are validated against the selected session's saved
+workspace. The original checkout recorded during creation is the destination; editing the parent
+Project cannot retarget delivery. Each member exposes its current HEAD, local target branches,
+working-directory changes, and availability independently. Shared roots are never merge members.
+Preview resolves an explicit local target branch and pins both commit IDs. Incoming commits are
+those reachable from the worktree HEAD but not the target, rather than every commit since creation.
+The changed-file view compares the merge base to the worktree HEAD.
+
+Commit mergeability and checkout readiness are distinct results. Divergent tree merges use a
+private in-memory object database, leaving the real refs, index, object database, and working files
+untouched. Conflicts, fast-forwards, already-integrated commits, unrelated histories, and unsupported
+merge semantics are explicit outcomes. Custom Git attributes/drivers and multiple merge bases are
+reported conservatively; bounded result lists indicate truncation. The preview separately reports
+target-branch mismatch, unfinished Git operations, locks, target working changes, and possible
+ignored-file collisions. Source uncommitted files are displayed but excluded from the commit
+comparison. Branch movement during inspection rejects the snapshot. The UI expires previous
+results when the session, repository, or target changes. Preview remains read-only; an explicit
+execution request carries a fresh attempt ID, selected checkout and branch, and the displayed
+source and target commit IDs. Native execution revalidates the saved session workspace, ownership,
+both commits, checkout readiness, and supported Git semantics before saving an attempt.
+
+Delivery executes one checkout per request. Group locks and a lock keyed by the canonical Git
+common directory serialize this product's delivery operations, including separate groups sharing
+a repository. Unresolved attempts in another group block a new delivery into that repository.
+The first attempt upgrades the ownership journal to version 2; version 1 records remain readable,
+while older binaries reject version 2 instead of dropping recovery metadata. Attempt IDs are
+idempotent: repeating a request observes the saved attempt rather than applying it again.
+
+The in-process Git implementation supports fast-forward and conflict-free two-parent merges.
+It saves the prepared result commit before changing files, locks HEAD, the target branch and the
+index, rechecks the target under those locks, and uses safe checkout without removing untracked or
+ignored files. The index lock spans checkout, atomic publication of the prepared index, and branch
+update, so concurrent staging cannot be accepted and then overwritten. It advances the branch only
+after the complete index and working directory match the prepared result. Hooks, signing,
+attributes, filters, submodules, sparse checkouts and other
+unsupported configured semantics are reported as blockers rather than silently bypassed. No Git
+subprocess outlives the native operation, and no force reset or automatic abort is used.
+
+Recovery classifies a persisted attempt as completed, unchanged, ready to finish, or needing
+inspection. Refreshing this state does not rerun checkout or merge. An explicit finish action may
+advance the original branch only when its old commit is unchanged and all planned files are already
+present; it revalidates under the same Git reference locks. Partial writes, changed branches,
+unavailable objects and leftover Git locks remain visible for manual inspection. Git and filesystem
+updates are not an atomic transaction; a journal retained across interruption is the recovery
+authority. Unresolved attempts block both physical cleanup (including force discard) and detaching
+the managed Project. Physical cleanup holds the same repository locks and also checks other groups'
+unresolved attempts, preserving a managed checkout that is another group's delivery destination.
+Successful delivery in one repository is never rolled back because another repository fails.
 
 This is a deliberate Rust product extension. The current local TypeScript Pi session manager uses
 v3 headers without this metadata extension; the Pi-compatible v3 RPC projection remains unchanged.

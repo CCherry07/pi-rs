@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { renderHook } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkspaceInfo } from "../../../types";
 import { useSidebarMenus } from "./useSidebarMenus";
@@ -43,6 +43,54 @@ vi.mock("../../../services/toasts", () => ({
 }));
 
 describe("useSidebarMenus", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it.each(["workspace", "clone"])("edits the clicked %s even when another context menu is opened", async (kind) => {
+    const onEditWorkspace = vi.fn();
+    const onDeleteWorkspace = vi.fn();
+    const onReloadWorkspaceThreads = vi.fn();
+    const { result } = renderHook(() => useSidebarMenus({
+      onDeleteThread: vi.fn(),
+      onSyncThread: vi.fn(),
+      onPinThread: vi.fn(),
+      onUnpinThread: vi.fn(),
+      isThreadPinned: vi.fn(() => false),
+      onRenameThread: vi.fn(),
+      onReloadWorkspaceThreads,
+      onEditWorkspace,
+      onDeleteWorkspace,
+      onDeleteWorktree: vi.fn(),
+    }));
+    const event = {
+      preventDefault: vi.fn(), stopPropagation: vi.fn(), clientX: 12, clientY: 34,
+    } as unknown as ReactMouseEvent;
+    const target: WorkspaceInfo = {
+      id: "clicked-workspace", name: "Clicked", path: "/tmp/clicked",
+      settings: { sidebarCollapsed: false },
+    };
+    if (kind === "clone") {
+      await result.current.showCloneMenu(event, target);
+    } else {
+      await result.current.showWorkspaceMenu(event, target.id);
+    }
+    const menuArgs = menuNew.mock.calls[0]?.[0];
+    const editItem = menuArgs.items.find(
+      (item: { text: string }) => item.text === "Edit workspace…",
+    );
+    expect(editItem).toBeDefined();
+    expect(onEditWorkspace).not.toHaveBeenCalled();
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(event.stopPropagation).toHaveBeenCalledTimes(1);
+
+    await result.current.showWorkspaceMenu(event, "another-workspace");
+    await editItem.action();
+    expect(onEditWorkspace).toHaveBeenCalledExactlyOnceWith("clicked-workspace");
+    expect(onDeleteWorkspace).not.toHaveBeenCalled();
+    expect(onReloadWorkspaceThreads).not.toHaveBeenCalled();
+  });
+
   it("adds a show in file manager option for worktrees", async () => {
     const onDeleteThread = vi.fn();
     const onSyncThread = vi.fn();
@@ -63,6 +111,7 @@ describe("useSidebarMenus", () => {
         isThreadPinned,
         onRenameThread,
         onReloadWorkspaceThreads,
+        onEditWorkspace: vi.fn(),
         onDeleteWorkspace,
         onDeleteWorktree,
       }),
@@ -90,6 +139,9 @@ describe("useSidebarMenus", () => {
     await result.current.showWorktreeMenu(event, worktree);
 
     const menuArgs = menuNew.mock.calls[0]?.[0];
+    expect(menuArgs.items.some(
+      (item: { text: string }) => item.text === "Edit workspace…",
+    )).toBe(false);
     const revealItem = menuArgs.items.find(
       (item: { text: string }) => item.text === `Show in ${fileManagerName()}`,
     );

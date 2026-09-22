@@ -755,7 +755,6 @@
   overflow: auto;
   overscroll-behavior-x: contain;
   overscroll-behavior-y: auto;
-  scrollbar-width: thin;
   margin: 0;
   padding: 0 12px;
 }
@@ -946,7 +945,6 @@
   overflow-y: auto;
   overflow-x: hidden;
   gap: 2px;
-  scrollbar-width: thin;
   -webkit-mask-image: linear-gradient(180deg, transparent 0%, #000 18px);
   mask-image: linear-gradient(180deg, transparent 0%, #000 18px);
 }

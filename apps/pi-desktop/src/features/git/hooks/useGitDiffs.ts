@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useGitOperationScope, useGitScopedState } from "./useGitOperationScope";
+import { gitRequestFor, gitScopeKey } from "../gitContext";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { getGitDiffs } from "../../../services/tauri";
 import type { GitFileDiff, GitFileStatus, WorkspaceInfo } from "../../../types";
 
@@ -20,7 +22,8 @@ export function useGitDiffs(
   enabled: boolean,
   ignoreWhitespaceChanges: boolean,
 ) {
-  const [state, setState] = useState<GitDiffState>(emptyState);
+  const scope = useGitOperationScope(activeWorkspace);
+  const [state, setState] = useGitScopedState<GitDiffState>(scope, emptyState);
   const requestIdRef = useRef(0);
   const cacheKeyRef = useRef<string | null>(null);
   const cachedDiffsRef = useRef<Map<string, GitFileDiff[]>>(new Map());
@@ -38,19 +41,21 @@ export function useGitDiffs(
   );
 
   const refresh = useCallback(async () => {
+    if (!scope.isCurrent()) return;
     if (!activeWorkspace) {
       setState(emptyState);
       return;
     }
-    const workspaceId = activeWorkspace.id;
+    const workspaceId = gitScopeKey(activeWorkspace)!;
     const cacheKey = `${workspaceId}|ignoreWhitespaceChanges:${ignoreWhitespaceChanges ? "1" : "0"}`;
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
     setState((prev) => ({ ...prev, isLoading: true, error: null }));
     try {
-      const diffs = await getGitDiffs(workspaceId);
+      const diffs = await getGitDiffs(gitRequestFor(activeWorkspace));
       if (
-        requestIdRef.current !== requestId ||
+        !scope.isCurrent() ||
+          requestIdRef.current !== requestId ||
         cacheKeyRef.current !== cacheKey
       ) {
         return;
@@ -60,7 +65,8 @@ export function useGitDiffs(
     } catch (error) {
       console.error("Failed to load git diffs", error);
       if (
-        requestIdRef.current !== requestId ||
+        !scope.isCurrent() ||
+          requestIdRef.current !== requestId ||
         cacheKeyRef.current !== cacheKey
       ) {
         return;
@@ -71,10 +77,10 @@ export function useGitDiffs(
         error: error instanceof Error ? error.message : String(error),
       });
     }
-  }, [activeWorkspace, ignoreWhitespaceChanges]);
+  }, [activeWorkspace, ignoreWhitespaceChanges, scope, setState]);
 
   useEffect(() => {
-    const workspaceId = activeWorkspace?.id ?? null;
+    const workspaceId = gitScopeKey(activeWorkspace);
     const nextCacheKey = workspaceId
       ? `${workspaceId}|ignoreWhitespaceChanges:${ignoreWhitespaceChanges ? "1" : "0"}`
       : null;
@@ -92,7 +98,7 @@ export function useGitDiffs(
         error: null,
       });
     }
-  }, [activeWorkspace?.id, ignoreWhitespaceChanges]);
+  }, [activeWorkspace, ignoreWhitespaceChanges, setState]);
 
   useEffect(() => {
     if (!enabled) {

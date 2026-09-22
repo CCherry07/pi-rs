@@ -21,6 +21,7 @@ type UseSidebarLayoutActionsOptions = {
   removeImagesForThread: (threadId: string) => void;
   refreshThread: (workspaceId: string, threadId: string) => void | Promise<unknown>;
   handleRenameThread: (workspaceId: string, threadId: string) => void;
+  editWorkspace: (workspaceId: string) => void | Promise<unknown>;
   removeWorkspace: (workspaceId: string) => void | Promise<unknown>;
   removeWorktree: (workspaceId: string) => void | Promise<unknown>;
   loadOlderThreadsForWorkspace: (workspace: WorkspaceInfo) => void | Promise<unknown>;
@@ -43,6 +44,7 @@ export function useSidebarLayoutActions({
   removeImagesForThread,
   refreshThread,
   handleRenameThread,
+  editWorkspace,
   removeWorkspace,
   removeWorktree,
   loadOlderThreadsForWorkspace,
@@ -128,6 +130,13 @@ export function useSidebarLayoutActions({
     [handleRenameThread],
   );
 
+  const onEditWorkspace = useCallback(
+    (workspaceId: string) => {
+      void editWorkspace(workspaceId);
+    },
+    [editWorkspace],
+  );
+
   const onDeleteWorkspace = useCallback(
     (workspaceId: string) => {
       void removeWorkspace(workspaceId);
@@ -173,6 +182,7 @@ export function useSidebarLayoutActions({
     onDeleteThread,
     onSyncThread,
     onRenameThread,
+    onEditWorkspace,
     onDeleteWorkspace,
     onDeleteWorktree,
     onLoadOlderThreads,

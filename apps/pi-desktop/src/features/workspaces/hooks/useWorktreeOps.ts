@@ -5,7 +5,7 @@ import * as Sentry from "@sentry/react";
 import type { DebugEntry, WorkspaceInfo } from "../../../types";
 import {
   addClone as addCloneService,
-  addWorktree as addWorktreeService,
+  executeWorktreePlan,
   removeWorktree as removeWorktreeService,
   renameWorktree as renameWorktreeService,
   renameWorktreeUpstream as renameWorktreeUpstreamService,
@@ -31,10 +31,11 @@ export function useWorktreeOps({
     async (
       parent: WorkspaceInfo,
       branch: string,
-      options?: {
+      options: {
         activate?: boolean;
         displayName?: string | null;
         copyAgentsMd?: boolean;
+        planId: string;
       },
     ) => {
       const trimmed = branch.trim();
@@ -56,12 +57,7 @@ export function useWorktreeOps({
         },
       });
       try {
-        const workspace = await addWorktreeService(
-          parent.id,
-          trimmed,
-          trimmedName,
-          copyAgentsMd,
-        );
+        const workspace = await executeWorktreePlan(options.planId);
         setWorkspaces((prev) => [...prev, workspace]);
         if (options?.activate !== false) {
           setActiveWorkspaceId(workspace.id);

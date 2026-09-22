@@ -1,19 +1,13 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use git2::{BranchType, Repository, Status, StatusOptions};
 use serde_json::{json, Value};
-use tokio::sync::Mutex;
 
-use crate::git_utils::{
-    checkout_branch, list_git_roots as scan_git_roots, parse_github_repo, resolve_git_root,
-};
+use crate::git_utils::{checkout_branch, parse_github_repo};
 use crate::shared::process_core::tokio_command;
-use crate::types::{BranchInfo, WorkspaceEntry};
+use crate::types::BranchInfo;
 use crate::utils::{git_env_path, normalize_git_path, resolve_git_binary};
-
-use super::context::workspace_entry_for_id;
 
 async fn run_git_command(repo_root: &Path, args: &[&str]) -> Result<(), String> {
     let git_bin = resolve_git_binary().map_err(|e| format!("Failed to run git: {e}"))?;
@@ -396,48 +390,25 @@ async fn pull_with_default_strategy(repo_root: &Path) -> Result<(), String> {
     }
 }
 
-pub(super) async fn stage_git_file_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
-    path: String,
-) -> Result<(), String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
+pub(crate) async fn stage_git_file_inner(repo_root: PathBuf, path: String) -> Result<(), String> {
     for path in action_paths_for_file(&repo_root, &path) {
         run_git_command(&repo_root, &["add", "-A", "--", &path]).await?;
     }
     Ok(())
 }
 
-pub(super) async fn stage_git_all_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
-) -> Result<(), String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
+pub(crate) async fn stage_git_all_inner(repo_root: PathBuf) -> Result<(), String> {
     run_git_command(&repo_root, &["add", "-A"]).await
 }
 
-pub(super) async fn unstage_git_file_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
-    path: String,
-) -> Result<(), String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
+pub(crate) async fn unstage_git_file_inner(repo_root: PathBuf, path: String) -> Result<(), String> {
     for path in action_paths_for_file(&repo_root, &path) {
         run_git_command(&repo_root, &["restore", "--staged", "--", &path]).await?;
     }
     Ok(())
 }
 
-pub(super) async fn revert_git_file_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
-    path: String,
-) -> Result<(), String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
+pub(crate) async fn revert_git_file_inner(repo_root: PathBuf, path: String) -> Result<(), String> {
     for path in action_paths_for_file(&repo_root, &path) {
         if run_git_command(
             &repo_root,
@@ -453,12 +424,7 @@ pub(super) async fn revert_git_file_inner(
     Ok(())
 }
 
-pub(super) async fn revert_git_all_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
-) -> Result<(), String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
+pub(crate) async fn revert_git_all_inner(repo_root: PathBuf) -> Result<(), String> {
     run_git_command(
         &repo_root,
         &["restore", "--staged", "--worktree", "--", "."],
@@ -467,74 +433,34 @@ pub(super) async fn revert_git_all_inner(
     run_git_command(&repo_root, &["clean", "-f", "-d"]).await
 }
 
-pub(super) async fn commit_git_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
-    message: String,
-) -> Result<(), String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
+pub(crate) async fn commit_git_inner(repo_root: PathBuf, message: String) -> Result<(), String> {
     run_git_command(&repo_root, &["commit", "-m", &message]).await
 }
 
-pub(super) async fn push_git_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
-) -> Result<(), String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
+pub(crate) async fn push_git_inner(repo_root: PathBuf) -> Result<(), String> {
     push_with_upstream(&repo_root).await
 }
 
-pub(super) async fn pull_git_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
-) -> Result<(), String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
+pub(crate) async fn pull_git_inner(repo_root: PathBuf) -> Result<(), String> {
     pull_with_default_strategy(&repo_root).await
 }
 
-pub(super) async fn fetch_git_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
-) -> Result<(), String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
+pub(crate) async fn fetch_git_inner(repo_root: PathBuf) -> Result<(), String> {
     fetch_with_default_remote(&repo_root).await
 }
 
-pub(super) async fn sync_git_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
-) -> Result<(), String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
+pub(crate) async fn sync_git_inner(repo_root: PathBuf) -> Result<(), String> {
     pull_with_default_strategy(&repo_root).await?;
     push_with_upstream(&repo_root).await
 }
 
-pub(super) async fn list_git_roots_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
-    depth: Option<usize>,
-) -> Result<Vec<String>, String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let root = PathBuf::from(&entry.path);
-    let depth = depth.unwrap_or(2).clamp(1, 6);
-    Ok(scan_git_roots(&root, depth, 200))
-}
-
-pub(super) async fn init_git_repo_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
+pub(crate) async fn init_git_repo_inner(
+    repo_root: PathBuf,
     branch: String,
     force: bool,
 ) -> Result<Value, String> {
     const INITIAL_COMMIT_MESSAGE: &str = "Initial commit";
 
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
     let branch = validate_branch_name(&branch)?;
 
     if Repository::open(&repo_root).is_ok() {
@@ -584,15 +510,12 @@ pub(super) async fn init_git_repo_inner(
     Ok(json!({ "status": "initialized" }))
 }
 
-pub(super) async fn create_github_repo_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
+pub(crate) async fn create_github_repo_inner(
+    repo_root: PathBuf,
     repo: String,
     visibility: String,
     branch: Option<String>,
 ) -> Result<Value, String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
     let repo = validate_normalized_repo_name(&validate_github_repo_name(&repo)?)?;
 
     let visibility_flag = match visibility.trim() {
@@ -718,12 +641,7 @@ pub(super) async fn create_github_repo_inner(
     }))
 }
 
-pub(super) async fn list_git_branches_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
-) -> Result<Value, String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
+pub(crate) async fn list_git_branches_inner(repo_root: PathBuf) -> Result<Value, String> {
     let repo = Repository::open(&repo_root).map_err(|e| e.to_string())?;
     let mut branches = Vec::new();
     let refs = repo
@@ -747,24 +665,18 @@ pub(super) async fn list_git_branches_inner(
     Ok(json!({ "branches": branches }))
 }
 
-pub(super) async fn checkout_git_branch_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
+pub(crate) async fn checkout_git_branch_inner(
+    repo_root: PathBuf,
     name: String,
 ) -> Result<(), String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
     let repo = Repository::open(&repo_root).map_err(|e| e.to_string())?;
     checkout_branch(&repo, &name).map_err(|e| e.to_string())
 }
 
-pub(super) async fn create_git_branch_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
+pub(crate) async fn create_git_branch_inner(
+    repo_root: PathBuf,
     name: String,
 ) -> Result<(), String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
     let repo = Repository::open(&repo_root).map_err(|e| e.to_string())?;
     let head = repo.head().map_err(|e| e.to_string())?;
     let target = head.peel_to_commit().map_err(|e| e.to_string())?;

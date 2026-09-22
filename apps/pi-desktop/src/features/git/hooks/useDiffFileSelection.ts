@@ -115,5 +115,6 @@ export function useDiffFileSelection({
     handleFileClick,
     handleDiffListClick,
     selectOnlyFile,
+    clearSelection,
   };
 }

@@ -5,10 +5,12 @@ import type { WorkspaceInfo } from "../../../types";
 import {
   addWorkspace,
   addWorkspaceFromGitUrl,
+  executeWorktreePlan,
   isWorkspacePathDir,
   listWorkspaces,
   renameWorktree,
   renameWorktreeUpstream,
+  removeWorktree,
   updateWorkspaceSettings,
 } from "../../../services/tauri";
 import { useWorkspaces } from "./useWorkspaces";
@@ -21,6 +23,7 @@ vi.mock("../../../services/tauri", () => ({
   addWorkspace: vi.fn(),
   addWorkspaceFromGitUrl: vi.fn(),
   addWorktree: vi.fn(),
+  executeWorktreePlan: vi.fn(),
   isWorkspacePathDir: vi.fn(),
   pickWorkspacePaths: vi.fn(),
   removeWorkspace: vi.fn(),
@@ -586,5 +589,34 @@ describe("useWorkspaces.addWorkspaceFromGitUrl", () => {
       "repo",
     );
     expect(result.current.activeWorkspace?.id).toBe("from-url");
+  });
+});
+
+describe("managed worktree operations", () => {
+  it("registers a workspace only after its reviewed plan finishes creating", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([workspaceOne]);
+    const managed: WorkspaceInfo = { ...worktree, worktree: { branch: "feature/old", managed: true, checkoutCount: 2 } };
+    vi.mocked(executeWorktreePlan).mockResolvedValue(managed);
+    const { result } = renderHook(() => useWorkspaces());
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      await result.current.addWorktreeAgent(workspaceOne, "feature/old", { planId: "reviewed", activate: false });
+    });
+    expect(executeWorktreePlan).toHaveBeenCalledWith("reviewed");
+    expect(result.current.workspaces.map((entry) => entry.id)).toEqual([workspaceOne.id, managed.id]);
+    expect(result.current.activeWorkspaceId).toBeNull();
+  });
+
+  it("retains the association when ordinary cleanup refuses dirty worktrees", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([worktree]);
+    vi.mocked(removeWorktree).mockRejectedValue(new Error("Worktree has uncommitted changes"));
+    const { result } = renderHook(() => useWorkspaces());
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => {
+      await expect(result.current.removeWorktree(worktree.id)).rejects.toThrow("uncommitted changes");
+    });
+    expect(removeWorktree).toHaveBeenCalledWith(worktree.id);
+    expect(result.current.workspaces).toEqual([worktree]);
+    expect(result.current.deletingWorktreeIds.size).toBe(0);
   });
 });

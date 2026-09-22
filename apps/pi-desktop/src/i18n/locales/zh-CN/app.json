@@ -43,6 +43,7 @@
       "unpin": "取消置顶",
       "pin": "置顶",
       "reload": "重新加载任务",
+      "editWorkspace": "编辑工作区…",
       "delete": "删除",
       "showIn": "在 {{fileManager}} 中显示",
       "showWorktreeFailed": "无法在 {{fileManager}} 中显示工作树",
@@ -143,6 +144,17 @@
     }
   },
   "header": {
+    "environment": {
+      "local": "Local",
+      "worktree": "Worktree",
+      "title": "当前工作环境",
+      "directory": "工作目录",
+      "copy": "复制路径",
+      "copied": "已复制",
+      "loading": "读取中…",
+      "unavailable": "无法读取",
+      "retry": "重试"
+    },
     "worktreeInfo": "工作树信息",
     "name": "名称",
     "confirmRename": "确认重命名",

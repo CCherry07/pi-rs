@@ -53,7 +53,7 @@ export function useMainAppWorktreeState({
   const activeRenamePrompt =
     renameWorktreePrompt?.workspaceId === activeWorkspace?.id ? renameWorktreePrompt : null;
   const worktreeRename: WorktreeRenameState | null =
-    isWorktreeWorkspace && activeWorkspace
+    isWorktreeWorkspace && activeWorkspace && !activeWorkspace.worktree?.managed
       ? {
           name: activeRenamePrompt?.name ?? worktreeLabel ?? "",
           error: activeRenamePrompt?.error ?? null,

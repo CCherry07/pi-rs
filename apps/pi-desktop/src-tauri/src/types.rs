@@ -190,6 +190,7 @@ impl WorkspaceInfo {
         if self.id != project.id {
             return Err("Project does not match workspace entry".into());
         }
+        self.name = project.name.clone();
         self.path = project.spec()?.cwd().to_string_lossy().into_owned();
         self.project = Some(project);
         Ok(self)
@@ -214,6 +215,8 @@ impl WorkspaceKind {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct WorktreeInfo {
     pub(crate) branch: String,
+    #[serde(default)]
+    pub(crate) managed: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -946,7 +949,25 @@ impl Default for AppSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppSettings, WorkspaceEntry, WorkspaceGroup, WorkspaceKind, WorkspaceSettings};
+    use super::{
+        AppSettings, WorkspaceEntry, WorkspaceGroup, WorkspaceKind, WorkspaceSettings, WorktreeInfo,
+    };
+
+    #[test]
+    fn worktree_management_marker_defaults_to_legacy_and_round_trips() {
+        let legacy: WorktreeInfo = serde_json::from_value(serde_json::json!({
+            "branch": "feature/legacy"
+        }))
+        .unwrap();
+        assert!(!legacy.managed);
+        let managed: WorktreeInfo = serde_json::from_value(serde_json::json!({
+            "branch": "feature/group",
+            "managed": true
+        }))
+        .unwrap();
+        assert!(managed.managed);
+        assert_eq!(serde_json::to_value(managed).unwrap()["managed"], true);
+    }
 
     #[test]
     fn app_settings_defaults_from_empty_json() {

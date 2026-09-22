@@ -574,8 +574,7 @@ pub(crate) async fn run_background_prompt(
     run_background_session(pi, session, prompt, model).await
 }
 
-#[cfg(test)]
-async fn run_background_prompt_in_cwd(
+pub(crate) async fn run_background_prompt_in_cwd(
     pi: &PiRuntimeState,
     cwd: &Path,
     prompt: String,
@@ -1767,6 +1766,8 @@ mod tests {
         let id = session.log().header().id.clone();
         project.roots[1].path = base.join("replacement");
         state.project_store().upsert(project).unwrap();
+        git2::Repository::init(base.join("shared")).unwrap();
+        git2::Repository::init(base.join("replacement")).unwrap();
         let saved = pi
             .workspace_spec(&state, "project", Some(&id))
             .await
@@ -1774,6 +1775,16 @@ mod tests {
         let draft = pi.workspace_spec(&state, "project", None).await.unwrap();
         assert_eq!(saved.roots()[1].path, base.join("shared"));
         assert_eq!(draft.roots()[1].path, base.join("replacement"));
+        let saved_git = crate::shared::git_targets::discover(saved.clone(), None);
+        assert!(saved_git
+            .checkouts
+            .iter()
+            .any(|checkout| checkout.workdir == base.join("shared").canonicalize().unwrap()));
+        assert!(!saved_git
+            .checkouts
+            .iter()
+            .any(|checkout| checkout.workdir == base.join("replacement").canonicalize().unwrap()));
+
         let listing = crate::workspaces::files::list_workspace_files_inner(saved.clone());
         assert_eq!(listing.files.len(), 2);
         let response =
@@ -1785,6 +1796,187 @@ mod tests {
             .await
             .is_err());
         assert!(!session.log().path().exists());
+    }
+
+    #[tokio::test]
+    async fn managed_worktree_session_reopens_with_its_checkout_and_cleans_up_without_losing_commits(
+    ) {
+        use crate::shared::{git_targets, git_ui_core, worktree_groups};
+        use pi_core::{WorkspaceRoot, WorkspaceRootId, WorkspaceSpec};
+        use pi_sdk::projects::Project;
+
+        fn commit_file(repo: &git2::Repository, contents: &str) -> git2::Oid {
+            let path = repo.workdir().unwrap().join("src/file.txt");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("src/file.txt")).unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let parent = repo.head().ok().map(|head| head.peel_to_commit().unwrap());
+            let signature = git2::Signature::now("Test", "test@example.invalid").unwrap();
+            repo.commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "Worktree lifecycle fixture",
+                &tree,
+                &parent.iter().collect::<Vec<_>>(),
+            )
+            .unwrap()
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let source_dir = base.join("source");
+        let shared_dir = base.join("shared");
+        for path in [&source_dir, &shared_dir] {
+            commit_file(&git2::Repository::init(path).unwrap(), "base\n");
+        }
+        let source = WorkspaceSpec::new(
+            vec![
+                WorkspaceRoot::external("source", "Source", &source_dir),
+                WorkspaceRoot::external("shared", "Shared", &shared_dir),
+            ],
+            WorkspaceRootId::new("source"),
+            source_dir.join("src"),
+        )
+        .unwrap();
+        let parent = crate::types::WorkspaceEntry {
+            id: "parent".into(),
+            name: "Parent".into(),
+            path: source_dir.to_string_lossy().into_owned(),
+            kind: Default::default(),
+            parent_id: None,
+            worktree: None,
+            settings: Default::default(),
+        };
+        let state = AppState {
+            workspaces: Mutex::new(HashMap::from([(parent.id.clone(), parent)])),
+            terminal_sessions: Default::default(),
+            storage_path: base.join("workspaces.json"),
+            settings_path: base.join("settings.json"),
+            app_settings: Default::default(),
+            dictation: Default::default(),
+        };
+        state
+            .project_store()
+            .upsert(Project::from_workspace("parent", "Parent", &source).unwrap())
+            .unwrap();
+        let plan = worktree_groups::prepare(
+            &state,
+            &base,
+            worktree_groups::WorktreeRequest {
+                parent_id: "parent".into(),
+                thread_id: None,
+                name: "Feature".into(),
+                copy_agents_md: false,
+                execution_root_id: None,
+                checkouts: vec![worktree_groups::CheckoutRequest {
+                    target: git_targets::target_at(&source_dir).unwrap(),
+                    branch: "feature/basic-worktree".into(),
+                    start_point: "HEAD".into(),
+                }],
+            },
+            source.clone(),
+        )
+        .await
+        .unwrap();
+        worktree_groups::create(&state, &plan.id, source)
+            .await
+            .unwrap();
+        let project = state.project(&plan.id).await.unwrap();
+        let destination = &plan.workspace.primary_root().path;
+        assert_eq!(project.resolve().unwrap(), plan.workspace);
+        assert_eq!(plan.workspace.cwd(), destination.join("src"));
+        assert_eq!(plan.workspace.roots()[1].path, shared_dir);
+
+        let agent_dir = base.join("agent");
+        let manager = MultiSessionManager::new(ScriptedFactory(Arc::default()));
+        let store = SessionStore::new(manager.clone(), agent_dir.clone());
+        let session = store
+            .start_scoped(SessionScope::project(&project).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(session.runtime().workspace().spec(), &plan.workspace);
+        assert!(!session.log().path().exists());
+        session
+            .submit("work in the isolated checkout")
+            .await
+            .unwrap();
+        let header = SessionLog::read(session.log().path()).unwrap().header;
+        assert_eq!(header.cwd, destination.join("src"));
+        assert_eq!(header.workspace().unwrap(), plan.workspace);
+        assert_eq!(
+            pi_sdk::projects::session_project_id(header.metadata.as_ref()),
+            Some(project.id.as_str())
+        );
+        manager.shutdown().await.unwrap();
+
+        // A fresh store must restore the saved environment, with no live handle to reuse.
+        let reopened_manager = MultiSessionManager::new(ScriptedFactory(Arc::default()));
+        let reopened_store = SessionStore::new(reopened_manager.clone(), agent_dir);
+        let reopened = reopened_store.open(&header.id).await.unwrap();
+        let workspace = reopened.runtime().workspace();
+        assert_eq!(workspace.spec(), &plan.workspace);
+        let inventory = git_targets::discover(workspace.spec().clone(), None);
+        assert_eq!(inventory.checkouts.len(), 2);
+        assert!(inventory
+            .checkouts
+            .iter()
+            .any(|checkout| checkout.workdir == shared_dir));
+        assert!(git_targets::resolve(
+            workspace.spec(),
+            Some(&git_targets::target_at(&source_dir).unwrap()),
+        )
+        .is_err());
+        let selected = git_targets::resolve(
+            workspace.spec(),
+            Some(&git_targets::target_at(destination).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(&selected, destination);
+        std::fs::write(source_dir.join("original-only.txt"), "source changes").unwrap();
+        std::fs::write(destination.join("src/file.txt"), "isolated changes\n").unwrap();
+        let status = git_ui_core::get_git_status_core(selected).await.unwrap();
+        assert_eq!(status["branchName"], "feature/basic-worktree");
+        assert_eq!(status["files"].as_array().unwrap().len(), 1);
+        assert_eq!(status["files"][0]["path"], "src/file.txt");
+        reopened
+            .submit("continue in the same checkout")
+            .await
+            .unwrap();
+        reopened_manager.shutdown().await.unwrap();
+
+        assert!(worktree_groups::remove(&state, &plan.id, false)
+            .await
+            .unwrap_err()
+            .contains("changes"));
+        assert!(destination.exists());
+        let commit = commit_file(
+            &git2::Repository::open(destination).unwrap(),
+            "isolated changes\n",
+        );
+        worktree_groups::remove(&state, &plan.id, false)
+            .await
+            .unwrap();
+        assert!(!destination.exists());
+        let source_repo = git2::Repository::open(&source_dir).unwrap();
+        assert_eq!(
+            source_repo
+                .find_reference("refs/heads/feature/basic-worktree")
+                .unwrap()
+                .target(),
+            Some(commit)
+        );
+        assert_eq!(
+            std::fs::read_to_string(source_dir.join("src/file.txt")).unwrap(),
+            "base\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(shared_dir.join("src/file.txt")).unwrap(),
+            "base\n"
+        );
     }
 
     #[tokio::test]

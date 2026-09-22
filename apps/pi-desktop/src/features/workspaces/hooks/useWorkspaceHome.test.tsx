@@ -53,7 +53,7 @@ describe("useWorkspaceHome", () => {
         activeWorkspace: workspace,
         models,
         selectedModelId: "openai/gpt-5.1-max",
-        addWorktreeAgent: vi.fn(),
+        requestWorktree: vi.fn(),
         startThreadForWorkspace,
         sendUserMessageToThread,
         reloadWorkspace,
@@ -73,7 +73,7 @@ describe("useWorkspaceHome", () => {
   });
 
   it("uses provider-qualified model identity for worktree runs", async () => {
-    const addWorktreeAgent = vi.fn().mockResolvedValue(worktreeWorkspace);
+    const requestWorktree = vi.fn().mockResolvedValue(worktreeWorkspace);
     const startThreadForWorkspace = vi.fn().mockResolvedValue("thread-1");
     const sendUserMessageToThread = vi.fn().mockResolvedValue(undefined);
     const seedThreadRunParams = vi.fn();
@@ -88,7 +88,7 @@ describe("useWorkspaceHome", () => {
         models,
         selectedModelId: null,
         seedThreadRunParams,
-        addWorktreeAgent,
+        requestWorktree,
         startThreadForWorkspace,
         sendUserMessageToThread,
       }),
@@ -119,7 +119,7 @@ describe("useWorkspaceHome", () => {
   });
 
   it("allows image-only local runs", async () => {
-    const addWorktreeAgent = vi.fn();
+    const requestWorktree = vi.fn();
     const startThreadForWorkspace = vi.fn().mockResolvedValue("thread-1");
     const sendUserMessageToThread = vi.fn().mockResolvedValue(undefined);
     const seedThreadRunParams = vi.fn();
@@ -134,7 +134,7 @@ describe("useWorkspaceHome", () => {
         models,
         selectedModelId: "openai/gpt-5.1-max",
         seedThreadRunParams,
-        addWorktreeAgent,
+        requestWorktree,
         startThreadForWorkspace,
         sendUserMessageToThread,
       }),
@@ -160,7 +160,7 @@ describe("useWorkspaceHome", () => {
   });
 
   it("blocks worktree runs without model selections", async () => {
-    const addWorktreeAgent = vi.fn();
+    const requestWorktree = vi.fn();
     const startThreadForWorkspace = vi.fn();
     const sendUserMessageToThread = vi.fn();
     vi.mocked(generateRunMetadata).mockResolvedValue({
@@ -173,7 +173,7 @@ describe("useWorkspaceHome", () => {
         activeWorkspace: workspace,
         models,
         selectedModelId: null,
-        addWorktreeAgent,
+        requestWorktree,
         startThreadForWorkspace,
         sendUserMessageToThread,
       }),
@@ -197,10 +197,10 @@ describe("useWorkspaceHome", () => {
   });
 
   it("captures partial failures for multi-instance worktree runs", async () => {
-    const addWorktreeAgent = vi
+    const requestWorktree = vi
       .fn()
       .mockResolvedValueOnce(worktreeWorkspace)
-      .mockResolvedValueOnce(null);
+      .mockRejectedValueOnce(new Error("Failed to create worktree"));
     const startThreadForWorkspace = vi.fn().mockResolvedValue("thread-1");
     const sendUserMessageToThread = vi.fn().mockResolvedValue(undefined);
     vi.mocked(generateRunMetadata).mockResolvedValue({
@@ -213,7 +213,7 @@ describe("useWorkspaceHome", () => {
         activeWorkspace: workspace,
         models,
         selectedModelId: null,
-        addWorktreeAgent,
+        requestWorktree,
         startThreadForWorkspace,
         sendUserMessageToThread,
       }),
@@ -235,7 +235,7 @@ describe("useWorkspaceHome", () => {
   });
 
   it("updates title after metadata resolves for local runs", async () => {
-    const addWorktreeAgent = vi.fn();
+    const requestWorktree = vi.fn();
     const startThreadForWorkspace = vi.fn().mockResolvedValue("thread-1");
     const sendUserMessageToThread = vi.fn().mockResolvedValue(undefined);
     let resolveMetadata: (value: { title: string; worktreeName: string }) => void =
@@ -251,7 +251,7 @@ describe("useWorkspaceHome", () => {
         activeWorkspace: workspace,
         models,
         selectedModelId: "openai/gpt-5.1-max",
-        addWorktreeAgent,
+        requestWorktree,
         startThreadForWorkspace,
         sendUserMessageToThread,
       }),
@@ -276,7 +276,7 @@ describe("useWorkspaceHome", () => {
   });
 
   it("keeps attachments when worktree selection is missing", async () => {
-    const addWorktreeAgent = vi.fn();
+    const requestWorktree = vi.fn();
     const startThreadForWorkspace = vi.fn();
     const sendUserMessageToThread = vi.fn();
     vi.mocked(generateRunMetadata).mockResolvedValue({
@@ -289,7 +289,7 @@ describe("useWorkspaceHome", () => {
         activeWorkspace: workspace,
         models,
         selectedModelId: null,
-        addWorktreeAgent,
+        requestWorktree,
         startThreadForWorkspace,
         sendUserMessageToThread,
       }),

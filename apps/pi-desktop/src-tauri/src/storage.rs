@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use crate::types::{AppSettings, WorkspaceEntry, WorkspaceSettings};
 use crate::utils::normalize_windows_namespace_path;
@@ -93,13 +94,36 @@ pub(crate) fn read_workspaces(path: &PathBuf) -> Result<HashMap<String, Workspac
         .collect())
 }
 
-pub(crate) fn write_workspaces(path: &PathBuf, entries: &[WorkspaceEntry]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
+pub(crate) fn write_workspaces(path: &Path, entries: &[WorkspaceEntry]) -> Result<(), String> {
     let (entries, _) = normalize_workspace_entries(entries.iter().cloned());
-    let data = serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())?;
-    std::fs::write(path, data).map_err(|e| e.to_string())
+    write_json_atomic(path, &entries)
+}
+
+pub(crate) fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temporary_path = parent.join(format!(".pi-{}.tmp", uuid::Uuid::new_v4()));
+    let mut temporary = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary_path)
+        .map_err(|error| error.to_string())?;
+    let result = (|| {
+        serde_json::to_writer_pretty(&mut temporary, value).map_err(|error| error.to_string())?;
+        temporary
+            .write_all(b"\n")
+            .map_err(|error| error.to_string())?;
+        temporary.sync_all().map_err(|error| error.to_string())?;
+        drop(temporary);
+        std::fs::rename(&temporary_path, path).map_err(|error| error.to_string())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary_path);
+    }
+    result
 }
 
 pub(crate) fn read_settings(path: &PathBuf) -> Result<AppSettings, String> {
@@ -152,9 +176,64 @@ fn migrate_follow_up_message_behavior(value: &mut Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_settings, read_workspaces, write_settings, write_workspaces};
+    use super::{
+        read_settings, read_workspaces, write_json_atomic, write_settings, write_workspaces,
+    };
     use crate::types::{AppSettings, WorkspaceEntry, WorkspaceKind, WorkspaceSettings};
     use uuid::Uuid;
+
+    #[test]
+    fn atomic_json_write_replaces_existing_document_and_cleans_temporary_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("document.json");
+        write_json_atomic(&path, &serde_json::json!({ "version": 1 })).unwrap();
+        let next = serde_json::json!({ "version": 2, "members": ["first", "second"] });
+        write_json_atomic(&path, &next).unwrap();
+
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored, next);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_json_write_preserves_document_after_partial_serialization_failure() {
+        struct FailsAfterWriting;
+
+        impl serde::Serialize for FailsAfterWriting {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                use serde::ser::SerializeSeq;
+                let mut sequence = serializer.serialize_seq(Some(2))?;
+                sequence.serialize_element("partially written")?;
+                Err(serde::ser::Error::custom("serialization failed"))
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("document.json");
+        let original = b"{\"version\": 1}\n";
+        std::fs::write(&path, original).unwrap();
+
+        assert!(write_json_atomic(&path, &FailsAfterWriting).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_json_write_preserves_destination_after_replacement_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("document.json");
+        std::fs::create_dir(&path).unwrap();
+        let existing = path.join("existing");
+        std::fs::write(&existing, b"preserve this").unwrap();
+
+        assert!(write_json_atomic(&path, &serde_json::json!({ "version": 2 })).is_err());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"preserve this");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn write_read_workspaces_persists_sort_and_group() {

@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import "./styles/base.css";
 import "./styles/ds-tokens.css";
+import "./styles/ds-scrollbars.css";
 import "./styles/ds-modal.css";
 import "./styles/ds-toast.css";
 import "./styles/ds-panel.css";
@@ -28,6 +29,7 @@ import "./styles/plan.css";
 import "./styles/about.css";
 import "./styles/tabbar.css";
 import "./styles/worktree-modal.css";
+import "./styles/worktree-delivery.css";
 import "./styles/clone-modal.css";
 import "./styles/workspace-from-url-modal.css";
 import "./styles/branch-switcher-modal.css";

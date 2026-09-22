@@ -315,6 +315,7 @@ function buildPrimarySurface({
       isThreadPinned: threadPinning.isThreadPinned,
       getPinTimestamp: threadPinning.getPinTimestamp,
       onRenameThread: sidebarHandlers.onRenameThread,
+      onEditWorkspace: sidebarHandlers.onEditWorkspace,
       onDeleteWorkspace: sidebarHandlers.onDeleteWorkspace,
       onDeleteWorktree: sidebarHandlers.onDeleteWorktree,
       onLoadOlderThreads: sidebarHandlers.onLoadOlderThreads,
@@ -457,6 +458,9 @@ function buildPrimarySurface({
     mainHeaderProps: activeWorkspace
       ? {
           workspace: activeWorkspace,
+          workspaceInventory: gitState.repositories.inventory,
+          workspaceError: gitState.repositories.error,
+          onRefreshWorkspace: gitState.repositories.refresh,
           parentName: worktreeState.activeParentWorkspace?.name ?? null,
           worktreeLabel: worktreeState.worktreeLabel,
           worktreeRename: worktreeState.worktreeRename ?? undefined,
@@ -575,8 +579,13 @@ function buildGitSurface({
       canRevealGeneralPrompts: Boolean(activeWorkspace),
     },
     gitDiffPanelProps: {
+      onOpenWorktreeDelivery: gitState.worktreeDelivery.canOpen ? gitState.worktreeDelivery.open : undefined,
+      repositoryOptions: gitState.repositories.options,
+      selectedRepository: gitState.repositories.selected,
+      onSelectRepository: gitState.repositories.select,
+      repositoryScope: gitState.gitWorkspace?.gitScope,
       workspaceId: activeWorkspace?.id ?? null,
-      workspacePath: activeWorkspace?.path ?? null,
+      workspacePath: gitState.activeGitRoot,
       mode: gitState.gitPanelMode,
       onModeChange: gitState.handleGitPanelModeChange,
       filePanelMode: gitState.filePanelMode,
@@ -597,7 +606,7 @@ function buildGitSurface({
       worktreeApplySuccess: worktreeState.isWorktreeWorkspace
         ? gitState.worktreeApplySuccess
         : false,
-      onApplyWorktreeChanges: worktreeState.isWorktreeWorkspace
+      onApplyWorktreeChanges: gitState.canApplyWorktree
         ? gitState.handleApplyWorktreeChanges
         : undefined,
       branchName:
@@ -654,7 +663,6 @@ function buildGitSurface({
       onClearGitRoot: () => {
         void gitState.handleSetGitRoot(null);
       },
-      onPickGitRoot: gitState.handlePickGitRoot,
       onInitGitRepo: openInitGitRepoPrompt,
       initGitRepoLoading: gitState.initGitRepoLoading,
       onStageAllChanges: gitState.handleStageGitAll,

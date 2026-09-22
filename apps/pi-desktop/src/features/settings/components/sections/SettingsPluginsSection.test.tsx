@@ -60,7 +60,7 @@ describe("SettingsPluginsSection", () => {
     fireEvent.click(button("Install plugin"));
     fireEvent.click(button("Choose local package folder"));
     await waitFor(() => expect(screen.getByLabelText("Source")).toHaveProperty("value", "/absolute/local-package"));
-    expect(dirty).toHaveBeenLastCalledWith(true);
+    await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(true));
     expect(button("Install trusted plugin")).toHaveProperty("disabled", true);
     fireEvent.change(screen.getByLabelText("Version constraint (optional)"), { target: { value: "^1" } });
     fireEvent.change(screen.getByLabelText("Registry URL (optional)"), { target: { value: "https://registry.example/index.json" } });

@@ -1,4 +1,15 @@
+import scrollbarStyles from "../../../styles/ds-scrollbars.css?raw";
+
 export const DIFF_VIEWER_SCROLL_CSS = `
+${scrollbarStyles}
+
+/* The diff can use a different color scheme from the surrounding app. */
+:host {
+  --ds-scrollbar-thumb: color-mix(in srgb, var(--diffs-fg) 30%, transparent);
+  --ds-scrollbar-thumb-hover: color-mix(in srgb, var(--diffs-fg) 50%, transparent);
+  --ds-scrollbar-thumb-active: color-mix(in srgb, var(--diffs-fg) 60%, transparent);
+}
+
 [data-column-number],
 [data-buffer],
 [data-annotation-content] {

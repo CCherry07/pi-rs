@@ -131,6 +131,8 @@ export default function MainApp() {
     activeWorkspaceId,
     setActiveWorkspaceId,
     addWorkspace,
+    workspaceProjectPrompt,
+    editWorkspace,
     addWorkspaceFromPath,
     addWorkspaceFromGitUrl,
     addWorkspacesFromPaths,
@@ -451,7 +453,7 @@ export default function MainApp() {
   });
   const gitState = useMainAppGitState({
     activeWorkspace,
-    activeWorkspaceId,
+    activeThreadId,
     activeItems,
     activeTab,
     tabletTab,
@@ -464,7 +466,6 @@ export default function MainApp() {
       splitChatDiffView: appSettings.splitChatDiffView,
     },
     addDebugEntry,
-    updateWorkspaceSettings,
     commitMessageModelId,
   });
   const {
@@ -793,6 +794,8 @@ export default function MainApp() {
       renameThread,
     },
     git: {
+      workspace: gitState.gitWorkspace,
+      worktreeDelivery: gitState.worktreeDelivery,
       checkoutBranch: handleCheckoutBranch,
       initGitRepo: handleInitGitRepo,
       createGitHubRepo: handleCreateGitHubRepo,
@@ -801,6 +804,7 @@ export default function MainApp() {
       createGitHubRepoLoading,
     },
     workspacePrompts: {
+      workspaceProjectPrompt,
       addWorktreeAgent,
       addCloneAgent,
       updateWorkspaceSettings,
@@ -945,8 +949,7 @@ export default function MainApp() {
       seedThreadRunParams: patchThreadRunParams,
       startCompact,
       startReload,
-      addWorktreeAgent,
-      handleWorktreeCreated,
+      requestWorktree: modalActions.requestWorktree,
       addDebugEntry,
     },
   });
@@ -1183,6 +1186,7 @@ export default function MainApp() {
       removeImagesForThread,
       refreshThread,
       handleRenameThread,
+      editWorkspace,
       removeWorkspace,
       removeWorktree,
       loadOlderThreadsForWorkspace,
@@ -1506,7 +1510,7 @@ export default function MainApp() {
       appModalsProps,
     },
     gitHubPanelDataProps: {
-      activeWorkspace,
+      activeWorkspace: gitState.gitWorkspace,
       gitPanelMode,
       shouldLoadDiffs,
       diffSource,

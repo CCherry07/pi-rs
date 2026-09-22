@@ -87,3 +87,77 @@
   font-size: 12px;
   color: var(--ds-text-subtle);
 }
+
+.worktree-modal-options {
+  border-top: 1px solid var(--ds-border-subtle);
+  padding-top: 12px;
+}
+
+.worktree-modal-options summary {
+  color: var(--ds-text-subtle);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.worktree-modal-options-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 12px;
+}
+
+.worktree-modal-checkout,
+.worktree-modal-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--ds-border-subtle);
+  border-radius: 10px;
+  min-width: 0;
+}
+
+.worktree-modal-checkout-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.worktree-modal-checkout-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.worktree-modal-checkout-fields label {
+  display: flex;
+  flex: 1 1 180px;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.worktree-modal-mapping {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.worktree-modal-mapping dt {
+  font-weight: 600;
+}
+
+.worktree-modal-mapping dd {
+  margin: 4px 0 0;
+  color: var(--ds-text-subtle);
+  overflow-wrap: anywhere;
+}
+
+.worktree-modal-preview code {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}

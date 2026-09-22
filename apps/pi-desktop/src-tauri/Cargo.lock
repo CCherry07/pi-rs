@@ -4034,6 +4034,7 @@ dependencies = [
  "cpal",
  "dotenvy",
  "fix-path-env",
+ "fs2",
  "futures-util",
  "git2",
  "ignore",

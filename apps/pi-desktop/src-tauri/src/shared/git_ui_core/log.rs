@@ -1,20 +1,14 @@
-use std::collections::HashMap;
+use std::path::PathBuf;
 
 use git2::{BranchType, Repository, Sort};
-use tokio::sync::Mutex;
 
-use crate::git_utils::{commit_to_entry, resolve_git_root};
-use crate::types::{GitLogResponse, WorkspaceEntry};
+use crate::git_utils::commit_to_entry;
+use crate::types::GitLogResponse;
 
-use super::context::workspace_entry_for_id;
-
-pub(super) async fn get_git_log_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
+pub(crate) async fn get_git_log_inner(
+    repo_root: PathBuf,
     limit: Option<usize>,
 ) -> Result<GitLogResponse, String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
     let repo = Repository::open(&repo_root).map_err(|e| e.to_string())?;
     let max_items = limit.unwrap_or(40);
     let mut revwalk = repo.revwalk().map_err(|e| e.to_string())?;
@@ -100,12 +94,7 @@ pub(super) async fn get_git_log_inner(
     })
 }
 
-pub(super) async fn get_git_remote_inner(
-    workspaces: &Mutex<HashMap<String, WorkspaceEntry>>,
-    workspace_id: String,
-) -> Result<Option<String>, String> {
-    let entry = workspace_entry_for_id(workspaces, &workspace_id).await?;
-    let repo_root = resolve_git_root(&entry)?;
+pub(crate) async fn get_git_remote_inner(repo_root: PathBuf) -> Result<Option<String>, String> {
     let repo = Repository::open(&repo_root).map_err(|e| e.to_string())?;
     let remotes = repo.remotes().map_err(|e| e.to_string())?;
     let name = if remotes.iter().any(|remote| remote == Some("origin")) {

@@ -48,10 +48,9 @@ type UseWorkspaceHomeOptions = {
       serviceTier: ServiceTier | null | undefined;
     },
   ) => void;
-  addWorktreeAgent: (
+  requestWorktree: (
     workspace: WorkspaceInfo,
     branch: string,
-    options?: { activate?: boolean },
   ) => Promise<WorkspaceInfo | null>;
   startThreadForWorkspace: (
     workspaceId: string,
@@ -69,7 +68,6 @@ type UseWorkspaceHomeOptions = {
     },
   ) => Promise<void | SendMessageResult>;
   reloadWorkspace?: () => Promise<void>;
-  onWorktreeCreated?: (worktree: WorkspaceInfo, parent: WorkspaceInfo) => Promise<void> | void;
 };
 
 type WorkspaceHomeState = {
@@ -192,11 +190,10 @@ export function useWorkspaceHome({
   effort = null,
   serviceTier = undefined,
   seedThreadRunParams,
-  addWorktreeAgent,
+  requestWorktree,
   startThreadForWorkspace,
   sendUserMessageToThread,
   reloadWorkspace = noopReloadWorkspace,
-  onWorktreeCreated,
 }: UseWorkspaceHomeOptions) {
   const { t } = useTranslation("workspaces");
   const [state, setState] = useState<WorkspaceHomeState>({
@@ -455,7 +452,9 @@ export function useWorkspaceHome({
         ...prev.runsByWorkspace,
         [activeWorkspaceId]: [run, ...(prev.runsByWorkspace[activeWorkspaceId] ?? [])],
       },
-      draftsByWorkspace: { ...prev.draftsByWorkspace, [activeWorkspaceId]: "" },
+      draftsByWorkspace: runMode === "local"
+        ? { ...prev.draftsByWorkspace, [activeWorkspaceId]: "" }
+        : prev.draftsByWorkspace,
     }));
 
     let worktreeBaseName: string | null = null;
@@ -494,6 +493,7 @@ export function useWorkspaceHome({
     const instances: WorkspaceHomeRunInstance[] = [];
     let runError: string | null = null;
     const instanceErrors: Array<{ message: string }> = [];
+    let cancelled = false;
     try {
       if (runMode === "local") {
         try {
@@ -536,7 +536,7 @@ export function useWorkspaceHome({
           0,
         );
         const branchBaseFallback = worktreeSlugBase ?? buildWorktreeBranch(prompt);
-        for (const selection of selectedModels) {
+        worktreeRuns: for (const selection of selectedModels) {
           const label = resolveModelLabel(selection.model, selection.modelId);
           for (let index = 0; index < selection.count; index += 1) {
             instanceCounter += 1;
@@ -544,18 +544,13 @@ export function useWorkspaceHome({
               totalInstanceCount > 1 ? `-${instanceCounter}` : "";
             const branch = `${branchBaseFallback}${instanceSuffix}`;
             try {
-              const worktreeWorkspace = await addWorktreeAgent(
+              const worktreeWorkspace = await requestWorktree(
                 activeWorkspace,
                 branch,
-                { activate: false },
               );
               if (!worktreeWorkspace) {
-                throw new Error(t("worktree.createFailed"));
-              }
-              try {
-                await onWorktreeCreated?.(worktreeWorkspace, activeWorkspace);
-              } catch {
-                // Setup script errors are handled by the caller; runs should still proceed.
+                cancelled = true;
+                break worktreeRuns;
               }
               const threadId = await startThreadForWorkspace(worktreeWorkspace.id, {
                 activate: false,
@@ -602,11 +597,15 @@ export function useWorkspaceHome({
             failed: failureCount,
           });
         }
+        if (cancelled && instances.length > 0) {
+          runError ??= t("home.reviewCancelled");
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       runError ??= message;
     } finally {
+      const cancelledBeforeStart = cancelled && instances.length === 0 && instanceErrors.length === 0;
       let status: WorkspaceHomeRun["status"] = "ready";
       if (instances.length === 0) {
         runError ??= t("home.allFailed");
@@ -614,23 +613,29 @@ export function useWorkspaceHome({
       } else if (runError) {
         status = "partial";
       }
-      updateRunState(activeWorkspaceId, runId, {
-        instances,
-        status,
-        error: runError,
-        instanceErrors,
-      });
-      if (runError && status === "failed") {
+      if (cancelledBeforeStart) {
+        setState((prev) => ({ ...prev, runsByWorkspace: {
+          ...prev.runsByWorkspace,
+          [activeWorkspaceId]: (prev.runsByWorkspace[activeWorkspaceId] ?? []).filter((entry) => entry.id !== runId),
+        } }));
+      } else {
+        updateRunState(activeWorkspaceId, runId, { instances, status, error: runError, instanceErrors });
+      }
+      if (!cancelledBeforeStart && runError && status === "failed") {
         setWorkspaceError(runError);
+      }
+      if (runMode === "worktree" && !cancelled && instances.length > 0 && instanceErrors.length === 0) {
+        setState((prev) => prev.draftsByWorkspace[activeWorkspaceId] === draft ? {
+          ...prev, draftsByWorkspace: { ...prev.draftsByWorkspace, [activeWorkspaceId]: "" },
+        } : prev);
       }
       setSubmitting(false);
     }
-    return true;
+    return runMode === "local" || (!cancelled && instances.length > 0 && instanceErrors.length === 0);
   }, [
     activeWorkspace,
     activeWorkspaceId,
-    addWorktreeAgent,
-    onWorktreeCreated,
+    requestWorktree,
     draft,
     effort,
     isSubmitting,

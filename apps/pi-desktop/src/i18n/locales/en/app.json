@@ -43,6 +43,7 @@
       "unpin": "Unpin",
       "pin": "Pin",
       "reload": "Reload threads",
+      "editWorkspace": "Edit workspace…",
       "delete": "Delete",
       "showIn": "Show in {{fileManager}}",
       "showWorktreeFailed": "Couldn't show worktree in {{fileManager}}",
@@ -143,6 +144,17 @@
     }
   },
   "header": {
+    "environment": {
+      "local": "Local",
+      "worktree": "Worktree",
+      "title": "Current environment",
+      "directory": "Working directory",
+      "copy": "Copy path",
+      "copied": "Copied",
+      "loading": "Loading…",
+      "unavailable": "Unavailable",
+      "retry": "Retry"
+    },
     "worktreeInfo": "Worktree info",
     "name": "Name",
     "confirmRename": "Confirm rename",

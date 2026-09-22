@@ -990,7 +990,6 @@
     overflow-x: auto;
     gap: 6px;
     padding-bottom: 2px;
-    scrollbar-width: thin;
   }
 
   .app.layout-phone .composer-context {

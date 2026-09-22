@@ -4,15 +4,25 @@ import type { BranchInfo, WorkspaceInfo } from "../../../types";
 import type { SettingsViewProps } from "../../settings/components/SettingsView";
 import { useRenameThreadPrompt } from "../../threads/hooks/useRenameThreadPrompt";
 import { useClonePrompt } from "../../workspaces/hooks/useClonePrompt";
+import type { useWorktreeDelivery } from "../../workspaces/hooks/useWorktreeDelivery";
 import { useWorktreePrompt } from "../../workspaces/hooks/useWorktreePrompt";
 import { useWorkspaceFromUrlPrompt } from "../../workspaces/hooks/useWorkspaceFromUrlPrompt";
 import type { BranchSwitcherState } from "../../git/hooks/useBranchSwitcher";
-import { useGitBranches } from "../../git/hooks/useGitBranches";
+import type { useWorkspaceProjectPrompt } from "../../workspaces/hooks/useWorkspaceProjectPrompt";
+
+const CreateWorkspacePrompt = lazy(() =>
+  import("../../workspaces/components/CreateWorkspacePrompt").then((module) => ({
+    default: module.CreateWorkspacePrompt,
+  })),
+);
 
 const RenameThreadPrompt = lazy(() =>
   import("../../threads/components/RenameThreadPrompt").then((module) => ({
     default: module.RenameThreadPrompt,
   })),
+);
+const WorktreeDeliveryDialog = lazy(() =>
+  import("../../workspaces/components/WorktreeDeliveryDialog").then((module) => ({ default: module.WorktreeDeliveryDialog })),
 );
 const WorktreePrompt = lazy(() =>
   import("../../workspaces/components/WorktreePrompt").then((module) => ({
@@ -50,6 +60,7 @@ type WorkspaceFromUrlPromptState = ReturnType<
 >["workspaceFromUrlPrompt"];
 
 export type AppModalsProps = {
+  workspaceProjectPrompt: ReturnType<typeof useWorkspaceProjectPrompt>;
   renamePrompt: RenamePromptState;
   onRenamePromptChange: (value: string) => void;
   onRenamePromptCancel: () => void;
@@ -69,6 +80,7 @@ export type AppModalsProps = {
   onInitGitRepoPromptPrivateChange: (value: boolean) => void;
   onInitGitRepoPromptCancel: () => void;
   onInitGitRepoPromptConfirm: () => void;
+  worktreeDelivery: ReturnType<typeof useWorktreeDelivery>;
   worktreePrompt: WorktreePromptState;
   onWorktreePromptNameChange: (value: string) => void;
   onWorktreePromptChange: (value: string) => void;
@@ -76,6 +88,7 @@ export type AppModalsProps = {
   onWorktreeSetupScriptChange: (value: string) => void;
   onWorktreePromptCancel: () => void;
   onWorktreePromptConfirm: () => void;
+  worktreePlanning: Pick<ReturnType<typeof useWorktreePrompt>, "reviewPrompt" | "updateCheckout" | "updateExecutionRoot">;
   clonePrompt: ClonePromptState;
   onClonePromptCopyNameChange: (value: string) => void;
   onClonePromptChooseCopiesFolder: () => void;
@@ -106,6 +119,7 @@ export type AppModalsProps = {
 };
 
 export const AppModals = memo(function AppModals({
+  workspaceProjectPrompt,
   renamePrompt,
   onRenamePromptChange,
   onRenamePromptCancel,
@@ -119,12 +133,14 @@ export const AppModals = memo(function AppModals({
   onInitGitRepoPromptCancel,
   onInitGitRepoPromptConfirm,
   worktreePrompt,
+  worktreeDelivery,
   onWorktreePromptNameChange,
   onWorktreePromptChange,
   onWorktreePromptCopyAgentsMdChange,
   onWorktreeSetupScriptChange,
   onWorktreePromptCancel,
   onWorktreePromptConfirm,
+  worktreePlanning,
   clonePrompt,
   onClonePromptCopyNameChange,
   onClonePromptChooseCopiesFolder,
@@ -153,12 +169,23 @@ export const AppModals = memo(function AppModals({
   SettingsViewComponent,
   settingsProps,
 }: AppModalsProps) {
-  const { branches: worktreeBranches } = useGitBranches({
-    activeWorkspace: worktreePrompt?.workspace ?? null,
-  });
-
   return (
     <>
+      {workspaceProjectPrompt.prompt && (
+        <Suspense fallback={null}>
+          <CreateWorkspacePrompt
+            {...workspaceProjectPrompt.prompt}
+            onNameChange={workspaceProjectPrompt.updateName}
+            onChooseDirectories={workspaceProjectPrompt.chooseDirectories}
+            onRemoveDirectory={workspaceProjectPrompt.removeDirectory}
+            onPrimaryRootChange={workspaceProjectPrompt.updatePrimaryRoot}
+            onCancel={workspaceProjectPrompt.cancel}
+            onConfirm={workspaceProjectPrompt.confirm}
+            onRetryLoad={workspaceProjectPrompt.prompt.mode === "edit" && !workspaceProjectPrompt.prompt.project
+              ? workspaceProjectPrompt.retryLoad : undefined}
+          />
+        </Suspense>
+      )}
       {renamePrompt && (
         <Suspense fallback={null}>
           <RenameThreadPrompt
@@ -189,6 +216,9 @@ export const AppModals = memo(function AppModals({
           />
         </Suspense>
       )}
+      {worktreeDelivery.state && (
+        <Suspense fallback={null}><WorktreeDeliveryDialog delivery={worktreeDelivery} /></Suspense>
+      )}
       {worktreePrompt && (
         <Suspense fallback={null}>
           <WorktreePrompt
@@ -196,7 +226,6 @@ export const AppModals = memo(function AppModals({
             name={worktreePrompt.name}
             branch={worktreePrompt.branch}
             branchWasEdited={worktreePrompt.branchWasEdited}
-            branchSuggestions={worktreeBranches}
             copyAgentsMd={worktreePrompt.copyAgentsMd}
             setupScript={worktreePrompt.setupScript}
             scriptError={worktreePrompt.scriptError}
@@ -209,6 +238,15 @@ export const AppModals = memo(function AppModals({
             onSetupScriptChange={onWorktreeSetupScriptChange}
             onCancel={onWorktreePromptCancel}
             onConfirm={onWorktreePromptConfirm}
+            inventory={worktreePrompt.inventory}
+            checkouts={worktreePrompt.checkouts}
+            executionRootId={worktreePrompt.executionRootId}
+            plan={worktreePrompt.plan}
+            isLoading={worktreePrompt.isLoading}
+            isPreparing={worktreePrompt.isPreparing}
+            onReview={worktreePlanning.reviewPrompt}
+            onCheckoutChange={worktreePlanning.updateCheckout}
+            onExecutionRootChange={worktreePlanning.updateExecutionRoot}
           />
         </Suspense>
       )}

@@ -55,7 +55,7 @@ export function ProjectRootsEditor({ workspace }: { workspace: WorkspaceInfo }) 
                   checked={isPrimary}
                   disabled={saving || project.roots.length === 1}
                   aria-label={t("projects.roots.selectPrimary", { name: root.name })}
-                  onChange={() => void save({ ...project, primaryRoot: root.id })}
+                  onChange={() => void save({ ...project, primaryRoot: root.id, executionDir: null })}
                 />
                 <Folder className="settings-project-root-icon" aria-hidden />
                 <span className="settings-project-root-copy">
@@ -85,7 +85,8 @@ export function ProjectRootsEditor({ workspace }: { workspace: WorkspaceInfo }) 
                   aria-label={t("projects.roots.removeNamed", { name: root.name })}
                   onClick={() => {
                     const roots = project.roots.filter((candidate) => candidate.id !== root.id);
-                    void save({ ...project, roots, primaryRoot: isPrimary ? roots[0].id : project.primaryRoot });
+                    void save({ ...project, roots, primaryRoot: isPrimary ? roots[0].id : project.primaryRoot,
+                      executionDir: isPrimary ? null : project.executionDir });
                   }}
                 >
                   <X aria-hidden />
