@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.8.4](https://github.com/CCherry07/pi-rs/compare/v0.8.3...v0.8.4) (2026-09-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* unify agent/session plugins and consolidate native tooling
+
+### Features
+
+* add multi-root projects with session-scoped workspaces ([8ccec73](https://github.com/CCherry07/pi-rs/commit/8ccec73fc8b24a1b38f3701d20af8dd398f2c2a3))
+* **desktop:** add multi-root workspaces and managed worktree delivery ([f5a1446](https://github.com/CCherry07/pi-rs/commit/f5a1446639918d2462c89cede4013c12314779b3))
+* **desktop:** add session-aware multi-root file browsing and mentions ([b503753](https://github.com/CCherry07/pi-rs/commit/b50375356f2d38088273ca4c356256ee389b3f47))
+* **desktop:** compact sidebar rows with accessible hover cards ([efb1344](https://github.com/CCherry07/pi-rs/commit/efb13440ee98a07f8d094a4dcb1e2f6587191283))
+* **sdk:** add runtime feature flags and rename ProductConfig to Config ([650c6c9](https://github.com/CCherry07/pi-rs/commit/650c6c9e573ce5815874a2bd31b93c01171ef37c))
+
+
+### Code Refactoring
+
+* unify agent/session plugins and consolidate native tooling ([13667a4](https://github.com/CCherry07/pi-rs/commit/13667a4ea04283d3fd2f2177feb374f2c5560d9c))
+
 ## [0.8.3](https://github.com/CCherry07/pi-rs/compare/v0.8.2...v0.8.3) (2026-09-16)
 
 
