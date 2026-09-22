@@ -6,6 +6,7 @@ import type { ThreadStatusById } from "../../../utils/threadStatus";
 import { ThreadList } from "./ThreadList";
 import { ThreadLoading } from "./ThreadLoading";
 import { WorktreeCard } from "./WorktreeCard";
+import type { WorkspaceHoverAction } from "./WorkspaceHoverContents";
 import { getVisibleThreadListState } from "./threadSearchUtils";
 
 type ThreadRowsResult = {
@@ -39,6 +40,7 @@ type WorktreeSectionProps = {
   isThreadPinned: (workspaceId: string, threadId: string) => boolean;
   getPinTimestamp: (workspaceId: string, threadId: string) => number | null;
   pinnedThreadsVersion: number;
+  getWorkspaceActions: (workspace: WorkspaceInfo) => WorkspaceHoverAction[];
   onSelectWorkspace: (id: string) => void;
   onToggleWorkspaceCollapse: (workspaceId: string, collapsed: boolean) => void;
   onSelectThread: (workspaceId: string, threadId: string) => void;
@@ -76,6 +78,7 @@ export function WorktreeSection({
   isThreadPinned,
   getPinTimestamp,
   pinnedThreadsVersion,
+  getWorkspaceActions,
   onSelectWorkspace,
   onToggleWorkspaceCollapse,
   onSelectThread,
@@ -146,6 +149,7 @@ export function WorktreeSection({
               worktree={worktree}
               isActive={worktree.id === activeWorkspaceId}
               isDeleting={deletingWorktreeIds.has(worktree.id)}
+              actions={getWorkspaceActions(worktree)}
               onSelectWorkspace={onSelectWorkspace}
               onShowWorktreeMenu={onShowWorktreeMenu}
               onToggleWorkspaceCollapse={onToggleWorkspaceCollapse}

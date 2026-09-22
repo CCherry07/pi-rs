@@ -5,10 +5,14 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTranslation } from "react-i18next";
 
 import type { WorkspaceInfo } from "../../../types";
+import type { WorkspaceHoverAction } from "../components/WorkspaceHoverContents";
 import { pushErrorToast } from "../../../services/toasts";
 import { fileManagerName } from "../../../utils/platformPaths";
 
 type SidebarMenuHandlers = {
+  onAddAgent: (workspace: WorkspaceInfo) => void;
+  onAddWorktreeAgent: (workspace: WorkspaceInfo) => void;
+  onAddCloneAgent: (workspace: WorkspaceInfo) => void;
   onDeleteThread: (workspaceId: string, threadId: string) => void;
   onSyncThread: (workspaceId: string, threadId: string) => void;
   onPinThread: (workspaceId: string, threadId: string) => void;
@@ -21,7 +25,28 @@ type SidebarMenuHandlers = {
   onDeleteWorktree: (workspaceId: string) => void;
 };
 
+async function showWorkspaceActionsMenu(
+  event: MouseEvent,
+  actions: WorkspaceHoverAction[],
+) {
+  event.preventDefault();
+  event.stopPropagation();
+  const items = await Promise.all(
+    actions.map((action) => MenuItem.new({
+      text: action.label,
+      action: action.onSelect,
+    })),
+  );
+  const menu = await Menu.new({ items });
+  const window = getCurrentWindow();
+  const position = new LogicalPosition(event.clientX, event.clientY);
+  await menu.popup(position, window);
+}
+
 export function useSidebarMenus({
+  onAddAgent,
+  onAddWorktreeAgent,
+  onAddCloneAgent,
   onDeleteThread,
   onSyncThread,
   onPinThread,
@@ -98,129 +123,155 @@ export function useSidebarMenus({
     ],
   );
 
-  const showWorkspaceMenu = useCallback(
-    async (event: MouseEvent, workspaceId: string) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const editItem = await MenuItem.new({
-        text: t("sidebar.menu.editWorkspace"),
-        action: () => onEditWorkspace(workspaceId),
-      });
-      const reloadItem = await MenuItem.new({
-        text: t("sidebar.menu.reload"),
-        action: () => onReloadWorkspaceThreads(workspaceId),
-      });
-      const deleteItem = await MenuItem.new({
-        text: t("sidebar.menu.delete"),
-        action: () => onDeleteWorkspace(workspaceId),
-      });
-      const menu = await Menu.new({ items: [editItem, reloadItem, deleteItem] });
-      const window = getCurrentWindow();
-      const position = new LogicalPosition(event.clientX, event.clientY);
-      await menu.popup(position, window);
+  const getWorkspaceActions = useCallback(
+    (workspace: WorkspaceInfo): WorkspaceHoverAction[] => [
+      {
+        id: "new-agent",
+        label: t("sidebar.workspace.newAgent"),
+        onSelect: () => onAddAgent(workspace),
+      },
+      {
+        id: "new-worktree-agent",
+        label: t("sidebar.workspace.newWorktreeAgent"),
+        onSelect: () => onAddWorktreeAgent(workspace),
+      },
+      {
+        id: "new-clone-agent",
+        label: t("sidebar.workspace.newCloneAgent"),
+        onSelect: () => onAddCloneAgent(workspace),
+      },
+      {
+        id: "edit",
+        label: t("sidebar.menu.editWorkspace"),
+        onSelect: () => onEditWorkspace(workspace.id),
+      },
+      {
+        id: "reload",
+        label: t("sidebar.menu.reload"),
+        onSelect: () => onReloadWorkspaceThreads(workspace.id),
+      },
+      {
+        id: "delete",
+        label: t("sidebar.menu.delete"),
+        onSelect: () => onDeleteWorkspace(workspace.id),
+        destructive: true,
+      },
+    ],
+    [
+      onAddAgent,
+      onAddWorktreeAgent,
+      onAddCloneAgent,
+      onEditWorkspace,
+      onReloadWorkspaceThreads,
+      onDeleteWorkspace,
+      t,
+    ],
+  );
+
+  const getRevealAction = useCallback(
+    (workspace: WorkspaceInfo, kind: "worktree" | "clone"): WorkspaceHoverAction => {
+      const fileManagerLabel = fileManagerName();
+      return {
+        id: "reveal",
+        label: t("sidebar.menu.showIn", { fileManager: fileManagerLabel }),
+        onSelect: async () => {
+          if (!workspace.path) {
+            return;
+          }
+          try {
+            const { revealItemInDir } = await import(
+              "@tauri-apps/plugin-opener"
+            );
+            await revealItemInDir(workspace.path);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            pushErrorToast({
+              title: t(
+                kind === "worktree"
+                  ? "sidebar.menu.showWorktreeFailed"
+                  : "sidebar.menu.showCloneFailed",
+                { fileManager: fileManagerLabel },
+              ),
+              message,
+            });
+            console.warn(`Failed to reveal ${kind}`, {
+              message,
+              workspaceId: workspace.id,
+              path: workspace.path,
+            });
+          }
+        },
+      };
     },
-    [onEditWorkspace, onReloadWorkspaceThreads, onDeleteWorkspace, t],
+    [t],
+  );
+
+  const getWorktreeActions = useCallback(
+    (worktree: WorkspaceInfo): WorkspaceHoverAction[] => [
+      {
+        id: "reload",
+        label: t("sidebar.menu.reload"),
+        onSelect: () => onReloadWorkspaceThreads(worktree.id),
+      },
+      getRevealAction(worktree, "worktree"),
+      {
+        id: "delete",
+        label: t("sidebar.menu.deleteWorktree"),
+        onSelect: () => onDeleteWorktree(worktree.id),
+        destructive: true,
+      },
+    ],
+    [getRevealAction, onReloadWorkspaceThreads, onDeleteWorktree, t],
+  );
+
+  const getCloneActions = useCallback(
+    (clone: WorkspaceInfo): WorkspaceHoverAction[] => [
+      {
+        id: "edit",
+        label: t("sidebar.menu.editWorkspace"),
+        onSelect: () => onEditWorkspace(clone.id),
+      },
+      {
+        id: "reload",
+        label: t("sidebar.menu.reload"),
+        onSelect: () => onReloadWorkspaceThreads(clone.id),
+      },
+      getRevealAction(clone, "clone"),
+      {
+        id: "delete",
+        label: t("sidebar.menu.deleteClone"),
+        onSelect: () => onDeleteWorkspace(clone.id),
+        destructive: true,
+      },
+    ],
+    [getRevealAction, onEditWorkspace, onReloadWorkspaceThreads, onDeleteWorkspace, t],
+  );
+
+  const showWorkspaceMenu = useCallback(
+    (event: MouseEvent, workspace: WorkspaceInfo) =>
+      showWorkspaceActionsMenu(event, getWorkspaceActions(workspace)),
+    [getWorkspaceActions],
   );
 
   const showWorktreeMenu = useCallback(
-    async (event: MouseEvent, worktree: WorkspaceInfo) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const fileManagerLabel = fileManagerName();
-      const reloadItem = await MenuItem.new({
-        text: t("sidebar.menu.reload"),
-        action: () => onReloadWorkspaceThreads(worktree.id),
-      });
-      const revealItem = await MenuItem.new({
-        text: t("sidebar.menu.showIn", { fileManager: fileManagerLabel }),
-        action: async () => {
-          if (!worktree.path) {
-            return;
-          }
-          try {
-            const { revealItemInDir } = await import(
-              "@tauri-apps/plugin-opener"
-            );
-            await revealItemInDir(worktree.path);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            pushErrorToast({
-              title: t("sidebar.menu.showWorktreeFailed", {
-                fileManager: fileManagerLabel,
-              }),
-              message,
-            });
-            console.warn("Failed to reveal worktree", {
-              message,
-              workspaceId: worktree.id,
-              path: worktree.path,
-            });
-          }
-        },
-      });
-      const deleteItem = await MenuItem.new({
-        text: t("sidebar.menu.deleteWorktree"),
-        action: () => onDeleteWorktree(worktree.id),
-      });
-      const menu = await Menu.new({ items: [reloadItem, revealItem, deleteItem] });
-      const window = getCurrentWindow();
-      const position = new LogicalPosition(event.clientX, event.clientY);
-      await menu.popup(position, window);
-    },
-    [onReloadWorkspaceThreads, onDeleteWorktree, t],
+    (event: MouseEvent, worktree: WorkspaceInfo) =>
+      showWorkspaceActionsMenu(event, getWorktreeActions(worktree)),
+    [getWorktreeActions],
   );
 
   const showCloneMenu = useCallback(
-    async (event: MouseEvent, clone: WorkspaceInfo) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const fileManagerLabel = fileManagerName();
-      const editItem = await MenuItem.new({
-        text: t("sidebar.menu.editWorkspace"),
-        action: () => onEditWorkspace(clone.id),
-      });
-      const reloadItem = await MenuItem.new({
-        text: t("sidebar.menu.reload"),
-        action: () => onReloadWorkspaceThreads(clone.id),
-      });
-      const revealItem = await MenuItem.new({
-        text: t("sidebar.menu.showIn", { fileManager: fileManagerLabel }),
-        action: async () => {
-          if (!clone.path) {
-            return;
-          }
-          try {
-            const { revealItemInDir } = await import(
-              "@tauri-apps/plugin-opener"
-            );
-            await revealItemInDir(clone.path);
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            pushErrorToast({
-              title: t("sidebar.menu.showCloneFailed", {
-                fileManager: fileManagerLabel,
-              }),
-              message,
-            });
-            console.warn("Failed to reveal clone", {
-              message,
-              workspaceId: clone.id,
-              path: clone.path,
-            });
-          }
-        },
-      });
-      const deleteItem = await MenuItem.new({
-        text: t("sidebar.menu.deleteClone"),
-        action: () => onDeleteWorkspace(clone.id),
-      });
-      const menu = await Menu.new({ items: [editItem, reloadItem, revealItem, deleteItem] });
-      const window = getCurrentWindow();
-      const position = new LogicalPosition(event.clientX, event.clientY);
-      await menu.popup(position, window);
-    },
-    [onEditWorkspace, onReloadWorkspaceThreads, onDeleteWorkspace, t],
+    (event: MouseEvent, clone: WorkspaceInfo) =>
+      showWorkspaceActionsMenu(event, getCloneActions(clone)),
+    [getCloneActions],
   );
 
-  return { showThreadMenu, showWorkspaceMenu, showWorktreeMenu, showCloneMenu };
+  return {
+    showThreadMenu,
+    showWorkspaceMenu,
+    showWorktreeMenu,
+    showCloneMenu,
+    getWorkspaceActions,
+    getWorktreeActions,
+    getCloneActions,
+  };
 }

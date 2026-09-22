@@ -35,6 +35,22 @@
     "settings": "Settings",
     "openSettings": "Open settings",
     "openDebug": "Open debug log",
+    "details": {
+      "title": "Project details",
+      "show": "Details and actions",
+      "directory": "Working directory",
+      "roots": "Project directories",
+      "primary": "Primary",
+      "branch": "Branch",
+      "local": "Local",
+      "worktree": "Worktree",
+      "clone": "Clone",
+      "thread": "Task details",
+      "workspace": "Project",
+      "model": "Model",
+      "agent": "Sub-agent",
+      "context": "Context"
+    },
     "menu": {
       "rename": "Rename",
       "sync": "Sync from server",

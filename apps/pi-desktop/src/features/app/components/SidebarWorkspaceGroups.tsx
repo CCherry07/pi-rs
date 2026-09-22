@@ -1,24 +1,17 @@
-import { createPortal } from "react-dom";
-import type { MouseEvent, MutableRefObject, ReactNode } from "react";
+import type { MouseEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import Copy from "lucide-react/dist/esm/icons/copy";
-import GitBranch from "lucide-react/dist/esm/icons/git-branch";
-import Plus from "lucide-react/dist/esm/icons/plus";
 
 import type { ThreadSummary, WorkspaceInfo } from "../../../types";
 import type { ThreadStatusById } from "../../../utils/threadStatus";
-import {
-  PopoverMenuItem,
-  PopoverSurface,
-} from "../../design-system/components/popover/PopoverPrimitives";
 import { ThreadList } from "./ThreadList";
 import { ThreadLoading } from "./ThreadLoading";
 import { WorkspaceCard } from "./WorkspaceCard";
+import type { WorkspaceHoverAction } from "./WorkspaceHoverContents";
 import { WorkspaceGroup } from "./WorkspaceGroup";
 import { WorktreeSection } from "./WorktreeSection";
 import { getVisibleThreadListState } from "./threadSearchUtils";
 import type {
-  SidebarWorkspaceAddMenuAnchor,
   ThreadRowsResult,
   WorkspaceGroupSection,
 } from "./sidebarTypes";
@@ -59,15 +52,12 @@ type SidebarWorkspaceGroupsProps = {
   isThreadPinned: (workspaceId: string, threadId: string) => boolean;
   getPinTimestamp: (workspaceId: string, threadId: string) => number | null;
   pinnedThreadsVersion: number;
-  addMenuAnchor: SidebarWorkspaceAddMenuAnchor | null;
-  addMenuRef: MutableRefObject<HTMLDivElement | null>;
-  addMenuWidth: number;
+  getWorkspaceActions: (workspace: WorkspaceInfo) => WorkspaceHoverAction[];
+  getWorktreeActions: (workspace: WorkspaceInfo) => WorkspaceHoverAction[];
+  getCloneActions: (workspace: WorkspaceInfo) => WorkspaceHoverAction[];
   newAgentDraftWorkspaceId?: string | null;
   startingDraftThreadWorkspaceId?: string | null;
   onSelectWorkspace: (workspaceId: string) => void;
-  onAddAgent: (workspace: WorkspaceInfo) => void;
-  onAddWorktreeAgent: (workspace: WorkspaceInfo) => void;
-  onAddCloneAgent: (workspace: WorkspaceInfo) => void;
   onToggleWorkspaceCollapse: (workspaceId: string, collapsed: boolean) => void;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onShowThreadMenu: (
@@ -76,12 +66,11 @@ type SidebarWorkspaceGroupsProps = {
     threadId: string,
     canPin: boolean,
   ) => void;
-  onShowWorkspaceMenu: (event: MouseEvent, workspaceId: string) => void;
+  onShowWorkspaceMenu: (event: MouseEvent, workspace: WorkspaceInfo) => void;
   onShowWorktreeMenu: (event: MouseEvent, worktree: WorkspaceInfo) => void;
   onShowCloneMenu: (event: MouseEvent, worktree: WorkspaceInfo) => void;
   onToggleExpanded: (workspaceId: string) => void;
   onLoadOlderThreads: (workspaceId: string) => void;
-  onToggleAddMenu: (anchor: SidebarWorkspaceAddMenuAnchor | null) => void;
 };
 
 type SidebarWorkspaceEntryProps = Omit<
@@ -121,15 +110,12 @@ function SidebarWorkspaceEntry({
   isThreadPinned,
   getPinTimestamp,
   pinnedThreadsVersion,
-  addMenuAnchor,
-  addMenuRef,
-  addMenuWidth,
+  getWorkspaceActions,
+  getWorktreeActions,
+  getCloneActions,
   newAgentDraftWorkspaceId,
   startingDraftThreadWorkspaceId,
   onSelectWorkspace,
-  onAddAgent,
-  onAddWorktreeAgent,
-  onAddCloneAgent,
   onToggleWorkspaceCollapse,
   onSelectThread,
   onShowThreadMenu,
@@ -138,7 +124,6 @@ function SidebarWorkspaceEntry({
   onShowCloneMenu,
   onToggleExpanded,
   onLoadOlderThreads,
-  onToggleAddMenu,
 }: SidebarWorkspaceEntryProps) {
   const { t } = useTranslation("app");
   if (cloneChildIds.has(workspace.id)) {
@@ -186,7 +171,6 @@ function SidebarWorkspaceEntry({
           workspaceVisibleDuringSearchById.get(worktree.id),
         )
       : (worktreesByParent.get(workspace.id) ?? []);
-  const addMenuOpen = addMenuAnchor?.workspaceId === workspace.id;
   const isDraftNewAgent = newAgentDraftWorkspaceId === workspace.id;
   const isDraftRowActive =
     isDraftNewAgent &&
@@ -216,60 +200,11 @@ function SidebarWorkspaceEntry({
       })()}
       isActive={workspace.id === activeWorkspaceId}
       isCollapsed={isCollapsed}
-      addMenuOpen={addMenuOpen}
-      addMenuWidth={addMenuWidth}
+      actions={getWorkspaceActions(workspace)}
       onSelectWorkspace={onSelectWorkspace}
-      onShowWorkspaceMenu={onShowWorkspaceMenu}
+      onShowWorkspaceMenu={(event) => onShowWorkspaceMenu(event, workspace)}
       onToggleWorkspaceCollapse={onToggleWorkspaceCollapse}
-      onToggleAddMenu={onToggleAddMenu}
     >
-      {addMenuOpen && addMenuAnchor &&
-        createPortal(
-          <PopoverSurface
-            className="workspace-add-menu"
-            ref={addMenuRef}
-            style={{
-              top: addMenuAnchor.top,
-              left: addMenuAnchor.left,
-              width: addMenuAnchor.width,
-            }}
-          >
-            <PopoverMenuItem
-              className="workspace-add-option"
-              onClick={(event) => {
-                event.stopPropagation();
-                onToggleAddMenu(null);
-                onAddAgent(workspace);
-              }}
-              icon={<Plus aria-hidden />}
-            >
-              {t("sidebar.workspace.newAgent")}
-            </PopoverMenuItem>
-            <PopoverMenuItem
-              className="workspace-add-option"
-              onClick={(event) => {
-                event.stopPropagation();
-                onToggleAddMenu(null);
-                onAddWorktreeAgent(workspace);
-              }}
-              icon={<GitBranch aria-hidden />}
-            >
-              {t("sidebar.workspace.newWorktreeAgent")}
-            </PopoverMenuItem>
-            <PopoverMenuItem
-              className="workspace-add-option"
-              onClick={(event) => {
-                event.stopPropagation();
-                onToggleAddMenu(null);
-                onAddCloneAgent(workspace);
-              }}
-              icon={<Copy aria-hidden />}
-            >
-              {t("sidebar.workspace.newCloneAgent")}
-            </PopoverMenuItem>
-          </PopoverSurface>,
-          document.body,
-        )}
       {isDraftNewAgent && (
         <div
           className={`thread-row thread-row-draft${isDraftRowActive ? " active" : ""}`}
@@ -315,6 +250,7 @@ function SidebarWorkspaceEntry({
           onSelectThread={onSelectThread}
           onShowThreadMenu={onShowThreadMenu}
           onShowWorktreeMenu={onShowCloneMenu}
+          getWorkspaceActions={getCloneActions}
           onToggleExpanded={onToggleExpanded}
           onLoadOlderThreads={onLoadOlderThreads}
           searchQuery={normalizedQuery}
@@ -349,6 +285,7 @@ function SidebarWorkspaceEntry({
           onSelectThread={onSelectThread}
           onShowThreadMenu={onShowThreadMenu}
           onShowWorktreeMenu={onShowWorktreeMenu}
+          getWorkspaceActions={getWorktreeActions}
           onToggleExpanded={onToggleExpanded}
           onLoadOlderThreads={onLoadOlderThreads}
           searchQuery={normalizedQuery}

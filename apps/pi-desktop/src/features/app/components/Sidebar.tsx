@@ -24,7 +24,6 @@ import type {
   FlatThreadRootGroup,
   FlatThreadRow,
   SidebarOverlayMenuAnchor,
-  SidebarWorkspaceAddMenuAnchor,
   ThreadBucket,
   WorkspaceGroupSection,
 } from "./sidebarTypes";
@@ -39,7 +38,6 @@ import type { ThreadStatusById } from "../../../utils/threadStatus";
 
 const COLLAPSED_GROUPS_STORAGE_KEY = "pi-monitor.collapsedGroups";
 const UNGROUPED_COLLAPSE_ID = "__ungrouped__";
-const ADD_MENU_WIDTH = 200;
 const ALL_THREADS_ADD_MENU_WIDTH = 220;
 
 function getThreadBucketId(timestamp: number, nowMs: number): ThreadBucket["id"] {
@@ -198,16 +196,9 @@ export const Sidebar = memo(function Sidebar({
   );
   const [searchQuery, setSearchQuery] = useState("");
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [addMenuAnchor, setAddMenuAnchor] =
-    useState<SidebarWorkspaceAddMenuAnchor | null>(null);
   const [allThreadsAddMenuAnchor, setAllThreadsAddMenuAnchor] =
     useState<SidebarOverlayMenuAnchor | null>(null);
   const allThreadsAddMenuOpen = Boolean(allThreadsAddMenuAnchor);
-  const addMenuController = useMenuController({
-    open: Boolean(addMenuAnchor),
-    onDismiss: () => setAddMenuAnchor(null),
-  });
-  const { containerRef: addMenuRef } = addMenuController;
   const allThreadsAddMenuController = useMenuController({
     open: Boolean(allThreadsAddMenuAnchor),
     onDismiss: () => setAllThreadsAddMenuAnchor(null),
@@ -217,19 +208,29 @@ export const Sidebar = memo(function Sidebar({
     COLLAPSED_GROUPS_STORAGE_KEY,
   );
   const { getThreadRows } = useThreadRows(threadParentById);
-  const { showThreadMenu, showWorkspaceMenu, showWorktreeMenu, showCloneMenu } =
-    useSidebarMenus({
-      onDeleteThread,
-      onSyncThread,
-      onPinThread: pinThread,
-      onUnpinThread: unpinThread,
-      isThreadPinned,
-      onRenameThread,
-      onReloadWorkspaceThreads,
-      onEditWorkspace,
-      onDeleteWorkspace,
-      onDeleteWorktree,
-    });
+  const {
+    showThreadMenu,
+    showWorkspaceMenu,
+    showWorktreeMenu,
+    showCloneMenu,
+    getWorkspaceActions,
+    getWorktreeActions,
+    getCloneActions,
+  } = useSidebarMenus({
+    onAddAgent,
+    onAddWorktreeAgent,
+    onAddCloneAgent,
+    onDeleteThread,
+    onSyncThread,
+    onPinThread: pinThread,
+    onUnpinThread: unpinThread,
+    isThreadPinned,
+    onRenameThread,
+    onReloadWorkspaceThreads,
+    onEditWorkspace,
+    onDeleteWorkspace,
+    onDeleteWorktree,
+  });
   const debouncedQuery = useDebouncedValue(searchQuery, 150);
   const normalizedQuery = debouncedQuery.trim().toLowerCase();
   const isSearchActive = Boolean(normalizedQuery);
@@ -678,7 +679,6 @@ export const Sidebar = memo(function Sidebar({
         setAllThreadsAddMenuAnchor(null);
         return;
       }
-      setAddMenuAnchor(null);
       const rect = event.currentTarget.getBoundingClientRect();
       const left = Math.min(
         Math.max(rect.left, 12),
@@ -784,19 +784,6 @@ export const Sidebar = memo(function Sidebar({
     [],
   );
   const pinnedRootCount = useMemo(() => countRootRows(pinnedThreadRows), [pinnedThreadRows]);
-
-  useEffect(() => {
-    if (!addMenuAnchor) {
-      return;
-    }
-    function handleScroll() {
-      setAddMenuAnchor(null);
-    }
-    window.addEventListener("scroll", handleScroll, true);
-    return () => {
-      window.removeEventListener("scroll", handleScroll, true);
-    };
-  }, [addMenuAnchor]);
 
   useEffect(() => {
     if (!allThreadsAddMenuAnchor) {
@@ -949,15 +936,12 @@ export const Sidebar = memo(function Sidebar({
                   isThreadPinned={isThreadPinned}
                   getPinTimestamp={getPinTimestamp}
                   pinnedThreadsVersion={pinnedThreadsVersion}
-                  addMenuAnchor={addMenuAnchor}
-                  addMenuRef={addMenuRef}
-                  addMenuWidth={ADD_MENU_WIDTH}
+                  getWorkspaceActions={getWorkspaceActions}
+                  getWorktreeActions={getWorktreeActions}
+                  getCloneActions={getCloneActions}
                   newAgentDraftWorkspaceId={newAgentDraftWorkspaceId}
                   startingDraftThreadWorkspaceId={startingDraftThreadWorkspaceId}
                   onSelectWorkspace={onSelectWorkspace}
-                  onAddAgent={onAddAgent}
-                  onAddWorktreeAgent={onAddWorktreeAgent}
-                  onAddCloneAgent={onAddCloneAgent}
                   onToggleWorkspaceCollapse={onToggleWorkspaceCollapse}
                   onSelectThread={onSelectThread}
                   onShowThreadMenu={showThreadMenu}
@@ -966,7 +950,6 @@ export const Sidebar = memo(function Sidebar({
                   onShowCloneMenu={showCloneMenu}
                   onToggleExpanded={handleToggleExpanded}
                   onLoadOlderThreads={onLoadOlderThreads}
-                  onToggleAddMenu={setAddMenuAnchor}
                 />
               )}
           {!groupedWorkspacesForRender.length && (

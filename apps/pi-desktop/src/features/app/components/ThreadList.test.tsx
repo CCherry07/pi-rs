@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ThreadSummary } from "../../../types";
 import { ThreadList } from "./ThreadList";
@@ -141,8 +141,8 @@ describe("ThreadList", () => {
     );
   });
 
-  it("shows the subagent nickname pill with role styling", () => {
-    const { container } = render(
+  it("keeps subagent details in the hover panel and supports keyboard access", async () => {
+    render(
       <ThreadList
         {...baseProps}
         unpinnedRows={[{ thread: nestedThread, depth: 1 }]}
@@ -150,12 +150,49 @@ describe("ThreadList", () => {
       />,
     );
 
-    const pill = screen.getByText("Robie");
-    const role = screen.getByText("Explorer");
-    expect(pill.className).toContain("thread-subagent-pill");
-    expect(role.className).toContain("thread-subagent-role");
-    expect((pill as HTMLElement).style.getPropertyValue("--thread-subagent-pill-hue")).toBeTruthy();
-    expect(container.querySelector(".thread-workspace-label")).toBeNull();
+    const row = screen.getByText("Nested Agent").closest(".thread-row");
+    if (!row) {
+      throw new Error("Missing nested thread row");
+    }
+    expect(screen.queryByText("Robie · Explorer")).toBeNull();
+    expect(row.querySelector(".thread-details")).toBeNull();
+
+    fireEvent.keyDown(row, { key: "ArrowRight" });
+    const panel = await screen.findByRole("dialog");
+    expect(within(panel).getByText("Robie · Explorer")).toBeTruthy();
+    expect(row.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.keyDown(panel, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("shows model, context and pinned information on hover without expanding the row", async () => {
+    render(
+      <ThreadList
+        {...baseProps}
+        unpinnedRows={[{
+          thread: { ...thread, modelId: "test-model", effort: "high" },
+          depth: 0,
+        }]}
+        getThreadArgsBadge={() => "Custom context"}
+        isThreadPinned={() => true}
+      />,
+    );
+
+    const row = screen.getByText("Alpha").closest(".thread-row");
+    if (!row) {
+      throw new Error("Missing thread row");
+    }
+    expect(screen.queryByText("test-model · high")).toBeNull();
+    expect(screen.queryByText("Custom context")).toBeNull();
+    expect(screen.queryByText("Pinned")).toBeNull();
+
+    fireEvent.mouseEnter(row);
+    const panel = await screen.findByRole("dialog");
+    expect(within(panel).getByText("test-model · high")).toBeTruthy();
+    expect(within(panel).getByText("Custom context")).toBeTruthy();
+    expect(within(panel).getByText("Pinned")).toBeTruthy();
+    expect(row.querySelector(".thread-details")).toBeNull();
   });
 
   it("shows blue unread-style status when a thread is waiting for user input", () => {
@@ -177,10 +214,12 @@ describe("ThreadList", () => {
     expect(row?.querySelector(".thread-status")?.className).not.toContain("processing");
   });
 
-  it("toggles sub-agent descendants for parent rows", () => {
+  it("toggles sub-agent descendants without selecting the parent row", () => {
+    const onSelectThread = vi.fn();
     const { getByText, queryByText, getByRole } = render(
       <ThreadList
         {...baseProps}
+        onSelectThread={onSelectThread}
         unpinnedRows={[
           { thread, depth: 0 },
           { thread: nestedThread, depth: 1 },
@@ -190,12 +229,15 @@ describe("ThreadList", () => {
 
     expect(getByText("Nested Agent")).toBeTruthy();
     const hideButton = getByRole("button", { name: "Hide sub-agents" });
+    fireEvent.keyDown(hideButton, { key: "Enter" });
     fireEvent.click(hideButton);
     expect(queryByText("Nested Agent")).toBeNull();
 
     const showButton = getByRole("button", { name: "Show sub-agents" });
+    fireEvent.keyDown(showButton, { key: " " });
     fireEvent.click(showButton);
     expect(getByText("Nested Agent")).toBeTruthy();
+    expect(onSelectThread).not.toHaveBeenCalled();
   });
 
   it("does not show sub-agent toggle for rows without descendants", () => {

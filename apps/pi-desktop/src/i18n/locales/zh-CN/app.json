@@ -35,6 +35,22 @@
     "settings": "设置",
     "openSettings": "打开设置",
     "openDebug": "打开调试日志",
+    "details": {
+      "title": "项目详情",
+      "show": "详情与操作",
+      "directory": "工作目录",
+      "roots": "项目目录",
+      "primary": "主目录",
+      "branch": "分支",
+      "local": "Local",
+      "worktree": "Worktree",
+      "clone": "Clone",
+      "thread": "任务详情",
+      "workspace": "项目",
+      "model": "模型",
+      "agent": "子代理",
+      "context": "上下文"
+    },
     "menu": {
       "rename": "重命名",
       "sync": "从服务器同步",

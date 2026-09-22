@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ThreadSummary } from "../../../types";
 import { PinnedThreadList } from "./PinnedThreadList";
@@ -74,6 +74,31 @@ describe("PinnedThreadList", () => {
       "thread-1",
       true,
     );
+  });
+
+  it("keeps the workspace label in the keyboard-accessible details panel", async () => {
+    const onSelectThread = vi.fn();
+    render(
+      <PinnedThreadList
+        {...baseProps}
+        getWorkspaceLabel={() => "Project Alpha"}
+        onSelectThread={onSelectThread}
+      />,
+    );
+
+    const row = screen.getByText("Pinned Alpha").closest(".thread-row");
+    if (!row) {
+      throw new Error("Missing pinned row");
+    }
+    expect(screen.queryByText("Project Alpha")).toBeNull();
+    fireEvent.keyDown(row, { key: "ArrowRight" });
+    const panel = await screen.findByRole("dialog");
+    expect(within(panel).getByText("Project Alpha")).toBeTruthy();
+    expect(onSelectThread).not.toHaveBeenCalled();
+
+    fireEvent.click(row);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onSelectThread).toHaveBeenCalledExactlyOnceWith("ws-1", "thread-1");
   });
 
   it("routes callbacks for rows across workspaces", () => {

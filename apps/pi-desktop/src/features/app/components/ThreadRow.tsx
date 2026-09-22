@@ -3,32 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import type { ThreadSummary } from "../../../types";
 import { getThreadStatusClass, type ThreadStatusById } from "../../../utils/threadStatus";
-
-function hashString(value: string) {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
-  }
-  return hash;
-}
-
-function getSubagentPillToneStyle(
-  workspaceId: string,
-  nickname: string | null | undefined,
-  role: string | null | undefined,
-  threadId: string,
-) {
-  const identity = [workspaceId, nickname ?? role ?? threadId].join(":");
-  const hash = hashString(identity);
-  const hue = hash % 360;
-  const saturation = 68 + (hash % 12);
-  const accent = 52 + ((hash >> 3) % 10);
-  return {
-    "--thread-subagent-pill-hue": `${hue}`,
-    "--thread-subagent-pill-saturation": `${saturation}%`,
-    "--thread-subagent-pill-accent": `${accent}%`,
-  } as CSSProperties;
-}
+import { SidebarHoverCard } from "./SidebarHoverCard";
 
 function formatSubagentRoleLabel(role: string | null | undefined) {
   const normalized = (role ?? "").trim();
@@ -117,122 +92,128 @@ export function ThreadRow({
     thread.isSubagent && (thread.subagentNickname || thread.subagentRole)
       ? thread.subagentNickname ?? thread.subagentRole ?? null
       : null;
-  const subagentTitle =
-    thread.subagentNickname && thread.subagentRole
-      ? `${thread.subagentNickname} · ${thread.subagentRole}`
-      : subagentLabel;
   const subagentRoleLabel =
     thread.subagentNickname && thread.subagentRole
       ? formatSubagentRoleLabel(thread.subagentRole)
       : null;
-  const subagentPillStyle = subagentLabel
-    ? getSubagentPillToneStyle(
-        workspaceId,
-        thread.subagentNickname,
-        thread.subagentRole,
-        thread.id,
-      )
-    : undefined;
+  const subagentDetails = subagentLabel
+    ? [subagentLabel, subagentRoleLabel].filter(Boolean).join(" · ")
+    : null;
   const effectiveWorkspaceLabel = depth > 0 ? null : workspaceLabel;
-  const contextLabel = badge ?? modelBadge;
   const canPin = depth === 0;
   const isPinned = canPin && isThreadPinned(workspaceId, thread.id);
   const canToggleSubagents = hasSubagentChildren && Boolean(onToggleSubagents);
-  const hasDetails = Boolean(
-    effectiveWorkspaceLabel || subagentLabel || contextLabel || statusLabel || isPinned,
-  );
-
   return (
-    <div
-      className={`thread-row ${
-        workspaceId === activeWorkspaceId && thread.id === activeThreadId
-          ? "active"
-          : ""
-      }${hasDetails ? " has-details" : ""}${
-        hasDetails ? " has-secondary-line" : ""
-      }${canToggleSubagents ? " has-subagent-children" : ""}${
-        depth > 0 ? " is-nested" : ""
-      }${isPinned ? " is-pinned" : ""}`}
-      style={indentStyle}
-      onClick={() => onSelectThread(workspaceId, thread.id)}
-      onContextMenu={(event) => onShowThreadMenu(event, workspaceId, thread.id, canPin)}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onSelectThread(workspaceId, thread.id);
-        }
-      }}
-    >
-      <span className={`thread-status ${statusClass}`} aria-hidden />
-      <div className="thread-content">
-        <div className="thread-headline">
-          <span className="thread-name">{displayThreadName}</span>
-        </div>
-        {hasDetails && (
-          <div className="thread-details">
+    <SidebarHoverCard
+      label={t("sidebar.details.thread")}
+      content={(
+        <>
+          <div className="sidebar-hovercard-summary">{displayThreadName}</div>
+          <dl className="sidebar-hovercard-details">
             {effectiveWorkspaceLabel && (
-              <span className="thread-workspace-label" title={effectiveWorkspaceLabel}>
-                {effectiveWorkspaceLabel}
-              </span>
+              <>
+                <dt>{t("sidebar.details.workspace")}</dt>
+                <dd>{effectiveWorkspaceLabel}</dd>
+              </>
             )}
-            {subagentLabel && (
-              <span
-                className="thread-subagent-pill"
-                title={subagentTitle ?? undefined}
-                style={subagentPillStyle}
+            {subagentDetails && (
+              <>
+                <dt>{t("sidebar.details.agent")}</dt>
+                <dd>{subagentDetails}</dd>
+              </>
+            )}
+            {modelBadge && (
+              <>
+                <dt>{t("sidebar.details.model")}</dt>
+                <dd>{modelBadge}</dd>
+              </>
+            )}
+            {badge && (
+              <>
+                <dt>{t("sidebar.details.context")}</dt>
+                <dd>{badge}</dd>
+              </>
+            )}
+          </dl>
+          {showPinnedLabel && isPinned && (
+            <span className="thread-pinned-label">{t("sidebar.thread.pinned")}</span>
+          )}
+        </>
+      )}
+    >
+      {({ isOpen, panelId, close }) => (
+        <div
+          className={`thread-row ${
+            workspaceId === activeWorkspaceId && thread.id === activeThreadId
+              ? "active"
+              : ""
+          }${canToggleSubagents ? " has-subagent-children" : ""}${
+            depth > 0 ? " is-nested" : ""
+          }${isPinned ? " is-pinned" : ""}`}
+          style={indentStyle}
+          onClick={() => {
+            close();
+            onSelectThread(workspaceId, thread.id);
+          }}
+          onContextMenu={(event) => {
+            close();
+            onShowThreadMenu(event, workspaceId, thread.id, canPin);
+          }}
+          role="button"
+          tabIndex={0}
+          aria-haspopup="dialog"
+          aria-expanded={isOpen}
+          aria-controls={isOpen ? panelId : undefined}
+          onKeyDown={(event) => {
+            if (
+              event.target === event.currentTarget &&
+              (event.key === "Enter" || event.key === " ")
+            ) {
+              event.preventDefault();
+              close();
+              onSelectThread(workspaceId, thread.id);
+            }
+          }}
+        >
+          <span className={`thread-status ${statusClass}`} aria-hidden />
+          <div className="thread-content">
+            <div className="thread-headline">
+              <span className="thread-name">{displayThreadName}</span>
+              {statusLabel && (
+                <span className={`thread-state-chip ${statusClass}`}>{statusLabel}</span>
+              )}
+            </div>
+          </div>
+          <div className="thread-meta">
+            {canToggleSubagents ? (
+              <button
+                type="button"
+                className={`thread-subagent-time-toggle ${subagentsExpanded ? "expanded" : ""}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onToggleSubagents?.(workspaceId, thread.id);
+                }}
+                data-tauri-drag-region="false"
+                aria-label={
+                  subagentsExpanded
+                    ? t("sidebar.thread.hideSubagents")
+                    : t("sidebar.thread.showSubagents")
+                }
+                aria-expanded={subagentsExpanded}
               >
-                {subagentLabel}
-              </span>
-            )}
-            {subagentRoleLabel && (
-              <span className="thread-subagent-role" title={thread.subagentRole ?? undefined}>
-                {subagentRoleLabel}
-              </span>
-            )}
-            {statusLabel && (
-              <span className={`thread-state-chip ${statusClass}`}>{statusLabel}</span>
-            )}
-            {contextLabel && (
-              <span className="thread-context-label" title={contextLabel}>
-                {contextLabel}
-              </span>
-            )}
-            {showPinnedLabel && isPinned && (
-              <span className="thread-pinned-label">{t("sidebar.thread.pinned")}</span>
+                <span className="thread-subagent-time-label">
+                  {relativeTime ?? t("sidebar.thread.now")}
+                </span>
+                <span className="thread-subagent-toggle-icon" aria-hidden>
+                  ›
+                </span>
+              </button>
+            ) : (
+              relativeTime && <span className="thread-time">{relativeTime}</span>
             )}
           </div>
-        )}
-      </div>
-      <div className="thread-meta">
-        {canToggleSubagents ? (
-          <button
-            type="button"
-            className={`thread-subagent-time-toggle ${subagentsExpanded ? "expanded" : ""}`}
-            onClick={(event) => {
-              event.stopPropagation();
-              onToggleSubagents?.(workspaceId, thread.id);
-            }}
-            data-tauri-drag-region="false"
-            aria-label={
-              subagentsExpanded
-                ? t("sidebar.thread.hideSubagents")
-                : t("sidebar.thread.showSubagents")
-            }
-            aria-expanded={subagentsExpanded}
-          >
-            <span className="thread-subagent-time-label">
-              {relativeTime ?? t("sidebar.thread.now")}
-            </span>
-            <span className="thread-subagent-toggle-icon" aria-hidden>
-              ›
-            </span>
-          </button>
-        ) : (
-          relativeTime && <span className="thread-time">{relativeTime}</span>
-        )}
-      </div>
-    </div>
+        </div>
+      )}
+    </SidebarHoverCard>
   );
 }
