@@ -2,6 +2,12 @@
 use pi_core::{WorkspaceSnapshot, WorkspaceSpec};
 
 mod ephemeral;
+mod prompt;
+
+pub use prompt::{
+    DiagnosticKind, PreparedSystemPrompt, PromptContext, PromptOutput, ResourceDiagnostic,
+    SystemPrompt, SystemPromptFactory, SystemPromptRenderer,
+};
 
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -21,8 +27,6 @@ use pi_plugin::{
     PluginContextHandle, PluginContextScope, PluginDiagnostic, ProviderCallContext, ProviderPlugin,
     ProviderRequest, RegistriesBuilder, is_retryable_provider_error_message,
 };
-use pi_prompt::{BuildSystemPromptOptions, build_system_prompt};
-use pi_resources::{ResourceDiagnostic, ResourceLoaderOptions, load_resources};
 use pi_utils::time::unix_timestamp_ms as now_ms;
 
 #[derive(Debug, thiserror::Error)]
@@ -33,8 +37,6 @@ pub enum RuntimeError {
     Agent(String),
     #[error("unknown tools: {0}")]
     UnknownTools(String),
-    #[error("dynamic prompt reconfiguration is unavailable for Final system prompts")]
-    FinalPromptIsStatic,
     #[error("command {command} failed: {message}")]
     Command { command: String, message: String },
     #[error("input processing failed: {0}")]
@@ -179,15 +181,6 @@ pub struct RuntimeRestoreState {
     pub messages: Vec<Message>,
 }
 
-#[derive(Debug, Clone)]
-pub enum SystemPrompt {
-    /// Use this exact final prompt without Pi-style assembly.
-    Final(String),
-    /// Assemble the base prompt from active tools, context, and Pi defaults.
-    /// Plugins may contribute generation-local content in `before_agent_start`.
-    Pi(Box<BuildSystemPromptOptions>),
-}
-
 type PluginFactory = Arc<dyn Fn() -> Result<Arc<dyn Plugin>, String> + Send + Sync>;
 type ProviderPluginFactory = Arc<dyn Fn() -> Result<Arc<dyn ProviderPlugin>, String> + Send + Sync>;
 
@@ -239,13 +232,23 @@ impl ProviderPluginSource {
     }
 }
 
+enum ToolSelection {
+    Explicit(Vec<String>),
+    ExplicitWithRestoredAdditions {
+        tools: Vec<String>,
+        additions: Vec<String>,
+    },
+    AllRegistered,
+    Restored(Vec<String>),
+}
+
 pub struct PiRuntimeBuilder {
     plugin_sources: Vec<PluginSource>,
     provider_plugin_sources: Vec<ProviderPluginSource>,
     agent_options: AgentOptions,
+    initial_tools: Option<ToolSelection>,
     workspace: Option<WorkspaceSnapshot>,
     system_prompt: Option<SystemPrompt>,
-    resources: Option<ResourceLoaderOptions>,
     supplemental_diagnostics: Vec<ResourceDiagnostic>,
     completion_retry_policy: Option<CompletionRetryPolicy>,
     plugin_context: Arc<dyn PluginContext>,
@@ -264,9 +267,9 @@ impl PiRuntimeBuilder {
             plugin_sources: Vec::new(),
             provider_plugin_sources: Vec::new(),
             agent_options: AgentOptions::default(),
+            initial_tools: None,
             workspace: None,
             system_prompt: None,
-            resources: None,
             supplemental_diagnostics: Vec::new(),
             completion_retry_policy: None,
             plugin_context: Arc::new(pi_plugin::UnavailablePluginContext),
@@ -480,19 +483,39 @@ impl PiRuntimeBuilder {
         self
     }
 
-    /// Configures either an exact final prompt or Pi-style prompt assembly.
-    /// Without this, `AgentOptions.system_prompt` remains the final low-level prompt.
-    pub fn system_prompt(mut self, system_prompt: SystemPrompt) -> Self {
-        self.system_prompt = Some(system_prompt);
+    /// Selects every registered tool for the initial generation, in name order.
+    /// Selection happens after registration and before the first prompt render.
+    /// Later reloads retain the active selection, including explicitly disabled tools.
+    /// Without this opt-in, `AgentOptions.active_tools` supplies the initial selection.
+    pub fn all_tools_active(mut self) -> Self {
+        self.initial_tools = Some(ToolSelection::AllRegistered);
         self
     }
 
-    /// Loads generic Pi prompt and project-context resources and injects them
-    /// into Pi-style prompt assembly. Feature-specific resources belong to the
-    /// plugin that consumes them.
-    /// Resource `cwd` is always synchronized to `AgentOptions.cwd`.
-    pub fn resources(mut self, resources: ResourceLoaderOptions) -> Self {
-        self.resources = Some(resources);
+    /// Restores a saved selection before the first prompt render. Tools no longer registered
+    /// are removed and duplicates retain their first position, matching session restoration.
+    /// This is distinct from strict caller-supplied `AgentOptions.active_tools`.
+    pub fn restored_active_tools(mut self, tools: Vec<String>) -> Self {
+        self.initial_tools = Some(ToolSelection::Restored(tools));
+        self
+    }
+
+    /// Uses strict caller defaults for a legacy journal without a saved selection, then
+    /// appends registered restoration additions before the first prompt render.
+    pub fn active_tools_with_restored_additions(
+        mut self,
+        tools: Vec<String>,
+        additions: Vec<String>,
+    ) -> Self {
+        self.initial_tools =
+            Some(ToolSelection::ExplicitWithRestoredAdditions { tools, additions });
+        self
+    }
+
+    /// Configures either an exact final prompt or domain-owned prompt assembly.
+    /// Without this, `AgentOptions.system_prompt` remains the final low-level prompt.
+    pub fn system_prompt(mut self, system_prompt: SystemPrompt) -> Self {
+        self.system_prompt = Some(system_prompt);
         self
     }
 
@@ -534,18 +557,21 @@ impl PiRuntimeBuilder {
             provider_plugin_sources: self.provider_plugin_sources,
             system_prompt: self.system_prompt,
             fallback_system_prompt: self.agent_options.system_prompt.clone(),
-            resources: self.resources,
             supplemental_diagnostics: self.supplemental_diagnostics,
             completion_retry_policy: self.completion_retry_policy,
             plugin_context: self.plugin_context,
             execution_origin: self.execution_origin,
             workspace: workspace.clone(),
         });
-        let generation = Arc::new(build_generation(
+        let (generation, active_tools) = build_generation(
             &blueprint,
             1,
-            &self.agent_options.active_tools,
-        )?);
+            self.initial_tools.unwrap_or_else(|| {
+                ToolSelection::Explicit(std::mem::take(&mut self.agent_options.active_tools))
+            }),
+        )?;
+        let generation = Arc::new(generation);
+        self.agent_options.active_tools = active_tools;
         self.agent_options.system_prompt = generation.agent.system_prompt().to_string();
         let agent = Agent::with_runtime(self.agent_options, Arc::clone(&generation.agent));
         Ok(PiRuntime {
@@ -563,7 +589,6 @@ struct RuntimeBlueprint {
     provider_plugin_sources: Vec<ProviderPluginSource>,
     system_prompt: Option<SystemPrompt>,
     fallback_system_prompt: String,
-    resources: Option<ResourceLoaderOptions>,
     supplemental_diagnostics: Vec<ResourceDiagnostic>,
     completion_retry_policy: Option<CompletionRetryPolicy>,
     plugin_context: Arc<dyn PluginContext>,
@@ -573,8 +598,8 @@ struct RuntimeBlueprint {
 
 struct RuntimeGeneration {
     agent: Arc<AgentRuntime>,
-    prompt_options: Mutex<Option<BuildSystemPromptOptions>>,
-    resource_options: Option<ResourceLoaderOptions>,
+    prompt: Option<PreparedSystemPrompt>,
+    prompt_options: Mutex<Option<serde_json::Value>>,
     resource_diagnostics: Vec<ResourceDiagnostic>,
     plugin_context_epoch: PluginContextEpoch,
 }
@@ -588,27 +613,19 @@ impl Drop for RuntimeGeneration {
 fn build_generation(
     blueprint: &RuntimeBlueprint,
     generation: u64,
-    active_tools: &[String],
-) -> Result<RuntimeGeneration, RuntimeError> {
-    let mut system_prompt = blueprint.system_prompt.clone();
+    selection: ToolSelection,
+) -> Result<(RuntimeGeneration, Vec<String>), RuntimeError> {
+    let prepared_prompt = match &blueprint.system_prompt {
+        Some(SystemPrompt::Dynamic(factory)) => Some(
+            factory
+                .prepare(&blueprint.workspace)
+                .map_err(RuntimeError::Build)?,
+        ),
+        _ => None,
+    };
     let mut diagnostics = blueprint.supplemental_diagnostics.clone();
-    let mut applied_resources = None;
-    if let Some(mut resources) = blueprint.resources.clone() {
-        if matches!(system_prompt, Some(SystemPrompt::Final(_))) {
-            return Err(RuntimeError::Build(
-                "resources require Pi-style system prompt assembly; Final prompt cannot accept resources"
-                    .to_string(),
-            ));
-        }
-        resources.cwd = blueprint.workspace.cwd().to_path_buf();
-        let loaded = load_resources(&resources);
-        diagnostics.extend(loaded.diagnostics.clone());
-        let prompt = system_prompt.get_or_insert_with(|| SystemPrompt::Pi(Box::default()));
-        let SystemPrompt::Pi(prompt) = prompt else {
-            unreachable!("Final prompt rejected above")
-        };
-        loaded.apply_to_prompt(prompt);
-        applied_resources = Some(resources);
+    if let Some(prompt) = &prepared_prompt {
+        diagnostics.extend(prompt.diagnostics.clone());
     }
 
     let mut plugins = Vec::with_capacity(blueprint.plugin_sources.len());
@@ -645,57 +662,80 @@ fn build_generation(
     let driver = Arc::new(driver);
     let provider_driver = Arc::new(provider_driver);
     let registries = Arc::new(registries);
-
-    let (assembled_prompt, prompt_options) = match system_prompt {
-        Some(SystemPrompt::Final(prompt)) => (prompt, None),
-        Some(SystemPrompt::Pi(mut prompt)) => {
-            let assembled = assemble_prompt(
-                &mut prompt,
-                active_tools,
-                blueprint.workspace.cwd(),
-                &registries,
-            )?;
-            (assembled, Some(*prompt))
+    let active_tools = match selection {
+        ToolSelection::AllRegistered => registries
+            .all_tool_specs()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect(),
+        ToolSelection::Explicit(tools) => tools,
+        ToolSelection::ExplicitWithRestoredAdditions {
+            mut tools,
+            additions,
+        } => {
+            registries
+                .tool_specs(&tools)
+                .map_err(|error| RuntimeError::Build(error.to_string()))?;
+            tools.extend(
+                additions
+                    .into_iter()
+                    .filter(|tool| registries.tool(tool).is_some()),
+            );
+            let mut seen = std::collections::HashSet::new();
+            tools.retain(|tool| seen.insert(tool.clone()));
+            tools
         }
-        None => (blueprint.fallback_system_prompt.clone(), None),
+        ToolSelection::Restored(mut tools) => {
+            let mut seen = std::collections::HashSet::new();
+            tools.retain(|tool| registries.tool(tool).is_some() && seen.insert(tool.clone()));
+            tools
+        }
     };
-    Ok(RuntimeGeneration {
-        agent: Arc::new(AgentRuntime::new(
-            generation,
-            assembled_prompt,
-            registries,
-            driver,
-            Arc::clone(&provider_driver),
-        )),
-        prompt_options: Mutex::new(prompt_options),
-        resource_options: applied_resources,
-        resource_diagnostics: diagnostics,
-        plugin_context_epoch,
-    })
+    // Validate explicit selections even when the prompt is an exact final string.
+    registries
+        .tool_specs(&active_tools)
+        .map_err(|error| RuntimeError::Build(error.to_string()))?;
+
+    let output = match (&blueprint.system_prompt, &prepared_prompt) {
+        (_, Some(prompt)) => {
+            assemble_prompt(prompt, &active_tools, &blueprint.workspace, &registries)?
+        }
+        (Some(SystemPrompt::Final(prompt)), _) => PromptOutput::new(prompt.clone()),
+        _ => PromptOutput::new(blueprint.fallback_system_prompt.clone()),
+    };
+    Ok((
+        RuntimeGeneration {
+            agent: Arc::new(AgentRuntime::new(
+                generation,
+                output.system_prompt,
+                registries,
+                driver,
+                Arc::clone(&provider_driver),
+            )),
+            prompt: prepared_prompt,
+            prompt_options: Mutex::new(output.options),
+            resource_diagnostics: diagnostics,
+            plugin_context_epoch,
+        },
+        active_tools,
+    ))
 }
 
 fn assemble_prompt(
-    prompt: &mut BuildSystemPromptOptions,
+    prompt: &PreparedSystemPrompt,
     active_tools: &[String],
-    cwd: &std::path::Path,
+    workspace: &WorkspaceSnapshot,
     registries: &pi_plugin::FrozenRegistries,
-) -> Result<String, RuntimeError> {
-    prompt.selected_tools = active_tools.to_vec();
-    prompt.cwd = cwd.to_path_buf();
-    prompt.tool_snippets.clear();
-    prompt.prompt_guidelines.clear();
-    for spec in registries
+) -> Result<PromptOutput, RuntimeError> {
+    let active_tools = registries
         .tool_specs(active_tools)
-        .map_err(|error| RuntimeError::Build(error.to_string()))?
-    {
-        if let Some(snippet) = spec.prompt_snippet {
-            prompt
-                .tool_snippets
-                .insert(spec.name.clone(), normalize_snippet(&snippet));
-        }
-        prompt.prompt_guidelines.extend(spec.prompt_guidelines);
-    }
-    Ok(build_system_prompt(prompt))
+        .map_err(|error| RuntimeError::Build(error.to_string()))?;
+    prompt
+        .render(PromptContext {
+            workspace,
+            active_tools: &active_tools,
+        })
+        .map_err(RuntimeError::Build)
 }
 
 fn parse_command(input: &str) -> Option<(&str, &str)> {
@@ -708,10 +748,6 @@ fn parse_command(input: &str) -> Option<(&str, &str)> {
         Some(index) => (&command[..index], command[index..].trim()),
         None => (command, ""),
     })
-}
-
-fn normalize_snippet(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn completion_result_is_retryable(result: &Result<AssistantMessage, RuntimeError>) -> bool {
@@ -876,7 +912,7 @@ impl PiRuntime {
         diagnostics
     }
 
-    pub fn prompt_options(&self) -> Option<BuildSystemPromptOptions> {
+    pub fn prompt_options(&self) -> Option<serde_json::Value> {
         self.current_generation()
             .prompt_options
             .lock()
@@ -884,8 +920,11 @@ impl PiRuntime {
             .clone()
     }
 
-    pub fn resource_options(&self) -> Option<ResourceLoaderOptions> {
-        self.current_generation().resource_options.clone()
+    pub fn resource_options(&self) -> Option<serde_json::Value> {
+        self.current_generation()
+            .prompt
+            .as_ref()
+            .and_then(|prompt| prompt.resource_options.clone())
     }
 
     pub fn command_specs(&self) -> Vec<CommandSpec> {
@@ -960,7 +999,8 @@ impl PiRuntime {
         self.agent.state().active_tools
     }
 
-    /// Atomically updates active tools and the Pi base prompt. The agent must be idle.
+    /// Atomically updates active tools and a dynamic base prompt. Exact final
+    /// prompts retain their text. The agent must be idle.
     pub fn set_active_tools(
         &self,
         tools: impl IntoIterator<Item = impl Into<String>>,
@@ -988,20 +1028,24 @@ impl PiRuntime {
             .prompt_options
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next_prompt = stored_prompt
-            .clone()
-            .ok_or(RuntimeError::FinalPromptIsStatic)?;
-        let cwd = next_prompt.cwd.clone();
         let runtime = self.agent.runtime();
-        let system_prompt = assemble_prompt(&mut next_prompt, &tools, &cwd, runtime.registries())?;
+        let output = generation
+            .prompt
+            .as_ref()
+            .map(|prompt| assemble_prompt(prompt, &tools, &self.workspace, runtime.registries()))
+            .transpose()?;
+        let (system_prompt, prompt_options) = match output {
+            Some(output) => (Some(output.system_prompt), output.options),
+            None => (None, None),
+        };
         self.agent
             .configure(AgentConfigurationPatch {
                 active_tools: Some(tools),
-                system_prompt: Some(system_prompt),
+                system_prompt,
                 ..AgentConfigurationPatch::default()
             })
             .map_err(|error| RuntimeError::Agent(error.to_string()))?;
-        *stored_prompt = Some(next_prompt);
+        *stored_prompt = prompt_options;
         Ok(())
     }
 
@@ -1064,17 +1108,23 @@ impl PiRuntime {
             .prompt_options
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut next_prompt = stored_prompt.clone();
-        let system_prompt = if let Some(prompt) = &mut next_prompt {
-            let cwd = prompt.cwd.clone();
-            Some(assemble_prompt(
-                prompt,
-                &restored.active_tools,
-                &cwd,
-                self.agent.runtime().registries(),
-            )?)
-        } else {
+        // Prepared inputs and workspace are fixed for this generation. Restoring transcript
+        // or model state with the same selected tools reuses the already-validated prompt.
+        let output = if self.active_tools() == restored.active_tools {
             None
+        } else {
+            generation
+                .prompt
+                .as_ref()
+                .map(|prompt| {
+                    assemble_prompt(prompt, &restored.active_tools, &self.workspace, registries)
+                })
+                .transpose()?
+        };
+        let prompt_changed = output.is_some();
+        let (system_prompt, prompt_options) = match output {
+            Some(output) => (Some(output.system_prompt), output.options),
+            None => (None, None),
         };
         self.agent
             .restore(AgentRestoreState {
@@ -1086,7 +1136,9 @@ impl PiRuntime {
                 messages: restored.messages,
             })
             .map_err(|error| RuntimeError::Agent(error.to_string()))?;
-        *stored_prompt = next_prompt;
+        if prompt_changed {
+            *stored_prompt = prompt_options;
+        }
         Ok(())
     }
 
@@ -1426,11 +1478,12 @@ impl PiRuntime {
         let previous = self.agent.runtime();
         let next_id = previous.generation().saturating_add(1);
         let state = self.agent.state();
-        let next = Arc::new(build_generation(
+        let (next, _) = build_generation(
             &self.blueprint,
             next_id,
-            &state.active_tools,
-        )?);
+            ToolSelection::Explicit(state.active_tools.clone()),
+        )?;
+        let next = Arc::new(next);
         if previous.registries().provider(&state.provider_id).is_some()
             && next
                 .agent
@@ -3324,77 +3377,233 @@ mod tests {
         );
     }
 
-    #[test]
-    fn active_tools_switch_rebuilds_prompt_atomically() {
-        let cwd = std::env::current_dir().unwrap();
+    #[tokio::test]
+    async fn all_registered_tools_are_selected_before_first_render_and_not_reselected_on_reload() {
+        let prepares = Arc::new(AtomicUsize::new(0));
+        let plugins = Arc::new(AtomicUsize::new(0));
+        let renders = Arc::new(Mutex::new(Vec::new()));
         let runtime = PiRuntime::builder()
-            .plugin(pi_plugin_read::ReadPlugin)
-            .plugin(pi_plugin_write::WritePlugin)
-            .agent_options(AgentOptions {
-                active_tools: vec!["read".to_string()],
-                cwd,
-                ..AgentOptions::default()
+            .provider_plugin_factory(|| ScriptedProviderPlugin::scripted([]))
+            .plugin_factory({
+                let plugins = Arc::clone(&plugins);
+                move || {
+                    plugins.fetch_add(1, Ordering::SeqCst);
+                    TestToolsPlugin::new()
+                }
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .all_tools_active()
+            .system_prompt(SystemPrompt::dynamic({
+                let prepares = Arc::clone(&prepares);
+                let renders = Arc::clone(&renders);
+                move |_: &WorkspaceSnapshot| {
+                    prepares.fetch_add(1, Ordering::SeqCst);
+                    let renders = Arc::clone(&renders);
+                    Ok(PreparedSystemPrompt::new(
+                        move |context: PromptContext<'_>| {
+                            let tools = context
+                                .active_tools
+                                .iter()
+                                .map(|tool| tool.name.clone())
+                                .collect::<Vec<_>>();
+                            assert!(!tools.is_empty());
+                            renders.lock().unwrap().push(tools.clone());
+                            Ok(PromptOutput::new(tools.join(",")))
+                        },
+                    ))
+                }
+            }))
             .build()
             .unwrap();
-        runtime.set_active_tools(["write", "write"]).unwrap();
+        let all_tools = runtime
+            .tool_specs()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(runtime.active_tools(), all_tools);
+        assert_eq!(*renders.lock().unwrap(), vec![all_tools]);
+        assert_eq!(plugins.load(Ordering::SeqCst), 1);
+        assert_eq!(prepares.load(Ordering::SeqCst), 1);
         let state = runtime.agent().state();
-        assert_eq!(state.active_tools, vec!["write"]);
-        assert!(
-            state
-                .system_prompt
-                .contains("- write: Create or overwrite files")
-        );
-        assert!(!state.system_prompt.contains("- read: Read file contents"));
+        runtime
+            .restore_state(RuntimeRestoreState {
+                provider_id: state.provider_id,
+                model_id: state.model_id,
+                thinking_level: state.thinking_level,
+                active_tools: state.active_tools,
+                messages: state.messages,
+            })
+            .unwrap();
+        assert_eq!(renders.lock().unwrap().len(), 1);
 
-        let before = state;
+        runtime.set_active_tools(["echo"]).unwrap();
+        runtime.reload().await.unwrap();
+        assert_eq!(runtime.active_tools(), ["echo"]);
+        assert_eq!(runtime.agent().state().system_prompt, "echo");
+        assert_eq!(plugins.load(Ordering::SeqCst), 2);
+        assert_eq!(prepares.load(Ordering::SeqCst), 2);
+
+        let default_runtime = PiRuntime::builder()
+            .plugin(TestToolsPlugin::new())
+            .build()
+            .unwrap();
+        assert!(default_runtime.active_tools().is_empty());
+    }
+
+    #[test]
+    fn restored_initial_tool_selection_filters_missing_names_before_render() {
+        let runtime = PiRuntime::builder()
+            .plugin(TestToolsPlugin::new())
+            .restored_active_tools(vec![
+                "removed".into(),
+                "echo".into(),
+                "delay".into(),
+                "echo".into(),
+            ])
+            .system_prompt(SystemPrompt::dynamic(|_: &WorkspaceSnapshot| {
+                Ok(PreparedSystemPrompt::new(|context: PromptContext<'_>| {
+                    let tools = context
+                        .active_tools
+                        .iter()
+                        .map(|tool| tool.name.as_str())
+                        .collect::<Vec<_>>();
+                    assert_eq!(tools, ["echo", "delay"]);
+                    Ok(PromptOutput::new(tools.join(",")))
+                }))
+            }))
+            .build()
+            .unwrap();
+        assert_eq!(runtime.active_tools(), ["echo", "delay"]);
+    }
+
+    #[test]
+    fn explicit_unknown_initial_tools_are_rejected_with_a_final_prompt() {
+        let result = PiRuntime::builder()
+            .system_prompt(SystemPrompt::Final("Exact prompt".into()))
+            .agent_options(AgentOptions {
+                active_tools: vec!["not_registered".into()],
+                ..AgentOptions::default()
+            })
+            .build();
+        assert!(
+            matches!(result, Err(RuntimeError::Build(message)) if message.contains("not_registered"))
+        );
+    }
+
+    #[tokio::test]
+    async fn domain_prompt_updates_restore_and_reload_are_atomic() {
+        let revision = Arc::new(AtomicUsize::new(1));
+        let prepare_count = Arc::new(AtomicUsize::new(0));
+        let reject_render = Arc::new(AtomicBool::new(false));
+        let source_revision = Arc::clone(&revision);
+        let source_prepares = Arc::clone(&prepare_count);
+        let source_reject_render = Arc::clone(&reject_render);
+        let cwd = std::env::current_dir().unwrap();
+        let runtime = PiRuntime::builder()
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
+            .plugin(TestToolsPlugin::new())
+            .agent_options(AgentOptions {
+                active_tools: vec!["echo".to_string()],
+                cwd: cwd.clone(),
+                ..AgentOptions::default()
+            })
+            .system_prompt(SystemPrompt::dynamic(move |workspace: &WorkspaceSnapshot| {
+                source_prepares.fetch_add(1, Ordering::SeqCst);
+                let revision = source_revision.load(Ordering::SeqCst);
+                if revision == 0 {
+                    return Err("domain resource preparation failed".to_string());
+                }
+                let reject_render = Arc::clone(&source_reject_render);
+                let mut prompt = PreparedSystemPrompt::new(move |context: PromptContext<'_>| {
+                    if reject_render.load(Ordering::SeqCst) {
+                        return Err("domain prompt render failed".to_string());
+                    }
+                    let names = context.active_tools.iter().map(|tool| tool.name.clone()).collect::<Vec<_>>();
+                    Ok(PromptOutput {
+                        system_prompt: format!("domain {revision}: {}", names.join(",")),
+                        options: Some(json!({ "revision": revision, "selectedTools": names, "cwd": context.workspace.cwd() })),
+                    })
+                });
+                prompt.resource_options = Some(json!({ "revision": revision }));
+                prompt.diagnostics.push(ResourceDiagnostic {
+                    kind: DiagnosticKind::Warning,
+                    message: format!("domain diagnostic {revision}"),
+                    path: workspace.cwd().join("policy.md"),
+                });
+                Ok(prompt)
+            }))
+            .build()
+            .unwrap();
+        assert_eq!(runtime.agent().state().system_prompt, "domain 1: echo");
+        assert_eq!(runtime.prompt_options().unwrap()["cwd"], json!(cwd));
+        assert_eq!(
+            runtime.resource_diagnostics()[0].path,
+            cwd.join("policy.md")
+        );
+
+        revision.store(2, Ordering::SeqCst);
+        runtime.set_active_tools(["delay", "delay"]).unwrap();
+        assert_eq!(runtime.active_tools(), vec!["delay"]);
+        assert_eq!(runtime.agent().state().system_prompt, "domain 1: delay");
+        assert_eq!(
+            runtime.prompt_options().unwrap()["selectedTools"],
+            json!(["delay"])
+        );
+        assert_eq!(prepare_count.load(Ordering::SeqCst), 1);
         assert!(matches!(
             runtime.set_active_tools(["missing"]),
             Err(RuntimeError::UnknownTools(_))
         ));
-        let after = runtime.agent().state();
-        assert_eq!(after.active_tools, before.active_tools);
-        assert_eq!(after.system_prompt, before.system_prompt);
-    }
 
-    #[test]
-    fn resources_enable_pi_prompt_and_load_project_context() {
-        let root = tempfile::tempdir().unwrap();
-        let cwd = root.path().join("project");
-        let agent_dir = root.path().join("agent");
-        std::fs::create_dir_all(&cwd).unwrap();
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(cwd.join("AGENTS.md"), "project rules").unwrap();
-        let runtime = PiRuntime::builder()
-            .plugin(pi_plugin_read::ReadPlugin)
-            .agent_options(AgentOptions {
-                active_tools: vec!["read".to_string()],
-                cwd: cwd.clone(),
-                ..AgentOptions::default()
-            })
-            .resources(pi_resources::ResourceLoaderOptions::new(
-                "ignored", &agent_dir,
-            ))
-            .build()
-            .unwrap();
-        let prompt = runtime.agent().state().system_prompt;
-        assert!(prompt.contains("project rules"));
-        assert!(prompt.contains(&format!("Current working directory: {}", cwd.display())));
-        assert!(runtime.resource_diagnostics().is_empty());
-    }
+        reject_render.store(true, Ordering::SeqCst);
+        let before = runtime.agent().state();
+        let before_options = runtime.prompt_options();
+        assert!(matches!(
+            runtime.set_active_tools(["echo"]),
+            Err(RuntimeError::Build(_))
+        ));
+        assert_eq!(runtime.active_tools(), before.active_tools);
+        assert_eq!(runtime.agent().state().system_prompt, before.system_prompt);
+        assert_eq!(runtime.prompt_options(), before_options);
 
-    #[test]
-    fn resources_reject_final_system_prompt() {
-        let error = match PiRuntime::builder()
-            .system_prompt(SystemPrompt::Final("final".to_string()))
-            .resources(pi_resources::ResourceLoaderOptions::new(".", "."))
-            .build()
-        {
-            Ok(_) => panic!("resources with Final prompt must fail"),
-            Err(error) => error,
+        let restore = RuntimeRestoreState {
+            provider_id: before.provider_id,
+            model_id: before.model_id,
+            thinking_level: before.thinking_level,
+            active_tools: vec!["echo".to_string()],
+            messages: Vec::new(),
         };
-        assert!(error.to_string().contains("Final prompt"));
+        assert!(matches!(
+            runtime.restore_state(restore.clone()),
+            Err(RuntimeError::Build(_))
+        ));
+        assert_eq!(runtime.active_tools(), vec!["delay"]);
+        reject_render.store(false, Ordering::SeqCst);
+        runtime.restore_state(restore).unwrap();
+        assert_eq!(runtime.agent().state().system_prompt, "domain 1: echo");
+        assert_eq!(
+            runtime.prompt_options().unwrap()["selectedTools"],
+            json!(["echo"])
+        );
+
+        let report = runtime.reload().await.unwrap();
+        assert_eq!(report.generation, 2);
+        assert_eq!(runtime.agent().state().system_prompt, "domain 2: echo");
+        assert_eq!(runtime.resource_options(), Some(json!({ "revision": 2 })));
+        assert_eq!(
+            report.resource_diagnostics[0].message,
+            "domain diagnostic 2"
+        );
+        assert_eq!(prepare_count.load(Ordering::SeqCst), 2);
+
+        revision.store(0, Ordering::SeqCst);
+        assert!(matches!(
+            runtime.reload().await,
+            Err(RuntimeError::Build(_))
+        ));
+        assert_eq!(runtime.generation(), 2);
+        assert_eq!(runtime.agent().state().system_prompt, "domain 2: echo");
+        assert_eq!(runtime.resource_options(), Some(json!({ "revision": 2 })));
+        assert_eq!(runtime.resource_diagnostics(), report.resource_diagnostics);
     }
 
     #[tokio::test]
@@ -3479,45 +3688,32 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn final_system_prompt_overrides_agent_option_without_assembly() {
-        let runtime = PiRuntime::builder()
-            .agent_options(AgentOptions {
-                system_prompt: "old".to_string(),
-                ..AgentOptions::default()
-            })
-            .system_prompt(SystemPrompt::Final("final".to_string()))
-            .build()
-            .unwrap();
-        assert_eq!(runtime.agent().state().system_prompt, "final");
-    }
-
-    #[test]
-    fn pi_prompt_collects_only_active_tool_contributions() {
-        let cwd = std::env::current_dir().unwrap();
-        let runtime = PiRuntime::builder()
-            .plugin(pi_plugin_read::ReadPlugin)
-            .plugin(pi_plugin_write::WritePlugin)
-            .agent_options(AgentOptions {
-                active_tools: vec!["read".to_string()],
-                cwd: cwd.clone(),
-                ..AgentOptions::default()
-            })
-            .system_prompt(SystemPrompt::Pi(Box::new(
-                pi_prompt::BuildSystemPromptOptions {
-                    readme_path: Some("/pi/README.md".into()),
-                    docs_path: Some("/pi/docs".into()),
-                    examples_path: Some("/pi/examples".into()),
-                    ..Default::default()
-                },
-            )))
-            .build()
-            .unwrap();
-        let prompt = runtime.agent().state().system_prompt;
-        assert!(prompt.contains("- read: Read file contents"));
-        assert!(prompt.contains("Use read to examine files instead of cat or sed."));
-        assert!(!prompt.contains("- write: Create or overwrite files"));
-        assert!(prompt.contains(&format!("Current working directory: {}", cwd.display())));
+    #[tokio::test]
+    async fn final_and_fallback_prompts_allow_tool_changes_without_assembly() {
+        for (system_prompt, expected) in [
+            (Some(SystemPrompt::Final("final".to_string())), "final"),
+            (None, "fallback"),
+        ] {
+            let mut builder = PiRuntime::builder()
+                .plugin(TestToolsPlugin::new())
+                .provider_plugin(ScriptedProviderPlugin::scripted([]))
+                .agent_options(AgentOptions {
+                    system_prompt: "fallback".to_string(),
+                    ..AgentOptions::default()
+                });
+            if let Some(prompt) = system_prompt {
+                builder = builder.system_prompt(prompt);
+            }
+            let runtime = builder.build().unwrap();
+            runtime.set_active_tools(["echo", "echo"]).unwrap();
+            assert_eq!(runtime.active_tools(), vec!["echo"]);
+            assert_eq!(runtime.agent().state().system_prompt, expected);
+            assert_eq!(runtime.prompt_options(), None);
+            runtime.reload().await.unwrap();
+            assert_eq!(runtime.active_tools(), vec!["echo"]);
+            assert_eq!(runtime.agent().state().system_prompt, expected);
+            assert_eq!(runtime.resource_options(), None);
+        }
     }
 
     fn assistant_texts(messages: &[Message]) -> Vec<&str> {

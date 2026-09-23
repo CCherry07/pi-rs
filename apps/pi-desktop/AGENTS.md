@@ -1,6 +1,6 @@
 # Pi Desktop Agent Guide
 
-Treat `src-tauri/src/pi_runtime/*` and `pi-sdk::Pi` as the Pi integration seam.
+Treat `src-tauri/src/pi_runtime/*` and `pi-coding::Pi` as the Pi integration seam.
 
 ## Scope
 

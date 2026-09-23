@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
-use pi_eval::{ArtifactStore, EvalExecutionOutcome, EvalRun, PiEvalHarness, summarize_comparisons};
+use pi_coding::Config;
+use pi_coding_eval::CodingEvalHarness;
+use pi_eval::{ArtifactStore, EvalExecutionOutcome, EvalRun, summarize_comparisons};
 use pi_js_plugin::JsPluginHost;
-use pi_sdk::Config;
 
 use crate::catalog::{EvalPlan, resolve_plan};
 
@@ -97,14 +98,14 @@ async fn execute(cli: Cli, js_plugin_host: Option<Arc<dyn JsPluginHost>>) -> Res
             let provider = resolve_selection(provider, "PI_PROVIDER", "--provider")?;
             let model = resolve_selection(model, "PI_MODEL", "--model")?;
             let source_agent_dir = agent_dir
-                .or_else(pi_sdk::default_agent_dir)
+                .or_else(pi_coding::default_agent_dir)
                 .ok_or_else(|| "cannot determine agent directory; pass --agent-dir".to_string())?;
             let cwd = std::env::current_dir()
                 .map_err(|error| format!("cannot determine current directory: {error}"))?;
             let artifact_dir = artifact_dir.unwrap_or_else(default_artifact_directory);
             let artifact_store =
                 ArtifactStore::new(&artifact_dir).map_err(|error| error.to_string())?;
-            let mut harness = PiEvalHarness::new(artifact_store.clone());
+            let mut harness = CodingEvalHarness::new(artifact_store.clone());
             if let Some(host) = js_plugin_host {
                 harness = harness.with_js_plugin_host(host);
             }
@@ -123,7 +124,7 @@ async fn execute(cli: Cli, js_plugin_host: Option<Arc<dyn JsPluginHost>>) -> Res
                     for eval_variant in &plan.variants {
                         println!(
                             "[eval] case={} variant={} repetition={repetition}",
-                            eval_case.id, eval_variant.name
+                            eval_case.case.id, eval_variant.name
                         );
                         let config = product_config(
                             &cwd,

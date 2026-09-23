@@ -8,6 +8,7 @@ use pi_plugin::Plugin;
 use pi_runtime::{PiRuntime, PiRuntimeBuilder};
 use tokio::sync::watch;
 
+use crate::agent_session::SessionRecoveryPlan;
 use crate::journal::comparable_path;
 use crate::{
     AgentSession, AgentSessionOptions, ForkOptions, ForkPosition, PiSession, PreparedAgentSession,
@@ -177,6 +178,21 @@ pub struct SessionGenerationRequest {
     /// generation is being rebuilt for reload. Product policy may use this to
     /// avoid reapplying startup-only model arguments.
     pub reload_model: Option<ModelSelection>,
+    /// Read-only projection of an existing journal after accepted recovery writes.
+    /// Present for every existing journal, including those without configuration entries.
+    pub restored_configuration: Option<RestoredSessionConfiguration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoredSessionConfiguration {
+    pub active_tools: RestoredToolSelection,
+}
+
+/// A restored journal can intentionally select no tools, or have no selection record at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoredToolSelection {
+    RuntimeDefault,
+    Selected(Vec<String>),
 }
 
 /// Fully resolved initial runtime state for a fresh agent session.
@@ -368,6 +384,7 @@ enum ResolvedSessionTarget {
     },
     Existing {
         log: SessionLog,
+        recovery: SessionRecoveryPlan,
     },
 }
 
@@ -399,6 +416,7 @@ impl ResolvedSessionTarget {
                     generation_overlay,
                     initial_state,
                     reload_model: None,
+                    restored_configuration: None,
                 };
                 Ok((
                     Self::Create {
@@ -426,6 +444,8 @@ impl ResolvedSessionTarget {
         generation_overlay: SessionGenerationOverlay,
     ) -> Result<(Self, SessionGenerationRequest), SessionError> {
         let reload_model = reload_model(&log, reason)?;
+        let recovery = SessionRecoveryPlan::prepare(&log)?;
+        let restored_configuration = Some(recovery.configuration(&log)?);
         let request = SessionGenerationRequest {
             workspace: log.header().workspace()?.snapshot(),
             cwd: log.header().cwd.clone(),
@@ -434,8 +454,9 @@ impl ResolvedSessionTarget {
             generation_overlay,
             initial_state: None,
             reload_model,
+            restored_configuration,
         };
-        Ok((Self::Existing { log }, request))
+        Ok((Self::Existing { log, recovery }, request))
     }
 }
 
@@ -805,10 +826,10 @@ impl AgentSessionRuntime {
                 options.header_metadata = metadata;
                 AgentSession::prepare_create_with_options(runtime, path, options).await
             }
-            ResolvedSessionTarget::Existing { log } => {
+            ResolvedSessionTarget::Existing { log, recovery } => {
                 options.parent_session_path = None;
                 options.session_id = None;
-                AgentSession::prepare_reuse_with_options(runtime, log, options).await
+                AgentSession::prepare_reuse_with_recovery(runtime, log, options, recovery)
             }
         };
         let prepared = match prepared {

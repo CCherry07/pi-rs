@@ -578,7 +578,12 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 | Directory                                        | Responsibility                                                                           |
 | ------------------------------------------------ | ---------------------------------------------------------------------------------------- |
 | `apps/pi-cli`                                    | CLI, TUI, and terminal lifecycle Adapter                                                  |
-| `crates/pi-sdk`                                  | Shared headless product assembly for CLI, desktop, and embedded adapters                 |
+| `crates/pi-sdk`                                  | Explicit domain-neutral agent embedding and shared Project definitions                  |
+| `domains/coding`                                 | Coding defaults, resources, providers/tools and product generation assembly              |
+| `crates/pi-eval`                                 | Domain-neutral eval execution, grading, artifacts and comparisons                        |
+| `domains/coding/eval`                            | Coding eval configuration and isolated product preparation (`pi-coding-eval`)             |
+| `apps/pi-eval`                                   | Eval CLI, case catalog and result presentation                                            |
+| `examples/order-agent`                           | Deterministic non-Coding SDK example                                                     |
 | `crates/pi-plugin` | Plugin contracts, preparation, typed contexts, generation drivers, and optional native exports |
 | `crates/pi-core`                                 | Messages, models, tool data and shared session wire values                                 |
 | `crates/pi-media`                                | Shared image validation, resizing, and format conversion                               |
@@ -590,7 +595,8 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 | `plugins/features/pi-plugin-mcp`               | MCP client/tools, local configuration management and `/mcp` commands                    |
 | `crates/pi-telemetry`                            | Typed provider/harness span schemas and sink adapters                                    |
 | `crates/pi-provider`                             | Provider-neutral HTTP transport and SSE                                                  |
-| `crates/pi-prompt` / `pi-resources`              | System prompt and project context discovery                                              |
+| `domains/coding/src/{prompt,resources}.rs`       | Private Coding prompt assembly and project context discovery                             |
+| `domains/coding/settings`                      | Shared Coding settings documents and persistence (`pi-settings`)                          |
 | `apps/pi-cli/src/markdown`                       | TUI-owned Markdown parsing, streaming repair, syntax highlighting, and Ratatui rendering |
 | `crates/pi-plugin-macros` | Static/native plugin procedural macros |
 | `crates/pi-plugin-manager` | Native loading, package installation/reconciliation, and optional build/publication tools |

@@ -5,8 +5,8 @@ use std::path::Path;
 
 use fs2::FileExt;
 #[cfg(test)]
-use pi_sdk::read_stored_credential;
-use pi_sdk::{StoredCredential, read_credentials};
+use pi_coding::read_stored_credential;
+use pi_coding::{StoredCredential, read_credentials};
 
 use crate::config::AuthCommand;
 

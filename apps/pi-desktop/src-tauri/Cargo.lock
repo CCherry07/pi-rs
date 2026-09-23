@@ -4014,6 +4014,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-coding"
+version = "0.8.4"
+dependencies = [
+ "async-trait",
+ "fs2",
+ "pi-agent",
+ "pi-core",
+ "pi-js-package-manager",
+ "pi-js-plugin",
+ "pi-memory-loader",
+ "pi-plugin",
+ "pi-plugin-anthropic",
+ "pi-plugin-azure-openai",
+ "pi-plugin-bash",
+ "pi-plugin-bedrock",
+ "pi-plugin-copilot",
+ "pi-plugin-edit",
+ "pi-plugin-find",
+ "pi-plugin-google",
+ "pi-plugin-grep",
+ "pi-plugin-hashline-edit",
+ "pi-plugin-ls",
+ "pi-plugin-manager",
+ "pi-plugin-mcp",
+ "pi-plugin-memory-hermes",
+ "pi-plugin-mistral",
+ "pi-plugin-models",
+ "pi-plugin-openai",
+ "pi-plugin-openrouter",
+ "pi-plugin-prompts",
+ "pi-plugin-read",
+ "pi-plugin-schedule",
+ "pi-plugin-session-transfer",
+ "pi-plugin-skills",
+ "pi-plugin-subagents",
+ "pi-plugin-write",
+ "pi-plugin-xai",
+ "pi-provider",
+ "pi-runtime",
+ "pi-sdk",
+ "pi-session",
+ "pi-settings",
+ "pi-shell",
+ "pi-utils",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "pi-core"
 version = "0.1.0"
 dependencies = [
@@ -4044,6 +4097,7 @@ dependencies = [
  "objc2-av-foundation",
  "objc2-foundation",
  "pi-agent",
+ "pi-coding",
  "pi-core",
  "pi-plugin",
  "pi-plugin-mcp",
@@ -4076,7 +4130,7 @@ dependencies = [
 
 [[package]]
 name = "pi-js-package-manager"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "futures",
  "glob",
@@ -4112,7 +4166,7 @@ dependencies = [
 
 [[package]]
 name = "pi-media"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -4122,7 +4176,7 @@ dependencies = [
 
 [[package]]
 name = "pi-memory-loader"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "async-trait",
  "pi-core",
@@ -4351,7 +4405,7 @@ dependencies = [
 
 [[package]]
 name = "pi-plugin-mcp"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "async-trait",
  "fs2",
@@ -4371,7 +4425,7 @@ dependencies = [
 
 [[package]]
 name = "pi-plugin-memory-hermes"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4602,14 +4656,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pi-prompt"
-version = "0.1.0"
-dependencies = [
- "pi-utils",
- "serde",
-]
-
-[[package]]
 name = "pi-provider"
 version = "0.1.0"
 dependencies = [
@@ -4626,15 +4672,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pi-resources"
-version = "0.1.0"
-dependencies = [
- "pi-prompt",
- "pi-utils",
- "serde",
-]
-
-[[package]]
 name = "pi-runtime"
 version = "0.1.0"
 dependencies = [
@@ -4642,62 +4679,27 @@ dependencies = [
  "pi-agent",
  "pi-core",
  "pi-plugin",
- "pi-prompt",
- "pi-resources",
  "pi-utils",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
 ]
 
 [[package]]
 name = "pi-sdk"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "async-trait",
  "fs2",
  "pi-agent",
  "pi-core",
- "pi-js-package-manager",
- "pi-js-plugin",
- "pi-memory-loader",
  "pi-plugin",
- "pi-plugin-anthropic",
- "pi-plugin-azure-openai",
- "pi-plugin-bash",
- "pi-plugin-bedrock",
- "pi-plugin-copilot",
- "pi-plugin-edit",
- "pi-plugin-find",
- "pi-plugin-google",
- "pi-plugin-grep",
- "pi-plugin-hashline-edit",
- "pi-plugin-ls",
- "pi-plugin-manager",
- "pi-plugin-mcp",
- "pi-plugin-memory-hermes",
- "pi-plugin-mistral",
- "pi-plugin-models",
- "pi-plugin-openai",
- "pi-plugin-openrouter",
- "pi-plugin-prompts",
- "pi-plugin-read",
- "pi-plugin-schedule",
- "pi-plugin-session-transfer",
- "pi-plugin-skills",
- "pi-plugin-subagents",
- "pi-plugin-write",
- "pi-plugin-xai",
- "pi-provider",
- "pi-resources",
  "pi-runtime",
  "pi-session",
- "pi-settings",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -4723,7 +4725,7 @@ dependencies = [
 
 [[package]]
 name = "pi-settings"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "fs2",
  "serde",

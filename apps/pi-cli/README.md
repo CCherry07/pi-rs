@@ -793,7 +793,7 @@ registry formats.
 
 ## Development
 
-CLI startup and frontend selection live in `src/lib.rs`; `pi-sdk::ProductSessionFactory` assembles
+CLI startup and frontend selection live in `src/lib.rs`; `pi-coding::ProductSessionFactory` assembles
 the production runtime generation for every presentation adapter. Terminal ownership remains in
 this crate, while reusable product, agent, provider, plugin, resource, and session behavior stays
 in the workspace libraries.

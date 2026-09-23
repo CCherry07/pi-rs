@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use async_trait::async_trait;
 use pi_core::{
     AbortSignal, ContentBlock, Message, StopReason, ThinkingLevel, Usage, UsageCost, UserMessage,
@@ -48,7 +46,7 @@ Use this EXACT format:
 - [Any data, examples, or references needed to continue]
 - [Or "(none)" if not applicable]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages."#;
+Keep each section concise. Preserve exact identifiers, important references, and error messages."#;
 
 const UPDATE_SUMMARIZATION_PROMPT: &str = r#"The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
@@ -57,7 +55,7 @@ Update the existing structured summary with new information. RULES:
 - ADD new progress, decisions, and context from the new messages
 - UPDATE the Progress section: move items from "In Progress" to "Done" when completed
 - UPDATE "Next Steps" based on what was accomplished
-- PRESERVE exact file paths, function names, and error messages
+- PRESERVE exact identifiers, important references, and error messages
 - If something is no longer relevant, you may remove it
 
 Use this EXACT format:
@@ -87,7 +85,7 @@ Use this EXACT format:
 ## Critical Context
 - [Preserve important context, add new if needed]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages."#;
+Keep each section concise. Preserve exact identifiers, important references, and error messages."#;
 
 const TURN_PREFIX_SUMMARIZATION_PROMPT: &str = r#"This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
 
@@ -103,6 +101,53 @@ Summarize the prefix to provide context for the retained suffix:
 - [Information needed to understand the retained recent work]
 
 Be concise. Focus on what's needed to understand the kept suffix."#;
+
+const BRANCH_SUMMARIZATION_PROMPT: &str = "Create a structured summary of this conversation branch for context when returning later.\n\nUse this EXACT format:\n\n## Goal\n[What was the user trying to accomplish in this branch?]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Work that was started but not finished]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [What should happen next to continue this work]\n\nKeep each section concise. Preserve exact identifiers, important references, and error messages.";
+
+/// Immutable summary policy selected while building a session generation.
+///
+/// The session owns cut points, model calls, cancellation and checkpoint writes.
+/// A domain can supply prompts and enrich preparation/result metadata without
+/// adding another plugin lifecycle or changing the persisted session schema.
+pub trait SessionCompactionPolicy: Send + Sync {
+    fn system_prompt(&self) -> &str {
+        SUMMARIZATION_SYSTEM_PROMPT
+    }
+
+    fn summary_prompt(&self, updating: bool) -> &str {
+        if updating {
+            UPDATE_SUMMARIZATION_PROMPT
+        } else {
+            SUMMARIZATION_PROMPT
+        }
+    }
+
+    fn turn_prefix_prompt(&self) -> &str {
+        TURN_PREFIX_SUMMARIZATION_PROMPT
+    }
+
+    fn branch_prompt(&self) -> &str {
+        BRANCH_SUMMARIZATION_PROMPT
+    }
+
+    /// Enriches the prepared input before session lifecycle hooks see it.
+    fn prepare(&self, _path_entries: &[SessionRecord], _preparation: &mut CompactionPreparation) {}
+
+    /// Appends domain summary context and returns optional checkpoint details.
+    fn finalize(
+        &self,
+        _preparation: &CompactionPreparation,
+        _summary: &mut String,
+    ) -> Option<Value> {
+        None
+    }
+}
+
+/// General-purpose summaries with no assumptions about tools or domain data.
+#[derive(Debug, Default)]
+pub struct GenericCompactionPolicy;
+
+impl SessionCompactionPolicy for GenericCompactionPolicy {}
 
 const ESTIMATED_IMAGE_CHARS: usize = 4_800;
 const TOOL_RESULT_MAX_CHARS: usize = 2_000;
@@ -375,6 +420,7 @@ pub fn prepare_compaction(
     path_entries: &[SessionRecord],
     settings: CompactionSettings,
     context_options: &SessionContextBuildOptions,
+    policy: &dyn SessionCompactionPolicy,
 ) -> Option<CompactionPreparation> {
     if path_entries.is_empty()
         || path_entries
@@ -433,33 +479,24 @@ pub fn prepare_compaction(
         });
     let retained_tail = messages_in(&compactable[cut.first_kept_entry_index..]);
 
-    let mut file_ops = FileOperations::default();
-    if let Some(index) = previous_index
-        && let SessionEntry::Compaction(previous) = &path_entries[index].entry
-        && let Some(details) = &previous.details
-    {
-        extend_string_set(&mut file_ops.read, details.get("readFiles"));
-        extend_string_set(&mut file_ops.edited, details.get("modifiedFiles"));
-    }
-    for message in messages_to_summarize.iter().chain(&turn_prefix_messages) {
-        extract_file_operations(message, &mut file_ops);
-    }
-
-    Some(CompactionPreparation {
+    let mut preparation = CompactionPreparation {
         messages_to_summarize,
         turn_prefix_messages,
         retained_tail,
         is_split_turn: cut.is_split_turn,
         tokens_before,
         previous_summary,
-        file_ops,
+        file_ops: FileOperations::default(),
         settings,
-    })
+    };
+    policy.prepare(path_entries, &mut preparation);
+    Some(preparation)
 }
 
 pub async fn compact(
     preparation: &CompactionPreparation,
     completer: &dyn CompactionCompleter,
+    policy: &dyn SessionCompactionPolicy,
     custom_instructions: Option<&str>,
     thinking_level: ThinkingLevel,
     signal: AbortSignal,
@@ -472,6 +509,7 @@ pub async fn compact(
                 Some(
                     generate_summary(
                         completer,
+                        policy,
                         &preparation.messages_to_summarize,
                         preparation,
                         custom_instructions,
@@ -483,6 +521,7 @@ pub async fn compact(
             };
             let prefix = generate_turn_prefix_summary(
                 completer,
+                policy,
                 &preparation.turn_prefix_messages,
                 preparation.settings.reserve_tokens,
                 thinking_level,
@@ -505,6 +544,7 @@ pub async fn compact(
         } else {
             let generated = generate_summary(
                 completer,
+                policy,
                 &preparation.messages_to_summarize,
                 preparation,
                 custom_instructions,
@@ -515,16 +555,12 @@ pub async fn compact(
             (generated.text, generated.usage)
         };
 
-    let (read_files, modified_files) = compute_file_lists(&preparation.file_ops);
-    summary.push_str(&format_file_operations(&read_files, &modified_files));
+    let details = policy.finalize(preparation, &mut summary);
     Ok(CompactionEntry {
         summary,
         retained_tail: preparation.retained_tail.clone(),
         tokens_before: preparation.tokens_before,
-        details: Some(json!({
-            "readFiles": read_files,
-            "modifiedFiles": modified_files,
-        })),
+        details,
         usage: Some(usage),
     })
 }
@@ -598,17 +634,16 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
 
 async fn generate_summary(
     completer: &dyn CompactionCompleter,
+    policy: &dyn SessionCompactionPolicy,
     messages: &[AgentMessage],
     preparation: &CompactionPreparation,
     custom_instructions: Option<&str>,
     thinking_level: ThinkingLevel,
     signal: AbortSignal,
 ) -> Result<CompactionCompletion, CompactionError> {
-    let mut base_prompt = if preparation.previous_summary.is_some() {
-        UPDATE_SUMMARIZATION_PROMPT.to_string()
-    } else {
-        SUMMARIZATION_PROMPT.to_string()
-    };
+    let mut base_prompt = policy
+        .summary_prompt(preparation.previous_summary.is_some())
+        .to_string();
     if let Some(instructions) = custom_instructions.filter(|value| !value.is_empty()) {
         base_prompt.push_str("\n\nAdditional focus: ");
         base_prompt.push_str(instructions);
@@ -632,7 +667,7 @@ async fn generate_summary(
     completer
         .complete_compaction(
             CompactionCompletionRequest {
-                system_prompt: SUMMARIZATION_SYSTEM_PROMPT.to_string(),
+                system_prompt: policy.system_prompt().to_string(),
                 prompt,
                 max_output_tokens,
                 thinking_level,
@@ -644,14 +679,16 @@ async fn generate_summary(
 
 async fn generate_turn_prefix_summary(
     completer: &dyn CompactionCompleter,
+    policy: &dyn SessionCompactionPolicy,
     messages: &[AgentMessage],
     reserve_tokens: u64,
     thinking_level: ThinkingLevel,
     signal: AbortSignal,
 ) -> Result<CompactionCompletion, CompactionError> {
     let prompt = format!(
-        "<conversation>\n{}\n</conversation>\n\n{TURN_PREFIX_SUMMARIZATION_PROMPT}",
-        serialize_conversation(messages)
+        "<conversation>\n{}\n</conversation>\n\n{}",
+        serialize_conversation(messages),
+        policy.turn_prefix_prompt()
     );
     let capabilities = completer.model_capabilities();
     let max_output_tokens = clamp_summary_tokens(reserve_tokens / 2, capabilities);
@@ -659,7 +696,7 @@ async fn generate_turn_prefix_summary(
     completer
         .complete_compaction(
             CompactionCompletionRequest {
-                system_prompt: SUMMARIZATION_SYSTEM_PROMPT.to_string(),
+                system_prompt: policy.system_prompt().to_string(),
                 prompt,
                 max_output_tokens,
                 thinking_level,
@@ -895,73 +932,6 @@ fn json_content_chars(value: &Value) -> usize {
     }
 }
 
-fn extract_file_operations(message: &AgentMessage, file_ops: &mut FileOperations) {
-    let Some(Message::Assistant(message)) = message.as_standard() else {
-        return;
-    };
-    for call in message.tool_calls() {
-        let Some(path) = call.arguments.get("path").and_then(Value::as_str) else {
-            continue;
-        };
-        match call.name.as_str() {
-            "read" => {
-                file_ops.read.insert(path.to_string());
-            }
-            "write" => {
-                file_ops.written.insert(path.to_string());
-            }
-            "edit" => {
-                file_ops.edited.insert(path.to_string());
-            }
-            _ => {}
-        }
-    }
-}
-
-fn extend_string_set(target: &mut HashSet<String>, value: Option<&Value>) {
-    if let Some(Value::Array(values)) = value {
-        target.extend(values.iter().filter_map(Value::as_str).map(str::to_string));
-    }
-}
-
-fn compute_file_lists(file_ops: &FileOperations) -> (Vec<String>, Vec<String>) {
-    let modified = file_ops
-        .written
-        .union(&file_ops.edited)
-        .cloned()
-        .collect::<HashSet<_>>();
-    let mut read_files = file_ops
-        .read
-        .difference(&modified)
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut modified_files = modified.into_iter().collect::<Vec<_>>();
-    read_files.sort();
-    modified_files.sort();
-    (read_files, modified_files)
-}
-
-fn format_file_operations(read_files: &[String], modified_files: &[String]) -> String {
-    let mut sections = Vec::new();
-    if !read_files.is_empty() {
-        sections.push(format!(
-            "<read-files>\n{}\n</read-files>",
-            read_files.join("\n")
-        ));
-    }
-    if !modified_files.is_empty() {
-        sections.push(format!(
-            "<modified-files>\n{}\n</modified-files>",
-            modified_files.join("\n")
-        ));
-    }
-    if sections.is_empty() {
-        String::new()
-    } else {
-        format!("\n\n{}", sections.join("\n\n"))
-    }
-}
-
 fn content_text(content: &[ContentBlock]) -> String {
     content
         .iter()
@@ -1193,7 +1163,9 @@ mod tests {
                 summary: "previous".to_string(),
                 retained_tail: vec![user("retained user"), assistant("retained assistant", 50)],
                 tokens_before: 1_000,
-                details: None,
+                details: Some(
+                    json!({ "readFiles": ["README.md"], "modifiedFiles": ["src/lib.rs"] }),
+                ),
                 usage: None,
             }),
         );
@@ -1209,9 +1181,11 @@ mod tests {
                 ..CompactionSettings::default()
             },
             &SessionContextBuildOptions::default(),
+            &GenericCompactionPolicy,
         )
         .unwrap();
         assert_eq!(preparation.previous_summary.as_deref(), Some("previous"));
+        assert_eq!(preparation.file_ops, FileOperations::default());
         let all = preparation
             .messages_to_summarize
             .iter()
@@ -1228,7 +1202,8 @@ mod tests {
             prepare_compaction(
                 &[],
                 CompactionSettings::default(),
-                &SessionContextBuildOptions::default()
+                &SessionContextBuildOptions::default(),
+                &GenericCompactionPolicy,
             )
             .is_none()
         );
@@ -1246,7 +1221,8 @@ mod tests {
             prepare_compaction(
                 &[latest],
                 CompactionSettings::default(),
-                &SessionContextBuildOptions::default()
+                &SessionContextBuildOptions::default(),
+                &GenericCompactionPolicy,
             )
             .is_none()
         );
@@ -1346,6 +1322,7 @@ mod tests {
         let result = compact(
             &preparation,
             &completer,
+            &GenericCompactionPolicy,
             Some("preserve exact errors"),
             ThinkingLevel::High,
             signal,
@@ -1409,6 +1386,7 @@ mod tests {
             let error = compact(
                 &preparation,
                 &FailingCompleter { aborted },
+                &GenericCompactionPolicy,
                 None,
                 ThinkingLevel::Off,
                 signal,
@@ -1464,9 +1442,16 @@ mod tests {
         };
         let (_, signal) = pi_core::AbortHandle::new();
 
-        compact(&preparation, &completer, None, ThinkingLevel::High, signal)
-            .await
-            .unwrap();
+        compact(
+            &preparation,
+            &completer,
+            &GenericCompactionPolicy,
+            None,
+            ThinkingLevel::High,
+            signal,
+        )
+        .await
+        .unwrap();
 
         let requests = completer.prompts.lock().unwrap();
         assert_eq!(requests.len(), 2);
@@ -1483,7 +1468,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn split_turn_uses_two_summaries_and_preserves_file_details() {
+    async fn generic_split_turn_summarizes_without_interpreting_coding_tools() {
         let mut calling = assistant("", 50);
         if let Some(Message::Assistant(message)) = calling.as_standard() {
             let mut value = (**message).clone();
@@ -1501,11 +1486,7 @@ mod tests {
             is_split_turn: true,
             tokens_before: 500,
             previous_summary: None,
-            file_ops: {
-                let mut operations = FileOperations::default();
-                extract_file_operations(&preparation_message_for_edit(), &mut operations);
-                operations
-            },
+            file_ops: FileOperations::default(),
             settings: CompactionSettings::default(),
         };
         let completer = Arc::new(FakeCompleter {
@@ -1516,6 +1497,7 @@ mod tests {
         let result = compact(
             &preparation,
             completer.as_ref(),
+            &GenericCompactionPolicy,
             None,
             ThinkingLevel::Off,
             signal,
@@ -1524,21 +1506,8 @@ mod tests {
         .unwrap();
         assert_eq!(completer.prompts.lock().unwrap().len(), 2);
         assert!(result.summary.contains("Turn Context (split turn)"));
-        assert!(result.summary.contains("<modified-files>\nsrc/lib.rs"));
+        assert!(!result.summary.contains("<modified-files>"));
+        assert_eq!(result.details, None);
         assert_eq!(result.usage.unwrap().total_tokens, 50);
-    }
-
-    fn preparation_message_for_edit() -> AgentMessage {
-        let mut message = assistant("", 1);
-        if let Some(Message::Assistant(assistant)) = message.as_standard() {
-            let mut value = (**assistant).clone();
-            value.content = vec![ContentBlock::ToolCall(ToolCall::new(
-                "call",
-                "edit",
-                json!({"path":"src/lib.rs"}),
-            ))];
-            message = Message::assistant(value).into();
-        }
-        message
     }
 }

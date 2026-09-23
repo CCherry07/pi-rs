@@ -10,9 +10,9 @@ exec cargo test --locked \
   -p pi-core \
   -p pi-agent \
   -p pi-runtime \
+  -p pi-sdk \
+  -p pi-coding \
   -p pi-provider \
-  -p pi-prompt \
-  -p pi-resources \
   -p pi-session \
   -p pi-telemetry \
   -p pi-tool-support \

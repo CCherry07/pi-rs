@@ -73,6 +73,14 @@ claiming Pi compatibility; do not implement from memory or from an older Pi shap
 - `SkillsPlugin` owns skill roots, discovery, parsing, collisions, catalog prompt contribution, and
   `/skill:<name>` commands. Generic resources and prompt assembly remain skill-agnostic.
 
+### Domain composition
+
+- `crates/pi-sdk` owns explicit, domain-neutral embedding and shared Project definitions.
+  `domains/coding` owns Coding defaults and product assembly; apps enter through `pi-coding`.
+- Keep generic runtime/session Modules independent of Coding discovery and defaults. Inject
+  prompt, shell and compaction strategies through their existing Interfaces.
+- Providers, tools and optional features remain independently reusable under `plugins/`.
+
 ### Models and prompts
 
 - `models.json` owns registered model/provider catalog and request routing. Keep credentials and

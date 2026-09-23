@@ -23,9 +23,9 @@ Run the complete Rust core set with:
 ./scripts/test-core.sh
 ```
 
-The script uses `cargo test --locked` and selects the core crates plus the production skills,
-shell, truncation, and filesystem-tool adapters. `cargo test --workspace` remains the superset and
-the required CI gate.
+The script uses `cargo test --locked` and selects the core crates, generic SDK dependency guard,
+Coding prompt/resource regressions, and production skills, shell, truncation, and filesystem-tool
+adapters. `cargo test --workspace` remains the superset and the required CI gate.
 
 ## Status meanings
 

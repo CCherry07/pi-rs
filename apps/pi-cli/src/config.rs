@@ -339,7 +339,7 @@ pub(crate) enum PluginPublishCommand {
     },
 }
 
-pub(crate) type AppConfig = pi_sdk::Config;
+pub(crate) type AppConfig = pi_coding::Config;
 
 pub(crate) fn resolve_app_config(cli: &Cli) -> Result<AppConfig, String> {
     let cwd = std::fs::canonicalize(&cli.cwd)
@@ -347,7 +347,7 @@ pub(crate) fn resolve_app_config(cli: &Cli) -> Result<AppConfig, String> {
     let agent_dir = cli
         .agent_dir
         .clone()
-        .or_else(pi_sdk::default_agent_dir)
+        .or_else(pi_coding::default_agent_dir)
         .ok_or_else(|| "cannot determine agent directory; pass --agent-dir".to_string())?;
     let mut config = AppConfig::new(cwd, agent_dir);
     if let Some(session_path) = &cli.session {

@@ -24,4 +24,5 @@ pub use repo::{ExactSessionIdResolution, JsonlSessionRepo};
 pub use usage::{aggregate_document_usage, aggregate_session_usage, session_entry_usage};
 
 pub(crate) use paths::comparable_path;
+pub(crate) use reducer::reduce_lane_operation;
 pub(crate) use repo::validate_session_id;

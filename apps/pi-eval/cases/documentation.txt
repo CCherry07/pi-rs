@@ -11,6 +11,7 @@ crates/pi-plugin-manager/README.md
 crates/pi-plugin/docs/native.md
 crates/pi-plugin-manager/docs/authoring.md
 crates/pi-sdk/README.md
+domains/coding/README.md
 docs/architecture.md
 docs/js-extension-compatibility.md
 packages/pi/README.md

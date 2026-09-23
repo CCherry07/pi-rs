@@ -10,7 +10,7 @@ use pi_agent::AgentOptions;
 use pi_core::{ModelId, ProviderId};
 use pi_plugin::{PluginContext, PresentationMode};
 use pi_plugin_schedule::{ScheduleOptions, SchedulePlugin};
-use pi_runtime::{PiRuntime, SystemPrompt};
+use pi_runtime::PiRuntime;
 use pi_session::{
     AgentSessionOptions, MultiSessionManager, PiPluginContext, PiSession, PluginContextBinding,
     PreparedSessionGeneration, SessionError, SessionGenerationFactory, SessionGenerationRequest,
@@ -77,7 +77,9 @@ impl SessionGenerationFactory for Factory {
         let builder = PiRuntime::builder()
             .plugin_context(access)
             .provider_plugin(provider)
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(pi_runtime::SystemPrompt::Final(
+                "Test assistant".to_string(),
+            ))
             .plugin_factory({
                 let options = options.clone();
                 move || SchedulePlugin::new(options.clone())

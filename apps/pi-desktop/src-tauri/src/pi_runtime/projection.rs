@@ -1306,10 +1306,15 @@ mod tests {
                 ]))
                 .build()
                 .unwrap();
-            let session =
-                pi_session::AgentSession::create(runtime, directory.path().join("session.jsonl"))
-                    .await
-                    .unwrap();
+            let session = pi_session::AgentSession::create_with_options(
+                runtime,
+                directory.path().join("session.jsonl"),
+                pi_session::AgentSessionOptions::default().shell_executor(std::sync::Arc::new(
+                    pi_coding::CodingShellExecutor::default(),
+                )),
+            )
+            .await
+            .unwrap();
             session.submit("first task").await.unwrap();
             let mut subscription = session.subscribe();
             let before_count = subscription.snapshot.agent.messages.len();

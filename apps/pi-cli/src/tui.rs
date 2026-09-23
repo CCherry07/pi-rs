@@ -53,7 +53,7 @@ use crate::plugin_ui::{
 };
 use crate::text_selection::{ScreenSelection, ScreenTextSurface};
 use crate::{InteractiveRequestReceivers, auth, auth::AuthProviderInfo};
-use pi_sdk::{ProjectTrustOption, ProjectTrustPromptRequest, ProjectTrustService};
+use pi_coding::{ProjectTrustOption, ProjectTrustPromptRequest, ProjectTrustService};
 
 mod components;
 mod controller;
@@ -2259,7 +2259,7 @@ mod tests {
         assert!(app.trust_prompt.is_none());
         assert_eq!(
             service.evaluate(&project).unwrap(),
-            pi_sdk::ProjectTrustEvaluation::Known(true)
+            pi_coding::ProjectTrustEvaluation::Known(true)
         );
     }
 

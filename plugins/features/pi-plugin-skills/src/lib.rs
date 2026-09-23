@@ -739,7 +739,7 @@ fn format_skills_for_prompt(skills: &[SkillInfo]) -> String {
 mod tests {
     use super::*;
     use pi_core::{AbortHandle, ModelId, ProviderId, RunId};
-    use pi_runtime::{PiRuntime, SystemPrompt};
+    use pi_runtime::PiRuntime;
     use pi_test_support::ScriptedProviderPlugin;
 
     #[test]
@@ -1400,7 +1400,9 @@ mod tests {
         let runtime = PiRuntime::builder()
             .provider_plugin(ScriptedProviderPlugin::scripted([]))
             .plugin_factory(move || SkillsPlugin::load(options.clone()))
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(pi_runtime::SystemPrompt::Final(
+                "Test assistant".to_string(),
+            ))
             .build()
             .unwrap();
         assert!(

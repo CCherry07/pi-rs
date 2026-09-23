@@ -6,6 +6,13 @@ workspace, agent, and session directories. Only `auth.json` and `models.json`
 are copied into the temporary agent directory for provider bootstrap; they are
 never attached to eval artifacts.
 
+This app owns argument parsing, the first-party case catalog, and result
+presentation. [`pi-coding-eval`](../../domains/coding/eval/README.md) owns the
+Coding-specific configuration and environment preparation.
+[`pi-eval`](../../crates/pi-eval/README.md) owns the reusable session runner,
+observations, graders, artifacts, and comparisons. Other domains can use that
+runner by preparing their own session manager through `pi-sdk::AgentHost`.
+
 The native-only smoke case can run through Cargo:
 
 ```bash

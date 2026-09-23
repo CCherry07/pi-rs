@@ -14,9 +14,9 @@ use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use pi_agent::AgentStateSnapshot;
+use pi_coding::{Config, Pi};
 use pi_core::{ContentBlock, ImageContent, Message, ModelId, ModelSpec, ProviderId, ThinkingLevel};
 use pi_plugin::PresentationMode;
-use pi_sdk::{Config, Pi};
 use pi_session::{
     AgentSession, AgentSessionSnapshot, BranchQuery, EntryOrder, EntryQuery,
     IsolatedSessionObservation, QueueSnapshot, SessionEntry, SessionInput, SessionRecord,
@@ -38,7 +38,7 @@ pub(crate) struct PiRuntimeState {
     store: SessionStore,
     info: PiDesktopInfo,
     forwarders: projection::ForwarderRegistry,
-    project_trust: pi_sdk::ProjectTrustService,
+    project_trust: pi_coding::ProjectTrustService,
     skill_mutation_gate: skills::SkillMutationGate,
     desktop_command_scopes: desktop_commands::DesktopCommandScopes,
 }
@@ -1723,7 +1723,7 @@ mod tests {
                 reason: None,
             },
             forwarders: Default::default(),
-            project_trust: pi_sdk::ProjectTrustService::new(
+            project_trust: pi_coding::ProjectTrustService::new(
                 &agent_dir,
                 None,
                 false,

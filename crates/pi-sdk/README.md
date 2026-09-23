@@ -1,87 +1,88 @@
 # pi-sdk
 
-`pi-sdk` is the headless product integration layer for embedding Pi in the CLI,
-desktop application, and other presentation adapters.
+Domain-neutral agent composition using the existing `MultiSessionManager`, `PiSession`,
+and transactional session generation lifecycle. The Coding product's defaults live in
+[`pi-coding`](../../domains/coding/README.md).
 
-It owns the product runtime composition: providers and model catalogs, built-in
-tools, skills, memory, subagents, settings, project trust, plugin generations,
-and session construction. This is selection, settings adaptation, cross-plugin wiring,
-and transactional generation activation—not ownership of each component's implementation.
-Domain configuration and validation stay with the corresponding crates, whose APIs accept
-their own typed inputs rather than `pi_sdk::Config`. It does not own terminal, Tauri, RPC,
-or other presentation behavior; Desktop extension package discovery lives in the Desktop app.
-MCP client, local configuration management and `/mcp` commands live together in `pi-plugin-mcp`.
-The SDK only supplies the resolved trust decision and prepares/registers the candidate plugin;
-callers managing MCP files use `pi_plugin_mcp::McpLibrary` directly.
+Supply the model, complete base prompt, and plugin factories explicitly:
 
-```rust
-use pi_plugin::PresentationMode;
-use pi_sdk::{Pi, Config};
+```rust,ignore
+use pi_sdk::{AgentHost, ModelSelection};
 
-let config = Config::new(cwd, agent_dir);
-let pi = Pi::builder(config)
-    .presentation_mode(PresentationMode::Rpc)
-    .build()?;
-let session = pi.sessions().create_session(cwd, session_path).await?;
+let host = AgentHost::builder(
+    ModelSelection::new("my-provider", "my-model"),
+    "Answer order questions using the order service.",
+)
+.provider_plugin_factory(|| MyProviderPlugin::new())
+.plugin_factory(|| OrdersPlugin::new())
+.build();
+
+let session = host.sessions()
+    .create_session(workspace_directory, session_file)
+    .await?;
+session.current().submit("Where is order ORD-42?").await?;
+session.reload().await?;
+host.sessions().shutdown().await?;
 ```
 
-## Internal responsibilities
+`build()` does not access the filesystem or instantiate plugins. Session creation prepares all
+registered factories, validates registration, and binds session capabilities before lifecycle
+callbacks and tool execution. Preparation failures leave the previous generation intact.
+`into_factory()` exposes the same composition to an existing `MultiSessionManager`.
 
-- `session_factory`: complete generation preparation, trust gates, context binding and staged
-  product activation/rollback.
-- `runtime_composition`: plugin selection and registration order, cross-plugin wiring, memory
-  preparation and default/extension tool activation policy.
-- `configuration`: settings and explicit-selection adapters into domain-owned options; no
-  resource discovery or plugin activation.
-- `runtime_inventory`: labels for resolved JavaScript sources and loaded configured native plugins.
+The SDK does not discover `.pi`, `AGENTS.md`, settings, skills, native plugins, packages,
+or environment credentials. Providers and tools are installed only by caller-supplied factories.
+All registered tools are initially active unless `active_tools(...)` specifies a subset.
+An empty list disables them. `session_options(...)` supplies shared session policy explicitly.
 
-Runtime and session registration share one borrowed `GenerationComponents` view of already-prepared
-native/JavaScript/MCP/memory/subagent components. It carries no credentials, configuration or
-activation state. Runtime capabilities and overlays remain explicit inputs; built-in provider
-preparation owns the shared transport and keeps test credential overrides out of the runtime seam.
+For resource-backed prompts, `AgentHostBuilder::system_prompt(SystemPrompt)` accepts the
+runtime's existing dynamic factory. The string passed to `AgentHost::builder` remains the
+compatible exact-prompt API; this optional method replaces it:
 
-These modules are private. `Pi`, `Config`, `ProductSessionFactory` and managed-session entry points
-remain unchanged. Configuration/registration tests live beside their owners; factory tests focus
-on lifecycle, trust and transactional preparation.
+```rust,ignore
+use pi_sdk::{PreparedSystemPrompt, PromptContext, PromptOutput, SystemPrompt, WorkspaceSnapshot};
 
-## Runtime features
-
-`Config::features` selects first-party plugins before a runtime generation is built.
-All flags default to `true`, preserving the standard product. For example:
-
-```rust
-use pi_sdk::{Config, Features, Pi};
-
-let mut config = Config::new(cwd, agent_dir);
-config.features = Features {
-    memory: true,
-    skills: true,
-    ..Features::none()
-};
-let pi = Pi::builder(config).build()?;
+let builder = builder.system_prompt(SystemPrompt::dynamic(|workspace: &WorkspaceSnapshot| {
+    let policy = std::fs::read_to_string(workspace.cwd().join("policy.txt"))
+        .map_err(|error| error.to_string())?;
+    Ok(PreparedSystemPrompt::new(move |context: PromptContext<'_>| {
+        let tools = context.active_tools.iter()
+            .map(|tool| tool.name.as_str()).collect::<Vec<_>>().join(", ");
+        Ok(PromptOutput::new(format!("{policy}\nAvailable tools: {tools}")))
+    }))
+}));
 ```
 
-The available flags are `memory`, `subagents`, `schedule`, `skills`,
-`prompt_templates`, and `session_transfer` (export/import/share commands).
-`Features::all()` is equivalent to `Features::default()`; `Features::none()` disables
-these six features while retaining providers, filesystem/shell tools, core session
-management, and independently configured native/JavaScript/MCP plugins.
+This domain chooses and reads its own resources. Preparation runs once per candidate generation,
+using that session's saved workspace. The first render receives the selected registered tools:
+all tools in name order by default, or the explicit selection in caller order. Tool changes
+re-render the prepared inputs, and subsequent turns reuse the assembled prompt. Resources are
+read again only when a new generation is prepared, including reload and resume. Prepare or render
+errors reject the candidate; a failed tool-selection render also preserves the active selection,
+prompt, and journal. No additional prompt lifecycle is introduced.
+Reload and resume supply a read-only projection of the recovered configuration before the first
+render, including accepted deferred tool changes. Legacy journals without a selection use the host
+defaults together with registered restoration additions. Saved names missing from the new registry
+are dropped; explicit host defaults remain strict. The same recovery plan repairs the journal only
+after generation validation succeeds. Fresh isolated sessions render their inherited or requested
+selection. Restoring unchanged tool selections reuses the validated prompt and inspection options.
 
-Disabling a feature omits its built-in registration and corresponding session hooks,
-not just its tools. Disabled memory does not load `memory.json` or start memory work;
-disabled scheduling does not start its scheduler. Skills remain usable without
-subagents or memory. Feature-specific settings still apply when enabled.
-The host captures this selection and reuses it for new/resumed/forked sessions and
-reloads; it is not a live mutable registry or a persisted session setting.
+Each new session receives its workspace and JSONL path from the caller. Use
+`create_session_with_workspace` for multiple roots and optional application metadata.
+Session capabilities available to plugins and tools refer to that exact managed session;
+they support the same history, model, and event operations used by the Coding product.
+The `projects` module remains available for applications that want durable project definitions.
 
-These are **runtime flags, not Cargo features**: dependencies are still compiled.
-They select first-party composition, not a security boundary for explicitly loaded
-plugins. Existing extension/MCP configuration remains independent. Read-only Desktop
-skill-file management also remains available independently of session features.
-Disabling `skills` or `prompt_templates` removes the corresponding built-in plugin
-entirely, including explicit resource paths; this is a deliberate Rust SDK policy,
-not Pi's automatic-discovery-only `noSkills`/`noPromptTemplates` behavior.
-AGENTS.md/CLAUDE.md and general system-prompt resources are unaffected.
+The configured model starts fresh sessions. Resume restores the saved selection unless
+`AgentSessionOptions::initial_model` explicitly overrides it, and reload retains the live model.
+Session history, workspace, tool selection, lazy first-assistant persistence, queues, and
+generation replacement use the shared session implementation and v4 storage schema.
 
-The crate is currently workspace-internal (`publish = false`). `pi-plugin`
-is the separate authoring interface for native plugins.
+Run the self-contained, deterministic order workflow with:
+
+```sh
+cargo run -p pi-order-agent-example
+```
+
+The example uses a real `lookup_order` tool and a scripted local provider. It performs no
+network requests and requires no credentials. See [`examples/order-agent`](../../examples/order-agent/README.md).

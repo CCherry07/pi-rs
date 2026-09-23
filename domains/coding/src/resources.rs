@@ -1,13 +1,15 @@
-#![forbid(unsafe_code)]
+//! Coding project-context and system-prompt discovery.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use pi_prompt::{BuildSystemPromptOptions, ContextFile};
+use pi_runtime::ResourceDiagnostic;
 use pi_utils::path::absolute_from_current_dir as absolute;
 use serde::{Deserialize, Serialize};
 
-pub const CONFIG_DIR_NAME: &str = ".pi";
+use crate::prompt::{BuildSystemPromptOptions, ContextFile};
+
+const CONFIG_DIR_NAME: &str = ".pi";
 const CONTEXT_CANDIDATES: &[&str] = &[
     "HERMES.md",
     "AGENTS.override.md",
@@ -19,7 +21,7 @@ const CONTEXT_CANDIDATES: &[&str] = &[
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ResourceLoaderOptions {
+pub(crate) struct ResourceLoaderOptions {
     pub cwd: PathBuf,
     pub agent_dir: PathBuf,
     pub project_trusted: bool,
@@ -29,7 +31,7 @@ pub struct ResourceLoaderOptions {
 }
 
 impl ResourceLoaderOptions {
-    pub fn new(cwd: impl Into<PathBuf>, agent_dir: impl Into<PathBuf>) -> Self {
+    pub(crate) fn new(cwd: impl Into<PathBuf>, agent_dir: impl Into<PathBuf>) -> Self {
         Self {
             cwd: cwd.into(),
             agent_dir: agent_dir.into(),
@@ -41,33 +43,16 @@ impl ResourceLoaderOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DiagnosticKind {
-    Warning,
-    Collision,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResourceDiagnostic {
-    pub kind: DiagnosticKind,
-    pub message: String,
-    pub path: PathBuf,
-}
-
 #[derive(Debug, Clone, Default)]
-pub struct LoadedResources {
+pub(crate) struct LoadedResources {
     pub system_prompt: Option<String>,
-    pub system_prompt_source: Option<PathBuf>,
     pub append_system_prompts: Vec<String>,
-    pub append_system_prompt_sources: Vec<PathBuf>,
     pub context_files: Vec<ContextFile>,
     pub diagnostics: Vec<ResourceDiagnostic>,
 }
 
 impl LoadedResources {
-    pub fn apply_to_prompt(&self, options: &mut BuildSystemPromptOptions) {
+    pub(crate) fn apply_to_prompt(&self, options: &mut BuildSystemPromptOptions) {
         options.custom_prompt.clone_from(&self.system_prompt);
         options.append_system_prompt = (!self.append_system_prompts.is_empty())
             .then(|| self.append_system_prompts.join("\n\n"));
@@ -75,10 +60,10 @@ impl LoadedResources {
     }
 }
 
-pub fn load_resources(options: &ResourceLoaderOptions) -> LoadedResources {
+pub(crate) fn load_resources(options: &ResourceLoaderOptions) -> LoadedResources {
     let cwd = absolute(&options.cwd);
     let agent_dir = absolute(&options.agent_dir);
-    let (system_prompt, system_prompt_source) = load_prompt_source(
+    let system_prompt = load_prompt_source(
         options.system_prompt.as_deref(),
         discover_prompt(&cwd, &agent_dir, options.project_trusted, "SYSTEM.md").as_deref(),
     );
@@ -94,14 +79,12 @@ pub fn load_resources(options: &ResourceLoaderOptions) -> LoadedResources {
         .collect()
     });
     let mut append_system_prompts = Vec::new();
-    let mut append_system_prompt_sources = Vec::new();
     for source in append_sources {
         let path = Path::new(&source);
         if path.exists() {
             match std::fs::read_to_string(path) {
                 Ok(content) => {
                     append_system_prompts.push(content);
-                    append_system_prompt_sources.push(absolute(path));
                 }
                 Err(_) => append_system_prompts.push(source),
             }
@@ -116,9 +99,7 @@ pub fn load_resources(options: &ResourceLoaderOptions) -> LoadedResources {
     };
     LoadedResources {
         system_prompt,
-        system_prompt_source,
         append_system_prompts,
-        append_system_prompt_sources,
         context_files,
         diagnostics: Vec::new(),
     }
@@ -133,27 +114,24 @@ fn discover_prompt(cwd: &Path, agent_dir: &Path, trusted: bool, name: &str) -> O
     global.is_file().then_some(global)
 }
 
-fn load_prompt_source(
-    explicit: Option<&str>,
-    discovered: Option<&Path>,
-) -> (Option<String>, Option<PathBuf>) {
+fn load_prompt_source(explicit: Option<&str>, discovered: Option<&Path>) -> Option<String> {
     if let Some(value) = explicit {
         let path = Path::new(value);
         if path.exists() {
             return match std::fs::read_to_string(path) {
-                Ok(content) => (Some(content), Some(absolute(path))),
-                Err(_) => (Some(value.to_string()), None),
+                Ok(content) => Some(content),
+                Err(_) => Some(value.to_string()),
             };
         }
-        return (Some(value.to_string()), None);
+        return Some(value.to_string());
     }
-    discovered.map_or((None, None), |path| match std::fs::read_to_string(path) {
-        Ok(content) => (Some(content), Some(absolute(path))),
-        Err(_) => (Some(path.to_string_lossy().into_owned()), None),
+    discovered.map(|path| match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => path.to_string_lossy().into_owned(),
     })
 }
 
-pub fn load_project_context_files(cwd: &Path, agent_dir: &Path) -> Vec<ContextFile> {
+pub(crate) fn load_project_context_files(cwd: &Path, agent_dir: &Path) -> Vec<ContextFile> {
     let cwd = absolute(cwd);
     let agent_dir = absolute(agent_dir);
     let mut output = Vec::new();

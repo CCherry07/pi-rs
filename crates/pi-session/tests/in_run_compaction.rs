@@ -123,7 +123,7 @@ async fn threshold_compaction_between_tool_turns_resumes_with_composed_turn_cont
             turn_control: prior_turn_control,
             ..AgentOptions::default()
         })
-        .system_prompt(SystemPrompt::Pi(Box::default()))
+        .system_prompt(generic_system_prompt())
         .build()
         .unwrap();
     let session = AgentSession::create_with_options(
@@ -193,7 +193,7 @@ async fn failed_in_run_compaction_is_best_effort_and_does_not_stop_the_agent() {
             cwd: directory.path().to_path_buf(),
             ..AgentOptions::default()
         })
-        .system_prompt(SystemPrompt::Pi(Box::default()))
+        .system_prompt(generic_system_prompt())
         .build()
         .unwrap();
     let session = AgentSession::create_with_options(
@@ -272,7 +272,7 @@ async fn permanent_turn_control_does_not_keep_a_dropped_session_alive() {
             turn_control: base_control,
             ..AgentOptions::default()
         })
-        .system_prompt(SystemPrompt::Pi(Box::default()))
+        .system_prompt(generic_system_prompt())
         .build()
         .unwrap();
     let session = AgentSession::create(runtime, directory.path().join("session-lifetime.jsonl"))
@@ -291,4 +291,16 @@ async fn permanent_turn_control_does_not_keep_a_dropped_session_alive() {
         Some(Message::Assistant(message))
             if matches!(message.content.first(), Some(ContentBlock::Text(text)) if text.text == "finished through base control")
     ));
+}
+
+fn generic_system_prompt() -> SystemPrompt {
+    SystemPrompt::dynamic(|_: &pi_core::WorkspaceSnapshot| {
+        Ok(pi_runtime::PreparedSystemPrompt::new(
+            |_: pi_runtime::PromptContext<'_>| {
+                Ok(pi_runtime::PromptOutput::new(
+                    "Assist with the user's task.",
+                ))
+            },
+        ))
+    })
 }

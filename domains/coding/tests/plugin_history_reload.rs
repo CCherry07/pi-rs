@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use pi_coding::{Config, Pi};
 use pi_core::{
     CustomMessage, CustomMessageContent, Message, PluginId, ToolCallId, ToolExecutionMode,
     ToolResult, ToolSpec, UserMessage,
@@ -11,7 +12,6 @@ use pi_plugin::{
     AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, Plugin, PluginError,
     RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink,
 };
-use pi_sdk::{Config, Pi};
 use pi_session::{AgentMessage, AgentSession, PiSession, SessionGenerationOverlay};
 use serde_json::{Value, json};
 

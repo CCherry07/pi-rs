@@ -15,10 +15,10 @@ async fn invalid_reload_keeps_previous_generation_and_acp_mode_skips_files() {
         r#"{"version":1,"enabled":false}"#,
     )
     .unwrap();
-    let mut config = pi_sdk::Config::new(project.clone(), agent.clone());
+    let mut config = pi_coding::Config::new(project.clone(), agent.clone());
     config.discover_extensions = false;
     config.trust_override = Some(false);
-    let pi = pi_sdk::Pi::builder(config.clone()).build().unwrap();
+    let pi = pi_coding::Pi::builder(config.clone()).build().unwrap();
     let session = pi
         .sessions()
         .create_session(&project, agent.join("test.jsonl"))
@@ -44,7 +44,7 @@ async fn invalid_reload_keeps_previous_generation_and_acp_mode_skips_files() {
     assert!(!agent.join("test.jsonl").exists());
     fs::write(agent.join("mcp.json"), "invalid").unwrap();
     config.load_mcp_config = false;
-    let isolated = pi_sdk::Pi::builder(config).build().unwrap();
+    let isolated = pi_coding::Pi::builder(config).build().unwrap();
     let acp = isolated
         .sessions()
         .create_session(&project, agent.join("acp.jsonl"))

@@ -25,17 +25,17 @@ use crate::event::AgentSessionEventHub;
 use crate::{
     ActiveToolsEntry, AgentMessage, AgentSessionOptions, AutoRetrySettings, BranchSummaryEntry,
     CompactionEntry, CompactionError, CompactionPreparation, CompactionSettings, CustomEntry,
-    EntryOrder, FileOperations, LaneRecord, LaneRecordEntry, MAIN_LANE, ModelChangeEntry,
-    NewLaneRecord, OperationError, OperationIntent, OperationOutcome, ProvisionedEntry, QueueKind,
-    QueueSnapshot, RecordQuery, SessionBeforeCompactEvent, SessionBeforeTreeEvent,
-    SessionCompactEvent, SessionCompactFailedEvent, SessionContext, SessionContextBuildOptions,
-    SessionDocument, SessionEntry, SessionError, SessionHeader, SessionIdentity,
-    SessionInfoChangedEvent, SessionLog, SessionModel, SessionRecord, SessionRuntimeInventory,
+    EntryOrder, FileOperations, GenericCompactionPolicy, LaneRecord, LaneRecordEntry, MAIN_LANE,
+    ModelChangeEntry, NewLaneRecord, OperationError, OperationIntent, OperationOutcome,
+    ProvisionedEntry, QueueKind, QueueSnapshot, RecordQuery, SessionBeforeCompactEvent,
+    SessionBeforeTreeEvent, SessionCompactEvent, SessionCompactFailedEvent,
+    SessionCompactionPolicy, SessionContext, SessionContextBuildOptions, SessionDocument,
+    SessionEntry, SessionError, SessionHeader, SessionIdentity, SessionInfoChangedEvent,
+    SessionLog, SessionModel, SessionRecord, SessionRuntimeInventory, SessionShellExecutor,
     SessionShutdownEvent, SessionShutdownReason, SessionStartEvent, SessionStartReason,
     SessionTreeEvent, SessionUsage, ThinkingLevelEntry, TreePreparation, UsageAttribution,
     UsageRecord, compact as generate_compaction, estimate_context_tokens,
-    estimate_session_context_tokens, next_unique_id, now_ms, prepare_compaction, reduce_lane_state,
-    should_compact,
+    estimate_session_context_tokens, next_unique_id, now_ms, prepare_compaction, should_compact,
 };
 
 const SESSION_OPEN: u8 = 0;
@@ -176,8 +176,8 @@ pub struct AgentSession {
     retry_attempt: Arc<AtomicU32>,
     retry_abort: Arc<std::sync::Mutex<Option<AbortHandle>>>,
     in_run_compaction_reconcile: Arc<AtomicBool>,
-    shell_path: Option<PathBuf>,
-    shell_command_prefix: Option<String>,
+    shell_executor: Option<Arc<dyn SessionShellExecutor>>,
+    compaction_policy: Arc<dyn SessionCompactionPolicy>,
     initial_model_fallback_message: std::sync::Mutex<Option<String>>,
 }
 
@@ -430,7 +430,8 @@ impl AgentSession {
     ) -> Result<Arc<Self>, SessionError> {
         let path = path.into();
         let log = SessionLog::open_handle(&path)?;
-        let session = Self::prepare_loaded(runtime, log, options)?
+        let recovery = SessionRecoveryPlan::prepare(&log)?;
+        let session = Self::prepare_loaded(runtime, log, options, recovery)?
             .activate(SessionStartEvent {
                 reason: SessionStartReason::Startup,
                 previous_session_file: None,
@@ -446,13 +447,24 @@ impl AgentSession {
         log: SessionLog,
         options: AgentSessionOptions,
     ) -> Result<PreparedAgentSession, SessionError> {
-        Self::prepare_loaded(runtime, log, options)
+        let recovery = SessionRecoveryPlan::prepare(&log)?;
+        Self::prepare_loaded(runtime, log, options, recovery)
+    }
+
+    pub(crate) fn prepare_reuse_with_recovery(
+        runtime: PiRuntime,
+        log: SessionLog,
+        options: AgentSessionOptions,
+        recovery: SessionRecoveryPlan,
+    ) -> Result<PreparedAgentSession, SessionError> {
+        Self::prepare_loaded(runtime, log, options, recovery)
     }
 
     fn prepare_loaded(
         runtime: PiRuntime,
         log: SessionLog,
         mut options: AgentSessionOptions,
+        recovery: SessionRecoveryPlan,
     ) -> Result<PreparedAgentSession, SessionError> {
         if log.header().workspace()? != *runtime.workspace().spec() {
             return Err(SessionError::Runtime(
@@ -460,16 +472,7 @@ impl AgentSession {
             ));
         }
         default_configure_session_message_conversion(&runtime)?;
-        let agent_state = runtime.agent().state();
-        let recovery_defaults = crate::EffectiveLaneConfiguration {
-            model: SessionModel {
-                provider: agent_state.provider_id.clone(),
-                model_id: agent_state.model_id.clone(),
-            },
-            thinking_level: agent_state.thinking_level.as_str().to_string(),
-            active_tool_names: runtime.active_tools(),
-        };
-        let recovery = recover_interrupted_state(&log, recovery_defaults)?;
+        let recovery = recover_interrupted_state(&log, recovery)?;
         let recovered_queue = recovery.queue;
         let header = log.header();
         runtime.agent().set_session_id(Some(header.id.clone()));
@@ -559,8 +562,10 @@ impl AgentSession {
             retry_attempt: Arc::new(AtomicU32::new(0)),
             retry_abort: Arc::new(std::sync::Mutex::new(None)),
             in_run_compaction_reconcile: Arc::new(AtomicBool::new(false)),
-            shell_path: options.shell_path,
-            shell_command_prefix: options.shell_command_prefix,
+            shell_executor: options.shell_executor,
+            compaction_policy: options
+                .compaction_policy
+                .unwrap_or_else(|| Arc::new(GenericCompactionPolicy)),
             initial_model_fallback_message: std::sync::Mutex::new(
                 options.initial_model_fallback_message,
             ),
@@ -1181,6 +1186,11 @@ impl AgentSession {
         {
             return Err(SessionError::Busy);
         }
+        let executor = self.shell_executor.as_ref().ok_or_else(|| {
+            SessionError::InvalidPayload(
+                "shell execution is not configured for this session".to_string(),
+            )
+        })?;
         let command = command.into();
         if command.trim().is_empty() {
             return Err(SessionError::InvalidPayload(
@@ -1201,24 +1211,20 @@ impl AgentSession {
         }
         self.events
             .publish_bash_start(id.clone(), command.clone(), options.exclude_from_context);
-        let resolved_command = self
-            .shell_command_prefix
-            .as_deref()
-            .filter(|prefix| !prefix.is_empty())
-            .map_or_else(|| command.clone(), |prefix| format!("{prefix}\n{command}"));
         let events = Arc::clone(&self.events);
         let update_id = id.clone();
-        let execution = pi_shell::execute(ShellRequest {
-            command: resolved_command,
-            cwd: self.runtime.cwd().to_path_buf(),
-            timeout: options.timeout,
-            shell_path: options.shell_path.or_else(|| self.shell_path.clone()),
-            abort_signal: signal,
-            on_chunk: Some(Arc::new(move |chunk: ShellChunk| {
-                events.publish_bash_update(update_id.clone(), chunk.stream, chunk.text);
-            })),
-        })
-        .await;
+        let execution = executor
+            .execute(ShellRequest {
+                command: command.clone(),
+                cwd: self.runtime.cwd().to_path_buf(),
+                timeout: options.timeout,
+                shell_path: options.shell_path,
+                abort_signal: signal,
+                on_chunk: Some(Arc::new(move |chunk: ShellChunk| {
+                    events.publish_bash_update(update_id.clone(), chunk.stream, chunk.text);
+                })),
+            })
+            .await;
         self.clear_bash_abort(&id);
         let result = match execution {
             Ok(result) => result,
@@ -1999,18 +2005,22 @@ impl AgentSession {
         let reason = crate::CompactionReason::Manual;
         let branch_entries = self.log.branch_entries()?;
         let compaction_settings = self.compaction_settings();
-        let preparation =
-            prepare_compaction(&branch_entries, compaction_settings, &self.context_options)
-                .unwrap_or_else(|| CompactionPreparation {
-                    messages_to_summarize: Vec::new(),
-                    turn_prefix_messages: Vec::new(),
-                    retained_tail: compaction.retained_tail.clone(),
-                    is_split_turn: false,
-                    tokens_before: compaction.tokens_before,
-                    previous_summary: None,
-                    file_ops: FileOperations::default(),
-                    settings: compaction_settings,
-                });
+        let preparation = prepare_compaction(
+            &branch_entries,
+            compaction_settings,
+            &self.context_options,
+            self.compaction_policy.as_ref(),
+        )
+        .unwrap_or_else(|| CompactionPreparation {
+            messages_to_summarize: Vec::new(),
+            turn_prefix_messages: Vec::new(),
+            retained_tail: compaction.retained_tail.clone(),
+            is_split_turn: false,
+            tokens_before: compaction.tokens_before,
+            previous_summary: None,
+            file_ops: FileOperations::default(),
+            settings: compaction_settings,
+        });
         self.events.publish_compaction_start(reason);
         let (_, signal) = AbortHandle::new();
         let before = self
@@ -2102,7 +2112,7 @@ impl AgentSession {
         }
     }
 
-    /// Generates, persists, and activates a Pi-style compaction checkpoint.
+    /// Generates, persists, and activates a structured compaction checkpoint.
     pub async fn compact(
         &self,
         custom_instructions: Option<String>,
@@ -2219,6 +2229,7 @@ impl AgentSession {
             &preparation_entries,
             self.compaction_settings(),
             &self.context_options,
+            self.compaction_policy.as_ref(),
         ) else {
             return Err(SessionError::InvalidEntry(
                 "there is no uncompacted history to compact".to_string(),
@@ -2271,6 +2282,7 @@ impl AgentSession {
             None => generate_compaction(
                 &preparation,
                 &self.runtime,
+                self.compaction_policy.as_ref(),
                 custom_instructions.as_deref(),
                 self.runtime.agent().state().thinking_level,
                 signal,
@@ -2470,7 +2482,7 @@ impl AgentSession {
         Ok(id)
     }
 
-    /// Generates a Pi-compatible abandoned-branch summary with the selected
+    /// Generates an abandoned-branch summary with the selected
     /// provider, checks out the target, and appends the summary as the new
     /// leaf. Extension `session_before_tree` hooks may still replace it.
     pub async fn summarize_branch_and_checkout(
@@ -2481,7 +2493,6 @@ impl AgentSession {
         label: Option<String>,
     ) -> Result<String, SessionError> {
         const PREAMBLE: &str = "The user explored a different conversation branch before returning here.\nSummary of that exploration:\n\n";
-        const PROMPT: &str = "Create a structured summary of this conversation branch for context when returning later.\n\nUse this EXACT format:\n\n## Goal\n[What was the user trying to accomplish in this branch?]\n\n## Constraints & Preferences\n- [Any constraints, preferences, or requirements mentioned]\n\n## Progress\n### Done\n- [x] [Completed tasks/changes]\n\n### In Progress\n- [ ] [Work that was started but not finished]\n\n### Blocked\n- [Issues preventing progress, if any]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale]\n\n## Next Steps\n1. [What should happen next to continue this work]\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.";
 
         self.ensure_open()?;
         let document = self.log.shared_document()?;
@@ -2498,17 +2509,18 @@ impl AgentSession {
         } else {
             let conversation = serde_json::to_string_pretty(&summary_messages)
                 .map_err(|error| SessionError::InvalidPayload(error.to_string()))?;
+            let prompt = self.compaction_policy.branch_prompt();
             let instructions = match (custom_instructions, replace_instructions) {
                 (Some(custom), true) => custom,
-                (Some(custom), false) => format!("{PROMPT}\n\nAdditional focus: {custom}"),
-                (None, _) => PROMPT.to_string(),
+                (Some(custom), false) => format!("{prompt}\n\nAdditional focus: {custom}"),
+                (None, _) => prompt.to_string(),
             };
             let (_, signal) = AbortHandle::new();
             let response = self
                 .runtime
                 .complete(
                     RuntimeCompletionRequest {
-                        system_prompt: crate::SUMMARIZATION_SYSTEM_PROMPT.to_string(),
+                        system_prompt: self.compaction_policy.system_prompt().to_string(),
                         messages: vec![Message::User(UserMessage::text(
                             format!(
                                 "<conversation>\n{conversation}\n</conversation>\n\n{instructions}"
@@ -2992,21 +3004,28 @@ struct RecoveredSessionState {
     queue: Vec<PendingSessionMessage>,
 }
 
-fn recover_interrupted_state(
-    log: &SessionLog,
-    defaults: crate::EffectiveLaneConfiguration,
-) -> Result<RecoveredSessionState, SessionError> {
-    let open_operations = log.find_open_operations(MAIN_LANE, None)?;
-    let mut missing_initial_messages = Vec::new();
-    if let Some(started) = open_operations.first() {
+/// Read-only recovery preparation shared by generation configuration and journal repair.
+/// Only interrupted sessions require the reducer's complete document view.
+#[derive(Default)]
+pub(crate) struct SessionRecoveryPlan {
+    pending_writes: Vec<ProvisionedEntry>,
+    missing_initial_messages: Vec<ProvisionedEntry>,
+}
+
+impl SessionRecoveryPlan {
+    pub(crate) fn prepare(log: &SessionLog) -> Result<Self, SessionError> {
+        let open_operations = log.find_open_operations(MAIN_LANE, None)?;
+        let Some(started) = open_operations.first() else {
+            return Ok(Self::default());
+        };
         // Reducer recovery is intentionally the slow path. It needs the full
         // tree and record log to reconstruct accepted writes from an
         // interrupted operation, while settled sessions never materialize a
         // SessionDocument during startup.
         let document = log.shared_document()?;
         let branch = document.branch()?;
-        let reduction = reduce_lane_state(&crate::LaneReductionInput {
-            slice: crate::RecordLogSlice {
+        let (state, _) = crate::journal::reduce_lane_operation(
+            &crate::RecordLogSlice {
                 lane: MAIN_LANE.to_string(),
                 open_operations: open_operations.clone(),
                 records: document
@@ -3017,35 +3036,70 @@ fn recover_interrupted_state(
                     .collect(),
                 entries: document.entries.clone(),
             },
-            leaf_id: document
+            document
                 .lanes
                 .iter()
                 .find(|lane| lane.lane == MAIN_LANE)
-                .and_then(|lane| lane.leaf_id.clone()),
-            own_entries: branch
+                .and_then(|lane| lane.leaf_id.as_deref()),
+            &branch
                 .iter()
                 .filter(|entry| entry.seq > started.seq)
                 .map(|entry| (*entry).clone())
-                .collect(),
-            configuration_entries: branch
-                .iter()
-                .filter(|entry| entry.seq <= started.seq)
-                .map(|entry| (*entry).clone())
-                .collect(),
-            defaults,
-        })
+                .collect::<Vec<_>>(),
+        )
         .map_err(|error| {
             SessionError::InvalidPayload(format!("invalid interrupted operation log: {error}"))
         })?;
-        if let Some(operation) = reduction.lane_state.operation {
-            // A deferred write records an entry already accepted by the live
-            // operation. Applying it is idempotent because the reducer only
-            // returns targets whose exact IDs are still absent.
-            for target in operation.pending_writes {
-                log.append_entry(target, MAIN_LANE)?;
+        Ok(state
+            .operation
+            .map_or_else(Self::default, |operation| Self {
+                pending_writes: operation.pending_writes,
+                missing_initial_messages: operation.missing_initial_messages,
+            }))
+    }
+
+    pub(crate) fn configuration(
+        &self,
+        log: &SessionLog,
+    ) -> Result<crate::RestoredSessionConfiguration, SessionError> {
+        let selected = log.find_entries_on_branch(&crate::BranchQuery {
+            entries: crate::EntryQuery {
+                entry_type: Some(crate::SessionEntryType::ActiveToolsChange),
+                limit: Some(1),
+                ..crate::EntryQuery::default()
+            },
+            ..crate::BranchQuery::default()
+        })?;
+        let mut active_tools = selected.into_iter().find_map(|record| match record.entry {
+            SessionEntry::ActiveToolsChange(change) => Some(change.active_tool_names),
+            _ => None,
+        });
+        // The repair below appends accepted writes in this exact reducer-provided order.
+        for target in &self.pending_writes {
+            if let SessionEntry::ActiveToolsChange(change) = &target.entry {
+                active_tools = Some(change.active_tool_names.clone());
             }
-            missing_initial_messages = operation.missing_initial_messages;
         }
+        Ok(crate::RestoredSessionConfiguration {
+            active_tools: active_tools.map_or(
+                crate::RestoredToolSelection::RuntimeDefault,
+                crate::RestoredToolSelection::Selected,
+            ),
+        })
+    }
+}
+
+fn recover_interrupted_state(
+    log: &SessionLog,
+    plan: SessionRecoveryPlan,
+) -> Result<RecoveredSessionState, SessionError> {
+    let SessionRecoveryPlan {
+        pending_writes,
+        missing_initial_messages,
+    } = plan;
+    // Accepted writes are idempotent: the reducer only returns targets with absent IDs.
+    for target in pending_writes {
+        log.append_entry(target, MAIN_LANE)?;
     }
 
     // Queue recovery and operation closure only need the append-only record
@@ -3222,6 +3276,18 @@ fn restore_runtime_context_with_request(
 
 #[cfg(test)]
 mod tests {
+    fn generic_system_prompt() -> SystemPrompt {
+        SystemPrompt::dynamic(|_: &pi_core::WorkspaceSnapshot| {
+            Ok(pi_runtime::PreparedSystemPrompt::new(
+                |_: pi_runtime::PromptContext<'_>| {
+                    Ok(pi_runtime::PromptOutput::new(
+                        "Assist with the user's task.",
+                    ))
+                },
+            ))
+        })
+    }
+
     use async_trait::async_trait;
     use pi_agent::{AgentLoopStop, AgentOptions};
     use pi_core::{
@@ -3397,7 +3463,7 @@ mod tests {
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(generic_system_prompt())
             .build()
             .unwrap()
     }
@@ -3473,7 +3539,7 @@ mod tests {
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(generic_system_prompt())
             .build()
             .unwrap();
         let session = AgentSession::create(runtime, &path).await.unwrap();
@@ -3840,7 +3906,7 @@ mod tests {
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(generic_system_prompt())
             .build()
             .unwrap();
         let session = AgentSession::create(runtime, &path).await.unwrap();
@@ -3896,7 +3962,7 @@ mod tests {
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(generic_system_prompt())
             .build()
             .unwrap();
         let session = AgentSession::create(runtime, &path).await.unwrap();
@@ -3939,7 +4005,7 @@ mod tests {
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(generic_system_prompt())
             .build()
             .unwrap();
         let session = AgentSession::create(runtime, &path).await.unwrap();
@@ -3982,7 +4048,7 @@ mod tests {
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(generic_system_prompt())
             .build()
             .unwrap();
         let session = AgentSession::create(runtime, &path).await.unwrap();
@@ -4204,7 +4270,7 @@ mod tests {
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(generic_system_prompt())
             .build()
             .unwrap();
         let session = AgentSession::create(runtime, &path).await.unwrap();
@@ -4239,7 +4305,7 @@ mod tests {
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(generic_system_prompt())
             .build()
             .unwrap();
         let session = AgentSession::create(runtime, directory.path().join("session.jsonl"))
@@ -4286,7 +4352,7 @@ mod tests {
                 model_id: ModelId::new("test"),
                 ..AgentOptions::default()
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(generic_system_prompt())
             .build()
             .unwrap();
         let session = AgentSession::create(runtime, &path).await.unwrap();
@@ -4325,9 +4391,10 @@ mod tests {
     async fn new_session_is_saved_only_after_the_first_assistant_message() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("sessions/session.jsonl");
-        let session = AgentSession::create(
+        let session = AgentSession::create_with_options(
             scripted_runtime([ScriptedTurn::Text("first answer".to_string())]),
             &path,
+            AgentSessionOptions::default().shell_executor(Arc::new(FixtureShellExecutor)),
         )
         .await
         .unwrap();
@@ -4364,40 +4431,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_defaults_affect_execution_but_preserve_the_submitted_command() {
+    async fn generic_session_requires_an_explicit_shell_executor() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("shell-settings.jsonl");
-        let original = "printf '%s' \"$configured_value\"";
-        let session = AgentSession::create_with_options(
-            scripted_runtime([]),
-            &path,
-            AgentSessionOptions::default().shell(
-                if cfg!(unix) {
-                    Some(PathBuf::from("/bin/sh"))
-                } else {
-                    None
-                },
-                Some("configured_value=from-settings".to_string()),
-            ),
-        )
-        .await
-        .unwrap();
-
-        let result = session
-            .execute_shell(original, ShellExecutionOptions::default())
+        let path = directory.path().join("session.jsonl");
+        let session = AgentSession::create(scripted_runtime([]), &path)
             .await
             .unwrap();
+        let before = session.log().load().unwrap().entries.len();
+        let error = session
+            .execute_shell("ignored", ShellExecutionOptions::default())
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("shell execution is not configured")
+        );
+        assert_eq!(session.log().load().unwrap().entries.len(), before);
+        assert!(session.snapshot().bash.is_none());
+        assert!(!path.exists());
+    }
 
-        assert_eq!(result.output, "from-settings");
-        let message = session
-            .log()
-            .load()
-            .unwrap()
-            .messages()
-            .into_iter()
-            .find(|message| message.role() == "bashExecution")
-            .expect("bash execution message");
-        assert_eq!(message.as_custom().unwrap()["command"], original);
+    struct FixtureShellExecutor;
+
+    #[async_trait::async_trait]
+    impl SessionShellExecutor for FixtureShellExecutor {
+        async fn execute(
+            &self,
+            request: ShellRequest,
+        ) -> Result<ShellResult, pi_shell::ShellError> {
+            if let Some(on_chunk) = request.on_chunk {
+                on_chunk(ShellChunk {
+                    stream: pi_shell::ShellStream::Stdout,
+                    text: "shell-only".to_string(),
+                });
+            }
+            Ok(ShellResult {
+                output: "shell-only".to_string(),
+                exit_code: Some(0),
+                cancelled: false,
+                timed_out: false,
+                truncated: false,
+                truncation: None,
+                full_output_path: None,
+            })
+        }
     }
 
     struct LifecyclePlugin {
@@ -4593,6 +4671,7 @@ mod tests {
             &document.entries,
             CompactionSettings::default(),
             &Default::default(),
+            &GenericCompactionPolicy,
         )
         .unwrap();
         let compacted_messages = preparation
@@ -4639,7 +4718,7 @@ mod tests {
                 thinking_level: ThinkingLevel::High,
                 ..AgentOptions::default()
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(generic_system_prompt())
             .build()
             .unwrap();
         let session = AgentSession::create(runtime, &path).await.unwrap();
@@ -4674,7 +4753,7 @@ mod tests {
                 telemetry: pi_telemetry::TelemetryContext::new(sink.clone()),
                 ..AgentOptions::default()
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(generic_system_prompt())
             .build()
             .unwrap();
         let session = AgentSession::create(runtime, directory.path().join("telemetry.jsonl"))
@@ -4936,7 +5015,7 @@ mod tests {
                 cwd: directory.path().to_path_buf(),
                 ..AgentOptions::default()
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(generic_system_prompt())
             .build()
             .unwrap();
         let session = AgentSession::create(runtime, &path).await.unwrap();
@@ -4972,7 +5051,7 @@ mod tests {
                 cwd: directory.path().to_path_buf(),
                 ..AgentOptions::default()
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
+            .system_prompt(generic_system_prompt())
             .build()
             .unwrap();
         let reopened = AgentSession::open(runtime, &path).await.unwrap();

@@ -22,6 +22,9 @@ use pi_settings::{SettingsContext, SettingsManager};
 
 use crate::Config;
 use crate::builtin_providers::BuiltinProviderSet;
+use crate::composition::{
+    GenerationComponents, RuntimeBuildOutcome, additional_active_tools, prepare_memory_provider,
+};
 use crate::configuration::{
     apply_settings, initial_model_request, memory_options, session_options,
 };
@@ -29,9 +32,6 @@ use crate::dynamic_providers::{
     DynamicProviderCandidate, DynamicProviderOverlay, DynamicProviderPreparation,
 };
 use crate::project_trust::ProjectTrustService;
-use crate::runtime_composition::{
-    GenerationComponents, RuntimeBuildOutcome, additional_active_tools, prepare_memory_provider,
-};
 use crate::runtime_inventory::{configured_native_plugin_ids, javascript_inventory_labels};
 
 #[derive(Clone)]
@@ -162,6 +162,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
             generation_overlay,
             initial_state,
             reload_model,
+            restored_configuration: _,
         } = request;
         if workspace.cwd() != cwd {
             return Err(SessionError::Runtime(
@@ -666,6 +667,7 @@ command = "fixture-command"
                 generation_overlay: SessionGenerationOverlay::default(),
                 initial_state: None,
                 reload_model: None,
+                restored_configuration: None,
             })
             .await
             .unwrap();

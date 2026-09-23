@@ -59,7 +59,7 @@ pub(crate) async fn pi_skill_library_list(
     tokio::task::spawn_blocking(move || {
         let _guard = gate.lock().map_err(|e| e.to_string())?;
         let (library, project_trusted) =
-            pi_sdk::skills::desktop_skill_library(&agent_dir, cwd.as_deref(), &trust)?;
+            pi_coding::skills::desktop_skill_library(&agent_dir, cwd.as_deref(), &trust)?;
         Ok(LibrarySnapshot {
             skills: library.list(),
             destination: library.destination().map(PathBuf::from),
@@ -87,7 +87,7 @@ pub(crate) async fn pi_skill_library_operation(
     tokio::task::spawn_blocking(move || {
         let _guard = gate.lock().map_err(|e| e.to_string())?;
         let (library, _) =
-            pi_sdk::skills::desktop_skill_library(&agent_dir, cwd.as_deref(), &trust)?;
+            pi_coding::skills::desktop_skill_library(&agent_dir, cwd.as_deref(), &trust)?;
         match operation {
             SkillOperation::Read { path } => library.read(&path).map(Some),
             SkillOperation::Save {

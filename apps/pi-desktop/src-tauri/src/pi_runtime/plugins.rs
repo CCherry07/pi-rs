@@ -1,5 +1,5 @@
 //! Native package Adapter: listing never constructs a session or loads native code.
-use pi_sdk::plugins::{PluginLibrary, PluginLibrarySnapshot, PluginOperation};
+use pi_coding::plugins::{PluginLibrary, PluginLibrarySnapshot, PluginOperation};
 use serde::Serialize;
 use tauri::State;
 

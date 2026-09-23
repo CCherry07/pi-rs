@@ -26,9 +26,10 @@ use pi_plugin_subagents::{
     SubagentLoaderOptions, SubagentRuntime, SubagentSkillPromptProjector, SubagentsPlugin,
 };
 use pi_plugin_write::WritePlugin;
-use pi_resources::ResourceLoaderOptions;
-use pi_runtime::{CompletionRetryPolicy, PiRuntime, RuntimeError, SystemPrompt};
+use pi_runtime::{CompletionRetryPolicy, PiRuntime, RuntimeError};
 use pi_session::SessionGenerationOverlay;
+
+use crate::resources::ResourceLoaderOptions;
 
 use crate::builtin_providers::BuiltinProviderSet;
 use crate::configuration::{
@@ -255,8 +256,11 @@ impl GenerationComponents<'_> {
                 follow_up_mode: settings_queue_mode(config.runtime_settings.follow_up_mode),
                 ..AgentOptions::default()
             })
-            .system_prompt(SystemPrompt::Pi(Box::default()))
-            .resources(resources)
+            .system_prompt(
+                crate::prompt::CodingSystemPrompt::new(Default::default())
+                    .resources(resources)
+                    .into(),
+            )
             .build()?;
 
         let registered_tools = runtime

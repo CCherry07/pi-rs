@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use pi_sdk::{ProjectTrustEvaluation, ProjectTrustService};
+use pi_coding::{ProjectTrustEvaluation, ProjectTrustService};
 
 const MAX_RESOURCE: u64 = 16 * 1024 * 1024;
 const MAX_CATALOG: usize = 64 * 1024 * 1024;

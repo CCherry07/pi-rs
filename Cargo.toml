@@ -8,13 +8,14 @@ members = [
     "crates/pi-agent",
     "crates/pi-runtime",
     "crates/pi-provider",
-    "crates/pi-prompt",
-    "crates/pi-resources",
     "crates/pi-utils",
     "crates/pi-session",
     "crates/pi-shell",
-    "crates/pi-settings",
+    "domains/coding/settings",
     "crates/pi-sdk",
+    "domains/coding",
+    "domains/coding/eval",
+    "examples/order-agent",
     "crates/pi-plugin-macros",
     "crates/pi-memory-loader",
     "crates/pi-plugin-manager",
@@ -84,13 +85,13 @@ pi-media = { path = "crates/pi-media" }
 pi-agent = { path = "crates/pi-agent" }
 pi-runtime = { path = "crates/pi-runtime" }
 pi-provider = { path = "crates/pi-provider" }
-pi-prompt = { path = "crates/pi-prompt" }
-pi-resources = { path = "crates/pi-resources" }
 pi-utils = { path = "crates/pi-utils" }
 pi-session = { path = "crates/pi-session" }
 pi-shell = { path = "crates/pi-shell" }
-pi-settings = { path = "crates/pi-settings" }
+pi-settings = { path = "domains/coding/settings" }
 pi-sdk = { path = "crates/pi-sdk" }
+pi-coding = { path = "domains/coding" }
+pi-coding-eval = { path = "domains/coding/eval" }
 pi-plugin-macros = { path = "crates/pi-plugin-macros" }
 pi-memory-loader = { path = "crates/pi-memory-loader" }
 pi-plugin-manager = { path = "crates/pi-plugin-manager" }

@@ -1,8 +1,8 @@
 //! Thin Desktop MCP configuration adapter. No sessions are constructed here.
 use std::path::Path;
 
+use pi_coding::{ProjectTrustEvaluation, ProjectTrustService};
 use pi_plugin_mcp::{McpDocument, McpLibrary, McpScope};
-use pi_sdk::{ProjectTrustEvaluation, ProjectTrustService};
 use tauri::State;
 
 use super::{workspace_path, PiRuntimeState};

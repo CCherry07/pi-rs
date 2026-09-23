@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "pi-acp"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "agent-client-protocol",
  "pi-agent",
@@ -2988,7 +2988,7 @@ dependencies = [
 
 [[package]]
 name = "pi-bench"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "pi-agent",
  "pi-core",
@@ -3004,7 +3004,7 @@ dependencies = [
 
 [[package]]
 name = "pi-cli"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "arboard",
  "async-trait",
@@ -3016,6 +3016,7 @@ dependencies = [
  "futures",
  "pi-acp",
  "pi-agent",
+ "pi-coding",
  "pi-core",
  "pi-js-package-manager",
  "pi-js-plugin",
@@ -3032,7 +3033,6 @@ dependencies = [
  "pi-plugin-xai",
  "pi-rpc",
  "pi-runtime",
- "pi-sdk",
  "pi-session",
  "pi-settings",
  "pi-test-support",
@@ -3055,6 +3055,76 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-coding"
+version = "0.8.4"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "fs2",
+ "pi-agent",
+ "pi-core",
+ "pi-js-package-manager",
+ "pi-js-plugin",
+ "pi-memory-loader",
+ "pi-plugin",
+ "pi-plugin-anthropic",
+ "pi-plugin-azure-openai",
+ "pi-plugin-bash",
+ "pi-plugin-bedrock",
+ "pi-plugin-copilot",
+ "pi-plugin-edit",
+ "pi-plugin-find",
+ "pi-plugin-google",
+ "pi-plugin-grep",
+ "pi-plugin-hashline-edit",
+ "pi-plugin-ls",
+ "pi-plugin-manager",
+ "pi-plugin-mcp",
+ "pi-plugin-memory-hermes",
+ "pi-plugin-mistral",
+ "pi-plugin-models",
+ "pi-plugin-openai",
+ "pi-plugin-openrouter",
+ "pi-plugin-prompts",
+ "pi-plugin-read",
+ "pi-plugin-schedule",
+ "pi-plugin-session-transfer",
+ "pi-plugin-skills",
+ "pi-plugin-subagents",
+ "pi-plugin-write",
+ "pi-plugin-xai",
+ "pi-provider",
+ "pi-runtime",
+ "pi-sdk",
+ "pi-session",
+ "pi-settings",
+ "pi-shell",
+ "pi-test-support",
+ "pi-utils",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "pi-coding-eval"
+version = "0.8.4"
+dependencies = [
+ "axum",
+ "pi-coding",
+ "pi-eval",
+ "pi-js-plugin",
+ "pi-plugin",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "pi-core"
 version = "0.1.0"
 dependencies = [
@@ -3068,15 +3138,14 @@ dependencies = [
 
 [[package]]
 name = "pi-eval"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "async-trait",
- "axum",
  "pi-core",
- "pi-js-plugin",
  "pi-plugin",
  "pi-sdk",
  "pi-session",
+ "pi-test-support",
  "pi-utils",
  "serde",
  "serde_json",
@@ -3089,17 +3158,18 @@ dependencies = [
 
 [[package]]
 name = "pi-eval-cli"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "async-trait",
  "axum",
  "clap",
  "dotenvy",
+ "pi-coding",
+ "pi-coding-eval",
  "pi-core",
  "pi-eval",
  "pi-js-plugin",
  "pi-plugin",
- "pi-sdk",
  "serde_json",
  "tempfile",
  "tokio",
@@ -3108,7 +3178,7 @@ dependencies = [
 
 [[package]]
 name = "pi-js-package-manager"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "futures",
  "glob",
@@ -3145,7 +3215,7 @@ dependencies = [
 
 [[package]]
 name = "pi-media"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -3155,7 +3225,7 @@ dependencies = [
 
 [[package]]
 name = "pi-memory-loader"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "async-trait",
  "pi-core",
@@ -3169,7 +3239,7 @@ dependencies = [
 
 [[package]]
 name = "pi-napi"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "async-trait",
  "dotenvy",
@@ -3183,6 +3253,20 @@ dependencies = [
  "pi-plugin",
  "serde",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "pi-order-agent-example"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "pi-core",
+ "pi-plugin",
+ "pi-sdk",
+ "pi-test-support",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -3416,7 +3500,7 @@ dependencies = [
 
 [[package]]
 name = "pi-plugin-mcp"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "async-trait",
  "axum",
@@ -3437,7 +3521,7 @@ dependencies = [
 
 [[package]]
 name = "pi-plugin-memory-hermes"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3704,14 +3788,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pi-prompt"
-version = "0.1.0"
-dependencies = [
- "pi-utils",
- "serde",
-]
-
-[[package]]
 name = "pi-provider"
 version = "0.1.0"
 dependencies = [
@@ -3728,17 +3804,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "pi-resources"
-version = "0.1.0"
-dependencies = [
- "pi-prompt",
- "pi-utils",
- "serde",
-]
-
-[[package]]
 name = "pi-rpc"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "pi-agent",
  "pi-core",
@@ -3760,12 +3827,9 @@ dependencies = [
  "pi-agent",
  "pi-core",
  "pi-plugin",
- "pi-plugin-read",
- "pi-plugin-write",
- "pi-prompt",
- "pi-resources",
  "pi-test-support",
  "pi-utils",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
@@ -3774,56 +3838,20 @@ dependencies = [
 
 [[package]]
 name = "pi-sdk"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "async-trait",
- "axum",
- "base64 0.22.1",
  "fs2",
  "pi-agent",
  "pi-core",
- "pi-js-package-manager",
- "pi-js-plugin",
- "pi-memory-loader",
  "pi-plugin",
- "pi-plugin-anthropic",
- "pi-plugin-azure-openai",
- "pi-plugin-bash",
- "pi-plugin-bedrock",
- "pi-plugin-copilot",
- "pi-plugin-edit",
- "pi-plugin-find",
- "pi-plugin-google",
- "pi-plugin-grep",
- "pi-plugin-hashline-edit",
- "pi-plugin-ls",
- "pi-plugin-manager",
- "pi-plugin-mcp",
- "pi-plugin-memory-hermes",
- "pi-plugin-mistral",
- "pi-plugin-models",
- "pi-plugin-openai",
- "pi-plugin-openrouter",
- "pi-plugin-prompts",
- "pi-plugin-read",
- "pi-plugin-schedule",
- "pi-plugin-session-transfer",
- "pi-plugin-skills",
- "pi-plugin-subagents",
- "pi-plugin-write",
- "pi-plugin-xai",
- "pi-provider",
- "pi-resources",
  "pi-runtime",
  "pi-session",
- "pi-settings",
  "pi-test-support",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.20",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -3851,7 +3879,7 @@ dependencies = [
 
 [[package]]
 name = "pi-settings"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "fs2",
  "serde",

@@ -11,44 +11,15 @@ pub const EVAL_RUN_SCHEMA_VERSION: u32 = 1;
 
 pub type EvalAgentPluginFactory = Arc<dyn Fn() -> Arc<dyn Plugin> + Send + Sync + 'static>;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum EvalSystemPrompt {
-    #[default]
-    Default,
-    WithoutPiDocumentation,
-}
-
+/// A domain-neutral label used to pair and compare runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalVariant {
     pub name: String,
-    pub system_prompt: EvalSystemPrompt,
-    pub extensions: Vec<String>,
-    pub native_plugins: Vec<PathBuf>,
 }
 
 impl EvalVariant {
     pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            system_prompt: EvalSystemPrompt::Default,
-            extensions: Vec::new(),
-            native_plugins: Vec::new(),
-        }
-    }
-
-    pub fn system_prompt(mut self, treatment: EvalSystemPrompt) -> Self {
-        self.system_prompt = treatment;
-        self
-    }
-
-    pub fn extension(mut self, source: impl Into<String>) -> Self {
-        self.extensions.push(source.into());
-        self
-    }
-
-    pub fn native_plugin(mut self, path: impl Into<PathBuf>) -> Self {
-        self.native_plugins.push(path.into());
-        self
+        Self { name: name.into() }
     }
 
     pub(crate) fn validate(&self) -> Result<(), EvalError> {
@@ -82,8 +53,8 @@ pub enum EvalFixture {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalStep {
     Prompt(String),
-    /// Prompt with `{{workspace}}`, `{{agent_dir}}`, and `{{home}}` replaced
-    /// by the isolated run paths.
+    /// Prompt with `{{name}}` tokens replaced from the prepared target's explicit bindings.
+    /// Unbound or unterminated tokens fail the step.
     PromptTemplate(String),
     Reload,
     InvokeCommand {
@@ -114,8 +85,6 @@ pub struct EvalCase {
     pub graders: Vec<Arc<dyn EvalGrader>>,
     pub limits: EvalLimits,
     pub active_tools: Option<Vec<String>>,
-    pub discover_extensions: bool,
-    pub requires_js_host: bool,
     pub agent_plugins: Vec<EvalAgentPluginFactory>,
 }
 
@@ -129,8 +98,6 @@ impl EvalCase {
             graders: Vec::new(),
             limits: EvalLimits::default(),
             active_tools: None,
-            discover_extensions: false,
-            requires_js_host: false,
             agent_plugins: Vec::new(),
         }
     }
@@ -152,16 +119,6 @@ impl EvalCase {
 
     pub fn active_tools(mut self, tools: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.active_tools = Some(tools.into_iter().map(Into::into).collect());
-        self
-    }
-
-    pub fn discover_extensions(mut self, discover: bool) -> Self {
-        self.discover_extensions = discover;
-        self
-    }
-
-    pub fn requires_js_host(mut self, required: bool) -> Self {
-        self.requires_js_host = required;
         self
     }
 

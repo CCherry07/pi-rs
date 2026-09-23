@@ -46,7 +46,7 @@ a caller resolves them with `McpConfigContext`, specifying the configuration-dir
 default stdio cwd. Resolution supports `${VAR}`, `${env:VAR}`, whole-value `$VAR`, and `~` in
 stdio paths, without shell evaluation.
 
-The crate has no `pi-sdk`, `pi-acp` or `pi-session` dependency. Frontend adapters resolve trust,
+The crate has no `pi-coding`, `pi-acp` or `pi-session` dependency. Frontend adapters resolve trust,
 adapt their request data and choose which entry point to call. Merely depending on this crate
 does not load a local library or start a connection. This migration adds no feature flag,
 new plugin lifecycle, activation transaction or runtime behavior.

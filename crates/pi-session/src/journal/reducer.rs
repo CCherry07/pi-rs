@@ -789,14 +789,30 @@ fn derive_tool_batch(
 pub fn reduce_lane_state(
     input: &LaneReductionInput,
 ) -> Result<LaneReductionResult, RecordLogCorruption> {
-    validate_record_log(&input.slice)?;
+    let (lane_state, terminal_failure) =
+        reduce_lane_operation(&input.slice, input.leaf_id.as_deref(), &input.own_entries)?;
+    Ok(LaneReductionResult {
+        lane_state,
+        effective_configuration: derive_effective_configuration(input),
+        terminal_failure,
+    })
+}
 
-    let mut records = input.slice.records.iter().collect::<Vec<_>>();
+/// Projects operation recovery without requiring a product's default configuration.
+/// The public reducer and session recovery plans share this validation and state calculation.
+pub(crate) fn reduce_lane_operation(
+    slice: &RecordLogSlice,
+    leaf_id: Option<&str>,
+    own_entries: &[SessionRecord],
+) -> Result<(LaneState, Option<TerminalFailureState>), RecordLogCorruption> {
+    validate_record_log(slice)?;
+
+    let mut records = slice.records.iter().collect::<Vec<_>>();
     records.sort_by_key(|record| record.seq);
-    let mut own_entries = input.own_entries.clone();
+    let mut own_entries = own_entries.to_vec();
     own_entries.sort_by_key(|entry| entry.seq);
     let mut entries_by_id = HashMap::<&str, &SessionRecord>::new();
-    for entry in &input.slice.entries {
+    for entry in &slice.entries {
         entries_by_id.insert(entry.id.as_str(), entry);
     }
     for entry in &own_entries {
@@ -822,7 +838,7 @@ pub fn reduce_lane_state(
         })
         .collect::<Vec<_>>();
 
-    let started = input.slice.open_operations.first();
+    let started = slice.open_operations.first();
     let captured_initial_message_ids = started
         .and_then(|record| match &record.record {
             LaneRecordEntry::OperationStarted {
@@ -851,19 +867,17 @@ pub fn reduce_lane_state(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let effective_configuration = derive_effective_configuration(input);
 
     let Some(started) = started else {
-        return Ok(LaneReductionResult {
-            lane_state: LaneState {
-                lane: input.slice.lane.clone(),
-                leaf_id: input.leaf_id.clone(),
+        return Ok((
+            LaneState {
+                lane: slice.lane.clone(),
+                leaf_id: leaf_id.map(str::to_owned),
                 operation: None,
                 pending_next_run,
             },
-            effective_configuration,
-            terminal_failure: None,
-        });
+            None,
+        ));
     };
     let LaneRecordEntry::OperationStarted { intent, .. } = &started.record else {
         return Err(corruption(
@@ -1074,10 +1088,10 @@ pub fn reduce_lane_state(
         &deferred_write_ids,
     );
 
-    Ok(LaneReductionResult {
-        lane_state: LaneState {
-            lane: input.slice.lane.clone(),
-            leaf_id: input.leaf_id.clone(),
+    Ok((
+        LaneState {
+            lane: slice.lane.clone(),
+            leaf_id: leaf_id.map(str::to_owned),
             operation: Some(LaneOperationState {
                 id: started.id.clone(),
                 kind: intent.kind(),
@@ -1096,9 +1110,8 @@ pub fn reduce_lane_state(
             }),
             pending_next_run,
         },
-        effective_configuration,
         terminal_failure,
-    })
+    ))
 }
 
 #[cfg(test)]

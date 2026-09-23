@@ -550,9 +550,9 @@ impl SessionContextAccess for PiPluginContext {
         require_command(scope, "getSystemPromptOptions")?;
         let session = self.session()?;
         let runtime = session.runtime();
-        runtime
+        Ok(runtime
             .prompt_options()
-            .map_or_else(|| Ok(json!({ "cwd": runtime.cwd() })), value)
+            .unwrap_or_else(|| json!({ "cwd": runtime.cwd() })))
     }
 
     fn session_cwd(&self) -> Result<PathBuf, PluginContextError> {

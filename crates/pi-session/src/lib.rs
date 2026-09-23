@@ -24,6 +24,7 @@ mod multi_session_manager;
 pub mod plugin;
 mod plugin_context;
 mod session_options;
+mod shell;
 mod types;
 
 pub use agent_session::{
@@ -31,16 +32,18 @@ pub use agent_session::{
 };
 pub use agent_session_runtime::{
     AgentSessionInitialModelSource, AgentSessionInitialState, AgentSessionReplacement,
-    PreparedSessionGeneration, SessionGenerationActivation, SessionGenerationFactory,
-    SessionGenerationOverlay, SessionGenerationRequest,
+    PreparedSessionGeneration, RestoredSessionConfiguration, RestoredToolSelection,
+    SessionGenerationActivation, SessionGenerationFactory, SessionGenerationOverlay,
+    SessionGenerationRequest,
 };
 pub(crate) use compaction::{
     CompactionError, compact, estimate_session_context_tokens, estimate_tokens, prepare_compaction,
     should_compact,
 };
 pub use compaction::{
-    ContextUsageEstimate, SUMMARIZATION_SYSTEM_PROMPT, calculate_context_tokens,
-    current_session_context_tokens, estimate_context_tokens,
+    ContextUsageEstimate, GenericCompactionPolicy, SUMMARIZATION_SYSTEM_PROMPT,
+    SessionCompactionPolicy, calculate_context_tokens, current_session_context_tokens,
+    estimate_context_tokens,
 };
 pub use context::{
     ContextEntryTransform, CustomEntryContextMessageProjector, SessionContext,
@@ -84,6 +87,7 @@ pub use session_options::{
     InitialModelSelection, SessionRuntimeInventory, resolve_model_scope,
     validate_initial_model_scope,
 };
+pub use shell::SessionShellExecutor;
 pub use types::*;
 
 pub(crate) use pi_utils::time::unix_timestamp_ms as now_ms;

@@ -1,0 +1,19 @@
+[package]
+name = "pi-coding-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pi-coding.workspace = true
+pi-eval.workspace = true
+pi-js-plugin.workspace = true
+pi-plugin.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+axum = "0.8"
+tempfile = "3.21.0"
+tokio = { workspace = true, features = ["net"] }

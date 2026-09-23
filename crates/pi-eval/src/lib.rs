@@ -1,7 +1,7 @@
-//! Model-backed evaluation support for the Pi product runtime.
+//! Domain-neutral agent evaluation over the shared managed-session lifecycle.
 //!
-//! This crate is an outer test/product-quality layer. Production crates do not
-//! depend on it; the harness deliberately enters through [`pi_sdk::Pi`].
+//! Applications prepare their own target, prompt bindings, and optional prompt
+//! transformation. The runner owns fixtures, steps, grading, and artifacts.
 
 #![forbid(unsafe_code)]
 
@@ -20,10 +20,10 @@ pub use comparison::{
     HarnessPairComparison, PairedMetricSummary, format_comparison_report, summarize_comparisons,
 };
 pub use grader::{EvalGrader, ExactOutputGrader};
-pub use harness::PiEvalHarness;
+pub use harness::{EvalPromptTransform, EvalRunContext, EvalRunner, PreparedEvalTarget};
 pub use model::{
     ArtifactReference, EvalAgentPluginFactory, EvalCase, EvalError, EvalExecutionOutcome,
-    EvalFixture, EvalGrade, EvalLimits, EvalObservation, EvalRun, EvalStep, EvalSystemPrompt,
-    EvalTranscriptEvent, EvalUsage, EvalVariant, WorkspaceChange, WorkspaceChangeKind,
+    EvalFixture, EvalGrade, EvalLimits, EvalObservation, EvalRun, EvalStep, EvalTranscriptEvent,
+    EvalUsage, EvalVariant, WorkspaceChange, WorkspaceChangeKind,
 };
 pub use submission::{JsonSubmissionGrader, JsonSubmissionPlugin};

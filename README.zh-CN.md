@@ -483,7 +483,12 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 | 目录                                             | 职责                                                                |
 | ------------------------------------------------ | ------------------------------------------------------------------- |
 | `apps/pi-cli`                                    | CLI、TUI 和终端生命周期 Adapter                                    |
-| `crates/pi-sdk`                                  | CLI、桌面与嵌入式 Adapter 共用的无界面产品装配                      |
+| `crates/pi-sdk`                                  | 显式配置的通用 Agent 嵌入入口与共享 Project 定义                    |
+| `domains/coding`                                 | Coding 默认配置、项目资源、工具与产品 generation 装配               |
+| `crates/pi-eval`                                 | 通用评测执行、评分、产物和对比报告                                  |
+| `domains/coding/eval`                            | Coding 评测配置与隔离产品环境准备（`pi-coding-eval`）                |
+| `apps/pi-eval`                                   | 评测 CLI、用例目录与结果展示                                        |
+| `examples/order-agent`                           | 使用通用 SDK 的确定性订单查询示例                                   |
 | `crates/pi-plugin` | 统一 Plugin 接口、准备、强类型 context、generation driver 与可选 native 导出 |
 | `crates/pi-core`                                 | 消息、模型、工具数据与会话共享 wire 类型                         |
 | `crates/pi-media`                                | 共享图片校验、缩放和格式转换                                        |
@@ -495,7 +500,8 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 | `plugins/features/pi-plugin-mcp`               | MCP 客户端与工具、本地配置管理和 `/mcp` 命令                       |
 | `crates/pi-telemetry`                            | 强类型 Provider/harness span schema 与 sink adapter                 |
 | `crates/pi-provider`                             | Provider-neutral HTTP transport 与 SSE                              |
-| `crates/pi-prompt` / `pi-resources`              | 系统 prompt 和项目上下文发现                                        |
+| `domains/coding/src/{prompt,resources}.rs`       | Coding 内部的系统 prompt 组装与项目上下文发现                        |
+| `domains/coding/settings`                      | 独立的 Coding 设置格式与持久化 crate（`pi-settings`）                 |
 | `apps/pi-cli/src/markdown`                       | TUI 所有的 Markdown 解析、streaming mend、语法高亮和 Ratatui 渲染   |
 | `crates/pi-plugin-macros` | 静态与 native 插件过程宏 |
 | `crates/pi-plugin-manager` | Native 加载、安装与同步，以及可选的构建发布工具 |

@@ -1,6 +1,7 @@
 //! Session initialization options and model-selection policy.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use globset::GlobBuilder;
 use pi_core::{ModelId, ModelSelection, ModelSpec, PluginId, ProviderId, ThinkingLevel};
@@ -8,14 +9,17 @@ use pi_plugin::ScopedModel;
 use pi_runtime::PiRuntime;
 
 use crate::{
-    AgentSessionInitialModelSource, CompactionSettings, SessionContextBuildOptions, SessionError,
-    SessionModel,
+    AgentSessionInitialModelSource, CompactionSettings, SessionCompactionPolicy,
+    SessionContextBuildOptions, SessionError, SessionModel, SessionShellExecutor,
 };
 
 #[derive(Clone, Default)]
 pub struct AgentSessionOptions {
     pub context: SessionContextBuildOptions,
     pub compaction: CompactionSettings,
+    /// Optional domain summary policy. Without one, summaries use neutral
+    /// prompts and do not interpret tool names or attach domain metadata.
+    pub compaction_policy: Option<Arc<dyn SessionCompactionPolicy>>,
     /// Product-level model request to merge with a resumed session model.
     pub initial_model: InitialModelRequest,
     /// Generation-local tools the product enables when restoring a session.
@@ -37,10 +41,9 @@ pub struct AgentSessionOptions {
     pub session_id: Option<String>,
     /// Extra metadata for a new header; workspace metadata is supplied by the runtime.
     pub header_metadata: Option<serde_json::Map<String, serde_json::Value>>,
-    /// Generation-local defaults for shell shorthand execution. Explicit
-    /// per-call shell paths still take precedence.
-    pub shell_path: Option<PathBuf>,
-    pub shell_command_prefix: Option<String>,
+    /// Optional generation-local shell execution adapter. Shell shorthand is
+    /// unavailable unless the product explicitly supplies an executor.
+    pub shell_executor: Option<Arc<dyn SessionShellExecutor>>,
     /// Session-owned retry policy for transient assistant/provider failures.
     pub retry: AutoRetrySettings,
     pub(crate) initial_model_fallback_message: Option<String>,
@@ -98,9 +101,13 @@ impl AgentSessionOptions {
         self
     }
 
-    pub fn shell(mut self, shell_path: Option<PathBuf>, command_prefix: Option<String>) -> Self {
-        self.shell_path = shell_path;
-        self.shell_command_prefix = command_prefix;
+    pub fn shell_executor(mut self, executor: Arc<dyn SessionShellExecutor>) -> Self {
+        self.shell_executor = Some(executor);
+        self
+    }
+
+    pub fn compaction_policy(mut self, policy: Arc<dyn SessionCompactionPolicy>) -> Self {
+        self.compaction_policy = Some(policy);
         self
     }
 

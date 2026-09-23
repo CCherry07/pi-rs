@@ -1,38 +1,86 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use pi_core::{ContentBlock, Message, PluginId, StopReason, Usage};
-use pi_js_plugin::JsPluginHost;
 use pi_plugin::{
     AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, Plugin, PluginError,
-    PresentationMode,
 };
-use pi_sdk::{Config, Pi};
-use pi_session::{SessionGenerationOverlay, SubmitOutcome};
+use pi_session::{MultiSessionManager, SessionGenerationOverlay, SubmitOutcome};
 use pi_utils::time::unix_timestamp_ms as now_ms;
 
 use crate::model::EVAL_RUN_SCHEMA_VERSION;
-use crate::snapshot::{changes, copy_bootstrap_file, copy_fixture, snapshot_workspace};
+use crate::snapshot::{changes, copy_fixture, snapshot_workspace};
 use crate::{
     ArtifactStore, EvalCase, EvalError, EvalExecutionOutcome, EvalFixture, EvalObservation,
-    EvalRun, EvalStep, EvalSystemPrompt, EvalTranscriptEvent, EvalUsage, EvalVariant,
+    EvalRun, EvalStep, EvalTranscriptEvent, EvalUsage, EvalVariant,
 };
 
-pub struct PiEvalHarness {
-    artifacts: ArtifactStore,
-    js_plugin_host: Option<Arc<dyn JsPluginHost>>,
+/// Isolated paths and initial tool selection supplied to the target preparer.
+#[derive(Debug, Clone)]
+pub struct EvalRunContext {
+    pub root: PathBuf,
+    pub workspace: PathBuf,
+    pub session_path: PathBuf,
+    /// Apply this selection before the target's first dynamic prompt render.
+    pub active_tools: Option<Vec<String>>,
 }
 
-impl PiEvalHarness {
+/// A pure, run-local transformation applied through a reloadable session overlay.
+pub type EvalPromptTransform = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync + 'static>;
+
+/// A domain-composed target using the existing managed-session lifecycle.
+///
+/// Supply a manager dedicated to this run.
+/// The runner creates its session and shuts the manager down after execution,
+/// including when session creation, observation, or artifact persistence fails.
+pub struct PreparedEvalTarget {
+    pub manager: MultiSessionManager,
+    pub provider: String,
+    pub model: String,
+    pub template_bindings: BTreeMap<String, String>,
+    pub prompt_transform: Option<EvalPromptTransform>,
+}
+
+impl PreparedEvalTarget {
+    pub fn new(
+        manager: MultiSessionManager,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            manager,
+            provider: provider.into(),
+            model: model.into(),
+            template_bindings: BTreeMap::new(),
+            prompt_transform: None,
+        }
+    }
+}
+
+/// Runs evaluations without choosing domain tools, settings, or discovery policy.
+pub struct EvalRunner {
+    artifacts: ArtifactStore,
+    ignored_directories: BTreeSet<String>,
+}
+
+impl EvalRunner {
     pub fn new(artifacts: ArtifactStore) -> Self {
         Self {
             artifacts,
-            js_plugin_host: None,
+            ignored_directories: BTreeSet::new(),
         }
     }
 
-    pub fn with_js_plugin_host(mut self, host: Arc<dyn JsPluginHost>) -> Self {
-        self.js_plugin_host = Some(host);
+    /// Directory basenames excluded from both fixture copying and observations.
+    /// No directories are excluded by default.
+    pub fn ignored_directories(
+        mut self,
+        names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.ignored_directories = names.into_iter().map(Into::into).collect();
         self
     }
 
@@ -40,13 +88,17 @@ impl PiEvalHarness {
         &self.artifacts
     }
 
-    pub async fn run(
+    pub async fn run<F, Fut>(
         &self,
         case: &EvalCase,
         variant: impl Into<EvalVariant>,
         repetition: u32,
-        mut config: Config,
-    ) -> Result<EvalRun, EvalError> {
+        prepare: F,
+    ) -> Result<EvalRun, EvalError>
+    where
+        F: FnOnce(EvalRunContext) -> Fut,
+        Fut: Future<Output = Result<PreparedEvalTarget, EvalError>>,
+    {
         case.validate()?;
         if repetition == 0 {
             return Err(EvalError::InvalidCase(
@@ -55,250 +107,225 @@ impl PiEvalHarness {
         }
         let variant = variant.into();
         variant.validate()?;
-        if (case.requires_js_host || !variant.extensions.is_empty())
-            && self.js_plugin_host.is_none()
-        {
-            return Err(EvalError::Runtime(
-                "eval case requires the JavaScript/TypeScript extension host; run it through the Node pi-eval launcher"
-                    .to_string(),
-            ));
-        }
-
-        let provider = config.provider.clone();
-        let model = config
-            .model
-            .clone()
-            .unwrap_or_else(|| config.fallback_model.clone());
-        let source_agent_dir = config.agent_dir.clone();
-        let source_cwd = config.cwd.clone();
         let temporary = tempfile::Builder::new()
             .prefix("pi-eval-")
             .tempdir()
             .map_err(|error| EvalError::Fixture(format!("cannot create eval root: {error}")))?;
         let workspace = temporary.path().join("workspace");
-        let isolated_home = temporary.path().join("home");
-        let agent_dir = isolated_home.join(".pi/agent");
         let sessions_dir = temporary.path().join("sessions");
         std::fs::create_dir_all(&workspace)
-            .and_then(|_| std::fs::create_dir_all(&agent_dir))
             .and_then(|_| std::fs::create_dir_all(&sessions_dir))
             .map_err(|error| {
                 EvalError::Fixture(format!("cannot prepare eval directories: {error}"))
             })?;
         if let EvalFixture::Directory(source) = &case.fixture {
-            copy_fixture(source, &workspace)?;
+            copy_fixture(source, &workspace, &self.ignored_directories)?;
         }
-        for name in ["auth.json", "models.json"] {
-            copy_bootstrap_file(&source_agent_dir, &agent_dir, name)?;
-        }
-        std::fs::write(
-            agent_dir.join("memory.json"),
-            "{\"version\":1,\"enabled\":false}\n",
-        )
-        .map_err(|error| EvalError::Fixture(format!("cannot disable eval memory: {error}")))?;
-        let mut settings = serde_json::Map::new();
-        settings.insert(
-            "shellCommandPrefix".to_string(),
-            serde_json::Value::String(isolated_shell_prefix(&isolated_home)),
-        );
-        if let Some(active_tools) = &case.active_tools {
-            settings.insert(
-                "defaultTools".to_string(),
-                serde_json::to_value(active_tools)
-                    .map_err(|error| EvalError::Fixture(error.to_string()))?,
-            );
-        }
-        let encoded = serde_json::to_string_pretty(&settings)
-            .map_err(|error| EvalError::Fixture(error.to_string()))?;
-        std::fs::write(agent_dir.join("settings.json"), format!("{encoded}\n"))
-            .map_err(|error| EvalError::Fixture(format!("cannot write eval settings: {error}")))?;
-
-        let before = snapshot_workspace(&workspace)?;
+        // Preparers may create domain resources in the workspace; retain those changes.
+        let before = snapshot_workspace(&workspace, &self.ignored_directories)?;
         let session_path = sessions_dir.join("session.jsonl");
-        config.cwd = workspace.clone();
-        config.agent_dir = agent_dir.clone();
-        config.session_path = session_path.clone();
-        config.trust_override = Some(true);
-        config.discover_extensions = case.discover_extensions;
-        config.load_mcp_config = false;
-        config.extensions = config
-            .extensions
-            .iter()
-            .chain(&variant.extensions)
-            .map(|source| resolve_extension_source(&source_cwd, source))
-            .collect();
-        config.native_plugins = config
-            .native_plugins
-            .iter()
-            .chain(&variant.native_plugins)
-            .map(|path| resolve_local_path(&source_cwd, path))
-            .collect();
-
         let started_at_ms = now_ms();
         let started = Instant::now();
-        let mut builder = Pi::builder(config).presentation_mode(PresentationMode::Print);
-        if let Some(js_plugin_host) = &self.js_plugin_host {
-            builder = builder.js_plugin_host(Arc::clone(js_plugin_host));
-        }
-        let host = builder.build().map_err(EvalError::Runtime)?;
-        let manager = host.session_manager();
-        let prompt_capture = Arc::new(Mutex::new(PromptCapture::default()));
-        let mut overlay = SessionGenerationOverlay::new();
-        for factory in &case.agent_plugins {
-            let factory = Arc::clone(factory);
-            overlay = overlay.with_plugin(move || factory());
-        }
-        overlay = overlay.with_plugin({
-            let prompt_capture = Arc::clone(&prompt_capture);
-            let treatment = variant.system_prompt;
-            move || {
-                Arc::new(EvalPromptPlugin {
-                    treatment,
-                    capture: Arc::clone(&prompt_capture),
-                })
-            }
-        });
-        let session = manager
-            .create_session_with_overlay(&workspace, &session_path, overlay)
-            .await
-            .map_err(|error| EvalError::Runtime(error.to_string()))?;
+        let target = prepare(EvalRunContext {
+            root: temporary.path().to_path_buf(),
+            workspace: workspace.clone(),
+            session_path: session_path.clone(),
+            active_tools: case.active_tools.clone(),
+        })
+        .await?;
 
-        let mut execution_outcome = EvalExecutionOutcome::Completed;
-        let mut errors = Vec::new();
-        for step in &case.steps {
-            let result = match step {
-                EvalStep::Prompt(prompt) => {
-                    run_submission(&session, prompt.clone(), case.limits.step_timeout).await
+        let cleanup = RunCleanup::new(target.manager.clone(), temporary);
+        // Keep every fallible operation after preparation inside this scope so
+        // the manager is always shut down before returning its result.
+        let result = async {
+            let prompt_capture = Arc::new(Mutex::new(PromptCapture::default()));
+            let mut overlay = SessionGenerationOverlay::new();
+            for factory in &case.agent_plugins {
+                let factory = Arc::clone(factory);
+                overlay = overlay.with_plugin(move || factory());
+            }
+            overlay = overlay.with_plugin({
+                let prompt_capture = Arc::clone(&prompt_capture);
+                let transform = target.prompt_transform.clone();
+                move || {
+                    Arc::new(EvalPromptPlugin {
+                        transform: transform.clone(),
+                        capture: Arc::clone(&prompt_capture),
+                    })
                 }
-                EvalStep::PromptTemplate(prompt) => {
-                    run_submission(
-                        &session,
-                        render_prompt_template(prompt, &workspace, &agent_dir, &isolated_home),
-                        case.limits.step_timeout,
-                    )
-                    .await
-                }
-                EvalStep::Reload => {
-                    tokio::time::timeout(case.limits.step_timeout, session.reload())
+            });
+            let session = target
+                .manager
+                .create_session_with_overlay(&workspace, &session_path, overlay)
+                .await
+                .map_err(|error| EvalError::Runtime(error.to_string()))?;
+
+            let mut execution_outcome = EvalExecutionOutcome::Completed;
+            let mut errors = Vec::new();
+            for step in &case.steps {
+                let result = match step {
+                    EvalStep::Prompt(prompt) => {
+                        run_submission(
+                            &session,
+                            prompt.clone(),
+                            case.limits.step_timeout,
+                            &cleanup.operation,
+                        )
                         .await
-                        .map_err(|_| StepError::TimedOut)
-                        .and_then(|result| {
-                            result.map_err(|error| StepError::Failed(error.to_string()))
-                        })
-                }
-                EvalStep::InvokeCommand { name, arguments } => {
-                    let current = session.current();
-                    let name = name.clone();
-                    let arguments = arguments.clone();
-                    run_future_submission(
-                        &session,
-                        async move { current.invoke_command(&name, &arguments).await },
-                        case.limits.step_timeout,
-                    )
-                    .await
-                }
-            };
-            if let Err(error) = result {
-                execution_outcome = match error {
-                    StepError::TimedOut => EvalExecutionOutcome::TimedOut,
-                    StepError::Failed(_) => EvalExecutionOutcome::Errored,
+                    }
+                    EvalStep::PromptTemplate(prompt) => {
+                        match render_prompt_template(prompt, &target.template_bindings) {
+                            Ok(prompt) => {
+                                run_submission(
+                                    &session,
+                                    prompt,
+                                    case.limits.step_timeout,
+                                    &cleanup.operation,
+                                )
+                                .await
+                            }
+                            Err(error) => Err(StepError::Failed(error)),
+                        }
+                    }
+                    EvalStep::Reload => {
+                        let reloading = session.clone();
+                        run_operation(
+                            &session,
+                            async move { reloading.reload().await },
+                            case.limits.step_timeout,
+                            &cleanup.operation,
+                        )
+                        .await
+                    }
+                    EvalStep::InvokeCommand { name, arguments } => {
+                        let current = session.current();
+                        let name = name.clone();
+                        let arguments = arguments.clone();
+                        run_future_submission(
+                            &session,
+                            async move { current.invoke_command(&name, &arguments).await },
+                            case.limits.step_timeout,
+                            &cleanup.operation,
+                        )
+                        .await
+                    }
                 };
-                errors.push(error.to_string());
-                break;
-            }
-        }
-
-        let captured_prompt = prompt_capture
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if execution_outcome == EvalExecutionOutcome::Completed
-            && let Some(error) = captured_prompt.error
-        {
-            execution_outcome = EvalExecutionOutcome::Errored;
-            errors.push(error);
-        }
-
-        let state = session.current().runtime().agent().state();
-        let model_has_pricing = session
-            .current()
-            .runtime()
-            .model(&state.provider_id, &state.model_id)
-            .is_some_and(|model| {
-                model.cost.input > 0.0
-                    || model.cost.output > 0.0
-                    || model.cost.cache_read > 0.0
-                    || model.cost.cache_write > 0.0
-                    || !model.cost.tiers.is_empty()
-            });
-        let final_assistant = state
-            .messages
-            .iter()
-            .rev()
-            .find_map(|message| match message {
-                Message::Assistant(message) => Some(message),
-                _ => None,
-            });
-        if execution_outcome == EvalExecutionOutcome::Completed {
-            match final_assistant.map(|message| message.stop_reason) {
-                Some(StopReason::Stop | StopReason::ToolUse) => {}
-                Some(reason) => {
-                    execution_outcome = EvalExecutionOutcome::Errored;
-                    errors.push(
-                        final_assistant
-                            .and_then(|message| message.error_message.clone())
-                            .unwrap_or_else(|| {
-                                format!("assistant response ended with stop reason {reason:?}")
-                            }),
-                    );
+                if let Err(error) = result {
+                    execution_outcome = match error {
+                        StepError::TimedOut => EvalExecutionOutcome::TimedOut,
+                        StepError::Failed(_) => EvalExecutionOutcome::Errored,
+                    };
+                    errors.push(error.to_string());
+                    break;
                 }
-                None if case.steps.iter().any(|step| {
-                    matches!(step, EvalStep::Prompt(_) | EvalStep::PromptTemplate(_))
-                }) =>
-                {
-                    execution_outcome = EvalExecutionOutcome::Errored;
-                    errors.push("eval prompt completed without an assistant response".to_string());
-                }
-                None => {}
             }
-        }
-        let after = snapshot_workspace(&workspace)?;
-        let mut observation = observe(
-            &state.messages,
-            captured_prompt.system_prompt,
-            model_has_pricing,
-            changes(&before, &after),
-        );
-        observation.errors.extend(errors);
-        let grades = case
-            .graders
-            .iter()
-            .map(|grader| grader.grade(&observation))
-            .collect::<Vec<_>>();
-        let passed = execution_outcome == EvalExecutionOutcome::Completed
-            && grades.iter().all(|grade| !grade.required || grade.passed);
-        let session_jsonl = std::fs::read_to_string(&session_path).ok();
-        manager
-            .shutdown()
-            .await
-            .map_err(|error| EvalError::Runtime(format!("session shutdown failed: {error}")))?;
 
-        let mut run = EvalRun {
-            schema_version: EVAL_RUN_SCHEMA_VERSION,
-            run_id: uuid::Uuid::now_v7().to_string(),
-            case_id: case.id.clone(),
-            variant: variant.name,
-            provider,
-            model,
-            repetition,
-            started_at_ms,
-            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            execution_outcome,
-            passed,
-            observation,
-            grades,
-            artifacts: Vec::new(),
+            let captured_prompt = prompt_capture
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if execution_outcome == EvalExecutionOutcome::Completed
+                && let Some(error) = captured_prompt.error
+            {
+                execution_outcome = EvalExecutionOutcome::Errored;
+                errors.push(error);
+            }
+
+            let current = session.current();
+            let state = current.runtime().agent().state();
+            let model_has_pricing = current
+                .runtime()
+                .model(&state.provider_id, &state.model_id)
+                .is_some_and(|model| {
+                    model.cost.input > 0.0
+                        || model.cost.output > 0.0
+                        || model.cost.cache_read > 0.0
+                        || model.cost.cache_write > 0.0
+                        || !model.cost.tiers.is_empty()
+                });
+            let final_assistant = state
+                .messages
+                .iter()
+                .rev()
+                .find_map(|message| match message {
+                    Message::Assistant(message) => Some(message),
+                    _ => None,
+                });
+            if execution_outcome == EvalExecutionOutcome::Completed {
+                match final_assistant.map(|message| message.stop_reason) {
+                    Some(StopReason::Stop | StopReason::ToolUse) => {}
+                    Some(reason) => {
+                        execution_outcome = EvalExecutionOutcome::Errored;
+                        errors.push(
+                            final_assistant
+                                .and_then(|message| message.error_message.clone())
+                                .unwrap_or_else(|| {
+                                    format!("assistant response ended with stop reason {reason:?}")
+                                }),
+                        );
+                    }
+                    None if case.steps.iter().any(|step| {
+                        matches!(step, EvalStep::Prompt(_) | EvalStep::PromptTemplate(_))
+                    }) =>
+                    {
+                        execution_outcome = EvalExecutionOutcome::Errored;
+                        errors.push(
+                            "eval prompt completed without an assistant response".to_string(),
+                        );
+                    }
+                    None => {}
+                }
+            }
+            let after = snapshot_workspace(&workspace, &self.ignored_directories)?;
+            let mut observation = observe(
+                &state.messages,
+                captured_prompt.system_prompt,
+                model_has_pricing,
+                changes(&before, &after),
+            );
+            observation.errors.extend(errors);
+            let grades = case
+                .graders
+                .iter()
+                .map(|grader| grader.grade(&observation))
+                .collect::<Vec<_>>();
+            let passed = execution_outcome == EvalExecutionOutcome::Completed
+                && grades.iter().all(|grade| !grade.required || grade.passed);
+            Ok(EvalRun {
+                schema_version: EVAL_RUN_SCHEMA_VERSION,
+                run_id: uuid::Uuid::now_v7().to_string(),
+                case_id: case.id.clone(),
+                variant: variant.name,
+                provider: target.provider,
+                model: target.model,
+                repetition,
+                started_at_ms,
+                duration_ms: 0,
+                execution_outcome,
+                passed,
+                observation,
+                grades,
+                artifacts: Vec::new(),
+            })
+        }
+        .await;
+        let (_temporary, shutdown) = cleanup.finish().await?;
+        let mut run = match (result, shutdown) {
+            (Ok(run), Ok(())) => run,
+            (Err(error), Ok(())) => return Err(error),
+            (Ok(_), Err(error)) => {
+                return Err(EvalError::Runtime(format!(
+                    "session shutdown failed: {error}"
+                )));
+            }
+            (Err(error), Err(shutdown)) => {
+                return Err(EvalError::Runtime(format!(
+                    "{error}; session shutdown failed: {shutdown}"
+                )));
+            }
         };
+        run.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let session_jsonl = std::fs::read_to_string(&session_path).ok();
         self.artifacts
             .persist_run(&mut run, session_jsonl.as_deref())?;
         Ok(run)
@@ -312,7 +339,7 @@ struct PromptCapture {
 }
 
 struct EvalPromptPlugin {
-    treatment: EvalSystemPrompt,
+    transform: Option<EvalPromptTransform>,
     capture: Arc<Mutex<PromptCapture>>,
 }
 
@@ -327,11 +354,9 @@ impl Plugin for EvalPromptPlugin {
         _context: AgentPluginContext,
         event: BeforeAgentStartEvent,
     ) -> Result<BeforeAgentStartPatch, PluginError> {
-        let transformed = match self.treatment {
-            EvalSystemPrompt::Default => Ok(event.system_prompt),
-            EvalSystemPrompt::WithoutPiDocumentation => {
-                remove_pi_documentation(&event.system_prompt)
-            }
+        let transformed = match &self.transform {
+            Some(transform) => transform(&event.system_prompt),
+            None => Ok(event.system_prompt),
         };
         let mut capture = self
             .capture
@@ -340,7 +365,6 @@ impl Plugin for EvalPromptPlugin {
         match transformed {
             Ok(system_prompt) => {
                 capture.system_prompt = Some(system_prompt.clone());
-                capture.error = None;
                 Ok(BeforeAgentStartPatch {
                     system_prompt: Some(system_prompt),
                     ..BeforeAgentStartPatch::default()
@@ -352,24 +376,6 @@ impl Plugin for EvalPromptPlugin {
             }
         }
     }
-}
-
-fn remove_pi_documentation(system_prompt: &str) -> Result<String, String> {
-    let documentation_start = system_prompt
-        .find("\nPi documentation (read only")
-        .ok_or_else(|| "default system prompt has no Pi documentation section".to_string())?;
-    let cwd_start = system_prompt[documentation_start..]
-        .find("\nCurrent working directory:")
-        .map(|offset| documentation_start + offset)
-        .ok_or_else(|| {
-            "default system prompt has no current-working-directory marker after Pi documentation"
-                .to_string()
-        })?;
-    Ok(format!(
-        "{}{}",
-        &system_prompt[..documentation_start],
-        &system_prompt[cwd_start..]
-    ))
 }
 
 #[derive(Debug)]
@@ -391,12 +397,14 @@ async fn run_submission(
     session: &pi_session::PiSession,
     prompt: String,
     timeout: std::time::Duration,
+    operation: &OperationSlot,
 ) -> Result<(), StepError> {
     let current = session.current();
     run_future_submission(
         session,
         async move { current.submit(prompt).await },
         timeout,
+        operation,
     )
     .await
 }
@@ -405,35 +413,120 @@ async fn run_future_submission<F>(
     session: &pi_session::PiSession,
     future: F,
     step_timeout: std::time::Duration,
+    operation: &OperationSlot,
 ) -> Result<(), StepError>
 where
-    F: std::future::Future<Output = Result<SubmitOutcome, pi_session::SessionError>>
-        + Send
-        + 'static,
+    F: Future<Output = Result<SubmitOutcome, pi_session::SessionError>> + Send + 'static,
 {
-    let mut task = tokio::spawn(future);
-    match tokio::time::timeout(step_timeout, &mut task).await {
-        Ok(Ok(Ok(SubmitOutcome::Agent(_) | SubmitOutcome::Handled))) => Ok(()),
-        Ok(Ok(Ok(SubmitOutcome::Queued { .. }))) => Err(StepError::Failed(
+    match run_operation(session, future, step_timeout, operation).await? {
+        SubmitOutcome::Agent(_) | SubmitOutcome::Handled => Ok(()),
+        SubmitOutcome::Queued { .. } => Err(StepError::Failed(
             "input was queued while the sequential eval runner was idle".to_string(),
         )),
-        Ok(Ok(Ok(_))) => Err(StepError::Failed(
+        _ => Err(StepError::Failed(
             "submission returned an unsupported outcome".to_string(),
         )),
-        Ok(Ok(Err(error))) => Err(StepError::Failed(error.to_string())),
-        Ok(Err(error)) => Err(StepError::Failed(format!(
-            "eval submission task failed: {error}"
-        ))),
-        Err(_) => {
-            session.current().abort();
-            if tokio::time::timeout(std::time::Duration::from_secs(10), &mut task)
-                .await
-                .is_err()
-            {
-                task.abort();
+    }
+}
+
+// The cleanup task owns the workspace and the active operation independently of
+// the caller. Dropping the caller only closes the signal; cleanup itself remains
+// owned until the same shutdown future has completed.
+type OperationSlot = Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>;
+type CleanupResult = (
+    tempfile::TempDir,
+    Result<(), pi_session::MultiSessionManagerError>,
+);
+
+struct RunCleanup {
+    operation: OperationSlot,
+    finish: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<CleanupResult>,
+}
+
+impl RunCleanup {
+    fn new(manager: MultiSessionManager, temporary: tempfile::TempDir) -> Self {
+        let operation = OperationSlot::default();
+        let pending = Arc::clone(&operation);
+        let (finish, finished) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = finished.await;
+            for session in manager.sessions() {
+                session.abort();
             }
-            Err(StepError::TimedOut)
+            let active = pending.lock().await.take();
+            if let Some(active) = active {
+                active.abort();
+                let _ = active.await;
+            }
+            // Manager lifecycle transactions complete even when their requesting
+            // future is dropped. Shutdown waits for that existing operation gate.
+            let result = manager.shutdown().await;
+            (temporary, result)
+        });
+        Self {
+            operation,
+            finish,
+            task,
         }
+    }
+
+    async fn finish(self) -> Result<CleanupResult, EvalError> {
+        let _ = self.finish.send(());
+        self.task
+            .await
+            .map_err(|error| EvalError::Runtime(format!("eval cleanup task failed: {error}")))
+    }
+}
+
+async fn run_operation<F, T, E>(
+    session: &pi_session::PiSession,
+    future: F,
+    step_timeout: std::time::Duration,
+    operation: &OperationSlot,
+) -> Result<T, StepError>
+where
+    F: Future<Output = Result<T, E>> + Send + 'static,
+    T: Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    let (sender, mut receiver) = tokio::sync::oneshot::channel();
+    {
+        let mut active = operation.lock().await;
+        *active = Some(tokio::spawn(async move {
+            let result = future.await.map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        }));
+    }
+    let result = tokio::time::timeout(step_timeout, &mut receiver).await;
+    let timed_out = result.is_err();
+    if timed_out {
+        session.abort();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), &mut receiver).await;
+    }
+    // Await the JoinHandle in place. If the caller is cancelled during this
+    // await, the mutex guard drops but the cleanup task still owns the handle.
+    let joined = {
+        let mut active = operation.lock().await;
+        let task = active.as_mut().expect("one sequential eval operation");
+        if timed_out {
+            task.abort();
+        }
+        let joined = task.await;
+        active.take();
+        joined
+    };
+    if timed_out {
+        return Err(StepError::TimedOut);
+    }
+    if let Err(error) = joined {
+        return Err(StepError::Failed(format!("eval step task failed: {error}")));
+    }
+    match result {
+        Ok(Ok(Ok(outcome))) => Ok(outcome),
+        Ok(Ok(Err(error))) => Err(StepError::Failed(error)),
+        Ok(Err(error)) => Err(StepError::Failed(format!("eval step task failed: {error}"))),
+        Err(_) => unreachable!("timeout handled above"),
     }
 }
 
@@ -517,239 +610,94 @@ fn add_usage(summary: &mut EvalUsage, usage: &Usage, model_has_pricing: bool) {
     }
 }
 
-fn resolve_local_path(cwd: &std::path::Path, path: &std::path::Path) -> std::path::PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    }
-}
-
-fn resolve_extension_source(cwd: &std::path::Path, source: &str) -> String {
-    let path = std::path::Path::new(source);
-    if path.is_absolute() {
-        return source.to_string();
-    }
-    let resolved = cwd.join(path);
-    if source.starts_with('.') || resolved.exists() {
-        resolved.display().to_string()
-    } else {
-        source.to_string()
-    }
-}
-
 fn render_prompt_template(
     prompt: &str,
-    workspace: &std::path::Path,
-    agent_dir: &std::path::Path,
-    home: &std::path::Path,
-) -> String {
-    prompt
-        .replace("{{workspace}}", &workspace.display().to_string())
-        .replace("{{agent_dir}}", &agent_dir.display().to_string())
-        .replace("{{home}}", &home.display().to_string())
-}
-
-#[cfg(not(windows))]
-fn isolated_shell_prefix(home: &std::path::Path) -> String {
-    let quoted = format!("'{}'", home.display().to_string().replace('\'', "'\"'\"'"));
-    format!(
-        "export HOME={quoted}; unset PI_AGENT_DIR PI_CODING_AGENT_DIR PI_EVAL_ARTIFACT_DIR PI_MODEL PI_PROVIDER PI_REASONING_LEVEL PI_SESSION_FILE PI_SESSION_ID;"
-    )
-}
-
-#[cfg(windows)]
-fn isolated_shell_prefix(home: &std::path::Path) -> String {
-    format!(
-        "set \"HOME={}\" && set PI_AGENT_DIR= && set PI_CODING_AGENT_DIR= && set PI_EVAL_ARTIFACT_DIR= && set PI_MODEL= && set PI_PROVIDER= && set PI_REASONING_LEVEL= && set PI_SESSION_FILE= && set PI_SESSION_ID= &&",
-        home.display()
-    )
+    bindings: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let mut rendered = String::new();
+    let mut remaining = prompt;
+    while let Some(start) = remaining.find("{{") {
+        rendered.push_str(&remaining[..start]);
+        let token = &remaining[start + 2..];
+        let end = token
+            .find("}}")
+            .ok_or_else(|| "unterminated prompt template token".to_string())?;
+        let name = &token[..end];
+        let value = bindings
+            .get(name)
+            .ok_or_else(|| format!("unbound prompt template token: {{{{{name}}}}}"))?;
+        rendered.push_str(value);
+        remaining = &token[end + 2..];
+    }
+    rendered.push_str(remaining);
+    Ok(rendered)
 }
 
 #[cfg(test)]
 mod tests {
-    use axum::Router;
-    use axum::http::header::CONTENT_TYPE;
-    use axum::routing::post;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use pi_sdk::{AgentHost, ModelSelection};
 
     use super::*;
-    use crate::{EvalSystemPrompt, EvalVariant, ExactOutputGrader};
 
-    async fn completion() -> ([(&'static str, &'static str); 1], String) {
-        (
-            [(CONTENT_TYPE.as_str(), "text/event-stream")],
-            concat!(
-                "data: {\"id\":\"chatcmpl-eval\",\"object\":\"chat.completion.chunk\",",
-                "\"created\":0,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,",
-                "\"delta\":{\"role\":\"assistant\",\"content\":\"Paris\"},\"finish_reason\":null}]}\n\n",
-                "data: {\"id\":\"chatcmpl-eval\",\"object\":\"chat.completion.chunk\",",
-                "\"created\":0,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,",
-                "\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,",
-                "\"completion_tokens\":1,\"total_tokens\":9}}\n\n",
-                "data: [DONE]\n\n"
-            )
-            .to_string(),
-        )
-    }
-
-    #[tokio::test]
-    async fn harness_runs_the_product_session_and_persists_native_artifacts() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                Router::new().route("/v1/chat/completions", post(completion)),
-            )
-            .await
-            .unwrap();
-        });
-        let root = tempfile::tempdir().unwrap();
-        let source_agent = root.path().join("source-agent");
-        std::fs::create_dir_all(&source_agent).unwrap();
-        let artifact_directory = root.path().join("artifacts");
-        let harness = PiEvalHarness::new(ArtifactStore::new(&artifact_directory).unwrap());
-        let case = EvalCase::new("smoke/basic-answer", "product harness smoke")
-            .step(EvalStep::Prompt("Capital of France?".to_string()))
-            .grader(ExactOutputGrader::new("Paris"))
-            .active_tools(Vec::<String>::new());
-        let mut config = Config::new(root.path().to_path_buf(), source_agent);
-        config.provider = "openai-compatible".to_string();
-        config.requested_provider = Some(config.provider.clone());
-        config.model = Some("gpt-4o-mini".to_string());
-        config.base_url = format!("http://{address}/v1");
-        config.api_key = Some("test-key".to_string());
-        let run = harness.run(&case, "candidate", 1, config).await.unwrap();
-        server.abort();
-
-        assert!(run.passed, "{run:#?}");
-        assert_eq!(run.observation.final_response, "Paris");
-        assert_eq!(run.observation.usage.total_tokens, 9);
+    #[test]
+    fn prompt_templates_use_explicit_bindings_without_recursive_expansion() {
+        let bindings = BTreeMap::from([
+            ("order".into(), "ORD-42".into()),
+            ("literal".into(), "{{not_a_binding}}".into()),
+        ]);
+        assert_eq!(
+            render_prompt_template("{{order}} / {{literal}} / {{order}}", &bindings).unwrap(),
+            "ORD-42 / {{not_a_binding}} / ORD-42"
+        );
         assert!(
-            run.artifacts
-                .iter()
-                .any(|artifact| artifact.name == "session.jsonl")
+            render_prompt_template("{{home}}", &bindings)
+                .unwrap_err()
+                .contains("unbound")
         );
-        assert!(artifact_directory.join("runs.jsonl").exists());
+        assert!(
+            render_prompt_template("{{order", &bindings)
+                .unwrap_err()
+                .contains("unterminated")
+        );
     }
 
-    #[tokio::test]
-    async fn prompt_treatment_runs_as_a_generation_local_native_plugin() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(
-                listener,
-                Router::new().route("/v1/chat/completions", post(completion)),
-            )
+    #[tokio::test(start_paused = true)]
+    async fn noncooperative_step_is_joined_after_forced_cancellation() {
+        struct Cleanup(Arc<AtomicBool>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let host = AgentHost::builder(ModelSelection::new("scripted", "test"), "test")
+            .provider_plugin_factory(|| pi_test_support::ScriptedProviderPlugin::scripted([]))
+            .build();
+        let session = host
+            .sessions()
+            .create_session(directory.path(), directory.path().join("session.jsonl"))
             .await
             .unwrap();
-        });
-        let root = tempfile::tempdir().unwrap();
-        let source_agent = root.path().join("source-agent");
-        std::fs::create_dir_all(&source_agent).unwrap();
-        let harness =
-            PiEvalHarness::new(ArtifactStore::new(root.path().join("artifacts")).unwrap());
-        let case = EvalCase::new("prompt/treatment", "prompt treatment")
-            .step(EvalStep::Prompt("Capital of France?".to_string()))
-            .grader(ExactOutputGrader::new("Paris"))
-            .active_tools(Vec::<String>::new());
-        let mut config = Config::new(root.path().to_path_buf(), source_agent);
-        config.provider = "openai-compatible".to_string();
-        config.requested_provider = Some(config.provider.clone());
-        config.model = Some("gpt-4o-mini".to_string());
-        config.base_url = format!("http://{address}/v1");
-        config.api_key = Some("test-key".to_string());
-        let run = harness
-            .run(
-                &case,
-                EvalVariant::new("without-docs")
-                    .system_prompt(EvalSystemPrompt::WithoutPiDocumentation),
-                1,
-                config,
-            )
-            .await
-            .unwrap();
-        server.abort();
-
-        let prompt = run.observation.system_prompt.unwrap();
-        assert!(!prompt.contains("Pi documentation (read only"));
-        assert!(prompt.contains("Current working directory:"));
-    }
-
-    #[tokio::test]
-    async fn explicit_native_plugin_paths_reach_the_product_loader() {
-        let root = tempfile::tempdir().unwrap();
-        let source_agent = root.path().join("source-agent");
-        std::fs::create_dir_all(&source_agent).unwrap();
-        let harness =
-            PiEvalHarness::new(ArtifactStore::new(root.path().join("artifacts")).unwrap());
-        let case = EvalCase::new("native/explicit", "native path")
-            .step(EvalStep::Prompt("unused".to_string()));
-        let config = Config::new(root.path().to_path_buf(), source_agent);
-        let error = harness
-            .run(
-                &case,
-                EvalVariant::new("candidate").native_plugin(root.path().join("missing-plugin")),
-                1,
-                config,
-            )
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("missing-plugin"));
-    }
-
-    #[tokio::test]
-    async fn javascript_cases_fail_before_running_without_the_node_host() {
-        let root = tempfile::tempdir().unwrap();
-        let source_agent = root.path().join("source-agent");
-        let harness =
-            PiEvalHarness::new(ArtifactStore::new(root.path().join("artifacts")).unwrap());
-        let case = EvalCase::new("javascript/required", "requires JavaScript")
-            .step(EvalStep::Prompt("unused".to_string()))
-            .requires_js_host(true);
-        let error = harness
-            .run(
-                &case,
-                "candidate",
-                1,
-                Config::new(root.path().to_path_buf(), source_agent),
-            )
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("Node pi-eval launcher"));
-    }
-
-    #[test]
-    fn documentation_removal_requires_both_stable_markers() {
-        let prompt =
-            "before\nPi documentation (read only):\n- docs\nCurrent working directory: /tmp";
-        assert_eq!(
-            remove_pi_documentation(prompt).unwrap(),
-            "before\nCurrent working directory: /tmp"
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let cleanup = Cleanup(Arc::clone(&cleaned));
+        let result = run_operation(
+            &session,
+            async move {
+                let _cleanup = cleanup;
+                std::future::pending::<Result<(), String>>().await
+            },
+            std::time::Duration::from_millis(1),
+            &OperationSlot::default(),
+        )
+        .await;
+        assert!(matches!(result, Err(StepError::TimedOut)));
+        assert!(
+            cleaned.load(Ordering::SeqCst),
+            "task must be dropped before returning"
         );
-        assert!(remove_pi_documentation("before").is_err());
-    }
-
-    #[test]
-    fn shell_prefix_isolates_home_and_eval_control_variables() {
-        let prefix = isolated_shell_prefix(std::path::Path::new("/tmp/pi eval"));
-        assert!(prefix.contains("HOME="));
-        assert!(prefix.contains("PI_AGENT_DIR"));
-        assert!(prefix.contains("PI_MODEL"));
-    }
-
-    #[test]
-    fn prompt_templates_expose_only_explicit_isolated_paths() {
-        let prompt = render_prompt_template(
-            "workspace={{workspace}} agent={{agent_dir}} home={{home}}",
-            std::path::Path::new("/tmp/workspace"),
-            std::path::Path::new("/tmp/home/.pi/agent"),
-            std::path::Path::new("/tmp/home"),
-        );
-        assert_eq!(
-            prompt,
-            "workspace=/tmp/workspace agent=/tmp/home/.pi/agent home=/tmp/home"
-        );
+        host.sessions().shutdown().await.unwrap();
     }
 }

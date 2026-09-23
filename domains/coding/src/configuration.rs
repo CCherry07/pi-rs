@@ -2,6 +2,7 @@
 //! loading, trust resolution and generation activation remain with the factory.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use pi_agent::QueueMode;
@@ -24,8 +25,8 @@ pub(crate) fn apply_settings(config: &mut Config, settings: &SettingsSnapshot) {
     config.settings_diagnostics = settings
         .diagnostics()
         .iter()
-        .map(|diagnostic| pi_resources::ResourceDiagnostic {
-            kind: pi_resources::DiagnosticKind::Warning,
+        .map(|diagnostic| pi_runtime::ResourceDiagnostic {
+            kind: pi_runtime::DiagnosticKind::Warning,
             message: diagnostic.message.clone(),
             path: diagnostic.path.clone(),
         })
@@ -197,10 +198,11 @@ pub(crate) fn session_options(
             base_delay_ms: settings.retry.base_delay_ms,
         })
         .initial_model(initial_model)
-        .shell(
+        .shell_executor(Arc::new(crate::session::CodingShellExecutor::new(
             settings.shell_path.as_deref().map(expand_tilde_path),
             settings.shell_command_prefix.clone(),
-        )
+        )))
+        .compaction_policy(Arc::new(crate::session::CodingCompactionPolicy))
 }
 
 #[cfg(test)]
@@ -435,7 +437,7 @@ mod tests {
             .iter()
             .zip(snapshot.diagnostics())
         {
-            assert_eq!(actual.kind, pi_resources::DiagnosticKind::Warning);
+            assert_eq!(actual.kind, pi_runtime::DiagnosticKind::Warning);
             assert_eq!(actual.path, original.path);
             assert_eq!(actual.message, original.message);
         }
@@ -545,11 +547,8 @@ mod tests {
                 base_delay_ms: 25,
             }
         );
-        assert_eq!(options.shell_path, Some(expand_tilde_path("~/bin/shell")));
-        assert_eq!(
-            options.shell_command_prefix.as_deref(),
-            Some("source init.sh")
-        );
+        assert!(options.shell_executor.is_some());
+        assert!(options.compaction_policy.is_some());
         assert!(options.additional_active_tools.is_empty());
         assert_eq!(options.runtime_inventory, Default::default());
         assert!(options.context_window.is_none());

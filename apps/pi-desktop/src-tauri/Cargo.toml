@@ -43,6 +43,7 @@ pi-agent = { path = "../../../crates/pi-agent" }
 pi-core = { path = "../../../crates/pi-core" }
 pi-runtime = { path = "../../../crates/pi-runtime" }
 pi-sdk = { path = "../../../crates/pi-sdk" }
+pi-coding = { path = "../../../domains/coding" }
 pi-session = { path = "../../../crates/pi-session" }
 pi-utils = { path = "../../../crates/pi-utils", features = ["frontmatter"] }
 pi-plugin-mcp = { path = "../../../plugins/features/pi-plugin-mcp" }

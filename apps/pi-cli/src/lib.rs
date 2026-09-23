@@ -18,12 +18,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use config::{AppConfig, Cli, CliCommand, OutputMode};
+use pi_coding::{
+    ProductSessionFactory, ProjectTrustEvaluation, ProjectTrustPromptRequest, ProjectTrustService,
+};
 use pi_js_package_manager::PackageManager as JsPackageManager;
 use pi_js_plugin::JsPluginHost;
 use pi_plugin::PresentationMode;
-use pi_sdk::{
-    ProductSessionFactory, ProjectTrustEvaluation, ProjectTrustPromptRequest, ProjectTrustService,
-};
 use pi_session::{
     ExactSessionIdResolution, JsonlSessionRepo, MultiSessionManager, PiSession,
     PluginContextBinding, SessionInput, SessionLog,
@@ -176,7 +176,7 @@ async fn run(
         let cwd = config.cwd.clone();
         let args = arguments.clone();
         let output = tokio::task::spawn_blocking(move || {
-            pi_sdk::curator::execute_local(&agent_dir, &cwd, trust.trusted(), &args)
+            pi_coding::curator::execute_local(&agent_dir, &cwd, trust.trusted(), &args)
         })
         .await
         .map_err(|e| e.to_string())??;

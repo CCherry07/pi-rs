@@ -19,6 +19,75 @@ session/runtime and terminal presentation. Interrupted operations are reducer-re
 implicitly replaying external side effects. Signed/OCI native-plugin distribution remains an open
 product seam.
 
+## Domain composition
+
+The reusable framework and the Coding product share one Agent loop, Plugin/ProviderPlugin contract,
+`MultiSessionManager`, and generation transaction. `crates/pi-sdk` exposes `AgentHost` and
+`AgentSessionFactory` for explicit model, prompt, tool and provider factory composition. It owns
+shared Project definitions and has no dependency on `pi-coding`, settings/resource discovery,
+provider implementations, native package discovery, or first-party tool/feature plugins. Creating
+an embedded host does not read `.pi`, AGENTS.md, skills, credentials, or environment model defaults.
+The caller chooses plugin factories and session options. Each session binds its own generation
+capabilities, preserves its WorkspaceSnapshot, and retains current/restored model and tool selections.
+
+`domains/coding` is the `pi-coding` crate. It owns `Pi`, `Config`, `Features`,
+`ProductSessionFactory`, configured providers/tools, project trust, local discovery, memory and
+subagent wiring, and prepared package activation. CLI, Desktop and the Coding eval harness use this
+entry point. Rust embedders of the old product SDK migrate `pi_sdk::{Pi, Config}` to
+`pi_coding::{Pi, Config}`; the generic SDK does not import the Coding crate as a compatibility facade.
+Providers, tools and optional features remain independently reusable under `plugins/`. Coding
+prompt assembly and project resource discovery are private modules in
+`domains/coding/src/{prompt,resources}.rs`; the former `pi-prompt` and `pi-resources` crates have
+been removed. `pi-settings` remains an independent crate under `domains/coding/settings` so the
+CLI and JS package manager can share the current settings format without depending on the entire
+Coding product. Its package name and public API are unchanged.
+
+`pi-runtime::SystemPrompt` accepts final text or an injected `SystemPromptFactory`. Preparation
+runs once per candidate generation and returns a renderer plus diagnostics/inspection metadata.
+Rendering receives the immutable workspace and currently active ToolSpecs; tool-selection changes,
+including state restoration, rerender those frozen inputs before publication. Restoring the same
+selection reuses the prepared prompt and inspection data. Failed preparation/rendering preserves
+the previous generation/selection. Final text stays exact while tools can change independently.
+`pi-sdk::AgentHostBuilder::system_prompt` exposes this same prompt contract for domain-specific
+composition. Default tool selection is resolved after registration and before the first render;
+explicit selections preserve their order. `SessionGenerationRequest::restored_configuration`
+previews the effective tool selection through the same read-only recovery plan later used to
+repair the journal. It includes accepted deferred writes and distinguishes an older log without
+a selection from an explicitly empty selection. The SDK reconciles removed tools and configured
+additions before rendering a resumed or reloaded session; rejected prompts do not apply those
+recovery writes. Fresh isolated sessions use their inherited selection. Generic hosts still
+perform no implicit resource discovery.
+Coding's private `prompt::CodingSystemPrompt` adapts its resource and prompt builders at this seam.
+It preserves existing Rust prompt rendering and serialized options; plugin prompt hooks remain
+run-local. This is not a new plugin lifecycle or a new claim of complete upstream prompt parity.
+
+`crates/pi-sdk/tests/dependency_graph.rs` enforces the production dependency boundary for
+`pi-core`, `pi-plugin`, `pi-agent`, `pi-runtime`, `pi-session`, `pi-sdk`, and `pi-eval`. It walks Cargo's
+resolved normal/build dependency graph with all features and targets, rejecting direct or
+transitive dependencies into repository `domains/`, `apps/`, `plugins/`, `bindings/`, or
+`packages/`. A second rule automatically includes every workspace package under `crates/` and
+rejects direct or transitive dependencies on `pi-coding` or `pi-coding-eval`, including paths
+starting at a crate's own dev dependencies. Downstream packages' dev dependencies are not built
+by that crate and are excluded from traversal. Dev-only fixtures are otherwise permitted. The
+guard runs in both the workspace suite and `scripts/test-core.sh` and reports the dependency path
+when an edge violates either rule.
+
+`pi-session` owns operation admission, cancellation, event ordering, persistence and compaction
+cut points. `AgentSessionOptions` selects a shell executor and compaction policy. Defaults have no
+shell executor and use `GenericCompactionPolicy`; `domains/coding/src/session` supplies
+`CodingShellExecutor` and `CodingCompactionPolicy`, including shell defaults, Coding summary text,
+and read/write/edit tracking. The shell request/result types and old `bashExecution` projections
+remain readable for Pi wire compatibility. Shell execution still records the submitted command,
+respects the session operation gate and does not materialize a new log before an assistant response.
+`FileOperations` remains a compatibility hook value; generic compaction does not interpret coding
+tool names. Existing lazy JSONL persistence, recovery, shared mutation sequencing and native plugin
+contracts are unchanged.
+
+`examples/order-agent` is a deterministic non-Coding consumer: it registers an order lookup tool
+and a scripted provider through the generic SDK. SDK integration tests exercise tool continuation,
+capability binding, resume, preserved model/workspace/tool selection, failed reload rollback and
+absence of implicit Coding resources. It needs no model credentials or network.
+
 ## Workspace
 
 The product execution model is `Project → WorkspaceSpec → Session → Generation`.
@@ -202,14 +271,16 @@ crates/pi-agent                 Agent façade, AgentLoop, StreamAssembler, ToolS
 crates/pi-runtime               plugin registration and Agent construction
 crates/pi-provider              vendor-neutral HTTP transport and SSE framing
 crates/pi-media                 multimodal byte processing; image detection, conversion and inline limits
-crates/pi-prompt                pure Pi-style system prompt assembly
-crates/pi-resources             generic system/append prompts and project context discovery
 crates/pi-utils                 policy-free shared mechanics, namespaced by concept
 crates/pi-session               Pi v4 storage/runtime; re-exports shared lifecycle and wire values
-crates/pi-settings              current-format settings documents, snapshots, and safe writes
-crates/pi-sdk                   headless product composition shared by CLI, desktop, and embedded adapters
+crates/pi-sdk                   explicit domain-neutral embedding and shared Project definitions
+domains/coding                 headless Coding product composition shared by CLI, desktop, and adapters
+domains/coding/src/prompt.rs    private Coding prompt assembly and generation-local rendering
+domains/coding/src/resources.rs private system/append prompts and project context discovery
+domains/coding/settings        pi-settings: current-format documents, snapshots, and safe writes
+domains/coding/eval            pi-coding-eval: Coding eval configuration and isolated product preparation
 crates/pi-telemetry             typed Pi AI/harness span schemas and sink adapters
-crates/pi-eval                  model-backed eval cases, product harness, native eval overlays, graders,
+crates/pi-eval                  domain-neutral eval cases, session execution, plugin overlays, graders,
                                 artifacts and paired comparison data
 crates/pi-bench                 deterministic, test-only performance workloads and provenance-rich JSON reports
 crates/pi-rpc                   Pi JSON projector and stdin/stdout RPC adapter
@@ -246,7 +317,7 @@ crates/pi-tool-support           shared path validation, argument, and truncatio
 plugins/tools/pi-plugin-{read,write,edit,hashline-edit,bash,grep,find,ls}
                                 one production tool per plugin crate
 e2e/                            in-process runtime acceptance and frontend example resources
-crates/pi-sdk/src/project_trust.rs product trust policy and persistence
+domains/coding/src/project_trust.rs product trust policy and persistence
 apps/pi-cli/src/tui.rs           terminal project-trust prompt Adapter
 ```
 
@@ -257,12 +328,11 @@ pi-plugin            -> pi-core + pi-plugin-macros
 pi-agent             -> pi-core + pi-plugin
 pi-provider          -> pi-core + pi-plugin
 pi-media             -> pi-core + image codecs
-pi-prompt            -> standard library only
-pi-resources         -> pi-prompt
 pi-utils             -> standard library; serde + YAML decoding behind its `frontmatter` feature
 pi-session           -> pi-core + pi-plugin + pi-runtime
 pi-settings          -> serde JSON + filesystem persistence only
-pi-sdk               -> pi-session + pi-settings + pi-runtime + product providers, tools, resources,
+pi-sdk               -> pi-session + pi-runtime + pi-core + pi-plugin
+pi-coding            -> pi-sdk + pi-session + pi-settings + pi-runtime + product providers, tools, resources,
                         memory, skills, subagents, and plugin loaders
 pi-rpc               -> pi-agent + pi-core + pi-session
 pi-plugin-mcp        -> pi-core + pi-plugin + rmcp + filesystem configuration persistence
@@ -284,17 +354,18 @@ plugins/features/pi-plugin-memory-hermes
 plugins/providers/pi-plugin-models
                      -> pi-core + pi-plugin + pi-plugin-openai (credential-blind catalog and routing)
 other plugins/*      -> pi-core + pi-plugin
-pi-runtime           -> pi-core + pi-plugin + pi-agent + pi-prompt
-apps/pi-cli          -> pi-sdk + pi-rpc + pi-acp + terminal and Markdown adapters
+pi-runtime           -> pi-core + pi-plugin + pi-agent
+apps/pi-cli          -> pi-coding + pi-rpc + pi-acp + terminal and Markdown adapters
                         + pi-media (attachments) + pi-tool-support (Pi read-path semantics)
-apps/pi-desktop      -> pi-sdk + pi-session + Tauri
+apps/pi-desktop      -> pi-coding + pi-sdk::projects + pi-session + Tauri
 pi-plugin-manager    -> pi-plugin (native) + pi-runtime + dynamic loading, HTTP/filesystem installation
                         + optional Cargo/GitHub authoring tools
 pi-js-package-manager -> filesystem + npm/git process adapters (no Node dependency)
 pi-js-plugin         -> pi-core + pi-plugin (no Node or terminal dependency)
 pi-bench             -> pi-agent + pi-runtime + pi-session + pi-core + pi-plugin + pi-test-support (test-only)
-crates/pi-eval       -> pi-sdk + pi-session + pi-core + pi-plugin + pi-js-plugin
-apps/pi-eval         -> pi-eval + pi-sdk + pi-js-plugin
+pi-eval              -> pi-session + pi-core + pi-plugin + pi-utils
+pi-coding-eval       -> pi-eval + pi-coding + pi-js-plugin
+apps/pi-eval         -> pi-coding-eval + pi-eval + pi-coding + pi-js-plugin
 bindings/pi-napi     -> pi-js-plugin + apps/pi-cli + apps/pi-eval + NAPI-RS
 packages/pi          -> Node + jiti + platform pi-napi artifact
 ```
@@ -362,13 +433,39 @@ arguments are forwarded unchanged. Its separate `pi-eval` executable reuses that
 than a test-only JavaScript implementation. This keeps extension callbacks in Node without allowing Node
 and Rust to compete for raw mode, stdout, editor state, or transcript projection.
 
-`pi-eval` is an outer product-quality Module, not a production dependency of the runtime. Its harness
-enters through `pi-sdk::Pi`, creates isolated workspace/agent/session directories, and may accept the
-same `JsPluginHost` capability as other embedded Adapters. Case-local Rust `Plugin` factories are
-applied with `SessionGenerationOverlay`, so structured submission tools and prompt treatments are rebuilt
-on reload but never serialized. Real native plugin evaluation stays on the product loader path: explicit
-libraries/manifests flow through `Config::native_plugins`, while trusted project manifests under
-`.pi/plugins` are rediscovered on reload. The eval layer does not load dynamic libraries itself.
+Evaluation has three owners. `crates/pi-eval` owns `EvalRunner`, domain-neutral cases and variants,
+step execution, timeout/abort cleanup, observations, grading, artifacts and comparisons.
+`domains/coding/eval` is the independent `pi-coding-eval` crate, which owns `CodingEvalHarness`,
+Coding case options and variants, and isolated Coding product preparation. `apps/pi-eval` owns the
+CLI, first-party case catalog and result presentation. `pi-coding` has no dependency on either eval
+crate. This is a deliberate Rust architecture choice; it does not introduce a new Pi runtime or
+plugin lifecycle.
+
+`EvalRunner::run` creates a temporary workspace and session path, copies a fixture, and invokes a
+caller-supplied preparation function once. `PreparedEvalTarget` supplies an existing
+`MultiSessionManager`, provider/model report labels, explicit template bindings and an optional
+fallible prompt transform. The preparer applies `EvalRunContext::active_tools` before the first
+prompt render. The runner owns session creation and shutdown, including cleanup after execution
+errors. After preparation, a cleanup task retains the workspace, manager and active operation;
+caller cancellation aborts and joins the operation, then completes the same shutdown future
+before releasing the workspace. Cancelling while shutdown hooks run does not restart or skip
+those hooks. The runner never discovers `.pi` resources or constructs a Coding product. Fixture
+and snapshot directory exclusions are explicit runner configuration with no default Coding exclusions.
+Case-local Rust `Plugin` factories and prompt capture use `SessionGenerationOverlay`, preserving
+factory-backed reload without serializing executable code. Deterministic tests prepare a non-Coding
+`pi-sdk::AgentHost` through this same Interface.
+
+`CodingEvalHarness` prepares `pi-coding::Pi` in print presentation mode. It creates the isolated
+home/agent directory, copies credential and model bootstrap files, disables memory and MCP discovery,
+configures the shell environment and initial tools, and supplies `workspace`, `agent_dir` and `home`
+template bindings. It explicitly excludes `.git`, `node_modules` and `target` from fixture copying
+and workspace observations. Its optional `JsPluginHost`, extension discovery, native plugin paths
+and Pi-documentation prompt treatment stay in this domain Adapter. Real native plugin evaluation
+stays on the product loader path: explicit libraries/manifests flow through `Config::native_plugins`,
+while trusted project manifests under `.pi/plugins` are rediscovered on reload. The eval layer does
+not load dynamic libraries itself. Existing CLI options and artifact schema version 1 remain intact.
+The documentation treatment removes only the built-in documentation section, preserving appended
+instructions and project context before and after reload.
 
 Comparative evals pair observations by eval set, case identity, and repetition. Correctness lift is based
 only on pairs with completed, scored observations; token, latency, and estimated-cost deltas use the same
@@ -394,14 +491,14 @@ standalone Rust Adapter remains native-only. Before constructing a session, it a
 an active requirement fails with an actionable launcher message unless the user explicitly disabled
 discovery. This probe is read-only and never installs or updates a package.
 
-All frontend adapters enter the product through `pi-sdk`, whose `Pi` Module owns the shared
+All frontend adapters enter the product through `pi-coding`, whose `Pi` Module owns the shared
 product composition and exposes the session manager. It selects first-party components, adapts
 settings into owner-defined options, connects cross-plugin capabilities and coordinates prepared
 product activation. Domain parsing and validation belong to their owning crates; inner crates must
-not depend on `pi-sdk::Config`. In particular, the composition layer retains the complete
+not depend on `pi-coding::Config`. In particular, the composition layer retains the complete
 package/provider activation transaction rather than splitting commits across domain loaders.
-Inside the SDK, private `session_factory` owns generation preparation, trust-before-discovery,
-context binding and `PreparedProductActivation`; `runtime_composition` owns first-party selection,
+Inside `domains/coding`, private `generation` owns generation preparation, trust-before-discovery,
+context binding and `PreparedProductActivation`; `composition` owns first-party selection,
 ordered Plugin/ProviderPlugin registrations, cross-plugin wiring and active-tool policy.
 Its private borrowed `GenerationComponents` view contains only already-prepared native, JavaScript,
 MCP, memory and subagent components. Unified registration retains one memory provider instance
@@ -414,8 +511,8 @@ not runtime-build options. These helpers do not start or commit another generati
 Private `configuration` maps snapshots and explicit selections into owner-defined options;
 `runtime_inventory` derives product labels from resolved/loaded metadata without loading code.
 Their tests follow those responsibilities, with lifecycle/rollback tests retained at the factory
-and frontend-facing handoff tests using the public SDK. This is an internal Rust refactor: no new
-runtime lifecycle, crate dependency or public configuration surface is introduced.
+and frontend-facing handoff tests using the Coding product entry point. These Modules retain
+the same generation and registration lifecycle.
 `Config::features` is a typed, host-captured runtime selection of first-party memory, subagents, scheduling, skills, prompt templates, and
 session-transfer plugins. All default to enabled. Generation construction gates complete agent/session
 registrations and initialization, so disabled memory never loads its provider and disabled scheduling
@@ -443,9 +540,9 @@ RPC adapters watch the handle's replacement stream. This keeps generation change
 Interface while preventing a single in-flight submission from crossing generations.
 
 `apps/pi-desktop` is an experimental desktop Adapter that provides workspace, thread, Git, file,
-terminal, and conversation presentation on top of the in-process `pi-sdk` / `MultiSessionManager`
+terminal, and conversation presentation on top of the in-process `pi-coding` / `MultiSessionManager`
 / `PiSession` Interface. CLI and desktop do not assemble independent provider, tool, skill, or
-prompt runtimes; those product defaults belong to `pi-sdk`.
+prompt runtimes; those product defaults belong to `pi-coding`.
 `PiRuntimeState` owns native sessions, `SessionStore` owns create/open/fork/archive/unarchive/delete
 discovery, and one projection Module translates Pi lifecycle events into the UI's `thread/*`,
 `turn/*`, and `item/*` vocabulary. The Adapter emits that vocabulary through its own `pi-event`
@@ -467,7 +564,7 @@ identity just as they do in Pi.
 Archive and unarchive preserve that project-relative path and companion session tree. An unarchive
 event includes a freshly projected summary from the restored JSONL so the desktop rebuilds the
 title, model, message count, and timestamps instead of publishing an empty thread placeholder.
-The model selector reads the generation-local catalogue from `pi-sdk` and sends the exact
+The model selector reads the generation-local catalogue from `pi-coding` and sends the exact
 provider/model identity back to `AgentSession`; thinking selection is constrained by that model's
 declared levels and persisted through the session configuration entries. The Adapter exposes no
 synthetic read-only, on-request, or full-access mode because filesystem and shell tools follow Pi's
@@ -551,7 +648,7 @@ outside collapsed tool groups.
 
 Read-only discovery in the Desktop-owned `pi_runtime::desktop_extensions::catalog` module reads
 bundled ESM/CSS packages from the agent `desktop-extensions` directory and trusted project
-`.pi/desktop-extensions`, consuming the shared `pi-sdk::ProjectTrustService` decision. Manifest
+`.pi/desktop-extensions`, consuming the shared `pi-coding::ProjectTrustService` decision. Manifest
 validation, resource containment, byte limits, hashing and presentation DTOs remain in the app,
 not the headless SDK. It does not grant trust or prepare a session. Native manifests, dynamic-library
 ABI and installation are unchanged; combined native/desktop packaging is future work. The local
@@ -706,7 +803,7 @@ Use `plugin_factory` / `try_plugin_factory` for reloadable agent plugins and `pr
 
 Whole-session product reload preserves the current selected model, including explicitly selected
 models absent from the catalog, instead of reapplying startup CLI model arguments. Restored tool
-selections are intersected with the candidate registry. `pi-sdk` supplies non-built-in tools to
+selections are intersected with the candidate registry. `pi-coding` supplies non-built-in tools to
 activate for user sessions through `AgentSessionOptions::additional_active_tools`; `pi-session`
 only merges and deduplicates these names. Managed subagents receive no such additions, preserving
 their active-tool ceiling. This follows current Pi's reload extension-tool activation while keeping
@@ -871,7 +968,7 @@ explicit `plugins.json` array order, and replaces a generated `plugins/installed
 Native plugin manifests do not declare runtime plugin dependencies: Rust crate dependencies remain
 build-time concerns, and hook registration order remains consumer policy rather than a package graph.
 
-`ProductSessionFactory` in `crates/pi-sdk/src/session_factory.rs` is the production Adapter at the
+`ProductSessionFactory` in `domains/coding/src/generation.rs` is the production Adapter at the
 generation-construction Seam. It prepares global package state and, after trust resolution, trusted
 project package state before native discovery. The manager holds a package-state guard and retains
 the previous lock and activation view until the complete runtime and session generation prepares
@@ -890,7 +987,7 @@ milestones.
 ## Desktop native-plugin management
 
 Settings → Plugins is a deliberate Rust/Desktop management extension, not a port of Pi's
-npm/git extension settings. `pi-sdk::plugins::PluginLibrary` owns scoped package access and
+npm/git extension settings. `pi-coding::plugins::PluginLibrary` owns scoped package access and
 project-trust policy; the Tauri Adapter delegates package inspection and explicit
 install/sync/remove operations to it. `pi-plugin-manager` remains the sole owner of
 `plugins.json`, `plugins.lock`, package resolution and activation. Browsing never reconciles,
@@ -1346,7 +1443,7 @@ loading remains a product concern.
 
 ## Project trust
 
-Project trust is a product-level service in `pi-cli`, not a `pi-core` policy. It follows current Pi
+Project trust is a product-level service in `pi-coding`, not a `pi-core` policy. It follows current Pi
 behavior: `<agent-dir>/trust.json` stores canonical absolute paths, the nearest cwd/ancestor entry
 wins, and writes are locked and key-sorted. Resolution order is an explicit
 `--approve`/`--no-approve` override, the absence of trust-requiring resources, the in-process cwd
@@ -1417,7 +1514,7 @@ resolution behind validated entries and an explicit configuration-directory/defa
 `pi_plugin_mcp::McpLibrary` owns independent `<agent-dir>/mcp.json` and `<cwd>/.pi/mcp.json` files,
 scoped merging, revision-safe management and preparation of tools plus `/mcp` commands. It consumes
 a host-resolved trust decision and enforces it before project reads/writes; it has no dependency on
-`pi-sdk`, `pi-acp`, `pi-session`, or terminal/frontend types. The Desktop adapter resolves shared
+`pi-coding`, `pi-acp`, `pi-session`, or terminal/frontend types. The Desktop adapter resolves shared
 project trust and calls that library directly. MCP does not live in `settings.json`.
 Documents contain `version: 1` and `mcpServers`, keyed by server name. Each entry has
 `type: "stdio"` (command, args, env, cwd) or `type: "http"` (url, headers), and optional
@@ -2088,7 +2185,7 @@ remain Rust adaptations. The compressor
 implements the default window/retention profile and detached lifecycle, not every upstream
 compressor tuning option or recovery heuristic. This is not byte-for-byte or complete Hermes parity.
 
-Hermes is the only first-party memory provider registered by `pi-sdk`. `memory.json` selects
+Hermes is the only first-party memory provider registered by `pi-coding`. `memory.json` selects
 exactly one provider; an unknown provider id, including the retired `"local"` id, rejects candidate
 generation instead of falling back or migrating data. Removing the local provider does not delete
 existing files under `<agent-dir>/memory`; the product simply no longer reads them.
@@ -2421,7 +2518,7 @@ portability APIs; interactive imports remain `/import` commands.
 `pi-plugin-schedule` is a first-party feature over the same managed isolated-session capability.
 `SchedulePlugin` registers the typed `schedule` tool and `/schedule` command;
 The same `SchedulePlugin` owns a cancellable, generation-local worker activated only by
-`session_start` and joined during `session_shutdown`. A single factory registration in `pi-sdk`
+`session_start` and joined during `session_shutdown`. A single factory registration in `pi-coding`
 supplies both callback families. Factories never start timers or open task storage. Failed preparation keeps the old
 worker; successful reload cancels/records active work before retiring its context and starts a
 fresh worker in the new `session_start`. Child launch waits for the manager's registration gate.
@@ -2498,7 +2595,7 @@ The workspace includes an end-to-end test where two delay tools complete in reve
 ## Desktop skill-file management
 
 Settings → Skills is a deliberate Desktop management addition, not a Pi terminal UI
-compatibility claim. `pi-sdk::skills::desktop_skill_library` prepares a disk catalog
+compatibility claim. `pi-coding::skills::desktop_skill_library` prepares a disk catalog
 without creating a session or initializing memory/provider/native plugin code. It shares
 `runtime_skill_options` with generation construction, uses the existing project trust
 service and scoped settings, and reads only already-installed package skill resources

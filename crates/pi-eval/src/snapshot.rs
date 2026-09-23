@@ -15,13 +15,21 @@ pub(crate) struct FileSnapshot {
 
 pub(crate) type WorkspaceSnapshot = BTreeMap<String, FileSnapshot>;
 
-pub(crate) fn snapshot_workspace(root: &Path) -> Result<WorkspaceSnapshot, EvalError> {
+pub(crate) fn snapshot_workspace(
+    root: &Path,
+    ignored_directories: &BTreeSet<String>,
+) -> Result<WorkspaceSnapshot, EvalError> {
     let mut snapshot = BTreeMap::new();
-    visit(root, root, &mut snapshot)?;
+    visit(root, root, &mut snapshot, ignored_directories)?;
     Ok(snapshot)
 }
 
-fn visit(root: &Path, directory: &Path, snapshot: &mut WorkspaceSnapshot) -> Result<(), EvalError> {
+fn visit(
+    root: &Path,
+    directory: &Path,
+    snapshot: &mut WorkspaceSnapshot,
+    ignored_directories: &BTreeSet<String>,
+) -> Result<(), EvalError> {
     let entries = std::fs::read_dir(directory).map_err(|error| {
         EvalError::Fixture(format!("cannot read {}: {error}", directory.display()))
     })?;
@@ -31,21 +39,14 @@ fn visit(root: &Path, directory: &Path, snapshot: &mut WorkspaceSnapshot) -> Res
         let relative = path
             .strip_prefix(root)
             .map_err(|error| EvalError::Fixture(error.to_string()))?;
-        if relative
-            .components()
-            .next()
-            .is_some_and(|part| part.as_os_str() == ".git")
-        {
-            continue;
-        }
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
             EvalError::Fixture(format!("cannot inspect {}: {error}", path.display()))
         })?;
         if metadata.is_dir() {
-            if ignored_generated_directory(&path) {
+            if ignored_directory(&path, ignored_directories) {
                 continue;
             }
-            visit(root, &path, snapshot)?;
+            visit(root, &path, snapshot, ignored_directories)?;
         } else if metadata.is_file() {
             let bytes = std::fs::read(&path).map_err(|error| {
                 EvalError::Fixture(format!("cannot read {}: {error}", path.display()))
@@ -106,17 +107,25 @@ pub(crate) fn changes(
         .collect()
 }
 
-pub(crate) fn copy_fixture(source: &Path, destination: &Path) -> Result<(), EvalError> {
+pub(crate) fn copy_fixture(
+    source: &Path,
+    destination: &Path,
+    ignored_directories: &BTreeSet<String>,
+) -> Result<(), EvalError> {
     if !source.is_dir() {
         return Err(EvalError::Fixture(format!(
             "fixture directory does not exist: {}",
             source.display()
         )));
     }
-    copy_directory(source, destination)
+    copy_directory(source, destination, ignored_directories)
 }
 
-fn copy_directory(source: &Path, destination: &Path) -> Result<(), EvalError> {
+fn copy_directory(
+    source: &Path,
+    destination: &Path,
+    ignored_directories: &BTreeSet<String>,
+) -> Result<(), EvalError> {
     std::fs::create_dir_all(destination).map_err(|error| {
         EvalError::Fixture(format!("cannot create {}: {error}", destination.display()))
     })?;
@@ -130,10 +139,10 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), EvalError> {
             EvalError::Fixture(format!("cannot inspect {}: {error}", from.display()))
         })?;
         if metadata.is_dir() {
-            if ignored_generated_directory(&from) {
+            if ignored_directory(&from, ignored_directories) {
                 continue;
             }
-            copy_directory(&from, &to)?;
+            copy_directory(&from, &to, ignored_directories)?;
         } else if metadata.is_file() {
             std::fs::copy(&from, &to).map_err(|error| {
                 EvalError::Fixture(format!(
@@ -152,10 +161,10 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<(), EvalError> {
     Ok(())
 }
 
-fn ignored_generated_directory(path: &Path) -> bool {
+fn ignored_directory(path: &Path, ignored_directories: &BTreeSet<String>) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| matches!(name, ".git" | "node_modules" | "target"))
+        .is_some_and(|name| ignored_directories.contains(name))
 }
 
 fn normalize_relative(path: &Path) -> String {
@@ -163,26 +172,6 @@ fn normalize_relative(path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/")
-}
-
-pub(crate) fn copy_bootstrap_file(
-    source_directory: &Path,
-    destination_directory: &Path,
-    name: &str,
-) -> Result<(), EvalError> {
-    let source = source_directory.join(name);
-    if !source.exists() {
-        return Ok(());
-    }
-    let destination = destination_directory.join(name);
-    std::fs::copy(&source, &destination).map_err(|error| {
-        EvalError::Fixture(format!(
-            "cannot copy bootstrap file {} to {}: {error}",
-            source.display(),
-            destination.display()
-        ))
-    })?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -195,11 +184,11 @@ mod tests {
         std::fs::write(directory.path().join("same"), "same").unwrap();
         std::fs::write(directory.path().join("changed"), "before").unwrap();
         std::fs::write(directory.path().join("removed"), "gone").unwrap();
-        let before = snapshot_workspace(directory.path()).unwrap();
+        let before = snapshot_workspace(directory.path(), &BTreeSet::new()).unwrap();
         std::fs::write(directory.path().join("changed"), "after").unwrap();
         std::fs::remove_file(directory.path().join("removed")).unwrap();
         std::fs::write(directory.path().join("added"), "new").unwrap();
-        let after = snapshot_workspace(directory.path()).unwrap();
+        let after = snapshot_workspace(directory.path(), &BTreeSet::new()).unwrap();
         let changes = changes(&before, &after);
         assert_eq!(changes.len(), 3);
         assert_eq!(changes[0].kind, WorkspaceChangeKind::Added);
@@ -208,14 +197,30 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_ignores_generated_dependency_and_build_directories() {
+    fn fixtures_and_snapshots_include_all_directories_unless_explicitly_ignored() {
+        let fixture = tempfile::tempdir().unwrap();
         let directory = tempfile::tempdir().unwrap();
-        for name in [".git", "node_modules", "target"] {
-            std::fs::create_dir_all(directory.path().join(name)).unwrap();
-            std::fs::write(directory.path().join(name).join("generated"), "large").unwrap();
+        for name in [".pi", ".git", "node_modules", "target", "nested/target"] {
+            std::fs::create_dir_all(fixture.path().join(name)).unwrap();
+            std::fs::write(fixture.path().join(name).join("data"), "data").unwrap();
         }
-        std::fs::write(directory.path().join("source.rs"), "source").unwrap();
-        let snapshot = snapshot_workspace(directory.path()).unwrap();
-        assert_eq!(snapshot.keys().collect::<Vec<_>>(), ["source.rs"]);
+        std::fs::write(fixture.path().join("source.txt"), "source").unwrap();
+        copy_fixture(fixture.path(), directory.path(), &BTreeSet::new()).unwrap();
+        let snapshot = snapshot_workspace(directory.path(), &BTreeSet::new()).unwrap();
+        assert_eq!(snapshot.len(), 6);
+        assert!(snapshot.contains_key(".pi/data"));
+        assert!(snapshot.contains_key(".git/data"));
+        assert!(snapshot.contains_key("target/data"));
+
+        let ignored = BTreeSet::from(["target".into(), "node_modules".into(), ".git".into()]);
+        let filtered = tempfile::tempdir().unwrap();
+        copy_fixture(fixture.path(), filtered.path(), &ignored).unwrap();
+        assert!(!filtered.path().join("target").exists());
+        assert!(!filtered.path().join("nested/target").exists());
+        let snapshot = snapshot_workspace(directory.path(), &ignored).unwrap();
+        assert_eq!(
+            snapshot.keys().map(String::as_str).collect::<Vec<_>>(),
+            [".pi/data", "source.txt"]
+        );
     }
 }

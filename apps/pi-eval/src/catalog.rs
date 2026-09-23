@@ -8,14 +8,14 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use pi_coding_eval::{CodingEvalCase, CodingEvalSystemPrompt, CodingEvalVariant};
 use pi_core::{
     ContentBlock, Message, ModelId, ModelInput, ModelSelection, PluginId, ProviderId, StopReason,
     ThinkingLevel, ToolCallId, ToolExecutionMode, ToolResult, ToolSpec, UserMessage,
 };
 use pi_eval::{
     EvalCase, EvalComparisonDefinition, EvalGrade, EvalGrader, EvalLimits, EvalObservation,
-    EvalStep, EvalSystemPrompt, EvalTranscriptEvent, EvalVariant, ExactOutputGrader,
-    JsonSubmissionGrader, JsonSubmissionPlugin,
+    EvalStep, EvalTranscriptEvent, ExactOutputGrader, JsonSubmissionGrader, JsonSubmissionPlugin,
 };
 use pi_plugin::{
     DirectCompletionRequest, Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink,
@@ -25,8 +25,8 @@ const SUBMIT_DOCUMENTATION_AUDIT: &str = "submit_documentation_audit";
 const DOCUMENTATION_MANIFEST: &str = include_str!("../cases/documentation.txt");
 
 pub(crate) struct EvalPlan {
-    pub cases: Vec<EvalCase>,
-    pub variants: Vec<EvalVariant>,
+    pub cases: Vec<CodingEvalCase>,
+    pub variants: Vec<CodingEvalVariant>,
     pub eval_set: Option<String>,
 }
 
@@ -43,7 +43,7 @@ impl EvalPlan {
         (!candidates.is_empty()).then(|| {
             EvalComparisonDefinition::new(
                 eval_set,
-                self.cases.iter().map(|case| case.id.clone()),
+                self.cases.iter().map(|case| case.case.id.clone()),
                 &baseline.name,
                 candidates,
                 repetitions,
@@ -56,8 +56,8 @@ pub(crate) fn resolve_plan(name: &str) -> Result<EvalPlan, String> {
     match name {
         "smoke" | "smoke/basic-answer" => Ok(standalone(smoke_case())),
         "docs" | "documentation" => Ok(EvalPlan {
-            cases: documentation_cases()?,
-            variants: vec![EvalVariant::new("candidate")],
+            cases: documentation_cases()?.into_iter().map(Into::into).collect(),
+            variants: vec![CodingEvalVariant::new("candidate")],
             eval_set: None,
         }),
         "coding/js-extension" | "js-extension" => Ok(comparative(
@@ -90,10 +90,10 @@ pub(crate) fn resolve_plan(name: &str) -> Result<EvalPlan, String> {
     }
 }
 
-fn standalone(case: EvalCase) -> EvalPlan {
+fn standalone(case: impl Into<CodingEvalCase>) -> EvalPlan {
     EvalPlan {
-        cases: vec![case],
-        variants: vec![EvalVariant::new("candidate")],
+        cases: vec![case.into()],
+        variants: vec![CodingEvalVariant::new("candidate")],
         eval_set: None,
     }
 }
@@ -101,19 +101,19 @@ fn standalone(case: EvalCase) -> EvalPlan {
 fn native_provider_plugin_plan() -> Result<EvalPlan, String> {
     let plugin = build_native_provider_fixture()?;
     Ok(EvalPlan {
-        cases: vec![native_provider_plugin_case()],
-        variants: vec![EvalVariant::new("candidate").native_plugin(plugin)],
+        cases: vec![native_provider_plugin_case().into()],
+        variants: vec![CodingEvalVariant::new("candidate").native_plugin(plugin)],
         eval_set: None,
     })
 }
 
-fn comparative(eval_set: &str, case: EvalCase) -> EvalPlan {
+fn comparative(eval_set: &str, case: impl Into<CodingEvalCase>) -> EvalPlan {
     EvalPlan {
-        cases: vec![case],
+        cases: vec![case.into()],
         variants: vec![
-            EvalVariant::new("system-prompt-without-docs")
-                .system_prompt(EvalSystemPrompt::WithoutPiDocumentation),
-            EvalVariant::new("default-system-prompt"),
+            CodingEvalVariant::new("system-prompt-without-docs")
+                .system_prompt(CodingEvalSystemPrompt::WithoutPiDocumentation),
+            CodingEvalVariant::new("default-system-prompt"),
         ],
         eval_set: Some(eval_set.to_string()),
     }
@@ -193,8 +193,8 @@ Use grep before reading implementation files in full. When the audit is complete
     .plugin(move || plugin.clone()))
 }
 
-fn js_extension_case() -> EvalCase {
-    EvalCase::new(
+fn js_extension_case() -> CodingEvalCase {
+    CodingEvalCase::new(EvalCase::new(
         "coding/js-extension",
         "Create, reload, and use a project TypeScript extension",
     )
@@ -212,7 +212,7 @@ fn js_extension_case() -> EvalCase {
         "hello",
         "Hello, Bob!",
     ).required_source("@earendil-works/pi-coding-agent"))
-    .active_tools(["read", "write", "edit", "bash", "grep", "find", "ls"])
+    .active_tools(["read", "write", "edit", "bash", "grep", "find", "ls"]))
     .discover_extensions(true)
     .requires_js_host(true)
 }
@@ -1206,28 +1206,35 @@ mod tests {
     use axum::Router;
     use axum::http::header::CONTENT_TYPE;
     use axum::routing::post;
-    use pi_eval::{ArtifactStore, PiEvalHarness};
-    use pi_sdk::Config;
+    use pi_coding::Config;
+    use pi_coding_eval::CodingEvalHarness;
+    use pi_eval::ArtifactStore;
 
     use super::*;
 
     #[test]
-    fn documentation_manifest_contains_only_existing_files() {
-        assert_eq!(documentation_cases().unwrap().len(), 15);
+    fn documentation_manifest_covers_framework_and_coding_with_existing_files() {
+        let cases = documentation_cases().unwrap();
+        for id in [
+            "docs/crates/pi-sdk/README.md",
+            "docs/domains/coding/README.md",
+        ] {
+            assert!(cases.iter().any(|case| case.id == id), "missing {id}");
+        }
     }
 
     #[test]
     fn js_case_is_comparative_and_requires_the_node_host() {
         let plan = resolve_plan("js-extension").unwrap();
         assert_eq!(plan.variants.len(), 2);
-        assert!(plan.cases[0].requires_js_host);
+        assert!(plan.cases[0].options.requires_js_host);
         assert!(plan.comparison_definition(5).is_some());
     }
 
     #[test]
     fn native_plugin_case_uses_the_product_discovery_directory() {
         let plan = resolve_plan("native-plugin").unwrap();
-        assert!(plan.cases[0].steps.iter().any(|step| {
+        assert!(plan.cases[0].case.steps.iter().any(|step| {
             matches!(step, EvalStep::Prompt(prompt) if prompt.contains(".pi/plugins/native-hello"))
         }));
     }
@@ -1236,7 +1243,7 @@ mod tests {
     fn model_case_uses_the_isolated_agent_directory_template() {
         let plan = resolve_plan("model").unwrap();
         assert!(matches!(
-            &plan.cases[0].steps[0],
+            &plan.cases[0].case.steps[0],
             EvalStep::PromptTemplate(prompt) if prompt.contains("{{agent_dir}}/models.json")
         ));
         assert_eq!(plan.variants.len(), 2);
@@ -1286,7 +1293,7 @@ mod tests {
         let source_agent = root.path().join("source-agent");
         std::fs::create_dir_all(&source_agent).unwrap();
         let harness =
-            PiEvalHarness::new(ArtifactStore::new(root.path().join("artifacts")).unwrap());
+            CodingEvalHarness::new(ArtifactStore::new(root.path().join("artifacts")).unwrap());
         let plan = resolve_plan("provider").unwrap();
         let mut config = Config::new(root.path().to_path_buf(), source_agent);
         config.provider = "openai-compatible".to_string();
@@ -1324,11 +1331,11 @@ mod tests {
         let source_agent = root.path().join("source-agent");
         std::fs::create_dir_all(&source_agent).unwrap();
         let harness =
-            PiEvalHarness::new(ArtifactStore::new(root.path().join("artifacts")).unwrap());
+            CodingEvalHarness::new(ArtifactStore::new(root.path().join("artifacts")).unwrap());
         let plan = resolve_plan("native-provider").unwrap();
         assert_eq!(plan.variants[0].native_plugins.len(), 1);
         assert!(plan.variants[0].native_plugins[0].is_file());
-        assert!(matches!(plan.cases[0].steps[0], EvalStep::Reload));
+        assert!(matches!(plan.cases[0].case.steps[0], EvalStep::Reload));
         let mut config = Config::new(root.path().to_path_buf(), source_agent);
         config.provider = "openai-compatible".to_string();
         config.requested_provider = Some(config.provider.clone());

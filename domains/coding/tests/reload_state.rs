@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use pi_agent::QueueMode;
+use pi_coding::{Config, Pi};
 use pi_core::{
     Message, ModelId, PluginId, ProviderId, ThinkingLevel, ToolCallId, ToolExecutionMode,
     ToolResult, ToolSpec, UserMessage,
@@ -10,7 +11,6 @@ use pi_core::{
 use pi_plugin::{
     Plugin, RegisterContext, SessionExecutionOrigin, Tool, ToolContext, ToolError, ToolUpdateSink,
 };
-use pi_sdk::{Config, Pi};
 use pi_session::{QueueKind, SessionGenerationOverlay};
 
 fn write_catalog(agent_dir: &Path, models: &[&str]) {
