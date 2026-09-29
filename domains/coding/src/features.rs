@@ -1,10 +1,12 @@
-/// Runtime selection of first-party product features.
+/// Host ceiling for first-party product features.
 ///
 /// All features are enabled by default to preserve the standard Pi product.
 /// Disabling a feature omits its built-in plugins and lifecycle work; it does not
 /// remove compiled dependencies or restrict explicitly supplied plugins/tools.
-/// The selection is captured by the host and reused across session replacements
-/// and reloads. Feature-specific settings still apply when a feature is enabled.
+/// The ceiling is captured by the host and reused across session replacements
+/// and reloads. Each generation intersects it with `settings.json` feature
+/// selections. Settings cannot re-enable a feature disabled by the host.
+/// Feature-specific settings still apply when a feature is enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Features {
     pub memory: bool,

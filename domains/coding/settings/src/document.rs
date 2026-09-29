@@ -5,8 +5,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 use crate::{
-    BranchSummarySettings, CompactionSettings, DefaultProjectTrust, ImageSettings, PackageSource,
-    ProviderRetrySettings, QueueModeSetting, RetrySettings, SettingsDiagnostic,
+    BranchSummarySettings, CompactionSettings, DefaultProjectTrust, FeatureSettings, ImageSettings,
+    PackageSource, ProviderRetrySettings, QueueModeSetting, RetrySettings, SettingsDiagnostic,
     SettingsDiagnosticKind, SettingsError, SettingsScope, SettingsValues, ThinkingBudgetsSettings,
     ThinkingLevelSetting, TransportSetting,
 };
@@ -60,6 +60,7 @@ pub(crate) fn decode_values(
     diagnostics: &mut Vec<SettingsDiagnostic>,
 ) -> SettingsValues {
     SettingsValues {
+        features: decode_features(document, origin, diagnostics),
         default_provider: optional_string(document, "defaultProvider", origin, diagnostics),
         default_model: optional_string(document, "defaultModel", origin, diagnostics),
         default_thinking_level: optional_enum(
@@ -139,6 +140,29 @@ pub(crate) fn decode_values(
             diagnostics,
         ),
         images: decode_images(document, origin, diagnostics),
+    }
+}
+
+fn decode_features(
+    document: &Map<String, Value>,
+    origin: Option<(SettingsScope, &Path)>,
+    diagnostics: &mut Vec<SettingsDiagnostic>,
+) -> FeatureSettings {
+    let defaults = FeatureSettings::default();
+    let Some(object) = optional_object(document, "features", origin, diagnostics) else {
+        return defaults;
+    };
+    FeatureSettings {
+        memory: optional_bool(object, "memory", origin, diagnostics).unwrap_or(defaults.memory),
+        subagents: optional_bool(object, "subagents", origin, diagnostics)
+            .unwrap_or(defaults.subagents),
+        schedule: optional_bool(object, "schedule", origin, diagnostics)
+            .unwrap_or(defaults.schedule),
+        skills: optional_bool(object, "skills", origin, diagnostics).unwrap_or(defaults.skills),
+        prompt_templates: optional_bool(object, "promptTemplates", origin, diagnostics)
+            .unwrap_or(defaults.prompt_templates),
+        session_transfer: optional_bool(object, "sessionTransfer", origin, diagnostics)
+            .unwrap_or(defaults.session_transfer),
     }
 }
 

@@ -83,6 +83,7 @@ impl GenerationComponents<'_> {
         dynamic_providers: Option<&DynamicProviderCandidate>,
         builtin_providers: BuiltinProviderSet,
     ) -> Result<RuntimeBuildOutcome, RuntimeError> {
+        let features = config.features();
         let memory_enabled = self.memory.is_some();
         let memory_is_hermes = self
             .memory
@@ -92,7 +93,7 @@ impl GenerationComponents<'_> {
         let effective_api_key = builtin_providers.effective_api_key().map(str::to_string);
         let skill_options =
             crate::skills::runtime_skill_options(config, project_trusted, memory_is_hermes);
-        if config.features.skills && memory_is_hermes {
+        if features.skills && memory_is_hermes {
             skill_activity_observer = Some(pi_plugin_memory_hermes::curator::activity_observer(
                 managed_skill_roots(&config.agent_dir, &config.cwd, project_trusted),
             ));
@@ -131,8 +132,7 @@ impl GenerationComponents<'_> {
                 base_delay_ms: config.runtime_settings.retry.base_delay_ms,
             });
         let builder = builtin_providers.register(builder.plugin_context(context), config);
-        let skill_prompt_projector = config
-            .features
+        let skill_prompt_projector = features
             .subagents
             .then(|| Arc::new(SubagentSkillPromptProjector::new(self.subagents.clone())));
         let mut builder = builder.try_provider_plugin_factory({
@@ -140,7 +140,7 @@ impl GenerationComponents<'_> {
             let transport = Arc::clone(&transport);
             move || ModelsPlugin::load_with_transport(model_options.clone(), Arc::clone(&transport))
         });
-        if config.features.prompt_templates {
+        if features.prompt_templates {
             builder = builder.plugin_factory({
                 let prompt_template_options = prompt_template_options.clone();
                 move || PromptTemplatesPlugin::load(prompt_template_options.clone())
@@ -154,14 +154,14 @@ impl GenerationComponents<'_> {
             None => builder,
         };
         let mut builder = builder;
-        if config.features.subagents {
+        if features.subagents {
             builder = builder.try_plugin_factory({
                 let subagents = self.subagents.clone();
                 let subagent_options = subagent_options.clone();
                 move || SubagentsPlugin::load(subagents.clone(), subagent_options.clone())
             });
         }
-        if config.features.skills {
+        if features.skills {
             builder = builder.plugin_factory({
                 let skill_options = skill_options.clone();
                 let skill_activity_observer = skill_activity_observer.clone();
@@ -177,10 +177,10 @@ impl GenerationComponents<'_> {
                 }
             });
         }
-        if config.features.session_transfer {
+        if features.session_transfer {
             builder = builder.plugin_factory(SessionTransferPlugin::default);
         }
-        if config.features.schedule {
+        if features.schedule {
             builder = builder.plugin_factory({
                 let options = ScheduleOptions::new(&config.cwd, &config.agent_dir, project_trusted);
                 move || SchedulePlugin::new(options.clone())
@@ -244,8 +244,8 @@ impl GenerationComponents<'_> {
                     .filter(|tool| match *tool {
                         "memory" | "session_search" => memory_enabled,
                         "spawn_agent" | "send_message" | "followup_task" | "wait_agent"
-                        | "interrupt_agent" | "list_agents" => config.features.subagents,
-                        "schedule" => config.features.schedule,
+                        | "interrupt_agent" | "list_agents" => features.subagents,
+                        "schedule" => features.schedule,
                         _ => true,
                     })
                     .map(str::to_string)
@@ -298,13 +298,17 @@ impl GenerationComponents<'_> {
 }
 
 /// Product extension activation policy; managed children retain their tool ceiling.
-pub(crate) fn additional_active_tools(runtime: &PiRuntime) -> Vec<String> {
+pub(crate) fn additional_active_tools(
+    runtime: &PiRuntime,
+    reload_registered_tools: Option<&[String]>,
+) -> Vec<String> {
     runtime
         .active_tools()
         .into_iter()
         .filter(|name| {
             runtime.execution_origin() == pi_plugin::SessionExecutionOrigin::User
-                && !BUILTIN_TOOL_NAMES.contains(&name.as_str())
+                && (!BUILTIN_TOOL_NAMES.contains(&name.as_str())
+                    || reload_registered_tools.is_some_and(|previous| !previous.contains(name)))
         })
         .collect()
 }
@@ -382,7 +386,7 @@ mod tests {
         config: &Config,
     ) -> Result<PiRuntime, RuntimeError> {
         let memory = prepare_memory_provider(
-            config.features.memory,
+            config.features().memory,
             crate::configuration::memory_options(
                 &config.cwd,
                 &config.agent_dir,

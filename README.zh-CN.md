@@ -327,6 +327,14 @@ project/
 > Project Trust 不是文件系统沙箱。与 Pi 一样，文件工具支持 cwd 相对路径、绝对路径、
 > `~`、`file://` 和越过 cwd 的父级路径；实际边界是运行进程的操作系统权限。
 
+## 功能开关
+
+全局 `~/.pi/agent/settings.json` 和可信项目的 `.pi/settings.json` 支持 `features` 对象，
+包含布尔字段 `memory`、`subagents`、`schedule`、`skills`、`promptTemplates` 和
+`sessionTransfer`。默认全部开启，项目配置按字段覆盖全局配置。例如
+`{"features":{"schedule":false}}` 会关闭内置定时任务。修改后在 TUI 执行 `/reload`
+或创建新会话生效，关闭功能会保留已有数据。完整示例见[功能配置](apps/pi-cli/README.md#runtime-feature-switches)。
+
 ## 记忆与 Skill 整理
 
 Hermes 是默认记忆 Provider。`<agent-dir>/pi-hermes-memory/` 下的 `MEMORY.md` 和

@@ -654,6 +654,33 @@ Like current Pi, `HERMES.md`, `AGENTS.md`, and `CLAUDE.md` context discovery is 
 project trust. Trusted repositories may provide `.hermes/skills` and `.agents/skills`; skills
 under `~/.agents/skills` are also supported.
 
+## Runtime feature switches
+
+Set `features` in `<agent-dir>/settings.json` (normally `~/.pi/agent/settings.json`) or the
+trusted project's `.pi/settings.json`:
+
+```json
+{
+  "features": {
+    "memory": true,
+    "subagents": true,
+    "schedule": false,
+    "skills": true,
+    "promptTemplates": true,
+    "sessionTransfer": true
+  }
+}
+```
+
+Every field defaults to `true`. Project fields override global fields individually. Run `/reload`
+to apply changes to the current TUI session, or start a new session; other open sessions keep their
+current generation. A failed generation rebuild keeps the previous session active. Disabling a
+feature removes its built-in plugins, commands, tools and background work while keeping saved
+memory, skills and schedule data. Provider-specific memory configuration stays in `memory.json`.
+Explicit native/JS plugins and MCP configuration remain independent. These switches are a pi-rs
+addition; see [the Coding guide](../../domains/coding/README.md#runtime-features) for SDK ceilings
+and validation rules.
+
 ## MCP servers
 
 Configure MCP separately from settings in `~/.pi/agent/mcp.json` (or `$PI_AGENT_DIR/mcp.json`)

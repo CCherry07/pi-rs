@@ -178,6 +178,10 @@ pub struct SessionGenerationRequest {
     /// generation is being rebuilt for reload. Product policy may use this to
     /// avoid reapplying startup-only model arguments.
     pub reload_model: Option<ModelSelection>,
+    /// Tool names registered in the live generation being reloaded, including
+    /// inactive tools. Product policy may enable newly available tools without
+    /// re-enabling tools the user deselected. Absent for other transitions.
+    pub reload_registered_tools: Option<Vec<String>>,
     /// Read-only projection of an existing journal after accepted recovery writes.
     /// Present for every existing journal, including those without configuration entries.
     pub restored_configuration: Option<RestoredSessionConfiguration>,
@@ -416,6 +420,7 @@ impl ResolvedSessionTarget {
                     generation_overlay,
                     initial_state,
                     reload_model: None,
+                    reload_registered_tools: None,
                     restored_configuration: None,
                 };
                 Ok((
@@ -454,6 +459,7 @@ impl ResolvedSessionTarget {
             generation_overlay,
             initial_state: None,
             reload_model,
+            reload_registered_tools: None,
             restored_configuration,
         };
         Ok((Self::Existing { log, recovery }, request))
@@ -491,6 +497,7 @@ impl AgentSessionRuntime {
             start_event.reason,
             generation_overlay.clone(),
             initial_state,
+            None,
         )
         .await?;
         if let Some(seed) = initial_context {
@@ -687,6 +694,7 @@ impl AgentSessionRuntime {
             start_event.reason,
             self.generation_overlay.clone(),
             None,
+            None,
         )
         .await
         {
@@ -763,12 +771,22 @@ impl AgentSessionRuntime {
         shutdown_event: SessionShutdownEvent,
     ) -> Result<(), SessionError> {
         let _session_transition = current.begin_replacement().await?;
+        let reload_registered_tools =
+            (start_event.reason == SessionStartReason::Reload).then(|| {
+                current
+                    .runtime()
+                    .tool_specs()
+                    .into_iter()
+                    .map(|tool| tool.name)
+                    .collect()
+            });
         let prepared = Self::prepare_session(
             self.factory.as_ref(),
             target,
             start_event.reason,
             self.generation_overlay.clone(),
             initial_state,
+            reload_registered_tools,
         )
         .await?;
         current.shutdown_with(shutdown_event).await;
@@ -783,13 +801,15 @@ impl AgentSessionRuntime {
         reason: SessionStartReason,
         generation_overlay: SessionGenerationOverlay,
         initial_state: Option<AgentSessionInitialState>,
+        reload_registered_tools: Option<Vec<String>>,
     ) -> Result<PreparedAgentSession, SessionError> {
-        let (target, request) = ResolvedSessionTarget::resolve(
+        let (target, mut request) = ResolvedSessionTarget::resolve(
             target,
             reason,
             generation_overlay,
             initial_state.clone(),
         )?;
+        request.reload_registered_tools = reload_registered_tools;
         let expected_workspace = request.workspace.clone();
         let generation = factory.prepare_generation(request).await?;
         let PreparedSessionGeneration {
@@ -1179,6 +1199,7 @@ mod tests {
             start_event.reason,
             SessionGenerationOverlay::default(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1222,6 +1243,7 @@ mod tests {
             ),
             SessionStartReason::Startup,
             SessionGenerationOverlay::default(),
+            None,
             None,
         )
         .await

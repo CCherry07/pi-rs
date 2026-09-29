@@ -145,6 +145,8 @@ impl ProductSessionFactory {
 impl SessionGenerationFactory for ProductSessionFactory {
     fn session_registered(&self, session: &pi_session::PiSession) {
         self.plugin_context_binding.bind(session.clone());
+        // Register allowed hosts even when settings currently disable subagents:
+        // a later generation can enable them without replacing the stable handle.
         if self.config.features.subagents {
             self.subagents.session_registered(session.clone());
         }
@@ -162,6 +164,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
             generation_overlay,
             initial_state,
             reload_model,
+            reload_registered_tools,
             restored_configuration: _,
         } = request;
         if workspace.cwd() != cwd {
@@ -207,7 +210,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
             None
         };
         let memory = prepare_memory_provider(
-            config.features.memory,
+            config.features().memory,
             memory_options(
                 &config.cwd,
                 &config.agent_dir,
@@ -353,7 +356,10 @@ impl SessionGenerationFactory for ProductSessionFactory {
             ),
         )
         .initial_model_fallback_message(initial_model_fallback_message)
-        .additional_active_tools(additional_active_tools(&runtime))
+        .additional_active_tools(additional_active_tools(
+            &runtime,
+            reload_registered_tools.as_deref(),
+        ))
         .runtime_inventory(SessionRuntimeInventory::new(
             js_extensions,
             configured_native_plugins,
@@ -667,6 +673,7 @@ command = "fixture-command"
                 generation_overlay: SessionGenerationOverlay::default(),
                 initial_state: None,
                 reload_model: None,
+                reload_registered_tools: None,
                 restored_configuration: None,
             })
             .await

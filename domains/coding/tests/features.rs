@@ -7,6 +7,7 @@ use pi_coding::{Config, Features, Pi};
 use pi_core::{AbortHandle, RunId};
 use pi_plugin::BeforeAgentStartEvent;
 use pi_session::{AgentSession, PiSession};
+use serde_json::json;
 
 const CORE_TOOLS: &[&str] = &[
     "read",
@@ -45,6 +46,23 @@ fn feature_values(features: &Features) -> [bool; 6] {
         features.prompt_templates,
         features.session_transfer,
     ]
+}
+
+fn write_features(path: &Path, features: Features) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        json!({"features": {
+            "memory": features.memory,
+            "subagents": features.subagents,
+            "schedule": features.schedule,
+            "skills": features.skills,
+            "promptTemplates": features.prompt_templates,
+            "sessionTransfer": features.session_transfer,
+        }})
+        .to_string(),
+    )
+    .unwrap();
 }
 
 fn write_skill(agent_dir: &Path, name: &str) {
@@ -342,6 +360,8 @@ async fn reload_preserves_feature_selection_while_refreshing_enabled_resources()
         )
         .unwrap();
         fs::write(pi.agent_dir().join("memory.json"), "not json").unwrap();
+        // Settings cannot widen the SDK host's allowed features.
+        write_features(&pi.agent_dir().join("settings.json"), Features::all());
 
         session.reload().await.unwrap();
 
@@ -367,4 +387,152 @@ async fn reload_preserves_feature_selection_while_refreshing_enabled_resources()
         assert!(!pi.agent_dir().join("pi-hermes-memory").exists());
         pi.sessions().shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn settings_features_apply_project_trust_and_the_host_ceiling() {
+    for trusted in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = fixture_config(root.path());
+        config.trust_override = Some(trusted);
+        config.features.memory = false;
+        config.features.session_transfer = false;
+        fs::write(config.agent_dir.join("memory.json"), "not json").unwrap();
+        write_features(
+            &config.agent_dir.join("settings.json"),
+            Features {
+                memory: true,
+                ..Features::none()
+            },
+        );
+        fs::create_dir_all(config.cwd.join(".pi")).unwrap();
+        fs::write(
+            config.cwd.join(".pi/settings.json"),
+            json!({"features": {
+                "subagents": true, "skills": true, "sessionTransfer": true
+            }})
+            .to_string(),
+        )
+        .unwrap();
+
+        let (pi, session) = create_session(config).await;
+        let expected = Features {
+            subagents: trusted,
+            skills: trusted,
+            ..Features::none()
+        };
+        assert_feature_registrations(&session.current(), &expected);
+        assert_eq!(
+            projected_prompt(&session.current())
+                .await
+                .contains(SKILL_NAME),
+            trusted
+        );
+        session.reload().await.unwrap();
+        assert_feature_registrations(&session.current(), &expected);
+        assert!(!pi.agent_dir().join("pi-hermes-memory").exists());
+        pi.sessions().shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn settings_features_can_be_reenabled_without_mutating_other_sessions_or_data() {
+    let root = tempfile::tempdir().unwrap();
+    let config = fixture_config(root.path());
+    let settings_path = config.agent_dir.join("settings.json");
+    let memory_path = config.agent_dir.join("memory.json");
+    let memory_config = fs::read(&memory_path).unwrap();
+    let cwd = config.cwd.clone();
+    write_features(&settings_path, Features::none());
+    // Disabled memory must not even parse its provider configuration.
+    fs::write(&memory_path, "not json").unwrap();
+    let (pi, session) = create_session(config).await;
+    let other = pi
+        .sessions()
+        .create_session(&cwd, pi.agent_dir().join("sessions/other.jsonl"))
+        .await
+        .unwrap();
+    assert_feature_registrations(&session.current(), &Features::none());
+    assert!(!pi.agent_dir().join("pi-hermes-memory").exists());
+    fs::write(&memory_path, &memory_config).unwrap();
+
+    for enabled in [true, false, true] {
+        let previous = session.current();
+        let previous_plugins = previous.runtime().plugin_order();
+        let expected = if enabled {
+            Features::all()
+        } else {
+            Features::none()
+        };
+        if enabled {
+            // Removing an override restores defaults, including after a previous reload.
+            fs::write(&settings_path, "{}").unwrap();
+        } else {
+            write_features(&settings_path, expected);
+        }
+        assert_eq!(session.current().runtime().plugin_order(), previous_plugins);
+        session.reload().await.unwrap();
+        assert!(!Arc::ptr_eq(&previous, &session.current()));
+        assert!(previous.is_closed());
+        assert_feature_registrations(&session.current(), &expected);
+        assert_feature_registrations(&other.current(), &Features::none());
+        assert_eq!(
+            projected_prompt(&session.current())
+                .await
+                .contains(SKILL_NAME),
+            enabled
+        );
+        assert!(!session.current().log().is_materialized());
+        assert_eq!(fs::read(&memory_path).unwrap(), memory_config);
+        assert!(
+            pi.agent_dir()
+                .join("skills")
+                .join(SKILL_NAME)
+                .join("SKILL.md")
+                .exists()
+        );
+    }
+    // New sessions use the current settings too, rather than the first generation's selection.
+    let fresh = pi
+        .sessions()
+        .create_session(&cwd, pi.agent_dir().join("sessions/fresh.jsonl"))
+        .await
+        .unwrap();
+    assert_feature_registrations(&fresh.current(), &Features::all());
+    pi.sessions().shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_feature_activation_preserves_the_previous_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let config = fixture_config(root.path());
+    let path = config.agent_dir.join("settings.json");
+    let memory_path = config.agent_dir.join("memory.json");
+    let memory_config = fs::read(&memory_path).unwrap();
+    let original_features = Features {
+        memory: false,
+        ..Features::all()
+    };
+    write_features(&path, original_features);
+    fs::write(&memory_path, "not json").unwrap();
+    let (pi, session) = create_session(config).await;
+    let original = session.current();
+    let requested = Features {
+        memory: true,
+        ..Features::none()
+    };
+    write_features(&path, requested);
+
+    let error = session.reload().await.unwrap_err();
+    assert!(error.to_string().contains("memory"), "{error}");
+    assert!(Arc::ptr_eq(&original, &session.current()));
+    assert!(!original.is_closed());
+    assert_feature_registrations(&session.current(), &original_features);
+    assert!(!pi.agent_dir().join("pi-hermes-memory").exists());
+
+    fs::write(&memory_path, memory_config).unwrap();
+    session.reload().await.unwrap();
+    assert_feature_registrations(&session.current(), &requested);
+    assert!(original.is_closed());
+    pi.sessions().shutdown().await.unwrap();
 }

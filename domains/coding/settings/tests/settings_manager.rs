@@ -2,8 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use pi_settings::{
-    DefaultProjectTrust, PackageFilter, PackageSource, QueueModeSetting, SettingsContext,
-    SettingsDiagnosticKind, SettingsError, SettingsManager, SettingsScope, TransportSetting,
+    DefaultProjectTrust, FeatureSettings, PackageFilter, PackageSource, QueueModeSetting,
+    SettingsContext, SettingsDiagnosticKind, SettingsError, SettingsManager, SettingsScope,
+    TransportSetting,
 };
 use serde_json::{Value, json};
 
@@ -95,13 +96,123 @@ fn untrusted_project_settings_are_never_read_and_reads_do_not_create_pi_director
 }
 
 #[test]
+fn features_default_to_enabled_and_merge_only_trusted_project_overrides() {
+    let root = tempfile::tempdir().unwrap();
+    let agent_dir = root.path().join("agent");
+    let cwd = root.path().join("project");
+    let manager = SettingsManager::new(&agent_dir);
+    let context = SettingsContext::new(&cwd, true);
+    assert_eq!(
+        manager.load(&context).effective().features,
+        FeatureSettings {
+            memory: true,
+            subagents: true,
+            schedule: true,
+            skills: true,
+            prompt_templates: true,
+            session_transfer: true,
+        }
+    );
+    write_json(
+        &agent_dir.join("settings.json"),
+        json!({"features": {
+            "memory": false,
+            "subagents": false,
+            "schedule": false,
+            "promptTemplates": false,
+            "futureFeature": {"enabled": false}
+        }}),
+    );
+    write_json(
+        &cwd.join(".pi/settings.json"),
+        json!({"features": {"memory": true, "skills": false, "sessionTransfer": false}}),
+    );
+
+    let trusted = manager.load(&context);
+    assert_eq!(
+        trusted.effective().features,
+        FeatureSettings {
+            memory: true,
+            subagents: false,
+            schedule: false,
+            skills: false,
+            prompt_templates: false,
+            session_transfer: false,
+        }
+    );
+    assert!(!trusted.global().features.memory);
+    assert!(trusted.diagnostics().is_empty());
+    assert_eq!(
+        trusted.raw_effective()["features"]["futureFeature"]["enabled"],
+        false
+    );
+
+    let untrusted = manager.load(&SettingsContext::new(&cwd, false));
+    assert_eq!(untrusted.effective().features, trusted.global().features);
+    assert!(untrusted.effective().features.skills);
+    assert!(untrusted.effective().features.session_transfer);
+    assert!(untrusted.raw_project().is_empty());
+}
+
+#[test]
+fn invalid_feature_settings_are_localized_and_reported() {
+    let root = tempfile::tempdir().unwrap();
+    let agent_dir = root.path().join("agent");
+    let cwd = root.path().join("project");
+    let path = agent_dir.join("settings.json");
+    let manager = SettingsManager::new(&agent_dir);
+    let context = SettingsContext::new(&cwd, false);
+    write_json(
+        &path,
+        json!({"defaultModel": "retained", "features": {
+            "memory": "false", "subagents": null, "schedule": 0, "skills": [],
+            "promptTemplates": false, "sessionTransfer": false
+        }}),
+    );
+    let snapshot = manager.load(&context);
+    assert_eq!(
+        snapshot.effective().default_model.as_deref(),
+        Some("retained")
+    );
+    assert_eq!(
+        snapshot.effective().features,
+        FeatureSettings {
+            prompt_templates: false,
+            session_transfer: false,
+            ..FeatureSettings::default()
+        }
+    );
+    assert_eq!(snapshot.diagnostics().len(), 4);
+    for diagnostic in snapshot.diagnostics() {
+        assert_eq!(diagnostic.kind, SettingsDiagnosticKind::InvalidValue);
+        assert_eq!(diagnostic.scope, SettingsScope::Global);
+        assert_eq!(diagnostic.path, path);
+        assert!(diagnostic.message.contains("must be a boolean"));
+    }
+
+    for value in [json!(false), json!([]), json!(null)] {
+        write_json(&path, json!({"features": value}));
+        let snapshot = manager.load(&context);
+        assert_eq!(snapshot.effective().features, FeatureSettings::default());
+        assert_eq!(snapshot.diagnostics().len(), 1);
+        assert_eq!(
+            snapshot.diagnostics()[0].message,
+            "features must be an object"
+        );
+    }
+}
+
+#[test]
 fn malformed_reload_retains_the_last_valid_document_for_that_scope() {
     let root = tempfile::tempdir().unwrap();
     let agent_dir = root.path().join("agent");
     let cwd = root.path().join("project");
     fs::create_dir_all(&cwd).unwrap();
     let path = agent_dir.join("settings.json");
-    write_json(&path, json!({"defaultProvider": "first"}));
+    write_json(
+        &path,
+        json!({"defaultProvider": "first", "features": {"schedule": false}}),
+    );
     let manager = SettingsManager::new(&agent_dir);
     let context = SettingsContext::new(&cwd, false);
     assert_eq!(
@@ -115,6 +226,8 @@ fn malformed_reload_retains_the_last_valid_document_for_that_scope() {
 
     fs::write(&path, "{ definitely-not-json").unwrap();
     let retained = manager.load(&context);
+
+    assert!(!retained.effective().features.schedule);
 
     assert_eq!(
         retained.effective().default_provider.as_deref(),

@@ -411,6 +411,15 @@ Supported values are `ask`, `always`, and `never`.
 > absolute paths, `~`, `file://`, and parent-relative paths outside cwd. The process and operating
 > system permissions are the actual boundary.
 
+## Runtime feature switches
+
+Global `~/.pi/agent/settings.json` and trusted project `.pi/settings.json` accept a `features`
+object with boolean `memory`, `subagents`, `schedule`, `skills`, `promptTemplates`, and
+`sessionTransfer` fields. All default to `true`; project fields override global fields individually.
+For example, `{"features":{"schedule":false}}` disables built-in scheduled tasks. Run `/reload`
+in the TUI or start a new session to apply changes. Existing data is retained when disabling features.
+See [feature configuration](apps/pi-cli/README.md#runtime-feature-switches) for the complete example.
+
 ## Memory and skill curation
 
 Hermes is the default memory provider. `MEMORY.md` and `USER.md` under

@@ -10,7 +10,7 @@ use pi_js_package_manager::ResolveRequest as JsResolveRequest;
 /// Product configuration shared by every Pi presentation adapter.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// First-party runtime features; defaults to all enabled.
+    /// Host ceiling for first-party runtime features; settings may disable allowed features.
     pub features: Features,
     pub cwd: PathBuf,
     /// Complete environment for direct runtime composition; managed sessions supply their own saved spec.
@@ -77,6 +77,19 @@ impl Config {
             settings_skill_paths: Vec::new(),
             settings_prompt_paths: Vec::new(),
             settings_diagnostics: Vec::new(),
+        }
+    }
+
+    /// Resolve one generation without changing the host ceiling used by later reloads.
+    pub(crate) fn features(&self) -> Features {
+        let requested = self.runtime_settings.features;
+        Features {
+            memory: self.features.memory && requested.memory,
+            subagents: self.features.subagents && requested.subagents,
+            schedule: self.features.schedule && requested.schedule,
+            skills: self.features.skills && requested.skills,
+            prompt_templates: self.features.prompt_templates && requested.prompt_templates,
+            session_transfer: self.features.session_transfer && requested.session_transfer,
         }
     }
 

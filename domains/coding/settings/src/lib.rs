@@ -233,9 +233,34 @@ pub struct PackageFilter {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// First-party feature selections from settings; the product host may further restrict them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeatureSettings {
+    pub memory: bool,
+    pub subagents: bool,
+    pub schedule: bool,
+    pub skills: bool,
+    pub prompt_templates: bool,
+    pub session_transfer: bool,
+}
+
+impl Default for FeatureSettings {
+    fn default() -> Self {
+        Self {
+            memory: true,
+            subagents: true,
+            schedule: true,
+            skills: true,
+            prompt_templates: true,
+            session_transfer: true,
+        }
+    }
+}
+
 /// Validated values from one raw document or the effective deep merge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsValues {
+    pub features: FeatureSettings,
     pub default_provider: Option<String>,
     pub default_model: Option<String>,
     pub default_thinking_level: Option<ThinkingLevelSetting>,
@@ -268,6 +293,7 @@ pub struct SettingsValues {
 impl Default for SettingsValues {
     fn default() -> Self {
         Self {
+            features: FeatureSettings::default(),
             default_provider: None,
             default_model: None,
             default_thinking_level: None,

@@ -513,15 +513,26 @@ Private `configuration` maps snapshots and explicit selections into owner-define
 Their tests follow those responsibilities, with lifecycle/rollback tests retained at the factory
 and frontend-facing handoff tests using the Coding product entry point. These Modules retain
 the same generation and registration lifecycle.
-`Config::features` is a typed, host-captured runtime selection of first-party memory, subagents, scheduling, skills, prompt templates, and
-session-transfer plugins. All default to enabled. Generation construction gates complete agent/session
+`Config::features` is a typed, host-captured ceiling for first-party memory, subagents, scheduling,
+skills, prompt templates, and session-transfer plugins. `SettingsValues::features` supplies the
+generation-local selection from the deep merge of global and trusted-project `settings.json`.
+All flags default to enabled. Coding configuration intersects the two without mutating the host
+ceiling, so settings cannot re-enable a host-disabled feature and removing a settings override can
+re-enable an allowed feature on reload. Generation construction gates complete agent/session
 registrations and initialization, so disabled memory never loads its provider and disabled scheduling
-never starts its worker. The selection survives settings refresh and managed session replacement/reload;
-it is neither serialized into session history nor mutated in live registries. Providers, core tools,
+never starts its worker. Each managed session replacement/reload rereads settings; existing sessions
+retain their generation until explicitly replaced. A failed candidate leaves the previous generation
+active. Neither the ceiling nor the resolved selection is serialized into session history or mutated
+in live registries; disabling a feature does not delete its persisted data. Providers, core tools,
 explicit native/JS/MCP plugins, general context resources, and read-only skill-file management remain
-independent. This is deliberate Rust SDK composition policy, not Cargo dependency pruning or a plugin
+independent. This is deliberate pi-rs composition policy, not Cargo dependency pruning or a plugin
 security boundary. In particular disabling skills/templates removes their built-in plugin, unlike
 legacy Pi's `noSkills`/`noPromptTemplates` automatic-discovery suppression, which retains explicit paths.
+Reload requests include the previous generation's registered tool names, including inactive tools.
+Coding uses this neutral snapshot to activate newly available default tools when a feature is enabled,
+through the existing `additional_active_tools` policy. Previously registered built-in tools retain
+the user's selection, and managed children never gain additional tools through reload. Other restore
+paths retain the saved tool selection and existing plugin-tool activation policy.
 Beneath that interface, two public session
 Modules remain responsible for session behavior. `MultiSessionManager`
 owns the runtime factory, manager shutdown, and a private table of active handles. `PiSession` is the
@@ -1427,10 +1438,14 @@ on filesystem or product policy.
 candidate. Non-UI mappings include initial provider/model/thinking, thinking budgets, active tools,
 steering/follow-up queues, compaction and branch-summary budgets, assistant/standalone-completion
 retry, shell configuration, session storage, image blocking/resizing, skills/prompts/packages,
-provider timeout/retry, HTTP proxy, and Codex transport. The proxy is bootstrap/global policy and
+provider timeout/retry, HTTP proxy, Codex transport, and first-party feature switches. The `features`
+object accepts boolean `memory`, `subagents`, `schedule`, `skills`, `promptTemplates`, and
+`sessionTransfer` fields, defaults omitted fields to true, and follows existing localized validation
+and last-valid-document fallback rules. The proxy is bootstrap/global policy and
 is intentionally not project-overridable. UI-only theme and selector settings are retained but do
 not create a second renderer settings implementation.
-Memory follows the same generation publication boundary but not the `settings.json` schema.
+Memory provider configuration follows the same generation publication boundary but lives outside
+the `settings.json` schema; only its feature gate is selected by `features.memory`.
 The global `<agent-dir>/memory.json` document selects one registered memory provider and owns the
 host recall limits; project settings never merge into it or redirect durable memory. The bundled
 factory id is `local`, and automatic capture remains off.
