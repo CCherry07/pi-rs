@@ -23,11 +23,9 @@ use pi_settings::{SettingsContext, SettingsManager};
 use crate::Config;
 use crate::builtin_providers::BuiltinProviderSet;
 use crate::composition::{
-    GenerationComponents, RuntimeBuildOutcome, additional_active_tools, prepare_memory_provider,
+    GenerationComponents, RuntimeBuildOutcome, additional_active_tools, prepare_memory,
 };
-use crate::configuration::{
-    apply_settings, initial_model_request, memory_options, session_options,
-};
+use crate::configuration::{apply_settings, initial_model_request, session_options};
 use crate::dynamic_providers::{
     DynamicProviderCandidate, DynamicProviderOverlay, DynamicProviderPreparation,
 };
@@ -159,7 +157,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
         let SessionGenerationRequest {
             cwd,
             workspace,
-            session_path: path,
+            session_path: _,
             reason,
             generation_overlay,
             initial_state,
@@ -209,18 +207,7 @@ impl SessionGenerationFactory for ProductSessionFactory {
         } else {
             None
         };
-        let memory = prepare_memory_provider(
-            config.features().memory,
-            memory_options(
-                &config.cwd,
-                &config.agent_dir,
-                &config.session_path,
-                Some(&path),
-                project_trusted,
-            ),
-        )
-        .await
-        .map_err(SessionError::Runtime)?;
+        let memory = prepare_memory(&config, project_trusted).map_err(SessionError::Runtime)?;
         let package_reconciliations =
             prepare_native_packages(&config.cwd, &config.agent_dir, project_trusted).await?;
         let mut native_options = NativePluginLoaderOptions::new(&config.cwd, &config.agent_dir);

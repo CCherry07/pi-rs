@@ -2,8 +2,7 @@
 //! Does not initialize providers, sessions, native plugins or background memory work.
 use std::path::Path;
 
-use pi_memory_loader::MemoryLoader;
-use pi_plugin_memory_hermes::managed_skill_roots;
+use pi_plugin_memory_hermes::{HermesMemoryPlugin, managed_skill_roots};
 use pi_plugin_skills::{SkillLoaderOptions, management::SkillLibrary};
 use pi_settings::{SettingsContext, SettingsManager};
 
@@ -59,10 +58,11 @@ pub fn desktop_skill_library(
         pi_js_package_manager::PackageManager::new(config.javascript_resolve_request(trusted))
             .installed_skill_paths(),
     );
-    let hermes = MemoryLoader::selected_provider(agent_dir)
-        .map_err(|e| e.to_string())?
-        .as_deref()
-        == Some("hermes");
+    let hermes =
+        HermesMemoryPlugin::configured_enabled(agent_dir).map_err(|error| match error {
+            pi_plugin::PrepareError::InvalidOptions(message)
+            | pi_plugin::PrepareError::Initialization(message) => message,
+        })?;
     let options = runtime_skill_options(&config, trusted, hermes);
     let destination = match cwd {
         Some(cwd) if trusted => Some(cwd.join(".pi/skills")),
@@ -131,5 +131,38 @@ mod tests {
         assert!(trusted);
         assert!(library.list().iter().any(|row| row.name == "check"));
         assert!(!agent.join("pi-hermes-memory").exists());
+    }
+
+    #[test]
+    fn disk_view_preserves_memory_profile_selection_without_opening_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        let skill = agent.join("pi-hermes-memory/skills/managed/SKILL.md");
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(
+            &skill,
+            "---\nname: managed\ndescription: Managed\n---\nBody",
+        )
+        .unwrap();
+        let (trust, _) =
+            ProjectTrustService::new(&agent, None, false, pi_settings::DefaultProjectTrust::Ask)
+                .unwrap();
+        for (raw, expected) in [
+            ("{}", true),
+            (r#"{"enabled":false}"#, false),
+            (r#"{"provider":"local"}"#, false),
+        ] {
+            std::fs::write(agent.join("memory.json"), raw).unwrap();
+            let (library, _) = desktop_skill_library(&agent, None, &trust).unwrap();
+            assert_eq!(
+                library.list().iter().any(|row| row.name == "managed"),
+                expected
+            );
+            assert!(!agent.join("pi-hermes-memory/sessions.db").exists());
+        }
+        std::fs::write(agent.join("memory.json"), "not json").unwrap();
+        assert!(desktop_skill_library(&agent, None, &trust).is_err());
+        assert!(!agent.join("pi-hermes-memory/sessions.db").exists());
+        assert!(skill.exists());
     }
 }

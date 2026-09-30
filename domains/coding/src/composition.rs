@@ -6,8 +6,7 @@ use std::sync::Arc;
 use pi_agent::AgentOptions;
 use pi_core::{ModelId, ProviderId};
 use pi_js_plugin::JsPluginGeneration;
-use pi_memory_loader::{MemoryLoader, MemoryLoaderOptions, PreparedMemoryProvider};
-use pi_plugin::PluginContext;
+use pi_plugin::{Plugin, PluginContext, PrepareContext, PrepareError};
 use pi_plugin_bash::{BashToolOptions, ConfiguredBashPlugin};
 use pi_plugin_edit::EditPlugin;
 use pi_plugin_find::FindPlugin;
@@ -15,7 +14,7 @@ use pi_plugin_grep::GrepPlugin;
 use pi_plugin_hashline_edit::HashlineEditPlugin;
 use pi_plugin_ls::LsPlugin;
 use pi_plugin_manager::loader::NativePlugins;
-use pi_plugin_memory_hermes::{HermesMemoryProviderFactory, managed_skill_roots};
+use pi_plugin_memory_hermes::{HermesMemoryPlugin, managed_skill_roots};
 use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
 use pi_plugin_prompts::{PromptTemplateLoaderOptions, PromptTemplatesPlugin};
 use pi_plugin_read::ConfiguredReadPlugin;
@@ -64,7 +63,7 @@ pub(crate) struct GenerationComponents<'a> {
     pub(crate) native: &'a NativePlugins,
     pub(crate) javascript: Option<&'a JsPluginGeneration>,
     pub(crate) mcp: Option<&'a Arc<dyn pi_plugin::Plugin>>,
-    pub(crate) memory: Option<&'a PreparedMemoryProvider>,
+    pub(crate) memory: Option<&'a Arc<HermesMemoryPlugin>>,
     pub(crate) subagents: &'a SubagentRuntime,
 }
 
@@ -85,15 +84,12 @@ impl GenerationComponents<'_> {
     ) -> Result<RuntimeBuildOutcome, RuntimeError> {
         let features = config.features();
         let memory_enabled = self.memory.is_some();
-        let memory_is_hermes = self
-            .memory
-            .is_some_and(|memory| memory.provider_id() == "hermes");
         let mut skill_activity_observer = None;
         let transport = builtin_providers.transport();
         let effective_api_key = builtin_providers.effective_api_key().map(str::to_string);
         let skill_options =
-            crate::skills::runtime_skill_options(config, project_trusted, memory_is_hermes);
-        if features.skills && memory_is_hermes {
+            crate::skills::runtime_skill_options(config, project_trusted, memory_enabled);
+        if features.skills && memory_enabled {
             skill_activity_observer = Some(pi_plugin_memory_hermes::curator::activity_observer(
                 managed_skill_roots(&config.agent_dir, &config.cwd, project_trusted),
             ));
@@ -148,7 +144,7 @@ impl GenerationComponents<'_> {
         }
         let builder = match self.memory {
             Some(memory) => {
-                let plugin = memory.plugin();
+                let plugin: Arc<dyn pi_plugin::Plugin> = memory.clone();
                 builder.try_plugin_arc_factory(move || Ok::<_, String>(Arc::clone(&plugin)))
             }
             None => builder,
@@ -313,18 +309,29 @@ pub(crate) fn additional_active_tools(
         .collect()
 }
 
-pub(crate) async fn prepare_memory_provider(
-    enabled: bool,
-    options: MemoryLoaderOptions,
-) -> Result<Option<PreparedMemoryProvider>, String> {
-    if !enabled {
+/// Prepare once before cross-plugin wiring so memory and Skills share one
+/// candidate's enablement decision. ProductSessionFactory calls this on every reload.
+pub(crate) fn prepare_memory(
+    config: &Config,
+    project_trusted: bool,
+) -> Result<Option<Arc<HermesMemoryPlugin>>, String> {
+    if !config.features().memory {
         return Ok(None);
     }
-    MemoryLoader::new(options)
-        .provider_factory(HermesMemoryProviderFactory)
-        .load()
-        .await
-        .map_err(|error| error.to_string())
+    let workspace = config
+        .workspace
+        .clone()
+        .unwrap_or_else(|| pi_core::WorkspaceSpec::from_cwd(&config.cwd).snapshot());
+    let context = PrepareContext::new(workspace, &config.agent_dir, project_trusted);
+    HermesMemoryPlugin::prepare(&context, Default::default())
+        .map(|plugin| plugin.map(Arc::new))
+        // Keep the product's existing memory diagnostics when adapting the
+        // ordinary factory error, which otherwise adds a generic plugin prefix.
+        .map_err(|error| match error {
+            PrepareError::InvalidOptions(message) | PrepareError::Initialization(message) => {
+                message
+            }
+        })
 }
 
 #[cfg(test)]
@@ -385,18 +392,7 @@ mod tests {
     async fn build_runtime_with_first_party_memory(
         config: &Config,
     ) -> Result<PiRuntime, RuntimeError> {
-        let memory = prepare_memory_provider(
-            config.features().memory,
-            crate::configuration::memory_options(
-                &config.cwd,
-                &config.agent_dir,
-                &config.session_path,
-                None,
-                false,
-            ),
-        )
-        .await
-        .map_err(RuntimeError::Build)?;
+        let memory = prepare_memory(config, false).map_err(RuntimeError::Build)?;
         GenerationComponents {
             native: &NativePlugins::default(),
             javascript: None,
@@ -429,20 +425,8 @@ mod tests {
                 ..crate::Features::none()
             };
             let (runtime, session_plugins, provider) = {
-                let memory = prepare_memory_provider(
-                    true,
-                    crate::configuration::memory_options(
-                        &config.cwd,
-                        &config.agent_dir,
-                        &config.session_path,
-                        None,
-                        false,
-                    ),
-                )
-                .await
-                .unwrap()
-                .unwrap();
-                let provider = Arc::downgrade(&memory.plugin());
+                let memory = prepare_memory(&config, false).unwrap().unwrap();
+                let provider = Arc::downgrade(&memory);
                 let components = GenerationComponents {
                     native: &NativePlugins::default(),
                     javascript: None,

@@ -1,12 +1,12 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pi_agent::AgentOptions;
 use pi_plugin::{
     AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, Plugin, PluginError,
-    PluginFactory, PluginId, PluginScope, PrepareContext, PrepareError, RegisterContext,
-    SessionHook, SessionInfoChangedEvent, SessionPluginContext, SessionShutdownEvent,
-    SessionStartEvent,
+    PluginId, PrepareContext, PrepareError, RegisterContext, SessionHook, SessionInfoChangedEvent,
+    SessionPluginContext, SessionShutdownEvent, SessionStartEvent,
 };
 use pi_runtime::PiRuntime;
 use pi_session::{
@@ -19,6 +19,8 @@ use serde::Deserialize;
 #[derive(Default)]
 struct Observations {
     prepared: AtomicUsize,
+    prepared_trust: Mutex<Vec<bool>>,
+    active_trust: Mutex<Vec<bool>>,
     events: Mutex<Vec<(usize, &'static str)>>,
 }
 
@@ -31,29 +33,9 @@ struct Options {
 
 struct UnifiedPlugin {
     instance: usize,
+    project_trusted: bool,
     observations: Arc<Observations>,
     started: AtomicUsize,
-}
-
-impl PluginFactory for UnifiedPlugin {
-    type Options = Options;
-
-    fn prepare(context: &PrepareContext, options: Options) -> Result<Option<Self>, PrepareError> {
-        let instance = options.observations.prepared.fetch_add(1, Ordering::SeqCst) + 1;
-        let file: Options = serde_json::from_slice(
-            &std::fs::read(context.package_dir().join("config.json"))
-                .map_err(|error| PrepareError::Initialization(error.to_string()))?,
-        )
-        .map_err(|error| PrepareError::InvalidOptions(error.to_string()))?;
-        if !options.enabled.or(file.enabled).unwrap_or(true) {
-            return Ok(None);
-        }
-        Ok(Some(Self {
-            instance,
-            observations: options.observations,
-            started: AtomicUsize::new(0),
-        }))
-    }
 }
 
 impl UnifiedPlugin {
@@ -68,6 +50,32 @@ impl UnifiedPlugin {
 
 #[pi_plugin::plugin]
 impl Plugin for UnifiedPlugin {
+    type Options = Options;
+
+    fn prepare(context: &PrepareContext, options: Options) -> Result<Option<Self>, PrepareError> {
+        let instance = options.observations.prepared.fetch_add(1, Ordering::SeqCst) + 1;
+        options
+            .observations
+            .prepared_trust
+            .lock()
+            .unwrap()
+            .push(context.project_trusted());
+        let file: Options = serde_json::from_slice(
+            &std::fs::read(context.agent_dir().join("config.json"))
+                .map_err(|error| PrepareError::Initialization(error.to_string()))?,
+        )
+        .map_err(|error| PrepareError::InvalidOptions(error.to_string()))?;
+        if !options.enabled.or(file.enabled).unwrap_or(true) {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            instance,
+            project_trusted: context.project_trusted(),
+            observations: options.observations,
+            started: AtomicUsize::new(0),
+        }))
+    }
+
     fn id(&self) -> PluginId {
         PluginId::new("unified-fixture")
     }
@@ -98,6 +106,11 @@ impl Plugin for UnifiedPlugin {
             "Session and Agent must use the same instance"
         );
         self.record("agent");
+        self.observations
+            .active_trust
+            .lock()
+            .unwrap()
+            .push(self.project_trusted);
         Ok(BeforeAgentStartPatch::default())
     }
 
@@ -119,7 +132,11 @@ impl Plugin for UnifiedPlugin {
     }
 }
 
-struct Factory(Options);
+struct Factory {
+    agent_dir: PathBuf,
+    project_trusted: Arc<AtomicBool>,
+    options: Options,
+}
 
 #[async_trait::async_trait]
 impl SessionGenerationFactory for Factory {
@@ -128,11 +145,15 @@ impl SessionGenerationFactory for Factory {
         request: SessionGenerationRequest,
     ) -> Result<PreparedSessionGeneration, SessionError> {
         let cwd = request.cwd;
-        let context = PrepareContext::new(&cwd, &cwd, &cwd, &cwd, PluginScope::ExplicitPath, 0);
         let runtime = request
             .generation_overlay
             .apply_to(PiRuntime::builder())
-            .prepare_plugin::<UnifiedPlugin>(context, self.0.clone())
+            .workspace(request.workspace)
+            .prepare_plugin::<UnifiedPlugin>(
+                &self.agent_dir,
+                self.project_trusted.load(Ordering::SeqCst),
+                self.options.clone(),
+            )
             .provider_plugin(ScriptedProviderPlugin::scripted([
                 ScriptedTurn::Text("one".into()),
                 ScriptedTurn::Text("two".into()),
@@ -154,19 +175,29 @@ impl SessionGenerationFactory for Factory {
 #[tokio::test]
 async fn one_preparation_and_instance_span_both_hook_families_and_transactional_reload() {
     let directory = tempfile::tempdir().unwrap();
-    let config = directory.path().join("config.json");
+    let profile = tempfile::tempdir().unwrap();
+    let config = profile.path().join("config.json");
     std::fs::write(&config, r#"{"enabled":true}"#).unwrap();
+    // A workspace-local file must not override the explicitly supplied profile.
+    std::fs::write(directory.path().join("config.json"), r#"{"enabled":false}"#).unwrap();
     let observations = Arc::new(Observations::default());
-    let manager = MultiSessionManager::new(Factory(Options {
-        observations: observations.clone(),
-        ..Options::default()
-    }));
+    let project_trusted = Arc::new(AtomicBool::new(false));
+    let manager = MultiSessionManager::new(Factory {
+        agent_dir: profile.path().to_path_buf(),
+        project_trusted: project_trusted.clone(),
+        options: Options {
+            observations: observations.clone(),
+            ..Options::default()
+        },
+    });
     let session = manager
         .create_session(directory.path(), directory.path().join("session.jsonl"))
         .await
         .unwrap();
     session.current().prompt("first").await.unwrap();
     assert_eq!(observations.prepared.load(Ordering::SeqCst), 1);
+    assert_eq!(*observations.prepared_trust.lock().unwrap(), [false]);
+    assert_eq!(*observations.active_trust.lock().unwrap(), [false]);
     assert_eq!(
         *observations.events.lock().unwrap(),
         [(1, "register"), (1, "start"), (1, "agent")]
@@ -193,10 +224,13 @@ async fn one_preparation_and_instance_span_both_hook_families_and_transactional_
     assert_eq!(diagnostics[0].hook, SessionHook::InfoChanged.into());
     assert!(driver.diagnostics().is_empty());
 
+    project_trusted.store(true, Ordering::SeqCst);
     std::fs::write(&config, "invalid json").unwrap();
     assert!(session.reload().await.is_err());
     assert!(Arc::ptr_eq(&previous, &session.current()));
     session.current().prompt("still active").await.unwrap();
+    assert_eq!(*observations.prepared_trust.lock().unwrap(), [false, true]);
+    assert_eq!(*observations.active_trust.lock().unwrap(), [false, false]);
     assert_eq!(
         observations.events.lock().unwrap().last(),
         Some(&(1, "agent"))
@@ -205,6 +239,14 @@ async fn one_preparation_and_instance_span_both_hook_families_and_transactional_
     std::fs::write(&config, r#"{"enabled":true}"#).unwrap();
     session.reload().await.unwrap();
     session.current().prompt("replacement").await.unwrap();
+    assert_eq!(
+        *observations.prepared_trust.lock().unwrap(),
+        [false, true, true]
+    );
+    assert_eq!(
+        *observations.active_trust.lock().unwrap(),
+        [false, false, true]
+    );
     assert_eq!(
         &observations.events.lock().unwrap()[4..],
         &[(3, "register"), (1, "shutdown"), (3, "start"), (3, "agent")]
@@ -225,11 +267,16 @@ async fn one_preparation_and_instance_span_both_hook_families_and_transactional_
 #[tokio::test]
 async fn explicit_override_can_enable_a_plugin_disabled_in_its_own_config() {
     let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("config.json"), r#"{"enabled":false}"#).unwrap();
-    let manager = MultiSessionManager::new(Factory(Options {
-        enabled: Some(true),
-        ..Options::default()
-    }));
+    let profile = tempfile::tempdir().unwrap();
+    std::fs::write(profile.path().join("config.json"), r#"{"enabled":false}"#).unwrap();
+    let manager = MultiSessionManager::new(Factory {
+        agent_dir: profile.path().to_path_buf(),
+        project_trusted: Arc::new(AtomicBool::new(false)),
+        options: Options {
+            enabled: Some(true),
+            ..Options::default()
+        },
+    });
     let session = manager
         .create_session(directory.path(), directory.path().join("session.jsonl"))
         .await

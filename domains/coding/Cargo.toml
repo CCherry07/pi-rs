@@ -16,7 +16,6 @@ pi-core.workspace = true
 pi-plugin-mcp.workspace = true
 pi-js-package-manager.workspace = true
 pi-js-plugin.workspace = true
-pi-memory-loader.workspace = true
 pi-plugin-anthropic.workspace = true
 pi-plugin-azure-openai.workspace = true
 pi-plugin-bash.workspace = true

@@ -26,10 +26,11 @@ async fn loads_both_native_kinds_including_session_hooks_and_constructs_fresh_in
         provider_package.join(dynamic_library_name("native_fixture_provider")),
     )
     .unwrap();
-    std::fs::write(
-        provider_package.join("pi-plugin.toml"),
-        format!(
-            r#"schema = 1
+    let write_provider_manifest = |project_trusted| {
+        std::fs::write(
+            provider_package.join("pi-plugin.toml"),
+            format!(
+                r#"schema = 1
 [plugin]
 id = "native-fixture-provider"
 version = "0.1.0"
@@ -38,11 +39,17 @@ artifact = "{}"
 
 [options]
 marker = "from-manifest"
+expected_agent_dir = {}
+expected_project_trusted = {}
 "#,
-            dynamic_library_name("native_fixture_provider")
-        ),
-    )
-    .unwrap();
+                dynamic_library_name("native_fixture_provider"),
+                serde_json::to_string(&agent_dir).unwrap(),
+                project_trusted,
+            ),
+        )
+        .unwrap();
+    };
+    write_provider_manifest(false);
 
     let mut options = NativePluginLoaderOptions::new(&fixture, &agent_dir);
     options.explicit_paths = [
@@ -52,6 +59,8 @@ marker = "from-manifest"
     .into_iter()
     .collect();
     let plugins = NativePluginLoader::new(options).discover().unwrap();
+    assert!(!agent_dir.join("plugin-data").exists());
+    assert!(!agent_dir.join("cache/plugins/runtime").exists());
 
     let descriptors = plugins.descriptors();
     assert_eq!(descriptors.len(), 3);
@@ -133,6 +142,69 @@ marker = "from-manifest"
             .as_str(),
         "native-fixture-agent"
     );
+
+    // Native preparation gets the candidate workspace, host profile and trust,
+    // even when the package and loader's original cwd are elsewhere.
+    let workspace_dir = target.path().join("workspace");
+    let workspace = pi_plugin::WorkspaceSpec::new(
+        vec![
+            pi_plugin::WorkspaceRoot::external("primary", "Primary", &workspace_dir),
+            pi_plugin::WorkspaceRoot::external("shared", "Shared", target.path().join("shared")),
+        ],
+        pi_plugin::WorkspaceRootId::new("primary"),
+        &workspace_dir,
+    )
+    .unwrap()
+    .snapshot();
+    let session_package = target.path().join("session-package");
+    std::fs::create_dir_all(&session_package).unwrap();
+    std::fs::copy(
+        dynamic_library(target.path(), "native_fixture_session"),
+        session_package.join(dynamic_library_name("native_fixture_session")),
+    )
+    .unwrap();
+    for project_trusted in [false, true] {
+        write_provider_manifest(project_trusted);
+        std::fs::write(
+            session_package.join("pi-plugin.toml"),
+            format!(
+                r#"schema = 1
+[plugin]
+id = "native-fixture-session"
+version = "0.1.0"
+kind = "plugin"
+artifact = "{}"
+[options]
+expected_cwd = {}
+expected_roots = "2"
+expected_project_trusted = "{}"
+"#,
+                dynamic_library_name("native_fixture_session"),
+                serde_json::to_string(&workspace_dir).unwrap(),
+                project_trusted,
+            ),
+        )
+        .unwrap();
+        let mut options = NativePluginLoaderOptions::new(&fixture, &agent_dir);
+        options.project_trusted = project_trusted;
+        options.explicit_paths.push(session_package.clone());
+        let plugins = NativePluginLoader::new(options).discover().unwrap();
+        assert!(plugins.plugin_factories()[0].create().is_err());
+        for _ in 0..2 {
+            assert!(
+                plugins.plugin_factories()[0]
+                    .create_in(&workspace)
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                plugins.provider_factories()[0]
+                    .create_in(&workspace)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
 
     let reload_dir = target.path().join("reload-source");
     std::fs::create_dir_all(&reload_dir).unwrap();

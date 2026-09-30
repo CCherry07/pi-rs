@@ -136,14 +136,21 @@ impl HermesMemoryConfig {
     }
 
     pub(crate) fn load(agent_dir: &Path, provider_value: Option<&Value>) -> Self {
+        let value = Self::load_document(agent_dir, provider_value);
+        Self::from_document(agent_dir, value.as_ref())
+    }
+
+    pub(crate) fn load_document(agent_dir: &Path, provider_value: Option<&Value>) -> Option<Value> {
         let path = agent_dir.join("hermes-memory-config.json");
-        let value = match std::fs::read_to_string(path) {
+        match std::fs::read_to_string(path) {
             Ok(raw) => serde_json::from_str::<Value>(&raw).ok(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => provider_value.cloned(),
             Err(_) => None,
-        };
+        }
+    }
+
+    pub(crate) fn from_document(agent_dir: &Path, value: Option<&Value>) -> Self {
         value
-            .as_ref()
             .and_then(Value::as_object)
             .map_or_else(Self::default, |object| Self::from_object(object, agent_dir))
     }

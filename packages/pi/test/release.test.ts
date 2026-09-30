@@ -66,7 +66,6 @@ test("release builds discover every crate inheriting the workspace version", () 
       "pi-js-package-manager",
       "pi-plugin-mcp",
       "pi-media",
-      "pi-memory-loader",
       "pi-napi",
       "pi-plugin-memory-hermes",
       "pi-rpc",

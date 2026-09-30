@@ -12,6 +12,7 @@ pub mod curator;
 mod database;
 mod execution;
 mod flush;
+mod preparation;
 mod project;
 mod review_plugin;
 mod skill_review;
@@ -27,12 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use pi_core::{AbortHandle, PluginId, RunId};
-use pi_memory_loader::{
-    MemoryProviderConfig, MemoryProviderFactory, MemoryProviderInitializeContext,
-    MemoryProviderInitializeError, MemoryProviderPlugin,
-};
 use pi_plugin::{
     AgentEndEvent, AgentPluginContext, AgentSettledEvent, AgentStartEvent, BeforeAgentStartEvent,
     BeforeAgentStartPatch, MessageEndEvent, MessageEndPatch, NoticeLevel, Plugin, PluginError,
@@ -47,45 +43,9 @@ use crate::config::HermesMemoryConfig;
 use crate::execution::{HermesRunLease, HermesRunState, HermesRuns};
 use crate::store::HermesMemoryStore;
 
-pub const HERMES_MEMORY_PROVIDER_ID: &str = "hermes";
+pub use preparation::HermesMemoryOptions;
+
 pub const HERMES_MEMORY_PLUGIN_ID: &str = "memory-hermes";
-
-/// Factory for the built-in Hermes curated-memory provider.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct HermesMemoryProviderFactory;
-
-#[async_trait]
-impl MemoryProviderFactory for HermesMemoryProviderFactory {
-    fn id(&self) -> &str {
-        HERMES_MEMORY_PROVIDER_ID
-    }
-
-    async fn initialize(
-        &self,
-        context: &MemoryProviderInitializeContext,
-        provider_config: &MemoryProviderConfig,
-    ) -> Result<Arc<dyn MemoryProviderPlugin>, MemoryProviderInitializeError> {
-        let config = HermesMemoryConfig::load(context.agent_dir(), provider_config.raw());
-        let store = HermesMemoryStore::load(
-            context.agent_dir(),
-            context.cwd(),
-            config.clone(),
-            context.session_roots().to_vec(),
-            context.project_trusted(),
-        )?;
-        Ok(Arc::new(HermesMemoryPlugin {
-            store: Arc::new(store),
-            config,
-            runs: Arc::new(HermesRuns::default()),
-            foreground_runs: Mutex::new(HashMap::new()),
-            activity: Arc::new(Mutex::new(HashMap::new())),
-            live_index: Mutex::new(None),
-            backfill: Mutex::new(None),
-            config_warning_emitted: AtomicBool::new(false),
-            curator_worker: Mutex::new(None),
-        }))
-    }
-}
 
 pub struct HermesMemoryPlugin {
     store: Arc<HermesMemoryStore>,
@@ -159,14 +119,17 @@ pub fn managed_skill_roots(agent_dir: &Path, cwd: &Path, project_trusted: bool) 
     HermesMemoryStore::managed_skill_roots(agent_dir, cwd, project_trusted)
 }
 
-impl MemoryProviderPlugin for HermesMemoryPlugin {
-    fn memory_provider_id(&self) -> &str {
-        HERMES_MEMORY_PROVIDER_ID
-    }
-}
-
 #[pi_plugin::plugin]
 impl Plugin for HermesMemoryPlugin {
+    type Options = HermesMemoryOptions;
+
+    fn prepare(
+        context: &pi_plugin::PrepareContext,
+        options: Self::Options,
+    ) -> pi_plugin::PrepareResult<Option<Self>> {
+        preparation::prepare(context, options)
+    }
+
     fn id(&self) -> PluginId {
         PluginId::new(HERMES_MEMORY_PLUGIN_ID)
     }

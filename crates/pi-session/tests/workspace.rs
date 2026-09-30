@@ -23,7 +23,9 @@ struct ProbeOptions {
     #[serde(skip)]
     observations: Arc<Mutex<Vec<(&'static str, WorkspaceSpec)>>>,
 }
-impl pi_plugin::PluginFactory for Probe {
+
+#[pi_plugin::plugin]
+impl Plugin for Probe {
     type Options = ProbeOptions;
     fn prepare(
         context: &pi_plugin::PrepareContext,
@@ -36,10 +38,7 @@ impl pi_plugin::PluginFactory for Probe {
             .push(("factory", context.workspace().spec().clone()));
         Ok(Some(Self(options.observations)))
     }
-}
 
-#[pi_plugin::plugin]
-impl Plugin for Probe {
     fn id(&self) -> PluginId {
         PluginId::new("workspace-probe")
     }
@@ -144,14 +143,8 @@ async fn multi_root_workspace_survives_execution_reload_resume_and_fork() {
                     ..Default::default()
                 })
                 .prepare_plugin::<Probe>(
-                    pi_plugin::PrepareContext::new(
-                        "/compatibility",
-                        "/package",
-                        "/data",
-                        "/cache",
-                        pi_plugin::PluginScope::Global,
-                        0,
-                    ),
+                    "/agent-profile",
+                    false,
                     ProbeOptions {
                         observations: probe.0,
                     },

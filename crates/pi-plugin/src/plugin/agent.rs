@@ -431,6 +431,30 @@ impl AgentHookInterests {
 /// interests and supplies the async-trait expansion.
 #[async_trait]
 pub trait Plugin: Send + Sync {
+    /// Typed construction inputs, excluded from the runtime trait object.
+    /// `#[pi_plugin::plugin]` supplies `()` when this type is omitted.
+    type Options: serde::de::DeserializeOwned + Send + Sync + 'static
+    where
+        Self: Sized;
+
+    /// Reads configuration, validates options and constructs an unpublished instance.
+    /// Return `None` to disable this plugin for the candidate generation. Start
+    /// background work in `session_start`, after generation validation.
+    /// Plugins requiring host-injected resources may use a closure factory instead;
+    /// the default rejects typed preparation for those plugins.
+    fn prepare(
+        _context: &crate::PrepareContext,
+        _options: Self::Options,
+    ) -> crate::PrepareResult<Option<Self>>
+    where
+        Self: Sized,
+    {
+        Err(crate::PrepareError::initialization(format!(
+            "{} requires a host-provided factory or an implementation of Plugin::prepare",
+            std::any::type_name::<Self>()
+        )))
+    }
+
     fn id(&self) -> PluginId;
 
     /// Declares the Agent callbacks this plugin implements. Use `#[pi_plugin::plugin]`

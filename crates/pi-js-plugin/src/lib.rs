@@ -1470,6 +1470,8 @@ fn same_message_role(left: &Message, right: &Message) -> bool {
 
 #[async_trait]
 impl Plugin for JsPlugin {
+    type Options = ();
+
     fn id(&self) -> PluginId {
         self.id.clone()
     }

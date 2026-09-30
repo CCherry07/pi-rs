@@ -13,7 +13,6 @@ base64 = "0.22.1"
 chrono = "0.4.45"
 fs2 = "0.4.3"
 pi-core.workspace = true
-pi-memory-loader.workspace = true
 pi-plugin-skills.workspace = true
 pi-session.workspace = true
 pi-tool-support.workspace = true

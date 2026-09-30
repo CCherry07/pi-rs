@@ -11,6 +11,8 @@ use serde_json::json;
 mod curator_integration;
 #[path = "tests/memory_conformance.rs"]
 mod memory_conformance;
+#[path = "tests/preparation.rs"]
+mod preparation;
 #[path = "tests/review_policy.rs"]
 mod review_policy;
 

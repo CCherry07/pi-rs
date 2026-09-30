@@ -195,7 +195,7 @@ register it once. See [pi-plugin](../README.md) for shared ownership and prepara
 
 ## Fallible/configured construction / 配置与可失败初始化
 
-Only configured plugins implement the additional factory interface:
+Configured plugins define `Options` and `prepare` directly in their plugin trait impl:
 
 ```rust
 use pi_plugin::prelude::*;
@@ -212,7 +212,8 @@ struct AcmePlugin {
     options: Options,
 }
 
-impl PluginFactory for AcmePlugin {
+#[pi_plugin::native_provider(factory)]
+impl ProviderPlugin for AcmePlugin {
     type Options = Options;
 
     fn prepare(
@@ -223,13 +224,34 @@ impl PluginFactory for AcmePlugin {
     }
 }
 
-#[pi_plugin::native_provider(factory)]
-impl ProviderPlugin for AcmePlugin {}
 ```
 
-`PrepareContext` exposes the active cwd, immutable package directory, persistent per-plugin data
-directory, disposable cache directory, load scope, and generation. It deliberately omits terminal
-state, mutable registries, sessions, provider credentials, and product configuration.
+The same pattern applies to `#[pi_plugin::native_plugin(factory)] impl Plugin`.
+The `factory` option requires an explicit `prepare`; without it, the macro supplies unit options
+and prepares through `Default`. Both native constructors call the owning trait's `prepare`.
+This replaces the separate `PluginFactory` author interface. Rebuild native plugins against the
+updated SDK; the existing exact-build fingerprint rejects previous artifacts. Export symbols,
+descriptor layout and the loader's library-pinning contract are unchanged.
+
+`PrepareContext` exposes the immutable `workspace()`, its derived `cwd()`, the host's agent profile
+root through `agent_dir()`, and resolved project trust through `project_trusted()`. Native and
+statically linked plugins receive the same host environment. The trust decision controls whether
+project-local settings and resources may be enabled; it is supplied by the host, independently of
+manifest options and plugin load scope. It is not a filesystem or tool-execution permission.
+Plugins own configuration, data and cache paths within the profile root and
+create their own directories when needed; the loader no longer creates per-plugin data/cache
+directories. Existing files are retained. Plugins needing external resource paths accept them
+through their options. Package paths remain internal to manifest/artifact resolution, while load
+scope and generation bookkeeping stay outside the preparation interface. Terminal state, mutable
+registries, sessions and provider credentials are also unavailable during preparation.
+
+Direct callers use `PrepareContext::new(workspace, agent_dir, project_trusted)`; runtime callers use
+`prepare_plugin::<P>(agent_dir, project_trusted, options)` and let the runtime supply its candidate
+workspace. Native loaders use the same resolved trust for discovery and preparation.
+Replace the removed `package_dir()` / `data_dir()` / `cache_dir()` accessors with plugin-owned
+path resolution; `agent_dir()` is a profile root, not a per-plugin data directory. The removed
+`scope()` / `generation()` accessors have no preparation replacement. Rebuild native libraries
+against this SDK: the exact-build fingerprint rejects artifacts using the previous context layout.
 
 ## Local loading / 本地加载
 

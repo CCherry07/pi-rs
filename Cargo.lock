@@ -3066,7 +3066,6 @@ dependencies = [
  "pi-core",
  "pi-js-package-manager",
  "pi-js-plugin",
- "pi-memory-loader",
  "pi-plugin",
  "pi-plugin-anthropic",
  "pi-plugin-azure-openai",
@@ -3221,20 +3220,6 @@ dependencies = [
  "image",
  "pi-core",
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "pi-memory-loader"
-version = "0.8.4"
-dependencies = [
- "async-trait",
- "pi-core",
- "pi-plugin",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]
@@ -3529,7 +3514,6 @@ dependencies = [
  "fs2",
  "pi-agent",
  "pi-core",
- "pi-memory-loader",
  "pi-plugin",
  "pi-plugin-read",
  "pi-plugin-skills",

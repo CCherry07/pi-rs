@@ -345,7 +345,7 @@ pub fn execute_local(
 }
 
 /// SDK adapter: explicit invocation is reported by the catalog owner; the
-/// provider owns persistence. Neither the catalog nor memory-loader knows policy.
+/// provider owns persistence. The catalog does not know storage policy.
 pub fn activity_observer(
     roots: Vec<PathBuf>,
 ) -> std::sync::Arc<dyn pi_plugin_skills::SkillActivityObserver> {

@@ -342,6 +342,72 @@ async fn disabled_memory_skips_invalid_configuration_on_create_and_reload() {
 }
 
 #[tokio::test]
+async fn memory_profile_reload_keeps_tools_skills_and_frozen_context_together() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = fixture_config(root.path());
+    config.features = Features {
+        memory: true,
+        skills: true,
+        ..Features::none()
+    };
+    let enabled_features = config.features;
+    let profile_path = config.agent_dir.join("memory.json");
+    let profile = fs::read(&profile_path).unwrap();
+    let memory_dir = config.agent_dir.join("pi-hermes-memory");
+    write_skill(&memory_dir, "memory-managed-skill");
+    let memory_path = memory_dir.join("MEMORY.md");
+    fs::write(&memory_path, "Prefers concise responses.").unwrap();
+    let (pi, session) = create_session(config).await;
+    assert_feature_registrations(&session.current(), &enabled_features);
+    let prompt = projected_prompt(&session.current()).await;
+    assert!(prompt.contains("Prefers concise responses."));
+    assert!(prompt.contains("memory-managed-skill"));
+
+    let original = session.current();
+    fs::write(&memory_path, "Prefers source-backed responses.").unwrap();
+    for invalid in [
+        "not json",
+        r#"{"provider":"local"}"#,
+        r#"{"providers":{"hermes":{"sessionRoots":[""]}}}"#,
+    ] {
+        fs::write(&profile_path, invalid).unwrap();
+        assert!(session.reload().await.is_err());
+        assert!(Arc::ptr_eq(&original, &session.current()));
+        assert!(!original.is_closed());
+        assert_feature_registrations(&session.current(), &enabled_features);
+        assert_eq!(projected_prompt(&session.current()).await, prompt);
+    }
+
+    fs::write(&profile_path, r#"{"enabled":false}"#).unwrap();
+    session.reload().await.unwrap();
+    assert!(original.is_closed());
+    assert_feature_registrations(
+        &session.current(),
+        &Features {
+            memory: false,
+            ..enabled_features
+        },
+    );
+    let disabled_prompt = projected_prompt(&session.current()).await;
+    assert!(!disabled_prompt.contains("Prefers concise responses."));
+    assert!(!disabled_prompt.contains("Prefers source-backed responses."));
+    assert!(!disabled_prompt.contains("memory-managed-skill"));
+    assert_eq!(
+        fs::read_to_string(&memory_path).unwrap(),
+        "Prefers source-backed responses."
+    );
+
+    fs::write(&profile_path, profile).unwrap();
+    session.reload().await.unwrap();
+    assert_feature_registrations(&session.current(), &enabled_features);
+    let refreshed = projected_prompt(&session.current()).await;
+    assert!(refreshed.contains("Prefers source-backed responses."));
+    assert!(refreshed.contains("memory-managed-skill"));
+    assert!(!refreshed.contains("Prefers concise responses."));
+    pi.sessions().shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn reload_preserves_feature_selection_while_refreshing_enabled_resources() {
     for skills in [false, true] {
         let root = tempfile::tempdir().unwrap();

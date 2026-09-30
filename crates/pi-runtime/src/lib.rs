@@ -9,6 +9,7 @@ pub use prompt::{
     SystemPrompt, SystemPromptFactory, SystemPromptRenderer,
 };
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
 use futures::StreamExt;
@@ -185,11 +186,9 @@ type PluginFactory = Arc<dyn Fn() -> Result<Arc<dyn Plugin>, String> + Send + Sy
 type ProviderPluginFactory = Arc<dyn Fn() -> Result<Arc<dyn ProviderPlugin>, String> + Send + Sync>;
 
 type PluginPreparation =
-    Arc<dyn Fn(u64, &WorkspaceSnapshot) -> Result<Option<Arc<dyn Plugin>>, String> + Send + Sync>;
+    Arc<dyn Fn(&WorkspaceSnapshot) -> Result<Option<Arc<dyn Plugin>>, String> + Send + Sync>;
 type ProviderPluginPreparation = Arc<
-    dyn Fn(u64, &WorkspaceSnapshot) -> Result<Option<Arc<dyn ProviderPlugin>>, String>
-        + Send
-        + Sync,
+    dyn Fn(&WorkspaceSnapshot) -> Result<Option<Arc<dyn ProviderPlugin>>, String> + Send + Sync,
 >;
 
 enum PluginSource {
@@ -199,15 +198,11 @@ enum PluginSource {
 }
 
 impl PluginSource {
-    fn prepare(
-        &self,
-        generation: u64,
-        workspace: &WorkspaceSnapshot,
-    ) -> Result<Option<Arc<dyn Plugin>>, String> {
+    fn prepare(&self, workspace: &WorkspaceSnapshot) -> Result<Option<Arc<dyn Plugin>>, String> {
         match self {
             Self::Pinned(plugin) => Ok(Some(Arc::clone(plugin))),
             Self::Factory(factory) => factory().map(Some),
-            Self::Prepared(factory) => factory(generation, workspace),
+            Self::Prepared(factory) => factory(workspace),
         }
     }
 }
@@ -221,13 +216,12 @@ enum ProviderPluginSource {
 impl ProviderPluginSource {
     fn prepare(
         &self,
-        generation: u64,
         workspace: &WorkspaceSnapshot,
     ) -> Result<Option<Arc<dyn ProviderPlugin>>, String> {
         match self {
             Self::Pinned(plugin) => Ok(Some(Arc::clone(plugin))),
             Self::Factory(factory) => factory().map(Some),
-            Self::Prepared(factory) => factory(generation, workspace),
+            Self::Prepared(factory) => factory(workspace),
         }
     }
 }
@@ -342,27 +336,30 @@ impl PiRuntimeBuilder {
     }
 
     /// Prepares typed plugin configuration once per candidate generation.
+    ///
+    /// The host supplies its agent profile directory and resolved project trust;
+    /// the runtime supplies the candidate workspace. Plugins own their configuration
+    /// and file layout.
     pub fn prepare_plugin<P>(
         mut self,
-        context: pi_plugin::PrepareContext,
+        agent_dir: impl Into<PathBuf>,
+        project_trusted: bool,
         options: P::Options,
     ) -> Self
     where
-        P: Plugin + pi_plugin::PluginFactory,
+        P: Plugin + 'static,
         P::Options: Clone,
     {
-        self.plugin_sources.push(PluginSource::Prepared(Arc::new(
-            move |generation, workspace| {
+        let agent_dir = agent_dir.into();
+        self.plugin_sources
+            .push(PluginSource::Prepared(Arc::new(move |workspace| {
                 P::prepare(
-                    &context
-                        .for_generation(generation)
-                        .with_workspace(workspace.clone()),
+                    &pi_plugin::PrepareContext::new(workspace.clone(), &agent_dir, project_trusted),
                     options.clone(),
                 )
                 .map(|plugin| plugin.map(|plugin| Arc::new(plugin) as Arc<dyn Plugin>))
                 .map_err(|error| error.to_string())
-            },
-        )));
+            })));
         self
     }
 
@@ -373,7 +370,7 @@ impl PiRuntimeBuilder {
         E: std::fmt::Display,
     {
         self.plugin_sources
-            .push(PluginSource::Prepared(Arc::new(move |_, _| {
+            .push(PluginSource::Prepared(Arc::new(move |_| {
                 factory().map_err(|error| error.to_string())
             })));
         self
@@ -385,7 +382,7 @@ impl PiRuntimeBuilder {
         E: std::fmt::Display,
     {
         self.provider_plugin_sources
-            .push(ProviderPluginSource::Prepared(Arc::new(move |_, _| {
+            .push(ProviderPluginSource::Prepared(Arc::new(move |_| {
                 factory().map_err(|error| error.to_string())
             })));
         self
@@ -398,7 +395,7 @@ impl PiRuntimeBuilder {
         E: std::fmt::Display,
     {
         self.plugin_sources
-            .push(PluginSource::Prepared(Arc::new(move |_, workspace| {
+            .push(PluginSource::Prepared(Arc::new(move |workspace| {
                 factory(workspace).map_err(|error| error.to_string())
             })));
         self
@@ -413,9 +410,9 @@ impl PiRuntimeBuilder {
         E: std::fmt::Display,
     {
         self.provider_plugin_sources
-            .push(ProviderPluginSource::Prepared(Arc::new(
-                move |_, workspace| factory(workspace).map_err(|error| error.to_string()),
-            )));
+            .push(ProviderPluginSource::Prepared(Arc::new(move |workspace| {
+                factory(workspace).map_err(|error| error.to_string())
+            })));
         self
     }
 
@@ -630,25 +627,17 @@ fn build_generation(
 
     let mut plugins = Vec::with_capacity(blueprint.plugin_sources.len());
     for (index, source) in blueprint.plugin_sources.iter().enumerate() {
-        if let Some(plugin) =
-            source
-                .prepare(generation, &blueprint.workspace)
-                .map_err(|message| {
-                    RuntimeError::Build(format!("plugin source {index} failed: {message}"))
-                })?
-        {
+        if let Some(plugin) = source.prepare(&blueprint.workspace).map_err(|message| {
+            RuntimeError::Build(format!("plugin source {index} failed: {message}"))
+        })? {
             plugins.push(plugin);
         }
     }
     let mut provider_plugins = Vec::with_capacity(blueprint.provider_plugin_sources.len());
     for (index, source) in blueprint.provider_plugin_sources.iter().enumerate() {
-        if let Some(plugin) =
-            source
-                .prepare(generation, &blueprint.workspace)
-                .map_err(|message| {
-                    RuntimeError::Build(format!("provider plugin source {index} failed: {message}"))
-                })?
-        {
+        if let Some(plugin) = source.prepare(&blueprint.workspace).map_err(|message| {
+            RuntimeError::Build(format!("provider plugin source {index} failed: {message}"))
+        })? {
             provider_plugins.push(plugin);
         }
     }

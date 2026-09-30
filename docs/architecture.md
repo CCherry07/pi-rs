@@ -288,7 +288,6 @@ crates/pi-acp                   official stable-v1 ACP adapter and ACP session p
 apps/pi-desktop                experimental Tauri/React shell with a Pi-to-thread event Adapter
 apps/pi-cli/src/markdown       TUI-owned Markdown parsing, streaming repair, highlighting, and Ratatui rendering
 crates/pi-plugin-macros         static plugin preparation, agent hook-interest derivation, and native exports
-crates/pi-memory-loader         memory.json loading and provider construction Interface
 crates/pi-plugin-manager        native loading, installation/reconciliation, and optional authoring tools
 crates/pi-js-package-manager     Pi-compatible JS discovery and npm/git orchestration
 crates/pi-js-plugin             JS wire DTOs plus unified Plugin and independent ProviderPlugin adapters
@@ -346,10 +345,8 @@ production tools     -> pi-core + pi-plugin + pi-tool-support
 pi-plugin-read       -> pi-media (shared image normalization)
 plugins/features/pi-plugin-skills
                      -> pi-core + pi-plugin (skill discovery, prompt contribution, explicit invocation)
-pi-memory-loader     -> pi-core + pi-plugin
-                        (provider selection, opaque configuration, and construction)
 plugins/features/pi-plugin-memory-hermes
-                     -> pi-memory-loader + filesystem locking
+                     -> pi-plugin + filesystem locking
                         (default bounded, file-backed curated memory provider)
 plugins/providers/pi-plugin-models
                      -> pi-core + pi-plugin + pi-plugin-openai (credential-blind catalog and routing)
@@ -501,9 +498,10 @@ Inside `domains/coding`, private `generation` owns generation preparation, trust
 context binding and `PreparedProductActivation`; `composition` owns first-party selection,
 ordered Plugin/ProviderPlugin registrations, cross-plugin wiring and active-tool policy.
 Its private borrowed `GenerationComponents` view contains only already-prepared native, JavaScript,
-MCP, memory and subagent components. Unified registration retains one memory provider instance
-for both callback families through the ordinary factory seam. Runtime context is required (tests
-supply an explicitly unavailable context); overlays, dynamic catalog candidates, settings and
+MCP, memory and subagent components. Hermes implements `Plugin::prepare`; the product
+prepares it once before Skills wiring and retains that same instance for both callback families.
+Every candidate product generation repeats preparation through `ProductSessionFactory`. Runtime context
+is required (tests supply an explicitly unavailable context); overlays, dynamic catalog candidates, settings and
 activation guards are not component fields. `BuiltinProviderSet` prepares the shared HTTP transport
 before reading credentials, retaining error precedence, and supplies it to both built-ins and
 `ModelsPlugin`. Codex credential/transport overrides are test-only provider preparation inputs,
@@ -772,14 +770,39 @@ features are development dependencies; `pi-core` uses `tokio-util` for cancellat
 pulls in the full futures facade. `pi-plugin` explicitly reexports its foundational core API so new
 core types do not silently enlarge the plugin surface.
 
-`PluginFactory::prepare(&PrepareContext, Options) -> Result<Option<Self>, PrepareError>` is a
-construction contract, separate from the object-safe Plugin interface. `prepare_plugin` runs it
-once per candidate runtime generation; ordinary closure factories remain available. `None` disables
-the instance. No `new()` is required. Native macros use the same factory with `factory`, or construct
-`Default` for configuration-free plugins. Native option types additionally implement JsonSchema.
+`Plugin` owns `Options` and `prepare(&PrepareContext, Options) -> Result<Option<Self>, PrepareError>`
+alongside registration and Agent/Session callbacks. `ProviderPlugin` owns the same construction
+members independently; there is no separate construction trait. Both members require `Self: Sized`,
+preserving the heterogeneous `Arc<dyn Plugin>` and `Arc<dyn ProviderPlugin>` runtime collections.
+`prepare_plugin` requires only `P: Plugin + 'static` and cloneable options, and runs preparation once
+per candidate runtime generation. Ordinary closure factories remain available. Static plugin macros
+supply unit options when omitted; default preparation reports that host-injected plugins require a
+factory instead of silently disabling them. `None` explicitly disables an instance. No `new()` is
+required. Native macros invoke the owning trait's `prepare`: `factory` requires its implementation,
+while configuration-free exports get a generated implementation using `Default`. Native option
+types additionally implement JsonSchema. This is a deliberate Rust author-interface simplification;
+native symbols, descriptor layout, generation ordering and Pi wire/storage formats are unchanged.
+The existing exact-build fingerprint requires native libraries to be rebuilt against the new SDK.
+
+`PrepareContext` contains an immutable `WorkspaceSnapshot`, the explicitly supplied `agent_dir`,
+and the host's resolved `project_trusted` decision; `cwd()` derives from that workspace. The
+read-only `project_trusted()` accessor describes permission to enable project-local settings and
+resources, matching Pi's `projectTrusted` / `isProjectTrusted()` concept. Trust resolution remains
+host policy; it is not a plugin option or a filesystem/tool-execution permission. Coding resolves
+it before each candidate generation and passes the same value to preparation and resource discovery.
+`prepare_plugin::<P>(agent_dir, project_trusted, options)` constructs the context from the candidate
+workspace. The generic runtime neither resolves project trust nor discovers a default profile or
+creates plugin data/cache directories. Native loading passes the same host profile root and trust
+decision, retains package paths only for manifest/artifact resolution, and no longer exposes load
+scope or a per-factory generation counter. Plugins own their file layouts and any explicit resource
+path options. This deliberately simplifies the Rust preparation interface; native libraries must
+be rebuilt through the existing fingerprint check, and runtime generations remain unchanged.
 
 Plugins own reading and validating their config files. Recommended precedence is explicit optional
-overrides, plugin file, then defaults; the framework imposes no product settings schema. A factory
+overrides, plugin file, then defaults; the framework imposes no product settings schema. `Options`
+contains user-configurable plugin inputs, while `PrepareContext` carries host facts. The generic
+native loader passes manifest options without knowing plugin fields; product composition does not
+synthesize private options from unrelated host state. A factory
 may retain caches outside generation instances and reuse expensive resources after comparing all
 relevant inputs (effective config, code/resource content, paths and trust). Equal settings alone do
 not skip generation validation or justify reusing mutable session state. Preparation must not
@@ -2127,8 +2150,8 @@ The project `.agents/skills` root, bundled/hub installs, external roots, missing
 packages are excluded. In particular, no bundled/hub ownership manifest or bundled pruning is
 introduced. Provenance records creation, activity, usage/view/patch counts, active/stale state,
 ownership, pinning, and a hash of every package file except the provenance itself.
-`SkillsPlugin` exposes an optional semantic invocation observer; SDK wiring connects Hermes
-usage persistence without putting storage policy in the catalog, session, or memory-loader.
+`SkillsPlugin` exposes an optional semantic invocation observer; Coding composition connects Hermes
+usage persistence without putting storage policy in the catalog or session.
 Invocation and foreground activity observers cover both managed roots and identify packages by
 path, so same-named skills in different scopes do not share activity. Successful foreground
 `read`/`skill_view` calls also record activity. Maintenance reads do not
@@ -2200,34 +2223,48 @@ remain Rust adaptations. The compressor
 implements the default window/retention profile and detached lifecycle, not every upstream
 compressor tuning option or recovery heuristic. This is not byte-for-byte or complete Hermes parity.
 
-Hermes is the only first-party memory provider registered by `pi-coding`. `memory.json` selects
-exactly one provider; an unknown provider id, including the retired `"local"` id, rejects candidate
-generation instead of falling back or migrating data. Removing the local provider does not delete
-existing files under `<agent-dir>/memory`; the product simply no longer reads them.
+Hermes is the first-party memory plugin registered by `pi-coding`. It implements the ordinary
+`Plugin` Interface, including `Options` and `prepare`; there is no memory-specific factory, marker trait,
+prepared-provider wrapper or loader crate. Its construction is synchronous; background work still
+starts through Session hooks and is cleaned up on shutdown. Embedders can register it through
+`PiRuntimeBuilder::prepare_plugin::<HermesMemoryPlugin>` without a memory-specific host.
 
-Memory providers do not add a fourth plugin Driver. `pi-memory-loader` is a host-side construction crate that
-owns `MemoryLoader`. The Loader reads `<agent-dir>/memory.json`, selects exactly one registered
-`MemoryProviderFactory`, and awaits provider initialization before the candidate generation is
-published. The resulting `Arc<dyn MemoryProviderPlugin>` is registered once in the unified PluginDriver. Agent and Session callbacks share that
-instance without a forwarding adapter or memory-specific driver.
+`HermesMemoryOptions` contains optional user overrides for additional historical-session scan roots.
+Coding passes default options; it no longer derives scan roots from configured or active session
+paths. Hermes reads `sessionRoots` from `memory.json`'s `providers.hermes` object or the existing
+`hermes-memory-config.json` document. Explicit options override the selected document, and an
+explicit empty list clears extra roots. The dedicated document retains its existing precedence
+over the profile object. Roots are deduplicated; relative paths resolve from `agent_dir`, absolute
+paths stay absolute, and empty paths or malformed lists fail preparation before storage creation.
+These roots supplement `<agent_dir>/sessions`; they are not an authoritative inventory of all
+session locations. Custom historical directories must now be configured explicitly. This is a
+deliberate Rust/Hermes discovery policy change; live session indexing still consumes session
+snapshots through the existing lifecycle callbacks.
+`PrepareContext` supplies the workspace/cwd, agent profile directory through `agent_dir()`, and
+resolved project trust through `project_trusted()`.
+The plugin adds that profile's default `sessions` root, reads its configuration, and constructs
+unpublished storage and plugin state. Coding prepares it once before cross-plugin wiring so tool
+activation and Hermes-managed Skills use the same enablement decision. It shares the resulting
+ordinary Plugin instance between Agent and Session callbacks, and repeats preparation for every
+candidate product generation. Failed preparation leaves the previous generation published.
 
-`MemoryProviderPlugin` is a marker Interface extending the ordinary `Plugin` interface. It adds only the provider identity used by `memory.json`; it does not
-copy their hooks into a parallel lifecycle contract. A provider declares its tools, commands,
-agent hooks, and session hooks directly through that existing plugin trait. There is no parallel
-`capabilities` declaration or generic `MemoryLifecycleTask` event envelope to keep in sync.
+Hermes owns the existing `<agent-dir>/memory.json` document, including validation of its outer
+shape. Generic `settings.json` parsing neither decodes nor merges memory policy, and project
+settings cannot redirect durable memory. The versioned document retains `enabled`, `provider`,
+`providers.<id>` and `recall`. Missing configuration defaults to Hermes; `enabled: false` skips
+storage initialization. An enabled unknown provider, including the retired `"local"` id, rejects
+preparation instead of falling back or migrating data. Unselected provider subtrees remain opaque
+and ignored. Legacy recall budgets are still parsed and validated for configuration compatibility;
+Hermes did not consume them, and they no longer have a public runtime options type.
+`hermes-memory-config.json` retains precedence over `providers.hermes`. This is a Rust product
+configuration contract, not a Pi upstream behavior.
 
-There is no provider-neutral record, storage, retrieval, or session-index Interface. Provider
-authors receive configuration plus the ordinary plugin lifecycles and own their complete memory
-model behind that seam. This avoids freezing the bundled SQLite provider's record and query shapes
-into every future provider before a second implementation demonstrates shared semantics.
-
-The Memory Loader owns only the outer shape of `<agent-dir>/memory.json`; generic `settings.json`
-parsing neither decodes nor merges memory policy, and project settings cannot redirect durable
-memory. The versioned document selects the provider, recall budgets, and provider-specific
-configuration under `providers.<id>`. Each provider value remains opaque JSON to the host, and
-only the selected subtree is passed to its factory. Missing configuration defaults to Hermes;
-an invalid document or unknown provider rejects generation preparation so the previous generation
-remains published.
+`HermesMemoryPlugin::configured_enabled` exposes read-only selection for Desktop skill management;
+it validates the same document but never opens stores, migrates files or starts workers. An unknown
+provider remains unselected in this read-only view. The product feature ceiling skips preparation
+entirely when memory is disabled, including when `memory.json` is invalid. Existing memory files
+are preserved. Provider-neutral storage, retrieval and record contracts remain absent; additional
+memory implementations can use ordinary plugin factories without adding a new lifecycle.
 
 The plugin-facing custom-entry capability permits an atomic extension-state append while the Agent
 itself owns the prompt operation. `SessionLog` still assigns the shared mutation sequence; busy

@@ -58,6 +58,7 @@ pub fn plugin(args: TokenStream, item: TokenStream) -> TokenStream {
     let mut implementation = parse_macro_input!(item as ItemImpl);
     match inject_agent_hook_interests(&mut implementation, quote!(::pi_plugin)) {
         Ok(()) => {
+            inject_default_options(&mut implementation);
             ensure_async_trait(
                 &mut implementation,
                 quote!(::pi_plugin::__plugin_async_trait),
@@ -130,6 +131,7 @@ fn expand_static_plugin(
         .into_compile_error()
         .into();
     }
+    inject_default_options(&mut implementation);
     ensure_async_trait(&mut implementation, async_trait_path);
     quote!(#implementation).into()
 }
@@ -197,6 +199,37 @@ fn expand_export(
         }
     }));
 
+    if args.factory {
+        if !implementation
+            .items
+            .iter()
+            .any(|item| matches!(item, ImplItem::Fn(item) if item.sig.ident == "prepare"))
+        {
+            return Err(syn::Error::new_spanned(
+                implementation,
+                "the `factory` option requires `prepare` in the plugin trait impl",
+            ));
+        }
+    } else {
+        if implementation.items.iter().any(|item| {
+            matches!(item, ImplItem::Type(item) if item.ident == "Options")
+                || matches!(item, ImplItem::Fn(item) if item.sig.ident == "prepare")
+        }) {
+            return Err(syn::Error::new_spanned(
+                implementation,
+                "native plugins defining `Options` or `prepare` must use the `factory` option",
+            ));
+        }
+        implementation.items.push(ImplItem::Fn(parse_quote! {
+            fn prepare(
+                _context: &::pi_plugin::PrepareContext,
+                _options: Self::Options,
+            ) -> ::pi_plugin::PrepareResult<Option<Self>> {
+                Ok(Some(<Self as ::core::default::Default>::default()))
+            }
+        }));
+    }
+    inject_default_options(implementation);
     ensure_async_trait(implementation, quote!(::pi_plugin::__plugin_async_trait));
 
     let self_type = &implementation.self_ty;
@@ -220,18 +253,18 @@ fn expand_export(
 
     let construct = if args.factory {
         quote! {
-            let options = ::pi_plugin::native::decode_plugin_options::<<#self_type as ::pi_plugin::PluginFactory>::Options>(options)?;
-            <#self_type as ::pi_plugin::PluginFactory>::prepare(context, options)
+            let options = ::pi_plugin::native::decode_plugin_options::<<#self_type as #trait_type>::Options>(options)?;
+            <#self_type as #trait_type>::prepare(context, options)
         }
     } else {
         quote! {
             ::pi_plugin::native::ensure_empty_plugin_options(options)?;
-            Ok(Some(<#self_type as ::core::default::Default>::default()))
+            <#self_type as #trait_type>::prepare(context, ())
         }
     };
     let schema = if args.factory {
         quote! {
-            ::pi_plugin::native::plugin_options_schema::<<#self_type as ::pi_plugin::PluginFactory>::Options>()
+            ::pi_plugin::native::plugin_options_schema::<<#self_type as #trait_type>::Options>()
         }
     } else {
         quote! {
@@ -281,6 +314,18 @@ fn expand_export(
             #schema
         }
     })
+}
+
+fn inject_default_options(implementation: &mut ItemImpl) {
+    if !implementation
+        .items
+        .iter()
+        .any(|item| matches!(item, ImplItem::Type(item) if item.ident == "Options"))
+    {
+        implementation.items.push(ImplItem::Type(parse_quote! {
+            type Options = ();
+        }));
+    }
 }
 
 fn inject_agent_hook_interests(

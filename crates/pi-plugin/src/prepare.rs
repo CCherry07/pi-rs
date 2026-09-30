@@ -1,45 +1,27 @@
-use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PluginScope {
-    Global,
-    Project { root: PathBuf },
-    ExplicitPath,
-}
-
+/// Host-supplied environment for preparing an unpublished plugin instance.
+///
+/// Plugins own their configuration and file layout beneath the agent directory.
+/// Constructing this context performs no discovery or filesystem operations.
 #[derive(Debug, Clone)]
 pub struct PrepareContext {
     workspace: crate::WorkspaceSnapshot,
-    package_dir: PathBuf,
-    data_dir: PathBuf,
-    cache_dir: PathBuf,
-    scope: PluginScope,
-    generation: u64,
+    agent_dir: PathBuf,
+    project_trusted: bool,
 }
 
 impl PrepareContext {
     pub fn new(
-        cwd: impl Into<PathBuf>,
-        package_dir: impl Into<PathBuf>,
-        data_dir: impl Into<PathBuf>,
-        cache_dir: impl Into<PathBuf>,
-        scope: PluginScope,
-        generation: u64,
+        workspace: crate::WorkspaceSnapshot,
+        agent_dir: impl Into<PathBuf>,
+        project_trusted: bool,
     ) -> Self {
         Self {
-            workspace: crate::WorkspaceSpec::from_cwd(cwd).snapshot(),
-            package_dir: package_dir.into(),
-            data_dir: data_dir.into(),
-            cache_dir: cache_dir.into(),
-            scope,
-            generation,
+            workspace,
+            agent_dir: agent_dir.into(),
+            project_trusted,
         }
-    }
-
-    pub fn with_workspace(mut self, workspace: crate::WorkspaceSnapshot) -> Self {
-        self.workspace = workspace;
-        self
     }
 
     pub fn workspace(&self) -> &crate::WorkspaceSnapshot {
@@ -50,43 +32,16 @@ impl PrepareContext {
         self.workspace.cwd()
     }
 
-    pub fn package_dir(&self) -> &Path {
-        &self.package_dir
+    /// The host's agent profile root, shared by plugins and distinct from cwd.
+    pub fn agent_dir(&self) -> &Path {
+        &self.agent_dir
     }
 
-    pub fn data_dir(&self) -> &Path {
-        &self.data_dir
+    /// The host's resolved decision to enable project-local settings and resources.
+    /// This is not a filesystem or tool-execution permission.
+    pub fn project_trusted(&self) -> bool {
+        self.project_trusted
     }
-
-    pub fn cache_dir(&self) -> &Path {
-        &self.cache_dir
-    }
-
-    pub fn scope(&self) -> &PluginScope {
-        &self.scope
-    }
-
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    #[doc(hidden)]
-    pub fn for_generation(&self, generation: u64) -> Self {
-        let mut context = self.clone();
-        context.generation = generation;
-        context
-    }
-}
-
-pub trait PluginFactory: Sized + Send + Sync + 'static {
-    type Options: DeserializeOwned + Send + Sync + 'static;
-
-    /// Reads plugin-owned configuration, validates effective options and constructs an unpublished instance.
-    /// Return None to disable this plugin for the candidate generation.
-    fn prepare(
-        context: &PrepareContext,
-        options: Self::Options,
-    ) -> Result<Option<Self>, PrepareError>;
 }
 
 #[derive(Debug, thiserror::Error)]

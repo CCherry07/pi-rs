@@ -185,6 +185,29 @@ impl<'a> ProviderRegisterContext<'a> {
 /// supplies the async-trait expansion.
 #[async_trait]
 pub trait ProviderPlugin: Send + Sync {
+    /// Typed construction inputs, excluded from the runtime trait object.
+    /// `#[pi_plugin::provider_plugin]` supplies `()` when this type is omitted.
+    type Options: serde::de::DeserializeOwned + Send + Sync + 'static
+    where
+        Self: Sized;
+
+    /// Reads configuration, validates options and constructs an unpublished instance.
+    /// Return `None` to disable this provider plugin for the candidate generation.
+    /// Plugins requiring host-injected resources may use a closure factory instead;
+    /// the default rejects typed preparation for those plugins.
+    fn prepare(
+        _context: &crate::PrepareContext,
+        _options: Self::Options,
+    ) -> crate::PrepareResult<Option<Self>>
+    where
+        Self: Sized,
+    {
+        Err(crate::PrepareError::initialization(format!(
+            "{} requires a host-provided factory or an implementation of ProviderPlugin::prepare",
+            std::any::type_name::<Self>()
+        )))
+    }
+
     fn id(&self) -> PluginId;
 
     fn register(&self, _context: &mut ProviderRegisterContext<'_>) -> Result<()> {

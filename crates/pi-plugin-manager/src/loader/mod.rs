@@ -12,7 +12,7 @@ use pi_plugin::native::{
     BUILD_FINGERPRINT, NATIVE_PLUGIN_ABI_VERSION, NativePluginKind, PluginCreateV24,
     PluginDescriptorFnV1, PluginOptionsValue, ProviderPluginCreateV24,
 };
-use pi_plugin::{Plugin, PluginScope, PrepareContext, ProviderPlugin};
+use pi_plugin::{Plugin, PrepareContext, ProviderPlugin};
 use pi_runtime::PiRuntimeBuilder;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -117,34 +117,12 @@ impl NativePluginLoader {
     }
 
     pub fn discover(&self) -> Result<NativePlugins, NativePluginError> {
-        let mut sources = Vec::new();
-        for manifest in discover_manifests(&self.options.agent_dir.join("plugins"))? {
-            sources.push(PluginSource {
-                path: manifest,
-                scope: PluginScope::Global,
-            });
-        }
+        let mut sources = discover_manifests(&self.options.agent_dir.join("plugins"))?;
         if self.options.project_trusted {
             let root = self.options.cwd.join(".pi/plugins");
-            for manifest in discover_manifests(&root)? {
-                sources.push(PluginSource {
-                    path: manifest,
-                    scope: PluginScope::Project {
-                        root: self.options.cwd.clone(),
-                    },
-                });
-            }
+            sources.extend(discover_manifests(&root)?);
         }
-        sources.extend(
-            self.options
-                .explicit_paths
-                .iter()
-                .cloned()
-                .map(|path| PluginSource {
-                    path,
-                    scope: PluginScope::ExplicitPath,
-                }),
-        );
+        sources.extend(self.options.explicit_paths.iter().cloned());
 
         let mut plugins = NativePlugins::default();
         let mut identities = HashSet::new();
@@ -166,11 +144,11 @@ impl NativePluginLoader {
         Ok(plugins)
     }
 
-    fn load_source(&self, source: PluginSource) -> Result<LoadedFactory, NativePluginError> {
-        let path = if source.path.is_dir() {
-            source.path.join(MANIFEST_FILE_NAME)
+    fn load_source(&self, path: PathBuf) -> Result<LoadedFactory, NativePluginError> {
+        let path = if path.is_dir() {
+            path.join(MANIFEST_FILE_NAME)
         } else {
-            source.path
+            path
         };
         let is_manifest = path
             .file_name()
@@ -180,7 +158,6 @@ impl NativePluginLoader {
         } else {
             ResolvedPackage {
                 artifact: canonicalize(&path)?,
-                package_dir: canonicalize(path.parent().unwrap_or_else(|| Path::new(".")))?,
                 options: PluginOptionsValue::Object(serde_json::Map::new()),
                 expected: None,
             }
@@ -189,7 +166,7 @@ impl NativePluginLoader {
             resolved,
             &self.options.cwd,
             &self.options.agent_dir,
-            source.scope,
+            self.options.project_trusted,
         )
     }
 }
@@ -252,14 +229,6 @@ struct FactoryCommon {
     descriptor: NativePluginDescriptor,
     context: PrepareContext,
     options: PluginOptionsValue,
-    next_generation: AtomicU64,
-}
-
-impl FactoryCommon {
-    fn context(&self) -> PrepareContext {
-        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        self.context.for_generation(generation)
-    }
 }
 
 #[derive(Clone)]
@@ -282,7 +251,11 @@ impl NativePluginFactory {
         workspace: &pi_plugin::WorkspaceSnapshot,
     ) -> Result<Option<Arc<dyn Plugin>>, NativePluginError> {
         (self.create)(
-            &self.common.context().with_workspace(workspace.clone()),
+            &PrepareContext::new(
+                workspace.clone(),
+                self.common.context.agent_dir(),
+                self.common.context.project_trusted(),
+            ),
             &self.common.options,
         )
         .map_err(|error| NativePluginError::Initialization {
@@ -312,7 +285,11 @@ impl NativeProviderPluginFactory {
         workspace: &pi_plugin::WorkspaceSnapshot,
     ) -> Result<Option<Arc<dyn ProviderPlugin>>, NativePluginError> {
         (self.create)(
-            &self.common.context().with_workspace(workspace.clone()),
+            &PrepareContext::new(
+                workspace.clone(),
+                self.common.context.agent_dir(),
+                self.common.context.project_trusted(),
+            ),
             &self.common.options,
         )
         .map_err(|error| NativePluginError::Initialization {
@@ -336,14 +313,8 @@ impl LoadedFactory {
     }
 }
 
-struct PluginSource {
-    path: PathBuf,
-    scope: PluginScope,
-}
-
 struct ResolvedPackage {
     artifact: PathBuf,
-    package_dir: PathBuf,
     options: PluginOptionsValue,
     expected: Option<ExpectedDescriptor>,
 }
@@ -419,7 +390,6 @@ fn resolve_manifest(path: &Path) -> Result<ResolvedPackage, NativePluginError> {
     })?;
     Ok(ResolvedPackage {
         artifact,
-        package_dir,
         options,
         expected: Some(ExpectedDescriptor {
             manifest_path: path.to_path_buf(),
@@ -434,7 +404,7 @@ fn load_library(
     package: ResolvedPackage,
     cwd: &Path,
     agent_dir: &Path,
-    scope: PluginScope,
+    project_trusted: bool,
 ) -> Result<LoadedFactory, NativePluginError> {
     let load_path = snapshot_artifact(&package.artifact, agent_dir)?;
     let pinned = pinned_library(&load_path, &package.artifact)?;
@@ -494,17 +464,16 @@ fn load_library(
         kind,
         artifact: package.artifact.clone(),
     };
-    let data_dir = agent_dir.join("plugin-data").join(&id);
-    let cache_dir = agent_dir.join("cache/plugins/runtime").join(&id);
-    create_dir_all(&data_dir)?;
-    create_dir_all(&cache_dir)?;
-    let context = PrepareContext::new(cwd, &package.package_dir, data_dir, cache_dir, scope, 0);
+    let context = PrepareContext::new(
+        pi_plugin::WorkspaceSpec::from_cwd(cwd).snapshot(),
+        agent_dir,
+        project_trusted,
+    );
     let common = Arc::new(FactoryCommon {
         _library: Arc::clone(&pinned),
         descriptor,
         context,
         options: package.options,
-        next_generation: AtomicU64::new(0),
     });
 
     match kind {

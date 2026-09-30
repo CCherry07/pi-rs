@@ -66,7 +66,7 @@ pub use provider::{
 pub use registry::{FrozenRegistries, RegistriesBuilder};
 pub use tool::{Tool, ToolContext, ToolError, ToolUpdateSink};
 
-pub use prepare::{PluginFactory, PluginScope, PrepareContext, PrepareError, PrepareResult};
+pub use prepare::{PrepareContext, PrepareError, PrepareResult};
 
 pub mod desktop;
 /// Native export contracts; enable only when building or loading a native plugin.

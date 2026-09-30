@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use pi_agent::QueueMode;
 use pi_core::{ProviderId, ThinkingBudgets, ThinkingLevel};
-use pi_memory_loader::MemoryLoaderOptions;
 use pi_plugin_openai::{CodexTransport, CodexTransportOptions};
 use pi_provider::ReqwestTransportConfig;
 use pi_session::{AgentSessionOptions, AutoRetrySettings, CompactionSettings, InitialModelRequest};
@@ -165,24 +164,6 @@ pub(crate) fn session_compaction_settings(
         reserve_tokens: settings.reserve_tokens,
         keep_recent_tokens: settings.keep_recent_tokens,
     }
-}
-
-pub(crate) fn memory_options(
-    cwd: &Path,
-    agent_dir: &Path,
-    configured_session_path: &Path,
-    active_session_path: Option<&Path>,
-    project_trusted: bool,
-) -> MemoryLoaderOptions {
-    let mut options = MemoryLoaderOptions::new(cwd, agent_dir);
-    options.project_trusted = project_trusted;
-    if let Some(root) = configured_session_path.parent() {
-        options.session_roots.push(root.to_path_buf());
-    }
-    if let Some(root) = active_session_path.and_then(Path::parent) {
-        options.session_roots.push(root.to_path_buf());
-    }
-    options
 }
 
 pub(crate) fn session_options(
@@ -459,36 +440,6 @@ mod tests {
             [agent_dir.join("global-prompts")]
         );
         assert!(config.settings_diagnostics.is_empty());
-    }
-
-    #[test]
-    fn memory_options_preserve_both_configured_and_active_session_roots() {
-        let directory = tempfile::tempdir().unwrap();
-        let cwd = directory.path().join("project");
-        let agent = directory.path().join("agent");
-        let configured = directory.path().join("configured/startup.jsonl");
-        let active = directory.path().join("isolated/child.jsonl");
-        let options = memory_options(&cwd, &agent, &configured, Some(&active), true);
-        assert_eq!(options.cwd, cwd);
-        assert_eq!(options.agent_dir, agent);
-        assert!(options.project_trusted);
-        assert_eq!(
-            options.session_roots,
-            [
-                agent.join("sessions"),
-                configured.parent().unwrap().to_path_buf(),
-                active.parent().unwrap().to_path_buf()
-            ]
-        );
-        let options = memory_options(&cwd, &agent, &configured, None, false);
-        assert!(!options.project_trusted);
-        assert_eq!(
-            options.session_roots,
-            [
-                agent.join("sessions"),
-                configured.parent().unwrap().to_path_buf()
-            ]
-        );
     }
 
     #[test]

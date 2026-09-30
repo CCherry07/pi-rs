@@ -17,7 +17,6 @@ members = [
     "domains/coding/eval",
     "examples/order-agent",
     "crates/pi-plugin-macros",
-    "crates/pi-memory-loader",
     "crates/pi-plugin-manager",
     "crates/pi-js-package-manager",
     "crates/pi-js-plugin",
@@ -93,7 +92,6 @@ pi-sdk = { path = "crates/pi-sdk" }
 pi-coding = { path = "domains/coding" }
 pi-coding-eval = { path = "domains/coding/eval" }
 pi-plugin-macros = { path = "crates/pi-plugin-macros" }
-pi-memory-loader = { path = "crates/pi-memory-loader" }
 pi-plugin-manager = { path = "crates/pi-plugin-manager" }
 pi-js-package-manager = { path = "crates/pi-js-package-manager" }
 pi-js-plugin = { path = "crates/pi-js-plugin" }
