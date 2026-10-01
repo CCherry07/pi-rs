@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.5](https://github.com/CCherry07/pi-rs/compare/v0.8.4...v0.8.5) (2026-10-01)
+
+
+### Features
+
+* **acp:** add opt-in tool permission requests ([690142c](https://github.com/CCherry07/pi-rs/commit/690142c0f53a94ad899ce902f84d5e9831abfc5e))
+* add runtime feature switches for memory, subagents, scheduling, skills, prompt templates, and session transfer ([f00af56](https://github.com/CCherry07/pi-rs/commit/f00af568d7beb536b2211eb51d996e60a83c3eed))
+
 ## [0.8.4](https://github.com/CCherry07/pi-rs/compare/v0.8.3...v0.8.4) (2026-09-22)
 
 
