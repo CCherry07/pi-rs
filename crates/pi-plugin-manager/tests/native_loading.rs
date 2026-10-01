@@ -9,14 +9,38 @@ use pi_plugin_manager::loader::{NativePluginLoader, NativePluginLoaderOptions};
 async fn loads_both_native_kinds_including_session_hooks_and_constructs_fresh_instances() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/native-plugins");
     let target = tempfile::tempdir().unwrap();
+    // Reuse Cargo's dependency cache across runs, outside the parent build's lock.
+    // Resolving from the test executable also respects a custom Cargo target directory.
+    let executable = std::env::current_exe().unwrap();
+    let cache = executable
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .join("native-plugin-fixtures");
     let status = Command::new(env!("CARGO"))
-        .args(["build", "--workspace", "--quiet"])
+        .args(["build", "--workspace", "--locked", "--quiet"])
         .arg("--manifest-path")
         .arg(fixture.join("Cargo.toml"))
-        .env("CARGO_TARGET_DIR", target.path())
+        .arg("--target-dir")
+        .arg(&cache)
         .status()
         .unwrap();
     assert!(status.success());
+
+    // Only compiled artifacts are shared. Loading, manifests and reload mutations
+    // keep using private copies so one run cannot contaminate the next.
+    std::fs::create_dir_all(target.path().join("debug")).unwrap();
+    for name in [
+        "native_fixture_agent",
+        "native_fixture_provider",
+        "native_fixture_session",
+    ] {
+        std::fs::copy(
+            dynamic_library(&cache, name),
+            dynamic_library(target.path(), name),
+        )
+        .unwrap();
+    }
 
     let agent_dir = target.path().join("agent-dir");
     let provider_package = agent_dir.join("plugins/native-fixture-provider/0.1.0");

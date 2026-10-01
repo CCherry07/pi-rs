@@ -631,6 +631,21 @@ The Pi core conformance subset and its oracle mapping are documented in
 ./scripts/test-core.sh
 ```
 
+Coding integration suites share one test binary to reduce linking and process initialization.
+Run all of them, or filter by the suite's module name:
+
+```bash
+cargo test -p pi-coding --test integration
+cargo test -p pi-coding --test integration mcp_reload::
+```
+
+Native plugin loading tests reuse compiled fixture dependencies in `native-plugin-fixtures`
+under Cargo's profile directory (normally `target/debug/native-plugin-fixtures`). Cargo checks
+source freshness on every run. Compiled libraries are copied into fresh temporary directories;
+manifests and session data stay private to each run. The first run builds this cache.
+
+Run the full quality gates before completing a change:
+
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace

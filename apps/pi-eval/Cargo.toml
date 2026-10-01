@@ -9,6 +9,8 @@ publish = false
 [[bin]]
 name = "pi-eval"
 path = "src/main.rs"
+# The entry point only delegates to the library, which owns the tests.
+test = false
 
 [dependencies]
 pi-plugin.workspace = true
