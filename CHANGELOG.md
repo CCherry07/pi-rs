@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.6](https://github.com/CCherry07/pi-rs/compare/v0.8.5...v0.8.6) (2026-10-01)
+
+
+### Bug Fixes
+
+* **cli:** preserve ACP permission flags in Node host ([c38c869](https://github.com/CCherry07/pi-rs/commit/c38c8699328d88029824311585d257920d9937b3))
+
+
+### Performance Improvements
+
+* **test:** reduce workspace test startup and fixture build overhead ([65c3133](https://github.com/CCherry07/pi-rs/commit/65c31334d46ca2ca10bef72a32f9a9efcf1e4f05))
+
 ## [0.8.5](https://github.com/CCherry07/pi-rs/compare/v0.8.4...v0.8.5) (2026-10-01)
 
 
