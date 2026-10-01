@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "pi-acp"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "agent-client-protocol",
  "pi-agent",
@@ -2989,7 +2989,7 @@ dependencies = [
 
 [[package]]
 name = "pi-bench"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "pi-agent",
  "pi-core",
@@ -3005,7 +3005,7 @@ dependencies = [
 
 [[package]]
 name = "pi-cli"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "arboard",
  "async-trait",
@@ -3057,7 +3057,7 @@ dependencies = [
 
 [[package]]
 name = "pi-coding"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -3112,7 +3112,7 @@ dependencies = [
 
 [[package]]
 name = "pi-coding-eval"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "axum",
  "pi-coding",
@@ -3138,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "pi-eval"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "async-trait",
  "pi-core",
@@ -3158,7 +3158,7 @@ dependencies = [
 
 [[package]]
 name = "pi-eval-cli"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -3178,7 +3178,7 @@ dependencies = [
 
 [[package]]
 name = "pi-js-package-manager"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "futures",
  "glob",
@@ -3215,7 +3215,7 @@ dependencies = [
 
 [[package]]
 name = "pi-media"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -3225,7 +3225,7 @@ dependencies = [
 
 [[package]]
 name = "pi-napi"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "async-trait",
  "dotenvy",
@@ -3486,7 +3486,7 @@ dependencies = [
 
 [[package]]
 name = "pi-plugin-mcp"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -3507,7 +3507,7 @@ dependencies = [
 
 [[package]]
 name = "pi-plugin-memory-hermes"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3790,7 +3790,7 @@ dependencies = [
 
 [[package]]
 name = "pi-rpc"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "pi-agent",
  "pi-core",
@@ -3823,7 +3823,7 @@ dependencies = [
 
 [[package]]
 name = "pi-sdk"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "async-trait",
  "fs2",
@@ -3864,7 +3864,7 @@ dependencies = [
 
 [[package]]
 name = "pi-settings"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "fs2",
  "serde",
