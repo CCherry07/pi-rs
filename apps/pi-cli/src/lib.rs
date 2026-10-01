@@ -319,7 +319,7 @@ async fn run(
         let result = tokio::select! {
             result = pi_acp::serve_stdio(
                 sessions.clone(),
-                pi_acp::AcpOptions::new(sessions_dir),
+                cli.acp_options(sessions_dir),
             ) => result.map_err(|error| error.to_string()),
             () = plugin_context_binding.wait_for_shutdown() => Ok(()),
         };

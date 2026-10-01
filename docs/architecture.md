@@ -335,7 +335,7 @@ pi-coding            -> pi-sdk + pi-session + pi-settings + pi-runtime + product
                         memory, skills, subagents, and plugin loaders
 pi-rpc               -> pi-agent + pi-core + pi-session
 pi-plugin-mcp        -> pi-core + pi-plugin + rmcp + filesystem configuration persistence
-pi-acp               -> pi-agent + pi-core + pi-plugin-mcp + pi-session + official ACP SDK
+pi-acp               -> pi-agent + pi-core + pi-plugin + pi-plugin-mcp + pi-session + official ACP SDK
 pi-plugin-openai     -> pi-core + pi-plugin + pi-provider
 pi-plugin-anthropic  -> pi-core + pi-plugin + pi-provider
 pi-plugin-xai        -> pi-core + pi-plugin + pi-provider + pi-plugin-openai::responses
@@ -715,6 +715,20 @@ resulting tool-only plugin by a
 but are never serialized; reopening a session requires the caller to provide its transient
 configuration again. This preserves Pi v4 storage and keeps ACP, MCP, and review policy out of
 `pi-core` and `pi-session`.
+
+ACP tool authorization is opt-in through `AcpOptions::request_tool_permissions` and the CLI's
+`--acp-permissions` / `--acp-permission-timeout`. `pi-acp` adds its permission plugin last in the
+session overlay, after MCP and product argument-rewriting hooks. The hook queues the prepared
+call and waits for a session-local decision. The ACP prompt task first projects preceding tool
+events, then dispatches `session/request_permission` on an independent connection task, keeping
+the ordered dispatcher available for replies and cancellation. Only an offered allow-once reply
+before the monotonic deadline releases execution; all other outcomes fail closed with ordinary
+tool results. Pending/in-progress projection belongs to ACP, not to the generic Agent loop.
+Requests and decisions are transient, isolated per live session and never cached in the journal;
+reload retains the channel and load/resume creates a fresh one. This is an ACP-specific product
+addition using the existing Pi tool-call hook, not an upstream Pi permission-policy change.
+It authorizes the attached session's tool calls, not trusted plugin internals or delegated sessions.
+Generic plugin UI confirmations and project-resource trust are separate interfaces.
 
 Pi's experimental framed-CBOR server/client protocol is intentionally outside the pi-rs product
 surface. Process integrations use the supported Pi stdin/stdout RPC or ACP adapters rather than a

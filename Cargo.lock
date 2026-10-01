@@ -2957,6 +2957,7 @@ dependencies = [
  "agent-client-protocol",
  "pi-agent",
  "pi-core",
+ "pi-plugin",
  "pi-plugin-mcp",
  "pi-runtime",
  "pi-session",

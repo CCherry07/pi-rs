@@ -32,6 +32,15 @@ pub(crate) struct Cli {
     )]
     pub(crate) acp: bool,
 
+    /// Ask the ACP client for permission before each tool call (including MCP tools).
+    #[arg(long, requires = "acp")]
+    pub(crate) acp_permissions: bool,
+
+    /// Maximum seconds to wait for each ACP tool permission response.
+    #[arg(long, requires = "acp_permissions", default_value_t = 300,
+        value_parser = clap::value_parser!(u64).range(1..=86400))]
+    pub(crate) acp_permission_timeout: u64,
+
     /// Use the terminal alternate screen. This is the default.
     #[arg(long)]
     pub(crate) fullscreen: bool,
@@ -385,6 +394,17 @@ pub(crate) fn resolve_app_config(cli: &Cli) -> Result<AppConfig, String> {
 }
 
 impl Cli {
+    pub(crate) fn acp_options(&self, sessions_dir: PathBuf) -> pi_acp::AcpOptions {
+        let options = pi_acp::AcpOptions::new(sessions_dir);
+        if self.acp_permissions {
+            options.request_tool_permissions(std::time::Duration::from_secs(
+                self.acp_permission_timeout,
+            ))
+        } else {
+            options
+        }
+    }
+
     pub(crate) fn parse_pi() -> Self {
         Self::parse_from(std::env::args_os().map(normalize_pi_arg))
     }
@@ -481,6 +501,43 @@ mod tests {
     }
 
     #[test]
+    fn acp_permission_flags_reach_the_server_and_require_acp_mode() {
+        let plain = Cli::try_parse_from(["pi", "--acp"]).unwrap();
+        assert_eq!(
+            plain
+                .acp_options(PathBuf::from("sessions"))
+                .tool_permission_timeout,
+            None
+        );
+        let enabled = Cli::try_parse_from([
+            "pi",
+            "--acp",
+            "--acp-permissions",
+            "--acp-permission-timeout",
+            "42",
+        ])
+        .unwrap();
+        assert_eq!(
+            enabled
+                .acp_options(PathBuf::from("sessions"))
+                .tool_permission_timeout,
+            Some(std::time::Duration::from_secs(42))
+        );
+        assert!(Cli::try_parse_from(["pi", "--acp-permissions"]).is_err());
+        assert!(Cli::try_parse_from(["pi", "--acp", "--acp-permission-timeout", "42"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "pi",
+                "--acp",
+                "--acp-permissions",
+                "--acp-permission-timeout",
+                "0"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn botmux_session_identity_and_name_flags_match_pi() {
         let parsed = Cli::try_parse_from([
             "pi",
@@ -516,6 +573,8 @@ mod tests {
             json: false,
             mode: None,
             acp: false,
+            acp_permissions: false,
+            acp_permission_timeout: 300,
             fullscreen: false,
             no_fullscreen: false,
             cwd: directory.path().to_path_buf(),

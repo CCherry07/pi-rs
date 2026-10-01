@@ -6,11 +6,14 @@
 //! conversation state to [`pi_session`]. Per-session MCP servers are adapted
 //! through [`pi_plugin_mcp`] and injected with a transient generation overlay.
 
+mod permissions;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent_client_protocol::schema::{ProtocolVersion, v1 as acp};
 use agent_client_protocol::{
@@ -29,6 +32,8 @@ use pi_session::{
 use pi_utils::time::unix_timestamp_ms as now_ms;
 use tokio::sync::Mutex;
 
+use permissions::{PendingPermission, PermissionGate};
+
 const MODEL_CONFIG_ID: &str = "model";
 const THINKING_CONFIG_ID: &str = "thought_level";
 const LIST_PAGE_SIZE: usize = 100;
@@ -39,6 +44,9 @@ pub struct AcpOptions {
     pub sessions_dir: PathBuf,
     pub agent_name: String,
     pub agent_version: String,
+    /// Request permission for every tool call in an ACP prompt when set.
+    /// Disabled by default; project trust is independent of tool authorization.
+    pub tool_permission_timeout: Option<Duration>,
 }
 
 impl AcpOptions {
@@ -47,6 +55,7 @@ impl AcpOptions {
             sessions_dir: sessions_dir.into(),
             agent_name: "pi-rs".to_string(),
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            tool_permission_timeout: None,
         }
     }
 
@@ -57,6 +66,13 @@ impl AcpOptions {
 
     pub fn agent_version(mut self, version: impl Into<String>) -> Self {
         self.agent_version = version.into();
+        self
+    }
+
+    /// Enable per-call permission requests. Only an explicit allow-once response
+    /// received before this deadline permits execution; decisions are not cached.
+    pub fn request_tool_permissions(mut self, timeout: Duration) -> Self {
+        self.tool_permission_timeout = Some(timeout);
         self
     }
 }
@@ -185,6 +201,7 @@ struct ManagedSession {
     session: PiSession,
     mcp: Option<McpToolSet>,
     prompt_gate: Mutex<()>,
+    permission_requests: Mutex<tokio::sync::mpsc::UnboundedReceiver<PendingPermission>>,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +242,8 @@ impl AcpState {
         reject_additional_directories(&request.additional_directories)?;
         let cwd = canonical_session_cwd(&request.cwd)?;
         let (overlay, mcp) = generation_overlay(request.mcp_servers, &cwd).await?;
+        let (overlay, permission_requests) =
+            PermissionGate::attach(overlay, self.options.tool_permission_timeout);
         let path = self
             .options
             .sessions_dir
@@ -249,6 +268,7 @@ impl AcpState {
                 session,
                 mcp,
                 prompt_gate: Mutex::new(()),
+                permission_requests: Mutex::new(permission_requests),
             }),
         );
         Ok(response)
@@ -315,6 +335,8 @@ impl AcpState {
             ));
         }
         let (overlay, mcp) = generation_overlay(mcp_servers, &cwd).await?;
+        let (overlay, permission_requests) =
+            PermissionGate::attach(overlay, self.options.tool_permission_timeout);
         let session = match self
             .manager
             .open_session_with_overlay(&stored.path, overlay)
@@ -330,6 +352,7 @@ impl AcpState {
             session,
             mcp,
             prompt_gate: Mutex::new(()),
+            permission_requests: Mutex::new(permission_requests),
         });
         self.sessions
             .lock()
@@ -478,6 +501,9 @@ impl AcpState {
     ) -> agent_client_protocol::Result<acp::PromptResponse> {
         let managed = self.active_session(&request.session_id).await?;
         let _prompt = managed.prompt_gate.lock().await;
+        let mut permission_requests = managed.permission_requests.lock().await;
+        let permissions_enabled = self.options.tool_permission_timeout.is_some();
+        let mut permissions_open = permissions_enabled;
         let messages = vec![Message::User(UserMessage {
             content: request
                 .prompt
@@ -497,7 +523,7 @@ impl AcpState {
                     let outcome = result.map_err(internal_error)?;
                     while let Ok(event) = subscription.events.try_recv() {
                         if event.revision > initial_revision {
-                            send_projected_event(connection, &request.session_id, &event.event)?;
+                            send_projected_event(connection, &request.session_id, &event.event, permissions_enabled)?;
                         }
                     }
                     return Ok(acp::PromptResponse::new(match outcome.stop {
@@ -507,10 +533,24 @@ impl AcpState {
                         AgentLoopStop::MaxToolIterations => acp::StopReason::MaxTurnRequests,
                     }));
                 }
+                pending = permission_requests.recv(), if permissions_open => {
+                    let Some(pending) = pending else {
+                        permissions_open = false;
+                        continue;
+                    };
+                    // ToolExecutionStart precedes the hook in the agent stream.
+                    // Publish it before asking the client to authorize that call.
+                    while let Ok(event) = subscription.events.try_recv() {
+                        if event.revision > initial_revision {
+                            send_projected_event(connection, &request.session_id, &event.event, permissions_enabled)?;
+                        }
+                    }
+                    pending.dispatch(connection, request.session_id.clone())?;
+                }
                 event = subscription.events.recv() => {
                     match event {
                         Ok(event) if event.revision > initial_revision => {
-                            send_projected_event(connection, &request.session_id, &event.event)?;
+                            send_projected_event(connection, &request.session_id, &event.event, permissions_enabled)?;
                         }
                         Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -888,8 +928,12 @@ fn send_projected_event(
     connection: &ConnectionTo<agent_client_protocol::Client>,
     session_id: &acp::SessionId,
     event: &AgentSessionEvent,
+    permissions_enabled: bool,
 ) -> agent_client_protocol::Result<()> {
-    if let Some(update) = project_event(event) {
+    if let Some(mut update) = project_event(event) {
+        if permissions_enabled && let acp::SessionUpdate::ToolCall(call) = &mut update {
+            call.status = acp::ToolCallStatus::Pending;
+        }
         connection.send_notification(acp::SessionNotification::new(session_id.clone(), update))?;
     }
     Ok(())

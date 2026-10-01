@@ -143,6 +143,13 @@ and a service-account file; Bedrock supports its AWS profile/static credential c
 event projection. JavaScript extension UI request/response remains a separate compatibility gap;
 unsolicited `extension_ui_response` messages are currently ignored.
 
+Add `--acp-permissions` to request client authorization before each ACP tool call. The client may
+prompt the user or apply its configured policy. `--acp-permission-timeout` defaults to 300 seconds;
+only an explicit allow-once response before the deadline releases execution. Rejection, timeout,
+cancellation, unknown options and connection errors block the operation. This is independent of
+project trust and is disabled by default. See [ACP tool permissions](../../crates/pi-acp/README.md#tool-permissions)
+for scope and lifecycle details.
+
 `--acp` serves the official ACP stable-v1 JSON-RPC protocol over stdin/stdout. It supports new,
 prompt, cancel, load, resume, list, and close, streams text/thought/tool updates, exposes model and
 thinking selectors, and accepts per-session stdio and Streamable HTTP MCP servers. ACP sessions use the normal Pi v4
