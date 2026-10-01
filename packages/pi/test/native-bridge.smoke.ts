@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { createInterface } from "node:readline";
 import test from "node:test";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
@@ -19,7 +20,7 @@ async function runNativeSmoke(arguments_: string[], root: string) {
   return runNativeLauncher(launcher, arguments_, root);
 }
 
-async function runNativeLauncher(entry: string, arguments_: string[], root: string) {
+function nativeEnvironment(root: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const name of [
     "PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT",
@@ -40,9 +41,13 @@ async function runNativeLauncher(entry: string, arguments_: string[], root: stri
     OPENAI_API_KEY: "unused-native-smoke-key",
     OPENAI_BASE_URL: "http://127.0.0.1:9/v1",
   });
+  return env;
+}
+
+async function runNativeLauncher(entry: string, arguments_: string[], root: string) {
   const run = execFileAsync(process.execPath, [entry, ...arguments_], {
     cwd: root,
-    env,
+    env: nativeEnvironment(root),
     timeout: 30_000,
     killSignal: "SIGKILL",
     maxBuffer: 1024 * 1024,
@@ -50,6 +55,54 @@ async function runNativeLauncher(entry: string, arguments_: string[], root: stri
   // EOF is part of the fixture, independent of the test runner's own stdin.
   run.child.stdin?.end();
   return run;
+}
+
+for (const timeout of [["--acp-permission-timeout", "17"], ["--acp-permission-timeout=17"]]) {
+  test(`creates an ACP session through Node/NAPI with ${timeout.join(" ")}`, { timeout: 35_000 }, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "pi-rs-napi-acp-permissions-"));
+    const run = execFileAsync(process.execPath, [launcher, "--acp", "--no-extensions", "--no-approve",
+      "--agent-dir", join(root, "agent"), "--acp-permissions", ...timeout], {
+      cwd: root, env: nativeEnvironment(root), timeout: 30_000,
+      killSignal: "SIGKILL", maxBuffer: 1024 * 1024,
+    });
+    // Observe process failures immediately while consuming the ACP stream.
+    void run.catch(() => {});
+    t.after(async () => {
+      run.child.kill("SIGKILL");
+      await run.catch(() => {});
+      await rm(root, { recursive: true, force: true });
+    });
+    const { stdin, stdout } = run.child;
+    assert.ok(stdin && stdout);
+    const lines = createInterface({ input: stdout });
+    const send = (id: string, method: string, params: Record<string, unknown>) => {
+      stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+    };
+    let initialized = false;
+    let sessionId: string | undefined;
+    try {
+      send("init", "initialize", { protocolVersion: 1, clientCapabilities: {} });
+      for await (const line of lines) {
+        const response = JSON.parse(line) as { id?: string; error?: unknown; result?: { sessionId?: string } };
+        if (response.id === "init") {
+          assert.equal(response.error, undefined);
+          assert.ok(response.result);
+          initialized = true;
+          send("new", "session/new", { cwd: root, mcpServers: [] });
+        } else if (response.id === "new") {
+          assert.equal(response.error, undefined);
+          sessionId = response.result?.sessionId;
+          break;
+        }
+      }
+    } finally {
+      lines.close();
+      stdin.end();
+    }
+    await run;
+    assert.ok(initialized);
+    assert.ok(sessionId, "ACP session/new must succeed with permission options");
+  });
 }
 
 test("exposes the eval runner through Node and NAPI", async (t) => {

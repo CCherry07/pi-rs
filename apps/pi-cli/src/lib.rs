@@ -394,6 +394,8 @@ fn split_extension_flags(
         "print",
         "json",
         "acp",
+        "acp-permissions",
+        "acp-permission-timeout",
         "mode",
         "fullscreen",
         "no-fullscreen",
@@ -414,6 +416,7 @@ fn split_extension_flags(
         "no-approve",
     ];
     const BUILT_IN_VALUE_OPTIONS: &[&str] = &[
+        "acp-permission-timeout",
         "mode",
         "cwd",
         "session",
@@ -683,6 +686,7 @@ fn resolve_input(
 #[cfg(test)]
 mod tests {
     use pi_session::SessionInput;
+    use std::collections::BTreeMap;
     use std::fs;
 
     use pi_settings::SettingsManager;
@@ -776,6 +780,32 @@ mod tests {
             ]
         );
         assert!(values.is_empty());
+    }
+
+    #[test]
+    fn node_adapter_preserves_acp_permission_options_for_native_parsing() {
+        for timeout in [
+            vec!["--acp-permission-timeout", "17"],
+            vec!["--acp-permission-timeout=17"],
+        ] {
+            let arguments = ["--acp", "--acp-permissions"]
+                .into_iter()
+                .chain(timeout)
+                .chain(["--fixture-enabled", "--no-extensions", "--no-approve"])
+                .map(str::to_string)
+                .collect();
+            let (arguments, values) = split_extension_flags(arguments);
+            assert_eq!(
+                values,
+                BTreeMap::from([("fixture-enabled".into(), json!(true))])
+            );
+            let cli = Cli::try_parse_pi_from(arguments).unwrap();
+            assert!(cli.acp);
+            assert!(cli.acp_permissions);
+            assert_eq!(cli.acp_permission_timeout, 17);
+            assert!(cli.no_extensions);
+            assert!(cli.no_approve);
+        }
     }
 
     #[test]
