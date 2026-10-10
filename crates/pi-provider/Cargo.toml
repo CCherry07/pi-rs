@@ -22,3 +22,6 @@ reqwest = { version = "0.12.23", default-features = false, features = [
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "net"] }

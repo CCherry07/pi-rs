@@ -14,7 +14,7 @@ use pi_plugin::{
     ToolError, ToolUpdateSink,
 };
 use pi_sdk::{
-    AgentHost, ModelSelection, PreparedSystemPrompt, PromptContext, PromptOutput, SystemPrompt,
+    AgentHarness, ModelSelection, PreparedSystemPrompt, PromptContext, PromptOutput, SystemPrompt,
     WorkspaceSnapshot,
 };
 use pi_session::MultiSessionManager;
@@ -139,45 +139,46 @@ async fn domain_target_continues_after_tools_reloads_factories_and_persists_arti
                 }
                 *context_path.lock().unwrap() = Some(context.root.clone());
                 std::fs::write(context.workspace.join("catalog.json"), "{\"stock\":42}").unwrap();
-                let host = AgentHost::builder(ModelSelection::new("scripted", "test"), "unused")
-                    .active_tools(context.active_tools.unwrap())
-                    .system_prompt(SystemPrompt::dynamic(move |_: &WorkspaceSnapshot| {
-                        let rendered_tools = Arc::clone(&rendered_tools);
-                        Ok(PreparedSystemPrompt::new(
-                            move |context: PromptContext<'_>| {
-                                let selected = context
-                                    .active_tools
-                                    .iter()
-                                    .map(|tool| tool.name.clone())
-                                    .collect::<Vec<_>>();
-                                // The preparer applies the requested tools before the first render.
-                                assert_eq!(selected, ["reserve_order"]);
-                                rendered_tools.lock().unwrap().push(selected);
-                                Ok(PromptOutput::new("Handle order reservations."))
-                            },
-                        ))
-                    }))
-                    .provider_plugin_factory(move || {
-                        let mut providers = providers.lock().unwrap();
-                        let turns = if providers.is_empty() {
-                            vec![
-                                ScriptedTurn::ToolCalls(vec![ToolCall::new(
-                                    "reserve-42",
-                                    "reserve_order",
-                                    json!({"orderId": "ORD-42"}),
-                                )]),
-                                ScriptedTurn::Text("Reserved order ORD-42.".into()),
-                            ]
-                        } else {
-                            vec![ScriptedTurn::Text("Order ORD-42 is reserved.".into())]
-                        };
-                        let plugin = ScriptedProviderPlugin::scripted(turns);
-                        providers.push(plugin.provider());
-                        plugin
-                    })
-                    .build();
+                let harness =
+                    AgentHarness::builder(ModelSelection::new("scripted", "test"), "unused")
+                        .active_tools(context.active_tools.unwrap())
+                        .system_prompt(SystemPrompt::dynamic(move |_: &WorkspaceSnapshot| {
+                            let rendered_tools = Arc::clone(&rendered_tools);
+                            Ok(PreparedSystemPrompt::new(
+                                move |context: PromptContext<'_>| {
+                                    let selected = context
+                                        .active_tools
+                                        .iter()
+                                        .map(|tool| tool.name.clone())
+                                        .collect::<Vec<_>>();
+                                    // The preparer applies the requested tools before the first render.
+                                    assert_eq!(selected, ["reserve_order"]);
+                                    rendered_tools.lock().unwrap().push(selected);
+                                    Ok(PromptOutput::new("Handle order reservations."))
+                                },
+                            ))
+                        }))
+                        .provider_plugin_factory(move || {
+                            let mut providers = providers.lock().unwrap();
+                            let turns = if providers.is_empty() {
+                                vec![
+                                    ScriptedTurn::ToolCalls(vec![ToolCall::new(
+                                        "reserve-42",
+                                        "reserve_order",
+                                        json!({"orderId": "ORD-42"}),
+                                    )]),
+                                    ScriptedTurn::Text("Reserved order ORD-42.".into()),
+                                ]
+                            } else {
+                                vec![ScriptedTurn::Text("Order ORD-42 is reserved.".into())]
+                            };
+                            let plugin = ScriptedProviderPlugin::scripted(turns);
+                            providers.push(plugin.provider());
+                            plugin
+                        })
+                        .build();
                 let mut target =
-                    PreparedEvalTarget::new(host.session_manager(), "scripted", "test");
+                    PreparedEvalTarget::new(harness.session_manager(), "scripted", "test");
                 target.template_bindings = BTreeMap::from([("order".into(), "ORD-42".into())]);
                 target.prompt_transform = Some(Arc::new(|prompt| {
                     Ok(format!("{prompt}\nRecord a receipt."))
@@ -253,12 +254,12 @@ async fn missing_template_bindings_are_errors_and_still_shutdown() {
     for name in ["home", "agent_dir", "workspace", "custom"] {
         let root = tempfile::tempdir().unwrap();
         let runner = EvalRunner::new(ArtifactStore::new(root.path()).unwrap());
-        let host = AgentHost::builder(ModelSelection::new("scripted", "test"), "Respond")
+        let harness = AgentHarness::builder(ModelSelection::new("scripted", "test"), "Respond")
             .provider_plugin_factory(|| {
                 ScriptedProviderPlugin::scripted([ScriptedTurn::Text("unused".into())])
             })
             .build();
-        let manager = host.session_manager();
+        let manager = harness.session_manager();
         let case = EvalCase::new("templates/missing", "No implicit domain path bindings")
             .step(EvalStep::PromptTemplate(format!("{{{{{name}}}}}")));
         let run = runner
@@ -280,7 +281,7 @@ async fn session_creation_and_artifact_errors_close_prepared_manager() {
         let root = tempfile::tempdir().unwrap();
         let artifacts = root.path().join("artifacts");
         let runner = EvalRunner::new(ArtifactStore::new(&artifacts).unwrap());
-        let mut builder = AgentHost::builder(ModelSelection::new("scripted", "test"), "Respond")
+        let mut builder = AgentHarness::builder(ModelSelection::new("scripted", "test"), "Respond")
             .provider_plugin_factory(|| {
                 ScriptedProviderPlugin::scripted([ScriptedTurn::Text("ready".into())])
             });
@@ -314,7 +315,7 @@ async fn timed_out_provider_is_drained_before_manager_shutdown() {
     let root = tempfile::tempdir().unwrap();
     let runner = EvalRunner::new(ArtifactStore::new(root.path()).unwrap());
     let shutdowns = Arc::new(AtomicUsize::new(0));
-    let host = AgentHost::builder(ModelSelection::new("scripted", "test"), "Respond")
+    let harness = AgentHarness::builder(ModelSelection::new("scripted", "test"), "Respond")
         .plugin_factory({
             let shutdowns = Arc::clone(&shutdowns);
             move || OrdersPlugin {
@@ -323,7 +324,7 @@ async fn timed_out_provider_is_drained_before_manager_shutdown() {
         })
         .provider_plugin_factory(|| ScriptedProviderPlugin::scripted([ScriptedTurn::WaitForAbort]))
         .build();
-    let manager = host.session_manager();
+    let manager = harness.session_manager();
     let case = EvalCase::new("cleanup/timeout", "Drain the provider before cleanup")
         .limits(EvalLimits {
             step_timeout: Duration::from_millis(20),
@@ -364,7 +365,7 @@ async fn observation_failure_shuts_down_the_running_session() {
     let root = tempfile::tempdir().unwrap();
     let runner = EvalRunner::new(ArtifactStore::new(root.path()).unwrap());
     let shutdowns = Arc::new(AtomicUsize::new(0));
-    let host = AgentHost::builder(ModelSelection::new("scripted", "test"), "Respond")
+    let harness = AgentHarness::builder(ModelSelection::new("scripted", "test"), "Respond")
         .plugin_factory({
             let shutdowns = Arc::clone(&shutdowns);
             move || OrdersPlugin {
@@ -375,7 +376,7 @@ async fn observation_failure_shuts_down_the_running_session() {
             ScriptedProviderPlugin::scripted([ScriptedTurn::Text("ready".into())])
         })
         .build();
-    let manager = host.session_manager();
+    let manager = harness.session_manager();
     let case = EvalCase::new(
         "cleanup/observation",
         "Snapshot failure still closes the session",
@@ -493,24 +494,25 @@ async fn caller_cancellation_drains_blocked_tools_and_preserves_inflight_shutdow
         let runner = EvalRunner::new(ArtifactStore::new(artifacts.path()).unwrap());
         let probe = Arc::new(CancellationProbe::default());
         let context_root = Arc::new(Mutex::new(None));
-        let host = AgentHost::builder(ModelSelection::new("scripted", "test"), "Reserve an order")
-            .plugin_factory({
-                let probe = Arc::clone(&probe);
-                move || CancellationPlugin(Arc::clone(&probe))
-            })
-            .provider_plugin_factory(move || {
-                ScriptedProviderPlugin::scripted([if cancel_during_tool {
-                    ScriptedTurn::ToolCalls(vec![ToolCall::new(
-                        "blocked-order",
-                        "reserve_order",
-                        json!({"orderId": "ORD-42"}),
-                    )])
-                } else {
-                    ScriptedTurn::Text("ready".into())
-                }])
-            })
-            .build();
-        let manager = host.session_manager();
+        let harness =
+            AgentHarness::builder(ModelSelection::new("scripted", "test"), "Reserve an order")
+                .plugin_factory({
+                    let probe = Arc::clone(&probe);
+                    move || CancellationPlugin(Arc::clone(&probe))
+                })
+                .provider_plugin_factory(move || {
+                    ScriptedProviderPlugin::scripted([if cancel_during_tool {
+                        ScriptedTurn::ToolCalls(vec![ToolCall::new(
+                            "blocked-order",
+                            "reserve_order",
+                            json!({"orderId": "ORD-42"}),
+                        )])
+                    } else {
+                        ScriptedTurn::Text("ready".into())
+                    }])
+                })
+                .build();
+        let manager = harness.session_manager();
         let running = tokio::spawn({
             let manager = manager.clone();
             let context_root = Arc::clone(&context_root);

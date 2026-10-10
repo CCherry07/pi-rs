@@ -16,7 +16,7 @@ building the target, before its initial dynamic prompt render.
 
 ```rust,no_run
 use pi_eval::{ArtifactStore, EvalCase, EvalRunner, EvalStep, PreparedEvalTarget};
-use pi_sdk::{AgentHost, ModelSelection};
+use pi_sdk::{AgentHarness, ModelSelection};
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 
 # async fn example() -> Result<(), pi_eval::EvalError> {
@@ -24,7 +24,7 @@ let runner = EvalRunner::new(ArtifactStore::new("eval-artifacts")?);
 let case = EvalCase::new("orders/help", "Answer an order question")
     .step(EvalStep::Prompt("How can I track my order?".into()));
 let run = runner.run(&case, "order-service", 1, |context| async move {
-    let mut builder = AgentHost::builder(
+    let mut builder = AgentHarness::builder(
         ModelSelection::new("scripted", "test"),
         "Help customers with their orders.",
     ).provider_plugin_factory(|| ScriptedProviderPlugin::scripted([

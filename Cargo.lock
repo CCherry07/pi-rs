@@ -3587,6 +3587,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "dotenvy",
+ "fs2",
  "futures",
  "pi-agent",
  "pi-core",
@@ -3598,6 +3599,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "time",
  "tokio",
  "tokio-tungstenite",
 ]

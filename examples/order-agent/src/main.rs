@@ -8,7 +8,7 @@ use pi_core::{
     ToolResult, ToolSpec,
 };
 use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
-use pi_sdk::AgentHost;
+use pi_sdk::AgentHarness;
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::{Value, json};
 
@@ -76,7 +76,7 @@ impl Tool for LookupOrder {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let host = AgentHost::builder(
+    let harness = AgentHarness::builder(
         ModelSelection::new("scripted", "test"),
         "You help customers track orders. Look up order facts before answering.",
     )
@@ -93,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .build();
     let storage = tempfile::tempdir()?;
-    let session = host
+    let session = harness
         .sessions()
         .create_session(storage.path(), storage.path().join("order.jsonl"))
         .await?;
@@ -107,6 +107,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    host.sessions().shutdown().await?;
+    harness.sessions().shutdown().await?;
     Ok(())
 }

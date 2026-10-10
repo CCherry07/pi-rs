@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod codex;
+mod codex_auth;
 mod config;
 mod oauth;
 mod plugin;

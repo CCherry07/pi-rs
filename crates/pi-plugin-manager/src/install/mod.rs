@@ -6,7 +6,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs2::FileExt;
-use futures::StreamExt;
+use futures::future::{BoxFuture, Shared};
+use futures::{FutureExt, StreamExt};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -208,7 +209,7 @@ pub struct PluginPackageRow {
 #[derive(Clone)]
 pub struct PluginManager {
     options: PluginManagerOptions,
-    client: reqwest::Client,
+    client: Shared<BoxFuture<'static, Result<reqwest::Client, String>>>,
 }
 
 #[must_use = "prepared plugin state must be committed or rolled back"]
@@ -268,16 +269,23 @@ impl Drop for PreparedPluginReconcile {
 
 impl PluginManager {
     pub fn new(options: PluginManagerOptions) -> Result<Self, PluginManagerError> {
-        let client = reqwest::Client::builder()
-            .user_agent(concat!("pi-rs/", env!("CARGO_PKG_VERSION")))
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .map_err(|error| PluginManagerError::InvalidData {
-                location: "HTTP client".to_string(),
-                message: error.to_string(),
-            })?;
+        // Local package inspection/reconcile must not load TLS roots. All clones share
+        // the first download's initialization, even if its original caller is cancelled.
+        let client = async {
+            tokio::task::spawn_blocking(|| {
+                reqwest::Client::builder()
+                    .user_agent(concat!("pi-rs/", env!("CARGO_PKG_VERSION")))
+                    .redirect(reqwest::redirect::Policy::limited(5))
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .timeout(std::time::Duration::from_secs(120))
+                    .build()
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(|error| format!("HTTP client initialization task failed: {error}"))?
+        }
+        .boxed()
+        .shared();
         Ok(Self { options, client })
     }
 
@@ -823,6 +831,9 @@ impl PluginManager {
         }
         let response = self
             .client
+            .clone()
+            .await
+            .map_err(|message| invalid_data("HTTP client", message))?
             .get(parsed)
             .send()
             .await
@@ -1875,6 +1886,35 @@ artifact = "plugin.dylib"
         package
     }
 
+    #[tokio::test]
+    async fn local_package_operations_do_not_initialize_http_client() {
+        let root = tempfile::tempdir().unwrap();
+        let agent = root.path().join("agent");
+        let manager = PluginManager::new(PluginManagerOptions::new(root.path(), &agent)).unwrap();
+        assert!(manager.client.peek().is_none());
+        assert!(manager.snapshot(InstallScope::Global).plugins.is_empty());
+        manager
+            .prepare_reconcile(InstallScope::Global)
+            .await
+            .unwrap()
+            .commit();
+        let package = write_local_package(root.path(), "local", b"local artifact");
+        manager
+            .install(package.to_string_lossy(), None, InstallScope::Global)
+            .await
+            .unwrap();
+        assert_eq!(manager.list(InstallScope::Global).unwrap().len(), 1);
+        manager
+            .prepare_reconcile(InstallScope::Global)
+            .await
+            .unwrap()
+            .commit();
+        assert!(manager.client.peek().is_none());
+        let cloned = manager.clone();
+        assert!(manager.client.ptr_eq(&cloned.client));
+        assert!(cloned.client.peek().is_none());
+    }
+
     #[test]
     fn snapshot_does_not_create_state_or_resolve_configured_sources() {
         let root = tempfile::tempdir().unwrap();
@@ -2312,6 +2352,9 @@ guidance = "default"
         options.target = "test-target".to_string();
         options.registry = Some(format!("{base}/index.json"));
         let manager = PluginManager::new(options).unwrap();
+        let cloned = manager.clone();
+        assert!(manager.client.peek().is_none());
+        assert!(manager.client.ptr_eq(&cloned.client));
 
         let installed = manager
             .install("registry:frontend-check@^1", None, InstallScope::Global)
@@ -2319,6 +2362,8 @@ guidance = "default"
             .unwrap();
 
         assert_eq!(installed.version, "1.2.0");
+        assert!(matches!(manager.client.peek(), Some(Ok(_))));
+        assert!(matches!(cloned.client.peek(), Some(Ok(_))));
         assert_eq!(
             manager
                 .list(InstallScope::Global)

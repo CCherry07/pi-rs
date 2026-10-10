@@ -7,9 +7,9 @@ and transactional session generation lifecycle. The Coding product's defaults li
 Supply the model, complete base prompt, and plugin factories explicitly:
 
 ```rust,ignore
-use pi_sdk::{AgentHost, ModelSelection};
+use pi_sdk::{AgentHarness, ModelSelection};
 
-let host = AgentHost::builder(
+let harness = AgentHarness::builder(
     ModelSelection::new("my-provider", "my-model"),
     "Answer order questions using the order service.",
 )
@@ -17,12 +17,12 @@ let host = AgentHost::builder(
 .plugin_factory(|| OrdersPlugin::new())
 .build();
 
-let session = host.sessions()
+let session = harness.sessions()
     .create_session(workspace_directory, session_file)
     .await?;
 session.current().submit("Where is order ORD-42?").await?;
 session.reload().await?;
-host.sessions().shutdown().await?;
+harness.sessions().shutdown().await?;
 ```
 
 `build()` does not access the filesystem or instantiate plugins. Session creation prepares all
@@ -35,8 +35,8 @@ or environment credentials. Providers and tools are installed only by caller-sup
 All registered tools are initially active unless `active_tools(...)` specifies a subset.
 An empty list disables them. `session_options(...)` supplies shared session policy explicitly.
 
-For resource-backed prompts, `AgentHostBuilder::system_prompt(SystemPrompt)` accepts the
-runtime's existing dynamic factory. The string passed to `AgentHost::builder` remains the
+For resource-backed prompts, `AgentHarnessBuilder::system_prompt(SystemPrompt)` accepts the
+runtime's existing dynamic factory. The string passed to `AgentHarness::builder` remains the
 compatible exact-prompt API; this optional method replaces it:
 
 ```rust,ignore
@@ -61,9 +61,9 @@ read again only when a new generation is prepared, including reload and resume. 
 errors reject the candidate; a failed tool-selection render also preserves the active selection,
 prompt, and journal. No additional prompt lifecycle is introduced.
 Reload and resume supply a read-only projection of the recovered configuration before the first
-render, including accepted deferred tool changes. Legacy journals without a selection use the host
+render, including accepted deferred tool changes. Legacy journals without a selection use the harness
 defaults together with registered restoration additions. Saved names missing from the new registry
-are dropped; explicit host defaults remain strict. The same recovery plan repairs the journal only
+are dropped; explicit harness defaults remain strict. The same recovery plan repairs the journal only
 after generation validation succeeds. Fresh isolated sessions render their inherited or requested
 selection. Restoring unchanged tool selections reuses the validated prompt and inspection options.
 

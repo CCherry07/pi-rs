@@ -7,7 +7,7 @@ use pi_core::{
     ToolExecutionMode, ToolResult, ToolSpec, WorkspaceRoot, WorkspaceRootId, WorkspaceSpec,
 };
 use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
-use pi_sdk::{AgentHost, AgentSessionOptions};
+use pi_sdk::{AgentHarness, AgentSessionOptions};
 use pi_session::AutoRetrySettings;
 use pi_test_support::{ScriptedProvider, ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::{Value, json};
@@ -30,10 +30,10 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn host(&self) -> AgentHost {
+    fn harness(&self) -> AgentHarness {
         let orders = self.clone();
         let providers = Arc::clone(&self.providers);
-        AgentHost::builder(ModelSelection::new("scripted", "test"), PROMPT)
+        AgentHarness::builder(ModelSelection::new("scripted", "test"), PROMPT)
             .try_plugin_factory(move || {
                 if orders.fail.load(Ordering::SeqCst) {
                     return Err("order service configuration is invalid");
@@ -173,9 +173,9 @@ async fn order_tool_continues_and_resumes_without_coding_resources() {
     )
     .unwrap();
     let fixture = Fixture::default();
-    let host = fixture.host();
+    let harness = fixture.harness();
     let path = directory.path().join("sessions/order.jsonl");
-    let session = host
+    let session = harness
         .sessions()
         .create_session_with_workspace(workspace.clone(), &path, None, None)
         .await
@@ -214,10 +214,14 @@ async fn order_tool_continues_and_resumes_without_coding_resources() {
     assert!(session.current().runtime().command_specs().is_empty());
     assert_eq!(fixture.lookups.lock().unwrap()[0].session_id, id);
     assert_eq!(fixture.lookups.lock().unwrap()[0].workspace, workspace);
-    host.sessions().shutdown().await.unwrap();
+    harness.sessions().shutdown().await.unwrap();
 
-    let resumed_host = fixture.host();
-    let resumed = resumed_host.sessions().open_session(&path).await.unwrap();
+    let resumed_harness = fixture.harness();
+    let resumed = resumed_harness
+        .sessions()
+        .open_session(&path)
+        .await
+        .unwrap();
     assert_eq!(resumed.current().log().id(), id);
     assert_eq!(resumed.current().runtime().workspace().spec(), &workspace);
     resumed
@@ -230,7 +234,7 @@ async fn order_tool_continues_and_resumes_without_coding_resources() {
         matches!(message, Message::Assistant(assistant) if text(&assistant.content).contains("has shipped"))
     }));
     assert_eq!(fixture.lookups.lock().unwrap()[1].session_id, id);
-    resumed_host.sessions().shutdown().await.unwrap();
+    resumed_harness.sessions().shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -238,8 +242,8 @@ async fn reload_rebuilds_plugins_and_retains_model_workspace_and_conversation() 
     let directory = tempfile::tempdir().unwrap();
     let workspace = workspace(directory.path());
     let fixture = Fixture::default();
-    let host = fixture.host();
-    let session = host
+    let harness = fixture.harness();
+    let session = harness
         .sessions()
         .create_session_with_workspace(
             workspace.clone(),
@@ -293,16 +297,16 @@ async fn reload_rebuilds_plugins_and_retains_model_workspace_and_conversation() 
     assert_eq!(std::fs::read(previous.log().path()).unwrap(), saved);
     session.current().submit("Continue.").await.unwrap();
     assert_eq!(fixture.provider(1).requests().len(), 3);
-    host.sessions().shutdown().await.unwrap();
+    harness.sessions().shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn unsaved_reload_stays_in_memory_and_sessions_have_distinct_capabilities() {
     let directory = tempfile::tempdir().unwrap();
     let fixture = Fixture::default();
-    let host = fixture.host();
+    let harness = fixture.harness();
     let path = directory.path().join("first.jsonl");
-    let first = host
+    let first = harness
         .sessions()
         .create_session(directory.path(), &path)
         .await
@@ -311,7 +315,7 @@ async fn unsaved_reload_stays_in_memory_and_sessions_have_distinct_capabilities(
     first.reload().await.unwrap();
     assert!(!path.exists());
     assert_eq!(first.current().log().id(), id);
-    let second = host
+    let second = harness
         .sessions()
         .create_session(
             directory.path().join("second"),
@@ -326,16 +330,16 @@ async fn unsaved_reload_stays_in_memory_and_sessions_have_distinct_capabilities(
     assert_eq!(lookups[1].session_id, second.current().log().id());
     assert_ne!(lookups[0].session_id, lookups[1].session_id);
     assert_ne!(lookups[0].workspace, lookups[1].workspace);
-    host.sessions().shutdown().await.unwrap();
+    harness.sessions().shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn missing_provider_fails_before_creating_a_resume_entry() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("never-created.jsonl");
-    let host =
-        AgentHost::builder(ModelSelection::new("missing", "model"), "Explicit prompt").build();
-    let result = host
+    let harness =
+        AgentHarness::builder(ModelSelection::new("missing", "model"), "Explicit prompt").build();
+    let result = harness
         .sessions()
         .create_session(directory.path(), &path)
         .await;
@@ -347,13 +351,13 @@ async fn missing_provider_fails_before_creating_a_resume_entry() {
             .contains("provider missing is not registered")
     );
     assert!(!path.exists());
-    assert!(host.sessions().sessions().is_empty());
+    assert!(harness.sessions().sessions().is_empty());
 }
 
 #[tokio::test]
 async fn explicit_tool_selection_and_later_changes_survive_reload() {
     let directory = tempfile::tempdir().unwrap();
-    let host = AgentHost::builder(ModelSelection::new("scripted", "test"), PROMPT)
+    let harness = AgentHarness::builder(ModelSelection::new("scripted", "test"), PROMPT)
         .plugin_factory(|| OrdersPlugin {
             generation: 1,
             lookups: Arc::default(),
@@ -361,7 +365,7 @@ async fn explicit_tool_selection_and_later_changes_survive_reload() {
         .provider_plugin_factory(|| ScriptedProviderPlugin::scripted([]))
         .active_tools(Vec::new())
         .build();
-    let session = host
+    let session = harness
         .sessions()
         .create_session(directory.path(), directory.path().join("empty.jsonl"))
         .await
@@ -375,5 +379,5 @@ async fn explicit_tool_selection_and_later_changes_survive_reload() {
         .unwrap();
     session.reload().await.unwrap();
     assert_eq!(session.current().runtime().active_tools(), ["lookup_order"]);
-    host.sessions().shutdown().await.unwrap();
+    harness.sessions().shutdown().await.unwrap();
 }

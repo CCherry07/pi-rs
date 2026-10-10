@@ -1,12 +1,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::responses::{input_items, stream as responses_stream, tools as response_tools};
 use async_trait::async_trait;
-use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use pi_core::{AbortSignal, ProviderId};
 use pi_plugin::{
@@ -73,6 +71,7 @@ impl Default for CodexTransportOptions {
 
 struct CachedWebSocket {
     socket: CodexWebSocket,
+    authorization: Option<String>,
     created_at: Instant,
     last_used_at: Instant,
     continuation: Option<WebSocketContinuation>,
@@ -91,94 +90,7 @@ struct WebSocketSessionState {
     sse_fallback_sessions: Mutex<HashSet<String>>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct CodexCredentials {
-    access_token: Option<String>,
-    account_id: Option<String>,
-    source: Option<PathBuf>,
-}
-
-impl CodexCredentials {
-    pub fn discover() -> Self {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            return Self::default();
-        };
-        Self::discover_from([
-            home.join(".codex/auth.json"),
-            home.join(".config/codex/auth.json"),
-        ])
-    }
-
-    pub fn discover_from(paths: impl IntoIterator<Item = PathBuf>) -> Self {
-        paths
-            .into_iter()
-            .find_map(|path| Self::read(&path))
-            .unwrap_or_default()
-    }
-
-    fn read(path: &Path) -> Option<Self> {
-        let bytes = std::fs::read(path).ok()?;
-        if bytes.len() > 1024 * 1024 {
-            return None;
-        }
-        let value: Value = serde_json::from_slice(&bytes).ok()?;
-        let access_token = token_candidate(&value, &["tokens", "access_token"])
-            .or_else(|| token_candidate(&value, &["tokens", "accessToken"]))
-            .or_else(|| token_candidate(&value, &["access_token"]))
-            .or_else(|| token_candidate(&value, &["accessToken"]))?;
-        let account_id = chatgpt_account_id(&access_token)?;
-        Some(Self {
-            access_token: Some(access_token),
-            account_id: Some(account_id),
-            source: Some(path.to_path_buf()),
-        })
-    }
-
-    pub fn from_access_token(access_token: impl Into<String>) -> Self {
-        let access_token = access_token.into();
-        let account_id = chatgpt_account_id(&access_token);
-        Self {
-            access_token: Some(access_token),
-            account_id,
-            source: None,
-        }
-    }
-
-    pub fn is_configured(&self) -> bool {
-        self.access_token.is_some() && self.account_id.is_some()
-    }
-
-    pub fn source(&self) -> Option<&Path> {
-        self.source.as_deref()
-    }
-}
-
-fn token_candidate(value: &Value, path: &[&str]) -> Option<String> {
-    let token = path
-        .iter()
-        .try_fold(value, |value, key| value.get(*key))?
-        .as_str()?
-        .trim();
-    (!token.is_empty()).then(|| token.to_string())
-}
-
-fn chatgpt_account_id(token: &str) -> Option<String> {
-    let payload = token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
-        .ok()?;
-    let claims: Value = serde_json::from_slice(&bytes).ok()?;
-    claims
-        .get("https://api.openai.com/auth")
-        .and_then(|auth| auth.get("chatgpt_account_id"))
-        .or_else(|| claims.get("chatgpt_account_id"))
-        .or_else(|| claims.pointer("/https://api.openai.com/auth/chatgpt_account_id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
+pub use crate::codex_auth::CodexCredentials;
 
 pub struct OpenAiCodexProvider {
     credentials: CodexCredentials,
@@ -218,14 +130,15 @@ impl OpenAiCodexProvider {
 
     fn headers(
         &self,
+        credentials: &CodexCredentials,
         request: &ProviderRequest,
     ) -> Result<BTreeMap<String, String>, ProviderError> {
-        let token = self.credentials.access_token.as_deref().ok_or_else(|| {
+        let token = credentials.access_token.as_deref().ok_or_else(|| {
             ProviderError::Failure(
                 "OpenAI Codex requires a login in ~/.codex/auth.json".to_string(),
             )
         })?;
-        let account_id = self.credentials.account_id.as_deref().ok_or_else(|| {
+        let account_id = credentials.account_id.as_deref().ok_or_else(|| {
             ProviderError::Failure(
                 "OpenAI Codex token is missing chatgpt_account_id; run codex login again"
                     .to_string(),
@@ -251,9 +164,10 @@ impl OpenAiCodexProvider {
 
     fn websocket_headers(
         &self,
+        credentials: &CodexCredentials,
         request: &ProviderRequest,
     ) -> Result<BTreeMap<String, String>, ProviderError> {
-        let mut headers = self.headers(request)?;
+        let mut headers = self.headers(credentials, request)?;
         remove_header(&mut headers, "Accept");
         remove_header(&mut headers, "Content-Type");
         remove_header(&mut headers, "OpenAI-Beta");
@@ -321,14 +235,14 @@ impl Provider for OpenAiCodexProvider {
         let payload = context
             .before_provider_request(&signal, responses_request_body(&request))
             .await?;
+        let mut credentials = self.credentials.current(false).await?;
         let responses_url = self.responses_url();
 
         if self.should_attempt_websocket(&request) {
             let headers = context
-                .before_provider_headers(&signal, self.websocket_headers(&request)?)
+                .before_provider_headers(&signal, self.websocket_headers(&credentials, &request)?)
                 .await;
-            let account_id = self
-                .credentials
+            let account_id = credentials
                 .account_id
                 .as_deref()
                 .expect("configured Codex credentials have an account id");
@@ -358,17 +272,28 @@ impl Provider for OpenAiCodexProvider {
             }
         }
 
-        let headers = self.headers(&request)?;
-        let response = post_json_with_provider_hooks(
-            self.transport.as_ref(),
-            &context,
-            &responses_url,
-            headers,
-            &payload,
-            signal.clone(),
-        )
-        .await
-        .map_err(map_transport_error)?;
+        let mut refreshed = false;
+        let response = loop {
+            let headers = self.headers(&credentials, &request)?;
+            let response = post_json_with_provider_hooks(
+                self.transport.as_ref(),
+                &context,
+                &responses_url,
+                headers,
+                &payload,
+                signal.clone(),
+            )
+            .await
+            .map_err(map_transport_error)?;
+            // Only retry an HTTP rejection before consuming any model stream.
+            if response.status == 401 && !refreshed && credentials.source().is_some() {
+                drop(response);
+                credentials = credentials.current(true).await?;
+                refreshed = true;
+                continue;
+            }
+            break response;
+        };
         if !(200..300).contains(&response.status) {
             let message = read_error_response(response)
                 .await
@@ -435,6 +360,7 @@ async fn open_websocket_body(
     )
     .await?;
     let mut socket = acquired.socket;
+    let authorization = authorization_header(&request.headers).map(str::to_string);
     let use_cached_context = matches!(
         request.options.transport,
         CodexTransport::Auto | CodexTransport::WebsocketCached
@@ -507,6 +433,7 @@ async fn open_websocket_body(
                             cache_key,
                             CachedWebSocket {
                                 socket,
+                                authorization,
                                 created_at,
                                 last_used_at: Instant::now(),
                                 continuation: use_cached_context.then_some(continuation).flatten(),
@@ -534,7 +461,8 @@ async fn acquire_websocket(
         && let Some(cached) = state.connections.lock().await.remove(cache_key)
     {
         let now = Instant::now();
-        if now.duration_since(cached.created_at) < SESSION_WEBSOCKET_MAX_AGE
+        if cached.authorization.as_deref() == authorization_header(headers)
+            && now.duration_since(cached.created_at) < SESSION_WEBSOCKET_MAX_AGE
             && now.duration_since(cached.last_used_at) < SESSION_WEBSOCKET_CACHE_TTL
         {
             return Ok(AcquiredWebSocket {
@@ -549,6 +477,13 @@ async fn acquire_websocket(
         socket: connect_websocket(url, headers, signal, connect_timeout).await?,
         created_at: Instant::now(),
         continuation: None,
+    })
+}
+
+fn authorization_header(headers: &BTreeMap<String, String>) -> Option<&str> {
+    headers.iter().find_map(|(name, value)| {
+        name.eq_ignore_ascii_case("Authorization")
+            .then_some(value.as_str())
     })
 }
 
@@ -899,6 +834,7 @@ fn map_transport_error(error: TransportError) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
@@ -932,7 +868,10 @@ mod tests {
 
         assert!(credentials.is_configured());
         assert_eq!(credentials.account_id.as_deref(), Some("acct-1"));
-        assert_eq!(credentials.source(), Some(path.as_path()));
+        assert_eq!(
+            credentials.source(),
+            Some(path.canonicalize().unwrap().as_path())
+        );
     }
 
     #[test]
@@ -1147,6 +1086,191 @@ mod tests {
 
     struct SseFallbackTransport {
         calls: AtomicUsize,
+    }
+
+    struct RotatedLoginTransport(String);
+
+    struct UnauthorizedThenRotatedLogin {
+        path: std::path::PathBuf,
+        calls: AtomicUsize,
+        keep_rejecting: bool,
+    }
+
+    #[async_trait]
+    impl HttpTransport for UnauthorizedThenRotatedLogin {
+        async fn post_json(
+            &self,
+            url: &str,
+            headers: &BTreeMap<String, String>,
+            body: &Value,
+            signal: AbortSignal,
+        ) -> Result<HttpResponse, TransportError> {
+            let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                std::fs::write(
+                    &self.path,
+                    json!({"tokens":{"access_token":jwt("new")}}).to_string(),
+                )
+                .unwrap();
+            }
+            if attempt == 0 || self.keep_rejecting {
+                return Ok(HttpResponse {
+                    status: 401,
+                    content_type: Some("application/json".into()),
+                    headers: vec![],
+                    body: Box::pin(futures::stream::once(async {
+                        Ok(b"token_expired".to_vec())
+                    })),
+                });
+            }
+            RotatedLoginTransport(jwt("new"))
+                .post_json(url, headers, body, signal)
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn unauthorized_request_reloads_login_and_retries_at_most_once() {
+        for keep_rejecting in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("auth.json");
+            std::fs::write(
+                &path,
+                json!({"tokens":{"access_token":jwt("old")}}).to_string(),
+            )
+            .unwrap();
+            let transport = Arc::new(UnauthorizedThenRotatedLogin {
+                path: path.clone(),
+                calls: AtomicUsize::new(0),
+                keep_rejecting,
+            });
+            let provider = OpenAiCodexProvider::with_transport_options(
+                CodexCredentials::discover_from([path]),
+                transport.clone(),
+                CodexTransportOptions {
+                    transport: CodexTransport::Sse,
+                    ..Default::default()
+                },
+            );
+            let (_abort, signal) = pi_core::AbortHandle::new();
+            let result = provider
+                .stream(
+                    request_with_messages(vec![user_message("hello")]),
+                    ProviderCallContext::without_plugins(
+                        "/workspace",
+                        ProviderId::new(PROVIDER_ID),
+                        pi_core::ModelId::new("gpt-5.5"),
+                    ),
+                    signal,
+                )
+                .await;
+            assert_eq!(result.is_err(), keep_rejecting);
+            assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn rotated_token_reconnects_cached_websocket_for_same_account() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/responses", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut sockets = Vec::new();
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                sockets.push(accept_async(stream).await.unwrap());
+            }
+        });
+        let state = WebSocketSessionState::default();
+        let key = ("session".to_string(), "account".to_string());
+        let (_abort, signal) = pi_core::AbortHandle::new();
+        let headers = BTreeMap::from([("Authorization".into(), "Bearer old-fixture".into())]);
+        let first = acquire_websocket(
+            &state,
+            Some(&key),
+            &url,
+            &headers,
+            &signal,
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .unwrap();
+        state.connections.lock().await.insert(
+            key.clone(),
+            CachedWebSocket {
+                socket: first.socket,
+                authorization: Some("Bearer old-fixture".into()),
+                created_at: Instant::now(),
+                last_used_at: Instant::now(),
+                continuation: None,
+            },
+        );
+        let headers = BTreeMap::from([("Authorization".into(), "Bearer new-fixture".into())]);
+        acquire_websocket(
+            &state,
+            Some(&key),
+            &url,
+            &headers,
+            &signal,
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[async_trait]
+    impl HttpTransport for RotatedLoginTransport {
+        async fn post_json(
+            &self,
+            url: &str,
+            headers: &BTreeMap<String, String>,
+            body: &Value,
+            signal: AbortSignal,
+        ) -> Result<HttpResponse, TransportError> {
+            assert_eq!(headers["Authorization"], format!("Bearer {}", self.0));
+            SseFallbackTransport {
+                calls: AtomicUsize::new(0),
+            }
+            .post_json(url, headers, body, signal)
+            .await
+        }
+    }
+
+    #[tokio::test]
+    async fn each_request_reads_rotated_codex_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        std::fs::write(
+            &path,
+            json!({"tokens":{"access_token":jwt("old")}}).to_string(),
+        )
+        .unwrap();
+        let provider = OpenAiCodexProvider::with_transport_options(
+            CodexCredentials::discover_from([path.clone()]),
+            Arc::new(RotatedLoginTransport(jwt("new"))),
+            CodexTransportOptions {
+                transport: CodexTransport::Sse,
+                ..Default::default()
+            },
+        );
+        std::fs::write(
+            &path,
+            json!({"tokens":{"access_token":jwt("new")}}).to_string(),
+        )
+        .unwrap();
+        collect_provider_events(
+            &provider,
+            request_with_messages(vec![user_message("hello")]),
+            ProviderCallContext::without_plugins(
+                "/workspace",
+                ProviderId::new(PROVIDER_ID),
+                pi_core::ModelId::new("gpt-5.5"),
+            ),
+        )
+        .await;
     }
 
     #[async_trait]

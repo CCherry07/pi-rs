@@ -637,7 +637,7 @@ fn render_prompt_template(
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use pi_sdk::{AgentHost, ModelSelection};
+    use pi_sdk::{AgentHarness, ModelSelection};
 
     use super::*;
 
@@ -673,10 +673,10 @@ mod tests {
         }
 
         let directory = tempfile::tempdir().unwrap();
-        let host = AgentHost::builder(ModelSelection::new("scripted", "test"), "test")
+        let harness = AgentHarness::builder(ModelSelection::new("scripted", "test"), "test")
             .provider_plugin_factory(|| pi_test_support::ScriptedProviderPlugin::scripted([]))
             .build();
-        let session = host
+        let session = harness
             .sessions()
             .create_session(directory.path(), directory.path().join("session.jsonl"))
             .await
@@ -698,6 +698,6 @@ mod tests {
             cleaned.load(Ordering::SeqCst),
             "task must be dropped before returning"
         );
-        host.sessions().shutdown().await.unwrap();
+        harness.sessions().shutdown().await.unwrap();
     }
 }

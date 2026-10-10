@@ -5,7 +5,8 @@ use std::time::{Duration, SystemTime};
 
 use async_stream::stream;
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
+use futures::future::{BoxFuture, Shared};
+use futures::{FutureExt, Stream, StreamExt};
 use pi_core::AbortSignal;
 use pi_plugin::{ProviderCallContext, ProviderError};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -128,7 +129,7 @@ impl Default for ReqwestTransportConfig {
 
 #[derive(Clone)]
 pub struct ReqwestTransport {
-    client: reqwest::Client,
+    client: Shared<BoxFuture<'static, Result<reqwest::Client, String>>>,
     config: ReqwestTransportConfig,
 }
 
@@ -141,6 +142,9 @@ impl ReqwestTransport {
     pub fn with_config(config: ReqwestTransportConfig) -> Result<Self, TransportError> {
         let mut builder = reqwest::Client::builder();
         if let Some(user_agent) = &config.user_agent {
+            let user_agent = HeaderValue::from_str(user_agent).map_err(|error| {
+                TransportError::InvalidConfiguration(format!("invalid HTTP user agent: {error}"))
+            })?;
             builder = builder.user_agent(user_agent);
         }
         if let Some(proxy) = config
@@ -153,9 +157,15 @@ impl ReqwestTransport {
                 TransportError::InvalidConfiguration(format!("invalid HTTP proxy: {error}"))
             })?);
         }
-        let client = builder
-            .build()
-            .map_err(|error| TransportError::InvalidConfiguration(error.to_string()))?;
+        // Keep native/system certificate loading off generation startup and async workers.
+        // Shared retains the initialization and its result across clones and cancelled callers.
+        let client = async move {
+            tokio::task::spawn_blocking(move || builder.build().map_err(|error| error.to_string()))
+                .await
+                .map_err(|error| format!("HTTP client initialization task failed: {error}"))?
+        }
+        .boxed()
+        .shared();
         Ok(Self { client, config })
     }
 
@@ -212,26 +222,35 @@ impl HttpTransport for ReqwestTransport {
             request_headers.insert(name, value);
         }
 
+        signal.check().map_err(|_| TransportError::Aborted)?;
         let mut retry_index = 0_u32;
         let response = loop {
-            let send = self
-                .client
-                .post(url)
-                .headers(request_headers.clone())
-                .json(body)
-                .send();
+            let send = async {
+                let client = self
+                    .client
+                    .clone()
+                    .await
+                    .map_err(TransportError::InvalidConfiguration)?;
+                client
+                    .post(url)
+                    .headers(request_headers.clone())
+                    .json(body)
+                    .send()
+                    .await
+                    .map_err(reqwest_request_error)
+            };
             let result = if let Some(timeout) = self.timeout_for(url) {
                 tokio::select! {
                     _ = signal.wait() => return Err(TransportError::Aborted),
                     result = tokio::time::timeout(timeout, send) => match result {
-                        Ok(result) => result.map_err(reqwest_request_error),
+                        Ok(result) => result,
                         Err(_) => Err(TransportError::Timeout { seconds: timeout.as_secs() }),
                     }
                 }
             } else {
                 tokio::select! {
                     _ = signal.wait() => return Err(TransportError::Aborted),
-                    result = send => result.map_err(reqwest_request_error),
+                    result = send => result,
                 }
             };
             match result {
@@ -250,7 +269,10 @@ impl HttpTransport for ReqwestTransport {
                 Ok(response) => break response,
                 Err(error)
                     if retry_index < self.config.max_retries
-                        && !matches!(error, TransportError::Aborted) =>
+                        && !matches!(
+                            error,
+                            TransportError::Aborted | TransportError::InvalidConfiguration(_)
+                        ) =>
                 {
                     let delay = exponential_retry_delay(retry_index);
                     retry_index = retry_index.saturating_add(1);
@@ -488,7 +510,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use async_trait::async_trait;
-    use futures::StreamExt;
+    use futures::{FutureExt, StreamExt};
     use pi_core::{AbortSignal, ModelId, PluginId, ProviderId};
     use pi_plugin::{
         AfterProviderResponseEvent, BeforeProviderHeadersEvent, PluginError, ProviderCallContext,
@@ -496,6 +518,8 @@ mod tests {
     };
     use reqwest::header::{HeaderMap, HeaderValue};
     use serde_json::{Value, json};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     use super::{
         DEFAULT_REMOTE_TIMEOUT, HttpResponse, HttpTransport, ReqwestTransport,
@@ -506,6 +530,162 @@ mod tests {
     struct CapturingTransport {
         headers: Mutex<Option<BTreeMap<String, String>>>,
         body_polls: Arc<AtomicUsize>,
+    }
+
+    #[test]
+    fn transport_validates_configuration_before_deferred_client_initialization() {
+        let transport = ReqwestTransport::new();
+        assert!(transport.client.peek().is_none());
+        for config in [
+            ReqwestTransportConfig {
+                user_agent: Some("invalid\r\nuser-agent".to_string()),
+                ..Default::default()
+            },
+            ReqwestTransportConfig {
+                proxy: Some("http://[".to_string()),
+                ..Default::default()
+            },
+        ] {
+            assert!(matches!(
+                ReqwestTransport::with_config(config),
+                Err(TransportError::InvalidConfiguration(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_client_sends_concurrent_requests_through_the_configured_proxy() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let mut buffer = [0; 4096];
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(count, 0);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                assert!(request.starts_with("post http://pi-client.test/request "));
+                assert!(request.contains("\r\nuser-agent: pi-client-test\r\n"));
+                assert!(request.contains("\r\nx-request-test: retained\r\n"));
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let transport = ReqwestTransport::with_config(ReqwestTransportConfig {
+            proxy: Some(proxy),
+            user_agent: Some("pi-client-test".to_string()),
+            timeout: Some(Duration::from_secs(60)),
+            ..Default::default()
+        })
+        .unwrap();
+        let cloned = transport.clone();
+        assert!(transport.client.ptr_eq(&cloned.client));
+        assert!(transport.client.peek().is_none());
+        let (_, signal) = pi_core::AbortHandle::new();
+        let headers = BTreeMap::from([("X-Request-Test".to_string(), "retained".to_string())]);
+        let body = json!({"prompt": "local fixture"});
+        let (first, second) = tokio::join!(
+            transport.post_json(
+                "http://pi-client.test/request",
+                &headers,
+                &body,
+                signal.clone()
+            ),
+            cloned.post_json("http://pi-client.test/request", &headers, &body, signal),
+        );
+        for response in [first, second] {
+            let response = response.unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(
+                super::collect_body_limited(response.body, 10)
+                    .await
+                    .unwrap(),
+                "ok"
+            );
+        }
+        server.await.unwrap();
+        assert!(matches!(transport.client.peek(), Some(Ok(_))));
+        assert!(matches!(cloned.client.peek(), Some(Ok(_))));
+    }
+
+    #[tokio::test]
+    async fn cancelled_client_initialization_is_reused_by_the_next_request() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut transport = ReqwestTransport::new();
+        transport.client = {
+            let started = started.clone();
+            let release = release.clone();
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                started.notify_one();
+                release.notified().await;
+                Err("fixture initialization failure".to_string())
+            }
+            .boxed()
+            .shared()
+        };
+        let cloned = transport.clone();
+        let (abort, signal) = pi_core::AbortHandle::new();
+        let request = tokio::spawn(async move {
+            cloned
+                .post_json("http://127.0.0.1:1", &BTreeMap::new(), &json!({}), signal)
+                .await
+        });
+        started.notified().await;
+        abort.abort();
+        assert!(matches!(
+            request.await.unwrap(),
+            Err(TransportError::Aborted)
+        ));
+        release.notify_one();
+        let (_, signal) = pi_core::AbortHandle::new();
+        assert!(matches!(
+            transport.post_json("http://127.0.0.1:1", &BTreeMap::new(), &json!({}), signal).await,
+            Err(TransportError::InvalidConfiguration(message)) if message == "fixture initialization failure"
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn request_timeout_includes_deferred_client_initialization() {
+        let mut transport = ReqwestTransport::with_config(ReqwestTransportConfig {
+            timeout: Some(Duration::from_millis(1)),
+            ..Default::default()
+        })
+        .unwrap();
+        transport.client = futures::future::pending().boxed().shared();
+        let (_, signal) = pi_core::AbortHandle::new();
+        assert!(matches!(
+            transport
+                .post_json("http://127.0.0.1:1", &BTreeMap::new(), &json!({}), signal)
+                .await,
+            Err(TransportError::Timeout { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn already_aborted_request_does_not_initialize_client() {
+        let transport = ReqwestTransport::new();
+        let (abort, signal) = pi_core::AbortHandle::new();
+        abort.abort();
+        assert!(matches!(
+            transport
+                .post_json("http://127.0.0.1:1", &BTreeMap::new(), &json!({}), signal)
+                .await,
+            Err(TransportError::Aborted)
+        ));
+        assert!(transport.client.peek().is_none());
     }
 
     #[async_trait]
@@ -709,6 +889,8 @@ mod tests {
             ..ReqwestTransportConfig::default()
         })
         .unwrap();
+        // This regression targets a socket error, independently of TLS setup time.
+        transport.client.clone().await.unwrap();
         let (_, signal) = pi_core::AbortHandle::new();
 
         let result = transport

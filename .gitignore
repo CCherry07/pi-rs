@@ -21,3 +21,4 @@ dist/
 
 # Local Hermes state and skills
 .hermes/
+docs/

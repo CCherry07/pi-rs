@@ -14,20 +14,20 @@ use pi_session::{
 type PluginFactory = Arc<dyn Fn() -> Result<Arc<dyn Plugin>, String> + Send + Sync>;
 type ProviderFactory = Arc<dyn Fn() -> Result<Arc<dyn ProviderPlugin>, String> + Send + Sync>;
 
-/// A domain-neutral host using the same managed sessions as the Coding product.
-pub struct AgentHost {
+/// A domain-neutral agent harness using the same managed sessions as the Coding product.
+pub struct AgentHarness {
     sessions: MultiSessionManager,
 }
 
 /// Explicit composition for a domain. No tools or provider plugins are installed implicitly.
-pub struct AgentHostBuilder {
+pub struct AgentHarnessBuilder {
     factory: AgentSessionFactory,
 }
 
 /// Rebuilds explicitly configured plugins for each session generation.
 ///
-/// Implements the existing session factory contract so custom hosts can use the same preparation,
-/// activation, rollback, and persistence transaction as [`AgentHost`].
+/// Implements the existing session factory contract so applications can use the same preparation,
+/// activation, rollback, and persistence transaction as [`AgentHarness`].
 #[derive(Clone)]
 pub struct AgentSessionFactory {
     model: ModelSelection,
@@ -40,11 +40,11 @@ pub struct AgentSessionFactory {
     binding: PluginContextBinding,
 }
 
-impl AgentHost {
+impl AgentHarness {
     /// Selects the model used for fresh sessions and the complete reusable base prompt.
     /// Saved sessions restore their model; a live model change survives reload.
-    pub fn builder(model: ModelSelection, system_prompt: impl Into<String>) -> AgentHostBuilder {
-        AgentHostBuilder {
+    pub fn builder(model: ModelSelection, system_prompt: impl Into<String>) -> AgentHarnessBuilder {
+        AgentHarnessBuilder {
             factory: AgentSessionFactory {
                 model,
                 system_prompt: SystemPrompt::Final(system_prompt.into()),
@@ -69,7 +69,7 @@ impl AgentHost {
     }
 }
 
-impl AgentHostBuilder {
+impl AgentHarnessBuilder {
     /// Supplies an exact prompt or a domain-owned factory using the runtime's existing
     /// generation preparation. Dynamic factories prepare once per generation; tool changes
     /// re-render those frozen inputs without reading resources again.
@@ -163,15 +163,15 @@ impl AgentHostBuilder {
         self
     }
 
-    /// Hands the configured factory to an existing multi-session host.
+    /// Hands the configured factory to an existing multi-session manager.
     pub fn into_factory(self) -> AgentSessionFactory {
         self.factory
     }
 
     /// Assembly is lazy: factories run only when a session generation is prepared.
     /// Registration errors are returned from session creation, resume, or reload.
-    pub fn build(self) -> AgentHost {
-        AgentHost {
+    pub fn build(self) -> AgentHarness {
+        AgentHarness {
             sessions: MultiSessionManager::new(self.factory),
         }
     }

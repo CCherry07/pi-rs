@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pi_sdk::{
-    AgentHost, AgentHostBuilder, ModelSelection, PreparedSystemPrompt, PromptContext, PromptOutput,
-    SystemPrompt, WorkspaceSnapshot, WorkspaceSpec,
+    AgentHarness, AgentHarnessBuilder, ModelSelection, PreparedSystemPrompt, PromptContext,
+    PromptOutput, SystemPrompt, WorkspaceSnapshot, WorkspaceSpec,
 };
 use pi_test_support::{ScriptedProvider, ScriptedProviderPlugin, ScriptedTurn, TestToolsPlugin};
 use serde_json::json;
@@ -25,11 +25,11 @@ struct Domain {
 }
 
 impl Domain {
-    fn builder(&self) -> AgentHostBuilder {
+    fn builder(&self) -> AgentHarnessBuilder {
         let source = self.clone();
         let registrations = Arc::clone(&self.registrations);
         let providers = Arc::clone(&self.providers);
-        AgentHost::builder(ModelSelection::new("scripted", "test"), "static fallback")
+        AgentHarness::builder(ModelSelection::new("scripted", "test"), "static fallback")
             .system_prompt(SystemPrompt::dynamic(
                 move |workspace: &WorkspaceSnapshot| {
                     source.prepares.fetch_add(1, Ordering::SeqCst);
@@ -120,11 +120,11 @@ async fn first_render_uses_registered_tools_or_the_exact_explicit_selection() {
     ] {
         let domain = Domain::default();
         let builder = domain.builder();
-        let host = match selection {
+        let harness = match selection {
             Some(tools) => builder.active_tools(tools).build(),
             None => builder.build(),
         };
-        let session = host
+        let session = harness
             .sessions()
             .create_session(directory.path(), directory.path().join("session.jsonl"))
             .await
@@ -155,21 +155,21 @@ async fn first_render_uses_registered_tools_or_the_exact_explicit_selection() {
                 .collect::<Vec<_>>(),
             expected
         );
-        host.sessions().shutdown().await.unwrap();
+        harness.sessions().shutdown().await.unwrap();
         std::fs::remove_file(directory.path().join("session.jsonl")).unwrap();
     }
 
     policy(directory.path(), "allow-empty");
     let domain = Domain::default();
-    let host = domain.builder().active_tools(Vec::new()).build();
-    let session = host
+    let harness = domain.builder().active_tools(Vec::new()).build();
+    let session = harness
         .sessions()
         .create_session(directory.path(), directory.path().join("empty.jsonl"))
         .await
         .unwrap();
     assert!(session.current().runtime().active_tools().is_empty());
     assert!(domain.rendered.lock().unwrap()[0].tools.is_empty());
-    host.sessions().shutdown().await.unwrap();
+    harness.sessions().shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -177,8 +177,8 @@ async fn frozen_prompt_inputs_survive_tool_changes_and_turns_until_reload() {
     let directory = tempfile::tempdir().unwrap();
     policy(directory.path(), "version-1");
     let domain = Domain::default();
-    let host = domain.builder().build();
-    let session = host
+    let harness = domain.builder().build();
+    let session = harness
         .sessions()
         .create_session(directory.path(), directory.path().join("session.jsonl"))
         .await
@@ -223,7 +223,7 @@ async fn frozen_prompt_inputs_survive_tool_changes_and_turns_until_reload() {
             .system_prompt
             .starts_with("echo-only; tools=echo;")
     );
-    host.sessions().shutdown().await.unwrap();
+    harness.sessions().shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -231,9 +231,9 @@ async fn failed_preparation_or_render_preserves_the_live_session_and_journal() {
     let directory = tempfile::tempdir().unwrap();
     policy(directory.path(), "version-1");
     let domain = Domain::default();
-    let host = domain.builder().build();
+    let harness = domain.builder().build();
     let path = directory.path().join("session.jsonl");
-    let session = host
+    let session = harness
         .sessions()
         .create_session(directory.path(), &path)
         .await
@@ -265,12 +265,12 @@ async fn failed_preparation_or_render_preserves_the_live_session_and_journal() {
             .iter()
             .all(|request| request.system_prompt.starts_with("version-1;"))
     );
-    host.sessions().shutdown().await.unwrap();
+    harness.sessions().shutdown().await.unwrap();
 
     policy(directory.path(), "echo-only");
     let domain = Domain::default();
-    let host = domain.builder().build();
-    let session = host.sessions().open_session(&path).await.unwrap();
+    let harness = domain.builder().build();
+    let session = harness.sessions().open_session(&path).await.unwrap();
     let saved = std::fs::read(&path).unwrap();
     let prompt = session
         .current()
@@ -286,7 +286,7 @@ async fn failed_preparation_or_render_preserves_the_live_session_and_journal() {
         prompt
     );
     assert_eq!(session.current().runtime().active_tools(), ["echo"]);
-    host.sessions().shutdown().await.unwrap();
+    harness.sessions().shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -310,8 +310,8 @@ async fn resume_prepares_current_domain_resources_in_the_saved_workspace_and_res
     .unwrap();
     let path = directory.path().join("session.jsonl");
     let domain = Domain::default();
-    let host = domain.builder().build();
-    let session = host
+    let harness = domain.builder().build();
+    let session = harness
         .sessions()
         .create_session_with_workspace(workspace.clone(), &path, None, None)
         .await
@@ -323,12 +323,16 @@ async fn resume_prepares_current_domain_resources_in_the_saved_workspace_and_res
         .submit("Persist this conversation.")
         .await
         .unwrap();
-    host.sessions().shutdown().await.unwrap();
+    harness.sessions().shutdown().await.unwrap();
 
     policy(&orders, "echo-only");
     let current_domain = Domain::default();
-    let resumed_host = current_domain.builder().build();
-    let resumed = resumed_host.sessions().open_session(&path).await.unwrap();
+    let resumed_harness = current_domain.builder().build();
+    let resumed = resumed_harness
+        .sessions()
+        .open_session(&path)
+        .await
+        .unwrap();
     assert_eq!(resumed.current().log().id(), id);
     assert_eq!(resumed.current().runtime().workspace().spec(), &workspace);
     assert_eq!(resumed.current().runtime().active_tools(), ["echo"]);
@@ -351,7 +355,7 @@ async fn resume_prepares_current_domain_resources_in_the_saved_workspace_and_res
             .system_prompt
             .starts_with("echo-only; tools=echo;")
     );
-    resumed_host.sessions().shutdown().await.unwrap();
+    resumed_harness.sessions().shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -359,12 +363,12 @@ async fn unknown_explicit_tools_fail_before_first_render_and_persistence() {
     let directory = tempfile::tempdir().unwrap();
     policy(directory.path(), "version-1");
     let domain = Domain::default();
-    let host = domain
+    let harness = domain
         .builder()
         .active_tools(vec!["unknown".into()])
         .build();
     let path = directory.path().join("session.jsonl");
-    let result = host
+    let result = harness
         .sessions()
         .create_session(directory.path(), &path)
         .await;
@@ -386,7 +390,7 @@ async fn legacy_journal_without_tool_selection_renders_defaults_and_additions_to
     assert!(log.context().unwrap().active_tool_names.is_none());
     drop(log);
     let domain = Domain::default();
-    let host = domain
+    let harness = domain
         .builder()
         .active_tools(vec!["echo".into()])
         .session_options(
@@ -394,7 +398,7 @@ async fn legacy_journal_without_tool_selection_renders_defaults_and_additions_to
                 .additional_active_tools(vec!["delay".into(), "removed-addition".into()]),
         )
         .build();
-    let session = host.sessions().open_session(&path).await.unwrap();
+    let session = harness.sessions().open_session(&path).await.unwrap();
     assert_eq!(
         session.current().runtime().active_tools(),
         ["echo", "delay"]
@@ -420,7 +424,7 @@ async fn legacy_journal_without_tool_selection_renders_defaults_and_additions_to
             .collect::<Vec<_>>(),
         ["echo", "delay"]
     );
-    host.sessions().shutdown().await.unwrap();
+    harness.sessions().shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -436,7 +440,7 @@ async fn legacy_journal_keeps_explicit_caller_tools_strict_before_first_render()
     drop(log);
     let saved = std::fs::read(&path).unwrap();
     let domain = Domain::default();
-    let host = domain
+    let harness = domain
         .builder()
         .active_tools(vec!["unknown-explicit".into()])
         .session_options(
@@ -444,7 +448,7 @@ async fn legacy_journal_keeps_explicit_caller_tools_strict_before_first_render()
                 .additional_active_tools(vec!["delay".into()]),
         )
         .build();
-    let result = host.sessions().open_session(&path).await;
+    let result = harness.sessions().open_session(&path).await;
     assert!(
         result
             .err()
@@ -454,7 +458,7 @@ async fn legacy_journal_keeps_explicit_caller_tools_strict_before_first_render()
     );
     assert!(domain.rendered.lock().unwrap().is_empty());
     assert_eq!(std::fs::read(&path).unwrap(), saved);
-    host.sessions().shutdown().await.unwrap();
+    harness.sessions().shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -509,10 +513,10 @@ async fn accepted_recovery_writes_determine_first_render_without_mutating_a_reje
 
     policy(directory.path(), "invalid-render");
     let domain = Domain::default();
-    let host = domain.builder().build();
-    assert!(host.sessions().open_session(&path).await.is_err());
+    let harness = domain.builder().build();
+    assert!(harness.sessions().open_session(&path).await.is_err());
     assert_eq!(std::fs::read(&path).unwrap(), saved);
-    assert!(host.sessions().sessions().is_empty());
+    assert!(harness.sessions().sessions().is_empty());
     let unchanged = pi_session::SessionLog::open_handle(&path).unwrap();
     assert!(unchanged.get_entry("recovered-selection").is_none());
     assert_eq!(
@@ -525,7 +529,7 @@ async fn accepted_recovery_writes_determine_first_render_without_mutating_a_reje
     drop(unchanged);
 
     policy(directory.path(), "delay-only");
-    let session = host.sessions().open_session(&path).await.unwrap();
+    let session = harness.sessions().open_session(&path).await.unwrap();
     assert_eq!(session.current().runtime().active_tools(), ["delay"]);
     assert_eq!(domain.rendered.lock().unwrap().len(), 1);
     assert!(
@@ -553,5 +557,5 @@ async fn accepted_recovery_writes_determine_first_render_without_mutating_a_reje
     );
     // Reopening performs no provider work and commits the already-accepted write only once.
     assert!(domain.requests(1).is_empty());
-    host.sessions().shutdown().await.unwrap();
+    harness.sessions().shutdown().await.unwrap();
 }

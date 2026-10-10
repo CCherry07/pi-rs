@@ -44,10 +44,11 @@ struct DeviceTokenResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: String,
-    expires_in: u64,
+pub(crate) struct TokenResponse {
+    pub(crate) access_token: String,
+    pub(crate) refresh_token: String,
+    pub(crate) expires_in: u64,
+    pub(crate) id_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -139,8 +140,13 @@ pub async fn poll_device_authorization(
 }
 
 pub async fn refresh(refresh_token: &str) -> Result<OAuthCredential, String> {
+    Ok(refresh_tokens(refresh_token).await?.into())
+}
+
+pub(crate) async fn refresh_tokens(refresh_token: &str) -> Result<TokenResponse, String> {
     let response = Client::new()
         .post(TOKEN_URL)
+        .timeout(Duration::from_secs(30))
         .header("Accept", "application/json")
         .form(&[
             ("grant_type", "refresh_token"),
@@ -150,7 +156,7 @@ pub async fn refresh(refresh_token: &str) -> Result<OAuthCredential, String> {
         .send()
         .await
         .map_err(|error| format!("OpenAI Codex token refresh failed: {error}"))?;
-    parse_token_response(response, "refresh").await
+    parse_tokens(response, "refresh").await
 }
 
 async fn exchange_code(code: &str, verifier: &str) -> Result<OAuthCredential, String> {
@@ -174,6 +180,13 @@ async fn parse_token_response(
     response: reqwest::Response,
     operation: &str,
 ) -> Result<OAuthCredential, String> {
+    Ok(parse_tokens(response, operation).await?.into())
+}
+
+async fn parse_tokens(
+    response: reqwest::Response,
+    operation: &str,
+) -> Result<TokenResponse, String> {
     let status = response.status();
     let bytes = bounded_body(response).await?;
     if !status.is_success() {
@@ -187,11 +200,17 @@ async fn parse_token_response(
     {
         return Err("invalid OpenAI Codex token response fields".to_string());
     }
-    Ok(OAuthCredential {
-        access: value.access_token,
-        refresh: value.refresh_token,
-        expires: now_ms().saturating_add(value.expires_in.saturating_mul(1_000)),
-    })
+    Ok(value)
+}
+
+impl From<TokenResponse> for OAuthCredential {
+    fn from(value: TokenResponse) -> Self {
+        Self {
+            access: value.access_token,
+            refresh: value.refresh_token,
+            expires: now_ms().saturating_add(value.expires_in.saturating_mul(1_000)),
+        }
+    }
 }
 
 async fn bounded_body(response: reqwest::Response) -> Result<Vec<u8>, String> {

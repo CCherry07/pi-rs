@@ -11,7 +11,7 @@ presentation. [`pi-coding-eval`](../../domains/coding/eval/README.md) owns the
 Coding-specific configuration and environment preparation.
 [`pi-eval`](../../crates/pi-eval/README.md) owns the reusable session runner,
 observations, graders, artifacts, and comparisons. Other domains can use that
-runner by preparing their own session manager through `pi-sdk::AgentHost`.
+runner by preparing their own session manager through `pi-sdk::AgentHarness`.
 
 The native-only smoke case can run through Cargo:
 

@@ -112,7 +112,7 @@ is the separate authoring interface for native plugins.
 
 ## Framework integration
 
-Use `pi-sdk::AgentHost` for explicit domain-neutral embedding and this crate for the complete
+Use `pi-sdk::AgentHarness` for explicit domain-neutral embedding and this crate for the complete
 Coding product. Project values remain in `pi_sdk::projects` (also re-exported here).
 Both entry points share `SessionGenerationFactory`, `MultiSessionManager`, the v4 journal and
 the unified plugin lifecycle.
