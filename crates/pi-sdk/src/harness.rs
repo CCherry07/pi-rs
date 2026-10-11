@@ -20,16 +20,11 @@ pub struct AgentHarness {
 }
 
 /// Explicit composition for a domain. No tools or provider plugins are installed implicitly.
-pub struct AgentHarnessBuilder {
-    factory: AgentSessionFactory,
-}
-
-/// Rebuilds explicitly configured plugins for each session generation.
 ///
-/// Implements the existing session factory contract so applications can use the same preparation,
-/// activation, rollback, and persistence transaction as [`AgentHarness`].
-#[derive(Clone)]
-pub struct AgentSessionFactory {
+/// Owns the configuration and implements [`SessionGenerationFactory`] to rebuild plugins for
+/// each session generation. [`Self::build`] transfers ownership to the harness's session manager;
+/// applications can also pass the builder directly to [`MultiSessionManager::new`].
+pub struct AgentHarnessBuilder {
     model: ModelSelection,
     system_prompt: SystemPrompt,
     thinking_level: ThinkingLevel,
@@ -45,16 +40,14 @@ impl AgentHarness {
     /// Saved sessions restore their model; a live model change survives reload.
     pub fn builder(model: ModelSelection, system_prompt: impl Into<String>) -> AgentHarnessBuilder {
         AgentHarnessBuilder {
-            factory: AgentSessionFactory {
-                model,
-                system_prompt: SystemPrompt::Final(system_prompt.into()),
-                thinking_level: ThinkingLevel::Off,
-                active_tools: None,
-                session_options: AgentSessionOptions::default(),
-                plugins: Vec::new(),
-                providers: Vec::new(),
-                binding: PluginContextBinding::new(),
-            },
+            model,
+            system_prompt: SystemPrompt::Final(system_prompt.into()),
+            thinking_level: ThinkingLevel::Off,
+            active_tools: None,
+            session_options: AgentSessionOptions::default(),
+            plugins: Vec::new(),
+            providers: Vec::new(),
+            binding: PluginContextBinding::new(),
         }
     }
 
@@ -74,7 +67,7 @@ impl AgentHarnessBuilder {
     /// generation preparation. Dynamic factories prepare once per generation; tool changes
     /// re-render those frozen inputs without reading resources again.
     pub fn system_prompt(mut self, prompt: SystemPrompt) -> Self {
-        self.factory.system_prompt = prompt;
+        self.system_prompt = prompt;
         self
     }
 
@@ -105,7 +98,7 @@ impl AgentHarnessBuilder {
         F: Fn() -> Result<Arc<dyn Plugin>, E> + Send + Sync + 'static,
         E: std::fmt::Display,
     {
-        self.factory.plugins.push(Arc::new(move || {
+        self.plugins.push(Arc::new(move || {
             factory().map_err(|error| error.to_string())
         }));
         self
@@ -136,14 +129,14 @@ impl AgentHarnessBuilder {
         F: Fn() -> Result<Arc<dyn ProviderPlugin>, E> + Send + Sync + 'static,
         E: std::fmt::Display,
     {
-        self.factory.providers.push(Arc::new(move || {
+        self.providers.push(Arc::new(move || {
             factory().map_err(|error| error.to_string())
         }));
         self
     }
 
     pub fn thinking_level(mut self, level: ThinkingLevel) -> Self {
-        self.factory.thinking_level = level;
+        self.thinking_level = level;
         self
     }
 
@@ -152,32 +145,25 @@ impl AgentHarnessBuilder {
     pub fn active_tools(mut self, mut tools: Vec<String>) -> Self {
         let mut seen = std::collections::HashSet::new();
         tools.retain(|tool| seen.insert(tool.clone()));
-        self.factory.active_tools = Some(tools);
+        self.active_tools = Some(tools);
         self
     }
 
     /// Supplies the shared session policies, including retry, context projection, and compaction.
     /// `initial_model` can explicitly override a saved model; otherwise resume uses the journal.
     pub fn session_options(mut self, options: AgentSessionOptions) -> Self {
-        self.factory.session_options = options;
+        self.session_options = options;
         self
-    }
-
-    /// Hands the configured factory to an existing multi-session manager.
-    pub fn into_factory(self) -> AgentSessionFactory {
-        self.factory
     }
 
     /// Assembly is lazy: factories run only when a session generation is prepared.
     /// Registration errors are returned from session creation, resume, or reload.
     pub fn build(self) -> AgentHarness {
         AgentHarness {
-            sessions: MultiSessionManager::new(self.factory),
+            sessions: MultiSessionManager::new(self),
         }
     }
-}
 
-impl AgentSessionFactory {
     fn runtime(
         &self,
         request: &SessionGenerationRequest,
@@ -242,7 +228,7 @@ impl AgentSessionFactory {
 }
 
 #[async_trait]
-impl SessionGenerationFactory for AgentSessionFactory {
+impl SessionGenerationFactory for AgentHarnessBuilder {
     fn session_registered(&self, session: &PiSession) {
         self.binding.bind(session.clone());
     }

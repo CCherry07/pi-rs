@@ -9,7 +9,7 @@
 mod harness;
 pub mod projects;
 
-pub use harness::{AgentHarness, AgentHarnessBuilder, AgentSessionFactory};
+pub use harness::{AgentHarness, AgentHarnessBuilder};
 pub use pi_core::{ModelSelection, ThinkingLevel, WorkspaceSnapshot, WorkspaceSpec};
 pub use pi_runtime::{
     PreparedSystemPrompt, PromptContext, PromptOutput, SystemPrompt, SystemPromptFactory,

@@ -28,7 +28,9 @@ harness.sessions().shutdown().await?;
 `build()` does not access the filesystem or instantiate plugins. Session creation prepares all
 registered factories, validates registration, and binds session capabilities before lifecycle
 callbacks and tool execution. Preparation failures leave the previous generation intact.
-`into_factory()` exposes the same composition to an existing `MultiSessionManager`.
+`AgentHarnessBuilder` owns the configuration and implements `SessionGenerationFactory` directly.
+`build()` consumes the builder and retains it in the session manager for creation, resume, and reload.
+Applications constructing their own manager can pass the builder to `MultiSessionManager::new(builder)`.
 
 The SDK does not discover `.pi`, `AGENTS.md`, settings, skills, native plugins, packages,
 or environment credentials. Providers and tools are installed only by caller-supplied factories.

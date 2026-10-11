@@ -22,13 +22,19 @@ product seam.
 ## Domain composition
 
 The reusable framework and the Coding product share one Agent loop, Plugin/ProviderPlugin contract,
-`MultiSessionManager`, and generation transaction. `crates/pi-sdk` exposes `AgentHost` and
-`AgentSessionFactory` for explicit model, prompt, tool and provider factory composition. It owns
+`MultiSessionManager`, and generation transaction. `crates/pi-sdk` exposes `AgentHarness` and
+`AgentHarnessBuilder` for explicit model, prompt, tool and provider factory composition. It owns
 shared Project definitions and has no dependency on `pi-coding`, settings/resource discovery,
 provider implementations, native package discovery, or first-party tool/feature plugins. Creating
-an embedded host does not read `.pi`, AGENTS.md, skills, credentials, or environment model defaults.
+an embedded harness does not read `.pi`, AGENTS.md, skills, credentials, or environment model defaults.
 The caller chooses plugin factories and session options. Each session binds its own generation
 capabilities, preserves its WorkspaceSnapshot, and retains current/restored model and tool selections.
+
+`AgentHarnessBuilder` owns its configuration and implements `SessionGenerationFactory` directly.
+`build(self)` moves it into `MultiSessionManager`, which retains it behind the shared factory trait
+for session creation, resume, and reload. Applications constructing their own manager can pass the
+builder directly to `MultiSessionManager::new`. This is a deliberate Rust composition choice; the
+shared generation preparation, activation, rollback, and session-binding contract is unchanged.
 
 `domains/coding` is the `pi-coding` crate. It owns `Pi`, `Config`, `Features`,
 `ProductSessionFactory`, configured providers/tools, project trust, local discovery, memory and
@@ -48,14 +54,14 @@ Rendering receives the immutable workspace and currently active ToolSpecs; tool-
 including state restoration, rerender those frozen inputs before publication. Restoring the same
 selection reuses the prepared prompt and inspection data. Failed preparation/rendering preserves
 the previous generation/selection. Final text stays exact while tools can change independently.
-`pi-sdk::AgentHostBuilder::system_prompt` exposes this same prompt contract for domain-specific
+`pi-sdk::AgentHarnessBuilder::system_prompt` exposes this same prompt contract for domain-specific
 composition. Default tool selection is resolved after registration and before the first render;
 explicit selections preserve their order. `SessionGenerationRequest::restored_configuration`
 previews the effective tool selection through the same read-only recovery plan later used to
 repair the journal. It includes accepted deferred writes and distinguishes an older log without
 a selection from an explicitly empty selection. The SDK reconciles removed tools and configured
 additions before rendering a resumed or reloaded session; rejected prompts do not apply those
-recovery writes. Fresh isolated sessions use their inherited selection. Generic hosts still
+recovery writes. Fresh isolated sessions use their inherited selection. Generic harnesses still
 perform no implicit resource discovery.
 Coding's private `prompt::CodingSystemPrompt` adapts its resource and prompt builders at this seam.
 It preserves existing Rust prompt rendering and serialized options; plugin prompt hooks remain
@@ -450,7 +456,7 @@ those hooks. The runner never discovers `.pi` resources or constructs a Coding p
 and snapshot directory exclusions are explicit runner configuration with no default Coding exclusions.
 Case-local Rust `Plugin` factories and prompt capture use `SessionGenerationOverlay`, preserving
 factory-backed reload without serializing executable code. Deterministic tests prepare a non-Coding
-`pi-sdk::AgentHost` through this same Interface.
+`pi-sdk::AgentHarness` through this same Interface.
 
 `CodingEvalHarness` prepares `pi-coding::Pi` in print presentation mode. It creates the isolated
 home/agent directory, copies credential and model bootstrap files, disables memory and MCP discovery,
