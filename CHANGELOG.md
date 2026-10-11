@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.0](https://github.com/CCherry07/pi-rs/compare/v0.8.6...v0.9.0) (2026-10-11)
+
+
+### Features
+
+* Implement Codex authentication with token rotation and update OAuth handling ([4e08084](https://github.com/CCherry07/pi-rs/commit/4e08084bba404b47e80836ec6de6c8d64d4cbcfc))
+* Refactor AgentHarnessBuilder to own configuration and implement SessionGenerationFactory ([4fc85f7](https://github.com/CCherry07/pi-rs/commit/4fc85f7b6db35b6562aebcbe69ea6c84757da9e6))
+
 ## [0.8.6](https://github.com/CCherry07/pi-rs/compare/v0.8.5...v0.8.6) (2026-10-01)
 
 
