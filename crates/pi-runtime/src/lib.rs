@@ -1340,6 +1340,15 @@ impl PiRuntime {
             .map_err(|error| RuntimeError::Agent(error.to_string()))
     }
 
+    /// Resume a session's current activity without repeating input preparation hooks.
+    pub async fn continue_activity(&self) -> Result<AgentLoopOutcome, RuntimeError> {
+        let _reload_guard = self.reload_lock.lock().await;
+        self.agent
+            .continue_activity()
+            .await
+            .map_err(|error| RuntimeError::Agent(error.to_string()))
+    }
+
     /// Runs an isolated, tool-free provider completion without mutating the
     /// agent transcript or emitting agent lifecycle events.
     pub async fn complete(
@@ -2522,9 +2531,9 @@ mod tests {
             &self,
             _: AgentPluginContext,
             _: TurnEndEvent,
-        ) -> Result<(), PluginError> {
+        ) -> Result<pi_plugin::BoundaryResult, PluginError> {
             self.push("turn_end");
-            Ok(())
+            Ok(pi_plugin::BoundaryResult::default())
         }
         async fn message_start(
             &self,
@@ -2601,9 +2610,9 @@ mod tests {
             &self,
             _context: AgentPluginContext,
             event: TurnEndEvent,
-        ) -> Result<(), PluginError> {
+        ) -> Result<pi_plugin::BoundaryResult, PluginError> {
             self.ends.lock().unwrap().push(event);
-            Ok(())
+            Ok(pi_plugin::BoundaryResult::default())
         }
     }
 
@@ -2845,7 +2854,7 @@ mod tests {
             ]))
             .agent_options(AgentOptions {
                 active_tools: vec!["echo".to_string()],
-                max_tool_iterations: 1,
+                max_tool_iterations: Some(1),
                 ..AgentOptions::default()
             })
             .build()

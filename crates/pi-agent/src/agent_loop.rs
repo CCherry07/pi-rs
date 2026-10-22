@@ -61,7 +61,7 @@ pub struct AgentLoopConfig {
     pub thinking_budgets: Option<ThinkingBudgets>,
     pub block_images: bool,
     pub tool_execution: ToolExecutionMode,
-    pub max_tool_iterations: usize,
+    pub max_tool_iterations: Option<usize>,
     pub max_parallel_tools: usize,
     pub cwd: PathBuf,
     pub session_id: Option<String>,
@@ -113,6 +113,26 @@ pub struct AgentTurnControlError(pub String);
 /// Run-local control seam for stopping after a turn and preparing a continuation.
 #[async_trait]
 pub trait AgentTurnControl: Send + Sync {
+    /// A session owner may dispatch enriched turn-end hooks after message persistence.
+    /// Return true when the hooks were dispatched; standalone agents use the default driver.
+    async fn dispatch_turn_end(
+        &self,
+        _run_id: RunId,
+        _event: pi_plugin::TurnEndEvent,
+        _signal: AbortSignal,
+    ) -> Result<bool, AgentTurnControlError> {
+        Ok(false)
+    }
+
+    /// Explicit continuation is checked before queue polling; an existing stop policy wins.
+    async fn should_continue_after_turn(
+        &self,
+        _context: AgentTurnContext,
+        _signal: AbortSignal,
+    ) -> Result<bool, AgentTurnControlError> {
+        Ok(false)
+    }
+
     /// Prepare an actual continuation from the previous completed turn, after
     /// the stop decision and queue polling, but before the next `turn_start`.
     async fn prepare_next_turn(
@@ -458,9 +478,10 @@ async fn run_loop(
             let mut tool_results = Vec::new();
             should_continue = false;
             if !calls.is_empty() {
-                tool_iterations += 1;
-                if tool_iterations > config.max_tool_iterations {
-                    let limit = config.max_tool_iterations;
+                tool_iterations = tool_iterations.saturating_add(1);
+                if let Some(limit) = config.max_tool_iterations
+                    && tool_iterations > limit
+                {
                     let batch = fail_unexecuted_tool_calls(
                         calls,
                         &signal,
@@ -542,6 +563,9 @@ async fn run_loop(
             {
                 break 'run;
             }
+            should_continue |= turn_control
+                .should_continue_after_turn(completed_turn.clone(), signal.clone())
+                .await?;
             last_completed_turn = Some(completed_turn);
 
             // Steering is polled after every completed turn, including a final

@@ -9,6 +9,9 @@ const RUST_PLUGINS_LABEL: &str = " rust plugins:   ";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct UiAreas {
+    pub(super) header: Rect,
+    pub(super) above_editor: Rect,
+    pub(super) below_editor: Rect,
     pub(super) transcript: Rect,
     pub(super) context: Rect,
     pub(super) composer: Rect,
@@ -36,6 +39,13 @@ pub(super) fn cached_transcript_layout(
     gutter: u16,
     appearance: TerminalAppearance,
 ) -> Arc<CachedTranscriptLayout> {
+    let show_startup_header = app.show_startup_header
+        && !app
+            .extension_surface
+            .frame
+            .regions
+            .iter()
+            .any(|r| r.placement == pi_plugin::UiRegionPlacement::Header);
     let show_working_placeholder = app.streaming_assistant.is_none()
         && !app.compacting
         && (app.working_started_at.is_some()
@@ -51,11 +61,11 @@ pub(super) fn cached_transcript_layout(
     {
         let mut cache = app.transcript_layout_cache.borrow_mut();
         if cache.transcript != app.transcript
-            || cache.show_startup_header != app.show_startup_header
+            || cache.show_startup_header != show_startup_header
             || cache.show_working_placeholder != show_working_placeholder
         {
             cache.transcript.clone_from(&app.transcript);
-            cache.show_startup_header = app.show_startup_header;
+            cache.show_startup_header = show_startup_header;
             cache.show_working_placeholder = show_working_placeholder;
             cache.entries.clear();
         }
@@ -69,7 +79,7 @@ pub(super) fn cached_transcript_layout(
         streaming: true,
         error: None,
     });
-    let startup_height = if app.show_startup_header {
+    let startup_height = if show_startup_header {
         usize::from(startup_header_height(app, width, gutter))
     } else {
         0
@@ -199,6 +209,9 @@ pub(super) fn ui_areas(root: Rect, app: &App) -> UiAreas {
             ..UiAreas::default()
         };
     }
+    if app.extension_surface.has_regions() {
+        return extension_areas(root, app);
+    }
     let content_width = root
         .width
         .saturating_sub(gutter.saturating_mul(2))
@@ -269,6 +282,7 @@ pub(super) fn ui_areas(root: Rect, app: &App) -> UiAreas {
             context: areas[2],
             footer: areas[3],
             gutter,
+            ..UiAreas::default()
         }
     } else {
         UiAreas {
@@ -277,6 +291,7 @@ pub(super) fn ui_areas(root: Rect, app: &App) -> UiAreas {
             composer: areas[2],
             footer: areas[3],
             gutter,
+            ..UiAreas::default()
         }
     }
 }
@@ -294,6 +309,8 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, app: &App, palette: UiPalette
         draw_confirmation_prompt(frame, &prompt.title, &prompt.message);
     } else if let Some(prompt) = &app.trust_prompt {
         draw_project_trust_prompt(frame, &prompt.cwd, &prompt.options, prompt.selected);
+    } else if app.extension_surface.has_regions() && app.active_bottom_view().is_none() {
+        draw_extension_layout(frame, app, palette);
     } else {
         let areas = ui_areas(root, app);
         let suggestions = suggestions_for_app(app);
@@ -2372,4 +2389,76 @@ pub(super) fn truncate_start(text: &str, max_width: usize) -> String {
     }
     tail.reverse();
     format!("…{}", tail.into_iter().collect::<String>())
+}
+
+fn extension_areas(root: Rect, app: &App) -> UiAreas {
+    use pi_plugin::UiRegionPlacement as P;
+    let ui = &app.extension_surface;
+    let editor = ui.height(P::Editor, root.height.saturating_sub(2));
+    let header = ui.height(P::Header, root.height / 3);
+    let above = ui.height(P::AboveEditor, root.height / 3);
+    let below = ui.height(P::BelowEditor, root.height / 3);
+    let footer = ui.height(P::Footer, root.height / 3).max(1);
+    let composer = editor.max(3);
+    let suggestions = suggestions_for_app(app);
+    let context = if editor == 0 {
+        suggestions
+            .len()
+            .max(app.queue.steering.len() + app.queue.follow_up.len())
+            .min(5) as u16
+    } else {
+        0
+    };
+    let transcript = desired_transcript_height(app, root.width, horizontal_gutter(root.width)).min(
+        root.height
+            .saturating_sub(header + above + below + footer + composer + context),
+    );
+    let areas = Layout::vertical([
+        Constraint::Length(header),
+        Constraint::Length(transcript),
+        Constraint::Length(above),
+        Constraint::Length(context),
+        Constraint::Length(composer),
+        Constraint::Length(below),
+        Constraint::Length(footer),
+        Constraint::Min(0),
+    ])
+    .split(root);
+    UiAreas {
+        header: areas[0],
+        transcript: areas[1],
+        above_editor: areas[2],
+        context: areas[3],
+        composer: areas[4],
+        below_editor: areas[5],
+        footer: areas[6],
+        gutter: horizontal_gutter(root.width),
+    }
+}
+fn draw_extension_layout(frame: &mut ratatui::Frame<'_>, app: &App, palette: UiPalette) {
+    use pi_plugin::UiRegionPlacement as P;
+    let areas = extension_areas(frame.area(), app);
+    let ui = &app.extension_surface;
+    ui.draw_regions(frame, P::Header, areas.header);
+    draw_transcript(frame, areas.transcript, app, areas.gutter, palette);
+    ui.draw_regions(frame, P::AboveEditor, areas.above_editor);
+    draw_context_panel(
+        frame,
+        areas.context,
+        app,
+        &suggestions_for_app(app),
+        palette,
+    );
+    if ui.height(P::Editor, frame.area().height) > 0 {
+        ui.draw_regions(frame, P::Editor, areas.composer);
+    } else {
+        draw_composer(frame, areas.composer, app, palette);
+    }
+    ui.draw_regions(frame, P::BelowEditor, areas.below_editor);
+    if ui.height(P::Footer, frame.area().height) > 0 {
+        ui.draw_regions(frame, P::Footer, areas.footer);
+    } else {
+        draw_footer(frame, areas.footer, app, palette);
+    }
+    ui.draw_overlays(frame);
 }

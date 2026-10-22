@@ -1741,6 +1741,7 @@ mod tests {
             .current()
             .log()
             .append_session_record(crate::SessionEntry::Compaction(crate::CompactionEntry {
+                retained_entry_ids: Vec::new(),
                 summary: "later context must not leak".into(),
                 retained_tail: vec![],
                 tokens_before: 10000,
@@ -1838,6 +1839,7 @@ mod tests {
             .current()
             .log()
             .append_session_record(crate::SessionEntry::Compaction(crate::CompactionEntry {
+                retained_entry_ids: Vec::new(),
                 summary: "parent compacted summary".into(),
                 retained_tail: vec![extension.clone()],
                 tokens_before: 10000,

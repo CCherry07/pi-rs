@@ -56,6 +56,10 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) session: Option<PathBuf>,
 
+    /// Directory for new sessions and session-ID lookup, including ACP sessions.
+    #[arg(long)]
+    pub(crate) session_dir: Option<String>,
+
     /// Use an exact project session ID, creating it when missing.
     #[arg(long, conflicts_with = "session")]
     pub(crate) session_id: Option<String>,
@@ -362,6 +366,7 @@ pub(crate) fn resolve_app_config(cli: &Cli) -> Result<AppConfig, String> {
     if let Some(session_path) = &cli.session {
         config.session_path.clone_from(session_path);
     }
+    config.apply_session_dir_setting(cli.session_dir.as_deref(), cli.session.is_some());
     config.model = cli.model.clone().filter(|model| !model.trim().is_empty());
     config.thinking = cli.thinking.map(Into::into);
     config.base_url.clone_from(&cli.base_url);
@@ -501,6 +506,43 @@ mod tests {
     }
 
     #[test]
+    fn acp_session_directory_is_independent_of_model_and_skill_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let sessions = directory.path().join("investigation-sessions");
+        let agent = directory.path().join("agent-resources");
+        let cli = Cli::try_parse_from([
+            "pi",
+            "--acp",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--agent-dir",
+            agent.to_str().unwrap(),
+            "--cwd",
+            directory.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let config = resolve_app_config(&cli).unwrap();
+        assert_eq!(config.session_path.parent(), Some(sessions.as_path()));
+        assert_eq!(config.agent_dir, agent);
+        assert!(!sessions.exists());
+
+        let cli = Cli::try_parse_from([
+            "pi",
+            "--session-dir",
+            sessions.to_str().unwrap(),
+            "--session",
+            "explicit.jsonl",
+            "--cwd",
+            directory.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(
+            resolve_app_config(&cli).unwrap().session_path,
+            PathBuf::from("explicit.jsonl")
+        );
+    }
+
+    #[test]
     fn acp_permission_flags_reach_the_server_and_require_acp_mode() {
         let plain = Cli::try_parse_from(["pi", "--acp"]).unwrap();
         assert_eq!(
@@ -579,6 +621,7 @@ mod tests {
             no_fullscreen: false,
             cwd: directory.path().to_path_buf(),
             session: Some(session_path.clone()),
+            session_dir: None,
             session_id: None,
             name: None,
             model: None,

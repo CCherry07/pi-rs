@@ -66,7 +66,7 @@ behavior, and being explicit whenever the Rust product diverges.
 
 ### Install from npm
 
-The published package is the recommended complete product entry point. It requires Node.js 20 or
+The published package is the recommended complete product entry point. It requires Node.js 22.19 or
 newer, installs both `pi` and `pi-rs`, and selects the native package for the current platform.
 
 ```bash
@@ -85,7 +85,7 @@ On first use, configure credentials and choose a model from inside the TUI:
 
 ### Run from source
 
-Repository development requires Rust 1.98 or newer and Node.js 20 or newer. The repository pins
+Repository development requires Rust 1.98 or newer and Node.js 22.19 or newer. The repository pins
 Rust 1.98.0 through `rust-toolchain.toml`.
 
 ```bash

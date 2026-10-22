@@ -8,8 +8,13 @@
 mod epoch;
 mod models;
 mod session;
+mod surface;
 mod types;
 mod ui;
+pub use surface::{
+    UiRegion, UiRegionPlacement, UiSurfaceAction, UiSurfaceEvent, UiSurfaceFrame,
+    UiSurfaceSnapshot, UiTextSpan,
+};
 
 use async_trait::async_trait;
 

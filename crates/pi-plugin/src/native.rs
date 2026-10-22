@@ -9,6 +9,8 @@ pub use serde_json::Value as PluginOptionsValue;
 
 /// Version of the trusted Rust-ABI plugin contract.
 ///
+/// ABI 26 adds generation-scoped extension UI surfaces and retirement cleanup.
+/// ABI 25 adds actionable session boundaries, context edits and retained entry provenance.
 /// ABI 24 moves native contracts into pi-plugin and consolidates host management.
 /// ABI 23 shares PluginError and typed diagnostics across Agent and Session hooks.
 /// ABI 22 unifies Agent and Session plugins and uses the shared prepare factory contract.
@@ -33,7 +35,7 @@ pub use serde_json::Value as PluginOptionsValue;
 /// tool argument preparation.
 /// Hosts must reject older artifacts before resolving their Rust-ABI
 /// constructors.
-pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 24;
+pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 26;
 pub const BUILD_FINGERPRINT: &str = env!("PI_PLUGIN_BUILD_FINGERPRINT");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -102,10 +104,10 @@ unsafe impl Sync for NativePluginDescriptorV1 {}
 pub type PluginDescriptorFnV1 = unsafe extern "C" fn() -> *const NativePluginDescriptorV1;
 pub type PluginOptionsSchemaFnV1 = unsafe fn() -> String;
 
-pub type PluginCreateV24 =
+pub type PluginCreateV26 =
     fn(&PrepareContext, &PluginOptionsValue) -> Result<Option<Arc<dyn Plugin>>, PrepareError>;
 
-pub type ProviderPluginCreateV24 = fn(
+pub type ProviderPluginCreateV26 = fn(
     &PrepareContext,
     &PluginOptionsValue,
 ) -> Result<Option<Arc<dyn ProviderPlugin>>, PrepareError>;

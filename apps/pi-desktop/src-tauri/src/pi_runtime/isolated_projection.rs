@@ -315,6 +315,7 @@ mod tests {
         }))
         .unwrap();
         log.append_session_record(SessionEntry::Compaction(pi_session::CompactionEntry {
+            retained_entry_ids: Vec::new(),
             summary: "mixed summary".into(),
             retained_tail: vec![own, inherited],
             tokens_before: 10,

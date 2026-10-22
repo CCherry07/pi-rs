@@ -32,7 +32,7 @@ NDJSON event stream, tools, sessions, model catalog, skills, and plugins all use
 ### npm package
 
 The npm package is the recommended installation when JavaScript/TypeScript extension support is
-needed. It requires Node.js 20 or newer and installs `pi`, `pi-rs`, and the model-backed
+needed. It requires Node.js 22.19 or newer and installs `pi`, `pi-rs`, and the model-backed
 `pi-eval` runner.
 
 ```bash
@@ -371,16 +371,12 @@ host's bundled runtime.
 The host resolves Pi's extension module table for both the current
 `@earendil-works` and legacy `@mariozechner` namespaces: `pi-coding-agent`, `pi-agent-core`,
 `pi-ai`, `pi-ai/compat`, `pi-ai/oauth`, `pi-ai/providers/all`, and `pi-tui`. The TUI names resolve to
-a terminal-inert module so mixed extensions can retain their tools, commands, and hooks without
-owning Ratatui. Module resolution does not imply that every upstream JavaScript runtime export is
-implemented; the compatibility API remains the explicit capability boundary.
-
-JavaScript extensions do not own the Ratatui frontend: `ctx.hasUI` is false and `ctx.ui` is an
-explicit inert implementation. Its interactive methods return safe defaults and its UI mutations
-remain inactive; `ctx.ui.notify()` becomes a semantic product notice rendered by the active Rust
-frontend. Hooks and registrations known to current Pi but not yet implemented are reported as
-inactive and do not fail generation construction; genuinely unknown hook names still fail so typos
-remain visible. Other missing dependencies remain fatal.
+the pinned Pi 1.3.0 component runtime. Ratatui owns the terminal while Node runs component logic.
+Interactive contexts expose `hasUI = true`: dialogs, text input, widgets, header/footer,
+custom components/overlays, custom editors, status, title and shortcuts run through the native UI
+bridge. Print/JSON/RPC retain inactive defaults. Tool/message/entry/Markdown renderers and several
+advanced UI APIs remain gaps. Module resolution does not imply full upstream runtime compatibility.
+Other missing dependencies remain fatal.
 See the repository's
 [JavaScript compatibility matrix](../../docs/js-extension-compatibility.md) for the precise hook,
 context, UI, and module status. Extension code runs in the Node process as trusted code; it is not

@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use libloading::{Library, Symbol};
 
 use pi_plugin::native::{
-    BUILD_FINGERPRINT, NATIVE_PLUGIN_ABI_VERSION, NativePluginKind, PluginCreateV24,
-    PluginDescriptorFnV1, PluginOptionsValue, ProviderPluginCreateV24,
+    BUILD_FINGERPRINT, NATIVE_PLUGIN_ABI_VERSION, NativePluginKind, PluginCreateV26,
+    PluginDescriptorFnV1, PluginOptionsValue, ProviderPluginCreateV26,
 };
 use pi_plugin::{Plugin, PrepareContext, ProviderPlugin};
 use pi_runtime::PiRuntimeBuilder;
@@ -18,8 +18,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 const DESCRIPTOR_SYMBOL: &[u8] = b"pi_plugin_descriptor_v1\0";
-const PLUGIN_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_plugin_create_v24\0";
-const PROVIDER_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_provider_plugin_create_v24\0";
+const PLUGIN_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_plugin_create_v26\0";
+const PROVIDER_CONSTRUCTOR_SYMBOL: &[u8] = b"pi_provider_plugin_create_v26\0";
 const MANIFEST_FILE_NAME: &str = "pi-plugin.toml";
 
 #[derive(Debug, thiserror::Error)]
@@ -234,7 +234,7 @@ struct FactoryCommon {
 #[derive(Clone)]
 pub struct NativePluginFactory {
     common: Arc<FactoryCommon>,
-    create: PluginCreateV24,
+    create: PluginCreateV26,
 }
 
 impl NativePluginFactory {
@@ -268,7 +268,7 @@ impl NativePluginFactory {
 #[derive(Clone)]
 pub struct NativeProviderPluginFactory {
     common: Arc<FactoryCommon>,
-    create: ProviderPluginCreateV24,
+    create: ProviderPluginCreateV26,
 }
 
 impl NativeProviderPluginFactory {
@@ -481,11 +481,11 @@ fn load_library(
             // SAFETY: The exact build fingerprint was verified before resolving
             // this Rust-ABI constructor, and the library remains pinned.
             let create = unsafe {
-                load_symbol::<PluginCreateV24>(
+                load_symbol::<PluginCreateV26>(
                     &pinned._library,
                     &package.artifact,
                     PLUGIN_CONSTRUCTOR_SYMBOL,
-                    "pi_plugin_create_v24",
+                    "pi_plugin_create_v26",
                 )?
             };
             Ok(LoadedFactory::Plugin(NativePluginFactory {
@@ -496,11 +496,11 @@ fn load_library(
         NativePluginKind::Provider => {
             // SAFETY: See the agent constructor branch above.
             let create = unsafe {
-                load_symbol::<ProviderPluginCreateV24>(
+                load_symbol::<ProviderPluginCreateV26>(
                     &pinned._library,
                     &package.artifact,
                     PROVIDER_CONSTRUCTOR_SYMBOL,
-                    "pi_provider_plugin_create_v24",
+                    "pi_provider_plugin_create_v26",
                 )?
             };
             Ok(LoadedFactory::Provider(NativeProviderPluginFactory {

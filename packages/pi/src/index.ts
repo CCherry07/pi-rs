@@ -12,6 +12,7 @@ export type {
   PiCommandOptions,
   PiExtensionApi,
   PiExtensionContext,
+  PiExtensionUI,
   PiModelRegistry,
   PiReadonlySessionManager,
   PiToolDefinition,

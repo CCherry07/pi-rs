@@ -705,6 +705,7 @@ const AGENT_HOOKS: &[&str] = &[
     "agent_start",
     "agent_end",
     "agent_settled",
+    "agent_before_settle",
     "turn_start",
     "turn_end",
     "message_start",
@@ -725,7 +726,6 @@ fn is_batched_agent_observer(name: &str) -> bool {
             | "agent_end"
             | "agent_settled"
             | "turn_start"
-            | "turn_end"
             | "message_start"
             | "message_update"
             | "tool_execution_start"
@@ -1719,18 +1719,87 @@ impl Plugin for JsPlugin {
         &self,
         context: AgentPluginContext,
         event: TurnEndEvent,
-    ) -> Result<(), PluginError> {
-        self.notify_hooks(
-            "turn_end",
-            &context,
-            json!({
-                "type": "turn_end",
-                "turnIndex": event.turn_index,
-                "message": event.message,
-                "toolResults": event.tool_results,
-            }),
-        )
-        .await
+    ) -> Result<pi_plugin::BoundaryResult, PluginError> {
+        // Standalone Agents have observer semantics and no session entry transaction.
+        self.notify_hooks("turn_end", &context, json!({ "type": "turn_end", "turnIndex": event.turn_index, "message": event.message, "toolResults": event.tool_results })).await?;
+        Ok(pi_plugin::BoundaryResult::default())
+    }
+
+    fn boundary_hook_count(&self, hook: pi_plugin::AgentHook) -> usize {
+        self.hook_callbacks(hook.as_str()).count()
+    }
+
+    async fn boundary_hook(
+        &self,
+        context: AgentPluginContext,
+        event: pi_plugin::SessionBoundaryEvent,
+        index: usize,
+    ) -> Result<pi_plugin::BoundaryResult, PluginError> {
+        let name = match &event {
+            pi_plugin::SessionBoundaryEvent::TurnEnd(_) => "turn_end",
+            pi_plugin::SessionBoundaryEvent::BeforeSettle(_) => "agent_before_settle",
+        };
+        let Some(hook) = self.hook_callbacks(name).nth(index) else {
+            return Ok(pi_plugin::BoundaryResult::default());
+        };
+        let mut payload = serde_json::to_value(event.state()).expect("boundary state serializes");
+        // Native contracts retain typed v4 records; only the JS adapter projects Pi's wire view.
+        if let Some(entries) = payload["context"]["contextEntries"].as_array_mut() {
+            for entry in entries {
+                if let Some(source) = entry["sourceEntry"].as_object_mut() {
+                    source.remove("seq");
+                    if source.get("type").and_then(Value::as_str) == Some("compaction") {
+                        let first = source
+                            .get("retainedEntryIds")
+                            .and_then(Value::as_array)
+                            .and_then(|ids| ids.first())
+                            .cloned()
+                            .unwrap_or(Value::Null);
+                        source.remove("retainedTail");
+                        source.remove("retainedEntryIds");
+                        source.insert("firstKeptEntryId".into(), first);
+                    }
+                }
+            }
+        }
+        payload["type"] = json!(name);
+        if let pi_plugin::SessionBoundaryEvent::TurnEnd(turn) = event {
+            payload["turnIndex"] = json!(turn.turn_index);
+            payload["message"] = json!(turn.message);
+            payload["toolResults"] = json!(turn.tool_results);
+            payload["messageEntryId"] = json!(turn.message_entry_id);
+            payload["toolResultEntryIds"] = json!(turn.tool_result_entry_ids);
+        }
+        let context = context.for_adapter_plugin(hook.plugin_id.clone());
+        let result = self
+            .invoke_hook(
+                name,
+                hook,
+                context.plugin_context_handle(),
+                agent_plugin_context_value(&context),
+                payload,
+                context.signal(),
+            )
+            .await?;
+        if let Some(error) = result.get("__boundaryError").and_then(Value::as_str) {
+            context.report_hook_error(name, error.to_string());
+        }
+        if result.is_null() {
+            return Ok(pi_plugin::BoundaryResult::default());
+        }
+        if let Some(entries) = result.get("entries")
+            && !entries.is_array()
+        {
+            context.report_hook_error(name, "boundary entries must be an array");
+            return Ok(pi_plugin::BoundaryResult {
+                entries: Some(vec![pi_plugin::SessionBoundaryDraft::Invalid(
+                    entries.clone(),
+                )]),
+                continue_run: result.get("continue").and_then(Value::as_bool),
+            });
+        }
+        serde_json::from_value(result)
+            .map_err(|error| PluginError::Failure(format!("invalid {name} result: {error}")))
     }
 
     async fn message_start(
@@ -2136,6 +2205,7 @@ impl Plugin for JsPlugin {
         Ok(Some(SessionBeforeCompactResult {
             cancel: result.cancel,
             compaction: result.compaction.map(|compaction| CompactionEntry {
+                retained_entry_ids: Vec::new(),
                 summary: compaction.summary,
                 retained_tail: preparation.retained_tail.clone(),
                 tokens_before: compaction.tokens_before,

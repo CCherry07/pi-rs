@@ -1,4 +1,16 @@
 use async_trait::async_trait;
+use pi_plugin::{UiSurfaceAction, UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot};
+use std::sync::{Arc, RwLock};
+
+pub(crate) enum SurfaceRequest {
+    Exchange(UiSurfaceFrame, oneshot::Sender<UiSurfaceEvent>),
+    Action(String, UiSurfaceAction),
+}
+pub(crate) struct SurfaceReceiver {
+    pub(crate) initial: std::collections::VecDeque<SurfaceRequest>,
+    pub(crate) requests: mpsc::UnboundedReceiver<SurfaceRequest>,
+    pub(crate) snapshot: Arc<RwLock<UiSurfaceSnapshot>>,
+}
 
 use pi_plugin::{UiMultiSelectRequest, UiMultiSelectResponse};
 use pi_session::PluginUiBridge;
@@ -26,6 +38,8 @@ pub(crate) struct PluginMultiSelectionRequest {
 
 #[derive(Clone)]
 pub(crate) struct PluginUiService {
+    surfaces: mpsc::UnboundedSender<SurfaceRequest>,
+    snapshot: Arc<RwLock<UiSurfaceSnapshot>>,
     confirmations: mpsc::UnboundedSender<PluginConfirmationRequest>,
     selections: mpsc::UnboundedSender<PluginSelectionRequest>,
     multi_selections: mpsc::UnboundedSender<PluginMultiSelectionRequest>,
@@ -37,12 +51,22 @@ impl PluginUiService {
         mpsc::UnboundedReceiver<PluginConfirmationRequest>,
         mpsc::UnboundedReceiver<PluginSelectionRequest>,
         mpsc::UnboundedReceiver<PluginMultiSelectionRequest>,
+        SurfaceReceiver,
     ) {
+        let (surfaces, requests) = mpsc::unbounded_channel();
+        let snapshot = Arc::new(RwLock::new(UiSurfaceSnapshot::default()));
+        let surface_receiver = SurfaceReceiver {
+            initial: Default::default(),
+            requests,
+            snapshot: snapshot.clone(),
+        };
         let (confirmations, confirmation_receiver) = mpsc::unbounded_channel();
         let (selections, selection_receiver) = mpsc::unbounded_channel();
         let (multi_selections, multi_selection_receiver) = mpsc::unbounded_channel();
         (
             Self {
+                surfaces,
+                snapshot,
                 confirmations,
                 selections,
                 multi_selections,
@@ -50,12 +74,33 @@ impl PluginUiService {
             confirmation_receiver,
             selection_receiver,
             multi_selection_receiver,
+            surface_receiver,
         )
     }
 }
 
 #[async_trait]
 impl PluginUiBridge for PluginUiService {
+    fn surface_snapshot(&self) -> Result<UiSurfaceSnapshot, String> {
+        Ok(self
+            .snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone())
+    }
+    fn surface_action(&self, owner: String, action: UiSurfaceAction) -> Result<(), String> {
+        self.surfaces
+            .send(SurfaceRequest::Action(owner, action))
+            .map_err(|_| "extension UI closed".into())
+    }
+    async fn surface_exchange(&self, frame: UiSurfaceFrame) -> Result<UiSurfaceEvent, String> {
+        let (sender, receiver) = oneshot::channel();
+        self.surfaces
+            .send(SurfaceRequest::Exchange(frame, sender))
+            .map_err(|_| "extension UI closed".to_string())?;
+        Ok(receiver.await.unwrap_or(UiSurfaceEvent::Closed))
+    }
+
     async fn confirm(&self, title: String, message: String) -> Result<bool, String> {
         let (response, receiver) = oneshot::channel();
         self.confirmations
@@ -98,13 +143,23 @@ impl PluginUiBridge for PluginUiService {
     }
 }
 
+impl SurfaceReceiver {
+    pub(crate) async fn recv(&mut self) -> Option<SurfaceRequest> {
+        if let Some(request) = self.initial.pop_front() {
+            return Some(request);
+        }
+        self.requests.recv().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn confirmation_round_trips_the_frontend_decision() {
-        let (ui, mut requests, _selections, _multi_selections) = PluginUiService::channel();
+        let (ui, mut requests, _selections, _multi_selections, _surfaces) =
+            PluginUiService::channel();
         let confirmation = tokio::spawn(async move {
             ui.confirm("Import?".to_string(), "Replace session".to_string())
                 .await
@@ -118,7 +173,8 @@ mod tests {
 
     #[tokio::test]
     async fn selection_round_trips_the_frontend_choice() {
-        let (ui, _confirmations, mut selections, _multi_selections) = PluginUiService::channel();
+        let (ui, _confirmations, mut selections, _multi_selections, _surfaces) =
+            PluginUiService::channel();
         let selection = tokio::spawn(async move {
             ui.select(
                 "Choose".to_string(),
@@ -135,7 +191,8 @@ mod tests {
 
     #[tokio::test]
     async fn multi_selection_round_trips_the_frontend_action() {
-        let (ui, _confirmations, _selections, mut multi_selections) = PluginUiService::channel();
+        let (ui, _confirmations, _selections, mut multi_selections, _surfaces) =
+            PluginUiService::channel();
         let request = UiMultiSelectRequest {
             title: "Skills".to_string(),
             options: Vec::new(),

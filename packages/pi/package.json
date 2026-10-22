@@ -47,12 +47,13 @@
     "start": "tsx ./bin/pi.ts"
   },
   "dependencies": {
+    "@pi-rs/pi-tui-runtime": "npm:@earendil-works/pi-tui@1.3.0",
     "jiti": "2.7.0",
     "typebox": "1.3.7",
     "zod": "4.1.11"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

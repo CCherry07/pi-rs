@@ -3095,6 +3095,7 @@ mod tests {
             };
             current
                 .append_compaction(pi_session::CompactionEntry {
+                    retained_entry_ids: Vec::new(),
                     summary: "mixed parent and child summary".into(),
                     retained_tail: tail,
                     tokens_before: 100,

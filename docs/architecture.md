@@ -36,6 +36,12 @@ for session creation, resume, and reload. Applications constructing their own ma
 builder directly to `MultiSessionManager::new`. This is a deliberate Rust composition choice; the
 shared generation preparation, activation, rollback, and session-binding contract is unchanged.
 
+For a fresh SDK session, a configured AgentSessionOptions.initial_model request is resolved through
+InitialModelRequest before the initial runtime model is recorded. Resume still resolves against the
+saved model, isolated sessions retain their supplied initial state, and reload retains the live model.
+An absent options-level request preserves the model supplied to AgentHarness::builder. This keeps
+domain model/settings selection out of catalog loading and avoids recording a bootstrap fallback.
+
 `domains/coding` is the `pi-coding` crate. It owns `Pi`, `Config`, `Features`,
 `ProductSessionFactory`, configured providers/tools, project trust, local discovery, memory and
 subagent wiring, and prepared package activation. CLI, Desktop and the Coding eval harness use this
@@ -829,9 +835,9 @@ not skip generation validation or justify reusing mutable session state. Prepara
 activate background work or mutate live registries; activation remains session_start and cleanup
 remains session_shutdown/Drop. Failed candidates are dropped without touching the live generation.
 
-Native ABI 24 exports only `Plugin` (kind 1) or `ProviderPlugin` (kind 2), using
-`pi_plugin_create_v24` / `pi_provider_plugin_create_v24`. Manifest kinds are `plugin` / `provider`.
-ABI 23 and older libraries are rejected before resolving constructors and must be rebuilt.
+Native ABI 26 exports only `Plugin` (kind 1) or `ProviderPlugin` (kind 2), using
+`pi_plugin_create_v26` / `pi_provider_plugin_create_v26`. Manifest kinds are `plugin` / `provider`.
+ABI 24 and older libraries are rejected before resolving constructors and must be rebuilt.
 `pi-plugin` is the single author-facing crate. Its default API covers static plugins, and its
 `native` feature enables `pi_plugin::native` descriptors/options, schema support and native export
 macros (`#[pi_plugin::native_plugin]` / `#[pi_plugin::native_provider]`). The feature pins the JSON
@@ -1319,11 +1325,9 @@ mirrors Pi's complete extension-loader module table for both the `@earendil-work
 `@sinclair/typebox` roots and subpaths alias to the bundled TypeBox runtime. This is module-resolution
 coverage, not a claim that every upstream JavaScript runtime export is reimplemented. It keeps one
 host ABI in a generation and prevents npm from installing a second Pi product runtime beside an
-extension. `@earendil-works/pi-tui` and `@mariozechner/pi-tui` alias to a separate terminal-inert
-compatibility module. Its pure text helpers and inert component classes allow mixed extension
-modules to evaluate and retain non-UI registrations, while renderer/widget/shortcut registrations
-remain inactive and terminal ownership stays in `apps/pi-cli`. All other missing modules remain
-fatal.
+extension. `@earendil-works/pi-tui` and `@mariozechner/pi-tui` alias to the pinned Pi 1.3.0
+component runtime. Node executes components through a generation-scoped UI host and sends typed
+frames to the app; terminal ownership stays in `apps/pi-cli`. All other missing modules remain fatal.
 
 The same Module exposes one management dispatcher,
 `manage(Install | Remove | Update | List) -> ManageResult`. Top-level CLI commands adapt to this
@@ -1372,12 +1376,10 @@ Executable JavaScript is never serialized into Pi v4 sessions.
 This is compatibility by explicit capability, not an unsafe claim that every Pi TUI API is already
 portable. The current bridge supports registered tools and commands, the Rust agent lifecycle
 hooks, `before_provider_request`, the ten session hooks, session/model inspection, the explicit
-non-replacing controls, and the command-safe session operations described above. UI is an intentional
-product divergence: every
-JavaScript context reports `hasUI = false` and exposes one explicit inert UI object with
-Pi-compatible default return values. Its `notify` method crosses the native context as a transient
-`AgentSessionEvent::PluginNotice`; each Rust frontend owns presentation, and nothing is persisted
-to the v4 session log. UI registrations, renderers, and resource discovery,
+non-replacing controls, and the command-safe session operations described above. TUI contexts expose
+active dialogs/components; other modes retain inactive UI defaults. `notify` crosses the native
+context as a transient `AgentSessionEvent::PluginNotice`. Component frames and notices do not
+change the v4 session log. Remaining renderer/resource discovery gaps,
 and other recognized-but-inactive facilities do not fail generation construction; they produce an
 `inactive` generation diagnostic and contribute no runtime callback. A hook name known to current
 Pi but not implemented follows the same inactive policy, while an unknown hook name remains a hard
@@ -1638,6 +1640,36 @@ and TUI without transport policy in either frontend.
   sinks are adapters, not alternate event systems.
 - `AbortHandle` / `AbortSignal`: provide cooperative cancellation without exposing Tokio types in public signatures.
 
+## Session context edits and actionable boundaries
+
+`pi-core::session` owns append-only `ContextEditEntry`, `ContextEditReplacement` and typed
+`ProjectedSessionEntry` values. `pi-session` validates targets against the selected ancestor path
+and applies the latest content edit only in model-context projection. Original messages, usage
+and unknown wire fields remain durable. Compaction snapshots have an optional `retainedEntryIds`
+field so edits after compaction resolve original message identities without changing plugin
+`details`. Legacy snapshots retain the ordered message-match fallback. The v1-v3 import bridge
+converts edits and compactions once in journal order, including retain-none checkpoints.
+
+`pi-plugin` owns `BoundaryResult`, draft and preview contracts plus ordered callback dispatch.
+The session supplies preview validation and one atomic journal commit. Each native or JavaScript
+handler sees prior proposals and the last valid preview; a later handler can repair invalid drafts.
+A final invalid batch is rejected without partial writes. JavaScript handlers cross the adapter
+individually at actionable boundaries so previews are rebuilt even between callbacks in one source.
+Pi wire conversion stays in the JavaScript adapter; native previews retain strongly typed entries.
+
+The session's composed turn controller dispatches `turn_end` after assistant/tool-result persistence,
+then the previous controller's stop decision wins over extension continuation. Context replacements
+are installed before the next provider request. `agent_before_settle` runs after recovery, retries,
+compaction and queued continuations and may request another run. Cancellation reaches an active
+boundary callback; `agent_settled` remains the final product event. All prompt entry points establish
+session activity so messages queued by these hooks use the existing durable queue lifecycle.
+Activity continuation preserves the last effective prompt and does not repeat `before_agent_start`;
+the standalone `continue_run` API retains its per-run preparation semantics.
+Retry records an omission edit for the failed attempt so later projection cannot restore it.
+Edits invalidate older context-usage checkpoints, and automatic compaction preserves unsent boundary
+input. Native ABI 25 carries these contracts. See [the session boundary guide](../crates/pi-session/README.md)
+for examples and the standalone-Agent boundary.
+
 ## Agent layering
 
 `Agent` is the stateful façade. It owns transcript state, active-run cancellation, steering/follow-up queues, subscriptions, and low-level run idleness. It is an `Arc`-backed cloneable handle so another task can call `abort`, `steer`, or `follow_up` while a prompt is running. Continuing from an assistant tail first consumes one steering batch as the new prompt and suppresses only the loop's initial duplicate steering poll; later steering remains queued until the first response completes. Follow-up is consumed only when no steering is available. `AgentSession` owns product settlement because only it can establish that retry, compaction, and queued-continuation policy has also finished; it dispatches the generation's `agent_settled` plugin hook before publishing `AgentSessionEvent::AgentSettled`.
@@ -1646,7 +1678,7 @@ and TUI without transport policy in either frontend.
 events, invokes a provider, delegates stream assembly and tool execution, polls steering after each
 turn, polls follow-up before settlement, and returns the final context plus messages added by that
 invocation. `AgentTurnControl` owns Pi's between-turn callbacks. After `turn_end`,
-`should_stop_after_turn` runs before queue polling. Only when another turn will run does
+`should_stop_after_turn` runs before `should_continue_after_turn` and queue polling. Only when another turn will run does
 `prepare_next_turn` receive that completed turn and optionally replace the run-local
 context/provider/model/thinking values, before the next `turn_start`. If no steering was already
 drained, the loop polls again after preparation to include messages queued during it. Settled runs
@@ -2700,3 +2732,25 @@ runtime generation. The settings UI warns that existing sessions are not refresh
 recommends restart/new conversation. A general Desktop generation reload UI remains separate.
 The panel uses the existing Settings shell, theme tokens, list/button styles and i18n;
 leaving settings, switching sections or discarding a dirty draft requires confirmation.
+
+
+## JavaScript extension component presentation
+
+The Node generation hosts real Pi 1.3.0 components through `ExtensionUI`; it does not start a Pi
+terminal. `UiContextAccess` exposes typed `UiSurfaceFrame`, `UiSurfaceEvent`, `UiSurfaceSnapshot`
+and `UiSurfaceAction` contracts. `pi-js-plugin` alone decodes their JS wire envelopes. `pi-session`
+binds the bridge and closes tracked surface owners when `PluginContextEpoch` retires. Native ABI
+26 reflects this trait change; descriptor validation and pinned library lifetime are unchanged.
+
+`apps/pi-cli::plugin_ui` owns the exchange channel and shared frontend snapshot. Ratatui stores
+component frames, lays out header/widget/editor/footer/overlay slots, applies decoded style spans,
+and forwards input with a sequence number. Node has at most one outstanding frame exchange per
+generation; refreshes coalesce and input stays ordered. This keeps provider/session work, redraw,
+and awaited JS callbacks independent. The app also services the same channel while session-start
+hooks are running, before the full session frontend exists. Retirement closes outstanding requests,
+disposes components/timers, and rejects stale owners. Reload preparation leaves active UI intact.
+
+The JS compatibility module re-exports the pinned `pi-tui` dependency under a distinct npm alias
+so Jiti does not resolve the runtime back to its own shim. Rust remains the terminal owner. The
+supported subset and intentional gaps are recorded in `docs/js-extension-compatibility.md`;
+Desktop and RPC do not automatically acquire this terminal component adapter.

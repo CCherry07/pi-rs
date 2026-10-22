@@ -1100,7 +1100,7 @@ test('keeps inactive JavaScript UI registrations non-fatal while agent_settled s
   assert.equal(settledHook?.name, 'agent_settled')
   assert.deepEqual(
     manifest.diagnostics.map(diagnostic => diagnostic.feature),
-    ['pi.registerShortcut', 'pi.registerMessageRenderer'],
+    ['pi.registerMessageRenderer'],
   )
 
   assert.deepEqual(parseJson(await host.dispatch(JSON.stringify({
@@ -1192,7 +1192,7 @@ test('keeps non-UI contributions from extensions that import current or legacy P
   )
   assert.deepEqual(
     manifest.diagnostics.map(diagnostic => diagnostic.feature),
-    ['pi.registerShortcut', 'pi.registerShortcut'],
+    [],
   )
 })
 
@@ -1290,6 +1290,7 @@ test('builds command context from the native query notify and request capability
       const values: Record<string, unknown> = {
         cwd: root,
         isProjectTrusted: false,
+        hasUi: false,
         isIdle: true,
         hasPendingMessages: false,
         model: { provider: 'test', id: 'model-1' },
@@ -1568,4 +1569,31 @@ test('input images and message_end replacements cross the JavaScript host unchan
   }), {
     message: { role: 'user', content: [{ type: 'text', text: 'finalized' }], timestamp: 1 },
   })
+})
+
+test('actionable boundaries preserve in-place proposals even when a handler throws', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-boundary-'))
+  const extension = join(root, 'boundary.ts')
+  await writeFile(extension, `export default (pi: any) => {
+    pi.on("turn_end", (event: any) => {
+      event.entries.push({ type: "context_edit", targetId: event.messageEntryId, replacement: null });
+      throw new Error("after mutation");
+    });
+    pi.on("agent_before_settle", (event: any) => ({ entries: [...event.entries, { type: "custom_message", customType: "verify", content: "verify", display: false }], continue: true }));
+  }`)
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration', request: { projectTrusted: true, extensionPaths: [extension], mode: 'print' },
+  })))
+  const hooks = manifest.agentPlugins[0]!.hooks
+  assert.deepEqual(hooks.map(hook => hook.name), ['turn_end', 'agent_before_settle'])
+  async function invoke(index: number) {
+    const hook = hooks[index]!
+    return parseJson(await host.dispatch(JSON.stringify({ type: 'invoke', invocation: {
+      invocationId: `boundary-${index}`, generationId: manifest.generationId, callbackId: hook.callbackId, kind: 'agentHook',
+      payload: { hook: hook.name, context: { cwd: root }, event: { type: hook.name, messageEntryId: 'assistant-1', entries: [], continue: false, outcome: 'completed', context: {} } },
+    } })))
+  }
+  assert.deepEqual(await invoke(0), { entries: [{ type: 'context_edit', targetId: 'assistant-1', replacement: null }], __boundaryError: 'after mutation' })
+  assert.deepEqual(await invoke(1), { entries: [{ type: 'custom_message', customType: 'verify', content: 'verify', display: false }], continue: true })
 })

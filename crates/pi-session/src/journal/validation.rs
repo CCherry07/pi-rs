@@ -56,6 +56,7 @@ fn validate_entry_payload(entry: &SessionEntry) -> Result<(), SessionError> {
             }
             Ok(())
         }
+        SessionEntry::ContextEdit(_) => Ok(()),
         SessionEntry::ModelChange(_)
         | SessionEntry::ThinkingLevelChange(_)
         | SessionEntry::ActiveToolsChange(_)

@@ -57,6 +57,7 @@ use pi_coding::{ProjectTrustOption, ProjectTrustPromptRequest, ProjectTrustServi
 
 mod components;
 mod controller;
+pub(crate) mod extension_surface;
 mod message;
 mod view;
 
@@ -637,6 +638,7 @@ impl RegisteredPluginInventory {
 }
 
 struct App {
+    extension_surface: extension_surface::ExtensionSurface,
     transcript: Vec<TranscriptItem>,
     show_startup_header: bool,
     transcript_layout_cache: RefCell<TranscriptLayoutCache>,
@@ -759,6 +761,7 @@ impl App {
         let registered_plugins =
             RegisteredPluginInventory::from_runtime(session.runtime_inventory());
         Self {
+            extension_surface: extension_surface::ExtensionSurface::default(),
             transcript,
             show_startup_header: true,
             transcript_layout_cache: RefCell::new(TranscriptLayoutCache::default()),
@@ -1538,6 +1541,7 @@ async fn run_loop(
         plugin_confirmation: mut confirmation_requests,
         plugin_selection: mut selection_requests,
         plugin_multi_selection: mut multi_selection_requests,
+        plugin_surface: mut surface_requests,
     } = interactive_requests;
     let mut session_changes = session_handle.subscribe();
     let mut session = session_handle.current();
@@ -1582,6 +1586,11 @@ async fn run_loop(
                 continue;
             }
             terminal_event = events.next() => {
+                let snapshot = surface_requests.snapshot.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                if let Some(Ok(ref event)) = terminal_event
+                    && app.trust_prompt.is_none() && app.confirmation_prompt.is_none() && app.selection_prompt.is_none() && app.multi_selection_prompt.is_none()
+                    && app.active_bottom_view().is_none()
+                    && app.extension_surface.input(event.clone(), &snapshot) { continue; }
                 match terminal_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         let copied_selection = terminal.fullscreen
@@ -1669,6 +1678,7 @@ async fn run_loop(
                     recovered.selection_prompt = selection_prompt;
                     recovered.multi_selection_prompt = multi_selection_prompt;
                     recovered.status = "Caught up after UI lag".to_string();
+                    recovered.extension_surface = std::mem::take(&mut app.extension_surface);
                     app = recovered;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => app.update(AppMessage::Quit),
@@ -1685,6 +1695,7 @@ async fn run_loop(
                     refreshed.epoch = epoch;
                     refreshed.tools_expanded = tools_expanded;
                     refreshed.status = status;
+                    refreshed.extension_surface = std::mem::take(&mut app.extension_surface);
                     app = refreshed;
                 } else if current_epoch {
                     app.sync_snapshot(&session.snapshot());
@@ -1698,6 +1709,34 @@ async fn run_loop(
                         Ok(None) => app.status = "Clipboard contains no image or text".to_string(),
                         Err(error) => app.status = format!("Paste failed: {error}"),
                     }
+                }
+            }
+            Some(request) = surface_requests.recv() => {
+                use crate::plugin_ui::SurfaceRequest;
+                use pi_plugin::UiSurfaceAction;
+                let snapshot = surface_requests.snapshot.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                match request {
+                    SurfaceRequest::Exchange(frame, response) => app.extension_surface.exchange(frame, response, &snapshot),
+                    SurfaceRequest::Action(owner, action) => {
+                        if matches!(action, UiSurfaceAction::Close) { app.extension_surface.retire(owner); redraw_pending = true; continue; }
+                        if app.extension_surface.is_retired(&owner) { continue; }
+                        if !app.extension_surface.frame.owner.is_empty() && app.extension_surface.frame.owner != owner { continue; }
+                        match action {
+                            UiSurfaceAction::Wake => app.extension_surface.wake(&snapshot),
+                            UiSurfaceAction::Close => app.extension_surface.retire(owner),
+                            UiSurfaceAction::EditorText { text, append } => { if !append { app.input = ComposerInput::default(); } app.input.insert_str(text); },
+                            UiSurfaceAction::ToolsExpanded { expanded } => app.tools_expanded = expanded,
+                            UiSurfaceAction::Title { title } => { crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(title.replace(['\x1b', '\x07'], ""))).map_err(|e| e.to_string())?; },
+                            UiSurfaceAction::ForwardInput { sequence } => app.extension_surface.forward(sequence),
+                            UiSurfaceAction::Submit { text } => { app.input = ComposerInput::default(); app.input.insert_str(text); app.extension_surface.forwarded.push_back(Event::Key(crossterm::event::KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))); },
+                        }
+                    }
+                }
+                while let Some(event) = app.extension_surface.forwarded.pop_front() {
+                    if let Event::Key(key) = event {
+                        let mut ui = KeyUi { clipboard: &mut clipboard, transcript_viewport_height };
+                        handle_key(key, &mut app, &session, &session_handle, &project_trust, &effect_sender, &mut ui);
+                    } else if let Event::Paste(text) = event { app.input.insert_str(text); }
                 }
             }
             Some(request) = trust_requests.recv() => {
@@ -1724,7 +1763,9 @@ async fn run_loop(
                 subscription = session.subscribe();
                 let next_epoch = app.epoch.saturating_add(1);
                 let tools_expanded = app.tools_expanded;
+                let extension_surface = std::mem::take(&mut app.extension_surface);
                 app = app_for_session(&session, &subscription.snapshot, &agent_dir);
+                app.extension_surface = extension_surface;
                 app.epoch = next_epoch;
                 app.tools_expanded = tools_expanded;
                 app.status = generation_status_override
@@ -1755,6 +1796,21 @@ async fn run_loop(
                 },
                 Err(error) => app.status = format!("Authentication error: {error}"),
             }
+        }
+        let size = terminal.terminal_mut().size().map_err(|e| e.to_string())?;
+        let snapshot = pi_plugin::UiSurfaceSnapshot {
+            columns: size.width,
+            rows: size.height,
+            editor_text: app.input.text(),
+            tools_expanded: app.tools_expanded,
+        };
+        let mut shared = surface_requests
+            .snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *shared != snapshot {
+            *shared = snapshot.clone();
+            app.extension_surface.refresh(&snapshot);
         }
         redraw_pending = true;
     }
@@ -1908,6 +1964,7 @@ fn session_entry_choices(
             SessionEntry::Compaction(_) => "Compaction summary".to_string(),
             SessionEntry::BranchSummary(_) => "Branch summary".to_string(),
             SessionEntry::Custom(change) => change.custom_type.clone(),
+            SessionEntry::ContextEdit(_) => "Context edited".to_string(),
         };
         let id = record.id;
         let choice = SessionEntryChoice {
@@ -2128,6 +2185,7 @@ mod tests {
 
     fn demo_app() -> App {
         App {
+            extension_surface: extension_surface::ExtensionSurface::default(),
             transcript: vec![
                 TranscriptItem::User("把插件 reload 的边界再收紧一点。".to_string()),
                 TranscriptItem::Assistant {
@@ -4784,6 +4842,7 @@ mod tests {
             },
         });
         let compaction = CompactionEntry {
+            retained_entry_ids: Vec::new(),
             summary: "summary".to_string(),
             retained_tail: Vec::new(),
             tokens_before: 1_000,
@@ -4858,6 +4917,7 @@ mod tests {
         }))
         .unwrap();
         log.append(SessionEntry::Compaction(CompactionEntry {
+            retained_entry_ids: Vec::new(),
             summary: "summary".to_string(),
             retained_tail: vec![assistant.clone().into()],
             tokens_before: 10_000,
@@ -5169,5 +5229,37 @@ mod tests {
         assert!(UnicodeWidthStr::width(start.as_str()) <= 12);
         assert!(end.ends_with('…'));
         assert!(start.starts_with('…'));
+    }
+    #[test]
+    fn extension_widgets_preserve_composer_completion_and_transcript_layout() {
+        use pi_plugin::{UiRegion, UiRegionPlacement, UiTextSpan};
+        let mut app = demo_app();
+        for placement in [
+            UiRegionPlacement::AboveEditor,
+            UiRegionPlacement::BelowEditor,
+        ] {
+            app.extension_surface.frame.regions.push(UiRegion {
+                placement,
+                lines: vec![vec![UiTextSpan {
+                    text: "widget".into(),
+                    ..Default::default()
+                }]],
+                cursor: None,
+                width: 80,
+                row: None,
+                column: None,
+            });
+        }
+        app.input.insert_str("/model");
+        let areas = ui_areas(Rect::new(0, 0, 80, 30), &app);
+        assert!(areas.transcript.bottom() <= areas.above_editor.y);
+        assert!(areas.above_editor.bottom() <= areas.context.y);
+        assert!(areas.context.bottom() <= areas.composer.y);
+        assert!(areas.composer.bottom() <= areas.below_editor.y);
+        app.push_bottom_view(BottomPaneView::Model);
+        assert_eq!(
+            ui_areas(Rect::new(0, 0, 80, 30), &app).above_editor.height,
+            0
+        );
     }
 }

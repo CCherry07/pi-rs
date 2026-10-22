@@ -1247,6 +1247,7 @@ mod tests {
         let mut refresh = ContextRefresh::default();
         session
             .append_compaction(pi_session::CompactionEntry {
+                retained_entry_ids: Vec::new(),
                 summary: "compact context".into(),
                 retained_tail: Vec::new(),
                 tokens_before: 100,

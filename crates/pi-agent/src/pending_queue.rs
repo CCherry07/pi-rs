@@ -56,6 +56,15 @@ impl PendingMessageQueue {
         }
     }
 
+    pub fn peek(&self) -> Vec<Message> {
+        self.messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     pub fn clear(&self) {
         self.messages
             .lock()

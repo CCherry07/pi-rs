@@ -339,3 +339,22 @@ fn retired_epoch_rejects_stored_native_contexts() {
         Err(PluginContextError::Retired)
     ));
 }
+
+#[test]
+fn epoch_retirement_releases_presentation_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct SurfaceAccess(AtomicUsize);
+    impl UiContextAccess for SurfaceAccess {
+        fn ui_retire(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    impl ModelsContextAccess for SurfaceAccess {}
+    #[async_trait]
+    impl SessionContextAccess for SurfaceAccess {}
+    let access = Arc::new(SurfaceAccess(AtomicUsize::new(0)));
+    let epoch = PluginContextEpoch::new(access.clone());
+    epoch.retire();
+    epoch.retire();
+    assert_eq!(access.0.load(Ordering::SeqCst), 1);
+}

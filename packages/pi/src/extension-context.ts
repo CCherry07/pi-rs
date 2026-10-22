@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { ExtensionUI } from './extension-ui.js'
 
 import type {
   PiExtensionCommandContext,
@@ -73,6 +74,7 @@ function parseContextResult<T>(schema: z.ZodType<T>, value: unknown, operation: 
 }
 
 interface ExtensionContextOptions {
+  ui?: ExtensionUI
   payload: Record<string, unknown>
   nativeContext?: NativeExtensionContext
   mode: HostMode
@@ -197,7 +199,9 @@ export function createExtensionContext(
     options.assertActive()
     return result
   }
-  const ui = createInactiveExtensionUI((message, level) => notify({
+  const hasUI = () => query({ type: 'hasUi' }, booleanSchema, () => false)
+  if (options.nativeContext) options.ui?.bind(options.nativeContext)
+  const inactiveUI = createInactiveExtensionUI((message, level) => notify({
     type: 'uiNotify',
     message,
     level,
@@ -247,7 +251,7 @@ export function createExtensionContext(
 
   const context = {
     ...options.payload,
-    ui,
+    get ui() { return options.ui && hasUI() ? options.ui.forContext(options.signal) : inactiveUI },
     sessionManager,
     modelRegistry,
     signal: options.signal,
@@ -289,7 +293,7 @@ export function createExtensionContext(
       enumerable: true,
       get: () => {
         options.assertActive()
-        return false
+        return hasUI()
       },
     },
     model: {

@@ -298,7 +298,8 @@ unchanged content reuses one pinned handle, while a rebuilt artifact gets a new 
 The SDK also pins the `serde_json::Value` map representation used by constructor options, so feature
 unification in a host workspace cannot silently change that Rust-ABI type's layout.
 
-The current contract is native ABI **24**. ABI 24 moves native contracts into `pi-plugin` and
+The current contract is native ABI **26**. ABI 26 adds extension UI surface capabilities and generation retirement cleanup. ABI 25 adds actionable session boundaries, context edits,
+and retained-entry provenance. ABI 24 moves native contracts into `pi-plugin` and
 consolidates host services in `pi-plugin-manager`. ABI 23 unifies callback errors as `PluginError` and
 uses typed `PluginHook` diagnostics with optional generation metadata. ABI 22 unifies Agent and Session callbacks under one Plugin, moves preparation
 to pi-plugin and permits disabled instances. ABI 21 added
@@ -377,8 +378,8 @@ ABI 5 added the generation-bound Pi product context shared by agent, tool prepar
 command, provider, and session callbacks. ABI 4 added provider header/response hooks,
 ABI 3 added macro-derived agent hook interests, and ABI 2 added the shared `AgentContext` /
 `added_tool_names` surface. Older artifacts are rejected before any Rust-ABI constructor is
-resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 24 constructors use the
-`pi_plugin_create_v24` / `pi_provider_plugin_create_v24` symbols. Rebuild every native plugin against the
+resolved. The stable C descriptor remains `pi_plugin_descriptor_v1`; ABI 26 constructors use the
+`pi_plugin_create_v26` / `pi_provider_plugin_create_v26` symbols. Rebuild every native plugin against the
 current SDK after upgrading the host.
 
 Every factory call creates a fresh instance. Runtime and session reload continue to use the existing

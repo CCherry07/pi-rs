@@ -63,6 +63,26 @@ pub struct UiMultiSelectResponse {
 #[doc(hidden)]
 #[async_trait]
 pub trait UiContextAccess: Send + Sync {
+    /// Releases frontend surfaces when this generation loses its capabilities.
+    fn ui_retire(&self) {}
+
+    fn ui_surface_snapshot(&self) -> PluginContextResult<super::UiSurfaceSnapshot> {
+        unbound()
+    }
+    fn ui_surface_action(
+        &self,
+        _owner: String,
+        _action: super::UiSurfaceAction,
+    ) -> PluginContextResult<()> {
+        unbound()
+    }
+    async fn ui_surface_exchange(
+        &self,
+        _frame: super::UiSurfaceFrame,
+    ) -> PluginContextResult<super::UiSurfaceEvent> {
+        unbound()
+    }
+
     fn mode(&self) -> PluginContextResult<PresentationMode> {
         unbound()
     }

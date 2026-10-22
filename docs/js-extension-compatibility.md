@@ -12,7 +12,8 @@ diagnostics. Unknown names still fail construction.
 | Agent | `input` | Active; receives `text`, `images`, `source`, and optional `streamingBehavior`. Continue, handled, and chained text/image transforms are supported. |
 | Agent | `before_agent_start` | Active; Pi prompt, images, chained system prompt, and system-prompt options are passed. Both `systemPrompt` replacement and persistent custom-message injection are supported and chain in registration order. |
 | Agent | `agent_start`, `agent_end`, `agent_settled` | Active; `agent_settled` fires after session-owned retry, compaction, and queued continuation have finished and before the product settled event. |
-| Agent | `turn_start`, `turn_end` | Active; both carry a zero-based per-run `turnIndex`, and `turn_start` carries `timestamp`. |
+| Agent | `turn_start`, `turn_end` | Active; both carry `turnIndex`. Session `turn_end` supports typed journal proposals, persisted message/tool-result IDs, context previews and `continue`. |
+| Agent | `agent_before_settle` | Active; proposes journal entries and another response after retries, compaction and queued work. |
 | Agent | `message_start`, `message_update`, `message_end` | Active; role-preserving `message_end` replacements chain and become the live and persisted message. |
 | Agent | `tool_execution_start`, `tool_execution_update`, `tool_execution_end` | Active. |
 | Agent | `context` | Active; message replacement is supported. |
@@ -28,6 +29,9 @@ Supported callbacks run in registration order. A rejected callback, malformed pa
 cross-role `message_end` replacement is recorded in the generation's diagnostics and later
 callbacks continue from the last valid value. `tool_call` is the deliberate exception: it remains
 fail-closed for the affected tool call, matching Pi's runner.
+
+Actionable `turn_end` and `agent_before_settle` callbacks receive a refreshed preview after every
+handler and atomically commit valid final drafts. See [the session boundary guide](../crates/pi-session/README.md).
 
 Agent observer hooks are dispatched as one generation batch per event. Handlers still await
 sequentially, share the same event object, and isolate failures. `message_update` uses a compact
@@ -82,18 +86,36 @@ context can immediately query and operate on the reloaded generation.
 
 ## UI and registrations
 
-JavaScript extensions never own terminal rendering. `ctx.hasUI` is always false and `ctx.ui` is an
-explicit inert object: selection/input/editor/custom calls resolve `undefined`, confirmation resolves
-`false`, getters return empty values, and setters do nothing. `ctx.ui.notify(message, level)` is the
-exception: it publishes a transient, presentation-neutral product notice that the Rust TUI, print,
-and NDJSON frontends render themselves. Factories supplied to UI registration methods are not
-executed.
+Interactive Node/NAPI sessions expose `ctx.hasUI = true`. Both Pi TUI package names resolve to
+real `pi-tui` **1.3.0** components, pinned under the private dependency alias
+`@pi-rs/pi-tui-runtime`. This requires Node **22.19+**. The alias prevents Jiti's compatibility
+mapping from recursively resolving its own implementation. Other missing dependencies still fail.
 
-Both `@earendil-works/pi-tui` and `@mariozechner/pi-tui` resolve to a terminal-inert compatibility
-module. It supplies pure text and key-identifier helpers plus inert component classes so a mixed extension can finish
-module evaluation and keep its tools, commands, and hooks. Renderer, widget, shortcut, and other UI
-registrations remain inactive. Any other missing dependency is fatal so broken packages and
-installation mistakes are not hidden.
+The generation owns JavaScript component objects; `apps/pi-cli` owns input and terminal rendering.
+`render(width)` ANSI output is decoded into typed text/style spans before crossing NAPI, and
+`CURSOR_MARKER` becomes a frontend cursor position. No component frame executes terminal escape
+sequences. Frames are cached by Ratatui and refreshed through an asynchronous exchange; keyboard
+and bracketed-paste events return to the component without blocking the session event loop.
+
+| UI capability | Interactive support |
+| --- | --- |
+| `select`, `confirm`, `input`, `editor` | Selection, cancellation, prefill, multiline editing, timeout countdown and `AbortSignal`; also while awaiting `session_start`. |
+| `custom` | Inline editor replacement or overlay, async factories, keyboard focus, `done(result)`, nested prompts, resize, refresh requests and disposal. |
+| `setWidget`, `setHeader`, `setFooter` | String widgets and actual component factories; above/below editor slots, replacement and disposal. Footer statuses are available; Git-branch data is not yet supplied. |
+| Editor state | Read, replace, paste, custom editor factories; `CustomEditor` uses real Pi editor behavior with Rust submit/escape/exit handoffs. Additional autocomplete providers and the full app action keymap remain gaps. |
+| Notifications/status/title | Product notices, keyed footer statuses, terminal title. |
+| Input/shortcuts | Input listeners and registered keyboard shortcuts. Input is reconstructed from Crossterm events; exact original terminal bytes, mouse routing and key-release events are not provided. |
+| Theme/tools | A dark extension theme, text styling helpers and tool-expansion getter/setter. Theme discovery/switching beyond this theme remains unsupported. |
+
+Component disposal runs on replacement, close, frontend shutdown and generation retirement.
+Pending dialogs resolve as cancelled; old owners cannot remount after retirement. A failed generation
+preparation preserves the existing UI. A renderer exception produces a product notice and closes
+that generation's component host. Frame transport is transient and does not change session JSONL.
+
+Working-indicator customization, hidden-thinking labels, external-editor launch, image protocols,
+full overlay focus/geometry options and arbitrary terminal operations remain unsupported. These
+limits mean compatibility with every upstream UI extension is not claimed. Print/JSON/RPC still
+use inactive UI defaults (notifications remain active); Desktop legacy JS UI is outside this adapter.
 
 The configuration-form provider registration surface supports `name`, `baseUrl`, `apiKey`, `api`,
 `headers`, `authHeader`, and `models`. Supplying `models` replaces the provider catalog; omitting it
@@ -101,8 +123,8 @@ preserves lower-layer models, and unregistering restores the built-in/`models.js
 next safe generation. The full `Provider` object overload and the `streamSimple`, `refreshModels`,
 and OAuth callbacks are recognized and inactive.
 
-The following registration surfaces are recognized and inactive: shortcuts and
-message/Markdown/entry renderers. Extension flags are active; boolean flags use `--name` and string
+Message/Markdown/entry renderer registrations remain recognized and inactive. Tool/shell render
+callbacks and global tool renderer registration are not implemented. Extension flags are active; boolean flags use `--name` and string
 flags accept both `--name value` and `--name=value`; first registration wins for duplicate names,
 and unregistered flags fail generation construction. Tool
 `prepareArguments` runs before Rust validation through its own asynchronous adapter callback using
@@ -116,7 +138,7 @@ retirement.
 The host covers every module specifier in Pi's extension-loader alias table for both
 `@earendil-works` and `@mariozechner`: `pi-coding-agent`, `pi-agent-core`, `pi-ai`,
 `pi-ai/compat`, `pi-ai/oauth`, and `pi-ai/providers/all` resolve to the one host compatibility
-module. Both `pi-tui` namespaces resolve to the separate terminal-inert compatibility module
+module. Both `pi-tui` namespaces resolve to the real component compatibility module
 described above. The host also maps `typebox` and `@sinclair/typebox`, including supported subpaths
 such as `/compile` and `/value`, to the single TypeBox runtime bundled by the host. Subpath aliases
 take precedence over package-root aliases so resolution cannot produce paths such as

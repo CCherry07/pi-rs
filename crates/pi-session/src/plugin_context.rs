@@ -44,6 +44,23 @@ pub trait PluginProviderMutationAccess: Send + Sync {
 /// graphical interaction remains outside this crate.
 #[async_trait]
 pub trait PluginUiBridge: Send + Sync {
+    fn surface_snapshot(&self) -> Result<pi_plugin::UiSurfaceSnapshot, String> {
+        Err("extension surfaces unavailable".into())
+    }
+    fn surface_action(
+        &self,
+        _owner: String,
+        _action: pi_plugin::UiSurfaceAction,
+    ) -> Result<(), String> {
+        Err("extension surfaces unavailable".into())
+    }
+    async fn surface_exchange(
+        &self,
+        _frame: pi_plugin::UiSurfaceFrame,
+    ) -> Result<pi_plugin::UiSurfaceEvent, String> {
+        Err("extension surfaces unavailable".into())
+    }
+
     async fn confirm(&self, title: String, message: String) -> Result<bool, String>;
 
     async fn select(&self, _title: String, _options: Vec<String>) -> Result<Option<usize>, String> {
@@ -168,6 +185,7 @@ pub struct PiPluginContext {
     runtime: tokio::runtime::Handle,
     provider_mutations: Option<Arc<dyn PluginProviderMutationAccess>>,
     ui_bridge: Option<Arc<dyn PluginUiBridge>>,
+    ui_owners: Mutex<std::collections::HashSet<String>>,
     provider_reload_gate: Arc<tokio::sync::Mutex<()>>,
     model_scope_patterns: Vec<String>,
 }
@@ -186,6 +204,7 @@ impl PiPluginContext {
             runtime: tokio::runtime::Handle::current(),
             provider_mutations: None,
             ui_bridge: None,
+            ui_owners: Mutex::default(),
             provider_reload_gate: Arc::new(tokio::sync::Mutex::new(())),
             model_scope_patterns: Vec::new(),
         }
@@ -267,6 +286,62 @@ impl PiPluginContext {
 
 #[async_trait]
 impl UiContextAccess for PiPluginContext {
+    fn ui_retire(&self) {
+        if let Some(bridge) = &self.ui_bridge {
+            for owner in self
+                .ui_owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .drain()
+            {
+                let _ = bridge.surface_action(owner, pi_plugin::UiSurfaceAction::Close);
+            }
+        }
+    }
+
+    fn ui_surface_snapshot(&self) -> Result<pi_plugin::UiSurfaceSnapshot, PluginContextError> {
+        self.ui_bridge
+            .as_ref()
+            .ok_or_else(|| {
+                PluginContextError::Unavailable("extension surfaces unavailable".into())
+            })?
+            .surface_snapshot()
+            .map_err(context_failed)
+    }
+    fn ui_surface_action(
+        &self,
+        owner: String,
+        action: pi_plugin::UiSurfaceAction,
+    ) -> Result<(), PluginContextError> {
+        self.ui_bridge
+            .as_ref()
+            .ok_or_else(|| {
+                PluginContextError::Unavailable("extension surfaces unavailable".into())
+            })?
+            .surface_action(owner, action)
+            .map_err(context_failed)
+    }
+    async fn ui_surface_exchange(
+        &self,
+        frame: pi_plugin::UiSurfaceFrame,
+    ) -> Result<pi_plugin::UiSurfaceEvent, PluginContextError> {
+        if !matches!(self.mode, PresentationMode::Tui) {
+            return Ok(pi_plugin::UiSurfaceEvent::Closed);
+        }
+        self.ui_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(frame.owner.clone());
+        self.ui_bridge
+            .as_ref()
+            .ok_or_else(|| {
+                PluginContextError::Unavailable("extension surfaces unavailable".into())
+            })?
+            .surface_exchange(frame)
+            .await
+            .map_err(context_failed)
+    }
+
     fn mode(&self) -> Result<PresentationMode, PluginContextError> {
         Ok(self.mode)
     }
@@ -1100,6 +1175,7 @@ fn session_entry_view(record: &SessionRecord) -> Result<SessionEntryView, Plugin
         SessionEntryType::Compaction => SessionEntryKind::Compaction,
         SessionEntryType::BranchSummary => SessionEntryKind::BranchSummary,
         SessionEntryType::Custom => SessionEntryKind::Custom,
+        SessionEntryType::ContextEdit => SessionEntryKind::ContextEdit,
     };
     Ok(SessionEntryView::new(
         record.id.clone(),

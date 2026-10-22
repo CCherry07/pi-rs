@@ -1,3 +1,4 @@
+import type { ExtensionUI } from "./extension-ui.js";
 import type { HostMode, ToolExecutionMode } from "./extension-protocol.js";
 
 export interface PiContextUsage {
@@ -40,6 +41,17 @@ export interface PiModelRegistry {
   getProviderDisplayName(provider: string): string;
 }
 
+/** Interactive extension UI; non-interactive contexts provide inactive defaults. */
+export type PiExtensionUI = Pick<ExtensionUI,
+  | "select" | "confirm" | "input" | "editor" | "custom" | "notify"
+  | "setWidget" | "setHeader" | "setFooter" | "setStatus" | "setTitle"
+  | "onTerminalInput" | "setEditorText" | "getEditorText" | "pasteToEditor"
+  | "setEditorComponent" | "getEditorComponent" | "getToolsExpanded" | "setToolsExpanded"
+  | "theme" | "getTheme" | "getAllThemes" | "setTheme"
+  | "setWorkingMessage" | "setWorkingVisible" | "setWorkingIndicator"
+  | "setHiddenThinkingLabel" | "addAutocompleteProvider"
+>;
+
 export interface PiExtensionContext extends Record<string, unknown> {
   readonly cwd: string;
   readonly workspace: {
@@ -47,10 +59,10 @@ export interface PiExtensionContext extends Record<string, unknown> {
     readonly primaryRoot: string;
     readonly executionDir: string;
   };
-  hasUI: false;
+  hasUI: boolean;
   mode: HostMode;
   signal: AbortSignal;
-  ui: Record<string, unknown>;
+  ui: PiExtensionUI;
   sessionManager: PiReadonlySessionManager;
   modelRegistry: PiModelRegistry;
   model: Record<string, unknown> | undefined;

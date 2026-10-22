@@ -662,7 +662,8 @@ fn derive_effective_configuration(input: &LaneReductionInput) -> EffectiveLaneCo
             SessionEntry::Compaction(_)
             | SessionEntry::BranchSummary(_)
             | SessionEntry::CustomMessage(_)
-            | SessionEntry::Custom(_) => {}
+            | SessionEntry::Custom(_)
+            | SessionEntry::ContextEdit(_) => {}
         }
     }
     configuration

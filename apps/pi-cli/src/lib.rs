@@ -42,6 +42,7 @@ pub(crate) struct InteractiveRequestReceivers {
     plugin_confirmation: mpsc::UnboundedReceiver<plugin_ui::PluginConfirmationRequest>,
     plugin_selection: mpsc::UnboundedReceiver<plugin_ui::PluginSelectionRequest>,
     plugin_multi_selection: mpsc::UnboundedReceiver<plugin_ui::PluginMultiSelectionRequest>,
+    plugin_surface: plugin_ui::SurfaceReceiver,
 }
 
 impl ResolvedProjectTrust {
@@ -168,7 +169,7 @@ async fn run(
     let startup_settings = settings.load(&SettingsContext::new(&config.cwd, false));
     config.apply_session_dir_setting(
         startup_settings.global().session_dir.as_deref(),
-        cli.session.is_some(),
+        cli.session.is_some() || cli.session_dir.is_some(),
     );
     let curator_command = if let Some(CliCommand::Curator { arguments }) = &cli.command {
         let trust = resolve_project_trust(&cli, &config, false, &settings).await?;
@@ -298,6 +299,7 @@ async fn run(
         plugin_confirmation_requests,
         plugin_selection_requests,
         plugin_multi_selection_requests,
+        mut plugin_surface_requests,
     ) = plugin_ui::PluginUiService::channel();
     let mut factory = ProductSessionFactory::new(config, trust.service.clone(), settings)
         .with_plugin_context(cli_mode.presentation_mode(), plugin_context_binding.clone())
@@ -326,16 +328,31 @@ async fn run(
         let shutdown = sessions.shutdown().await.map_err(|error| error.to_string());
         return finish_run(result, shutdown);
     }
-    let session = if let Some(log) = resumed_log {
-        sessions.open_session_from_log(log).await
-    } else if let Some(session_id) = create_session_id {
-        sessions
-            .create_session_with_id(&cwd, &session_path, session_id)
-            .await
+    let startup = async {
+        if let Some(log) = resumed_log {
+            sessions.open_session_from_log(log).await
+        } else if let Some(session_id) = create_session_id {
+            sessions
+                .create_session_with_id(&cwd, &session_path, session_id)
+                .await
+        } else {
+            sessions.create_session(&cwd, &session_path).await
+        }
+        .map_err(|error| error.to_string())
+    };
+    let session = if matches!(
+        cli_mode.presentation_mode(),
+        pi_plugin::PresentationMode::Tui
+    ) {
+        tui::extension_surface::during_startup(
+            startup,
+            &mut plugin_surface_requests,
+            cli.fullscreen_enabled(),
+        )
+        .await?
     } else {
-        sessions.create_session(&cwd, &session_path).await
-    }
-    .map_err(|error| error.to_string())?;
+        startup.await?
+    };
     if curator_command.is_some()
         && !session
             .current()
@@ -366,6 +383,7 @@ async fn run(
             plugin_confirmation: plugin_confirmation_requests,
             plugin_selection: plugin_selection_requests,
             plugin_multi_selection: plugin_multi_selection_requests,
+            plugin_surface: plugin_surface_requests,
         },
         agent_dir,
         Some(plugin_context_binding),
@@ -402,6 +420,7 @@ fn split_extension_flags(
         "cwd",
         "session",
         "session-id",
+        "session-dir",
         "name",
         "model",
         "thinking",
@@ -421,6 +440,7 @@ fn split_extension_flags(
         "cwd",
         "session",
         "session-id",
+        "session-dir",
         "name",
         "model",
         "thinking",
@@ -791,7 +811,13 @@ mod tests {
             let arguments = ["--acp", "--acp-permissions"]
                 .into_iter()
                 .chain(timeout)
-                .chain(["--fixture-enabled", "--no-extensions", "--no-approve"])
+                .chain([
+                    "--session-dir",
+                    "investigation-sessions",
+                    "--fixture-enabled",
+                    "--no-extensions",
+                    "--no-approve",
+                ])
                 .map(str::to_string)
                 .collect();
             let (arguments, values) = split_extension_flags(arguments);
@@ -803,6 +829,7 @@ mod tests {
             assert!(cli.acp);
             assert!(cli.acp_permissions);
             assert_eq!(cli.acp_permission_timeout, 17);
+            assert_eq!(cli.session_dir.as_deref(), Some("investigation-sessions"));
             assert!(cli.no_extensions);
             assert!(cli.no_approve);
         }
