@@ -425,9 +425,39 @@ mod tests {
 
     #[async_trait]
     impl PluginUiBridge for RecordingUi {
-        async fn confirm(&self, title: String, message: String) -> Result<bool, String> {
-            self.requests.lock().unwrap().push((title, message));
-            Ok(self.answer)
+        fn surface_action(
+            &self,
+            _owner: String,
+            _action: pi_plugin::UiSurfaceAction,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn surface_exchange(
+            &self,
+            frame: pi_plugin::UiSurfaceFrame,
+        ) -> Result<pi_plugin::UiSurfaceEvent, String> {
+            let pi_plugin::UiNodeKind::Column { children, .. } = &frame.regions[0].root.kind else {
+                panic!("expected dialog column");
+            };
+            let pi_plugin::UiNodeKind::Text { text, .. } = &children[0].kind else {
+                panic!("expected dialog title");
+            };
+            let (title, message) = text
+                .split_once('\n')
+                .expect("confirmation title and message");
+            self.requests
+                .lock()
+                .unwrap()
+                .push((title.into(), message.into()));
+            Ok(pi_plugin::UiSurfaceEvent::Interaction {
+                region_id: "dialog".into(),
+                node_id: "value".into(),
+                event: pi_plugin::UiInteraction::Submit {
+                    value: (if self.answer { 0 } else { 1 }).into(),
+                },
+                snapshot: pi_plugin::UiSurfaceSnapshot::default(),
+                revision: frame.revision,
+            })
         }
     }
 

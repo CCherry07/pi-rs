@@ -39,8 +39,6 @@ pub(crate) struct ResolvedProjectTrust {
 
 pub(crate) struct InteractiveRequestReceivers {
     project_trust: mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
-    plugin_confirmation: mpsc::UnboundedReceiver<plugin_ui::PluginConfirmationRequest>,
-    plugin_selection: mpsc::UnboundedReceiver<plugin_ui::PluginSelectionRequest>,
     plugin_multi_selection: mpsc::UnboundedReceiver<plugin_ui::PluginMultiSelectionRequest>,
     plugin_surface: plugin_ui::SurfaceReceiver,
 }
@@ -294,13 +292,12 @@ async fn run(
     let plugin_context_binding = PluginContextBinding::new();
     // ACP owns transient per-session MCP configuration, even when its list is empty.
     config.load_mcp_config = !matches!(cli_mode, CLIMode::Acp);
-    let (
-        plugin_ui,
-        plugin_confirmation_requests,
-        plugin_selection_requests,
-        plugin_multi_selection_requests,
-        mut plugin_surface_requests,
-    ) = plugin_ui::PluginUiService::channel();
+    let (plugin_ui, plugin_multi_selection_requests, mut plugin_surface_requests) =
+        plugin_ui::PluginUiService::channel();
+    let ui_settings = settings.load(&SettingsContext::new(&config.cwd, trust.trusted()));
+    plugin_surface_requests.theme = ui_settings.effective().theme.clone();
+    plugin_surface_requests.external_editor = ui_settings.effective().external_editor.clone();
+    plugin_surface_requests.show_images = ui_settings.effective().terminal.show_images;
     let mut factory = ProductSessionFactory::new(config, trust.service.clone(), settings)
         .with_plugin_context(cli_mode.presentation_mode(), plugin_context_binding.clone())
         .with_plugin_ui_bridge(Arc::new(plugin_ui));
@@ -315,8 +312,6 @@ async fn run(
         // Keep the receiver alive so per-session trust resolution retains its
         // normal non-interactive request channel semantics.
         let _trust_requests = trust.requests;
-        let _plugin_confirmation_requests = plugin_confirmation_requests;
-        let _plugin_selection_requests = plugin_selection_requests;
         let _plugin_multi_selection_requests = plugin_multi_selection_requests;
         let result = tokio::select! {
             result = pi_acp::serve_stdio(
@@ -344,7 +339,7 @@ async fn run(
         cli_mode.presentation_mode(),
         pi_plugin::PresentationMode::Tui
     ) {
-        tui::extension_surface::during_startup(
+        tui::extension_startup::during_startup(
             startup,
             &mut plugin_surface_requests,
             cli.fullscreen_enabled(),
@@ -380,8 +375,6 @@ async fn run(
         trust.service,
         InteractiveRequestReceivers {
             project_trust: trust.requests,
-            plugin_confirmation: plugin_confirmation_requests,
-            plugin_selection: plugin_selection_requests,
             plugin_multi_selection: plugin_multi_selection_requests,
             plugin_surface: plugin_surface_requests,
         },

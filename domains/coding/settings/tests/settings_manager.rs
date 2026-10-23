@@ -26,6 +26,9 @@ fn current_settings_deep_merge_nested_objects_and_replace_arrays() {
         json!({
             "defaultProvider": "global-provider",
             "defaultProjectTrust": "always",
+            "externalEditor": "nvim -f",
+            "outputPad": 0,
+            "terminal": {"showImages": false, "imageWidthCells": 72},
             "compaction": {"enabled": false, "reserveTokens": 10},
             "extensions": ["global.ts"],
             "futureUi": {"left": true, "shared": {"global": 1}}
@@ -55,6 +58,13 @@ fn current_settings_deep_merge_nested_objects_and_replace_arrays() {
     assert!(!snapshot.effective().compaction.enabled);
     assert_eq!(snapshot.effective().compaction.reserve_tokens, 20);
     assert_eq!(snapshot.effective().extensions, ["project.ts"]);
+    assert_eq!(
+        snapshot.effective().external_editor.as_deref(),
+        Some("nvim -f")
+    );
+    assert_eq!(snapshot.effective().output_pad, 0);
+    assert!(!snapshot.effective().terminal.show_images);
+    assert_eq!(snapshot.effective().terminal.image_width_cells, 72);
     assert_eq!(
         snapshot.default_project_trust(),
         DefaultProjectTrust::Always

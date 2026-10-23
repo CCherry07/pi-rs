@@ -1,147 +1,74 @@
-import {
-  CURSOR_MARKER,
-  stripTerminalSequences,
-  visibleWidth,
-} from "@pi-rs/pi-tui-runtime";
 import { z } from "zod";
 
+export type UiTone = "default" | "accent" | "muted" | "success" | "warning" | "error";
+export interface UiCompletion { value: string; label: string; description?: string }
+export type UiNode = { id: string } & (
+  | { type: "text"; text: string; tone?: UiTone }
+  | { type: "markdown"; text: string }
+  | { type: "link"; text: string; url: string }
+  | { type: "column" | "row"; children: UiNode[]; gap?: number }
+  | { type: "panel"; title?: string; child: UiNode }
+  | { type: "scroll"; child: UiNode; height: number }
+  | { type: "spacer"; height?: number }
+  | { type: "select"; options: string[]; initialSelected?: number }
+  | { type: "input"; initialValue?: string; placeholder?: string; completions?: UiCompletion[] }
+  | { type: "editor"; initialValue?: string; placeholder?: string; height?: number; completions?: UiCompletion[] }
+  | { type: "button"; text: string }
+  | { type: "progress"; text: string }
+  | { type: "image"; data: string; mimeType: string; alt: string; width: number; height: number }
+);
+const id = z.string().min(1);
+const cells = z.number().int().min(0).max(65535);
+const completions = z.array(z.strictObject({ value: z.string(), label: z.string(), description: z.string().optional() })).default([]);
+const node: z.ZodType<UiNode> = z.lazy(() => z.discriminatedUnion("type", [
+  z.strictObject({ id, type: z.literal("text"), text: z.string(), tone: z.enum(["default", "accent", "muted", "success", "warning", "error"]).default("default") }),
+  z.strictObject({ id, type: z.literal("markdown"), text: z.string() }),
+  z.strictObject({ id, type: z.literal("link"), text: z.string(), url: z.string() }),
+  z.strictObject({ id, type: z.literal("column"), children: z.array(node), gap: cells.default(0) }),
+  z.strictObject({ id, type: z.literal("row"), children: z.array(node), gap: cells.default(0) }),
+  z.strictObject({ id, type: z.literal("panel"), title: z.string().default(""), child: node }),
+  z.strictObject({ id, type: z.literal("scroll"), child: node, height: cells }),
+  z.strictObject({ id, type: z.literal("spacer"), height: cells.default(1) }),
+  z.strictObject({ id, type: z.literal("select"), options: z.array(z.string()), initialSelected: z.number().int().nonnegative().default(0) }),
+  z.strictObject({ id, type: z.literal("input"), initialValue: z.string().default(""), placeholder: z.string().default(""), completions }),
+  z.strictObject({ id, type: z.literal("editor"), initialValue: z.string().default(""), placeholder: z.string().default(""), height: cells.default(6), completions }),
+  z.strictObject({ id, type: z.literal("button"), text: z.string() }),
+  z.strictObject({ id, type: z.literal("progress"), text: z.string() }),
+  z.strictObject({ id, type: z.literal("image"), data: z.string(), mimeType: z.string(), alt: z.string(), width: cells, height: cells }),
+]));
+export const uiNodeSchema = node.superRefine((root, context) => {
+  const ids = new Set<string>();
+  const visit = (value: UiNode) => {
+    if (ids.has(value.id)) context.addIssue({ code: "custom", message: `Duplicate UI node id: ${value.id}` });
+    ids.add(value.id);
+    if (value.type === "column" || value.type === "row") value.children.forEach(visit);
+    else if (value.type === "panel" || value.type === "scroll") visit(value.child);
+  };
+  visit(root);
+});
+export type Placement = "header" | "aboveEditor" | "belowEditor" | "footer" | "editor" | "overlay";
+export interface UiRegion { id: string; placement: Placement; root: UiNode; overlay?: { width?: number; maxHeight?: number; modal?: boolean } }
 export const uiSnapshotSchema = z.object({
-  columns: z.number(),
-  rows: z.number(),
-  editorText: z.string(),
-  toolsExpanded: z.boolean(),
+  columns: z.number(), rows: z.number(), editorText: z.string(), toolsExpanded: z.boolean(),
+  isRunning: z.boolean().default(false),
+  transcript: z.array(z.object({ index: z.number().int().nonnegative(), fingerprint: z.string(), payload: z.record(z.string(), z.unknown()) })).default([]),
+  transcriptWidth: z.number().default(0),
+  areas: z.array(z.object({ placement: z.enum(["header", "aboveEditor", "belowEditor", "footer", "editor", "overlay"]), row: z.number(), column: z.number(), width: z.number(), height: z.number() })).default([]),
 });
 export type UiSnapshot = z.infer<typeof uiSnapshotSchema>;
+export const uiInteractionSchema = z.discriminatedUnion("type", [
+  z.strictObject({ type: z.literal("change"), value: z.unknown() }),
+  z.strictObject({ type: z.literal("submit"), value: z.unknown() }),
+  z.strictObject({ type: z.literal("activate") }),
+  z.strictObject({ type: z.literal("cancel") }),
+  z.strictObject({ type: z.literal("shortcut"), key: z.string() }),
+]);
+export type UiInteraction = z.infer<typeof uiInteractionSchema>;
 export const uiEventSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("hostResult"), id: z.number(), result: z.string().nullable(), error: z.string().nullable(), snapshot: uiSnapshotSchema }),
   z.object({ type: z.literal("refresh"), snapshot: uiSnapshotSchema }),
-  z.object({
-    type: z.literal("input"),
-    data: z.string(),
-    sequence: z.number(),
-    snapshot: uiSnapshotSchema,
-  }),
+  z.object({ type: z.literal("interaction"), regionId: z.string(), nodeId: z.string(), revision: z.number().int().nonnegative(), event: uiInteractionSchema, snapshot: uiSnapshotSchema }),
   z.object({ type: z.literal("closed") }),
 ]);
-type Rgb = [number, number, number];
-export interface TextSpan {
-  text: string;
-  foreground: Rgb | null;
-  background: Rgb | null;
-  bold: boolean;
-  italic: boolean;
-  underline: boolean;
-  inverse: boolean;
-}
-export type Placement =
-  | "header"
-  | "aboveEditor"
-  | "belowEditor"
-  | "footer"
-  | "editor"
-  | "overlay";
-export interface Region {
-  placement: Placement;
-  lines: TextSpan[][];
-  cursor: [number, number] | null;
-  width: number;
-  row: number | null;
-  column: number | null;
-}
-const palette: Rgb[] = [
-  [0, 0, 0],
-  [205, 49, 49],
-  [13, 188, 121],
-  [229, 229, 16],
-  [36, 114, 200],
-  [188, 63, 188],
-  [17, 168, 205],
-  [229, 229, 229],
-  [102, 102, 102],
-  [241, 76, 76],
-  [35, 209, 139],
-  [245, 245, 67],
-  [59, 142, 234],
-  [214, 112, 214],
-  [41, 184, 219],
-  [255, 255, 255],
-];
-function indexed(n: number): Rgb {
-  if (n < 16) return palette[n] ?? [255, 255, 255];
-  if (n >= 232) return [n * 10 - 2312, n * 10 - 2312, n * 10 - 2312];
-  const cube = [0, 95, 135, 175, 215, 255];
-  n -= 16;
-  return [
-    cube[Math.floor(n / 36)] ?? 0,
-    cube[Math.floor(n / 6) % 6] ?? 0,
-    cube[n % 6] ?? 0,
-  ];
-}
-const blank = (): Omit<TextSpan, "text"> => ({
-  foreground: null,
-  background: null,
-  bold: false,
-  italic: false,
-  underline: false,
-  inverse: false,
-});
-/** Decode styles into data. No extension escape sequence reaches the terminal. */
-export function componentRegion(
-  lines: string[],
-  placement: Placement,
-  width: number,
-): Region {
-  let cursor: [number, number] | null = null;
-  const result = lines.slice(0, 4096).map((line, row) => {
-    const marker = line.indexOf(CURSOR_MARKER);
-    if (marker >= 0) cursor = [row, visibleWidth(line.slice(0, marker))];
-    line = line.replaceAll(CURSOR_MARKER, "");
-    const spans: TextSpan[] = [];
-    let style = blank();
-    let start = 0;
-    const append = (text: string) => {
-      text = stripTerminalSequences(text).replace(/[\x00-\x1f\x7f]/g, "");
-      if (text) spans.push({ ...style, text });
-    };
-    for (const match of line.matchAll(/\x1b\[([0-9;:]*)m/g)) {
-      append(line.slice(start, match.index));
-      start = match.index + match[0].length;
-      const codes = (match[1] || "0").split(/[;:]/).map(Number);
-      for (let i = 0; i < codes.length; i++) {
-        const code = codes[i]!;
-        if (code === 0) style = blank();
-        else if (code === 1) style.bold = true;
-        else if (code === 22) style.bold = false;
-        else if (code === 3 || code === 23) style.italic = code === 3;
-        else if (code === 4 || code === 24) style.underline = code === 4;
-        else if (code === 7 || code === 27) style.inverse = code === 7;
-        else if (code === 39) style.foreground = null;
-        else if (code === 49) style.background = null;
-        else if (code >= 30 && code <= 37)
-          style.foreground = indexed(code - 30);
-        else if (code >= 90 && code <= 97)
-          style.foreground = indexed(code - 82);
-        else if (code >= 40 && code <= 47)
-          style.background = indexed(code - 40);
-        else if (code >= 100 && code <= 107)
-          style.background = indexed(code - 92);
-        else if (code === 38 || code === 48) {
-          const mode = codes[++i];
-          let color: Rgb | undefined;
-          if (mode === 5)
-            color = indexed(Math.min(255, Math.max(0, codes[++i] ?? 0)));
-          else if (mode === 2)
-            color = [codes[++i] ?? 0, codes[++i] ?? 0, codes[++i] ?? 0].map(
-              (n) => Math.max(0, Math.min(255, n)),
-            ) as Rgb;
-          if (color) {
-            if (code === 38) style.foreground = color;
-            else style.background = color;
-          }
-        }
-      }
-    }
-    append(line.slice(start));
-    return spans;
-  });
-  return { placement, lines: result, cursor, width, row: null, column: null };
-}
+export type UiEvent = z.infer<typeof uiEventSchema>;
+export type UiComponentEvent = Extract<UiEvent, { type: "interaction" }>;

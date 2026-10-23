@@ -50,9 +50,11 @@ pub use capabilities::{
     PluginContextResult, PluginContextScope, PresentationMode, ReplacedSessionContext, ScopedModel,
     SendMessageOptions, SendUserMessageOptions, SessionContext, SessionContextAccess,
     SessionEntryKind, SessionEntryView, SessionExecutionOrigin, SessionReplacement,
-    SessionSnapshot, UiContext, UiContextAccess, UiMultiSelectAction, UiMultiSelectOption,
-    UiMultiSelectRequest, UiMultiSelectResponse, UiRegion, UiRegionPlacement, UiSurfaceAction,
-    UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot, UiTextSpan, UnavailablePluginContext,
+    SessionSnapshot, UiAppAction, UiCompletion, UiContext, UiContextAccess, UiHostOperation,
+    UiInteraction, UiMultiSelectAction, UiMultiSelectOption, UiMultiSelectRequest,
+    UiMultiSelectResponse, UiNode, UiNodeKind, UiOverlayOptions, UiRegion, UiRegionPlacement,
+    UiShortcut, UiSurfaceAction, UiSurfaceArea, UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot,
+    UiTone, UiTranscriptItem, UiTranscriptRender, UnavailablePluginContext,
 };
 pub use provider::{
     AfterProviderResponseEvent, BeforeProviderHeadersEvent, BeforeProviderRequestEvent,

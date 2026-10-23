@@ -25,8 +25,49 @@ test('keeps session-only extensions in unified plugin registration order', async
   assert.equal(manifest.agentPlugins[1]?.hooks[0]?.name, 'agent_start')
 })
 
-test("rejects malformed host operations before dispatch", async () => {
+test('exposes the resolved generation agent directory during extension loading and callbacks', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-agent-dir-'))
+  const agentDir = join(root, 'agent')
+  const extension = join(root, 'agent-dir.ts')
+  await writeFile(extension, `
+    import { getAgentDir } from "@earendil-works/pi-coding-agent";
+    const loadedAgentDir = getAgentDir();
+    export default function (pi: any) {
+      pi.registerCommand("agent-dir", {
+        handler: () => ({ action: "transform", text: JSON.stringify({ loadedAgentDir, callbackAgentDir: getAgentDir() }) })
+      });
+    }
+  `)
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: { projectTrusted: true, agentDir, extensionPaths: [extension], mode: 'print' },
+  })))
+  const command = manifest.agentPlugins[0]?.commands[0]
+  assert.ok(command)
+  const result = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'agent-dir', generationId: manifest.generationId,
+      callbackId: command.callbackId, kind: 'command', payload: { arguments: '', context: {} },
+    },
+  }))) as { text: string }
+  assert.deepEqual(JSON.parse(result.text), { loadedAgentDir: agentDir, callbackAgentDir: agentDir })
+})
+
+test("accepts the resolved agent directory and rejects malformed host operations before dispatch", async () => {
   const host = new ExtensionHost();
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: "prepareGeneration",
+    request: {
+      cwd: "/workspace",
+      projectTrusted: true,
+      extensionPaths: [],
+      mode: "print",
+      agentDir: "/resolved-agent",
+    },
+  })));
+  assert.equal(manifest.generationId, "js-1");
   await assert.rejects(
     host.dispatch(JSON.stringify({ type: "retireGeneration", generation_id: "legacy-shape" })),
     /at generationId/,
@@ -43,10 +84,10 @@ test("rejects malformed host operations before dispatch", async () => {
         projectTrusted: true,
         extensionPaths: [],
         mode: "print",
-        agentDir: "/legacy-node-discovery",
+        explicitPaths: ["/legacy-node-discovery"],
       },
     })),
-    /Unrecognized key: "agentDir"/,
+    /Unrecognized key: "explicitPaths"/,
   );
 });
 
@@ -1050,7 +1091,7 @@ test('captures configured providers at load time and forwards runtime mutations'
   ])
 })
 
-test('keeps inactive JavaScript UI registrations non-fatal while agent_settled stays active', async () => {
+test('keeps noninteractive UI registrations non-fatal while agent_settled stays active', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-inactive-'))
   const extension = join(root, 'inactive-extension.ts')
   await writeFile(
@@ -1071,7 +1112,7 @@ test('keeps inactive JavaScript UI registrations non-fatal while agent_settled s
         pi.registerCommand("ui-defaults", {
           async handler(_args: string, ctx: any) {
             ctx.ui.notify("ignored");
-            ctx.ui.setWidget("example", () => { throw new Error("factory must not run") });
+            ctx.ui.setWidget("example", { id: "note", type: "text", text: "inactive" });
             const selected = await ctx.ui.select("Choose", ["a"]);
             const confirmed = await ctx.ui.confirm("Confirm", "Continue?");
             const edited = await ctx.ui.editor("Edit", "value");
@@ -1091,7 +1132,7 @@ test('keeps inactive JavaScript UI registrations non-fatal while agent_settled s
       request: {
         projectTrusted: true,
         extensionPaths: [extension],
-        mode: 'tui',
+        mode: 'print',
       },
     })),
   )
@@ -1131,69 +1172,6 @@ test('keeps inactive JavaScript UI registrations non-fatal while agent_settled s
     },
   })))
   assert.deepEqual(result, { action: 'handled' })
-})
-
-test('keeps non-UI contributions from extensions that import current or legacy Pi TUI', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-host-inert-tui-'))
-  const cases = [
-    { scope: 'earendil', module: '@earendil-works/pi-tui' },
-    { scope: 'mario', module: '@mariozechner/pi-tui' },
-  ] as const
-  const extensionPaths: string[] = []
-
-  for (const fixture of cases) {
-    const extension = join(root, `${fixture.scope}-extension.ts`)
-    extensionPaths.push(extension)
-    await writeFile(
-      extension,
-      `
-        import { Key, Text, truncateToWidth } from "${fixture.module}";
-        const preview = new Text(truncateToWidth("todo preview", 7, "…"), 0, 0);
-        const shortcut = Key.ctrlAlt("f");
-
-        export default function (pi: any) {
-          pi.registerTool({
-            name: "${fixture.scope}-todo",
-            description: "Mixed extension tool",
-            parameters: { type: "object", properties: {} },
-            renderCall: () => preview,
-            async execute() {
-              return { content: [{ type: "text", text: "ok" }] };
-            }
-          });
-          pi.registerCommand("${fixture.scope}-todos", {
-            handler: async () => ({ action: "handled" })
-          });
-          pi.registerShortcut(shortcut, () => undefined);
-        }
-      `,
-    )
-  }
-
-  const host = new ExtensionHost()
-  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
-    type: 'prepareGeneration',
-    request: {
-      projectTrusted: true,
-      extensionPaths,
-      mode: 'tui',
-    },
-  })))
-
-  assert.deepEqual(
-    manifest.agentPlugins.map(plugin => ({
-      tools: plugin.tools.map(tool => tool.name),
-      commands: plugin.commands.map(command => command.name),
-    })),
-    [
-      { tools: ['earendil-todo'], commands: ['earendil-todos'] },
-      { tools: ['mario-todo'], commands: ['mario-todos'] },
-    ],
-  )
-  assert.deepEqual(
-    manifest.diagnostics.map(diagnostic => diagnostic.feature),
-    [],
-  )
 })
 
 test('keeps ordinary missing extension dependencies fatal', async () => {

@@ -260,10 +260,13 @@ impl SessionGenerationFactory for ProductSessionFactory {
             let manifest = host
                 .prepare_generation(JsGenerationRequest {
                     project_trusted,
+                    agent_dir: config.agent_dir.display().to_string(),
                     extension_paths: extension_paths
                         .iter()
                         .map(|path| path.display().to_string())
                         .collect(),
+                    output_pad: config.runtime_settings.output_pad,
+                    show_images: config.runtime_settings.terminal.show_images,
                     mode: self.presentation_mode,
                     cwd: config.cwd.display().to_string(),
                     workspace: config
@@ -769,6 +772,11 @@ command = "fixture-command"
                 .all(|request| request.mode == PresentationMode::Tui)
         );
         assert!(requests.iter().all(|request| request.project_trusted));
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.agent_dir == agent_dir.display().to_string())
+        );
         assert!(
             requests
                 .iter()

@@ -86,36 +86,30 @@ context can immediately query and operate on the reloaded generation.
 
 ## UI and registrations
 
-Interactive Node/NAPI sessions expose `ctx.hasUI = true`. Both Pi TUI package names resolve to
-real `pi-tui` **1.3.0** components, pinned under the private dependency alias
-`@pi-rs/pi-tui-runtime`. This requires Node **22.19+**. The alias prevents Jiti's compatibility
-mapping from recursively resolving its own implementation. Other missing dependencies still fail.
-
-The generation owns JavaScript component objects; `apps/pi-cli` owns input and terminal rendering.
-`render(width)` ANSI output is decoded into typed text/style spans before crossing NAPI, and
-`CURSOR_MARKER` becomes a frontend cursor position. No component frame executes terminal escape
-sequences. Frames are cached by Ratatui and refreshed through an asynchronous exchange; keyboard
-and bracketed-paste events return to the component without blocking the session event loop.
+Interactive Node/NAPI sessions expose `ctx.hasUI = true` and use the shared Rust component
+runtime. This is a breaking UI API redesign, not compatibility with Pi's JavaScript TUI classes.
+`@pi-rs/cli` exports the declarative UI types. No upstream TUI or Coding Agent npm runtime is
+installed by the host. Node 22.19+ is required.
 
 | UI capability | Interactive support |
 | --- | --- |
-| `select`, `confirm`, `input`, `editor` | Selection, cancellation, prefill, multiline editing, timeout countdown and `AbortSignal`; also while awaiting `session_start`. |
-| `custom` | Inline editor replacement or overlay, async factories, keyboard focus, `done(result)`, nested prompts, resize, refresh requests and disposal. |
-| `setWidget`, `setHeader`, `setFooter` | String widgets and actual component factories; above/below editor slots, replacement and disposal. Footer statuses are available; Git-branch data is not yet supplied. |
-| Editor state | Read, replace, paste, custom editor factories; `CustomEditor` uses real Pi editor behavior with Rust submit/escape/exit handoffs. Additional autocomplete providers and the full app action keymap remain gaps. |
-| Notifications/status/title | Product notices, keyed footer statuses, terminal title. |
-| Input/shortcuts | Input listeners and registered keyboard shortcuts. Input is reconstructed from Crossterm events; exact original terminal bytes, mouse routing and key-release events are not provided. |
-| Theme/tools | A dark extension theme, text styling helpers and tool-expansion getter/setter. Theme discovery/switching beyond this theme remains unsupported. |
+| `select`, `confirm`, `input`, `editor` | Native Rust controls, prefill, cancellation, timeout and AbortSignal, including during `session_start`. Editor Enter inserts a newline; Ctrl+Enter submits. |
+| `mount`, `custom` | Semantic tree, stable node IDs, update/unmount/focus, inline slots and centered modal/nonmodal overlays. `custom` resolves submit/activate and cancellation. |
+| Layout and controls | Text, Link, Markdown, Column, Row, Panel, Spacer, Scroll, Select, Input, Editor, Button, Progress and Image. Rust owns measurement, clipping, focus, scrolling, edits and completions. |
+| Widgets/header/footer/status | Node trees in native slots, replacement and keyed status text. Business data is supplied by the plugin. |
+| Input/shortcuts | Semantic events; Rust handles ordinary keys, paste, mouse selection, focus and registered shortcuts. Raw terminal/input interception is removed. |
+| Themes | Shared built-in light/dark/system palettes. Upstream JS theme classes, JSON theme discovery/watchers and custom keybinding files are removed. |
+| Transcript renderers | Message, entry, Markdown-transformer, tool-call/partial/final and resolver callbacks return nodes. Tool metadata retains arguments, details, shared state, output padding, image policy and duration. |
+| System operations | Rust-owned title, progress/program status, clipboard, suspend and external editor. Image data is decoded/encoded by Rust for Kitty/iTerm; Link becomes a clipped terminal hyperlink. |
+| Editor/working state | Read/replace/paste composer text, tool expansion, working message/visibility and hidden-thinking labels. Custom editor UI uses the shared Editor node. |
 
-Component disposal runs on replacement, close, frontend shutdown and generation retirement.
-Pending dialogs resolve as cancelled; old owners cannot remount after retirement. A failed generation
-preparation preserves the existing UI. A renderer exception produces a product notice and closes
-that generation's component host. Frame transport is transient and does not change session JSONL.
+Stable node IDs preserve Rust editing state across description changes. Ordinary editing does not
+wait for JS. Removed/replaced nodes cannot receive queued events; retained nodes keep valid queued
+submissions. Unmount, cancellation, host failure and generation retirement settle pending dialogs
+and release callbacks. Failed generation preparation preserves live UI. Print/JSON/RPC use inactive
+UI defaults (notifications remain active); Desktop does not acquire the terminal renderer.
 
-Working-indicator customization, hidden-thinking labels, external-editor launch, image protocols,
-full overlay focus/geometry options and arbitrary terminal operations remain unsupported. These
-limits mean compatibility with every upstream UI extension is not claimed. Print/JSON/RPC still
-use inactive UI defaults (notifications remain active); Desktop legacy JS UI is outside this adapter.
+See [the shared plugin UI contract](plugin-ui.md) for usage and deliberate API changes.
 
 The configuration-form provider registration surface supports `name`, `baseUrl`, `apiKey`, `api`,
 `headers`, `authHeader`, and `models`. Supplying `models` replaces the provider catalog; omitting it
@@ -123,8 +117,8 @@ preserves lower-layer models, and unregistering restores the built-in/`models.js
 next safe generation. The full `Provider` object overload and the `streamSimple`, `refreshModels`,
 and OAuth callbacks are recognized and inactive.
 
-Message/Markdown/entry renderer registrations remain recognized and inactive. Tool/shell render
-callbacks and global tool renderer registration are not implemented. Extension flags are active; boolean flags use `--name` and string
+Message/Markdown/entry renderer registrations, tool call/result renderers and global tool renderer
+registration are active in interactive mode. Extension flags are active; boolean flags use `--name` and string
 flags accept both `--name value` and `--name=value`; first registration wins for duplicate names,
 and unregistered flags fail generation construction. Tool
 `prepareArguments` runs before Rust validation through its own asynchronous adapter callback using
@@ -135,11 +129,10 @@ retirement.
 
 ## Module compatibility
 
-The host covers every module specifier in Pi's extension-loader alias table for both
+The host provides runtime-neutral SDK aliases for both
 `@earendil-works` and `@mariozechner`: `pi-coding-agent`, `pi-agent-core`, `pi-ai`,
-`pi-ai/compat`, `pi-ai/oauth`, and `pi-ai/providers/all` resolve to the one host compatibility
-module. Both `pi-tui` namespaces resolve to the real component compatibility module
-described above. The host also maps `typebox` and `@sinclair/typebox`, including supported subpaths
+`pi-ai/compat`, `pi-ai/oauth`, and `pi-ai/providers/all` use the one host compatibility
+module. `@pi-rs/cli` resolves to the same host SDK. Neither `pi-tui` namespace is aliased. The host also maps `typebox` and `@sinclair/typebox`, including supported subpaths
 such as `/compile` and `/value`, to the single TypeBox runtime bundled by the host. Subpath aliases
 take precedence over package-root aliases so resolution cannot produce paths such as
 `build/index.mjs/value`.

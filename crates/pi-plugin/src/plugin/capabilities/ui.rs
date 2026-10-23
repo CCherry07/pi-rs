@@ -95,18 +95,6 @@ pub trait UiContextAccess: Send + Sync {
         unbound()
     }
 
-    async fn ui_confirm(&self, _title: String, _message: String) -> PluginContextResult<bool> {
-        unbound()
-    }
-
-    async fn ui_select(
-        &self,
-        _title: String,
-        _options: Vec<String>,
-    ) -> PluginContextResult<Option<usize>> {
-        unbound()
-    }
-
     async fn ui_multi_select(
         &self,
         _request: UiMultiSelectRequest,
@@ -134,6 +122,20 @@ impl UiContext {
         self.handle.access()?.has_ui()
     }
 
+    /// Runs a Rust component through the same declarative document/event protocol as JavaScript UI.
+    ///
+    /// The future owns the component: completion, cancellation and dropping the future close
+    /// its surface. Noninteractive modes return `None`. An expired generation returns `Retired`.
+    /// Rendering and event callbacks must be short and nonblocking; use the component's waker
+    /// for background updates. The frontend owns each node's layout, input and editing state.
+    pub async fn custom<C: crate::UiComponent>(
+        &self,
+        component: C,
+        signal: crate::AbortSignal,
+    ) -> PluginContextResult<Option<C::Output>> {
+        crate::ui::run_component(self.handle.clone(), component, signal).await
+    }
+
     pub fn notify(
         &self,
         level: NoticeLevel,
@@ -151,8 +153,13 @@ impl UiContext {
         title: impl Into<String>,
         message: impl Into<String>,
     ) -> PluginContextResult<bool> {
-        let access = self.handle.access()?;
-        access.ui_confirm(title.into(), message.into()).await
+        Ok(self
+            .select(
+                format!("{}\n{}", title.into(), message.into()),
+                vec!["Yes".into(), "No".into()],
+            )
+            .await?
+            == Some(0))
     }
 
     /// Requests one semantic choice from the active product UI.
@@ -164,8 +171,19 @@ impl UiContext {
         title: impl Into<String>,
         options: Vec<String>,
     ) -> PluginContextResult<Option<usize>> {
-        let access = self.handle.access()?;
-        access.ui_select(title.into(), options).await
+        self.handle.access()?;
+        if options.is_empty() {
+            return Ok(None);
+        }
+        let (_, signal) = crate::AbortHandle::new();
+        self.custom(
+            crate::ui::Selection {
+                title: title.into(),
+                options,
+            },
+            signal,
+        )
+        .await
     }
 
     /// Requests a searchable multi-selection and one semantic batch action.

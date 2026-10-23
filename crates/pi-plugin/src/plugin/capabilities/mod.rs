@@ -12,8 +12,10 @@ mod surface;
 mod types;
 mod ui;
 pub use surface::{
-    UiRegion, UiRegionPlacement, UiSurfaceAction, UiSurfaceEvent, UiSurfaceFrame,
-    UiSurfaceSnapshot, UiTextSpan,
+    UiAppAction, UiCompletion, UiHostOperation, UiInteraction, UiNode, UiNodeKind,
+    UiOverlayOptions, UiRegion, UiRegionPlacement, UiShortcut, UiSurfaceAction, UiSurfaceArea,
+    UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot, UiTone, UiTranscriptItem,
+    UiTranscriptRender,
 };
 
 use async_trait::async_trait;

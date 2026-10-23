@@ -57,10 +57,11 @@ pub use plugin::{
     SessionStartEvent, SessionStartReason, SessionSwitchReason, SessionTreeEvent,
     SessionTreeSummary, ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolExecutionEndEvent,
     ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch,
-    TreePreparation, TurnEndEvent, TurnStartEvent, UiContext, UiContextAccess, UiMultiSelectAction,
-    UiMultiSelectOption, UiMultiSelectRequest, UiMultiSelectResponse, UiRegion, UiRegionPlacement,
-    UiSurfaceAction, UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot, UiTextSpan,
-    UnavailablePluginContext,
+    TreePreparation, TurnEndEvent, TurnStartEvent, UiAppAction, UiCompletion, UiContext,
+    UiContextAccess, UiHostOperation, UiInteraction, UiMultiSelectAction, UiMultiSelectOption,
+    UiMultiSelectRequest, UiMultiSelectResponse, UiNode, UiNodeKind, UiOverlayOptions, UiRegion,
+    UiRegionPlacement, UiShortcut, UiSurfaceAction, UiSurfaceArea, UiSurfaceEvent, UiSurfaceFrame,
+    UiSurfaceSnapshot, UiTone, UiTranscriptItem, UiTranscriptRender, UnavailablePluginContext,
 };
 
 pub use provider::{
@@ -73,6 +74,8 @@ pub use tool::{Tool, ToolContext, ToolError, ToolUpdateSink};
 pub use prepare::{PrepareContext, PrepareError, PrepareResult};
 
 pub mod desktop;
+pub mod ui;
+pub use ui::{UiComponent, UiComponentUpdate, UiComponentWaker};
 /// Native export contracts; enable only when building or loading a native plugin.
 #[cfg(feature = "native")]
 #[allow(unsafe_code)]

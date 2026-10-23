@@ -1319,15 +1319,16 @@ into the existing semantic tool-update stream without adding a Node-owned event 
 Managed npm installation deliberately uses npm's legacy peer-dependency mode, matching current Pi:
 Pi extensions commonly declare the Pi SDK and TypeBox as peers, but those modules belong to the
 running host rather than each managed package root. Before Jiti imports an extension, the Node host
-mirrors Pi's complete extension-loader module table for both the `@earendil-works` and
+provides runtime-neutral extension SDK aliases for both the `@earendil-works` and
 `@mariozechner` namespaces. `pi-coding-agent`, `pi-agent-core`, `pi-ai`, `pi-ai/compat`,
-`pi-ai/oauth`, and `pi-ai/providers/all` alias to one compatibility API; `typebox` and
+`pi-ai/oauth`, and `pi-ai/providers/all` use one host API supplied through Jiti virtual modules; `typebox` and
 `@sinclair/typebox` roots and subpaths alias to the bundled TypeBox runtime. This is module-resolution
 coverage, not a claim that every upstream JavaScript runtime export is reimplemented. It keeps one
 host ABI in a generation and prevents npm from installing a second Pi product runtime beside an
-extension. `@earendil-works/pi-tui` and `@mariozechner/pi-tui` alias to the pinned Pi 1.3.0
-component runtime. Node executes components through a generation-scoped UI host and sends typed
-frames to the app; terminal ownership stays in `apps/pi-cli`. All other missing modules remain fatal.
+extension. Plugin UI uses the shared declarative `pi-plugin` contract. Rust and JavaScript
+plugins submit the same component trees to the app-owned Rust renderer. The host has no `pi-tui`
+alias, upstream TUI dependency, JS component renderer, or maintained upstream source copy.
+Other missing modules remain fatal.
 
 The same Module exposes one management dispatcher,
 `manage(Install | Remove | Update | List) -> ManageResult`. Top-level CLI commands adapt to this
@@ -2734,23 +2735,43 @@ The panel uses the existing Settings shell, theme tokens, list/button styles and
 leaving settings, switching sections or discarding a dirty draft requires confirmation.
 
 
-## JavaScript extension component presentation
+## Shared plugin UI
 
-The Node generation hosts real Pi 1.3.0 components through `ExtensionUI`; it does not start a Pi
-terminal. `UiContextAccess` exposes typed `UiSurfaceFrame`, `UiSurfaceEvent`, `UiSurfaceSnapshot`
-and `UiSurfaceAction` contracts. `pi-js-plugin` alone decodes their JS wire envelopes. `pi-session`
-binds the bridge and closes tracked surface owners when `PluginContextEpoch` retires. Native ABI
-26 reflects this trait change; descriptor validation and pinned library lifetime are unchanged.
+`pi-plugin` defines semantic `UiNode` trees, `UiSurfaceFrame` documents, interactions and explicit
+host actions. Native ABI 29 replaces preformatted rows, cursors, terminal escape payloads and raw
+input forwarding with this protocol. It has no Ratatui dependency. This is a deliberate breaking
+Rust product design: upstream `Component.render(width)`, editor subclasses, JS themes and raw
+terminal callbacks are not supported. Their replacements are described in [plugin UI](plugin-ui.md).
 
-`apps/pi-cli::plugin_ui` owns the exchange channel and shared frontend snapshot. Ratatui stores
-component frames, lays out header/widget/editor/footer/overlay slots, applies decoded style spans,
-and forwards input with a sequence number. Node has at most one outstanding frame exchange per
-generation; refreshes coalesce and input stays ordered. This keeps provider/session work, redraw,
-and awaited JS callbacks independent. The app also services the same channel while session-start
-hooks are running, before the full session frontend exists. Retirement closes outstanding requests,
-disposes components/timers, and rejects stale owners. Reload preparation leaves active UI intact.
+`apps/pi-cli::tui::extension_surface` owns layout, focus, per-node editing/selection/scroll state,
+completion selection, terminal input and rendering for both Rust and JavaScript plugins. Input and
+Editor reuse `ComposerInput`, Select/completions reuse `SelectionList`, and Markdown uses the app's
+Rust Markdown renderer. Node IDs preserve local state through document updates; a different ID or
+kind mounts fresh state. Ordinary typing, cursor movement, focus and scrolling run locally even
+while a plugin callback is busy. The bridge emits semantic change/submit/activate/cancel/shortcut
+notifications after applying input. Queued changes coalesce; submissions retain their order.
 
-The JS compatibility module re-exports the pinned `pi-tui` dependency under a distinct npm alias
-so Jiti does not resolve the runtime back to its own shim. Rust remains the terminal owner. The
-supported subset and intentional gaps are recorded in `docs/js-extension-compatibility.md`;
-Desktop and RPC do not automatically acquire this terminal component adapter.
+Documents are scoped to a surface owner and revision. Equal revisions may only repeat an identical
+document; older revisions cannot replace the current tree. Queued interactions remain valid only
+while the same region/node/kind survives and are dispatched against the current revision. The JS
+adapter also checks the actual sent frame and live mount identity before invoking a callback.
+Native callbacks use the same exchange through `UiContext::custom`. Its future owns the component
+and closes the surface on completion, cancellation, error, panic or drop. The generation's
+`PluginContextEpoch` closes tracked owners at retirement; late owners cannot remount. Failed reload
+preparation leaves live UI intact. UI state is transient and is never serialized into session JSONL.
+
+The Node host retains only component descriptions, business callbacks, transcript projection and
+lifetime/transport bookkeeping. It owns no terminal, layout, editor or theme engine. Message, entry,
+Markdown and tool renderers produce semantic trees. Rust validates and renders those trees in the
+same component runtime, preserving transcript fingerprints, partial details and normal transcript
+scrolling. Rust encodes images and links from final clipped rectangles; plugins never send escape
+sequences. Images use Kitty or iTerm protocols with alt text on unsupported terminals.
+
+The app services the same channel during `session_start`, before the session frontend exists,
+then transfers the component state, pending events and input decoder to the full TUI. The native
+input stream retains Unicode, IME/bracketed paste and fragmented terminal-reply decoding; raw
+bytes no longer cross the plugin seam. Rust owns title, progress/program status, clipboard,
+suspend and external editor execution, including terminal restore/reacquisition. Built-in
+light/dark/system palette selection affects the shared renderer. Editor configuration stays in
+Rust; JS generation preparation no longer receives theme paths or external-editor configuration.
+Print/JSON/RPC use inactive UI defaults. Desktop needs a separate renderer for this semantic contract.

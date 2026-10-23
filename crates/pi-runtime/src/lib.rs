@@ -958,11 +958,17 @@ impl PiRuntime {
         &self,
         input: &str,
     ) -> Result<Option<CommandOutcome>, RuntimeError> {
-        let _reload_guard = self.reload_lock.lock().await;
         let Some((name, arguments)) = parse_command(input) else {
             return Ok(None);
         };
-        let runtime = self.agent.runtime();
+        // Resolve against one published generation, then pin it for the callback.
+        // Commands can invoke session/model/UI capabilities which acquire this
+        // same lock. Holding it across user code makes those operations fail or
+        // deadlock, including a renderer command that appends a custom message.
+        let runtime = {
+            let _reload_guard = self.reload_lock.lock().await;
+            self.agent.runtime()
+        };
         let Some(command) = runtime.registries().command(name) else {
             return Ok(None);
         };

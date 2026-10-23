@@ -7,8 +7,8 @@ use pi_core::{
 };
 use pi_js_plugin::{
     JsAgentPluginManifest, JsCallbackDispatcher, JsCallbackError, JsGenerationManifest,
-    JsHookManifest, JsInvocation, JsInvocationKind, JsPluginGeneration, JsProviderPluginManifest,
-    JsToolManifest,
+    JsGenerationRequest, JsHookManifest, JsInvocation, JsInvocationKind, JsPluginGeneration,
+    JsPluginHost, JsProviderPluginManifest, JsToolManifest,
 };
 use pi_plugin::{ProviderPluginDriver, RegistriesBuilder, ToolContext, ToolUpdateSink};
 use serde_json::{Value, json};
@@ -90,10 +90,20 @@ impl JsCallbackDispatcher for RecordingDispatcher {
     }
 }
 
+#[async_trait]
+impl JsPluginHost for RecordingDispatcher {
+    async fn prepare_generation(
+        &self,
+        _request: JsGenerationRequest,
+    ) -> Result<JsGenerationManifest, JsCallbackError> {
+        panic!("the prepared manifest is supplied directly in this adapter test")
+    }
+}
+
 #[tokio::test]
 async fn manifest_tool_registers_and_dispatches_through_the_public_tool_interface() {
     let dispatcher = Arc::new(RecordingDispatcher::default());
-    let generation = JsPluginGeneration::prepare(
+    let generation = JsPluginGeneration::prepare_with_host(
         JsGenerationManifest {
             generation_id: "js-7".to_string(),
             agent_plugins: vec![JsAgentPluginManifest {

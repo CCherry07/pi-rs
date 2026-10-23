@@ -2,8 +2,6 @@ use super::*;
 
 pub(super) fn can_paste_to_composer(app: &App) -> bool {
     app.trust_prompt.is_none()
-        && app.confirmation_prompt.is_none()
-        && app.selection_prompt.is_none()
         && app.multi_selection_prompt.is_none()
         && app.active_bottom_view().is_none()
         && app.pending_auth.is_none()
@@ -31,12 +29,6 @@ pub(super) fn handle_key<C: ClipboardWriter>(
     ui: &mut KeyUi<'_, C>,
 ) {
     if handle_multi_selection_prompt_key(key, app) {
-        return;
-    }
-    if handle_selection_prompt_key(key, app) {
-        return;
-    }
-    if handle_confirmation_prompt_key(key, app) {
         return;
     }
     if handle_trust_prompt_key(key, app, project_trust) {
@@ -381,72 +373,6 @@ pub(super) fn handle_multi_selection_prompt_key(key: KeyEvent, app: &mut App) ->
     true
 }
 
-pub(super) fn handle_selection_prompt_key(key: KeyEvent, app: &mut App) -> bool {
-    let Some(prompt) = app.selection_prompt.as_mut() else {
-        return false;
-    };
-    match key.code {
-        KeyCode::Up => {
-            prompt.selected = prompt.selected.saturating_sub(1);
-        }
-        KeyCode::Down => {
-            prompt.selected = (prompt.selected + 1).min(prompt.options.len().saturating_sub(1));
-        }
-        KeyCode::Enter => {
-            let selected = prompt.selected;
-            if let Some(mut prompt) = app.selection_prompt.take()
-                && let Some(response) = prompt.response.take()
-            {
-                let _ = response.send(Some(selected));
-            }
-            app.status = "Selected".to_string();
-        }
-        KeyCode::Esc => {
-            if let Some(mut prompt) = app.selection_prompt.take()
-                && let Some(response) = prompt.response.take()
-            {
-                let _ = response.send(None);
-            }
-            app.status = "Cancelled".to_string();
-        }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(mut prompt) = app.selection_prompt.take()
-                && let Some(response) = prompt.response.take()
-            {
-                let _ = response.send(None);
-            }
-            app.status = "Cancelled".to_string();
-        }
-        _ => {}
-    }
-    true
-}
-
-pub(super) fn handle_confirmation_prompt_key(key: KeyEvent, app: &mut App) -> bool {
-    if app.confirmation_prompt.is_none() {
-        return false;
-    }
-    let decision = match key.code {
-        KeyCode::Enter => Some(true),
-        KeyCode::Esc => Some(false),
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(false),
-        _ => None,
-    };
-    if let Some(decision) = decision {
-        if let Some(mut prompt) = app.confirmation_prompt.take()
-            && let Some(response) = prompt.response.take()
-        {
-            let _ = response.send(decision);
-        }
-        app.status = if decision {
-            "Confirmed".to_string()
-        } else {
-            "Cancelled".to_string()
-        };
-    }
-    true
-}
-
 pub(super) fn ctrl_c_action(app: &App) -> CtrlCAction {
     if !app.input.is_empty() {
         CtrlCAction::ClearComposer
@@ -733,22 +659,14 @@ pub(super) fn handle_mouse(
     match mouse.kind {
         MouseEventKind::ScrollUp => {
             app.screen_selection = None;
-            if app.trust_prompt.is_none()
-                && app.confirmation_prompt.is_none()
-                && app.selection_prompt.is_none()
-                && app.multi_selection_prompt.is_none()
-            {
+            if app.trust_prompt.is_none() && app.multi_selection_prompt.is_none() {
                 let lines = app.scroll_input.lines(ScrollDirection::Up);
                 app.scroll_from_bottom = app.scroll_from_bottom.saturating_add(lines);
             }
         }
         MouseEventKind::ScrollDown => {
             app.screen_selection = None;
-            if app.trust_prompt.is_none()
-                && app.confirmation_prompt.is_none()
-                && app.selection_prompt.is_none()
-                && app.multi_selection_prompt.is_none()
-            {
+            if app.trust_prompt.is_none() && app.multi_selection_prompt.is_none() {
                 let lines = app.scroll_input.lines(ScrollDirection::Down);
                 app.scroll_from_bottom = app.scroll_from_bottom.saturating_sub(lines);
             }

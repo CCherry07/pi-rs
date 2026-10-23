@@ -47,6 +47,7 @@ pub(super) fn cached_transcript_layout(
             .iter()
             .any(|r| r.placement == pi_plugin::UiRegionPlacement::Header);
     let show_working_placeholder = app.streaming_assistant.is_none()
+        && !app.extension_surface.frame.hide_working
         && !app.compacting
         && (app.working_started_at.is_some()
             || app.awaiting_assistant
@@ -57,6 +58,8 @@ pub(super) fn cached_transcript_layout(
         appearance,
         working_elapsed_width: format_elapsed_compact(app.working_elapsed_seconds()).len(),
         tools_expanded: app.tools_expanded,
+        hide_working: app.extension_surface.frame.hide_working,
+        extension_revision: app.extension_surface.transcript_revision,
     };
     {
         let mut cache = app.transcript_layout_cache.borrow_mut();
@@ -75,6 +78,7 @@ pub(super) fn cached_transcript_layout(
     }
 
     let working_placeholder = show_working_placeholder.then(|| TranscriptItem::Assistant {
+        thinking: String::new(),
         text: String::new(),
         streaming: true,
         error: None,
@@ -91,54 +95,79 @@ pub(super) fn cached_transcript_layout(
             .len()
             .saturating_add(usize::from(show_working_placeholder)),
     );
-    for item in app.transcript.iter().chain(working_placeholder.iter()) {
+    for (index, item) in app
+        .transcript
+        .iter()
+        .chain(working_placeholder.iter())
+        .enumerate()
+    {
+        let rendered = app.extension_surface.transcript_lines(index);
+        let extension_index = rendered.as_ref().map(|_| index);
+        if matches!(item, TranscriptItem::Custom { message: false, .. }) && rendered.is_none() {
+            continue;
+        }
+        if rendered.as_ref().is_some_and(Vec::is_empty) {
+            continue;
+        }
+        if app.extension_surface.frame.hide_working
+            && rendered.is_none()
+            && matches!(item, TranscriptItem::Assistant { text, streaming: true, error: None, .. } if text.is_empty())
+        {
+            continue;
+        }
         if next_start > 0 {
             next_start = next_start.saturating_add(1);
         }
-        let is_user = matches!(item, TranscriptItem::User(_));
-        let streaming = matches!(
-            item,
-            TranscriptItem::Assistant {
-                streaming: true,
-                ..
-            }
-        );
-        let working = matches!(
-            item,
-            TranscriptItem::Assistant {
-                text,
-                streaming: true,
-                ..
-            } if text.is_empty()
-        );
-        let (user_text, lines, content_height, code_background_rows) =
-            if let TranscriptItem::User(text) = item {
-                let content_height = Paragraph::new(text.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(user_text_width)
-                    .max(1);
-                (Some(text.clone()), Vec::new(), content_height, Vec::new())
-            } else {
-                let lines = transcript_item_lines(
-                    item,
-                    appearance,
-                    0,
-                    app.tools_expanded,
-                    app.working_elapsed_seconds(),
-                );
-                let code_background_rows = wrapped_line_background_ranges(
-                    &lines,
-                    width.max(1),
-                    code_block_background(appearance),
-                );
-                let content_height = Paragraph::new(lines.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(width.max(1))
-                    .max(1);
-                (None, lines, content_height, code_background_rows)
-            };
+        let is_user = rendered.is_none() && matches!(item, TranscriptItem::User(_));
+        let streaming = rendered.is_none()
+            && matches!(
+                item,
+                TranscriptItem::Assistant {
+                    streaming: true,
+                    ..
+                }
+            );
+        let working = rendered.is_none()
+            && matches!(
+                item,
+                TranscriptItem::Assistant {
+                    text,
+                    streaming: true,
+                    ..
+                } if text.is_empty()
+            );
+        let (user_text, lines, content_height, code_background_rows) = if let Some(lines) = rendered
+        {
+            let height = lines.len();
+            (None, lines, height, Vec::new())
+        } else if let TranscriptItem::User(text) = item {
+            let content_height = Paragraph::new(text.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(user_text_width)
+                .max(1);
+            (Some(text.clone()), Vec::new(), content_height, Vec::new())
+        } else {
+            let lines = transcript_item_lines(
+                item,
+                appearance,
+                0,
+                app.tools_expanded,
+                app.working_elapsed_seconds(),
+            );
+            let code_background_rows = wrapped_line_background_ranges(
+                &lines,
+                width.max(1),
+                code_block_background(appearance),
+            );
+            let content_height = Paragraph::new(lines.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(width.max(1))
+                .max(1);
+            (None, lines, content_height, code_background_rows)
+        };
         let height = content_height.saturating_add(usize::from(is_user) * 2);
         blocks.push(CachedTranscriptBlock {
+            extension_index,
             user_text,
             lines,
             streaming,
@@ -298,15 +327,12 @@ pub(super) fn ui_areas(root: Rect, app: &App) -> UiAreas {
 
 pub(super) fn draw(frame: &mut ratatui::Frame<'_>, app: &App, palette: UiPalette) {
     let root = frame.area();
+    app.extension_surface.set_palette(palette);
     if root.is_empty() {
         return;
     }
     if let Some(prompt) = &app.multi_selection_prompt {
         draw_multi_selection_prompt(frame, prompt);
-    } else if let Some(prompt) = &app.selection_prompt {
-        draw_selection_prompt(frame, &prompt.title, &prompt.options, prompt.selected);
-    } else if let Some(prompt) = &app.confirmation_prompt {
-        draw_confirmation_prompt(frame, &prompt.title, &prompt.message);
     } else if let Some(prompt) = &app.trust_prompt {
         draw_project_trust_prompt(frame, &prompt.cwd, &prompt.options, prompt.selected);
     } else if app.extension_surface.has_regions() && app.active_bottom_view().is_none() {
@@ -524,61 +550,6 @@ pub(super) fn draw_multi_selection_prompt(
             )),
         ]);
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-}
-
-pub(super) fn draw_selection_prompt(
-    frame: &mut ratatui::Frame<'_>,
-    title: &str,
-    options: &[String],
-    selected: usize,
-) {
-    let root = frame.area();
-    frame.render_widget(Clear, root);
-    let area = inset(root, horizontal_gutter(root.width).saturating_add(1));
-    let mut lines = vec![
-        Line::from(Span::styled(
-            title.to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::default(),
-    ];
-    lines.extend(options.iter().enumerate().map(|(index, option)| {
-        let marker = if index == selected { "›" } else { " " };
-        let style = if index == selected {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        Line::from(Span::styled(format!("{marker} {option}"), style))
-    }));
-    lines.extend([
-        Line::default(),
-        Line::from(Span::styled(
-            "↑/↓ choose · enter select · esc cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ]);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-}
-
-pub(super) fn draw_confirmation_prompt(frame: &mut ratatui::Frame<'_>, title: &str, message: &str) {
-    let root = frame.area();
-    frame.render_widget(Clear, root);
-    let area = inset(root, horizontal_gutter(root.width).saturating_add(1));
-    let lines = vec![
-        Line::from(Span::styled(
-            title.to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::default(),
-        Line::from(message.to_string()),
-        Line::default(),
-        Line::from(Span::styled(
-            "enter confirm · esc cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
@@ -1030,6 +1001,13 @@ pub(super) fn draw_transcript(
                     .scroll((u16::try_from(content_scroll).unwrap_or(u16::MAX), 0)),
                 Rect::new(content_area.x, screen_y, content_area.width, visible_height),
             );
+            if let Some(index) = block.extension_index {
+                app.extension_surface.record_transcript_graphics(
+                    index,
+                    Rect::new(content_area.x, screen_y, content_area.width, visible_height),
+                    content_scroll,
+                );
+            }
         }
     }
 
@@ -1850,6 +1828,10 @@ pub(super) fn restore_terminal_writer(
     disable_raw: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
     let mut first_error = None;
+    record_terminal_cleanup_error(
+        &mut first_error,
+        write!(writer, "\x1b]9;4;0;0\x07\x1b]7501;state=clear\x1b\\"),
+    );
     if fullscreen {
         record_terminal_cleanup_error(&mut first_error, leave_fullscreen(writer));
     } else if let Err(error) = write!(writer, "\r\n") {
@@ -1929,7 +1911,7 @@ pub(super) fn transcript_item_lines(
                 )));
             }
         }
-        TranscriptItem::Notice(text) => {
+        TranscriptItem::Notice(text) | TranscriptItem::Custom { fallback: text, .. } => {
             push_plain_text(&mut lines, text, "  ");
             for line in &mut lines {
                 for span in &mut line.spans {
@@ -1941,6 +1923,7 @@ pub(super) fn transcript_item_lines(
             text,
             streaming,
             error,
+            ..
         } => {
             lines.extend(render_assistant_markdown_at(
                 text,
@@ -2389,6 +2372,27 @@ pub(super) fn truncate_start(text: &str, max_width: usize) -> String {
     }
     tail.reverse();
     format!("…{}", tail.into_iter().collect::<String>())
+}
+
+pub(super) fn extension_surface_areas(root: Rect, app: &App) -> Vec<pi_plugin::UiSurfaceArea> {
+    use pi_plugin::UiRegionPlacement as P;
+    let areas = extension_areas(root, app);
+    [
+        (P::Header, areas.header),
+        (P::AboveEditor, areas.above_editor),
+        (P::Editor, areas.composer),
+        (P::BelowEditor, areas.below_editor),
+        (P::Footer, areas.footer),
+    ]
+    .into_iter()
+    .map(|(placement, area)| pi_plugin::UiSurfaceArea {
+        placement,
+        row: area.y,
+        column: area.x,
+        width: area.width,
+        height: area.height,
+    })
+    .collect()
 }
 
 fn extension_areas(root: Rect, app: &App) -> UiAreas {

@@ -17,6 +17,7 @@ pi-plugin.workspace = true
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control", "image-data"] }
 async-trait.workspace = true
 base64 = "0.22"
+image = { version = "0.25.8", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 dotenvy.workspace = true
@@ -52,12 +53,15 @@ serde_json.workspace = true
 termina = "0.3.3"
 tempfile = "3.21.0"
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-std", "io-util", "signal"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "signal", "net"] }
 tui-realm-stdlib = "4.1.0"
 tuirealm = { version = "4.1.0", default-features = false }
 pulldown-cmark = "0.13"
 unicode-width = "0.2"
 uuid = { version = "1.18.1", features = ["v7"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs", "termios", "process"] }
 
 [dev-dependencies]
 pi-test-support.workspace = true

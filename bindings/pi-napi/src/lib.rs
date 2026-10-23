@@ -1,5 +1,6 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
@@ -150,6 +151,7 @@ fn context_error(error: pi_js_plugin::PluginContextError) -> napi::Error {
 struct NativePiHost {
     dispatch: Arc<DispatchFunction>,
     encode_buffer: Mutex<Vec<u8>>,
+    generations: Mutex<BTreeSet<String>>,
 }
 
 impl NativePiHost {
@@ -203,6 +205,25 @@ impl NativePiHost {
             FnArgs::from((operation, None)),
             ThreadsafeFunctionCallMode::NonBlocking,
         );
+    }
+
+    async fn flush_retirements(&self) -> Result<(), JsCallbackError> {
+        let generation_ids = {
+            let mut generations = self
+                .generations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *generations)
+        };
+        for generation_id in generation_ids {
+            self.request(
+                JsHostOperation::RetireGeneration { generation_id },
+                None,
+                None,
+            )
+            .await?;
+        }
+        Ok(())
     }
 }
 
@@ -287,6 +308,10 @@ impl JsCallbackDispatcher for NativePiHost {
     }
 
     fn retire_generation(&self, generation_id: &str) {
+        self.generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(generation_id.to_string());
         self.notify(JsHostOperation::RetireGeneration {
             generation_id: generation_id.to_string(),
         });
@@ -302,11 +327,16 @@ impl JsPluginHost for NativePiHost {
         let response = self
             .request(JsHostOperation::PrepareGeneration { request }, None, None)
             .await?;
-        serde_json::from_value(response).map_err(|error| {
+        let manifest: JsGenerationManifest = serde_json::from_value(response).map_err(|error| {
             JsCallbackError::new(format!(
                 "JavaScript host returned an invalid manifest: {error}"
             ))
-        })
+        })?;
+        self.generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(manifest.generation_id.clone());
+        Ok(manifest)
     }
 }
 
@@ -316,9 +346,8 @@ impl JsPluginHost for NativePiHost {
 pub async fn run_pi(arguments: Vec<String>, dispatch: DispatchFunction) -> napi::Result<()> {
     dotenvy::dotenv().ok();
     let host = native_host(dispatch);
-    pi_cli::run_with_js_host(arguments, host)
-        .await
-        .map_err(|message| napi::Error::new(Status::GenericFailure, message))
+    let result = pi_cli::run_with_js_host(arguments, host.clone()).await;
+    finish_native_run(result, host.flush_retirements().await)
 }
 
 /// Starts the model-backed eval runner while Node owns JavaScript/TypeScript
@@ -327,14 +356,29 @@ pub async fn run_pi(arguments: Vec<String>, dispatch: DispatchFunction) -> napi:
 pub async fn run_pi_eval(arguments: Vec<String>, dispatch: DispatchFunction) -> napi::Result<()> {
     dotenvy::dotenv().ok();
     let host = native_host(dispatch);
-    pi_eval_cli::run_with_js_host(arguments, host)
-        .await
-        .map_err(|message| napi::Error::new(Status::GenericFailure, message))
+    let result = pi_eval_cli::run_with_js_host(arguments, host.clone()).await;
+    finish_native_run(result, host.flush_retirements().await)
 }
 
-fn native_host(dispatch: DispatchFunction) -> Arc<dyn JsPluginHost> {
+fn finish_native_run(
+    result: Result<(), String>,
+    cleanup: Result<(), JsCallbackError>,
+) -> napi::Result<()> {
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(message), Ok(())) => Err(napi::Error::new(Status::GenericFailure, message)),
+        (Ok(()), Err(error)) => Err(napi::Error::new(Status::GenericFailure, error.to_string())),
+        (Err(message), Err(error)) => Err(napi::Error::new(
+            Status::GenericFailure,
+            format!("{message}; JavaScript generation cleanup failed: {error}"),
+        )),
+    }
+}
+
+fn native_host(dispatch: DispatchFunction) -> Arc<NativePiHost> {
     Arc::new(NativePiHost {
         dispatch: Arc::new(dispatch),
         encode_buffer: Mutex::new(Vec::with_capacity(2 * 1024)),
+        generations: Mutex::new(BTreeSet::new()),
     })
 }

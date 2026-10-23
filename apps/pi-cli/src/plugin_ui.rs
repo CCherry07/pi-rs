@@ -7,6 +7,10 @@ pub(crate) enum SurfaceRequest {
     Action(String, UiSurfaceAction),
 }
 pub(crate) struct SurfaceReceiver {
+    pub(crate) theme: Option<String>,
+    pub(crate) external_editor: Option<String>,
+    pub(crate) show_images: bool,
+    pub(crate) startup: Option<crate::tui::extension_startup::StartupUi>,
     pub(crate) initial: std::collections::VecDeque<SurfaceRequest>,
     pub(crate) requests: mpsc::UnboundedReceiver<SurfaceRequest>,
     pub(crate) snapshot: Arc<RwLock<UiSurfaceSnapshot>>,
@@ -15,20 +19,6 @@ pub(crate) struct SurfaceReceiver {
 use pi_plugin::{UiMultiSelectRequest, UiMultiSelectResponse};
 use pi_session::PluginUiBridge;
 use tokio::sync::{mpsc, oneshot};
-
-#[derive(Debug)]
-pub(crate) struct PluginConfirmationRequest {
-    pub(crate) title: String,
-    pub(crate) message: String,
-    pub(crate) response: oneshot::Sender<bool>,
-}
-
-#[derive(Debug)]
-pub(crate) struct PluginSelectionRequest {
-    pub(crate) title: String,
-    pub(crate) options: Vec<String>,
-    pub(crate) response: oneshot::Sender<Option<usize>>,
-}
 
 #[derive(Debug)]
 pub(crate) struct PluginMultiSelectionRequest {
@@ -40,39 +30,33 @@ pub(crate) struct PluginMultiSelectionRequest {
 pub(crate) struct PluginUiService {
     surfaces: mpsc::UnboundedSender<SurfaceRequest>,
     snapshot: Arc<RwLock<UiSurfaceSnapshot>>,
-    confirmations: mpsc::UnboundedSender<PluginConfirmationRequest>,
-    selections: mpsc::UnboundedSender<PluginSelectionRequest>,
     multi_selections: mpsc::UnboundedSender<PluginMultiSelectionRequest>,
 }
 
 impl PluginUiService {
     pub(crate) fn channel() -> (
         Self,
-        mpsc::UnboundedReceiver<PluginConfirmationRequest>,
-        mpsc::UnboundedReceiver<PluginSelectionRequest>,
         mpsc::UnboundedReceiver<PluginMultiSelectionRequest>,
         SurfaceReceiver,
     ) {
         let (surfaces, requests) = mpsc::unbounded_channel();
         let snapshot = Arc::new(RwLock::new(UiSurfaceSnapshot::default()));
         let surface_receiver = SurfaceReceiver {
+            theme: None,
+            external_editor: None,
+            show_images: true,
+            startup: None,
             initial: Default::default(),
             requests,
             snapshot: snapshot.clone(),
         };
-        let (confirmations, confirmation_receiver) = mpsc::unbounded_channel();
-        let (selections, selection_receiver) = mpsc::unbounded_channel();
         let (multi_selections, multi_selection_receiver) = mpsc::unbounded_channel();
         (
             Self {
                 surfaces,
                 snapshot,
-                confirmations,
-                selections,
                 multi_selections,
             },
-            confirmation_receiver,
-            selection_receiver,
             multi_selection_receiver,
             surface_receiver,
         )
@@ -94,39 +78,12 @@ impl PluginUiBridge for PluginUiService {
             .map_err(|_| "extension UI closed".into())
     }
     async fn surface_exchange(&self, frame: UiSurfaceFrame) -> Result<UiSurfaceEvent, String> {
+        frame.validate()?;
         let (sender, receiver) = oneshot::channel();
         self.surfaces
             .send(SurfaceRequest::Exchange(frame, sender))
             .map_err(|_| "extension UI closed".to_string())?;
         Ok(receiver.await.unwrap_or(UiSurfaceEvent::Closed))
-    }
-
-    async fn confirm(&self, title: String, message: String) -> Result<bool, String> {
-        let (response, receiver) = oneshot::channel();
-        self.confirmations
-            .send(PluginConfirmationRequest {
-                title,
-                message,
-                response,
-            })
-            .map_err(|_| "interactive confirmation is unavailable".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "interactive confirmation was dismissed".to_string())
-    }
-
-    async fn select(&self, title: String, options: Vec<String>) -> Result<Option<usize>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.selections
-            .send(PluginSelectionRequest {
-                title,
-                options,
-                response,
-            })
-            .map_err(|_| "interactive selection is unavailable".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "interactive selection was dismissed".to_string())
     }
 
     async fn multi_select(
@@ -157,42 +114,19 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn confirmation_round_trips_the_frontend_decision() {
-        let (ui, mut requests, _selections, _multi_selections, _surfaces) =
-            PluginUiService::channel();
-        let confirmation = tokio::spawn(async move {
-            ui.confirm("Import?".to_string(), "Replace session".to_string())
+    async fn malformed_document_is_rejected_before_entering_frontend() {
+        let (ui, _, mut surfaces) = PluginUiService::channel();
+        assert!(
+            ui.surface_exchange(UiSurfaceFrame::default())
                 .await
-        });
-        let request = requests.recv().await.unwrap();
-        assert_eq!(request.title, "Import?");
-        assert_eq!(request.message, "Replace session");
-        request.response.send(true).unwrap();
-        assert!(confirmation.await.unwrap().unwrap());
-    }
-
-    #[tokio::test]
-    async fn selection_round_trips_the_frontend_choice() {
-        let (ui, _confirmations, mut selections, _multi_selections, _surfaces) =
-            PluginUiService::channel();
-        let selection = tokio::spawn(async move {
-            ui.select(
-                "Choose".to_string(),
-                vec!["One".to_string(), "Two".to_string()],
-            )
-            .await
-        });
-        let request = selections.recv().await.unwrap();
-        assert_eq!(request.title, "Choose");
-        assert_eq!(request.options, ["One", "Two"]);
-        request.response.send(Some(1)).unwrap();
-        assert_eq!(selection.await.unwrap().unwrap(), Some(1));
+                .is_err()
+        );
+        assert!(surfaces.requests.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn multi_selection_round_trips_the_frontend_action() {
-        let (ui, _confirmations, _selections, mut multi_selections, _surfaces) =
-            PluginUiService::channel();
+        let (ui, mut multi_selections, _surfaces) = PluginUiService::channel();
         let request = UiMultiSelectRequest {
             title: "Skills".to_string(),
             options: Vec::new(),

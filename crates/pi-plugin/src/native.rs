@@ -9,6 +9,10 @@ pub use serde_json::Value as PluginOptionsValue;
 
 /// Version of the trusted Rust-ABI plugin contract.
 ///
+/// ABI 29 replaces preformatted plugin frames with Rust-owned declarative components and semantic events.
+/// ABI 28 adds terminal operations, application actions, graphics, transcript renders and host
+/// operations to the generation-scoped extension UI surface contract.
+/// ABI 27 supplies frontend region geometry to the upstream extension UI compositor.
 /// ABI 26 adds generation-scoped extension UI surfaces and retirement cleanup.
 /// ABI 25 adds actionable session boundaries, context edits and retained entry provenance.
 /// ABI 24 moves native contracts into pi-plugin and consolidates host management.
@@ -35,7 +39,7 @@ pub use serde_json::Value as PluginOptionsValue;
 /// tool argument preparation.
 /// Hosts must reject older artifacts before resolving their Rust-ABI
 /// constructors.
-pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 26;
+pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 29;
 pub const BUILD_FINGERPRINT: &str = env!("PI_PLUGIN_BUILD_FINGERPRINT");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

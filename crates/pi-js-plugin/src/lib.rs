@@ -83,14 +83,27 @@ pub enum JsExtensionSupportStatus {
 #[serde(rename_all = "camelCase")]
 pub struct JsGenerationRequest {
     pub project_trusted: bool,
+    pub agent_dir: String,
     #[serde(default)]
     pub extension_paths: Vec<String>,
+    #[serde(default = "default_output_pad")]
+    pub output_pad: u8,
+    #[serde(default = "default_show_images")]
+    pub show_images: bool,
     pub mode: PresentationMode,
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<pi_core::WorkspaceSpec>,
     #[serde(default)]
     pub flag_values: std::collections::BTreeMap<String, Value>,
+}
+
+const fn default_output_pad() -> u8 {
+    1
+}
+
+const fn default_show_images() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -208,7 +221,10 @@ mod wire_tests {
         let prepare = serde_json::to_value(JsHostOperation::PrepareGeneration {
             request: JsGenerationRequest {
                 project_trusted: true,
+                agent_dir: "/agent".to_string(),
                 extension_paths: vec!["/extensions/example.ts".to_string()],
+                output_pad: 1,
+                show_images: true,
                 mode: PresentationMode::Print,
                 cwd: "/workspace".to_string(),
                 workspace: None,
@@ -223,10 +239,10 @@ mod wire_tests {
 
         assert_eq!(request["extensionPaths"][0], "/extensions/example.ts");
         assert_eq!(request["projectTrusted"], true);
+        assert_eq!(request["agentDir"], "/agent");
         assert_eq!(request["mode"], "print");
         assert_eq!(request["cwd"], "/workspace");
         assert_eq!(request["flagValues"]["fixture"], true);
-        assert!(request.get("agentDir").is_none());
         assert!(request.get("explicitPaths").is_none());
         assert!(request.get("discoverExtensions").is_none());
     }
@@ -666,6 +682,17 @@ impl JsCallbackDispatcher for HostCallbackDispatcher {
         context: PluginContextHandle,
     ) -> Result<Value, JsCallbackError> {
         self.host.invoke(invocation, context).await
+    }
+
+    async fn invoke_with_tool_updates(
+        &self,
+        invocation: JsInvocation,
+        context: PluginContextHandle,
+        updates: ToolUpdateSink,
+    ) -> Result<Value, JsCallbackError> {
+        self.host
+            .invoke_with_tool_updates(invocation, context, updates)
+            .await
     }
 
     async fn invoke_hook_batch(

@@ -41,12 +41,14 @@ pub struct Resolution {
     pub extension_identities: Vec<ResolvedExtensionIdentity>,
     pub skill_paths: Vec<PathBuf>,
     pub prompt_paths: Vec<PathBuf>,
+    pub theme_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct ResolvedPackageResources {
     skills: Vec<PathBuf>,
     prompts: Vec<PathBuf>,
+    themes: Vec<PathBuf>,
 }
 
 /// User-facing identity for one or more resolved extension entry points.
@@ -264,11 +266,15 @@ impl PackageManager {
         explicit_resources
             .prompts
             .extend(configured_resources.prompts);
+        explicit_resources
+            .themes
+            .extend(configured_resources.themes);
         Ok(Resolution {
             extension_paths,
             extension_identities,
             skill_paths: dedupe_paths(explicit_resources.skills),
             prompt_paths: dedupe_paths(explicit_resources.prompts),
+            theme_paths: dedupe_paths(explicit_resources.themes),
         })
     }
 
@@ -1563,6 +1569,7 @@ struct PiManifest {
     extensions: Option<Vec<String>>,
     skills: Option<Vec<String>>,
     prompts: Option<Vec<String>>,
+    themes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1779,6 +1786,7 @@ fn read_pi_manifest(directory: &Path) -> Option<PiManifest> {
         extensions: string_list("extensions"),
         skills: string_list("skills"),
         prompts: string_list("prompts"),
+        themes: string_list("themes"),
     })
 }
 
@@ -1915,9 +1923,11 @@ fn collect_package_contents(
     let recognized = collect_package_extensions(package_root, extensions, filter, metadata);
     let skills = collect_package_resource_paths(package_root, ResourceKind::Skill, filter);
     let prompts = collect_package_resource_paths(package_root, ResourceKind::Prompt, filter);
-    let has_resources = !skills.is_empty() || !prompts.is_empty();
+    let themes = collect_package_resource_paths(package_root, ResourceKind::Theme, filter);
+    let has_resources = !skills.is_empty() || !prompts.is_empty() || !themes.is_empty();
     resources.skills.extend(skills);
     resources.prompts.extend(prompts);
+    resources.themes.extend(themes);
     recognized || has_resources || read_pi_manifest(package_root).is_some()
 }
 
@@ -1925,6 +1935,7 @@ fn collect_package_contents(
 enum ResourceKind {
     Skill,
     Prompt,
+    Theme,
 }
 
 impl ResourceKind {
@@ -1932,6 +1943,7 @@ impl ResourceKind {
         match self {
             Self::Skill => "skills",
             Self::Prompt => "prompts",
+            Self::Theme => "themes",
         }
     }
 
@@ -1939,6 +1951,7 @@ impl ResourceKind {
         match self {
             Self::Skill => manifest.skills.as_deref(),
             Self::Prompt => manifest.prompts.as_deref(),
+            Self::Theme => manifest.themes.as_deref(),
         }
     }
 
@@ -1946,6 +1959,7 @@ impl ResourceKind {
         match self {
             Self::Skill => filter.skills.as_deref(),
             Self::Prompt => filter.prompts.as_deref(),
+            Self::Theme => filter.themes.as_deref(),
         }
     }
 }
@@ -2033,10 +2047,17 @@ fn manifest_resource_files(
 
 fn collect_resource_files(path: &Path, kind: ResourceKind) -> Vec<PathBuf> {
     if path.is_file() {
-        return (path.extension().is_some_and(|extension| extension == "md"))
-            .then(|| path.to_path_buf())
-            .into_iter()
-            .collect();
+        return (path.extension().is_some_and(|extension| {
+            extension
+                == if matches!(kind, ResourceKind::Theme) {
+                    "json"
+                } else {
+                    "md"
+                }
+        }))
+        .then(|| path.to_path_buf())
+        .into_iter()
+        .collect();
     }
     if !path.is_dir() {
         return Vec::new();
@@ -2074,8 +2095,15 @@ fn collect_resource_directory(
         let path = entry.path();
         if path.is_dir() {
             collect_resource_directory(&path, root, kind, output);
-        } else if path.extension().is_some_and(|extension| extension == "md")
-            && (matches!(kind, ResourceKind::Prompt) || directory == root)
+        } else if path.extension().is_some_and(|extension| {
+            extension
+                == if matches!(kind, ResourceKind::Theme) {
+                    "json"
+                } else {
+                    "md"
+                }
+        }) && (matches!(kind, ResourceKind::Prompt | ResourceKind::Theme)
+            || directory == root)
         {
             output.push(path);
         }

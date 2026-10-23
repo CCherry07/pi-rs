@@ -1,772 +1,288 @@
-import {
-  Container,
-  Editor,
-  Input,
-  SelectList,
-  matchesKey,
-  type Component,
-  type EditorComponent,
-  type OverlayHandle,
-  type OverlayOptions,
-  type Terminal,
-  type TUI,
-  type TuiInputListener,
-} from "@pi-rs/pi-tui-runtime";
 import { randomUUID } from "node:crypto";
-import type { NativeExtensionContext } from "./native-binding.js";
+import { getAgentDir, withAgentDir } from "./extension-ui-paths.js";
+import { ExtensionTranscript } from "./extension-ui-transcript.js";
 import {
-  componentRegion,
-  uiEventSchema,
-  uiSnapshotSchema,
-  type Placement,
-  type UiSnapshot,
+  uiEventSchema, uiNodeSchema, uiSnapshotSchema,
+  type UiNode, type UiSnapshot, type UiComponentEvent, type Placement, type UiRegion,
 } from "./extension-ui-frame.js";
-import {
-  CustomEditor,
-  extensionTheme,
-  extensionKeybindings,
-  getEditorTheme,
-  getSelectListTheme,
-} from "./extension-ui-theme.js";
+import type { NativeExtensionContext } from "./native-binding.js";
 
-type Disposable = Component & { dispose?(): void; focused?: boolean };
-type Factory<T> = (
-  tui: TUI,
-  theme: typeof extensionTheme,
-  keybindings: typeof extensionKeybindings,
-  done: (value: T) => void,
-) => Disposable | Promise<Disposable>;
-type EditorFactory = (
-  tui: TUI,
-  theme: ReturnType<typeof getEditorTheme>,
-  keybindings: typeof extensionKeybindings,
-) => EditorComponent & { dispose?(): void };
-interface Mounted {
-  component: Disposable;
-  placement: Placement;
-  options?: OverlayOptions | (() => OverlayOptions);
-  hidden?: boolean;
-  close?: () => void;
+export interface DialogOptions { signal?: AbortSignal; timeout?: number }
+export type UiTheme = "light" | "dark" | "system";
+export interface MountOptions extends DialogOptions {
+  id?: string;
+  placement?: Placement;
+  overlay?: { width?: number; maxHeight?: number; modal?: boolean };
+  onEvent?(event: UiComponentEvent): void;
 }
-interface DialogOptions {
-  signal?: AbortSignal;
-  timeout?: number;
+export interface UiMount {
+  readonly id: string;
+  update(node: UiNode): void;
+  focus(nodeId: string): void;
+  unmount(): void;
 }
-interface CustomOptions {
-  overlay?: boolean;
-  overlayOptions?: OverlayOptions | (() => OverlayOptions);
-  onHandle?: (handle: OverlayHandle) => void;
+type NodeIdentities = Map<string, { type: UiNode["type"] }>;
+interface Mounted { region: UiRegion; nodes: NodeIdentities; onEvent?: (event: UiComponentEvent) => void; cleanup(): void }
+function nodeIdentities(root: UiNode, previous?: NodeIdentities): NodeIdentities {
+  const nodes: NodeIdentities = new Map();
+  const visit = (node: UiNode) => {
+    const identity = previous?.get(node.id);
+    nodes.set(node.id, identity?.type === node.type ? identity : { type: node.type });
+    if (node.type === "column" || node.type === "row") node.children.forEach(visit);
+    else if (node.type === "panel" || node.type === "scroll") visit(node.child);
+  };
+  visit(root);
+  return nodes;
 }
+interface ExtensionUIOptions { agentDir?: string; outputPad?: 0 | 1; showImages?: boolean }
+type HostOperation = { type: "clipboard"; text: string } | { type: "externalEditor"; text: string; command?: string } | { type: "suspend" };
 
-/** One component host per generation. Never starts a terminal or writes to stdout. */
+/** Generation-owned transport and callbacks. All widget state, layout and input belong to Rust. */
 export class ExtensionUI {
   readonly owner = randomUUID();
-  readonly theme = extensionTheme;
-  readonly #components = new Map<string, Mounted>();
-  readonly #listeners = new Set<TuiInputListener>();
-  readonly #statuses = new Map<string, string>();
-  readonly #dialogs: Mounted[] = [];
-  readonly #pendingClosers = new Set<() => void>();
+  readonly transcript: ExtensionTranscript;
+  readonly #regions = new Map<string, Mounted>();
   readonly #shortcuts = new Map<string, () => Promise<void>>();
-  readonly #tui: TUI;
+  readonly #statuses = new Map<string, string>();
+  readonly #pending = new Set<() => void>();
+  readonly #hostRequests = new Map<number, { resolve(value: string | undefined): void; reject(error: Error): void }>();
+  readonly #agentDir: string;
   #native?: NativeExtensionContext;
-  #snapshot: UiSnapshot = {
-    columns: 80,
-    rows: 24,
-    editorText: "",
-    toolsExpanded: false,
-  };
   #running = false;
   #retired = false;
-  #editorFactory?: EditorFactory;
-  #editor?: EditorComponent & { dispose?(): void };
-  #sequence = 0;
-  #editorTextOverride?: string;
+  #revision = 0;
+  #lastDocument = "";
+  #hostId = 0;
+  #workingConfigured = false;
+  #workingVisible = true;
+  #workingMessage = "Working...";
+  #snapshot: UiSnapshot = uiSnapshotSchema.parse({ columns: 80, rows: 24, editorText: "", toolsExpanded: false });
 
-  constructor() {
-    const terminal: Terminal = {
-      start: () => {
-        throw new Error("Ratatui owns the terminal");
-      },
-      stop() {},
-      drainInput: async () => {},
-      write: () => {
-        throw new Error(
-          "Direct terminal output is unsupported; return component lines",
-        );
-      },
-      get columns() {
-        return host.#snapshot.columns;
-      },
-      get rows() {
-        return host.#snapshot.rows;
-      },
-      kittyProtocolActive: false,
-      moveBy() {},
-      hideCursor() {},
-      showCursor() {},
-      clearLine() {},
-      clearFromCursor() {},
-      clearScreen() {},
-      setTitle: (title) => this.setTitle(title),
-      setProgress() {},
-      setProgramStatus() {},
-    };
-    const host = this;
-    const root = new Container();
-    this.#tui = Object.assign(root, {
-      mode: "fullscreen" as const,
-      terminal,
-      fullRedraws: 0,
-      getShowHardwareCursor: () => true,
-      setShowHardwareCursor() {},
-      getClearOnShrink: () => false,
-      setClearOnShrink() {},
-      setFocus: (c: Component | null) => {
-        for (const m of this.#all()) m.component.focused = m.component === c;
-      },
-      showOverlay: (component: Component, options?: OverlayOptions) =>
-        this.#overlay(component, options),
-      hideOverlay: () => {
-        this.#dialogs.at(-1)?.close?.();
-        this.#wake();
-      },
-      hasOverlay: () => this.#dialogs.some((m) => !m.hidden),
-      start: () => {
-        throw new Error("Ratatui owns the terminal");
-      },
-      stop() {},
-      renderNow: () => this.#wake(),
-      requestRender: () => this.#wake(),
-      addInputListener: (listener: TuiInputListener) =>
-        this.onTerminalInput(listener),
-      removeInputListener: (listener: TuiInputListener) => {
-        this.#listeners.delete(listener);
-      },
-      onTerminalColorSchemeChange: () => () => {},
-      setTerminalColorSchemeNotifications() {},
-      queryTerminalColors: async () => ({}),
-    }) as TUI;
+  constructor(options: ExtensionUIOptions = {}) {
+    this.#agentDir = options.agentDir ?? getAgentDir();
+    this.transcript = new ExtensionTranscript(() => this.#wake(), options.outputPad ?? 1, options.showImages ?? true);
   }
-
-  get nativeContext() {
-    return this.#native;
-  }
+  run<T>(callback: () => T): T { return withAgentDir(this.#agentDir, callback); }
+  get nativeContext() { return this.#native; }
+  bind(native: NativeExtensionContext) { this.#assertActive(); this.#native = native; }
+  activate() { if (this.#shortcuts.size || this.transcript.active || this.#regions.size) this.#wake(); }
+  #assertActive() { if (this.#retired) throw new Error("Extension UI generation retired"); }
   forContext(signal: AbortSignal): object {
-    const dialogs = new Set(["select", "confirm", "input"]);
     return new Proxy(this, {
       get: (target, property) => {
-        if (target.#retired) throw new Error("Extension UI generation retired");
+        target.#assertActive();
         const value = Reflect.get(target, property, target);
         if (typeof value !== "function") return value;
         return (...args: unknown[]) => {
-          if (target.#retired) throw new Error("Extension UI generation retired");
-          if (dialogs.has(String(property))) {
-            const opts = args[2] as DialogOptions | undefined;
-            args[2] = {
-              ...opts,
-              signal: opts?.signal
-                ? AbortSignal.any([signal, opts.signal])
-                : signal,
-            };
-          } else if (property === "custom" || property === "editor")
-            args[2] = signal;
-          return Reflect.apply(value, target, args);
+          target.#assertActive();
+          const index = property === "custom" ? 1 : ["select", "confirm", "input", "editor"].includes(String(property)) ? 2 : -1;
+          if (index >= 0) {
+            const opts = args[index] as DialogOptions | undefined;
+            args[index] = { ...opts, signal: opts?.signal ? AbortSignal.any([signal, opts.signal]) : signal };
+          }
+          return target.run(() => Reflect.apply(value, target, args));
         };
       },
     });
   }
-  bind(native: NativeExtensionContext) {
-    this.#native = native;
-  }
-  activate() {
-    if (this.#shortcuts.size) this.#wake();
-  }
-  registerShortcut(key: string, handler: () => Promise<void>) {
-    this.#shortcuts.set(key, handler);
-  }
-
   #query() {
-    if (this.#native)
-      this.#snapshot = uiSnapshotSchema.parse(
-        JSON.parse(this.#native.query('{"type":"uiSnapshot"}')),
-      );
-    if (this.#editorTextOverride !== undefined) {
-      if (this.#snapshot.editorText === this.#editorTextOverride) this.#editorTextOverride = undefined;
-      else this.#snapshot = { ...this.#snapshot, editorText: this.#editorTextOverride };
-    }
+    if (this.#native) this.#snapshot = uiSnapshotSchema.parse(JSON.parse(this.#native.query('{"type":"uiSnapshot"}')));
     return this.#snapshot;
   }
   #action(action: Record<string, unknown>) {
-    if (!this.#retired)
-      this.#native?.notify(
-        JSON.stringify({ type: "uiAction", owner: this.owner, action }),
-      );
+    if (!this.#retired) this.#native?.notify(JSON.stringify({ type: "uiAction", owner: this.owner, action }));
   }
   #wake() {
     if (this.#retired || !this.#native) return;
-    if (!this.#running) {
-      this.#running = true;
-      void this.#pump();
-    } else this.#action({ type: "wake" });
+    if (this.#running) this.#action({ type: "wake" });
+    else { this.#running = true; void this.#pump(); }
   }
-  #all(): Mounted[] {
-    return [...this.#components.values(), ...this.#dialogs];
+  #changed() { this.#wake(); }
+  #frame() {
+    const snapshot = this.#query();
+    const transcript = this.run(() => this.transcript.render(snapshot));
+    const regions = [...this.#regions.values()].map(({ region }) => region);
+    if (this.#statuses.size) regions.push({ id: "_statuses", placement: "footer", root: { id: "statuses", type: "text", text: [...this.#statuses.values()].join(" · "), tone: "muted" } });
+    if (this.#workingConfigured && this.#workingVisible && snapshot.isRunning) regions.push({ id: "_working", placement: "aboveEditor", root: { id: "working", type: "progress", text: this.#workingMessage } });
+    const document = {
+      regions,
+      hideWorking: this.#workingConfigured, renderTranscript: this.transcript.active,
+      transcript,
+      shortcuts: [...this.#shortcuts.keys()].map((key) => ({ key })),
+    };
+    const signature = JSON.stringify(document);
+    if (signature !== this.#lastDocument) { this.#lastDocument = signature; this.#revision++; }
+    return { owner: this.owner, revision: this.#revision, ...document };
   }
   async #pump() {
     try {
       while (!this.#retired && this.#native) {
-        const snapshot = this.#query();
-        const focused =
-          [...this.#dialogs].reverse().find((m) => !m.hidden) ??
-          this.#components.get("editor");
-        const regions = this.#all()
-          .filter(
-            (m) =>
-              !m.hidden &&
-              (m.placement !== "editor" ||
-                m === focused ||
-                focused?.placement === "overlay"),
-          )
-          .map((m) => {
-            m.component.focused = m === focused;
-            const options =
-              typeof m.options === "function" ? m.options() : m.options;
-            const size = (
-              n: number | `${number}%` | undefined,
-              total: number,
-              fallback: number,
-            ) =>
-              n === undefined
-                ? fallback
-                : typeof n === "number"
-                  ? n
-                  : Math.floor((total * parseFloat(n)) / 100);
-            const width = Math.max(
-              1,
-              Math.min(
-                snapshot.columns,
-                size(
-                  options?.width,
-                  snapshot.columns,
-                  m.placement === "overlay"
-                    ? Math.min(80, snapshot.columns)
-                    : snapshot.columns,
-                ),
-              ),
-            );
-            const region = componentRegion(
-              m.component.render(width),
-              m.placement,
-              width,
-            );
-            if (m.placement === "overlay") {
-              const height = Math.min(
-                region.lines.length,
-                snapshot.rows,
-                size(options?.maxHeight, snapshot.rows, snapshot.rows),
-              );
-              region.lines = region.lines.slice(0, height);
-              const anchor = options?.anchor ?? "center";
-              region.row = Math.max(
-                0,
-                Math.min(
-                  snapshot.rows - height,
-                  size(
-                    options?.row,
-                    Math.max(0, snapshot.rows - height),
-                    anchor.startsWith("top")
-                      ? 0
-                      : anchor.startsWith("bottom")
-                        ? snapshot.rows - height
-                        : Math.floor((snapshot.rows - height) / 2),
-                  ) + (options?.offsetY ?? 0),
-                ),
-              );
-              region.column = Math.max(
-                0,
-                Math.min(
-                  snapshot.columns - width,
-                  size(
-                    options?.col,
-                    Math.max(0, snapshot.columns - width),
-                    anchor.endsWith("left")
-                      ? 0
-                      : anchor.endsWith("right")
-                        ? snapshot.columns - width
-                        : Math.floor((snapshot.columns - width) / 2),
-                  ) + (options?.offsetX ?? 0),
-                ),
-              );
-            }
-            return region;
-          });
-        if (this.#statuses.size && !this.#components.has("footer"))
-          regions.push(
-            componentRegion(
-              [[...this.#statuses.values()].join(" · ")],
-              "footer",
-              snapshot.columns,
-            ),
-          );
-        const event = uiEventSchema.parse(
-          JSON.parse(
-            await this.#native.request(
-              JSON.stringify({
-                type: "uiExchange",
-                frame: {
-                  owner: this.owner,
-                  regions,
-                  captureInput:
-                    !!focused ||
-                    this.#listeners.size > 0 ||
-                    this.#shortcuts.size > 0,
-                },
-              }),
-            ),
-          ),
-        );
-        if (event.type === "closed") {
-          this.retire();
-          break;
-        }
+        const frame = this.#frame();
+        const sentRegions = new Map([...this.#regions].map(([id, mounted]) => [id, { mounted, nodes: mounted.nodes }]));
+        const sentShortcuts = new Map(this.#shortcuts);
+        const event = uiEventSchema.parse(JSON.parse(await this.#native.request(JSON.stringify({ type: "uiExchange", frame }))));
+        if (event.type === "closed") { this.retire(); break; }
         this.#snapshot = event.snapshot;
-        if (event.type === "input") {
-          this.#sequence = event.sequence;
-          let data = event.data;
-          let consumed = false;
-          for (const listener of this.#listeners) {
-            const result = listener(data);
-            if (result?.consume) {
-              consumed = true;
-              break;
-            }
-            if (result?.data !== undefined) data = result.data;
+        if (event.type === "hostResult") {
+          const request = this.#hostRequests.get(event.id);
+          this.#hostRequests.delete(event.id);
+          if (event.error) request?.reject(new Error(event.error)); else request?.resolve(event.result ?? undefined);
+        } else if (event.type === "interaction") {
+          if (event.revision !== frame.revision) continue;
+          if (event.event.type === "shortcut") {
+            const handler = this.#shortcuts.get(event.event.key);
+            if (handler && handler === sentShortcuts.get(event.event.key)) void this.run(handler).catch((error) => this.notify(String(error), "error"));
+          } else {
+            const mounted = this.#regions.get(event.regionId);
+            const sent = sentRegions.get(event.regionId);
+            const identity = mounted?.nodes.get(event.nodeId);
+            if (mounted && mounted === sent?.mounted && identity && identity === sent.nodes.get(event.nodeId)) this.run(() => mounted.onEvent?.(event));
           }
-          if (!consumed && this.#dialogs.length === 0) {
-            for (const [key, handler] of this.#shortcuts) {
-              if (matchesKey(data, key as Parameters<typeof matchesKey>[1])) {
-                consumed = true;
-                void handler().catch((error) => {
-                  if (!this.#retired) this.notify(String(error), "error");
-                });
-                break;
-              }
-            }
-          }
-          if (!consumed) {
-            if (focused?.component.handleInput)
-              focused.component.handleInput(data);
-            else
-              this.#action({ type: "forwardInput", sequence: event.sequence });
-          }
-        } else {
-          if (
-            this.#editor &&
-            this.#editor.getText() !== event.snapshot.editorText
-          )
-            this.#editor.setText(event.snapshot.editorText);
-          for (const m of this.#all()) m.component.invalidate();
         }
       }
     } catch (error) {
-      if (!this.#retired) {
-        try {
-          this.notify(
-            `Extension UI: ${error instanceof Error ? error.message : String(error)}`,
-            "error",
-          );
-        } catch {
-          /* retired context */
-        }
-        this.retire();
-      }
-    } finally {
-      this.#running = false;
-    }
+      if (!this.#retired) { try { this.notify(`Extension UI: ${String(error)}`, "error"); } catch {} this.retire(); }
+    } finally { this.#running = false; }
   }
 
-  #dispose(component: Disposable) {
-    try {
-      component.dispose?.();
-    } catch (error) {
+  mount(node: UiNode, options: MountOptions = {}): UiMount {
+    this.#assertActive();
+    const id = options.id ?? randomUUID();
+    const parsed = uiNodeSchema.parse(node);
+    if (this.#regions.has(id)) throw new Error(`UI region ${id} is already mounted`);
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unmount = () => {
+      if (!active) return;
+      active = false;
+      const mounted = this.#regions.get(id);
+      if (mounted === state) this.#regions.delete(id);
+      state.cleanup();
+      this.#changed();
+    };
+    const state: Mounted = {
+      region: { id, placement: options.placement ?? "aboveEditor", root: parsed, ...(options.overlay ? { overlay: options.overlay } : {}) },
+      nodes: nodeIdentities(parsed),
+      onEvent: options.onEvent,
+      cleanup: () => { clearTimeout(timer); options.signal?.removeEventListener("abort", unmount); },
+    };
+    if (!options.signal?.aborted) {
+      this.#regions.set(id, state);
+      options.signal?.addEventListener("abort", unmount, { once: true });
+      if (options.timeout !== undefined) timer = setTimeout(unmount, options.timeout);
+      this.#changed();
+    } else active = false;
+    return Object.freeze({
+      id,
+      update: (value: UiNode) => { this.#assertActive(); if (!active || this.#regions.get(id) !== state) throw new Error("UI region unmounted"); const root = uiNodeSchema.parse(value); state.region = { ...state.region, root }; state.nodes = nodeIdentities(root, state.nodes); this.#changed(); },
+      focus: (nodeId: string) => { this.#assertActive(); if (active && this.#regions.get(id) === state) this.#action({ type: "focus", regionId: id, nodeId }); },
+      unmount,
+    });
+  }
+  custom(node: UiNode, options: MountOptions = {}): Promise<unknown | undefined> {
+    this.#assertActive();
+    if (options.signal?.aborted) return Promise.resolve(undefined);
+    return new Promise((resolve, reject) => {
+      let mount: UiMount | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      const finish = (value?: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", cancel);
+        this.#pending.delete(cancel);
+        mount?.unmount();
+        resolve(value);
+      };
+      const cancel = () => finish();
+      this.#pending.add(cancel);
+      options.signal?.addEventListener("abort", cancel, { once: true });
+      if (options.timeout !== undefined) timer = setTimeout(cancel, options.timeout);
       try {
-        this.notify(`Extension dispose: ${String(error)}`, "error");
-      } catch {}
-    }
-  }
-  #remove(m: Mounted) {
-    const index = this.#dialogs.indexOf(m);
-    if (index < 0) return;
-    this.#dialogs.splice(index, 1);
-    this.#dispose(m.component);
-    this.#wake();
-  }
-  #overlay(component: Disposable, options?: OverlayOptions): OverlayHandle {
-    const m: Mounted = { component, placement: "overlay", options };
-    m.close = () => this.#remove(m);
-    this.#dialogs.push(m);
-    this.#wake();
-    return this.#handle(m);
-  }
-  #handle(m: Mounted): OverlayHandle {
-    return {
-      hide: () => m.close?.(),
-      setHidden: (hidden) => {
-        m.hidden = hidden;
-        this.#wake();
-      },
-      isHidden: () => !!m.hidden,
-      focus: () => {
-        m.hidden = false;
-        const i = this.#dialogs.indexOf(m);
-        if (i >= 0) this.#dialogs.splice(i, 1);
-        this.#dialogs.push(m);
-        this.#wake();
-      },
-      unfocus: () => {},
-      isFocused: () =>
-        [...this.#dialogs].reverse().find((d) => !d.hidden) === m,
-      getBounds: () => undefined,
-    } satisfies OverlayHandle;
-  }
-  async custom<T>(
-    factory: Factory<T>,
-    options?: CustomOptions,
-    signal?: AbortSignal,
-  ): Promise<T | undefined> {
-    if (this.#retired || signal?.aborted) return undefined;
-    return new Promise<T | undefined>((resolve, reject) => {
-      let m: Mounted | undefined;
-      let finished = false;
-      const cancel = () => done(undefined);
-      const done = (value: unknown) => {
-        if (finished) return;
-        finished = true;
-        this.#pendingClosers.delete(cancel);
-        signal?.removeEventListener("abort", cancel);
-        if (m) this.#remove(m);
-        resolve(value as T | undefined);
-      };
-      this.#pendingClosers.add(cancel);
-      signal?.addEventListener("abort", cancel, { once: true });
-      Promise.resolve()
-        .then(() => factory(this.#tui, this.theme, extensionKeybindings, done))
-        .then((component) => {
-          if (finished || this.#retired) {
-            component.dispose?.();
-            done(undefined);
-            return;
-          }
-          m = {
-            component,
-            placement: options?.overlay ? "overlay" : "editor",
-            options: options?.overlayOptions,
-            close: () => done(undefined),
-          };
-          this.#dialogs.push(m);
-          options?.onHandle?.(this.#handle(m));
-          this.#wake();
-        })
-        .catch((error) => {
-          this.#pendingClosers.delete(cancel);
-          signal?.removeEventListener("abort", cancel);
-          reject(error);
-        });
-    });
-  }
-  #dialog<T>(
-    title: string,
-    build: (done: (value: T | undefined) => void) => Disposable,
-    options?: DialogOptions,
-  ): Promise<T | undefined> {
-    if (options?.signal?.aborted) return Promise.resolve(undefined);
-    return this.custom<T | undefined>((_tui, _theme, _kb, done) => {
-      const started = Date.now();
-      const child = build(done);
-      const abort = () => done(undefined);
-      options?.signal?.addEventListener("abort", abort, { once: true });
-      if (options?.signal?.aborted) queueMicrotask(abort);
-      const timeout =
-        options?.timeout === undefined
-          ? undefined
-          : setTimeout(abort, Math.max(0, options.timeout));
-      const countdown =
-        options?.timeout === undefined
-          ? undefined
-          : setInterval(() => this.#wake(), 250);
-      return {
-        render: (width) => {
-          child.focused = true;
-          return [
-            ...title
-              .split("\n")
-              .map((line) =>
-                this.theme.fg(
-                  "accent",
-                  line +
-                    (options?.timeout === undefined
-                      ? ""
-                      : ` (${Math.max(0, Math.ceil((options.timeout - Date.now() + started) / 1000))}s)`),
-                ),
-              ),
-            "",
-            ...child.render(width),
-          ];
-        },
-        handleInput: (data) => child.handleInput?.(data),
-        invalidate: () => child.invalidate(),
-        dispose: () => {
-          clearTimeout(timeout);
-          clearInterval(countdown);
-          options?.signal?.removeEventListener("abort", abort);
-          child.dispose?.();
-        },
-      };
-    });
-  }
-  select(title: string, options: string[], opts?: DialogOptions) {
-    return this.#dialog<string>(
-      title,
-      (done) => {
-        const list = new SelectList(
-          options.map((value) => ({ value, label: value })),
-          10,
-          getSelectListTheme(),
-        );
-        list.onSelect = (item) => done(item.value);
-        list.onCancel = () => done(undefined);
-        return list;
-      },
-      opts,
-    );
-  }
-  async confirm(title: string, message: string, opts?: DialogOptions) {
-    return (
-      (await this.select(`${title}\n${message}`, ["Yes", "No"], opts)) === "Yes"
-    );
-  }
-  input(title: string, placeholder?: string, opts?: DialogOptions) {
-    return this.#dialog<string>(
-      title,
-      (done) => {
-        const input = new Input({ placeholder });
-        input.onSubmit = done;
-        input.onEscape = () => done(undefined);
-        return input;
-      },
-      opts,
-    );
-  }
-  editor(title: string, prefill = "", signal?: AbortSignal) {
-    return this.#dialog<string>(
-      `${title} · Enter submits · Shift+Enter newline · Esc cancels`,
-      (done) => {
-        const editor = new Editor(this.#tui, getEditorTheme());
-        editor.setText(prefill);
-        editor.onSubmit = done;
-        return {
-          render: (width) => {
-            editor.focused = true;
-            return editor.render(width);
-          },
-          invalidate: () => editor.invalidate(),
-          handleInput: (data) => {
-            if (matchesKey(data, "escape")) done(undefined);
-            else editor.handleInput(data);
-          },
-        };
-      },
-      { signal },
-    );
-  }
-  #set(
-    key: string,
-    placement: Placement,
-    content?:
-      | string[]
-      | ((tui: TUI, theme: typeof extensionTheme) => Disposable),
-  ) {
-    const previous = this.#components.get(key);
-    if (previous) this.#dispose(previous.component);
-    this.#components.delete(key);
-    if (content)
-      this.#components.set(key, {
-        placement,
-        component:
-          typeof content === "function"
-            ? content(this.#tui, this.theme)
-            : { render: () => content, invalidate() {} },
-      });
-    this.#wake();
-  }
-  setWidget(
-    key: string,
-    content?:
-      | string[]
-      | ((tui: TUI, theme: typeof extensionTheme) => Disposable),
-    options?: { placement?: "aboveEditor" | "belowEditor" },
-  ) {
-    this.#set(`widget:${key}`, options?.placement ?? "aboveEditor", content);
-  }
-  setHeader(factory?: (tui: TUI, theme: typeof extensionTheme) => Disposable) {
-    this.#set("header", "header", factory);
-  }
-  setFooter(
-    factory?: (
-      tui: TUI,
-      theme: typeof extensionTheme,
-      data: {
-        getGitBranch(): undefined;
-        getExtensionStatuses(): ReadonlyMap<string, string>;
-        onBranchChange(cb: () => void): () => void;
-      },
-    ) => Disposable,
-  ) {
-    this.#set(
-      "footer",
-      "footer",
-      factory &&
-        ((tui, theme) =>
-          factory(tui, theme, {
-            getGitBranch: () => undefined,
-            getExtensionStatuses: () => this.#statuses,
-            onBranchChange: () => () => {},
-          })),
-    );
-  }
-  setStatus(key: string, text?: string) {
-    if (text === undefined) this.#statuses.delete(key);
-    else this.#statuses.set(key, text);
-    this.#wake();
-  }
-  notify(message: unknown, level = "info") {
-    this.#native?.notify(
-      JSON.stringify({ type: "uiNotify", message: String(message), level }),
-    );
-  }
-  onTerminalInput(listener: TuiInputListener) {
-    this.#listeners.add(listener);
-    this.#wake();
-    return () => {
-      this.#listeners.delete(listener);
-      this.#wake();
-    };
-  }
-  setTitle(title: string) {
-    this.#action({ type: "title", title });
-  }
-  getEditorText() {
-    return this.#editor?.getText() ?? this.#query().editorText;
-  }
-  setEditorText(text: string) {
-    this.#editorTextOverride = text;
-    this.#editor?.setText(text);
-    this.#action({ type: "editorText", text, append: false });
-    this.#wake();
-  }
-  pasteToEditor(text: string) {
-    if (this.#editor) this.#editor.handleInput(`\x1b[200~${text}\x1b[201~`);
-    else this.#action({ type: "editorText", text, append: true });
-    this.#wake();
-  }
-  getToolsExpanded() {
-    return this.#query().toolsExpanded;
-  }
-  setToolsExpanded(expanded: boolean) {
-    this.#action({ type: "toolsExpanded", expanded });
-  }
-  getEditorComponent() {
-    return this.#editorFactory;
-  }
-  setEditorComponent(factory?: EditorFactory) {
-    const text = this.getEditorText();
-    this.#editorFactory = factory;
-    this.#editor?.dispose?.();
-    this.#editor = undefined;
-    this.#components.delete("editor");
-    if (factory) {
-      const editor = factory(this.#tui, getEditorTheme(), extensionKeybindings);
-      this.#editor = editor;
-      editor.setText(text);
-      editor.onChange = (value) =>
-        this.#action({ type: "editorText", text: value, append: false });
-      editor.onSubmit = (value) => {
-        editor.setText("");
-        this.#action({ type: "submit", text: value });
-      };
-      if (editor instanceof CustomEditor || "onEscape" in editor) {
-        Object.assign(editor, {
-          onEscape: () =>
-            this.#action({ type: "forwardInput", sequence: this.#sequence }),
-          onCtrlD: () =>
-            this.#action({ type: "forwardInput", sequence: this.#sequence }),
-        });
+        mount = this.mount(node, { ...options, signal: undefined, timeout: undefined, placement: options.placement ?? "overlay", onEvent: (event) => {
+          options.onEvent?.(event);
+          if (event.event.type === "cancel") finish();
+          else if (event.event.type === "submit") finish(event.event.value);
+          else if (event.event.type === "activate") finish(event.nodeId);
+        } });
+      } catch (error) {
+        settled = true;
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", cancel);
+        this.#pending.delete(cancel);
+        mount?.unmount();
+        reject(error);
       }
-      this.#components.set("editor", {
-        component: editor,
-        placement: "editor",
-      });
-    }
-    this.#wake();
+    });
   }
-  setWorkingMessage(_message?: string) {
-    this.notify("setWorkingMessage is not yet supported by Ratatui", "warning");
+  async select(title: string, options: string[], opts?: DialogOptions): Promise<string | undefined> {
+    const result = await this.custom({ type: "column", id: "dialog", children: [{ type: "text", id: "title", text: title, tone: "accent" }, { type: "select", id: "value", options }] }, opts);
+    return typeof result === "number" && Number.isInteger(result) ? options[result] : undefined;
   }
-  setWorkingVisible(_visible: boolean) {
-    this.notify("setWorkingVisible is not yet supported by Ratatui", "warning");
+  async confirm(title: string, message: string, opts?: DialogOptions): Promise<boolean> {
+    return await this.select(`${title}\n${message}`, ["Yes", "No"], opts) === "Yes";
   }
-  setWorkingIndicator(_options?: { frames: string[]; interval?: number }) {
-    this.notify(
-      "setWorkingIndicator is not yet supported by Ratatui",
-      "warning",
-    );
+  async input(title: string, placeholder = "", opts?: DialogOptions): Promise<string | undefined> {
+    const result = await this.custom({ type: "column", id: "dialog", children: [{ type: "text", id: "title", text: title, tone: "accent" }, { type: "input", id: "value", initialValue: "", placeholder }] }, opts);
+    return typeof result === "string" ? result : undefined;
   }
-  setHiddenThinkingLabel(_label?: string) {
-    this.notify(
-      "setHiddenThinkingLabel is not yet supported by Ratatui",
-      "warning",
-    );
+  async editor(title: string, prefill = "", opts?: DialogOptions): Promise<string | undefined> {
+    const result = await this.custom({ type: "column", id: "dialog", children: [{ type: "text", id: "title", text: title, tone: "accent" }, { type: "editor", id: "value", initialValue: prefill }] }, opts);
+    return typeof result === "string" ? result : undefined;
   }
-  addAutocompleteProvider(_factory: unknown) {
-    this.notify(
-      "addAutocompleteProvider is not yet supported by Ratatui",
-      "warning",
-    );
+  #set(id: string, placement: Placement, node?: UiNode) {
+    this.#assertActive();
+    const parsed = node === undefined ? undefined : uiNodeSchema.parse(node);
+    const old = this.#regions.get(id);
+    if (old) { old.cleanup(); this.#regions.delete(id); }
+    if (parsed) this.mount(parsed, { id, placement }); else this.#changed();
   }
-  getAllThemes() {
-    return [{ name: "dark", path: undefined }];
+  setWidget(key: string, node?: UiNode, options?: { placement?: "aboveEditor" | "belowEditor" }) { this.#set(`widget:${key}`, options?.placement ?? "aboveEditor", node); }
+  setHeader(node?: UiNode) { this.#set("header", "header", node); }
+  setFooter(node?: UiNode) { this.#set("footer", "footer", node); }
+  setStatus(key: string, text?: string) { this.#assertActive(); if (text === undefined) this.#statuses.delete(key); else this.#statuses.set(key, text); this.#changed(); }
+  registerShortcut(key: string, handler: () => Promise<void>) { this.#assertActive(); this.#shortcuts.set(key, handler); this.#changed(); }
+  notify(message: unknown, level = "info") { this.#assertActive(); this.#native?.notify(JSON.stringify({ type: "uiNotify", message: String(message), level })); }
+  setTheme(name: UiTheme) {
+    this.#assertActive();
+    if (name !== "light" && name !== "dark" && name !== "system") throw new Error(`Unknown UI theme: ${name}`);
+    this.#action({ type: "theme", name });
   }
-  getTheme(name: string) {
-    return name === "dark" ? this.theme : undefined;
+  setProgress(active: boolean) { this.#assertActive(); this.#action({ type: "progress", active }); }
+  setProgramStatus(status: { state: "working" | "error" | "success" | "clear"; text?: string; progress?: number }) {
+    this.#assertActive(); this.#action({ type: "programStatus", state: status.state, text: status.text ?? null, progress: status.progress ?? null });
   }
-  setTheme(name: string | typeof extensionTheme) {
-    if (name === "dark" || name === this.theme) return { success: true };
-    return {
-      success: false,
-      error: "Ratatui extension surfaces currently use the dark theme",
-    };
+  setTitle(title: string) { this.#assertActive(); this.#action({ type: "title", title }); }
+  setEditorText(text: string) { this.#assertActive(); this.#action({ type: "editorText", text, append: false }); }
+  pasteToEditor(text: string) { this.#assertActive(); this.#action({ type: "editorText", text, append: true }); }
+  getEditorText() { this.#assertActive(); return this.#query().editorText; }
+  getToolsExpanded() { this.#assertActive(); return this.#query().toolsExpanded; }
+  setToolsExpanded(expanded: boolean) { this.#assertActive(); this.#action({ type: "toolsExpanded", expanded }); }
+  setWorkingMessage(message = "Working...") { this.#workingConfigured = true; this.#workingMessage = message; this.#changed(); }
+  setWorkingVisible(visible: boolean) { this.#workingConfigured = true; this.#workingVisible = visible; this.#changed(); }
+  setHiddenThinkingLabel(label?: string) { this.transcript.setHiddenThinkingLabel(label); }
+  hostOperation(operation: HostOperation): Promise<string | undefined> {
+    this.#assertActive();
+    if (!this.#native) return Promise.reject(new Error("Extension UI is unavailable"));
+    return new Promise((resolve, reject) => {
+      const id = ++this.#hostId;
+      this.#hostRequests.set(id, { resolve, reject });
+      this.#wake();
+      try { this.#action({ type: "hostOperation", id, operation }); } catch (error) { this.#hostRequests.delete(id); reject(error); }
+    });
   }
   retire() {
     if (this.#retired) return;
-    try {
-      this.#action({ type: "close" });
-    } catch {
-      /* native epoch may already be retired */
-    }
+    try { this.#action({ type: "close" }); } catch {}
     this.#retired = true;
-    for (const cancel of [...this.#pendingClosers]) cancel();
-    for (const m of [...this.#dialogs]) m.close?.();
-    for (const m of this.#components.values()) {
-      try {
-        m.component.dispose?.();
-      } catch {
-        /* continue disposing */
-      }
-    }
-    this.#components.clear();
-    this.#dialogs.length = 0;
-    this.#listeners.clear();
+    for (const cancel of this.#pending) cancel();
+    this.#pending.clear();
+    for (const request of this.#hostRequests.values()) request.reject(new Error("Extension UI generation retired"));
+    this.#hostRequests.clear();
+    for (const mounted of this.#regions.values()) mounted.cleanup();
+    this.#regions.clear();
     this.#shortcuts.clear();
+    this.transcript.dispose();
   }
 }

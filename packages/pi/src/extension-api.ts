@@ -43,14 +43,15 @@ export interface PiModelRegistry {
 
 /** Interactive extension UI; non-interactive contexts provide inactive defaults. */
 export type PiExtensionUI = Pick<ExtensionUI,
-  | "select" | "confirm" | "input" | "editor" | "custom" | "notify"
+  | "select" | "confirm" | "input" | "editor" | "custom" | "mount" | "notify"
+  | "hostOperation"
   | "setWidget" | "setHeader" | "setFooter" | "setStatus" | "setTitle"
-  | "onTerminalInput" | "setEditorText" | "getEditorText" | "pasteToEditor"
-  | "setEditorComponent" | "getEditorComponent" | "getToolsExpanded" | "setToolsExpanded"
-  | "theme" | "getTheme" | "getAllThemes" | "setTheme"
-  | "setWorkingMessage" | "setWorkingVisible" | "setWorkingIndicator"
-  | "setHiddenThinkingLabel" | "addAutocompleteProvider"
+  | "setTheme" | "setProgress" | "setProgramStatus"
+  | "setEditorText" | "getEditorText" | "pasteToEditor"
+  | "getToolsExpanded" | "setToolsExpanded"
+  | "setWorkingMessage" | "setWorkingVisible" | "setHiddenThinkingLabel"
 >;
+
 
 export interface PiExtensionContext extends Record<string, unknown> {
   readonly cwd: string;
@@ -122,6 +123,8 @@ export interface PiToolResult {
 }
 
 export interface PiToolDefinition<TInput = Record<string, unknown>> {
+  renderCall?: import("./extension-ui-transcript.js").ToolRenderers["renderCall"];
+  renderResult?: import("./extension-ui-transcript.js").ToolRenderers["renderResult"];
   name: string;
   label?: string;
   description?: string;
@@ -154,9 +157,10 @@ export interface PiExtensionApi {
   registerShortcut(shortcut: string, options: unknown): void;
   registerFlag(name: string, options: unknown): void;
   getFlag(name: string): boolean | string | undefined;
-  registerMessageRenderer(customType: string, renderer: unknown): void;
-  registerMarkdownTransformer(transformer: unknown): void;
-  registerEntryRenderer(customType: string, renderer: unknown): void;
+  registerMessageRenderer(customType: string, renderer: import("./extension-ui-transcript.js").MessageRenderer): void;
+  registerMarkdownTransformer(transformer: import("./extension-ui-transcript.js").MarkdownTransformer): void;
+  registerEntryRenderer(customType: string, renderer: import("./extension-ui-transcript.js").EntryRenderer): void;
+  registerToolRenderer(resolver: import("./extension-ui-transcript.js").ToolRendererResolver): void;
   sendMessage(message: unknown, options?: unknown): void;
   sendUserMessage(content: unknown, options?: unknown): void;
   appendEntry(customType: string, data?: unknown): void;

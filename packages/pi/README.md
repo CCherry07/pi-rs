@@ -368,14 +368,17 @@ tool-result guards are available through current and legacy `pi-ai` / `pi-coding
 names; `typebox` and `@sinclair/typebox`, including subpaths such as `typebox/value`, resolve to the
 host's bundled runtime.
 
-The host resolves Pi's extension module table for both the current
-`@earendil-works` and legacy `@mariozechner` namespaces: `pi-coding-agent`, `pi-agent-core`,
-`pi-ai`, `pi-ai/compat`, `pi-ai/oauth`, `pi-ai/providers/all`, and `pi-tui`. The TUI names resolve to
-the pinned Pi 1.3.0 component runtime. Ratatui owns the terminal while Node runs component logic.
-Interactive contexts expose `hasUI = true`: dialogs, text input, widgets, header/footer,
-custom components/overlays, custom editors, status, title and shortcuts run through the native UI
-bridge. Print/JSON/RPC retain inactive defaults. Tool/message/entry/Markdown renderers and several
-advanced UI APIs remain gaps. Module resolution does not imply full upstream runtime compatibility.
+The host supplies runtime-neutral SDK aliases for the current `@earendil-works` and legacy
+`@mariozechner` namespaces: `pi-coding-agent`, `pi-agent-core`, `pi-ai`, `pi-ai/compat`,
+`pi-ai/oauth` and `pi-ai/providers/all`. `@pi-rs/cli` exposes the same host SDK and UI types.
+
+Rust and JavaScript plugins use one Rust UI runtime. JS submits declarative nodes through
+`ctx.ui.mount`/`custom` and handles semantic events; Rust owns layout, focus, editing, completions,
+scrolling and terminal output. Dialogs, widgets, overlays, tool/message rendering, images, links,
+clipboard and external-editor operations use this shared protocol. There is no `pi-tui` dependency
+or JS renderer. This intentionally breaks old `render(width)`, editor subclass and JS theme APIs.
+See [plugin UI](../../docs/plugin-ui.md) for the replacement interface. Print/JSON/RPC retain
+inactive UI defaults.
 Other missing dependencies remain fatal.
 See the repository's
 [JavaScript compatibility matrix](../../docs/js-extension-compatibility.md) for the precise hook,

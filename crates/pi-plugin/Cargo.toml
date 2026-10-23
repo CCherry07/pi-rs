@@ -20,6 +20,13 @@ serde_json.workspace = true
 thiserror.workspace = true
 # Only channels are needed in production; the workspace preset also enables the runtime.
 tokio = { version = "1.47.1", features = ["sync"] }
+uuid = { version = "1", features = ["v4"] }
+
+[[example]]
+name = "native-ui"
+path = "examples/native-ui.rs"
+crate-type = ["cdylib"]
+required-features = ["native"]
 
 [dev-dependencies]
 futures.workspace = true

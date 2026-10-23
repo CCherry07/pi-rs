@@ -29,9 +29,40 @@ impl UiContextAccess for StaticAccess {
         Ok(())
     }
 
-    async fn ui_confirm(&self, title: String, message: String) -> PluginContextResult<bool> {
-        self.confirmations.lock().unwrap().push((title, message));
+    fn has_ui(&self) -> PluginContextResult<bool> {
         Ok(true)
+    }
+    fn ui_surface_action(
+        &self,
+        _owner: String,
+        _action: crate::UiSurfaceAction,
+    ) -> PluginContextResult<()> {
+        Ok(())
+    }
+    async fn ui_surface_exchange(
+        &self,
+        frame: crate::UiSurfaceFrame,
+    ) -> PluginContextResult<crate::UiSurfaceEvent> {
+        let pi_plugin::UiNodeKind::Column { children, .. } = &frame.regions[0].root.kind else {
+            panic!("expected dialog column");
+        };
+        let pi_plugin::UiNodeKind::Text { text, .. } = &children[0].kind else {
+            panic!("expected dialog title");
+        };
+        let (title, message) = text
+            .split_once('\n')
+            .expect("confirmation title and message");
+        self.confirmations
+            .lock()
+            .unwrap()
+            .push((title.into(), message.into()));
+        Ok(pi_plugin::UiSurfaceEvent::Interaction {
+            region_id: "dialog".into(),
+            node_id: "value".into(),
+            event: pi_plugin::UiInteraction::Submit { value: 0.into() },
+            snapshot: pi_plugin::UiSurfaceSnapshot::default(),
+            revision: frame.revision,
+        })
     }
 }
 

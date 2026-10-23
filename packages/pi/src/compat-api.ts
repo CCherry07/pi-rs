@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,8 +29,8 @@ function packageVersion(): string {
  * erased by jiti; this shim contains only runtime-neutral helpers. */
 export const CONFIG_DIR_NAME = ".pi";
 export const VERSION = packageVersion();
+export { getAgentDir } from "./extension-ui-paths.js";
 export { Type };
-export { CustomEditor, getMarkdownTheme, getSelectListTheme } from "./extension-ui-theme.js";
 
 export function StringEnum<T extends readonly string[]>(
   values: T,
@@ -47,10 +46,6 @@ export function StringEnum<T extends readonly string[]>(
 
 export function defineTool<T>(tool: T): T {
   return tool;
-}
-
-export function getAgentDir() {
-  return process.env.PI_AGENT_DIR || join(homedir(), ".pi", "agent");
 }
 
 export function isToolCallEventType(
@@ -87,3 +82,5 @@ export function isFindToolResult(event: { toolName?: string } | null | undefined
 export function isLsToolResult(event: { toolName?: string } | null | undefined): boolean {
   return event?.toolName === "ls";
 }
+
+export type { UiNode, UiTone, UiInteraction, UiComponentEvent } from "./extension-ui-frame.js";

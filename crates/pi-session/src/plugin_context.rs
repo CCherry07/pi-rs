@@ -61,12 +61,6 @@ pub trait PluginUiBridge: Send + Sync {
         Err("extension surfaces unavailable".into())
     }
 
-    async fn confirm(&self, title: String, message: String) -> Result<bool, String>;
-
-    async fn select(&self, _title: String, _options: Vec<String>) -> Result<Option<usize>, String> {
-        Err("interactive selection is unavailable".to_string())
-    }
-
     async fn multi_select(
         &self,
         _request: pi_plugin::UiMultiSelectRequest,
@@ -313,13 +307,25 @@ impl UiContextAccess for PiPluginContext {
         owner: String,
         action: pi_plugin::UiSurfaceAction,
     ) -> Result<(), PluginContextError> {
+        self.ui_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(owner.clone());
+        let closes_surface = matches!(action, pi_plugin::UiSurfaceAction::Close);
         self.ui_bridge
             .as_ref()
             .ok_or_else(|| {
                 PluginContextError::Unavailable("extension surfaces unavailable".into())
             })?
-            .surface_action(owner, action)
-            .map_err(context_failed)
+            .surface_action(owner.clone(), action)
+            .map_err(context_failed)?;
+        if closes_surface {
+            self.ui_owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&owner);
+        }
+        Ok(())
     }
     async fn ui_surface_exchange(
         &self,
@@ -353,30 +359,6 @@ impl UiContextAccess for PiPluginContext {
     fn ui_notify(&self, level: NoticeLevel, message: String) -> Result<(), PluginContextError> {
         self.session()?.notify_plugin(message, level);
         Ok(())
-    }
-
-    async fn ui_confirm(&self, title: String, message: String) -> Result<bool, PluginContextError> {
-        if !matches!(self.mode, PresentationMode::Tui) {
-            return Ok(false);
-        }
-        let bridge = self.ui_bridge.as_ref().ok_or_else(|| {
-            PluginContextError::Unavailable("interactive confirmation is not configured".into())
-        })?;
-        bridge.confirm(title, message).await.map_err(context_failed)
-    }
-
-    async fn ui_select(
-        &self,
-        title: String,
-        options: Vec<String>,
-    ) -> Result<Option<usize>, PluginContextError> {
-        if !matches!(self.mode, PresentationMode::Tui) || options.is_empty() {
-            return Ok(None);
-        }
-        let bridge = self.ui_bridge.as_ref().ok_or_else(|| {
-            PluginContextError::Unavailable("interactive selection is not configured".into())
-        })?;
-        bridge.select(title, options).await.map_err(context_failed)
     }
 
     async fn ui_multi_select(
