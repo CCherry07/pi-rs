@@ -48,8 +48,9 @@ pub use compaction::{
 pub use context::{
     ContextEntryTransform, CustomEntryContextMessageProjector, SessionContext,
     SessionContextBuildOptions, SessionModel, agent_message_to_provider_message,
-    agent_message_to_runtime_message, build_context_entries, build_session_context,
-    default_context_entry_transform, session_entry_to_context_messages,
+    agent_message_to_runtime_message, annotate_compaction, build_context_entries,
+    build_session_context, default_context_entry_transform, project_session_entries,
+    session_entry_to_context_messages,
 };
 pub use event::{
     AgentSessionEvent, AgentSessionSnapshot, AgentSessionSubscription, AutoRetrySnapshot,

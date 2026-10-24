@@ -28,6 +28,7 @@ pub struct AgentHarnessBuilder {
     model: ModelSelection,
     system_prompt: SystemPrompt,
     thinking_level: ThinkingLevel,
+    max_tool_iterations: Option<usize>,
     active_tools: Option<Vec<String>>,
     session_options: AgentSessionOptions,
     plugins: Vec<PluginFactory>,
@@ -43,6 +44,7 @@ impl AgentHarness {
             model,
             system_prompt: SystemPrompt::Final(system_prompt.into()),
             thinking_level: ThinkingLevel::Off,
+            max_tool_iterations: AgentOptions::default().max_tool_iterations,
             active_tools: None,
             session_options: AgentSessionOptions::default(),
             plugins: Vec::new(),
@@ -140,6 +142,13 @@ impl AgentHarnessBuilder {
         self
     }
 
+    /// Overrides the core's tool-turn limit for every generation, including resumed sessions.
+    /// None runs until the model finishes or the caller cancels; Some(0) permits no tool turns.
+    pub fn max_tool_iterations(mut self, limit: Option<usize>) -> Self {
+        self.max_tool_iterations = limit;
+        self
+    }
+
     /// Defaults to every tool registered by the supplied plugins. An explicit empty list
     /// disables all tools. Saved sessions retain their active selection when reopened.
     pub fn active_tools(mut self, mut tools: Vec<String>) -> Self {
@@ -183,6 +192,7 @@ impl AgentHarnessBuilder {
                 provider_id: model.provider.clone(),
                 model_id: model.model_id.clone(),
                 thinking_level: self.thinking_level,
+                max_tool_iterations: self.max_tool_iterations,
                 cwd: request.workspace.cwd().to_path_buf(),
                 active_tools: initial_tools.cloned().unwrap_or_default(),
                 ..AgentOptions::default()
@@ -249,6 +259,20 @@ impl SessionGenerationFactory for AgentHarnessBuilder {
         ));
         let runtime = self.runtime(&request, context.clone())?;
         let mut options = self.session_options.clone();
+        // Fresh sessions record the runtime's selected model immediately. Apply an explicit
+        // options-level request before that header is prepared; reopen resolves it with the
+        // saved model, and isolated sessions already supply their own initial selection.
+        if request.restored_configuration.is_none()
+            && request.initial_state.is_none()
+            && options.initial_model != InitialModelRequest::default()
+        {
+            let selection = options
+                .initial_model
+                .clone()
+                .select(&runtime)
+                .map_err(|error| SessionError::Runtime(error.to_string()))?;
+            options = options.initial_model_fallback_message(selection.fallback_message);
+        }
         if let Some(model) = request.reload_model {
             options.initial_model =
                 InitialModelRequest::default().requested(model.provider, model.model_id.as_str());

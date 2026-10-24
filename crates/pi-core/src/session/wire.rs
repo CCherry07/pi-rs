@@ -334,6 +334,9 @@ pub struct CompactionEntry {
     pub summary: String,
     #[serde(default)]
     pub retained_tail: Vec<AgentMessage>,
+    /// Original journal IDs for retained snapshots; absent in older v4 checkpoints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retained_entry_ids: Vec<Option<String>>,
     pub tokens_before: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
@@ -384,6 +387,39 @@ impl CustomMessageEntry {
     }
 }
 
+/// An append-only, branch-local change to a message's provider-visible content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextEditEntry {
+    pub target_id: String,
+    #[serde(deserialize_with = "super::required_nullable::deserialize")]
+    pub replacement: Option<ContextEditReplacement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextEditReplacement {
+    pub content: CustomMessageContent,
+}
+
+impl ContextEditEntry {
+    /// Apply content only, retaining role, usage, signatures and unknown wire fields.
+    pub fn apply(&self, message: &AgentMessage) -> Option<AgentMessage> {
+        let replacement = self.replacement.as_ref()?;
+        let mut value = serde_json::to_value(message).expect("message is serializable");
+        let content = match &replacement.content {
+            CustomMessageContent::Text(text)
+                if matches!(message.role(), "assistant" | "toolResult") =>
+            {
+                serde_json::json!([{ "type": "text", "text": text }])
+            }
+            content => serde_json::to_value(content).expect("content is serializable"),
+        };
+        value["content"] = content;
+        // Journal admission validates content against the target role.
+        AgentMessage::custom(value).ok()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEntry {
@@ -395,6 +431,7 @@ pub enum SessionEntry {
     Compaction(CompactionEntry),
     BranchSummary(BranchSummaryEntry),
     Custom(CustomEntry),
+    ContextEdit(ContextEditEntry),
 }
 
 impl SessionEntry {
@@ -424,6 +461,7 @@ impl SessionEntry {
             Self::Compaction(_) => SessionEntryType::Compaction,
             Self::BranchSummary(_) => SessionEntryType::BranchSummary,
             Self::Custom(_) => SessionEntryType::Custom,
+            Self::ContextEdit(_) => SessionEntryType::ContextEdit,
         }
     }
 }
@@ -439,6 +477,7 @@ pub enum SessionEntryType {
     Compaction,
     BranchSummary,
     Custom,
+    ContextEdit,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -460,6 +499,14 @@ pub struct SessionRecord {
     pub timestamp_ms: i64,
     #[serde(flatten)]
     pub entry: SessionEntry,
+}
+
+/// Model-visible messages paired with their original journal entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectedSessionEntry {
+    pub source_entry: SessionRecord,
+    pub messages: Vec<AgentMessage>,
 }
 
 impl SessionRecord {

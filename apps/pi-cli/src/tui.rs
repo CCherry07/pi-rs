@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Stdout, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,21 +7,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
+    MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use futures::StreamExt;
 use pi_agent::AgentLoopStop;
 use pi_core::{
     AgentEvent, ContentBlock, Message, ModelId, ModelSpec, ProviderId, StopReason, StreamEvent,
     ThinkingLevel, ToolCallId,
 };
-use pi_plugin::{CommandSpec, UiMultiSelectAction, UiMultiSelectOption, UiMultiSelectResponse};
+use pi_plugin::CommandSpec;
 use pi_session::{
     AgentSession, AgentSessionEvent, AgentSessionSnapshot, EntryOrder, EntryQuery, ForkPosition,
     PiSession, QueueSnapshot, SessionEntry, SessionInput, SessionRuntimeInventory,
@@ -48,20 +46,20 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::clipboard::{ClipboardWriter, SystemClipboard};
 use crate::config::AuthCommand;
 use crate::output::{assistant_text, shell_command};
-use crate::plugin_ui::{
-    PluginConfirmationRequest, PluginMultiSelectionRequest, PluginSelectionRequest,
-};
 use crate::text_selection::{ScreenSelection, ScreenTextSurface};
 use crate::{InteractiveRequestReceivers, auth, auth::AuthProviderInfo};
 use pi_coding::{ProjectTrustOption, ProjectTrustPromptRequest, ProjectTrustService};
 
 mod components;
 mod controller;
+pub(crate) mod extensions;
+mod input;
 mod message;
 mod view;
 
 use components::{ComposerInput, SelectionList};
 use controller::*;
+use input::InputStream as EventStream;
 use message::AppMessage;
 use view::*;
 
@@ -71,6 +69,8 @@ struct TerminalSession {
     terminal: TuiTerminal,
     fullscreen: bool,
     active: bool,
+    progress_owner: Option<String>,
+    program_status: Option<(String, String, Option<String>, Option<u8>)>,
 }
 
 impl TerminalSession {
@@ -79,6 +79,8 @@ impl TerminalSession {
             terminal: setup_terminal(fullscreen)?,
             fullscreen,
             active: true,
+            progress_owner: None,
+            program_status: None,
         })
     }
 
@@ -88,6 +90,39 @@ impl TerminalSession {
 
     fn finish(mut self) -> io::Result<()> {
         self.restore()
+    }
+
+    fn set_progress(&mut self, owner: &str, active: bool) -> Result<(), String> {
+        extensions::host::set_progress(active)?;
+        self.progress_owner = active.then(|| owner.to_owned());
+        Ok(())
+    }
+
+    fn set_program_status(
+        &mut self,
+        owner: &str,
+        state: String,
+        text: Option<String>,
+        progress: Option<u8>,
+    ) -> Result<(), String> {
+        extensions::host::set_program_status(&state, text.as_deref(), progress)?;
+        self.program_status =
+            (state != "clear").then_some((owner.to_owned(), state, text, progress));
+        Ok(())
+    }
+
+    fn clear_owner(&mut self, owner: &str) -> Result<(), String> {
+        if self.progress_owner.as_deref() == Some(owner) {
+            self.set_progress(owner, false)?;
+        }
+        if self
+            .program_status
+            .as_ref()
+            .is_some_and(|(current, ..)| current == owner)
+        {
+            self.set_program_status(owner, "clear".into(), None, None)?;
+        }
+        Ok(())
     }
 
     fn restore(&mut self) -> io::Result<()> {
@@ -104,6 +139,11 @@ impl TerminalSession {
         }
         self.terminal = setup_terminal(self.fullscreen)?;
         self.active = true;
+        extensions::host::set_progress(self.progress_owner.is_some()).map_err(io::Error::other)?;
+        if let Some((_, state, text, progress)) = &self.program_status {
+            extensions::host::set_program_status(state, text.as_deref(), *progress)
+                .map_err(io::Error::other)?;
+        }
         Ok(())
     }
 }
@@ -194,7 +234,7 @@ async fn select_project_trust_loop(
         terminal
             .draw(|frame| draw_project_trust_prompt(frame, cwd, options, selected))
             .map_err(|error| error.to_string())?;
-        match events.next().await {
+        match events.next_native().await {
             Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => match key.code {
                 KeyCode::Up => {
                     selected = selected
@@ -408,8 +448,14 @@ enum ShellState {
 enum TranscriptItem {
     User(String),
     Notice(String),
+    Custom {
+        entry: serde_json::Value,
+        fallback: String,
+        message: bool,
+    },
     Assistant {
         text: String,
+        thinking: String,
         streaming: bool,
         error: Option<String>,
     },
@@ -419,6 +465,7 @@ enum TranscriptItem {
         detail: Option<String>,
         input: Option<String>,
         output: Option<String>,
+        render_result: Option<serde_json::Value>,
         state: ToolState,
     },
     Shell {
@@ -431,6 +478,7 @@ enum TranscriptItem {
 
 #[derive(Debug)]
 struct CachedTranscriptBlock {
+    extension_index: Option<usize>,
     user_text: Option<String>,
     lines: Vec<Line<'static>>,
     streaming: bool,
@@ -455,6 +503,8 @@ struct TranscriptLayoutKey {
     appearance: TerminalAppearance,
     working_elapsed_width: usize,
     tools_expanded: bool,
+    hide_working: bool,
+    extension_revision: u64,
 }
 
 #[derive(Debug)]
@@ -637,6 +687,7 @@ impl RegisteredPluginInventory {
 }
 
 struct App {
+    extension_surface: extensions::ExtensionSurface,
     transcript: Vec<TranscriptItem>,
     show_startup_header: bool,
     transcript_layout_cache: RefCell<TranscriptLayoutCache>,
@@ -659,6 +710,7 @@ struct App {
     streaming_assistant: Option<usize>,
     awaiting_assistant: bool,
     working_started_at: Option<Instant>,
+    tool_started_at: HashMap<ToolCallId, Instant>,
     bash_line: Option<usize>,
     provider: String,
     model: String,
@@ -675,9 +727,6 @@ struct App {
     scroll_input: ScrollInputNormalizer,
     screen_selection: Option<ScreenSelection>,
     trust_prompt: Option<TrustPromptState>,
-    confirmation_prompt: Option<ConfirmationPromptState>,
-    selection_prompt: Option<SelectionPromptState>,
-    multi_selection_prompt: Option<MultiSelectionPromptState>,
     pending_auth: Option<AuthRequest>,
     epoch: u64,
     quit: bool,
@@ -692,7 +741,7 @@ impl App {
             && let Ok(branch) = document.branch()
         {
             for record in &branch {
-                push_history_entry(&mut transcript, &record.entry);
+                push_history_record(&mut transcript, record);
             }
             session_tokens = aggregate_document_usage(&document).total_tokens;
             let messages = snapshot
@@ -717,11 +766,13 @@ impl App {
             .as_ref()
             .and_then(|stream| stream.snapshot())
             .and_then(|message| {
+                let thinking = thinking_text(&message.content);
                 let text = assistant_text(&Message::Assistant(Arc::new(message)))?;
-                if text.is_empty() {
+                if text.is_empty() && thinking.is_empty() {
                     return None;
                 }
                 transcript.push(TranscriptItem::Assistant {
+                    thinking,
                     text,
                     streaming: true,
                     error: None,
@@ -759,6 +810,7 @@ impl App {
         let registered_plugins =
             RegisteredPluginInventory::from_runtime(session.runtime_inventory());
         Self {
+            extension_surface: extensions::ExtensionSurface::default(),
             transcript,
             show_startup_header: true,
             transcript_layout_cache: RefCell::new(TranscriptLayoutCache::default()),
@@ -781,6 +833,7 @@ impl App {
             streaming_assistant,
             awaiting_assistant,
             working_started_at: snapshot.agent.is_running.then(Instant::now),
+            tool_started_at: HashMap::new(),
             bash_line,
             provider: snapshot.agent.provider_id.to_string(),
             model: snapshot.agent.model_id.to_string(),
@@ -797,9 +850,6 @@ impl App {
             scroll_input: ScrollInputNormalizer::for_terminal(),
             screen_selection: None,
             trust_prompt: None,
-            confirmation_prompt: None,
-            selection_prompt: None,
-            multi_selection_prompt: None,
             pending_auth: None,
             epoch: 1,
             quit: false,
@@ -835,21 +885,7 @@ impl App {
                 self.trust_prompt = Some(request.into());
                 self.status = "Choose project trust".to_string();
             }
-            AppMessage::ConfirmationRequested(request) => {
-                self.screen_selection = None;
-                self.confirmation_prompt = Some(request.into());
-                self.status = "Confirmation required".to_string();
-            }
-            AppMessage::SelectionRequested(request) => {
-                self.screen_selection = None;
-                self.selection_prompt = Some(request.into());
-                self.status = "Selection required".to_string();
-            }
-            AppMessage::MultiSelectionRequested(request) => {
-                self.screen_selection = None;
-                self.multi_selection_prompt = Some(request.into());
-                self.status = "Multi-selection required".to_string();
-            }
+
             AppMessage::AnimationTick => self.advance_animation(),
             AppMessage::Quit => self.quit = true,
         }
@@ -988,6 +1024,12 @@ impl App {
                 self.status = error_message.unwrap_or_else(|| "Compaction complete".to_string());
             }
             AgentSessionEvent::EntryAppended { entry } => {
+                if matches!(
+                    entry.entry,
+                    SessionEntry::Custom(_) | SessionEntry::CustomMessage(_)
+                ) {
+                    push_history_record(&mut self.transcript, &entry);
+                }
                 self.session_tokens = self
                     .session_tokens
                     .saturating_add(session_entry_token_usage(&entry.entry));
@@ -1080,6 +1122,7 @@ impl App {
                 Message::Assistant(_) => {
                     self.awaiting_assistant = false;
                     self.transcript.push(TranscriptItem::Assistant {
+                        thinking: String::new(),
                         text: String::new(),
                         streaming: true,
                         error: None,
@@ -1087,17 +1130,11 @@ impl App {
                     self.streaming_assistant = Some(self.transcript.len() - 1);
                 }
                 Message::ToolResult(_) => {}
-                Message::Custom(message) => {
-                    if message.display {
-                        self.transcript.push(TranscriptItem::Notice(format!(
-                            "[{}]\n{}",
-                            message.custom_type,
-                            custom_content_text(&message.content)
-                        )));
-                    }
-                }
+                // Custom messages are rendered from EntryAppended, including
+                // messages added without a provider turn. One event owns insertion.
+                Message::Custom(_) => {}
             },
-            AgentEvent::MessageUpdate { update, .. } => {
+            AgentEvent::MessageUpdate { stream, update } => {
                 if let StreamEvent::TextDelta { delta, .. } = update.as_ref()
                     && let Some(index) = self.streaming_assistant
                     && let Some(TranscriptItem::Assistant {
@@ -1109,6 +1146,31 @@ impl App {
                     current.push_str(delta);
                     *streaming = true;
                 }
+                if let StreamEvent::ThinkingDelta { delta, .. } = update.as_ref()
+                    && let Some(index) = self.streaming_assistant
+                    && let Some(TranscriptItem::Assistant { thinking, .. }) =
+                        self.transcript.get_mut(index)
+                {
+                    thinking.push_str(delta);
+                }
+                if matches!(
+                    update.as_ref(),
+                    StreamEvent::ToolCallStart { .. }
+                        | StreamEvent::ToolCallDelta { .. }
+                        | StreamEvent::ToolCallEnd { .. }
+                ) && let Some(message) = stream.snapshot()
+                {
+                    for call in message.tool_calls() {
+                        self.upsert_tool(
+                            call.id.clone(),
+                            call.name.clone(),
+                            summarize_tool_args(&call.arguments),
+                            format_tool_input(&call.arguments),
+                            None,
+                            ToolState::Pending,
+                        );
+                    }
+                }
             }
             AgentEvent::MessageEnd {
                 message: Message::Assistant(message),
@@ -1119,9 +1181,11 @@ impl App {
                     self.context_tokens = Some(assistant_context_usage(&message));
                 }
                 let text = assistant_text(&Message::Assistant(message.clone())).unwrap_or_default();
+                let thinking = thinking_text(&message.content);
                 let error = assistant_error(&message);
                 if let Some(index) = self.streaming_assistant.take() {
                     if text.trim().is_empty()
+                        && thinking.is_empty()
                         && error.is_none()
                         && index + 1 == self.transcript.len()
                     {
@@ -1130,14 +1194,17 @@ impl App {
                         text: current,
                         streaming,
                         error: current_error,
+                        thinking: current_thinking,
                     }) = self.transcript.get_mut(index)
                     {
                         *current = text;
+                        *current_thinking = thinking;
                         *streaming = false;
                         *current_error = error;
                     }
-                } else if !text.trim().is_empty() || error.is_some() {
+                } else if !text.trim().is_empty() || !thinking.is_empty() || error.is_some() {
                     self.transcript.push(TranscriptItem::Assistant {
+                        thinking,
                         text,
                         streaming: false,
                         error,
@@ -1160,6 +1227,8 @@ impl App {
                 args,
             } => {
                 self.awaiting_assistant = false;
+                self.tool_started_at
+                    .insert(tool_call_id.clone(), Instant::now());
                 self.upsert_tool(
                     tool_call_id,
                     tool_name.clone(),
@@ -1176,18 +1245,31 @@ impl App {
                 result,
                 is_error,
             } => {
+                let duration_ms = self
+                    .tool_started_at
+                    .remove(&tool_call_id)
+                    .map(|started| started.elapsed().as_secs_f64() * 1_000.0);
                 let state = if is_error {
                     ToolState::Failed(tool_result_text(&result))
                 } else {
                     ToolState::Succeeded
                 };
                 self.upsert_tool(
-                    tool_call_id,
+                    tool_call_id.clone(),
                     tool_name.clone(),
                     None,
                     None,
                     Some(format_tool_result(&result)),
                     state,
+                );
+                self.set_tool_render_result(
+                    &tool_call_id,
+                    serde_json::json!({
+                        "content": result.content,
+                        "details": result.details,
+                        "isError": is_error,
+                        "durationMs": duration_ms,
+                    }),
                 );
                 self.status = if is_error {
                     format!("{tool_name} failed")
@@ -1200,7 +1282,21 @@ impl App {
                 self.working_started_at = None;
                 self.is_running = false;
             }
-            AgentEvent::ToolExecutionUpdate { tool_name, .. } => {
+            AgentEvent::ToolExecutionUpdate {
+                tool_call_id,
+                tool_name,
+                args,
+                partial_result,
+            } => {
+                self.upsert_tool(
+                    tool_call_id.clone(),
+                    tool_name.clone(),
+                    summarize_tool_args(&args),
+                    format_tool_input(&args),
+                    Some(format_tool_result(&partial_result)),
+                    ToolState::Running,
+                );
+                self.set_tool_render_result(&tool_call_id, serde_json::json!({ "content": partial_result.content, "details": partial_result.details }));
                 self.status = format!("Running {tool_name}…");
             }
             AgentEvent::TurnStart => self.awaiting_assistant = true,
@@ -1241,6 +1337,7 @@ impl App {
             return;
         }
         self.transcript.push(TranscriptItem::Tool {
+            render_result: None,
             id,
             name,
             detail,
@@ -1249,6 +1346,15 @@ impl App {
             state,
         });
     }
+    fn set_tool_render_result(&mut self, id: &ToolCallId, result: serde_json::Value) {
+        if let Some(TranscriptItem::Tool { render_result, .. }) =
+            self.transcript.iter_mut().rev().find(
+                |item| matches!(item, TranscriptItem::Tool { id: current, .. } if current == id),
+            )
+        {
+            *render_result = Some(result);
+        }
+    }
 }
 
 struct TrustPromptState {
@@ -1256,183 +1362,6 @@ struct TrustPromptState {
     options: Vec<ProjectTrustOption>,
     selected: usize,
     response: Option<tokio::sync::oneshot::Sender<Option<usize>>>,
-}
-
-struct ConfirmationPromptState {
-    title: String,
-    message: String,
-    response: Option<tokio::sync::oneshot::Sender<bool>>,
-}
-
-struct SelectionPromptState {
-    title: String,
-    options: Vec<String>,
-    selected: usize,
-    response: Option<tokio::sync::oneshot::Sender<Option<usize>>>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MultiSelectionFocus {
-    List,
-    Search,
-    Filters,
-}
-
-struct MultiSelectionPromptState {
-    title: String,
-    options: Vec<UiMultiSelectOption>,
-    actions: Vec<UiMultiSelectAction>,
-    categories: Vec<(String, String)>,
-    active_categories: HashSet<String>,
-    pending_categories: Option<HashSet<String>>,
-    sort_modes: Vec<(String, bool)>,
-    sort_mode: usize,
-    selected: HashSet<usize>,
-    cursor: usize,
-    filter_cursor: usize,
-    query: String,
-    focus: MultiSelectionFocus,
-    summary_lines: Vec<String>,
-    pending_action: Option<String>,
-    response: Option<tokio::sync::oneshot::Sender<Option<UiMultiSelectResponse>>>,
-}
-
-impl MultiSelectionPromptState {
-    fn visible_indices(&self) -> Vec<usize> {
-        let query = self.query.trim().to_lowercase();
-        let mut indices = self
-            .options
-            .iter()
-            .enumerate()
-            .filter(|(_, option)| {
-                option
-                    .category
-                    .as_ref()
-                    .is_none_or(|category| self.active_categories.contains(category))
-                    && (query.is_empty() || fuzzy_matches(&option.search_text, &query))
-            })
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        if let Some((_, descending)) = self.sort_modes.get(self.sort_mode) {
-            indices.sort_by(|left, right| {
-                let left_option = &self.options[*left];
-                let right_option = &self.options[*right];
-                let left_values = left_option
-                    .sort_values
-                    .get(self.sort_mode)
-                    .map_or(&[][..], Vec::as_slice);
-                let right_values = right_option
-                    .sort_values
-                    .get(self.sort_mode)
-                    .map_or(&[][..], Vec::as_slice);
-                let primary = (0..left_values.len().max(right_values.len()))
-                    .find_map(|key_index| {
-                        let left_value = left_values.get(key_index).map_or("", String::as_str);
-                        let right_value = right_values.get(key_index).map_or("", String::as_str);
-                        let ordering = match (left_value.is_empty(), right_value.is_empty()) {
-                            (true, false) => std::cmp::Ordering::Greater,
-                            (false, true) => std::cmp::Ordering::Less,
-                            _ if *descending => right_value.cmp(left_value),
-                            _ => left_value.cmp(right_value),
-                        };
-                        (ordering != std::cmp::Ordering::Equal).then_some(ordering)
-                    })
-                    .unwrap_or(std::cmp::Ordering::Equal);
-                primary
-                    .then_with(|| {
-                        category_position(&self.categories, left_option.category.as_deref()).cmp(
-                            &category_position(&self.categories, right_option.category.as_deref()),
-                        )
-                    })
-                    .then_with(|| {
-                        left_option
-                            .label
-                            .to_lowercase()
-                            .cmp(&right_option.label.to_lowercase())
-                    })
-            });
-        }
-        indices
-    }
-
-    fn clamp_cursor(&mut self) {
-        self.cursor = self
-            .cursor
-            .min(self.visible_indices().len().saturating_sub(1));
-    }
-}
-
-fn category_position(categories: &[(String, String)], category: Option<&str>) -> usize {
-    category
-        .and_then(|category| categories.iter().position(|(id, _)| id == category))
-        .unwrap_or(categories.len())
-}
-
-fn fuzzy_matches(haystack: &str, query: &str) -> bool {
-    let haystack = haystack.to_lowercase();
-    if haystack.contains(query) {
-        return true;
-    }
-    let mut characters = haystack.chars();
-    query
-        .chars()
-        .all(|needle| characters.by_ref().any(|candidate| candidate == needle))
-}
-
-impl From<PluginConfirmationRequest> for ConfirmationPromptState {
-    fn from(request: PluginConfirmationRequest) -> Self {
-        Self {
-            title: request.title,
-            message: request.message,
-            response: Some(request.response),
-        }
-    }
-}
-
-impl From<PluginSelectionRequest> for SelectionPromptState {
-    fn from(request: PluginSelectionRequest) -> Self {
-        Self {
-            title: request.title,
-            options: request.options,
-            selected: 0,
-            response: Some(request.response),
-        }
-    }
-}
-
-impl From<PluginMultiSelectionRequest> for MultiSelectionPromptState {
-    fn from(request: PluginMultiSelectionRequest) -> Self {
-        let mut active_categories = request
-            .request
-            .initial_active_categories
-            .into_iter()
-            .collect::<HashSet<_>>();
-        if active_categories.is_empty() {
-            active_categories.extend(request.request.categories.iter().map(|(id, _)| id.clone()));
-        }
-        let sort_mode = request
-            .request
-            .initial_sort_mode
-            .min(request.request.sort_modes.len().saturating_sub(1));
-        Self {
-            title: request.request.title,
-            options: request.request.options,
-            actions: request.request.actions,
-            categories: request.request.categories,
-            active_categories,
-            pending_categories: None,
-            sort_modes: request.request.sort_modes,
-            sort_mode,
-            selected: request.request.initially_selected.into_iter().collect(),
-            cursor: 0,
-            filter_cursor: 0,
-            query: request.request.initial_query,
-            focus: MultiSelectionFocus::List,
-            summary_lines: request.request.summary_lines,
-            pending_action: None,
-            response: Some(request.response),
-        }
-    }
 }
 
 impl From<ProjectTrustPromptRequest> for TrustPromptState {
@@ -1502,14 +1431,18 @@ fn render_tui_frame(
     app: &App,
     palette: UiPalette,
 ) -> Result<(ScreenTextSurface, u16), String> {
+    app.extension_surface.begin_frame();
     let completed = terminal
         .draw(|frame| draw(frame, app, palette))
         .map_err(|error| error.to_string())?;
     let areas = ui_areas(completed.area, app);
-    Ok((
+    let result = (
         ScreenTextSurface::capture(completed.buffer),
         areas.transcript.height,
-    ))
+    );
+    let paint = app.extension_surface.prepare_frame(completed.buffer);
+    paint.emit(terminal).map_err(|error| error.to_string())?;
+    Ok(result)
 }
 
 fn app_for_session(
@@ -1528,17 +1461,22 @@ async fn run_loop(
     terminal: &mut TerminalSession,
     session_handle: PiSession,
     initial_prompt: Option<SessionInput>,
-    palette: UiPalette,
+    mut palette: UiPalette,
     project_trust: ProjectTrustService,
     interactive_requests: InteractiveRequestReceivers,
     agent_dir: PathBuf,
 ) -> Result<(), String> {
     let InteractiveRequestReceivers {
         project_trust: mut trust_requests,
-        plugin_confirmation: mut confirmation_requests,
-        plugin_selection: mut selection_requests,
-        plugin_multi_selection: mut multi_selection_requests,
+        plugin_surface: mut surface_requests,
     } = interactive_requests;
+    if let Some(selected) = surface_requests
+        .theme
+        .as_deref()
+        .and_then(extensions::host::theme)
+    {
+        palette = selected;
+    }
     let mut session_changes = session_handle.subscribe();
     let mut session = session_handle.current();
     let mut subscription = session.subscribe();
@@ -1560,7 +1498,21 @@ async fn run_loop(
             effect_sender.clone(),
         );
     }
-    let mut events = EventStream::new();
+    let mut events = if let Some(startup) = surface_requests.take_startup() {
+        app.extension_surface = startup.surface;
+        let snapshot = surface_requests
+            .snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        app.input.set_text(snapshot.editor_text.clone());
+        app.tools_expanded = snapshot.tools_expanded;
+        startup.input
+    } else {
+        EventStream::new()
+    };
+    app.extension_surface
+        .set_images_enabled(surface_requests.show_images);
+
     let mut clipboard = SystemClipboard::default();
     let mut animation_tick = tokio::time::interval(ACTIVITY_ANIMATION_INTERVAL);
     animation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1581,7 +1533,27 @@ async fn run_loop(
                 redraw_pending = false;
                 continue;
             }
-            terminal_event = events.next() => {
+            (terminal_packet, forwarded) = async {
+                if let Some(event) = app.extension_surface.pop_forwarded() {
+                    (Some(Ok(input::InputPacket { event: Some(event), data: None })), true)
+                } else {
+                    (events.next().await, false)
+                }
+            }, if app.extension_surface.can_accept_input() => {
+                let snapshot = surface_requests.snapshot.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                let terminal_event = match terminal_packet {
+                    Some(Ok(packet)) => {
+                        if !forwarded && app.trust_prompt.is_none()
+                            && app.active_bottom_view().is_none()
+                            && app.extension_surface.input_packet(packet.event.clone(), packet.data.as_deref(), &snapshot) {
+                                redraw_pending = true;
+                                continue;
+                            }
+                        match packet.event { Some(event) => Some(Ok(event)), None => continue }
+                    }
+                    Some(Err(error)) => Some(Err(error)),
+                    None => None,
+                };
                 match terminal_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         let copied_selection = terminal.fullscreen
@@ -1620,9 +1592,7 @@ async fn run_loop(
                     }
                     Some(Ok(Event::Paste(text)))
                         if app.trust_prompt.is_none()
-                            && app.confirmation_prompt.is_none()
-                            && app.selection_prompt.is_none()
-                            && app.multi_selection_prompt.is_none() =>
+                            =>
                     {
                         app.screen_selection = None;
                         app.input.insert_str(text);
@@ -1654,9 +1624,6 @@ async fn run_loop(
                     let tools_expanded = app.tools_expanded;
                     let scroll_from_bottom = app.scroll_from_bottom;
                     let trust_prompt = app.trust_prompt.take();
-                    let confirmation_prompt = app.confirmation_prompt.take();
-                    let selection_prompt = app.selection_prompt.take();
-                    let multi_selection_prompt = app.multi_selection_prompt.take();
                     let mut recovered = app_for_session(&session, &snapshot, &agent_dir);
                     recovered.input = input;
                     recovered.input_history = input_history;
@@ -1665,10 +1632,8 @@ async fn run_loop(
                     recovered.tools_expanded = tools_expanded;
                     recovered.scroll_from_bottom = scroll_from_bottom;
                     recovered.trust_prompt = trust_prompt;
-                    recovered.confirmation_prompt = confirmation_prompt;
-                    recovered.selection_prompt = selection_prompt;
-                    recovered.multi_selection_prompt = multi_selection_prompt;
                     recovered.status = "Caught up after UI lag".to_string();
+                    recovered.extension_surface = std::mem::take(&mut app.extension_surface);
                     app = recovered;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => app.update(AppMessage::Quit),
@@ -1685,6 +1650,7 @@ async fn run_loop(
                     refreshed.epoch = epoch;
                     refreshed.tools_expanded = tools_expanded;
                     refreshed.status = status;
+                    refreshed.extension_surface = std::mem::take(&mut app.extension_surface);
                     app = refreshed;
                 } else if current_epoch {
                     app.sync_snapshot(&session.snapshot());
@@ -1700,18 +1666,133 @@ async fn run_loop(
                     }
                 }
             }
+            Some(request) = surface_requests.recv() => {
+                use extensions::Effect;
+                let snapshot = surface_requests
+                    .snapshot
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if let Some(effect) = app.extension_surface.handle_request(request, &snapshot) {
+                    match effect {
+                        Effect::ClearOwner { owner } => terminal.clear_owner(&owner)?,
+                        Effect::HostOperation { owner, id, operation } => {
+                            let result = extensions::host::execute(
+                                operation,
+                                terminal,
+                                &mut clipboard,
+                                session.runtime().cwd(),
+                                surface_requests.external_editor.as_deref(),
+                            )
+                            .await;
+                            app.extension_surface
+                                .finish_host_operation(&owner, id, result, &snapshot);
+                        }
+                        Effect::Product { owner, command } => match command {
+                            pi_plugin::UiProductCommand::AppAction { action } => {
+                                use pi_plugin::UiAppAction as A;
+                                let key = match action {
+                                    A::Clear => Some((KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                                    A::Interrupt => Some((KeyCode::Esc, KeyModifiers::NONE)),
+                                    A::Exit => Some((KeyCode::Char('d'), KeyModifiers::CONTROL)),
+                                    A::Paste => Some((KeyCode::Char('v'), KeyModifiers::CONTROL)),
+                                    A::FollowUp => Some((KeyCode::Enter, KeyModifiers::ALT)),
+                                    _ => None,
+                                };
+                                if let Some((code, modifiers)) = key {
+                                    app.extension_surface
+                                        .forward(Event::Key(KeyEvent::new(code, modifiers)));
+                                    continue;
+                                }
+                                match action {
+                                    A::Copy => {
+                                        if let Some(text) = app
+                                            .screen_selection
+                                            .and_then(|selection| surface.selected_text(selection))
+                                        {
+                                            let _ = clipboard.set_text(&text);
+                                        } else {
+                                            handle_copy_command(&mut app, &mut clipboard);
+                                        }
+                                    }
+                                    A::Dequeue => {
+                                        if let Ok(queue) = session.clear_queue() {
+                                            let text = queue
+                                                .steering
+                                                .into_iter()
+                                                .chain(queue.follow_up)
+                                                .chain([app.input.text()])
+                                                .filter(|text| !text.is_empty())
+                                                .collect::<Vec<_>>()
+                                                .join("\n\n");
+                                            app.input.set_text(text);
+                                        }
+                                    }
+                                    A::Tree | A::Fork | A::Resume => {
+                                        let draft = app.input.text();
+                                        let command = match action {
+                                            A::Tree => "/tree",
+                                            A::Fork => "/fork",
+                                            _ => "/resume",
+                                        };
+                                        activate_bottom_view_for_command(&mut app, command);
+                                        app.input.set_text(draft);
+                                    }
+                                    A::NewSession => {
+                                        app.input.set_text("/new");
+                                        submit_editor(
+                                            &mut app,
+                                            &session,
+                                            &session_handle,
+                                            &project_trust,
+                                            &effect_sender,
+                                            &mut clipboard,
+                                            EffectMode::Submit,
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            pi_plugin::UiProductCommand::EditorText { text, append } => {
+                                if !append {
+                                    app.input = ComposerInput::default();
+                                }
+                                app.input.insert_str(text);
+                            }
+                            pi_plugin::UiProductCommand::ToolsExpanded { expanded } => app.tools_expanded = expanded,
+                            pi_plugin::UiProductCommand::Title { title } => extensions::host::set_title(&title)?,
+                            pi_plugin::UiProductCommand::Theme { name } => {
+                                if let Some(next) = extensions::host::theme(&name) {
+                                    palette = next;
+                                } else {
+                                    app.status = format!("Unknown theme: {name}");
+                                }
+                            }
+                            pi_plugin::UiProductCommand::Progress { active } => {
+                                terminal.set_progress(&owner, active)?;
+                            }
+                            pi_plugin::UiProductCommand::ProgramStatus {
+                                state,
+                                text,
+                                progress,
+                            } => terminal.set_program_status(&owner, state, text, progress)?,
+                            pi_plugin::UiProductCommand::Submit { text } => {
+                                app.input = ComposerInput::default();
+                                app.input.insert_str(text);
+                                app.extension_surface.forward(Event::Key(KeyEvent::new(
+                                    KeyCode::Enter,
+                                    KeyModifiers::NONE,
+                                )));
+                            }
+                        },
+                    }
+                }
+            }
             Some(request) = trust_requests.recv() => {
                 app.update(AppMessage::TrustRequested(request));
             }
-            Some(request) = confirmation_requests.recv() => {
-                app.update(AppMessage::ConfirmationRequested(request));
-            }
-            Some(request) = selection_requests.recv() => {
-                app.update(AppMessage::SelectionRequested(request));
-            }
-            Some(request) = multi_selection_requests.recv() => {
-                app.update(AppMessage::MultiSelectionRequested(request));
-            }
+
+
             _ = animation_tick.tick(), if app.has_active_animation() => {
                 app.update(AppMessage::AnimationTick);
             }
@@ -1724,7 +1805,9 @@ async fn run_loop(
                 subscription = session.subscribe();
                 let next_epoch = app.epoch.saturating_add(1);
                 let tools_expanded = app.tools_expanded;
+                let extension_surface = std::mem::take(&mut app.extension_surface);
                 app = app_for_session(&session, &subscription.snapshot, &agent_dir);
+                app.extension_surface = extension_surface;
                 app.epoch = next_epoch;
                 app.tools_expanded = tools_expanded;
                 app.status = generation_status_override
@@ -1755,6 +1838,29 @@ async fn run_loop(
                 },
                 Err(error) => app.status = format!("Authentication error: {error}"),
             }
+        }
+        let size = terminal.terminal_mut().size().map_err(|e| e.to_string())?;
+        let snapshot = pi_plugin::UiSurfaceSnapshot {
+            columns: size.width,
+            rows: size.height,
+            editor_text: app.input.text(),
+            tools_expanded: app.tools_expanded,
+            is_running: app.is_running || app.awaiting_assistant,
+            transcript: if app.extension_surface.renders_transcript() {
+                extensions::transcript_snapshot(&app)
+            } else {
+                Vec::new()
+            },
+            transcript_width: size.width,
+            areas: view::extension_surface_areas(Rect::new(0, 0, size.width, size.height), &app),
+        };
+        let mut shared = surface_requests
+            .snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *shared != snapshot {
+            *shared = snapshot.clone();
+            app.extension_surface.refresh(&snapshot);
         }
         redraw_pending = true;
     }
@@ -1908,6 +2014,7 @@ fn session_entry_choices(
             SessionEntry::Compaction(_) => "Compaction summary".to_string(),
             SessionEntry::BranchSummary(_) => "Branch summary".to_string(),
             SessionEntry::Custom(change) => change.custom_type.clone(),
+            SessionEntry::ContextEdit(_) => "Context edited".to_string(),
         };
         let id = record.id;
         let choice = SessionEntryChoice {
@@ -1953,18 +2060,59 @@ fn custom_content_text(content: &pi_core::CustomMessageContent) -> String {
         pi_core::CustomMessageContent::Blocks(blocks) => user_text(blocks),
     }
 }
+fn thinking_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Thinking(block) => Some(block.thinking.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 fn push_history_entry(transcript: &mut Vec<TranscriptItem>, entry: &SessionEntry) {
     match entry {
         SessionEntry::Message(message) => push_history_message(transcript, &message.message),
         SessionEntry::CustomMessage(message) if message.display => {
-            transcript.push(TranscriptItem::Notice(format!(
-                "[{}]\n{}",
-                message.custom_type,
-                custom_content_text(&message.content)
-            )));
+            transcript.push(TranscriptItem::Custom {
+                entry: serde_json::to_value(message).unwrap_or_default(),
+                message: true,
+                fallback: format!(
+                    "[{}]\n{}",
+                    message.custom_type,
+                    custom_content_text(&message.content)
+                ),
+            });
         }
+        SessionEntry::Custom(entry) => transcript.push(TranscriptItem::Custom {
+            entry: serde_json::to_value(entry).unwrap_or_default(),
+            message: false,
+            fallback: String::new(),
+        }),
         _ => {}
+    }
+}
+fn push_history_record(transcript: &mut Vec<TranscriptItem>, record: &pi_session::SessionRecord) {
+    push_history_entry(transcript, &record.entry);
+    if let SessionEntry::CustomMessage(message) = &record.entry
+        && message.display
+        && let Some(TranscriptItem::Custom {
+            entry,
+            message: true,
+            ..
+        }) = transcript.last_mut()
+    {
+        *entry = serde_json::to_value(message.to_message(record.timestamp_ms)).unwrap_or_default();
+    }
+    if matches!(record.entry, SessionEntry::Custom(_))
+        && let Some(TranscriptItem::Custom {
+            entry,
+            message: false,
+            ..
+        }) = transcript.last_mut()
+    {
+        *entry = serde_json::to_value(record).unwrap_or_default();
     }
 }
 
@@ -1980,9 +2128,11 @@ fn push_history_message(transcript: &mut Vec<TranscriptItem>, message: &pi_sessi
             }
             Message::Assistant(assistant) => {
                 let text = assistant_text(standard).unwrap_or_default();
+                let thinking = thinking_text(&assistant.content);
                 let error = assistant_error(assistant);
-                if !text.trim().is_empty() || error.is_some() {
+                if !text.trim().is_empty() || !thinking.is_empty() || error.is_some() {
                     transcript.push(TranscriptItem::Assistant {
+                        thinking,
                         text,
                         streaming: false,
                         error,
@@ -1990,6 +2140,7 @@ fn push_history_message(transcript: &mut Vec<TranscriptItem>, message: &pi_sessi
                 }
                 for call in assistant.tool_calls() {
                     transcript.push(TranscriptItem::Tool {
+                        render_result: None,
                         id: call.id,
                         name: call.name,
                         detail: summarize_tool_args(&call.arguments),
@@ -2013,6 +2164,7 @@ fn push_history_message(transcript: &mut Vec<TranscriptItem>, message: &pi_sessi
                 if let Some(TranscriptItem::Tool {
                     name,
                     output,
+                    render_result,
                     state: current_state,
                     ..
                 }) = transcript.iter_mut().rev().find(|item| {
@@ -2020,9 +2172,11 @@ fn push_history_message(transcript: &mut Vec<TranscriptItem>, message: &pi_sessi
                 }) {
                     *name = result.tool_name.clone();
                     *output = Some(user_text(&result.content));
+                    *render_result = Some(serde_json::to_value(result).unwrap_or_default());
                     *current_state = state;
                 } else {
                     transcript.push(TranscriptItem::Tool {
+                        render_result: Some(serde_json::to_value(result).unwrap_or_default()),
                         id: result.tool_call_id.clone(),
                         name: result.tool_name.clone(),
                         detail: None,
@@ -2034,11 +2188,15 @@ fn push_history_message(transcript: &mut Vec<TranscriptItem>, message: &pi_sessi
             }
             Message::Custom(message) => {
                 if message.display {
-                    transcript.push(TranscriptItem::Notice(format!(
-                        "[{}]\n{}",
-                        message.custom_type,
-                        custom_content_text(&message.content)
-                    )));
+                    transcript.push(TranscriptItem::Custom {
+                        entry: serde_json::to_value(message).unwrap_or_default(),
+                        message: true,
+                        fallback: format!(
+                            "[{}]\n{}",
+                            message.custom_type,
+                            custom_content_text(&message.content)
+                        ),
+                    });
                 }
             }
         }
@@ -2128,14 +2286,17 @@ mod tests {
 
     fn demo_app() -> App {
         App {
+            extension_surface: extensions::ExtensionSurface::default(),
             transcript: vec![
                 TranscriptItem::User("把插件 reload 的边界再收紧一点。".to_string()),
                 TranscriptItem::Assistant {
+                    thinking: String::new(),
                     text: "我会保留正在运行的 session，并原子替换完整插件 generation。\n\n- 新请求看到新 generation\n- 当前请求继续使用旧 generation".to_string(),
                     streaming: false,
                     error: None,
                 },
                 TranscriptItem::Tool {
+                    render_result: None,
                     id: ToolCallId::new("call-read"),
                     name: "read".to_string(),
                     detail: Some("crates/pi-runtime/src/lib.rs".to_string()),
@@ -2183,6 +2344,7 @@ mod tests {
             streaming_assistant: None,
             awaiting_assistant: false,
             working_started_at: None,
+            tool_started_at: HashMap::new(),
             bash_line: None,
             provider: "openai-compatible".to_string(),
             model: "gpt-5.6-sol".to_string(),
@@ -2199,9 +2361,6 @@ mod tests {
             scroll_input: ScrollInputNormalizer::with_events_per_tick(1),
             screen_selection: None,
             trust_prompt: None,
-            confirmation_prompt: None,
-            selection_prompt: None,
-            multi_selection_prompt: None,
             pending_auth: None,
             epoch: 1,
             quit: false,
@@ -2395,179 +2554,6 @@ mod tests {
         assert!(help.lines().count() > 10);
     }
 
-    #[test]
-    fn generic_plugin_confirmation_renders_and_returns_the_decision() {
-        let mut app = demo_app();
-        let (response, decision) = tokio::sync::oneshot::channel();
-        app.update(AppMessage::ConfirmationRequested(
-            PluginConfirmationRequest {
-                title: "Import session?".to_string(),
-                message: "/tmp/session.jsonl\n\nThe current session will be replaced.".to_string(),
-                response,
-            },
-        ));
-
-        let confirmation = render_app(&app, 100, 20);
-        assert!(confirmation.contains("Import session?"));
-        assert!(confirmation.contains("/tmp/session.jsonl"));
-        assert!(confirmation.contains("enter confirm · esc cancel"));
-        assert!(handle_confirmation_prompt_key(
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-            &mut app,
-        ));
-        assert!(app.confirmation_prompt.is_none());
-        assert!(!decision.blocking_recv().unwrap());
-    }
-
-    #[test]
-    fn generic_plugin_multi_selection_searches_filters_sorts_and_returns_an_action() {
-        let mut app = demo_app();
-        let (response, decision) = tokio::sync::oneshot::channel();
-        app.update(AppMessage::MultiSelectionRequested(
-            PluginMultiSelectionRequest {
-                request: pi_plugin::UiMultiSelectRequest {
-                    title: "Pi Hermes Memory — Procedural Skills".to_string(),
-                    options: vec![
-                        UiMultiSelectOption {
-                            label: "[G] Alpha (~/.pi/skills/alpha/SKILL.md)".to_string(),
-                            search_text: "Alpha global".to_string(),
-                            category: Some("G".to_string()),
-                            detail_lines: vec![
-                                "Global alpha procedure".to_string(),
-                                "global:alpha".to_string(),
-                            ],
-                            read_only: false,
-                            sort_values: vec![
-                                vec!["2026-01-01".to_string()],
-                                vec!["2025-01-01".to_string()],
-                                vec!["alpha".to_string()],
-                            ],
-                        },
-                        UiMultiSelectOption {
-                            label: "[P] Beta (.pi/skills/beta/SKILL.md)".to_string(),
-                            search_text: "Beta project".to_string(),
-                            category: Some("P".to_string()),
-                            detail_lines: vec![
-                                "Project beta procedure".to_string(),
-                                "project:demo:beta".to_string(),
-                            ],
-                            read_only: false,
-                            sort_values: vec![
-                                vec!["2026-02-01".to_string()],
-                                vec!["2025-02-01".to_string()],
-                                vec!["beta".to_string()],
-                            ],
-                        },
-                    ],
-                    actions: vec![
-                        UiMultiSelectAction {
-                            id: "move-global".to_string(),
-                            key: 'g',
-                            label: "global".to_string(),
-                            enabled: true,
-                            confirmation: None,
-                        },
-                        UiMultiSelectAction {
-                            id: "delete".to_string(),
-                            key: 'd',
-                            label: "delete".to_string(),
-                            enabled: true,
-                            confirmation: Some(
-                                "Delete {count} selected skill{plural}? This cannot be undone. Press y to confirm or n to cancel.{read_only_note}"
-                                    .to_string(),
-                            ),
-                        },
-                    ],
-                    categories: vec![
-                        ("G".to_string(), "Global [G]".to_string()),
-                        ("P".to_string(), "Project [P]".to_string()),
-                    ],
-                    sort_modes: vec![
-                        ("Updated".to_string(), true),
-                        ("Created".to_string(), true),
-                        ("Name".to_string(), false),
-                    ],
-                    initially_selected: Vec::new(),
-                    initial_query: String::new(),
-                    initial_active_categories: Vec::new(),
-                    initial_sort_mode: 0,
-                    summary_lines: vec!["Select skills with space.".to_string()],
-                },
-                response,
-            },
-        ));
-
-        let initial = render_app(&app, 110, 24);
-        assert!(initial.contains("2 visible · 2 total · 0 selected · sort: Updated"));
-        assert!(initial.contains("[P] Beta"));
-        assert!(initial.contains("Project beta procedure"));
-        assert!(handle_multi_selection_prompt_key(
-            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE),
-            &mut app,
-        ));
-        assert!(handle_multi_selection_prompt_key(
-            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
-            &mut app,
-        ));
-        assert!(handle_multi_selection_prompt_key(
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &mut app,
-        ));
-        let filtered = render_app(&app, 110, 24);
-        assert!(filtered.contains("1 visible · 2 total · 0 selected"));
-        assert!(filtered.contains("filters: [P]"));
-        assert!(handle_multi_selection_prompt_key(
-            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
-            &mut app,
-        ));
-        assert!(handle_multi_selection_prompt_key(
-            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
-            &mut app,
-        ));
-        assert!(handle_multi_selection_prompt_key(
-            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
-            &mut app,
-        ));
-        assert!(handle_multi_selection_prompt_key(
-            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
-            &mut app,
-        ));
-        assert!(handle_multi_selection_prompt_key(
-            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
-            &mut app,
-        ));
-        assert!(handle_multi_selection_prompt_key(
-            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
-            &mut app,
-        ));
-        let searched = render_app(&app, 110, 24);
-        assert!(searched.contains("1 visible · 2 total · 1 selected"));
-        assert!(handle_multi_selection_prompt_key(
-            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
-            &mut app,
-        ));
-        assert!(handle_multi_selection_prompt_key(
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
-            &mut app,
-        ));
-        assert!(render_app(&app, 110, 24).contains("Confirm delete: y yes"));
-        assert!(handle_multi_selection_prompt_key(
-            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
-            &mut app,
-        ));
-        assert!(app.multi_selection_prompt.is_none());
-        assert_eq!(
-            decision.blocking_recv().unwrap(),
-            Some(UiMultiSelectResponse {
-                selected: vec![1],
-                action_id: "delete".to_string(),
-                query: "bet".to_string(),
-                active_categories: vec!["P".to_string()],
-                sort_mode: 1,
-            })
-        );
-    }
-
     #[tokio::test]
     async fn image_attachments_reach_provider_and_storage_in_each_frontend() {
         use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
@@ -2720,6 +2706,7 @@ mod tests {
     fn copy_command_copies_the_last_completed_assistant_message() {
         let mut app = demo_app();
         app.transcript.push(TranscriptItem::Assistant {
+            thinking: String::new(),
             text: "latest answer".to_string(),
             streaming: false,
             error: None,
@@ -2769,6 +2756,7 @@ mod tests {
     #[test]
     fn completed_tool_output_is_collapsed_by_default() {
         let items = vec![TranscriptItem::Tool {
+            render_result: None,
             id: ToolCallId::new("call-collapsed"),
             name: "read".to_string(),
             detail: Some("notes.txt".to_string()),
@@ -2792,6 +2780,7 @@ mod tests {
     #[test]
     fn expanded_tool_output_shows_complete_input_and_output() {
         let item = TranscriptItem::Tool {
+            render_result: None,
             id: ToolCallId::new("call-expanded"),
             name: "read".to_string(),
             detail: Some("notes.txt".to_string()),
@@ -2841,6 +2830,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, (state, _))| TranscriptItem::Tool {
+                render_result: None,
                 id: ToolCallId::new(format!("call-{index}")),
                 name: format!("tool-{index}"),
                 detail: None,
@@ -2870,11 +2860,13 @@ mod tests {
         let items = vec![
             TranscriptItem::User("user".to_string()),
             TranscriptItem::Assistant {
+                thinking: String::new(),
                 text: "assistant".to_string(),
                 streaming: false,
                 error: None,
             },
             TranscriptItem::Tool {
+                render_result: None,
                 id: ToolCallId::new("call-spacing"),
                 name: "read".to_string(),
                 detail: None,
@@ -3251,6 +3243,7 @@ mod tests {
     fn provider_stream_replaces_the_local_working_placeholder_without_duplication() {
         let mut app = demo_app();
         app.transcript = vec![TranscriptItem::Assistant {
+            thinking: String::new(),
             text: String::new(),
             streaming: true,
             error: None,
@@ -3415,6 +3408,7 @@ mod tests {
         let mut app = demo_app();
         for item in [
             TranscriptItem::Assistant {
+                thinking: String::new(),
                 text: "before\x1b[?1049lafter".to_string(),
                 streaming: false,
                 error: None,
@@ -3511,6 +3505,8 @@ mod tests {
         assert!(raw_mode_disabled.get());
         assert!(contains_bytes(&output, b"\x1b[?1049l"));
         assert!(contains_bytes(&output, b"\x1b[?25h"));
+        assert!(contains_bytes(&output, b"\x1b]9;4;0;0\x07"));
+        assert!(contains_bytes(&output, b"\x1b]7501;state=clear\x1b\\"));
     }
 
     #[test]
@@ -3586,6 +3582,7 @@ mod tests {
         let mut app = demo_app();
         app.transcript = (0..20)
             .map(|index| TranscriptItem::Assistant {
+                thinking: String::new(),
                 text: format!("message-{index:02}"),
                 streaming: false,
                 error: None,
@@ -3612,6 +3609,7 @@ mod tests {
     fn mouse_drag_release_requests_copy_of_visible_assistant_text() {
         let mut app = demo_app();
         app.transcript = vec![TranscriptItem::Assistant {
+            thinking: String::new(),
             text: "copy me".to_string(),
             streaming: false,
             error: None,
@@ -3704,6 +3702,7 @@ mod tests {
     fn dragged_screen_selection_is_visibly_highlighted() {
         let mut app = demo_app();
         app.transcript = vec![TranscriptItem::Assistant {
+            thinking: String::new(),
             text: "highlight me".to_string(),
             streaming: false,
             error: None,
@@ -3906,6 +3905,7 @@ mod tests {
         let mut app = demo_app();
         app.transcript = (0..20)
             .map(|index| TranscriptItem::Assistant {
+                thinking: String::new(),
                 text: format!("message-{index:02}"),
                 streaming: false,
                 error: None,
@@ -4033,6 +4033,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = demo_app();
         app.transcript = vec![TranscriptItem::Assistant {
+            thinking: String::new(),
             text: "answer".to_string(),
             streaming: false,
             error: None,
@@ -4058,6 +4059,7 @@ mod tests {
         app.transcript = vec![
             TranscriptItem::User("question".to_string()),
             TranscriptItem::Assistant {
+                thinking: String::new(),
                 text: "answer".to_string(),
                 streaming: false,
                 error: None,
@@ -4088,6 +4090,7 @@ mod tests {
         app.transcript = vec![
             TranscriptItem::User("first request".to_string()),
             TranscriptItem::Assistant {
+                thinking: String::new(),
                 text: "first answer".to_string(),
                 streaming: false,
                 error: None,
@@ -4150,6 +4153,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = demo_app();
         app.transcript = vec![TranscriptItem::Assistant {
+            thinking: String::new(),
             text: "```rust\nfn main() {}\n```".to_string(),
             streaming: false,
             error: None,
@@ -4195,6 +4199,7 @@ mod tests {
         app.transcript = vec![
             TranscriptItem::User("aligned request".to_string()),
             TranscriptItem::Assistant {
+                thinking: String::new(),
                 text: "response".to_string(),
                 streaming: false,
                 error: None,
@@ -4358,6 +4363,7 @@ mod tests {
         app.transcript = vec![
             TranscriptItem::User("hi".to_string()),
             TranscriptItem::Assistant {
+                thinking: String::new(),
                 text: "Hi! How can I help?".to_string(),
                 streaming: false,
                 error: None,
@@ -4378,6 +4384,7 @@ mod tests {
     fn composer_follows_short_transcript_instead_of_sticking_to_the_bottom() {
         let mut app = demo_app();
         app.transcript = vec![TranscriptItem::Assistant {
+            thinking: String::new(),
             text: "Short answer".to_string(),
             streaming: false,
             error: None,
@@ -4400,6 +4407,7 @@ mod tests {
         app.queue = QueueSnapshot::default();
         app.transcript = (0..240)
             .map(|index| TranscriptItem::Assistant {
+                thinking: String::new(),
                 text: format!(
                     "## Response {index}\n\n- first item with `inline code`\n- second item\n\n```rust\nfn response_{index}() {{}}\n```"
                 ),
@@ -4784,6 +4792,7 @@ mod tests {
             },
         });
         let compaction = CompactionEntry {
+            retained_entry_ids: Vec::new(),
             summary: "summary".to_string(),
             retained_tail: Vec::new(),
             tokens_before: 1_000,
@@ -4858,6 +4867,7 @@ mod tests {
         }))
         .unwrap();
         log.append(SessionEntry::Compaction(CompactionEntry {
+            retained_entry_ids: Vec::new(),
             summary: "summary".to_string(),
             retained_tail: vec![assistant.clone().into()],
             tokens_before: 10_000,
@@ -5169,5 +5179,32 @@ mod tests {
         assert!(UnicodeWidthStr::width(start.as_str()) <= 12);
         assert!(end.ends_with('…'));
         assert!(start.starts_with('…'));
+    }
+    #[test]
+    fn extension_widgets_preserve_composer_completion_and_transcript_layout() {
+        use pi_plugin::{UiNode, UiRegion, UiRegionPlacement};
+        let mut app = demo_app();
+        for placement in [
+            UiRegionPlacement::AboveEditor,
+            UiRegionPlacement::BelowEditor,
+        ] {
+            app.extension_surface.push_region(UiRegion {
+                id: format!("{placement:?}"),
+                placement,
+                root: UiNode::text("widget", "widget"),
+                overlay: None,
+            });
+        }
+        app.input.insert_str("/model");
+        let areas = ui_areas(Rect::new(0, 0, 80, 30), &app);
+        assert!(areas.transcript.bottom() <= areas.above_editor.y);
+        assert!(areas.above_editor.bottom() <= areas.context.y);
+        assert!(areas.context.bottom() <= areas.composer.y);
+        assert!(areas.composer.bottom() <= areas.below_editor.y);
+        app.push_bottom_view(BottomPaneView::Model);
+        assert_eq!(
+            ui_areas(Rect::new(0, 0, 80, 30), &app).above_editor.height,
+            0
+        );
     }
 }

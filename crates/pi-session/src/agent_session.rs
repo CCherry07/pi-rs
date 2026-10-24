@@ -1,3 +1,4 @@
+mod boundary;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock, Weak};
@@ -179,6 +180,10 @@ pub struct AgentSession {
     shell_executor: Option<Arc<dyn SessionShellExecutor>>,
     compaction_policy: Arc<dyn SessionCompactionPolicy>,
     initial_model_fallback_message: std::sync::Mutex<Option<String>>,
+    boundary_continue: AtomicBool,
+    boundary_abort: AtomicBool,
+    boundary_cancellation: std::sync::Mutex<Option<AbortHandle>>,
+    boundary_stopped: AtomicBool,
 }
 
 struct SessionTurnControl {
@@ -199,6 +204,43 @@ struct CompletedCompaction {
 
 #[async_trait::async_trait]
 impl AgentTurnControl for SessionTurnControl {
+    async fn dispatch_turn_end(
+        &self,
+        run_id: pi_core::RunId,
+        event: pi_plugin::TurnEndEvent,
+        signal: pi_core::AbortSignal,
+    ) -> Result<bool, AgentTurnControlError> {
+        let Some(session) = self.session.upgrade() else {
+            return Ok(false);
+        };
+        let outcome = match event.message.stop_reason {
+            StopReason::Aborted => pi_plugin::AgentActivityOutcome::Aborted,
+            StopReason::Error => pi_plugin::AgentActivityOutcome::Error,
+            _ => pi_plugin::AgentActivityOutcome::Completed,
+        };
+        let resume = session
+            .run_boundary(&run_id, Some(event), outcome, &signal)
+            .await
+            .map_err(|error| AgentTurnControlError(error.to_string()))?;
+        session.boundary_continue.store(resume, Ordering::Release);
+        Ok(true)
+    }
+    async fn should_continue_after_turn(
+        &self,
+        turn: AgentTurnContext,
+        signal: pi_core::AbortSignal,
+    ) -> Result<bool, AgentTurnControlError> {
+        let requested = self
+            .session
+            .upgrade()
+            .is_some_and(|session| session.boundary_continue.swap(false, Ordering::AcqRel));
+        Ok(self
+            .previous
+            .should_continue_after_turn(turn, signal)
+            .await?
+            || requested)
+    }
+
     async fn prepare_next_turn(
         &self,
         mut turn: AgentTurnContext,
@@ -207,7 +249,24 @@ impl AgentTurnControl for SessionTurnControl {
         let Some(session) = self.session.upgrade() else {
             return self.previous.prepare_next_turn(turn, signal).await;
         };
-        let compacted_context = session.compact_before_next_turn(&turn).await;
+        let edited_context = if session.in_run_compaction_reconcile.load(Ordering::Acquire) {
+            let mut context = turn.context.as_ref().clone();
+            context.messages = session
+                .log
+                .context_with_options(&session.context_options)
+                .map_err(|error| AgentTurnControlError(error.to_string()))?
+                .runtime_messages();
+            Some(context)
+        } else {
+            None
+        };
+        if let Some(context) = &edited_context {
+            turn.context = Arc::new(context.clone());
+        }
+        let compacted_context = session
+            .compact_before_next_turn(&turn)
+            .await
+            .or(edited_context);
         if let Some(context) = &compacted_context {
             turn.context = Arc::new(context.clone());
         }
@@ -233,7 +292,14 @@ impl AgentTurnControl for SessionTurnControl {
         context: AgentTurnContext,
         signal: pi_core::AbortSignal,
     ) -> Result<bool, AgentTurnControlError> {
-        self.previous.should_stop_after_turn(context, signal).await
+        let stopped = self
+            .previous
+            .should_stop_after_turn(context, signal)
+            .await?;
+        if stopped && let Some(session) = self.session.upgrade() {
+            session.boundary_stopped.store(true, Ordering::Release);
+        }
+        Ok(stopped)
     }
 }
 
@@ -566,6 +632,10 @@ impl AgentSession {
             compaction_policy: options
                 .compaction_policy
                 .unwrap_or_else(|| Arc::new(GenericCompactionPolicy)),
+            boundary_continue: AtomicBool::new(false),
+            boundary_abort: AtomicBool::new(false),
+            boundary_cancellation: std::sync::Mutex::new(None),
+            boundary_stopped: AtomicBool::new(false),
             initial_model_fallback_message: std::sync::Mutex::new(
                 options.initial_model_fallback_message,
             ),
@@ -624,7 +694,10 @@ impl AgentSession {
             return Ok(());
         }
         let context = self.log.context_with_options(&self.context_options)?;
-        restore_runtime_context(&self.runtime, &context)?;
+        self.runtime
+            .agent()
+            .replace_context_messages(context.runtime_messages())
+            .map_err(|error| SessionError::Runtime(error.to_string()))?;
         self.in_run_compaction_reconcile
             .store(false, Ordering::Release);
         Ok(())
@@ -900,6 +973,9 @@ impl AgentSession {
         }
         let _operation = self.operation_gate.lock().await;
         self.ensure_open()?;
+        self.boundary_abort.store(false, Ordering::Release);
+        self.boundary_stopped.store(false, Ordering::Release);
+        self.boundary_continue.store(false, Ordering::Release);
         self.maybe_threshold_compact_locked().await;
         let prepared = match self
             .runtime
@@ -1106,6 +1182,15 @@ impl AgentSession {
     /// Requests cancellation without waiting for the operation gate. Any
     /// undelivered queue items are retained for [`Self::clear_queue`].
     pub fn abort(&self) {
+        self.boundary_abort.store(true, Ordering::Release);
+        if let Some(abort) = self
+            .boundary_cancellation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            abort.abort();
+        }
         self.abort_retry();
         self.abort_compaction();
         self.runtime.abort();
@@ -1554,8 +1639,11 @@ impl AgentSession {
     ) -> Result<AgentLoopOutcome, SessionError> {
         let _operation = self.operation_gate.lock().await;
         self.ensure_open()?;
+        self.boundary_abort.store(false, Ordering::Release);
+        self.boundary_stopped.store(false, Ordering::Release);
+        self.boundary_continue.store(false, Ordering::Release);
         self.maybe_threshold_compact_locked().await;
-        let recorded = match input.into() {
+        let (recorded, run_id) = match input.into() {
             PromptInput::Text(text) => match self.runtime.prepare_text_submission(text).await? {
                 PreparedTextSubmission::Handled => {
                     return Err(SessionError::Runtime(
@@ -1563,41 +1651,37 @@ impl AgentSession {
                     ));
                 }
                 PreparedTextSubmission::Agent(prepared) => {
-                    prepared.run().await.map_err(SessionError::from)
+                    let run_id = self.begin_run(
+                        prepared.generation(),
+                        prepared.display_text(),
+                        prepared.text(),
+                        prepared.images(),
+                    )?;
+                    (prepared.run().await, run_id)
                 }
             },
             PromptInput::Messages(messages) => {
                 let prepared = self.runtime.prepare_message_submission(messages).await;
                 let run_id = self.begin_message_run(prepared.generation(), prepared.messages())?;
-                let mut result = match prepared.run().await {
-                    Ok(recorded) => self.finish_prompt_locked(recorded).await,
-                    Err(error) => Err(SessionError::from(error)),
-                };
-                if let Err(error) = self.reconcile_in_run_compaction()
-                    && result.is_ok()
-                {
-                    result = Err(error);
-                }
-                let finish_result = self.finish_run(&run_id, &result);
-                self.emit_agent_settled().await;
-                return match (result, finish_result) {
-                    (Ok(outcome), Ok(())) => Ok(outcome),
-                    (Err(error), _) => Err(error),
-                    (Ok(_), Err(error)) => Err(error),
-                };
+                (prepared.run().await, run_id)
             }
         };
         let mut result = match recorded {
             Ok(recorded) => self.finish_prompt_locked(recorded).await,
-            Err(error) => Err(error),
+            Err(error) => Err(SessionError::from(error)),
         };
         if let Err(error) = self.reconcile_in_run_compaction()
             && result.is_ok()
         {
             result = Err(error);
         }
+        let finish_result = self.finish_run(&run_id, &result);
         self.emit_agent_settled().await;
-        result
+        match (result, finish_result) {
+            (Ok(outcome), Ok(())) => Ok(outcome),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     /// Runs a protocol-neutral, already-structured message batch.
@@ -1626,8 +1710,11 @@ impl AgentSession {
         let mut outcome = outcome;
         let mut retry_attempt = 0_u32;
         let mut overflow_recovery_attempted = false;
+        let mut continued_messages = Vec::new();
         loop {
-            if self.is_overflow_outcome(&outcome) {
+            self.reconcile_in_run_compaction()?;
+            outcome.final_context.messages = self.runtime.agent().state().messages.clone();
+            if !self.boundary_abort.load(Ordering::Acquire) && self.is_overflow_outcome(&outcome) {
                 if retry_attempt > 0 {
                     self.events.publish_auto_retry_end(
                         false,
@@ -1649,17 +1736,17 @@ impl AgentSession {
                         )
                         .await
                         .is_ok()
-                        && let Ok(retried) = self.runtime.continue_run().await
+                        && let Ok(retried) = self.runtime.continue_activity().await
                     {
                         outcome = retried;
                         continue;
                     }
                 }
-                return Ok(outcome);
             }
 
             let retry_settings = self.retry_settings();
-            if retry_settings.enabled
+            if !self.boundary_abort.load(Ordering::Acquire)
+                && retry_settings.enabled
                 && retry_attempt < retry_settings.max_retries
                 && is_retryable_assistant_outcome(&outcome)
             {
@@ -1674,19 +1761,20 @@ impl AgentSession {
                         .unwrap_or("Unknown error")
                         .to_string(),
                 );
-                self.runtime
-                    .agent()
-                    .remove_last_failed_assistant()
-                    .map_err(|error| SessionError::Runtime(error.to_string()))?;
+                self.omit_retry_attempt(&outcome)?;
                 if !self.wait_for_retry_delay(delay_ms).await {
                     self.events.publish_auto_retry_end(
                         false,
                         retry_attempt,
                         Some("Retry cancelled".to_string()),
                     );
+                    continued_messages.append(&mut outcome.new_messages);
+                    outcome.new_messages = continued_messages;
+                    // Cancellation stops the scheduled retry; the last provider attempt keeps
+                    // its error outcome because no aborted response was started.
                     return Ok(outcome);
                 }
-                match self.runtime.continue_run().await {
+                match self.runtime.continue_activity().await {
                     Ok(retried) => {
                         outcome = retried;
                         continue;
@@ -1708,8 +1796,64 @@ impl AgentSession {
                     retry_attempt,
                     assistant_error_message(&outcome).map(ToOwned::to_owned),
                 );
+                retry_attempt = 0;
+                self.retry_attempt.store(0, Ordering::Release);
             }
             self.maybe_threshold_compact_locked().await;
+            if !self.boundary_abort.load(Ordering::Acquire)
+                && outcome.stop != AgentLoopStop::Aborted
+            {
+                if !self.boundary_stopped.load(Ordering::Acquire)
+                    && self.runtime.agent().has_queued_messages()
+                {
+                    continued_messages.append(&mut outcome.new_messages);
+                    outcome = self.runtime.continue_activity().await?;
+                    continue;
+                }
+                let (abort, signal) = AbortHandle::new();
+                *self
+                    .boundary_cancellation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(abort.clone());
+                if self.boundary_abort.load(Ordering::Acquire) {
+                    abort.abort();
+                }
+                let activity = match outcome.stop {
+                    AgentLoopStop::ProviderError | AgentLoopStop::MaxToolIterations => {
+                        pi_plugin::AgentActivityOutcome::Error
+                    }
+                    _ => pi_plugin::AgentActivityOutcome::Completed,
+                };
+                let run_id = pi_core::RunId::new(
+                    self.activity
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .active_run
+                        .as_ref()
+                        .map_or_else(|| self.log.header().id.clone(), |run| run.id.clone()),
+                );
+                let continuation = self.run_boundary(&run_id, None, activity, &signal).await;
+                self.boundary_cancellation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if continuation?
+                    && !self.boundary_abort.load(Ordering::Acquire)
+                    && !self.boundary_stopped.load(Ordering::Acquire)
+                {
+                    self.reconcile_in_run_compaction()?;
+                    continued_messages.append(&mut outcome.new_messages);
+                    outcome = self.runtime.continue_activity().await?;
+                    continue;
+                }
+            }
+            self.reconcile_in_run_compaction()?;
+            outcome.final_context.messages = self.runtime.agent().state().messages.clone();
+            if self.boundary_abort.load(Ordering::Acquire) {
+                outcome.stop = AgentLoopStop::Aborted;
+            }
+            continued_messages.append(&mut outcome.new_messages);
+            outcome.new_messages = continued_messages;
             return Ok(outcome);
         }
     }
@@ -1719,7 +1863,10 @@ impl AgentSession {
         *self
             .retry_abort
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(abort);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(abort.clone());
+        if self.boundary_abort.load(Ordering::Acquire) {
+            abort.abort();
+        }
         let cancelled = tokio::select! {
             () = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => false,
             () = signal.wait() => true,
@@ -2059,6 +2206,11 @@ impl AgentSession {
             .map(|replacement| compaction = replacement)
             .is_some();
 
+        crate::context::annotate_compaction(
+            &mut compaction,
+            &self.log.branch_entries()?,
+            &self.context_options,
+        );
         let result: Result<SessionRecord, SessionError> = (|| {
             let record = self
                 .log
@@ -2185,7 +2337,8 @@ impl AgentSession {
         };
         message.stop_reason == StopReason::Length
             && should_compact(
-                estimate_context_tokens(
+                estimate_session_context_tokens(
+                    &self.log.branch_entries().unwrap_or_default(),
                     &outcome
                         .final_context
                         .messages
@@ -2296,7 +2449,7 @@ impl AgentSession {
             }),
         };
         self.clear_compaction_abort();
-        let compaction = match generated {
+        let mut compaction = match generated {
             Ok(compaction) => compaction,
             Err(error) => {
                 self.plugin_driver()
@@ -2322,13 +2475,42 @@ impl AgentSession {
             }
         };
 
+        if reason != crate::CompactionReason::Manual {
+            for message in crate::compaction::unsent_context_inputs(
+                &preparation_entries,
+                &self.context_options,
+            ) {
+                if !compaction.retained_tail.contains(&message) {
+                    compaction.retained_tail.push(message);
+                }
+            }
+        }
+        crate::context::annotate_compaction(
+            &mut compaction,
+            &preparation_entries,
+            &self.context_options,
+        );
         let persisted: Result<(SessionRecord, SessionContext), SessionError> = (|| {
             let record = self
                 .log
                 .append_session_record(SessionEntry::Compaction(compaction.clone()))?;
             let context = self.log.context_with_options(&self.context_options)?;
             if activation == RuntimeContextActivation::Immediate {
-                restore_runtime_context(&self.runtime, &context)?;
+                // Compaction during an activity must preserve its prompt and pending queues.
+                if self
+                    .activity
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .active_run
+                    .is_some()
+                {
+                    self.runtime
+                        .agent()
+                        .replace_context_messages(context.runtime_messages())
+                        .map_err(|error| SessionError::Runtime(error.to_string()))?;
+                } else {
+                    restore_runtime_context(&self.runtime, &context)?;
+                }
             }
             Ok((record, context))
         })();
@@ -4552,6 +4734,7 @@ mod tests {
                 return Ok(None);
             }
             let compaction = CompactionEntry {
+                retained_entry_ids: Vec::new(),
                 summary: "extension summary".to_string(),
                 retained_tail: event.preparation.retained_tail.clone(),
                 tokens_before: event.preparation.tokens_before,
@@ -5078,6 +5261,7 @@ mod tests {
             .unwrap();
         session
             .append_compaction(CompactionEntry {
+                retained_entry_ids: Vec::new(),
                 summary: "short".to_string(),
                 retained_tail: vec![Message::User(UserMessage::text("retained", 2)).into()],
                 tokens_before: 100,
@@ -5124,6 +5308,7 @@ mod tests {
 
         session
             .append_compaction(CompactionEntry {
+                retained_entry_ids: Vec::new(),
                 summary: "default summary".to_string(),
                 retained_tail: Vec::new(),
                 tokens_before: 10,

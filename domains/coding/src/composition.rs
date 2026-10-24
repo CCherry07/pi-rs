@@ -247,7 +247,7 @@ impl GenerationComponents<'_> {
                     .map(str::to_string)
                     .collect(),
                 cwd: config.cwd.clone(),
-                max_tool_iterations: 100,
+                max_tool_iterations: Some(100),
                 steering_mode: settings_queue_mode(config.runtime_settings.steering_mode),
                 follow_up_mode: settings_queue_mode(config.runtime_settings.follow_up_mode),
                 ..AgentOptions::default()

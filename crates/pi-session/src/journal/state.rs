@@ -200,6 +200,10 @@ impl SessionState {
                 record.id
             )));
         }
+        if let SessionEntry::ContextEdit(edit) = &record.entry {
+            let branch = self.branch_entries_at(record.parent_id.as_deref())?;
+            crate::context::validate_context_edit(edit, &branch)?;
+        }
         Ok(())
     }
 
@@ -225,6 +229,40 @@ impl SessionState {
             return self.validate_mutation(mutation);
         }
 
+        for mutation in mutations {
+            if let SessionMutation::Entry { record, .. } = mutation
+                && let SessionEntry::ContextEdit(edit) = &record.entry
+            {
+                let mut path = Vec::new();
+                let mut current = record.parent_id.as_deref();
+                while let Some(id) = current {
+                    let candidate = mutations
+                        .iter()
+                        .filter_map(|item| match item {
+                            SessionMutation::Entry {
+                                record: candidate, ..
+                            } if candidate.seq < record.seq => Some(candidate),
+                            _ => None,
+                        })
+                        .find(|candidate| candidate.id == id)
+                        .or_else(|| {
+                            self.entries_by_id
+                                .get(id)
+                                .map(|index| &self.entries[*index])
+                        })
+                        .ok_or_else(|| SessionError::NotFound(id.into()))?;
+                    path.push(candidate.clone());
+                    current = candidate.parent_id.as_deref();
+                    if path.len() > self.entries.len() + mutations.len() {
+                        return Err(SessionError::InvalidEntry(
+                            "cyclic context edit ancestry".into(),
+                        ));
+                    }
+                }
+                path.reverse();
+                crate::context::validate_context_edit(edit, &path)?;
+            }
+        }
         let mut next_sequence = self.next_sequence();
         let mut transaction_ids = HashSet::with_capacity(mutations.len());
         let mut transaction_entry_ids = HashSet::with_capacity(mutations.len());

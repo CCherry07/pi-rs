@@ -307,3 +307,65 @@ test("runs a PackageManager command through the Node/NAPI launcher", async (t) =
   ], root);
   assert.ok(stdout.includes(extension), "the configured local package must be listed");
 });
+
+test("context edits and both continuation boundaries cross Node/NAPI into provider requests", { timeout: 35_000 }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-boundary-napi-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const agentDirectory = join(root, "agent");
+  await mkdir(agentDirectory);
+  const extension = join(root, "boundaries.ts");
+  await writeFile(extension, `
+    export default function (pi) {
+      let continued = false;
+      let verified = false;
+      pi.on("before_agent_start", () => { continued = false; verified = false; });
+      pi.on("turn_end", event => {
+        if (continued) return;
+        continued = true;
+        if (!event.messageEntryId) throw new Error("missing persisted ID");
+        return { entries: [...event.entries,
+          { type:"context_edit", targetId:event.messageEntryId, replacement:{content:"edited first response"} },
+          { type:"custom_message", customType:"next", content:"boundary continuation", display:false }
+        ], continue:true };
+      });
+      pi.on("turn_end", event => {
+        if (event.entries.length && !JSON.stringify(event.context.contextMessages).includes("edited first response")) throw new Error("stale preview");
+        if (event.entries.length) process.stdout.write("boundary-preview-verified\\n");
+      });
+      pi.on("agent_before_settle", event => {
+        if (verified) return;
+        verified = true;
+        return { entries:[...event.entries, {type:"custom_message",customType:"verify",content:"settlement verification",display:false}],continue:true };
+      });
+    }
+  `);
+  const requests: Array<{ messages: Array<Record<string, unknown>> }> = [];
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", chunk => { body += chunk; });
+    request.on("end", () => {
+      requests.push(JSON.parse(body));
+      sendText(response, ["original first response", "second response", "verified response"][requests.length - 1] ?? "unexpected extra response");
+    });
+  });
+  await new Promise<void>((resolvePromise, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolvePromise);
+  });
+  t.after(() => server.close());
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const { stdout } = await runNativeSmoke([
+    "--cwd", root, "--agent-dir", agentDirectory, "--no-extensions", "--extension", extension,
+    "--no-approve", "--provider", "openai-compatible", "--model", "gpt-4o-mini",
+    "--base-url", `http://127.0.0.1:${address.port}/v1`, "--print", "start boundary check",
+  ], root);
+  assert.equal(requests.length, 3);
+  assert.match(JSON.stringify(requests[1]), /edited first response/);
+  assert.doesNotMatch(JSON.stringify(requests[1]), /original first response/);
+  assert.match(JSON.stringify(requests[1]), /boundary continuation/);
+  assert.match(JSON.stringify(requests[2]), /settlement verification/);
+  assert.match(stdout, /boundary-preview-verified/);
+  assert.match(stdout, /verified response/);
+});

@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 pub enum ExtensionContextQuery {
     Mode,
     HasUi,
+    UiSnapshot,
     Cwd,
     Workspace,
     IsProjectTrusted,
@@ -63,6 +64,10 @@ pub enum ExtensionContextQuery {
     rename_all_fields = "camelCase"
 )]
 pub enum ExtensionContextNotification {
+    UiCommand {
+        owner: String,
+        command: pi_plugin::UiCommand,
+    },
     Abort,
     Compact {
         #[serde(default)]
@@ -119,6 +124,9 @@ pub enum ExtensionContextNotification {
     rename_all_fields = "camelCase"
 )]
 pub enum ExtensionContextRequest {
+    UiExchange {
+        frame: pi_plugin::UiSurfaceFrame,
+    },
     WaitForIdle,
     SendMessage {
         message: CustomMessageInput,
@@ -168,6 +176,7 @@ pub fn execute_context_query(
     match query {
         ExtensionContextQuery::Mode => value(access.mode()?),
         ExtensionContextQuery::HasUi => value(access.has_ui()?),
+        ExtensionContextQuery::UiSnapshot => value(access.ui_surface_snapshot()?),
         ExtensionContextQuery::Cwd => value(access.cwd()?),
         ExtensionContextQuery::Workspace => value(
             context
@@ -244,6 +253,9 @@ pub fn execute_context_notification(
 ) -> Result<(), PluginContextError> {
     let access = context.access_for_adapter()?;
     match notification {
+        ExtensionContextNotification::UiCommand { owner, command } => {
+            access.ui_command(owner, command)
+        }
         ExtensionContextNotification::Abort => access.abort(),
         ExtensionContextNotification::Compact {
             custom_instructions,
@@ -295,6 +307,9 @@ pub async fn execute_context_request(
 ) -> Result<ExtensionContextRequestOutput, PluginContextError> {
     let access = context.access_for_adapter()?;
     match request {
+        ExtensionContextRequest::UiExchange { frame } => Ok(request_output(value(
+            access.ui_surface_exchange(frame).await?,
+        )?)),
         ExtensionContextRequest::WaitForIdle => {
             access.wait_for_idle(context.scope()).await?;
             Ok(request_output(Value::Null))

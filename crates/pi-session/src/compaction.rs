@@ -3,7 +3,9 @@ use pi_core::{
     AbortSignal, ContentBlock, Message, StopReason, ThinkingLevel, Usage, UsageCost, UserMessage,
 };
 use pi_runtime::{PiRuntime, RuntimeCompletionRequest, RuntimeError};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
 use crate::{
     AgentMessage, CompactionEntry, CompactionPreparation, CompactionSettings, FileOperations,
@@ -348,8 +350,10 @@ pub fn estimate_session_context_tokens(
     messages: &[AgentMessage],
 ) -> ContextUsageEstimate {
     let Some(compaction_index) = path_entries.iter().rposition(|entry| {
-        matches!(entry.entry, SessionEntry::Compaction(_))
-            || crate::isolated_context::is_seed(&entry.entry)
+        matches!(
+            entry.entry,
+            SessionEntry::Compaction(_) | SessionEntry::ContextEdit(_)
+        ) || crate::isolated_context::is_seed(&entry.entry)
     }) else {
         return estimate_context_tokens(messages);
     };
@@ -376,8 +380,10 @@ pub fn current_session_context_tokens(
     messages: &[AgentMessage],
 ) -> Option<ContextUsageEstimate> {
     let Some(compaction_index) = path_entries.iter().rposition(|entry| {
-        matches!(entry.entry, SessionEntry::Compaction(_))
-            || crate::isolated_context::is_seed(&entry.entry)
+        matches!(
+            entry.entry,
+            SessionEntry::Compaction(_) | SessionEntry::ContextEdit(_)
+        ) || crate::isolated_context::is_seed(&entry.entry)
     }) else {
         return Some(estimate_context_tokens(messages));
     };
@@ -416,6 +422,34 @@ pub fn estimate_tokens(message: &AgentMessage) -> u64 {
     u64::try_from(chars.saturating_add(3) / 4).unwrap_or(u64::MAX)
 }
 
+/// Input appended or replaced after the latest assistant has not reached a provider yet.
+/// Metadata appended after it must not make automatic compaction swallow it.
+pub(crate) fn unsent_context_inputs(
+    path: &[SessionRecord],
+    options: &SessionContextBuildOptions,
+) -> Vec<AgentMessage> {
+    let last_assistant = path.iter().rev().find(|entry| matches!(&entry.entry, SessionEntry::Message(message) if message.message.role() == "assistant")).map_or(0, |entry| entry.seq);
+    let edited = path
+        .iter()
+        .filter(|entry| entry.seq > last_assistant)
+        .filter_map(|entry| match &entry.entry {
+            SessionEntry::ContextEdit(edit) if edit.replacement.is_some() => {
+                Some(edit.target_id.as_str())
+            }
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    crate::project_session_entries(path, options)
+        .into_iter()
+        .filter(|entry| {
+            entry.source_entry.seq > last_assistant
+                || edited.contains(entry.source_entry.id.as_str())
+        })
+        .flat_map(|entry| entry.messages)
+        .filter(|message| matches!(message.role(), "user" | "custom"))
+        .collect()
+}
+
 pub fn prepare_compaction(
     path_entries: &[SessionRecord],
     settings: CompactionSettings,
@@ -433,38 +467,52 @@ pub fn prepare_compaction(
     let previous_index = path_entries
         .iter()
         .rposition(|entry| matches!(entry.entry, SessionEntry::Compaction(_)));
-    let mut previous_summary = None;
-    let compactable = if let Some(index) = previous_index {
-        let SessionEntry::Compaction(previous) = &path_entries[index].entry else {
-            unreachable!()
-        };
-        previous_summary = Some(previous.summary.clone());
-        previous
-            .retained_tail
-            .iter()
-            .cloned()
-            .map(CompactableEntry::Message)
-            .chain(
-                path_entries[index + 1..]
-                    .iter()
-                    .flat_map(CompactableEntry::expand_record),
-            )
-            .collect::<Vec<_>>()
-    } else {
-        path_entries
-            .iter()
-            .flat_map(CompactableEntry::expand_record)
-            .collect::<Vec<_>>()
-    };
+    let previous_summary = previous_index.and_then(|index| match &path_entries[index].entry {
+        SessionEntry::Compaction(previous) => Some(previous.summary.clone()),
+        _ => None,
+    });
+    let compactable = crate::project_session_entries(path_entries, context_options)
+        .into_iter()
+        .flat_map(|entry| {
+            if entry.messages.is_empty() {
+                return vec![CompactableEntry::Metadata];
+            }
+            entry
+                .messages
+                .into_iter()
+                .filter(|message| message.role() != "compactionSummary")
+                .map(|message| {
+                    if message.role() == "branchSummary" {
+                        CompactableEntry::BranchSummary(message)
+                    } else {
+                        CompactableEntry::Message(message)
+                    }
+                })
+                .collect()
+        })
+        .collect::<Vec<_>>();
 
     let context = build_session_context(path_entries, context_options);
     let tokens_before = estimate_session_context_tokens(path_entries, &context.messages).tokens;
-    let cut = find_cut_point_compactable(
+    let mut cut = find_cut_point_compactable(
         &compactable,
         0,
         compactable.len(),
         settings.keep_recent_tokens,
     );
+    let unsent = unsent_context_inputs(path_entries, context_options);
+    if let Some(index) = compactable.iter().position(|entry| {
+        entry
+            .message()
+            .is_some_and(|message| unsent.contains(message))
+    }) && index < cut.first_kept_entry_index
+    {
+        cut = CutPointResult {
+            first_kept_entry_index: index,
+            turn_start_index: None,
+            is_split_turn: false,
+        };
+    }
     let history_end = if cut.is_split_turn {
         cut.turn_start_index.unwrap_or(cut.first_kept_entry_index)
     } else {
@@ -557,6 +605,7 @@ pub async fn compact(
 
     let details = policy.finalize(preparation, &mut summary);
     Ok(CompactionEntry {
+        retained_entry_ids: Vec::new(),
         summary,
         retained_tail: preparation.retained_tail.clone(),
         tokens_before: preparation.tokens_before,
@@ -727,18 +776,13 @@ fn compaction_thinking_level(
 enum CompactableEntry {
     Message(AgentMessage),
     BranchSummary(AgentMessage),
+    #[cfg(test)]
     Compaction,
     Metadata,
 }
 
 impl CompactableEntry {
-    fn expand_record(record: &SessionRecord) -> Vec<Self> {
-        match crate::isolated_context::read_seed(&record.entry) {
-            Some(seed) => seed.messages.into_iter().map(Self::Message).collect(),
-            None => vec![Self::from_record(record)],
-        }
-    }
-
+    #[cfg(test)]
     fn from_record(record: &SessionRecord) -> Self {
         match &record.entry {
             SessionEntry::Message(message) => Self::Message(message.message.clone()),
@@ -758,14 +802,17 @@ impl CompactableEntry {
             SessionEntry::ModelChange(_)
             | SessionEntry::ThinkingLevelChange(_)
             | SessionEntry::ActiveToolsChange(_)
-            | SessionEntry::Custom(_) => Self::Metadata,
+            | SessionEntry::Custom(_)
+            | SessionEntry::ContextEdit(_) => Self::Metadata,
         }
     }
 
     fn message(&self) -> Option<&AgentMessage> {
         match self {
             Self::Message(message) | Self::BranchSummary(message) => Some(message),
-            Self::Compaction | Self::Metadata => None,
+            Self::Metadata => None,
+            #[cfg(test)]
+            Self::Compaction => None,
         }
     }
 
@@ -781,7 +828,9 @@ impl CompactableEntry {
                     | "branchSummary"
                     | "compactionSummary"
             ),
-            Self::Compaction | Self::Metadata => false,
+            Self::Metadata => false,
+            #[cfg(test)]
+            Self::Compaction => false,
         }
     }
 
@@ -825,7 +874,9 @@ fn find_cut_point_compactable(
     }
     while cut_index > start_index {
         match entries[cut_index - 1] {
-            CompactableEntry::Compaction | CompactableEntry::Message(_) => break,
+            CompactableEntry::Message(_) => break,
+            #[cfg(test)]
+            CompactableEntry::Compaction => break,
             CompactableEntry::BranchSummary(_) | CompactableEntry::Metadata => cut_index -= 1,
         }
     }
@@ -1160,6 +1211,7 @@ mod tests {
         let previous = record(
             0,
             SessionEntry::Compaction(CompactionEntry {
+                retained_entry_ids: Vec::new(),
                 summary: "previous".to_string(),
                 retained_tail: vec![user("retained user"), assistant("retained assistant", 50)],
                 tokens_before: 1_000,
@@ -1210,6 +1262,7 @@ mod tests {
         let latest = record(
             0,
             SessionEntry::Compaction(CompactionEntry {
+                retained_entry_ids: Vec::new(),
                 summary: "done".to_string(),
                 retained_tail: Vec::new(),
                 tokens_before: 10,
@@ -1234,6 +1287,7 @@ mod tests {
         let entries = vec![record(
             0,
             SessionEntry::Compaction(CompactionEntry {
+                retained_entry_ids: Vec::new(),
                 summary: "short summary".to_string(),
                 retained_tail: vec![retained],
                 tokens_before: 100_000,
@@ -1257,6 +1311,7 @@ mod tests {
             record(
                 0,
                 SessionEntry::Compaction(CompactionEntry {
+                    retained_entry_ids: Vec::new(),
                     summary: "short summary".to_string(),
                     retained_tail: vec![assistant_at("retained", 100_000, 1)],
                     tokens_before: 100_000,

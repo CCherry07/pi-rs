@@ -23,6 +23,8 @@ macro_rules! define_hooks {
 }
 
 mod agent;
+mod boundary;
+pub use boundary::*;
 mod capabilities;
 mod diagnostics;
 mod provider;
@@ -48,8 +50,12 @@ pub use capabilities::{
     PluginContextResult, PluginContextScope, PresentationMode, ReplacedSessionContext, ScopedModel,
     SendMessageOptions, SendUserMessageOptions, SessionContext, SessionContextAccess,
     SessionEntryKind, SessionEntryView, SessionExecutionOrigin, SessionReplacement,
-    SessionSnapshot, UiContext, UiContextAccess, UiMultiSelectAction, UiMultiSelectOption,
-    UiMultiSelectRequest, UiMultiSelectResponse, UnavailablePluginContext,
+    SessionSnapshot, UiAppAction, UiCommand, UiCompletion, UiContext, UiContextAccess,
+    UiHostOperation, UiHostRequest, UiInteraction, UiMultiSelectAction, UiMultiSelectOption,
+    UiMultiSelectRequest, UiMultiSelectResponse, UiNode, UiNodeKind, UiOverlayOptions,
+    UiProductCommand, UiRegion, UiRegionPlacement, UiShortcut, UiSurfaceArea, UiSurfaceCommand,
+    UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot, UiTone, UiTranscriptItem,
+    UiTranscriptRender, UnavailablePluginContext,
 };
 pub use provider::{
     AfterProviderResponseEvent, BeforeProviderHeadersEvent, BeforeProviderRequestEvent,

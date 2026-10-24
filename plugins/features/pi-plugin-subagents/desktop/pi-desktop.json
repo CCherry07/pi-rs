@@ -1,7 +1,0 @@
-{
-  "schemaVersion": 1,
-  "id": "pi.subagents",
-  "name": "Subagents",
-  "entry": "dist/index.js",
-  "styles": ["dist/style.css"]
-}

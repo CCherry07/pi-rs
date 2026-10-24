@@ -188,7 +188,52 @@ pub async fn serve_stdio(
     manager: MultiSessionManager,
     options: AcpOptions,
 ) -> Result<(), AcpError> {
+    let _stdio_mode = BlockingStdioMode::acquire().map_err(|error| {
+        AcpError::Protocol(internal_error(format!(
+            "failed to configure ACP stdio: {error}"
+        )))
+    })?;
     AcpServer::new(manager, options).serve(Stdio::new()).await
+}
+
+#[cfg(unix)]
+struct BlockingStdioMode {
+    stdin: rustix::fs::OFlags,
+    stdout: rustix::fs::OFlags,
+}
+
+#[cfg(unix)]
+impl BlockingStdioMode {
+    fn acquire() -> std::io::Result<Self> {
+        use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+
+        let stdin = fcntl_getfl(std::io::stdin())?;
+        let stdout = fcntl_getfl(std::io::stdout())?;
+        fcntl_setfl(std::io::stdin(), stdin - OFlags::NONBLOCK)?;
+        if let Err(error) = fcntl_setfl(std::io::stdout(), stdout - OFlags::NONBLOCK) {
+            let _ = fcntl_setfl(std::io::stdin(), stdin);
+            return Err(error.into());
+        }
+        Ok(Self { stdin, stdout })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for BlockingStdioMode {
+    fn drop(&mut self) {
+        let _ = rustix::fs::fcntl_setfl(std::io::stdin(), self.stdin);
+        let _ = rustix::fs::fcntl_setfl(std::io::stdout(), self.stdout);
+    }
+}
+
+#[cfg(not(unix))]
+struct BlockingStdioMode;
+
+#[cfg(not(unix))]
+impl BlockingStdioMode {
+    fn acquire() -> std::io::Result<Self> {
+        Ok(Self)
+    }
 }
 
 struct AcpState {

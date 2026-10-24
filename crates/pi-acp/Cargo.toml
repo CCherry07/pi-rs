@@ -18,6 +18,9 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 uuid = { version = "1.18.1", features = ["v7"] }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
 [dev-dependencies]
 pi-runtime.workspace = true
 pi-test-support.workspace = true

@@ -252,9 +252,9 @@ impl Plugin for LifecyclePlugin {
         &self,
         context: AgentPluginContext,
         _: TurnEndEvent,
-    ) -> Result<(), PluginError> {
+    ) -> Result<pi_plugin::BoundaryResult, PluginError> {
         self.record(&context, "turn_end");
-        Ok(())
+        Ok(pi_plugin::BoundaryResult::default())
     }
 
     async fn agent_end(

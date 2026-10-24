@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::boundary::*;
 use super::diagnostics::{PluginDiagnostic, PluginDiagnosticSink, PluginError};
 use super::session::*;
 
@@ -219,6 +220,9 @@ pub struct TurnStartEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnEndEvent {
+    pub boundary: Option<BoundaryState>,
+    pub message_entry_id: Option<String>,
+    pub tool_result_entry_ids: Vec<String>,
     pub turn_index: u64,
     pub message: Arc<AssistantMessage>,
     pub tool_results: Vec<ToolResultMessage>,
@@ -372,10 +376,11 @@ define_hooks! {
         Context => "context",
         ToolCall => "tool_call",
         ToolResult => "tool_result",
+        AgentBeforeSettle => "agent_before_settle",
     }
 }
 
-const AGENT_HOOKS: [AgentHook; 16] = [
+const AGENT_HOOKS: [AgentHook; 17] = [
     AgentHook::Input,
     AgentHook::BeforeAgentStart,
     AgentHook::AgentStart,
@@ -392,6 +397,7 @@ const AGENT_HOOKS: [AgentHook; 16] = [
     AgentHook::Context,
     AgentHook::ToolCall,
     AgentHook::ToolResult,
+    AgentHook::AgentBeforeSettle,
 ];
 
 impl AgentHook {
@@ -515,8 +521,34 @@ pub trait Plugin: Send + Sync {
         &self,
         _context: AgentPluginContext,
         _event: TurnEndEvent,
-    ) -> std::result::Result<(), PluginError> {
-        Ok(())
+    ) -> std::result::Result<BoundaryResult, PluginError> {
+        Ok(BoundaryResult::default())
+    }
+    async fn agent_before_settle(
+        &self,
+        _context: AgentPluginContext,
+        _event: AgentBeforeSettleEvent,
+    ) -> std::result::Result<BoundaryResult, PluginError> {
+        Ok(BoundaryResult::default())
+    }
+    /// Adapters may expose multiple handlers while retaining their single plugin identity.
+    #[doc(hidden)]
+    fn boundary_hook_count(&self, _hook: AgentHook) -> usize {
+        1
+    }
+    #[doc(hidden)]
+    async fn boundary_hook(
+        &self,
+        context: AgentPluginContext,
+        event: SessionBoundaryEvent,
+        _index: usize,
+    ) -> std::result::Result<BoundaryResult, PluginError> {
+        match event {
+            SessionBoundaryEvent::TurnEnd(event) => self.turn_end(context, event).await,
+            SessionBoundaryEvent::BeforeSettle(event) => {
+                self.agent_before_settle(context, event).await
+            }
+        }
     }
     async fn message_start(
         &self,
@@ -818,14 +850,17 @@ impl PluginDriver {
             .map(|&index| &self.plugins[index])
     }
 
-    fn interested_plugins(&self, hook: AgentHook) -> impl Iterator<Item = &RegisteredPlugin> {
+    pub(super) fn interested_plugins(
+        &self,
+        hook: AgentHook,
+    ) -> impl Iterator<Item = &RegisteredPlugin> {
         self.routes
             .get(hook)
             .iter()
             .map(|&index| &self.plugins[index])
     }
 
-    fn agent_plugin_context(
+    pub(super) fn agent_plugin_context(
         &self,
         registered: &RegisteredPlugin,
         run_id: &RunId,
@@ -1296,6 +1331,7 @@ mod tests {
                 AgentHook::AgentStart => "agent_start",
                 AgentHook::AgentEnd => "agent_end",
                 AgentHook::AgentSettled => "agent_settled",
+                AgentHook::AgentBeforeSettle => "agent_before_settle",
                 AgentHook::TurnStart => "turn_start",
                 AgentHook::TurnEnd => "turn_end",
                 AgentHook::MessageStart => "message_start",

@@ -19,7 +19,8 @@ pub fn session_entry_usage(entry: &SessionEntry) -> Option<&Usage> {
         | SessionEntry::ModelChange(_)
         | SessionEntry::ThinkingLevelChange(_)
         | SessionEntry::ActiveToolsChange(_)
-        | SessionEntry::Custom(_) => None,
+        | SessionEntry::Custom(_)
+        | SessionEntry::ContextEdit(_) => None,
     }
 }
 
@@ -201,6 +202,7 @@ mod tests {
             timestamp_ms: 2,
         }));
         let compaction = SessionEntry::Compaction(CompactionEntry {
+            retained_entry_ids: Vec::new(),
             summary: "summary".to_string(),
             retained_tail: Vec::<AgentMessage>::new(),
             tokens_before: 100,

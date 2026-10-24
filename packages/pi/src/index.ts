@@ -12,6 +12,7 @@ export type {
   PiCommandOptions,
   PiExtensionApi,
   PiExtensionContext,
+  PiExtensionUI,
   PiModelRegistry,
   PiReadonlySessionManager,
   PiToolDefinition,
@@ -53,3 +54,10 @@ export class PiEvalNodeHost extends PiNodeHost {
     );
   }
 }
+
+export type {
+  UiNode, UiTone, UiCompletion, UiInteraction, UiComponentEvent, UiMultiSelectAction,
+  UiMultiSelectOption, UiMultiSelectRequest, UiMultiSelectResponse,
+} from "./extension-ui-frame.js";
+export type { UiMount, MountOptions, DialogOptions, UiTheme } from "./extension-ui.js";
+export type { MessageRenderer, EntryRenderer, MarkdownTransformer, ToolRenderers, ToolRenderContext, ToolRendererResolver } from "./extension-ui-transcript.js";

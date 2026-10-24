@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { ExtensionUI } from './extension-ui.js'
 
 import type {
   PiExtensionCommandContext,
@@ -73,6 +74,7 @@ function parseContextResult<T>(schema: z.ZodType<T>, value: unknown, operation: 
 }
 
 interface ExtensionContextOptions {
+  ui?: ExtensionUI
   payload: Record<string, unknown>
   nativeContext?: NativeExtensionContext
   mode: HostMode
@@ -82,73 +84,38 @@ interface ExtensionContextOptions {
   assertActive(): void
 }
 
-interface InactiveExtensionUI {
-  select(): Promise<undefined>
-  confirm(): Promise<boolean>
-  input(): Promise<undefined>
-  notify(message: unknown, level?: unknown): void
-  onTerminalInput(): () => void
-  setStatus(): void
-  setWorkingMessage(): void
-  setWorkingVisible(): void
-  setWorkingIndicator(): void
-  setHiddenThinkingLabel(): void
-  setWidget(): void
-  setFooter(): void
-  setHeader(): void
-  setTitle(): void
-  custom(): Promise<undefined>
-  pasteToEditor(): void
-  setEditorText(): void
-  getEditorText(): string
-  editor(): Promise<undefined>
-  addAutocompleteProvider(): void
-  setEditorComponent(): void
-  getEditorComponent(): undefined
-  getAllThemes(): never[]
-  getTheme(): undefined
-  setTheme(): { success: false; error: string }
-  getToolsExpanded(): boolean
-  setToolsExpanded(): void
-  readonly theme: undefined
-}
-
 function createInactiveExtensionUI(
   publishNotice: (message: string, level: 'info' | 'warning' | 'error') => void,
-): InactiveExtensionUI {
+) {
   const noOp = (): void => {}
   return Object.freeze({
     select: async () => undefined,
     confirm: async () => false,
     input: async () => undefined,
+    editor: async () => undefined,
+    custom: async () => undefined,
+    hostOperation: async () => { throw new Error('Extension UI is unavailable') },
+    mount: () => Object.freeze({ id: '', update: noOp, focus: noOp, unmount: noOp }),
     notify: (message: unknown, level?: unknown) => publishNotice(
       typeof message === 'string' ? message : String(message),
       level === 'warning' || level === 'error' ? level : 'info',
     ),
-    onTerminalInput: () => noOp,
     setStatus: noOp,
     setWorkingMessage: noOp,
     setWorkingVisible: noOp,
-    setWorkingIndicator: noOp,
     setHiddenThinkingLabel: noOp,
     setWidget: noOp,
     setFooter: noOp,
     setHeader: noOp,
     setTitle: noOp,
-    custom: async () => undefined,
+    setTheme: noOp,
+    setProgress: noOp,
+    setProgramStatus: noOp,
     pasteToEditor: noOp,
     setEditorText: noOp,
     getEditorText: () => '',
-    editor: async () => undefined,
-    addAutocompleteProvider: noOp,
-    setEditorComponent: noOp,
-    getEditorComponent: () => undefined,
-    getAllThemes: () => [],
-    getTheme: () => undefined,
-    setTheme: () => ({ success: false as const, error: 'JavaScript extension UI is inactive in pi-rs' }),
     getToolsExpanded: () => false,
     setToolsExpanded: noOp,
-    theme: undefined,
   })
 }
 
@@ -197,7 +164,8 @@ export function createExtensionContext(
     options.assertActive()
     return result
   }
-  const ui = createInactiveExtensionUI((message, level) => notify({
+  const hasUI = () => query({ type: 'hasUi' }, booleanSchema, () => false)
+  const inactiveUI = createInactiveExtensionUI((message, level) => notify({
     type: 'uiNotify',
     message,
     level,
@@ -247,7 +215,11 @@ export function createExtensionContext(
 
   const context = {
     ...options.payload,
-    ui,
+    get ui() {
+      if (!options.ui || !hasUI()) return inactiveUI
+      if (options.nativeContext) options.ui.bind(options.nativeContext)
+      return options.ui.forContext(options.signal)
+    },
     sessionManager,
     modelRegistry,
     signal: options.signal,
@@ -289,7 +261,7 @@ export function createExtensionContext(
       enumerable: true,
       get: () => {
         options.assertActive()
-        return false
+        return hasUI()
       },
     },
     model: {

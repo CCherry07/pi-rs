@@ -99,7 +99,8 @@ pub struct AgentOptions {
     pub active_tools: Vec<String>,
     pub messages: Vec<Message>,
     pub tool_execution: ToolExecutionMode,
-    pub max_tool_iterations: usize,
+    /// Maximum tool-producing model turns per submission; None runs until completion or abort.
+    pub max_tool_iterations: Option<usize>,
     pub max_parallel_tools: usize,
     pub cwd: std::path::PathBuf,
     pub steering_mode: QueueMode,
@@ -123,7 +124,7 @@ impl Default for AgentOptions {
             active_tools: Vec::new(),
             messages: Vec::new(),
             tool_execution: ToolExecutionMode::Parallel,
-            max_tool_iterations: 50,
+            max_tool_iterations: Some(50),
             max_parallel_tools: 8,
             cwd: std::path::PathBuf::from("."),
             steering_mode: QueueMode::OneAtATime,
@@ -417,15 +418,23 @@ impl Agent {
             }
             PromptInput::Messages(messages) => messages,
         };
-        self.run(RunKind::Prompt {
-            messages: prompts,
-            skip_initial_steering_poll: false,
-        })
+        self.run(
+            RunKind::Prompt {
+                messages: prompts,
+                skip_initial_steering_poll: false,
+            },
+            true,
+        )
         .await
     }
 
     pub async fn continue_run(&self) -> Result<AgentLoopOutcome, AgentError> {
-        self.run(RunKind::Continue).await
+        self.run(RunKind::Continue, true).await
+    }
+
+    /// Continue a session-owned activity using its last effective prompt and input preparation.
+    pub async fn continue_activity(&self) -> Result<AgentLoopOutcome, AgentError> {
+        self.run(RunKind::Continue, false).await
     }
 
     pub fn steer(&self, message: Message) {
@@ -434,6 +443,13 @@ impl Agent {
 
     pub fn follow_up(&self, message: Message) {
         self.inner.follow_up.enqueue(message);
+    }
+
+    /// Inspect pending steering followed by follow-up messages without consuming them.
+    pub fn peek_queued_messages(&self) -> Vec<Message> {
+        let mut messages = self.inner.steering.peek();
+        messages.extend(self.inner.follow_up.peek());
+        messages
     }
 
     pub fn has_queued_messages(&self) -> bool {
@@ -655,6 +671,21 @@ impl Agent {
         Ok(())
     }
 
+    /// Replace projected conversation messages between provider runs, preserving queued input,
+    /// the effective activity prompt and the current model/tool configuration.
+    pub fn replace_context_messages(&self, messages: Vec<Message>) -> Result<(), AgentError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.snapshot.is_running {
+            return Err(AgentError::ConfigureWhileRunning);
+        }
+        state.snapshot.messages = messages;
+        Ok(())
+    }
+
     /// Replaces all persisted agent state while preserving transient runtime
     /// dependencies. Restore is only available while idle and validates the
     /// selected provider and tools against the active runtime generation.
@@ -767,7 +798,11 @@ impl Agent {
         Ok(failed)
     }
 
-    async fn run(&self, kind: RunKind) -> Result<AgentLoopOutcome, AgentError> {
+    async fn run(
+        &self,
+        kind: RunKind,
+        prepare_input: bool,
+    ) -> Result<AgentLoopOutcome, AgentError> {
         let _run_guard = self
             .inner
             .run_gate
@@ -831,26 +866,33 @@ impl Agent {
             RunKind::Prompt { messages, .. } => messages.clone(),
             RunKind::Continue => Vec::new(),
         };
-        let hook = match runtime
-            .plugins()
-            .before_agent_start(
-                &run_id,
-                &self.inner.config.cwd,
-                &abort_signal,
-                BeforeAgentStartEvent {
-                    system_prompt: runtime.system_prompt().to_string(),
-                    input_messages,
-                    active_tools: snapshot.active_tools.clone(),
-                    provider_id: snapshot.provider_id.clone(),
-                    model_id: snapshot.model_id.clone(),
-                },
-            )
-            .await
-        {
-            Ok(hook) => hook,
-            Err(error) => {
-                self.finish_active_run(&completion_sender);
-                return Err(AgentError::Loop(error.to_string()));
+        let hook = if prepare_input {
+            match runtime
+                .plugins()
+                .before_agent_start(
+                    &run_id,
+                    &self.inner.config.cwd,
+                    &abort_signal,
+                    BeforeAgentStartEvent {
+                        system_prompt: runtime.system_prompt().to_string(),
+                        input_messages,
+                        active_tools: snapshot.active_tools.clone(),
+                        provider_id: snapshot.provider_id.clone(),
+                        model_id: snapshot.model_id.clone(),
+                    },
+                )
+                .await
+            {
+                Ok(hook) => hook,
+                Err(error) => {
+                    self.finish_active_run(&completion_sender);
+                    return Err(AgentError::Loop(error.to_string()));
+                }
+            }
+        } else {
+            pi_plugin::BeforeAgentStartPatch {
+                system_prompt: Some(self.effective_system_prompt()),
+                messages: Vec::new(),
             }
         };
         let context = AgentContext {
@@ -969,6 +1011,7 @@ impl Agent {
             plugins,
             run_id,
             self.inner.config.cwd.clone(),
+            self.active_turn_control(),
         ))
     }
 }

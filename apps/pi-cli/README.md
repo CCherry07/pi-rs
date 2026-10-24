@@ -37,7 +37,7 @@ catalog, skills, and plugins all use the same production runtime.
 ### npm package
 
 The npm package is the recommended installation when JavaScript/TypeScript extension support is
-needed. It requires Node.js 20 or newer and installs both `pi` and `pi-rs` commands.
+needed. It requires Node.js 22.19 or newer and installs both `pi` and `pi-rs` commands.
 
 ```bash
 npm install --global @pi-rs/cli
@@ -157,6 +157,11 @@ store, while client-provided MCP configuration is transient and must be provided
 load/resume. Local `mcp.json` files are not loaded in ACP mode, even for an empty client server list.
 Legacy HTTP+SSE servers are not supported. ACP mode currently requires `--no-extensions` when JavaScript/TypeScript extensions
 would otherwise be active; native Rust plugins continue to work.
+
+Use `--session-dir <path>` to select journal storage and session-ID lookup without changing the
+global `--agent-dir` used for models, credentials and skills. The explicit directory takes priority
+over the global `sessionDir` setting; an exact `--session` path still takes priority in non-ACP modes.
+ACP supports `--session-dir` but rejects `--session`, because the client creates or resumes sessions.
 
 Shell shorthand works in interactive and one-shot frontends and does not require provider
 credentials; RPC exposes the corresponding `bash` command:

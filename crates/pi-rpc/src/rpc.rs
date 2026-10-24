@@ -395,10 +395,26 @@ async fn handle_line(
                 .await;
         }
     };
+    if let Some(response) = dispatch(&session, parsed, export_html).await {
+        output.emit(response).await?;
+    }
+    Ok(())
+}
+
+/// Dispatch a Pi wire request against an in-process managed session.
+///
+/// Transport adapters own delivery and event subscriptions. This shares command
+/// decoding, response correlation and session operations with the stdio adapter
+/// without starting a CLI process or acquiring stdin/stdout.
+pub async fn dispatch(
+    session: &PiSession,
+    parsed: Value,
+    export_html: HtmlExporter,
+) -> Option<Value> {
     if parsed.get("type").and_then(Value::as_str) == Some("extension_ui_response") {
         // The JS UI bridge is intentionally outside this P0 protocol change;
         // unsolicited responses are ignored like Pi ignores unknown request IDs.
-        return Ok(());
+        return None;
     }
     let fallback_id = parsed.get("id").and_then(Value::as_str).map(str::to_string);
     let fallback_command = parsed
@@ -409,29 +425,19 @@ async fn handle_line(
     let command = match serde_json::from_value::<RpcCommand>(parsed) {
         Ok(command) => command,
         Err(error) => {
-            return output
-                .emit(error_response(
-                    fallback_id.as_deref(),
-                    &fallback_command,
-                    &format!("Invalid command: {error}"),
-                ))
-                .await;
+            return Some(error_response(
+                fallback_id.as_deref(),
+                &fallback_command,
+                &format!("Invalid command: {error}"),
+            ));
         }
     };
     let id = command.id().map(str::to_string);
     let name = command.name();
-    match handle_command(&session, command, export_html).await {
-        Ok(data) => {
-            output
-                .emit(success_response(id.as_deref(), name, data))
-                .await
-        }
-        Err(error) => {
-            output
-                .emit(error_response(id.as_deref(), name, &error))
-                .await
-        }
-    }
+    Some(match handle_command(session, command, export_html).await {
+        Ok(data) => success_response(id.as_deref(), name, data),
+        Err(error) => error_response(id.as_deref(), name, &error),
+    })
 }
 
 async fn handle_command(

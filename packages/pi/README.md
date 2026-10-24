@@ -32,7 +32,7 @@ NDJSON event stream, tools, sessions, model catalog, skills, and plugins all use
 ### npm package
 
 The npm package is the recommended installation when JavaScript/TypeScript extension support is
-needed. It requires Node.js 20 or newer and installs `pi`, `pi-rs`, and the model-backed
+needed. It requires Node.js 22.19 or newer and installs `pi`, `pi-rs`, and the model-backed
 `pi-eval` runner.
 
 ```bash
@@ -368,19 +368,19 @@ tool-result guards are available through current and legacy `pi-ai` / `pi-coding
 names; `typebox` and `@sinclair/typebox`, including subpaths such as `typebox/value`, resolve to the
 host's bundled runtime.
 
-The host resolves Pi's extension module table for both the current
-`@earendil-works` and legacy `@mariozechner` namespaces: `pi-coding-agent`, `pi-agent-core`,
-`pi-ai`, `pi-ai/compat`, `pi-ai/oauth`, `pi-ai/providers/all`, and `pi-tui`. The TUI names resolve to
-a terminal-inert module so mixed extensions can retain their tools, commands, and hooks without
-owning Ratatui. Module resolution does not imply that every upstream JavaScript runtime export is
-implemented; the compatibility API remains the explicit capability boundary.
+The host supplies runtime-neutral SDK aliases for the current `@earendil-works` and legacy
+`@mariozechner` namespaces: `pi-coding-agent`, `pi-agent-core`, `pi-ai`, `pi-ai/compat`,
+`pi-ai/oauth` and `pi-ai/providers/all`. `@pi-rs/cli` exposes the same host SDK and UI types.
 
-JavaScript extensions do not own the Ratatui frontend: `ctx.hasUI` is false and `ctx.ui` is an
-explicit inert implementation. Its interactive methods return safe defaults and its UI mutations
-remain inactive; `ctx.ui.notify()` becomes a semantic product notice rendered by the active Rust
-frontend. Hooks and registrations known to current Pi but not yet implemented are reported as
-inactive and do not fail generation construction; genuinely unknown hook names still fail so typos
-remain visible. Other missing dependencies remain fatal.
+Rust and JavaScript plugins use one Rust UI runtime. JS submits declarative nodes through
+`ctx.ui.mount`/`custom` and handles semantic events; Rust owns layout, focus, editing, completions,
+scrolling and terminal output. Dialogs, widgets, overlays, tool/message rendering, images, links,
+searchable multi-selection, clipboard and external-editor operations use this shared protocol.
+There is no `pi-tui` dependency
+or JS renderer. This intentionally breaks old `render(width)`, editor subclass and JS theme APIs.
+See [plugin UI](../../docs/plugin-ui.md) for the replacement interface. `hasUI` also requires an
+installed frontend bridge; Print/JSON/RPC and the current Desktop adapter retain inactive defaults.
+Other missing dependencies remain fatal.
 See the repository's
 [JavaScript compatibility matrix](../../docs/js-extension-compatibility.md) for the precise hook,
 context, UI, and module status. Extension code runs in the Node process as trusted code; it is not

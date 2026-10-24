@@ -32,10 +32,56 @@ struct RecordingUiBridge {
 
 #[async_trait::async_trait]
 impl PluginUiBridge for RecordingUiBridge {
-    async fn confirm(&self, title: String, message: String) -> Result<bool, String> {
-        self.confirmations.lock().unwrap().push((title, message));
-        Ok(true)
+    fn ui_command(&self, _owner: String, _command: pi_plugin::UiCommand) -> Result<(), String> {
+        Ok(())
     }
+    async fn surface_exchange(
+        &self,
+        frame: pi_plugin::UiSurfaceFrame,
+    ) -> Result<pi_plugin::UiSurfaceEvent, String> {
+        let pi_plugin::UiNodeKind::Column { children, .. } = &frame.regions[0].root.kind else {
+            panic!("expected dialog column");
+        };
+        let pi_plugin::UiNodeKind::Text { text, .. } = &children[0].kind else {
+            panic!("expected dialog title");
+        };
+        let (title, message) = text
+            .split_once('\n')
+            .expect("confirmation title and message");
+        self.confirmations
+            .lock()
+            .unwrap()
+            .push((title.into(), message.into()));
+        Ok(pi_plugin::UiSurfaceEvent::Interaction {
+            region_id: "dialog".into(),
+            node_id: "value".into(),
+            event: pi_plugin::UiInteraction::Submit { value: 0.into() },
+            snapshot: pi_plugin::UiSurfaceSnapshot::default(),
+            revision: frame.revision,
+        })
+    }
+}
+
+#[tokio::test]
+async fn ui_availability_requires_both_tui_mode_and_a_frontend_bridge() {
+    let without_bridge = pi_plugin::PluginContextEpoch::new(Arc::new(PiPluginContext::new(
+        PresentationMode::Tui,
+        true,
+        PluginContextBinding::new(),
+    )));
+    assert!(!without_bridge.context().ui.is_available().unwrap());
+
+    let with_bridge = pi_plugin::PluginContextEpoch::new(Arc::new(
+        PiPluginContext::new(PresentationMode::Tui, true, PluginContextBinding::new())
+            .with_ui_bridge(Arc::new(RecordingUiBridge::default())),
+    ));
+    assert!(with_bridge.context().ui.is_available().unwrap());
+
+    let noninteractive = pi_plugin::PluginContextEpoch::new(Arc::new(
+        PiPluginContext::new(PresentationMode::Print, true, PluginContextBinding::new())
+            .with_ui_bridge(Arc::new(RecordingUiBridge::default())),
+    ));
+    assert!(!noninteractive.context().ui.is_available().unwrap());
 }
 
 #[pi_plugin::plugin]
@@ -261,4 +307,108 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
         replacement_context.ui.mode(),
         Err(pi_plugin::PluginContextError::Retired)
     ));
+}
+
+#[tokio::test]
+async fn standard_native_dialogs_close_on_completion_or_generation_retirement() {
+    use pi_plugin::{
+        PluginContextEpoch, PluginContextError, UiCommand, UiSurfaceCommand, UiSurfaceEvent,
+        UiSurfaceFrame,
+    };
+    use std::collections::HashMap;
+    use tokio::sync::{mpsc, oneshot};
+
+    struct PendingUiBridge {
+        frames: mpsc::UnboundedSender<UiSurfaceFrame>,
+        pending: Mutex<HashMap<String, oneshot::Sender<UiSurfaceEvent>>>,
+        closed: Mutex<Vec<String>>,
+    }
+    #[async_trait::async_trait]
+    impl PluginUiBridge for PendingUiBridge {
+        fn ui_command(&self, owner: String, command: UiCommand) -> Result<(), String> {
+            if command == UiCommand::Surface(UiSurfaceCommand::Close) {
+                self.closed.lock().unwrap().push(owner.clone());
+                if let Some(sender) = self.pending.lock().unwrap().remove(&owner) {
+                    let _ = sender.send(UiSurfaceEvent::Closed);
+                }
+            }
+            Ok(())
+        }
+        async fn surface_exchange(&self, frame: UiSurfaceFrame) -> Result<UiSurfaceEvent, String> {
+            let (sender, receiver) = oneshot::channel();
+            self.pending
+                .lock()
+                .unwrap()
+                .insert(frame.owner.clone(), sender);
+            self.frames.send(frame).unwrap();
+            Ok(receiver.await.unwrap_or(UiSurfaceEvent::Closed))
+        }
+    }
+
+    for (confirm, retire_pending) in [(false, false), (false, true), (true, false), (true, true)] {
+        let (frames, mut receiver) = mpsc::unbounded_channel();
+        let bridge = Arc::new(PendingUiBridge {
+            frames,
+            pending: Mutex::new(HashMap::new()),
+            closed: Mutex::new(Vec::new()),
+        });
+        let context = Arc::new(
+            PiPluginContext::new(PresentationMode::Tui, true, PluginContextBinding::new())
+                .with_ui_bridge(bridge.clone()),
+        );
+        let epoch = PluginContextEpoch::new(context);
+        let ui = epoch.context().ui;
+        let task = tokio::spawn(async move {
+            if confirm {
+                ui.confirm("Continue?", "Replace this session.")
+                    .await
+                    .map(|_| ())
+            } else {
+                ui.select("Environment", vec!["Test".into(), "Production".into()])
+                    .await
+                    .map(|_| ())
+            }
+        });
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(3), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(frame.owner.starts_with("native-ui:"));
+        assert!(frame.validate().is_ok());
+        if retire_pending {
+            epoch.retire();
+            assert!(matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(3), task)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                Err(PluginContextError::Retired)
+            ));
+        } else {
+            bridge
+                .pending
+                .lock()
+                .unwrap()
+                .remove(&frame.owner)
+                .unwrap()
+                .send(UiSurfaceEvent::Interaction {
+                    region_id: "dialog".into(),
+                    node_id: "value".into(),
+                    event: pi_plugin::UiInteraction::Submit { value: 0.into() },
+                    snapshot: pi_plugin::UiSurfaceSnapshot::default(),
+                    revision: frame.revision,
+                })
+                .unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(3), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_ok()
+            );
+            epoch.retire();
+        }
+        assert_eq!(*bridge.closed.lock().unwrap(), [frame.owner]);
+        assert!(bridge.pending.lock().unwrap().is_empty());
+    }
 }

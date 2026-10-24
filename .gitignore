@@ -22,3 +22,9 @@ dist/
 # Local Hermes state and skills
 .hermes/
 docs/
+
+# Desktop sources belong to codex/desktop; ignore leftovers after branch switches.
+/apps/orbit/
+/apps/pi-desktop/
+/packages/pi-desktop-sdk/
+/plugins/features/pi-plugin-subagents/desktop/

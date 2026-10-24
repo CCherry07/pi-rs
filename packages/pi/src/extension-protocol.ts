@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { getAgentDir } from './extension-ui-paths.js'
 
 const jsonObjectSchema = z.looseObject({})
 const hostModeSchema = z.enum(['tui', 'print', 'json', 'rpc'])
@@ -7,7 +8,10 @@ export const toolExecutionModeSchema = z.enum(['parallel', 'sequential'])
 
 const generationRequestSchema = z.strictObject({
   projectTrusted: z.boolean(),
+  agentDir: z.string().default(getAgentDir()),
   extensionPaths: z.array(z.string()),
+  outputPad: z.union([z.literal(0), z.literal(1)]).default(1),
+  showImages: z.boolean().default(true),
   mode: hostModeSchema,
   cwd: z.string().default(process.cwd()),
   workspace: z.unknown().optional(),

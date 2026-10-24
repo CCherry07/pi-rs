@@ -152,6 +152,21 @@ pub struct ImageSettings {
     pub block_images: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSettings {
+    pub show_images: bool,
+    pub image_width_cells: u16,
+}
+
+impl Default for TerminalSettings {
+    fn default() -> Self {
+        Self {
+            show_images: true,
+            image_width_cells: 60,
+        }
+    }
+}
+
 impl Default for ImageSettings {
     fn default() -> Self {
         Self {
@@ -279,6 +294,10 @@ pub struct SettingsValues {
     pub skills: Vec<String>,
     pub prompts: Vec<String>,
     pub themes: Vec<String>,
+    pub theme: Option<String>,
+    pub external_editor: Option<String>,
+    pub output_pad: u8,
+    pub terminal: TerminalSettings,
     pub enable_skill_commands: bool,
     pub enabled_models: Option<Vec<String>>,
     pub default_tools: Option<Vec<String>>,
@@ -312,6 +331,10 @@ impl Default for SettingsValues {
             skills: Vec::new(),
             prompts: Vec::new(),
             themes: Vec::new(),
+            theme: None,
+            external_editor: None,
+            output_pad: 1,
+            terminal: TerminalSettings::default(),
             enable_skill_commands: true,
             enabled_models: None,
             default_tools: None,

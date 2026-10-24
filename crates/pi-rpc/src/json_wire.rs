@@ -204,6 +204,11 @@ pub(crate) fn session_entry_json(
                 object.insert("data".to_string(), data.clone());
             }
         }
+        SessionEntry::ContextEdit(edit) => {
+            object.insert("type".into(), json!("context_edit"));
+            object.insert("targetId".into(), json!(edit.target_id));
+            object.insert("replacement".into(), json!(edit.replacement));
+        }
         SessionEntry::ActiveToolsChange(change) => {
             object.insert("type".to_string(), json!("custom"));
             object.insert("customType".to_string(), json!("pi-rs.active_tools_change"));
@@ -245,13 +250,11 @@ fn first_kept_entry_id(
     compaction_record: &SessionRecord,
     compaction: &CompactionEntry,
     document: &SessionDocument,
-) -> String {
-    let Some(first) = compaction.retained_tail.first() else {
-        return compaction_record
-            .parent_id
-            .clone()
-            .unwrap_or_else(|| compaction_record.id.clone());
-    };
+) -> Option<String> {
+    let first = compaction.retained_tail.first()?;
+    if let Some(Some(id)) = compaction.retained_entry_ids.first() {
+        return Some(id.clone());
+    }
     let by_id = document
         .entries
         .iter()
@@ -277,7 +280,7 @@ fn first_kept_entry_id(
         })
         .map(|record| record.id.clone())
         .or_else(|| compaction_record.parent_id.clone())
-        .unwrap_or_else(|| compaction_record.id.clone())
+        .or_else(|| Some(compaction_record.id.clone()))
 }
 
 fn timestamp_string(timestamp_ms: i64) -> Result<String, String> {

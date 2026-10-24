@@ -1,0 +1,292 @@
+import { randomUUID } from "node:crypto";
+import { getAgentDir, withAgentDir } from "./extension-ui-paths.js";
+import { ExtensionTranscript } from "./extension-ui-transcript.js";
+import {
+  uiCommandSchema, uiEventSchema, uiMultiSelectResponseSchema, uiNodeSchema, uiSnapshotSchema,
+  type UiCommand, type UiHostOperation, type UiNode, type UiSnapshot, type UiComponentEvent,
+  type UiMultiSelectRequest, type UiMultiSelectResponse, type Placement, type UiRegion,
+} from "./extension-ui-frame.js";
+import type { NativeExtensionContext } from "./native-binding.js";
+
+export interface DialogOptions { signal?: AbortSignal; timeout?: number }
+export type UiTheme = "light" | "dark" | "system";
+export interface MountOptions extends DialogOptions {
+  id?: string;
+  placement?: Placement;
+  overlay?: { width?: number; maxHeight?: number; modal?: boolean };
+  onEvent?(event: UiComponentEvent): void;
+}
+export interface UiMount {
+  readonly id: string;
+  update(node: UiNode): void;
+  focus(nodeId: string): void;
+  unmount(): void;
+}
+type NodeIdentities = Map<string, { type: UiNode["type"] }>;
+interface Mounted { region: UiRegion; nodes: NodeIdentities; onEvent?: (event: UiComponentEvent) => void; cleanup(): void }
+function nodeIdentities(root: UiNode, previous?: NodeIdentities): NodeIdentities {
+  const nodes: NodeIdentities = new Map();
+  const visit = (node: UiNode) => {
+    const identity = previous?.get(node.id);
+    nodes.set(node.id, identity?.type === node.type ? identity : { type: node.type });
+    if (node.type === "column" || node.type === "row") node.children.forEach(visit);
+    else if (node.type === "panel" || node.type === "scroll") visit(node.child);
+  };
+  visit(root);
+  return nodes;
+}
+interface ExtensionUIOptions { agentDir?: string; outputPad?: 0 | 1; showImages?: boolean }
+/** Generation-owned transport and callbacks. All widget state, layout and input belong to Rust. */
+export class ExtensionUI {
+  readonly owner = randomUUID();
+  readonly transcript: ExtensionTranscript;
+  readonly #regions = new Map<string, Mounted>();
+  readonly #shortcuts = new Map<string, () => Promise<void>>();
+  readonly #statuses = new Map<string, string>();
+  readonly #pending = new Set<() => void>();
+  readonly #hostRequests = new Map<number, { resolve(value: string | undefined): void; reject(error: Error): void }>();
+  readonly #agentDir: string;
+  #native?: NativeExtensionContext;
+  #running = false;
+  #retired = false;
+  #revision = 0;
+  #lastDocument = "";
+  #hostId = 0;
+  #workingConfigured = false;
+  #workingVisible = true;
+  #workingMessage = "Working...";
+  #snapshot: UiSnapshot = uiSnapshotSchema.parse({ columns: 80, rows: 24, editorText: "", toolsExpanded: false });
+
+  constructor(options: ExtensionUIOptions = {}) {
+    this.#agentDir = options.agentDir ?? getAgentDir();
+    this.transcript = new ExtensionTranscript(() => this.#wake(), options.outputPad ?? 1, options.showImages ?? true);
+  }
+  run<T>(callback: () => T): T { return withAgentDir(this.#agentDir, callback); }
+  get nativeContext() { return this.#native; }
+  bind(native: NativeExtensionContext) { this.#assertActive(); this.#native = native; }
+  activate() { if (this.#shortcuts.size || this.transcript.active || this.#regions.size) this.#wake(); }
+  #assertActive() { if (this.#retired) throw new Error("Extension UI generation retired"); }
+  forContext(signal: AbortSignal): object {
+    return new Proxy(this, {
+      get: (target, property) => {
+        target.#assertActive();
+        const value = Reflect.get(target, property, target);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          target.#assertActive();
+          const index = property === "custom" ? 1 : ["select", "confirm", "input", "editor"].includes(String(property)) ? 2 : -1;
+          if (index >= 0) {
+            const opts = args[index] as DialogOptions | undefined;
+            args[index] = { ...opts, signal: opts?.signal ? AbortSignal.any([signal, opts.signal]) : signal };
+          }
+          return target.run(() => Reflect.apply(value, target, args));
+        };
+      },
+    });
+  }
+  #query() {
+    if (this.#native) this.#snapshot = uiSnapshotSchema.parse(JSON.parse(this.#native.query('{"type":"uiSnapshot"}')));
+    return this.#snapshot;
+  }
+  #command(command: UiCommand) {
+    if (!this.#retired) this.#native?.notify(JSON.stringify({ type: "uiCommand", owner: this.owner, command: uiCommandSchema.parse(command) }));
+  }
+  #wake() {
+    if (this.#retired || !this.#native) return;
+    if (this.#running) this.#command({ channel: "surface", command: { type: "wake" } });
+    else { this.#running = true; void this.#pump(); }
+  }
+  #changed() { this.#wake(); }
+  #frame() {
+    const snapshot = this.#query();
+    const transcript = this.run(() => this.transcript.render(snapshot));
+    const regions = [...this.#regions.values()].map(({ region }) => region);
+    if (this.#statuses.size) regions.push({ id: "_statuses", placement: "footer", root: { id: "statuses", type: "text", text: [...this.#statuses.values()].join(" · "), tone: "muted" } });
+    if (this.#workingConfigured && this.#workingVisible && snapshot.isRunning) regions.push({ id: "_working", placement: "aboveEditor", root: { id: "working", type: "progress", text: this.#workingMessage } });
+    const document = {
+      regions,
+      hideWorking: this.#workingConfigured, renderTranscript: this.transcript.active,
+      transcript,
+      shortcuts: [...this.#shortcuts.keys()].map((key) => ({ key })),
+    };
+    const signature = JSON.stringify(document);
+    if (signature !== this.#lastDocument) { this.#lastDocument = signature; this.#revision++; }
+    return { owner: this.owner, revision: this.#revision, ...document };
+  }
+  async #pump() {
+    try {
+      while (!this.#retired && this.#native) {
+        const frame = this.#frame();
+        const sentRegions = new Map([...this.#regions].map(([id, mounted]) => [id, { mounted, nodes: mounted.nodes }]));
+        const sentShortcuts = new Map(this.#shortcuts);
+        const event = uiEventSchema.parse(JSON.parse(await this.#native.request(JSON.stringify({ type: "uiExchange", frame }))));
+        if (event.type === "closed") { this.retire(); break; }
+        this.#snapshot = event.snapshot;
+        if (event.type === "hostResult") {
+          const request = this.#hostRequests.get(event.id);
+          this.#hostRequests.delete(event.id);
+          if (event.error) request?.reject(new Error(event.error)); else request?.resolve(event.result ?? undefined);
+        } else if (event.type === "interaction") {
+          if (event.revision !== frame.revision) continue;
+          if (event.event.type === "shortcut") {
+            const handler = this.#shortcuts.get(event.event.key);
+            if (handler && handler === sentShortcuts.get(event.event.key)) void this.run(handler).catch((error) => this.notify(String(error), "error"));
+          } else {
+            const mounted = this.#regions.get(event.regionId);
+            const sent = sentRegions.get(event.regionId);
+            const identity = mounted?.nodes.get(event.nodeId);
+            if (mounted && mounted === sent?.mounted && identity && identity === sent.nodes.get(event.nodeId)) this.run(() => mounted.onEvent?.(event));
+          }
+        }
+      }
+    } catch (error) {
+      if (!this.#retired) { try { this.notify(`Extension UI: ${String(error)}`, "error"); } catch {} this.retire(); }
+    } finally { this.#running = false; }
+  }
+
+  mount(node: UiNode, options: MountOptions = {}): UiMount {
+    this.#assertActive();
+    const id = options.id ?? randomUUID();
+    const parsed = uiNodeSchema.parse(node);
+    if (this.#regions.has(id)) throw new Error(`UI region ${id} is already mounted`);
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unmount = () => {
+      if (!active) return;
+      active = false;
+      const mounted = this.#regions.get(id);
+      if (mounted === state) this.#regions.delete(id);
+      state.cleanup();
+      this.#changed();
+    };
+    const state: Mounted = {
+      region: { id, placement: options.placement ?? "aboveEditor", root: parsed, ...(options.overlay ? { overlay: options.overlay } : {}) },
+      nodes: nodeIdentities(parsed),
+      onEvent: options.onEvent,
+      cleanup: () => { clearTimeout(timer); options.signal?.removeEventListener("abort", unmount); },
+    };
+    if (!options.signal?.aborted) {
+      this.#regions.set(id, state);
+      options.signal?.addEventListener("abort", unmount, { once: true });
+      if (options.timeout !== undefined) timer = setTimeout(unmount, options.timeout);
+      this.#changed();
+    } else active = false;
+    return Object.freeze({
+      id,
+      update: (value: UiNode) => { this.#assertActive(); if (!active || this.#regions.get(id) !== state) throw new Error("UI region unmounted"); const root = uiNodeSchema.parse(value); state.region = { ...state.region, root }; state.nodes = nodeIdentities(root, state.nodes); this.#changed(); },
+      focus: (nodeId: string) => { this.#assertActive(); if (active && this.#regions.get(id) === state) this.#command({ channel: "surface", command: { type: "focus", regionId: id, nodeId } }); },
+      unmount,
+    });
+  }
+  custom(node: UiNode, options: MountOptions = {}): Promise<unknown | undefined> {
+    this.#assertActive();
+    if (options.signal?.aborted) return Promise.resolve(undefined);
+    return new Promise((resolve, reject) => {
+      let mount: UiMount | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      const finish = (value?: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", cancel);
+        this.#pending.delete(cancel);
+        mount?.unmount();
+        resolve(value);
+      };
+      const cancel = () => finish();
+      this.#pending.add(cancel);
+      options.signal?.addEventListener("abort", cancel, { once: true });
+      if (options.timeout !== undefined) timer = setTimeout(cancel, options.timeout);
+      try {
+        mount = this.mount(node, { ...options, signal: undefined, timeout: undefined, placement: options.placement ?? "overlay", onEvent: (event) => {
+          options.onEvent?.(event);
+          if (event.event.type === "cancel") finish();
+          else if (event.event.type === "submit") finish(event.event.value);
+          else if (event.event.type === "activate") finish(event.nodeId);
+        } });
+      } catch (error) {
+        settled = true;
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", cancel);
+        this.#pending.delete(cancel);
+        mount?.unmount();
+        reject(error);
+      }
+    });
+  }
+  async select(title: string, options: string[], opts?: DialogOptions): Promise<string | undefined> {
+    const result = await this.custom({ type: "column", id: "dialog", children: [{ type: "text", id: "title", text: title, tone: "accent" }, { type: "select", id: "value", options }] }, opts);
+    return typeof result === "number" && Number.isInteger(result) ? options[result] : undefined;
+  }
+  async confirm(title: string, message: string, opts?: DialogOptions): Promise<boolean> {
+    return await this.select(`${title}\n${message}`, ["Yes", "No"], opts) === "Yes";
+  }
+  async input(title: string, placeholder = "", opts?: DialogOptions): Promise<string | undefined> {
+    const result = await this.custom({ type: "column", id: "dialog", children: [{ type: "text", id: "title", text: title, tone: "accent" }, { type: "input", id: "value", initialValue: "", placeholder }] }, opts);
+    return typeof result === "string" ? result : undefined;
+  }
+  async editor(title: string, prefill = "", opts?: DialogOptions): Promise<string | undefined> {
+    const result = await this.custom({ type: "column", id: "dialog", children: [{ type: "text", id: "title", text: title, tone: "accent" }, { type: "editor", id: "value", initialValue: prefill }] }, opts);
+    return typeof result === "string" ? result : undefined;
+  }
+  async multiSelect(request: UiMultiSelectRequest, opts?: DialogOptions): Promise<UiMultiSelectResponse | undefined> {
+    const result = await this.custom({ id: "multi-select", type: "multiSelect", request }, opts);
+    const parsed = uiMultiSelectResponseSchema.safeParse(result);
+    return parsed.success ? parsed.data : undefined;
+  }
+  #set(id: string, placement: Placement, node?: UiNode) {
+    this.#assertActive();
+    const parsed = node === undefined ? undefined : uiNodeSchema.parse(node);
+    const old = this.#regions.get(id);
+    if (old) { old.cleanup(); this.#regions.delete(id); }
+    if (parsed) this.mount(parsed, { id, placement }); else this.#changed();
+  }
+  setWidget(key: string, node?: UiNode, options?: { placement?: "aboveEditor" | "belowEditor" }) { this.#set(`widget:${key}`, options?.placement ?? "aboveEditor", node); }
+  setHeader(node?: UiNode) { this.#set("header", "header", node); }
+  setFooter(node?: UiNode) { this.#set("footer", "footer", node); }
+  setStatus(key: string, text?: string) { this.#assertActive(); if (text === undefined) this.#statuses.delete(key); else this.#statuses.set(key, text); this.#changed(); }
+  registerShortcut(key: string, handler: () => Promise<void>) { this.#assertActive(); this.#shortcuts.set(key, handler); this.#changed(); }
+  notify(message: unknown, level = "info") { this.#assertActive(); this.#native?.notify(JSON.stringify({ type: "uiNotify", message: String(message), level })); }
+  setTheme(name: UiTheme) {
+    this.#assertActive();
+    if (name !== "light" && name !== "dark" && name !== "system") throw new Error(`Unknown UI theme: ${name}`);
+    this.#command({ channel: "product", command: { type: "theme", name } });
+  }
+  setProgress(active: boolean) { this.#assertActive(); this.#command({ channel: "product", command: { type: "progress", active } }); }
+  setProgramStatus(status: { state: "working" | "error" | "success" | "clear"; text?: string; progress?: number }) {
+    this.#assertActive(); this.#command({ channel: "product", command: { type: "programStatus", state: status.state, text: status.text ?? null, progress: status.progress ?? null } });
+  }
+  setTitle(title: string) { this.#assertActive(); this.#command({ channel: "product", command: { type: "title", title } }); }
+  setEditorText(text: string) { this.#assertActive(); this.#command({ channel: "product", command: { type: "editorText", text, append: false } }); }
+  pasteToEditor(text: string) { this.#assertActive(); this.#command({ channel: "product", command: { type: "editorText", text, append: true } }); }
+  getEditorText() { this.#assertActive(); return this.#query().editorText; }
+  getToolsExpanded() { this.#assertActive(); return this.#query().toolsExpanded; }
+  setToolsExpanded(expanded: boolean) { this.#assertActive(); this.#command({ channel: "product", command: { type: "toolsExpanded", expanded } }); }
+  setWorkingMessage(message = "Working...") { this.#workingConfigured = true; this.#workingMessage = message; this.#changed(); }
+  setWorkingVisible(visible: boolean) { this.#workingConfigured = true; this.#workingVisible = visible; this.#changed(); }
+  setHiddenThinkingLabel(label?: string) { this.transcript.setHiddenThinkingLabel(label); }
+  hostOperation(operation: UiHostOperation): Promise<string | undefined> {
+    this.#assertActive();
+    if (!this.#native) return Promise.reject(new Error("Extension UI is unavailable"));
+    return new Promise((resolve, reject) => {
+      const id = ++this.#hostId;
+      this.#hostRequests.set(id, { resolve, reject });
+      this.#wake();
+      try { this.#command({ channel: "host", command: { id, operation } }); } catch (error) { this.#hostRequests.delete(id); reject(error); }
+    });
+  }
+  retire() {
+    if (this.#retired) return;
+    try { this.#command({ channel: "surface", command: { type: "close" } }); } catch {}
+    this.#retired = true;
+    for (const cancel of this.#pending) cancel();
+    this.#pending.clear();
+    for (const request of this.#hostRequests.values()) request.reject(new Error("Extension UI generation retired"));
+    this.#hostRequests.clear();
+    for (const mounted of this.#regions.values()) mounted.cleanup();
+    this.#regions.clear();
+    this.#shortcuts.clear();
+    this.transcript.dispose();
+  }
+}

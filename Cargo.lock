@@ -2963,6 +2963,7 @@ dependencies = [
  "pi-session",
  "pi-test-support",
  "pi-utils",
+ "rustix 1.1.4",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
@@ -3015,6 +3016,7 @@ dependencies = [
  "dotenvy",
  "fs2",
  "futures",
+ "image",
  "pi-acp",
  "pi-agent",
  "pi-coding",
@@ -3043,6 +3045,7 @@ dependencies = [
  "ratatui-textarea",
  "regex",
  "rpassword",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -3270,6 +3273,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

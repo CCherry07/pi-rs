@@ -242,7 +242,7 @@ impl TestLoop {
                 thinking_budgets: None,
                 block_images: false,
                 tool_execution: ToolExecutionMode::default(),
-                max_tool_iterations: 10,
+                max_tool_iterations: Some(10),
                 max_parallel_tools: 8,
                 cwd: std::env::current_dir().unwrap(),
                 session_id: None,
