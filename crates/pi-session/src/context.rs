@@ -7,6 +7,7 @@ use pi_core::{
 };
 use serde_json::{Value, json};
 
+use crate::ProjectedSessionEntry;
 use crate::{
     AgentMessage, CustomEntry, MAIN_LANE, SessionDocument, SessionEntry, SessionError,
     SessionRecord,
@@ -135,13 +136,26 @@ fn session_entry_to_context_messages_inner(
         SessionEntry::ModelChange(_)
         | SessionEntry::ThinkingLevelChange(_)
         | SessionEntry::ActiveToolsChange(_)
-        | SessionEntry::BranchSummary(_) => Vec::new(),
+        | SessionEntry::BranchSummary(_)
+        | SessionEntry::ContextEdit(_) => Vec::new(),
     }
 }
 
 pub(crate) fn build_default_session_context_from_refs(
     path_entries: &[&SessionRecord],
 ) -> SessionContext {
+    if path_entries
+        .iter()
+        .any(|record| matches!(record.entry, SessionEntry::ContextEdit(_)))
+    {
+        return build_session_context(
+            &path_entries
+                .iter()
+                .map(|entry| (*entry).clone())
+                .collect::<Vec<_>>(),
+            &SessionContextBuildOptions::default(),
+        );
+    }
     let mut thinking_level = "off".to_string();
     let mut model = None;
     let mut active_tool_names = None;
@@ -173,7 +187,8 @@ pub(crate) fn build_default_session_context_from_refs(
             SessionEntry::Compaction(_)
             | SessionEntry::BranchSummary(_)
             | SessionEntry::CustomMessage(_)
-            | SessionEntry::Custom(_) => {}
+            | SessionEntry::Custom(_)
+            | SessionEntry::ContextEdit(_) => {}
         }
     }
 
@@ -234,17 +249,14 @@ pub fn build_session_context(
             SessionEntry::Compaction(_)
             | SessionEntry::BranchSummary(_)
             | SessionEntry::CustomMessage(_)
-            | SessionEntry::Custom(_) => {}
+            | SessionEntry::Custom(_)
+            | SessionEntry::ContextEdit(_) => {}
         }
     }
 
-    let context_entries = build_context_entries(path_entries, options);
-    let messages = context_entries
-        .iter()
-        .enumerate()
-        .flat_map(|(index, record)| {
-            session_entry_to_context_messages(record, index, &context_entries, options)
-        })
+    let messages = project_session_entries(path_entries, options)
+        .into_iter()
+        .flat_map(|entry| entry.messages)
         .collect();
     SessionContext {
         messages,
@@ -252,6 +264,164 @@ pub fn build_session_context(
         model,
         active_tool_names,
     }
+}
+
+pub fn project_session_entries(
+    path: &[SessionRecord],
+    options: &SessionContextBuildOptions,
+) -> Vec<ProjectedSessionEntry> {
+    let entries = build_context_entries(path, options);
+    let edits = entries
+        .iter()
+        .filter_map(|record| match &record.entry {
+            SessionEntry::ContextEdit(edit) => Some((edit.target_id.as_str(), edit)),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let mut output = Vec::new();
+    for (index, record) in entries.iter().enumerate() {
+        let mut messages = session_entry_to_context_messages(record, index, &entries, options);
+        if let SessionEntry::Compaction(compaction) = &record.entry {
+            let end = path
+                .iter()
+                .position(|entry| entry.id == record.id)
+                .unwrap_or(path.len());
+            let ids = retained_entry_ids(compaction, &path[..end], options);
+            let tail = messages.split_off(1.min(messages.len()));
+            output.push(ProjectedSessionEntry {
+                source_entry: record.clone(),
+                messages,
+            });
+            for (message, id) in tail.into_iter().zip(ids) {
+                let source = id
+                    .as_deref()
+                    .and_then(|id| path.iter().find(|entry| entry.id == id))
+                    .unwrap_or(record);
+                let messages = id.as_deref().and_then(|id| edits.get(id)).map_or_else(
+                    || vec![message.clone()],
+                    |edit| edit.apply(&message).into_iter().collect(),
+                );
+                output.push(ProjectedSessionEntry {
+                    source_entry: source.clone(),
+                    messages,
+                });
+            }
+        } else {
+            if let Some(edit) = edits.get(record.id.as_str()) {
+                messages = messages
+                    .iter()
+                    .filter_map(|message| edit.apply(message))
+                    .collect();
+            }
+            output.push(ProjectedSessionEntry {
+                source_entry: record.clone(),
+                messages,
+            });
+        }
+    }
+    output
+}
+
+fn retained_entry_ids(
+    compaction: &crate::CompactionEntry,
+    path: &[SessionRecord],
+    options: &SessionContextBuildOptions,
+) -> Vec<Option<String>> {
+    if compaction.retained_entry_ids.len() == compaction.retained_tail.len() {
+        return compaction.retained_entry_ids.clone();
+    }
+    // Older v4 checkpoints have snapshots only. Match their retained messages in order.
+    let mut cursor = path.len();
+    let mut ids = compaction
+        .retained_tail
+        .iter()
+        .rev()
+        .map(|message| {
+            let found = path[..cursor].iter().rposition(|entry| {
+                !matches!(entry.entry, SessionEntry::Compaction(_))
+                    && session_entry_to_context_messages_inner(entry, 0, None, options)
+                        .iter()
+                        .any(|candidate| candidate == message)
+            });
+            found.map(|index| {
+                cursor = index;
+                path[index].id.clone()
+            })
+        })
+        .collect::<Vec<_>>();
+    ids.reverse();
+    ids
+}
+
+pub fn annotate_compaction(
+    compaction: &mut crate::CompactionEntry,
+    path: &[SessionRecord],
+    options: &SessionContextBuildOptions,
+) {
+    let projected = project_session_entries(path, options);
+    let candidates = projected
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .messages
+                .iter()
+                .map(move |message| (&entry.source_entry.id, message))
+        })
+        .collect::<Vec<_>>();
+    let mut cursor = candidates.len();
+    let mut ids = compaction
+        .retained_tail
+        .iter()
+        .rev()
+        .map(|message| {
+            let found = candidates[..cursor]
+                .iter()
+                .rposition(|(_, candidate)| *candidate == message);
+            found.map(|index| {
+                cursor = index;
+                candidates[index].0.clone()
+            })
+        })
+        .collect::<Vec<_>>();
+    ids.reverse();
+    compaction.retained_entry_ids = ids;
+}
+
+pub(crate) fn validate_context_edit(
+    edit: &crate::ContextEditEntry,
+    path: &[SessionRecord],
+) -> Result<(), SessionError> {
+    let target = path
+        .iter()
+        .find(|entry| entry.id == edit.target_id)
+        .ok_or_else(|| {
+            SessionError::InvalidEntry(format!(
+                "context edit target {} is not on the active branch",
+                edit.target_id
+            ))
+        })?;
+    let message = match &target.entry {
+        SessionEntry::Message(entry)
+            if matches!(entry.message.role(), "user" | "assistant" | "toolResult") =>
+        {
+            entry.message.clone()
+        }
+        SessionEntry::CustomMessage(entry) => {
+            AgentMessage::from(entry.to_message(target.timestamp_ms))
+        }
+        _ => {
+            return Err(SessionError::InvalidEntry(format!(
+                "entry {} does not contribute editable model content",
+                edit.target_id
+            )));
+        }
+    };
+    if edit.replacement.is_some() && edit.apply(&message).is_none() {
+        return Err(SessionError::InvalidEntry(
+            "invalid context edit content for target role".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl SessionContext {
@@ -660,6 +830,7 @@ mod tests {
                 2,
                 Some("old"),
                 SessionEntry::Compaction(CompactionEntry {
+                    retained_entry_ids: Vec::new(),
                     summary: "summary".to_string(),
                     retained_tail: vec![user("retained"), assistant("answer", StopReason::Stop)],
                     tokens_before: 100,

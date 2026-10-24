@@ -2,7 +2,6 @@
 # Historical snapshots, research notes, and eval documentation are excluded.
 README.md
 apps/pi-cli/README.md
-apps/pi-desktop/README.md
 crates/pi-acp/README.md
 crates/pi-js-package-manager/README.md
 plugins/features/pi-plugin-mcp/README.md
@@ -15,4 +14,3 @@ domains/coding/README.md
 docs/architecture.md
 docs/js-extension-compatibility.md
 packages/pi/README.md
-packages/pi-desktop-sdk/README.md

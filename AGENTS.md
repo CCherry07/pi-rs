@@ -142,7 +142,28 @@ claiming Pi compatibility; do not implement from memory or from an older Pi shap
    worktree and keep protocol/storage compatibility explicit.
 4. Update `docs/architecture.md` when an architectural invariant, lifecycle, persistence rule, or
    deliberate Pi divergence changes.
-5. Finish only when all affected tests pass and the full quality gates are green:
+5. Validate proportionally, starting at the owning seam and expanding only when the change invalidates
+   broader evidence:
+
+   - **Iteration:** run the smallest regression that exercises the edited interface, plus a targeted
+     `cargo check -p <package>` when compilation coverage is useful. Keep this loop fast.
+   - **Default completion:** run affected-package tests and targeted Clippy for changed Rust packages,
+     then `cargo fmt --all -- --check` and `git diff --check`. If `packages/pi` changed, run its typecheck
+     and relevant Node tests. Add native-bridge or PTY checks only when the Node/NAPI or terminal UI seam
+     changed.
+   - **Documentation only:** use `git diff --check` plus relevant link/path or generated-doc checks. Rust
+     tests are not required unless the documentation change accompanies executable behavior.
+   - **Full workspace:** run the full gates when the user requests them; before a requested
+     commit/PR/merge/release; or after changing foundational/public contracts, session wire or
+     persistence, generation lifecycle, native ABI/loading, workspace dependency/features, or another
+     seam with broad transitive impact. Also expand to full when focused evidence suggests spillover.
+
+   A successful check remains valid across follow-up turns while its code inputs, configuration, and
+   toolchain are unchanged. Rerun only checks invalidated by later edits; do not mechanically repeat a
+   green full-workspace run for an unrelated follow-up. Report which tier ran and any broader gates not
+   run. CI remains the authoritative full-workspace gate.
+
+   The full gates are:
 
    ```text
    cargo fmt --all -- --check

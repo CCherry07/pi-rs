@@ -265,7 +265,7 @@ impl PiRuntime {
                 } else {
                     Vec::new()
                 },
-                max_tool_iterations: request.max_tool_iterations,
+                max_tool_iterations: Some(request.max_tool_iterations),
                 turn_control: Arc::new(control),
                 cwd: self.cwd().to_path_buf(),
                 ..AgentOptions::default()

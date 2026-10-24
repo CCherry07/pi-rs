@@ -381,3 +381,58 @@ async fn explicit_tool_selection_and_later_changes_survive_reload() {
     assert_eq!(session.current().runtime().active_tools(), ["lookup_order"]);
     harness.sessions().shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn initial_model_options_apply_before_the_first_request_and_reload_keeps_live_selection() {
+    let directory = tempfile::tempdir().unwrap();
+    let providers = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&providers);
+    let harness = AgentHarness::builder(ModelSelection::new("scripted", "fallback"), PROMPT)
+        .session_options(AgentSessionOptions::default().initial_model(
+            pi_session::InitialModelRequest::default().requested("scripted", "requested"),
+        ))
+        .provider_plugin_factory(move || {
+            let plugin = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".into())]);
+            recorded.lock().unwrap().push(plugin.provider());
+            plugin
+        })
+        .build();
+    let path = directory.path().join("requested.jsonl");
+    let session = harness
+        .sessions()
+        .create_session(directory.path(), &path)
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .current()
+            .runtime()
+            .agent()
+            .state()
+            .model_id
+            .as_str(),
+        "requested"
+    );
+    assert!(!path.exists());
+    session.current().submit("first turn").await.unwrap();
+    assert_eq!(
+        providers.lock().unwrap()[0].requests()[0].model.as_str(),
+        "requested"
+    );
+    session
+        .current()
+        .set_model("scripted".into(), "live".into())
+        .unwrap();
+    session.reload().await.unwrap();
+    assert_eq!(
+        session
+            .current()
+            .runtime()
+            .agent()
+            .state()
+            .model_id
+            .as_str(),
+        "live"
+    );
+    harness.sessions().shutdown().await.unwrap();
+}

@@ -7,8 +7,8 @@ use serde_json::{Map, Value};
 use crate::{
     BranchSummarySettings, CompactionSettings, DefaultProjectTrust, FeatureSettings, ImageSettings,
     PackageSource, ProviderRetrySettings, QueueModeSetting, RetrySettings, SettingsDiagnostic,
-    SettingsDiagnosticKind, SettingsError, SettingsScope, SettingsValues, ThinkingBudgetsSettings,
-    ThinkingLevelSetting, TransportSetting,
+    SettingsDiagnosticKind, SettingsError, SettingsScope, SettingsValues, TerminalSettings,
+    ThinkingBudgetsSettings, ThinkingLevelSetting, TransportSetting,
 };
 
 pub(crate) fn read(path: &Path) -> Result<Map<String, Value>, SettingsError> {
@@ -119,6 +119,12 @@ pub(crate) fn decode_values(
         skills: string_list(document, "skills", origin, diagnostics),
         prompts: string_list(document, "prompts", origin, diagnostics),
         themes: string_list(document, "themes", origin, diagnostics),
+        theme: optional_string(document, "theme", origin, diagnostics),
+        external_editor: optional_string(document, "externalEditor", origin, diagnostics),
+        output_pad: optional_u64(document, "outputPad", origin, diagnostics)
+            .filter(|value| *value == 0)
+            .map_or(1, |value| value as u8),
+        terminal: decode_terminal(document, origin, diagnostics),
         enable_skill_commands: optional_bool(document, "enableSkillCommands", origin, diagnostics)
             .unwrap_or(true),
         enabled_models: optional_string_list(document, "enabledModels", origin, diagnostics),
@@ -140,6 +146,24 @@ pub(crate) fn decode_values(
             diagnostics,
         ),
         images: decode_images(document, origin, diagnostics),
+    }
+}
+
+fn decode_terminal(
+    document: &Map<String, Value>,
+    origin: Option<(SettingsScope, &Path)>,
+    diagnostics: &mut Vec<SettingsDiagnostic>,
+) -> TerminalSettings {
+    let defaults = TerminalSettings::default();
+    let Some(object) = optional_object(document, "terminal", origin, diagnostics) else {
+        return defaults;
+    };
+    TerminalSettings {
+        show_images: optional_bool(object, "showImages", origin, diagnostics)
+            .unwrap_or(defaults.show_images),
+        image_width_cells: optional_u64(object, "imageWidthCells", origin, diagnostics)
+            .and_then(|value| u16::try_from(value.max(1)).ok())
+            .unwrap_or(defaults.image_width_cells),
     }
 }
 

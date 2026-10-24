@@ -559,6 +559,9 @@ async fn turn_metadata_and_message_end_replacement_match_pi() {
             cwd,
             &signal,
             TurnEndEvent {
+                boundary: None,
+                message_entry_id: None,
+                tool_result_entry_ids: Vec::new(),
                 turn_index: 3,
                 message: assistant("done").into(),
                 tool_results: Vec::<ToolResultMessage>::new(),
@@ -725,4 +728,108 @@ async fn observer_hooks_share_one_generation_batch_and_one_compact_stream_encodi
             && diagnostic.hook.as_str() == "message_update"
             && diagnostic.message.contains("intentional observer failure")
     }));
+}
+
+struct BoundaryDispatcher;
+#[async_trait]
+impl JsCallbackDispatcher for BoundaryDispatcher {
+    async fn invoke(
+        &self,
+        invocation: JsInvocation,
+        _: PluginContextHandle,
+    ) -> Result<Value, JsCallbackError> {
+        let event = &invocation.payload["event"];
+        match invocation.callback_id.as_str() {
+            "boundary:first" => Ok(
+                json!({"entries":[{"type":"context_edit","targetId":"missing","replacement":null}],"continue":true}),
+            ),
+            "boundary:repair" => {
+                assert_eq!(event["entries"][0]["targetId"], "missing");
+                assert_eq!(event["continue"], true);
+                Ok(
+                    json!({"entries":[{"type":"custom_message","customType":"repair","content":"fixed","display":false}]}),
+                )
+            }
+            "boundary:last" => {
+                assert_eq!(event["context"]["canContinue"], json!(true));
+                assert_eq!(event["entries"][0]["content"], "fixed");
+                Ok(json!({"continue":false}))
+            }
+            _ => panic!("unexpected boundary handler"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn boundary_callbacks_rebuild_previews_between_handlers_and_sources() {
+    let generation = JsPluginGeneration::prepare(
+        JsGenerationManifest {
+            generation_id: "boundaries".into(),
+            agent_plugins: vec![
+                JsAgentPluginManifest {
+                    id: "one".into(),
+                    tools: vec![],
+                    commands: vec![],
+                    hooks: vec![
+                        JsHookManifest {
+                            name: "agent_before_settle".into(),
+                            callback_id: "boundary:first".into(),
+                        },
+                        JsHookManifest {
+                            name: "agent_before_settle".into(),
+                            callback_id: "boundary:repair".into(),
+                        },
+                    ],
+                },
+                JsAgentPluginManifest {
+                    id: "two".into(),
+                    tools: vec![],
+                    commands: vec![],
+                    hooks: vec![JsHookManifest {
+                        name: "agent_before_settle".into(),
+                        callback_id: "boundary:last".into(),
+                    }],
+                },
+            ],
+            provider_plugins: vec![],
+            provider_registrations: vec![],
+            session_plugins: vec![],
+            diagnostics: vec![],
+        },
+        Arc::new(BoundaryDispatcher),
+    )
+    .unwrap();
+    let (driver, _) = RegistriesBuilder::new()
+        .register_plugins(generation.plugins())
+        .unwrap();
+    let (_, signal) = AbortHandle::new();
+    let result = driver
+        .dispatch_boundary(
+            &RunId::new("run"),
+            std::path::Path::new("."),
+            &signal,
+            None,
+            pi_plugin::AgentActivityOutcome::Completed,
+            |entries| {
+                if entries
+                    .iter()
+                    .any(|entry| matches!(entry, pi_plugin::SessionBoundaryDraft::ContextEdit(_)))
+                {
+                    return Err("unknown target".into());
+                }
+                Ok(pi_plugin::BoundaryContextPreview {
+                    can_continue: !entries.is_empty(),
+                    ..Default::default()
+                })
+            },
+        )
+        .await;
+    assert_eq!(result.continue_run, Some(false));
+    assert_eq!(result.entries.unwrap().len(), 1);
+    assert!(
+        driver
+            .diagnostics()
+            .iter()
+            .any(|error| error.message.contains("unknown target"))
+    );
 }

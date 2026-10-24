@@ -58,7 +58,9 @@ impl PluginContextEpoch {
     }
 
     pub fn retire(&self) {
-        self.inner.active.store(false, Ordering::Release);
+        if self.inner.active.swap(false, Ordering::AcqRel) {
+            self.inner.access.ui_retire();
+        }
     }
 
     fn ensure_active(&self) -> PluginContextResult<()> {

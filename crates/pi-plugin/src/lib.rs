@@ -27,36 +27,42 @@ pub use error::{CoreError, Result};
 pub use model_runtime::{ModelRuntime, ProviderStatus};
 pub use pi_plugin_macros::{plugin, provider_plugin};
 pub use plugin::{
-    AfterProviderResponseEvent, AgentEndEvent, AgentHook, AgentHookInterests, AgentPluginContext,
-    AgentSettledEvent, AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch,
-    BeforeProviderHeadersEvent, BeforeProviderRequestEvent, CommandContextParts,
-    CommandModelsContext, CommandSessionContext, CompactOptions, ContextEvent, ContextParts,
-    ContextPatch, ContextUsage, DirectCompletionRequest, EphemeralCompactionOptions,
-    EphemeralSessionOutcome, EphemeralSessionRequest, EphemeralSessionStatus, ForkOptions,
-    ForkPosition, InputContext, InputEvent, InputPatch, InputSource, InputStreamingBehavior,
-    IsolatedContextMode, IsolatedFollowUp, IsolatedFollowUpReceipt, IsolatedForkPoint,
-    IsolatedMessageDelivery, IsolatedMessageReceipt, IsolatedSessionHandle, IsolatedSessionId,
-    IsolatedSessionOptions, IsolatedSessionOutcome, IsolatedSessionRequest,
-    IsolatedSessionTurnHandle, IsolatedSessionTurnId, MessageDelivery, MessageEndEvent,
-    MessageEndPatch, MessageStartEvent, MessageUpdateEvent, ModelsContext, ModelsContextAccess,
-    NavigateTreeOptions, NewSessionOptions, NoticeLevel, Plugin, PluginContext, PluginContextEpoch,
-    PluginContextError, PluginContextHandle, PluginContextReplacement, PluginContextResult,
-    PluginContextScope, PluginDiagnostic, PluginDriver, PluginError, PluginHook, PresentationMode,
-    ProviderHook, ProviderPlugin, ProviderPluginContext, ProviderPluginDriver,
-    ProviderRegisterContext, RegisterContext, ReplacedSessionContext, ScopedModel,
-    SendMessageOptions, SendUserMessageOptions, SessionBeforeCompactEvent,
-    SessionBeforeCompactResult, SessionBeforeForkEvent, SessionBeforeForkResult,
-    SessionBeforeSwitchEvent, SessionBeforeSwitchResult, SessionBeforeTreeEvent,
-    SessionBeforeTreeResult, SessionCompactEvent, SessionCompactFailedEvent, SessionContext,
-    SessionContextAccess, SessionDispatchContext, SessionEntryKind, SessionEntryView,
-    SessionExecutionOrigin, SessionForkPosition, SessionHook, SessionHookInterests,
-    SessionIdentity, SessionInfoChangedEvent, SessionPluginContext, SessionReplacement,
-    SessionShutdownEvent, SessionShutdownReason, SessionSnapshot, SessionStartEvent,
-    SessionStartReason, SessionSwitchReason, SessionTreeEvent, SessionTreeSummary, ToolCallBlock,
-    ToolCallEvent, ToolCallPatch, ToolExecutionEndEvent, ToolExecutionStartEvent,
-    ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch, TreePreparation, TurnEndEvent,
-    TurnStartEvent, UiContext, UiContextAccess, UiMultiSelectAction, UiMultiSelectOption,
-    UiMultiSelectRequest, UiMultiSelectResponse, UnavailablePluginContext,
+    AfterProviderResponseEvent, AgentActivityOutcome, AgentBeforeSettleEvent, AgentEndEvent,
+    AgentHook, AgentHookInterests, AgentPluginContext, AgentSettledEvent, AgentStartEvent,
+    BeforeAgentStartEvent, BeforeAgentStartPatch, BeforeProviderHeadersEvent,
+    BeforeProviderRequestEvent, BoundaryCompaction, BoundaryContextPreview, BoundaryResult,
+    BoundaryState, CommandContextParts, CommandModelsContext, CommandSessionContext,
+    CompactOptions, ContextEvent, ContextParts, ContextPatch, ContextUsage,
+    DirectCompletionRequest, EphemeralCompactionOptions, EphemeralSessionOutcome,
+    EphemeralSessionRequest, EphemeralSessionStatus, ForkOptions, ForkPosition, InputContext,
+    InputEvent, InputPatch, InputSource, InputStreamingBehavior, IsolatedContextMode,
+    IsolatedFollowUp, IsolatedFollowUpReceipt, IsolatedForkPoint, IsolatedMessageDelivery,
+    IsolatedMessageReceipt, IsolatedSessionHandle, IsolatedSessionId, IsolatedSessionOptions,
+    IsolatedSessionOutcome, IsolatedSessionRequest, IsolatedSessionTurnHandle,
+    IsolatedSessionTurnId, MessageDelivery, MessageEndEvent, MessageEndPatch, MessageStartEvent,
+    MessageUpdateEvent, ModelsContext, ModelsContextAccess, NavigateTreeOptions, NewSessionOptions,
+    NoticeLevel, Plugin, PluginContext, PluginContextEpoch, PluginContextError,
+    PluginContextHandle, PluginContextReplacement, PluginContextResult, PluginContextScope,
+    PluginDiagnostic, PluginDriver, PluginError, PluginHook, PresentationMode, ProviderHook,
+    ProviderPlugin, ProviderPluginContext, ProviderPluginDriver, ProviderRegisterContext,
+    RegisterContext, ReplacedSessionContext, ScopedModel, SendMessageOptions,
+    SendUserMessageOptions, SessionBeforeCompactEvent, SessionBeforeCompactResult,
+    SessionBeforeForkEvent, SessionBeforeForkResult, SessionBeforeSwitchEvent,
+    SessionBeforeSwitchResult, SessionBeforeTreeEvent, SessionBeforeTreeResult,
+    SessionBoundaryDraft, SessionBoundaryEvent, SessionCompactEvent, SessionCompactFailedEvent,
+    SessionContext, SessionContextAccess, SessionDispatchContext, SessionEntryKind,
+    SessionEntryView, SessionExecutionOrigin, SessionForkPosition, SessionHook,
+    SessionHookInterests, SessionIdentity, SessionInfoChangedEvent, SessionPluginContext,
+    SessionReplacement, SessionShutdownEvent, SessionShutdownReason, SessionSnapshot,
+    SessionStartEvent, SessionStartReason, SessionSwitchReason, SessionTreeEvent,
+    SessionTreeSummary, ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolExecutionEndEvent,
+    ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch,
+    TreePreparation, TurnEndEvent, TurnStartEvent, UiAppAction, UiCommand, UiCompletion, UiContext,
+    UiContextAccess, UiHostOperation, UiHostRequest, UiInteraction, UiMultiSelectAction,
+    UiMultiSelectOption, UiMultiSelectRequest, UiMultiSelectResponse, UiNode, UiNodeKind,
+    UiOverlayOptions, UiProductCommand, UiRegion, UiRegionPlacement, UiShortcut, UiSurfaceArea,
+    UiSurfaceCommand, UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot, UiTone, UiTranscriptItem,
+    UiTranscriptRender, UnavailablePluginContext,
 };
 
 pub use provider::{
@@ -69,6 +75,8 @@ pub use tool::{Tool, ToolContext, ToolError, ToolUpdateSink};
 pub use prepare::{PrepareContext, PrepareError, PrepareResult};
 
 pub mod desktop;
+pub mod ui;
+pub use ui::{UiComponent, UiComponentUpdate, UiComponentWaker};
 /// Native export contracts; enable only when building or loading a native plugin.
 #[cfg(feature = "native")]
 #[allow(unsafe_code)]

@@ -264,6 +264,7 @@ mod tests {
             parent_id: None,
             timestamp_ms: 0,
             entry: SessionEntry::Compaction(CompactionEntry {
+                retained_entry_ids: Vec::new(),
                 summary: "previous".to_string(),
                 retained_tail: Vec::new(),
                 tokens_before: 1_000,

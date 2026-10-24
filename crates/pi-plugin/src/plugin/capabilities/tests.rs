@@ -29,9 +29,36 @@ impl UiContextAccess for StaticAccess {
         Ok(())
     }
 
-    async fn ui_confirm(&self, title: String, message: String) -> PluginContextResult<bool> {
-        self.confirmations.lock().unwrap().push((title, message));
+    fn has_ui(&self) -> PluginContextResult<bool> {
         Ok(true)
+    }
+    fn ui_command(&self, _owner: String, _command: crate::UiCommand) -> PluginContextResult<()> {
+        Ok(())
+    }
+    async fn ui_surface_exchange(
+        &self,
+        frame: crate::UiSurfaceFrame,
+    ) -> PluginContextResult<crate::UiSurfaceEvent> {
+        let pi_plugin::UiNodeKind::Column { children, .. } = &frame.regions[0].root.kind else {
+            panic!("expected dialog column");
+        };
+        let pi_plugin::UiNodeKind::Text { text, .. } = &children[0].kind else {
+            panic!("expected dialog title");
+        };
+        let (title, message) = text
+            .split_once('\n')
+            .expect("confirmation title and message");
+        self.confirmations
+            .lock()
+            .unwrap()
+            .push((title.into(), message.into()));
+        Ok(pi_plugin::UiSurfaceEvent::Interaction {
+            region_id: "dialog".into(),
+            node_id: "value".into(),
+            event: pi_plugin::UiInteraction::Submit { value: 0.into() },
+            snapshot: pi_plugin::UiSurfaceSnapshot::default(),
+            revision: frame.revision,
+        })
     }
 }
 
@@ -338,4 +365,23 @@ fn retired_epoch_rejects_stored_native_contexts() {
         context.ui.mode(),
         Err(PluginContextError::Retired)
     ));
+}
+
+#[test]
+fn epoch_retirement_releases_presentation_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct SurfaceAccess(AtomicUsize);
+    impl UiContextAccess for SurfaceAccess {
+        fn ui_retire(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    impl ModelsContextAccess for SurfaceAccess {}
+    #[async_trait]
+    impl SessionContextAccess for SurfaceAccess {}
+    let access = Arc::new(SurfaceAccess(AtomicUsize::new(0)));
+    let epoch = PluginContextEpoch::new(access.clone());
+    epoch.retire();
+    epoch.retire();
+    assert_eq!(access.0.load(Ordering::SeqCst), 1);
 }

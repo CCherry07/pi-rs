@@ -108,7 +108,7 @@ live here. Storage and orchestration remain in `pi-session`, `pi-agent` and `pi-
 
 Native authors enable the `native` feature and use `pi_plugin::prelude` and `#[pi_plugin::native_plugin]`. Configured native plugins
 use `#[pi_plugin::native_plugin(factory)]` and additionally derive `schemars::JsonSchema` for options.
-ABI 24 has two kinds (`plugin`, `provider`); older native libraries must be rebuilt. The SDK owns
+ABI 26 has two kinds (`plugin`, `provider`); older native libraries must be rebuilt. The SDK owns
 exports, macros generate their glue, and `pi-plugin-manager::loader` owns discovery and library lifetime.
 
 See the [native author guide](docs/native.md) and [host manager](../pi-plugin-manager/README.md).

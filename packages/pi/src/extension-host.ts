@@ -1,12 +1,12 @@
-import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { basename, dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { basename } from 'node:path'
 
 import { createJiti } from 'jiti'
 import { z } from 'zod'
 
+import * as compatibilityApi from './compat-api.js'
 import { CompatibilityResolver } from './compatibility-resolver.js'
+import { ExtensionUI } from './extension-ui.js'
 import { createExtensionContext } from './extension-context.js'
 import { ExtensionRuntime, type ExecOptions } from './extension-runtime.js'
 import type { PiExtensionCommandContext, PiExtensionContext } from './extension-api.js'
@@ -33,19 +33,9 @@ import {
   toolExecutionModeSchema,
 } from './extension-protocol.js'
 
-const hostDirectory = dirname(fileURLToPath(import.meta.url))
-const compatibilityModulePath = [join(hostDirectory, 'compat-api.js'), join(hostDirectory, 'compat-api.ts')].find(existsSync)
-if (!compatibilityModulePath) {
-  throw new Error(`Cannot locate the Pi extension compatibility module in ${hostDirectory}`)
-}
-const compatibilityTuiModulePath = [join(hostDirectory, 'compat-tui.js'), join(hostDirectory, 'compat-tui.ts')].find(existsSync)
-if (!compatibilityTuiModulePath) {
-  throw new Error(`Cannot locate the Pi TUI compatibility module in ${hostDirectory}`)
-}
 const require = createRequire(import.meta.url)
 const compatibilityResolver = new CompatibilityResolver(require, {
-  pi: compatibilityModulePath,
-  tui: compatibilityTuiModulePath,
+  pi: compatibilityApi,
 })
 
 const jsonObjectSchema = z.looseObject({})
@@ -184,6 +174,7 @@ const AGENT_HOOKS = new Set([
   'agent_start',
   'agent_end',
   'agent_settled',
+  'agent_before_settle',
   'turn_start',
   'turn_end',
   'message_start',
@@ -277,6 +268,7 @@ interface ExtensionDiagnostic {
 }
 
 interface GenerationState {
+  ui: ExtensionUI
   callbacks: Map<string, ExtensionCallback>
   active: Map<string, AbortController>
   events: ExtensionEventBus
@@ -312,12 +304,13 @@ interface ExtensionApi {
   registerTool(definition: unknown): void
   on(event: string, handler: unknown): void
   registerCommand(name: string, options: unknown): void
-  registerShortcut(): void
+  registerShortcut(key: string, options: unknown): void
   registerFlag(name: string, options: unknown): void
   registerProvider(nameOrProvider: string | Record<string, unknown>, config?: unknown): void
-  registerMessageRenderer(): void
-  registerMarkdownTransformer(): void
-  registerEntryRenderer(): void
+  registerMessageRenderer(customType: string, renderer: unknown): void
+  registerMarkdownTransformer(transformer: unknown): void
+  registerEntryRenderer(customType: string, renderer: unknown): void
+  registerToolRenderer(resolver: unknown): void
   sendMessage(message: unknown, options?: unknown): void
   sendUserMessage(content: unknown, options?: unknown): void
   appendEntry(customType: string, data?: unknown): void
@@ -645,7 +638,7 @@ export class ExtensionHost {
       case 'prepareGeneration':
         return JSON.stringify(await this.#prepareGeneration(operation.request))
       case 'invoke':
-        return JSON.stringify(await this.#invoke(operation.invocation, nativeContext))
+        return JSON.stringify(await this.#invoke(operation.invocation, nativeContext) ?? null)
       case 'invokeHookBatch':
         return JSON.stringify(await this.#invokeHookBatch(operation.invocation, nativeContext))
       case 'invokeStreamHookBatch':
@@ -668,6 +661,11 @@ export class ExtensionHost {
       this.#requireGeneration(generationId)
     })
     const state: GenerationState = {
+      ui: new ExtensionUI({
+        agentDir: request.agentDir,
+        outputPad: request.outputPad,
+        showImages: request.showImages,
+      }),
       callbacks: new Map(),
       active: new Map(),
       events: createExtensionEventBus(),
@@ -701,12 +699,13 @@ export class ExtensionHost {
         const api = this.#createExtensionApi(generationId, id, path, contribution, diagnostics)
         const jiti = createJiti(import.meta.url, {
           alias: compatibilityResolver.aliases,
+          virtualModules: compatibilityResolver.virtualModules,
           moduleCache: false,
           interopDefault: true,
         })
-        const imported = await jiti.import<unknown>(path, { default: true })
+        const imported = await state.ui.run(() => jiti.import<unknown>(path, { default: true }))
         const factory = parseExternal(callableSchema, imported, `Extension default export (${path})`)
-        await callDynamic(factory, undefined, [api])
+        await state.ui.run(() => callDynamic(factory, undefined, [api]))
         if (contribution.tools.length || contribution.commands.length || contribution.agentHooks.length || contribution.sessionHooks.length) {
           agentPlugins.push({
             id,
@@ -763,9 +762,18 @@ export class ExtensionHost {
         message: `${feature} is recognized but inactive in the pi-rs JavaScript host`,
       })
     }
+    const enableUi = () => {
+      if (contribution.sessionHooks.some(hook => hook.callbackId.endsWith(':ui-start'))) return
+      const callbackId = `${pluginId}:ui-start`
+      this.#registerCallback(state, callbackId, async (_invocation, _signal, nativeContext) => {
+        if (nativeContext && state.mode === 'tui') { state.ui.bind(nativeContext); state.ui.activate() }
+      })
+      contribution.sessionHooks.push({ name: 'session_start', callbackId })
+    }
     return {
       registerTool: value => {
         const definition = parseToolDefinition(value, path)
+        if (state.mode === 'tui') { state.ui.transcript.registerTool(definition.name, definition); enableUi() }
         const callbackId = `${pluginId}:tool:${definition.name}`
         const prepareCallbackId = definition.prepareArguments === undefined
           ? undefined
@@ -824,18 +832,32 @@ export class ExtensionHost {
           const chainedSystemPrompt = event === 'before_agent_start' && typeof eventValue.systemPrompt === 'string'
             ? eventValue.systemPrompt
             : undefined
-          const result = await handler(
-            eventValue,
-            this.#extensionContext(
-              payload.context,
-              generationId,
-              signal,
-              nativeContext,
-              false,
-              chainedSystemPrompt,
-            ),
-          )
+          let result: unknown
+          let boundaryError: string | undefined
+          try {
+            result = await handler(
+              eventValue,
+              this.#extensionContext(
+                payload.context,
+                generationId,
+                signal,
+                nativeContext,
+                false,
+                chainedSystemPrompt,
+              ),
+            )
+          } catch (error) {
+            if (event !== 'turn_end' && event !== 'agent_before_settle') throw error
+            boundaryError = error instanceof Error ? error.message : String(error)
+          }
           const resultRecord = isRecord(result) ? result : undefined
+          if (event === 'turn_end' || event === 'agent_before_settle') {
+            return {
+              entries: resultRecord?.entries !== undefined ? resultRecord.entries : eventValue.entries,
+              continue: resultRecord?.continue,
+              __boundaryError: boundaryError,
+            }
+          }
           if (event === 'before_agent_start' && resultRecord) {
             return parseExternal(
               beforeAgentStartResultSchema,
@@ -876,7 +898,22 @@ export class ExtensionHost {
           argumentHint: options.argumentHint,
         })
       },
-      registerShortcut: () => inactive('pi.registerShortcut'),
+      registerShortcut: (key, value) => {
+        const handler = typeof value === 'function' ? value : isRecord(value) ? value.handler : undefined
+        if (typeof handler !== 'function') throw new Error(`registerShortcut requires a handler (${path})`)
+        state.ui.registerShortcut(key, async () => {
+          await state.ui.run(async () => {
+            const id = `${pluginId}:shortcut:${key}:${Date.now()}`
+            const controller = new AbortController()
+            state.active.set(id, controller)
+            try {
+              const context = this.#extensionContext({}, generationId, controller.signal, state.ui.nativeContext, false)
+              await callDynamic(handler, undefined, [context])
+            } finally { controller.abort(); state.active.delete(id) }
+          })
+        })
+        enableUi()
+      },
       registerFlag: (name, value) => {
         if (!name) throw new Error(`registerFlag requires a non-empty name (${path})`)
         const options = parseExternal(z.looseObject({
@@ -928,9 +965,22 @@ export class ExtensionHost {
           })
         }
       },
-      registerMessageRenderer: () => inactive('pi.registerMessageRenderer'),
-      registerMarkdownTransformer: () => inactive('pi.registerMarkdownTransformer'),
-      registerEntryRenderer: () => inactive('pi.registerEntryRenderer'),
+      registerMessageRenderer: (customType, renderer) => {
+        if (state.mode !== 'tui') return inactive('pi.registerMessageRenderer')
+        state.ui.transcript.registerMessage(customType, renderer); enableUi()
+      },
+      registerMarkdownTransformer: transformer => {
+        if (state.mode !== 'tui') return inactive('pi.registerMarkdownTransformer')
+        state.ui.transcript.registerMarkdown(transformer); enableUi()
+      },
+      registerEntryRenderer: (customType, renderer) => {
+        if (state.mode !== 'tui') return inactive('pi.registerEntryRenderer')
+        state.ui.transcript.registerEntry(customType, renderer); enableUi()
+      },
+      registerToolRenderer: resolver => {
+        if (state.mode !== 'tui') return inactive('pi.registerToolRenderer')
+        state.ui.transcript.registerResolver(resolver); enableUi()
+      },
       sendMessage: (message, options) => state.runtime.notify({ type: 'sendMessage', message, options }),
       sendUserMessage: (content, options) => state.runtime.notify({ type: 'sendUserMessage', content, options }),
       appendEntry: (customType, data) => state.runtime.notify({ type: 'appendEntry', customType, data }),
@@ -994,7 +1044,7 @@ export class ExtensionHost {
     if (state.callbacks.has(callbackId)) {
       throw new Error(`duplicate JavaScript callback id: ${callbackId}`)
     }
-    state.callbacks.set(callbackId, callback)
+    state.callbacks.set(callbackId, (invocation, signal, native) => state.ui.run(() => callback(invocation, signal, native)))
   }
 
   #requireGeneration(generationId: string): GenerationState {
@@ -1014,6 +1064,7 @@ export class ExtensionHost {
     const parsedContext = extensionContextInputSchema.parse(context)
     const state = this.#requireGeneration(generationId)
     const contextFacade = createExtensionContext({
+      ui: state.ui,
       payload: { workspace: state.workspace, ...context, ...parsedContext },
       nativeContext,
       mode: state.mode,
@@ -1178,6 +1229,7 @@ export class ExtensionHost {
     state.callbacks.clear()
     state.streams.clear()
     state.events.clear()
+    state.ui.retire()
     state.runtime.retire()
     this.#generations.delete(generationId)
   }

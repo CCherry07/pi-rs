@@ -12,7 +12,8 @@ diagnostics. Unknown names still fail construction.
 | Agent | `input` | Active; receives `text`, `images`, `source`, and optional `streamingBehavior`. Continue, handled, and chained text/image transforms are supported. |
 | Agent | `before_agent_start` | Active; Pi prompt, images, chained system prompt, and system-prompt options are passed. Both `systemPrompt` replacement and persistent custom-message injection are supported and chain in registration order. |
 | Agent | `agent_start`, `agent_end`, `agent_settled` | Active; `agent_settled` fires after session-owned retry, compaction, and queued continuation have finished and before the product settled event. |
-| Agent | `turn_start`, `turn_end` | Active; both carry a zero-based per-run `turnIndex`, and `turn_start` carries `timestamp`. |
+| Agent | `turn_start`, `turn_end` | Active; both carry `turnIndex`. Session `turn_end` supports typed journal proposals, persisted message/tool-result IDs, context previews and `continue`. |
+| Agent | `agent_before_settle` | Active; proposes journal entries and another response after retries, compaction and queued work. |
 | Agent | `message_start`, `message_update`, `message_end` | Active; role-preserving `message_end` replacements chain and become the live and persisted message. |
 | Agent | `tool_execution_start`, `tool_execution_update`, `tool_execution_end` | Active. |
 | Agent | `context` | Active; message replacement is supported. |
@@ -28,6 +29,9 @@ Supported callbacks run in registration order. A rejected callback, malformed pa
 cross-role `message_end` replacement is recorded in the generation's diagnostics and later
 callbacks continue from the last valid value. `tool_call` is the deliberate exception: it remains
 fail-closed for the affected tool call, matching Pi's runner.
+
+Actionable `turn_end` and `agent_before_settle` callbacks receive a refreshed preview after every
+handler and atomically commit valid final drafts. See [the session boundary guide](../crates/pi-session/README.md).
 
 Agent observer hooks are dispatched as one generation batch per event. Handlers still await
 sequentially, share the same event object, and isolate failures. `message_update` uses a compact
@@ -82,18 +86,33 @@ context can immediately query and operate on the reloaded generation.
 
 ## UI and registrations
 
-JavaScript extensions never own terminal rendering. `ctx.hasUI` is always false and `ctx.ui` is an
-explicit inert object: selection/input/editor/custom calls resolve `undefined`, confirmation resolves
-`false`, getters return empty values, and setters do nothing. `ctx.ui.notify(message, level)` is the
-exception: it publishes a transient, presentation-neutral product notice that the Rust TUI, print,
-and NDJSON frontends render themselves. Factories supplied to UI registration methods are not
-executed.
+Interactive Node/NAPI sessions with an installed frontend bridge expose `ctx.hasUI = true` and use
+the shared Rust component runtime. TUI mode without a bridge reports false. This is a breaking UI
+API redesign, not compatibility with Pi's JavaScript TUI classes.
+`@pi-rs/cli` exports the declarative UI types. No upstream TUI or Coding Agent npm runtime is
+installed by the host. Node 22.19+ is required.
 
-Both `@earendil-works/pi-tui` and `@mariozechner/pi-tui` resolve to a terminal-inert compatibility
-module. It supplies pure text and key-identifier helpers plus inert component classes so a mixed extension can finish
-module evaluation and keep its tools, commands, and hooks. Renderer, widget, shortcut, and other UI
-registrations remain inactive. Any other missing dependency is fatal so broken packages and
-installation mistakes are not hidden.
+| UI capability | Interactive support |
+| --- | --- |
+| `select`, `confirm`, `input`, `editor` | Native Rust controls, prefill, cancellation, timeout and AbortSignal, including during `session_start`. Editor Enter inserts a newline; Ctrl+Enter submits. |
+| `mount`, `custom` | Semantic tree, stable node IDs, update/unmount/focus, inline slots and centered modal/nonmodal overlays. `custom` resolves submit/activate and cancellation. |
+| Layout and controls | Text, Link, Markdown, Column, Row, Panel, Spacer, Scroll, Select, Input, Editor, Button, Progress and Image. Rust owns measurement, clipping, focus, scrolling, edits and completions. |
+| Rich selection | Searchable/filterable/sortable multi-selection is a shared semantic node exposed by `ctx.ui.multiSelect`; native Rust uses the same node through `UiContext::multi_select`. |
+| Widgets/header/footer/status | Node trees in native slots, replacement and keyed status text. Business data is supplied by the plugin. |
+| Input/shortcuts | Semantic events; Rust handles ordinary keys, paste, mouse selection, focus and registered shortcuts. Raw terminal/input interception is removed. |
+| Themes | Shared built-in light/dark/system palettes. Upstream JS theme classes, JSON theme discovery/watchers and custom keybinding files are removed. |
+| Transcript renderers | Message, entry, Markdown-transformer, tool-call/partial/final and resolver callbacks return nodes. Tool metadata retains arguments, details, shared state, output padding, image policy and duration. |
+| System operations | Rust-owned title, progress/program status, clipboard, suspend and external editor. Image data is decoded/encoded by Rust for Kitty/iTerm; Link becomes a clipped terminal hyperlink. |
+| Editor/working state | Read/replace/paste composer text, tool expansion, working message/visibility and hidden-thinking labels. Custom editor UI uses the shared Editor node. |
+
+Stable node IDs preserve Rust editing state across description changes. Ordinary editing does not
+wait for JS. Removed/replaced nodes cannot receive queued events; retained nodes keep valid queued
+submissions. Unmount, cancellation, host failure and generation retirement settle pending dialogs
+and release callbacks. Failed generation preparation preserves live UI. Print/JSON/RPC use inactive
+UI defaults (notifications remain active). The CLI TUI is the current renderer; Desktop reports UI
+unavailable until it provides its own semantic-surface adapter.
+
+See [the shared plugin UI contract](plugin-ui.md) for usage and deliberate API changes.
 
 The configuration-form provider registration surface supports `name`, `baseUrl`, `apiKey`, `api`,
 `headers`, `authHeader`, and `models`. Supplying `models` replaces the provider catalog; omitting it
@@ -101,8 +120,8 @@ preserves lower-layer models, and unregistering restores the built-in/`models.js
 next safe generation. The full `Provider` object overload and the `streamSimple`, `refreshModels`,
 and OAuth callbacks are recognized and inactive.
 
-The following registration surfaces are recognized and inactive: shortcuts and
-message/Markdown/entry renderers. Extension flags are active; boolean flags use `--name` and string
+Message/Markdown/entry renderer registrations, tool call/result renderers and global tool renderer
+registration are active in interactive mode. Extension flags are active; boolean flags use `--name` and string
 flags accept both `--name value` and `--name=value`; first registration wins for duplicate names,
 and unregistered flags fail generation construction. Tool
 `prepareArguments` runs before Rust validation through its own asynchronous adapter callback using
@@ -113,11 +132,10 @@ retirement.
 
 ## Module compatibility
 
-The host covers every module specifier in Pi's extension-loader alias table for both
+The host provides runtime-neutral SDK aliases for both
 `@earendil-works` and `@mariozechner`: `pi-coding-agent`, `pi-agent-core`, `pi-ai`,
-`pi-ai/compat`, `pi-ai/oauth`, and `pi-ai/providers/all` resolve to the one host compatibility
-module. Both `pi-tui` namespaces resolve to the separate terminal-inert compatibility module
-described above. The host also maps `typebox` and `@sinclair/typebox`, including supported subpaths
+`pi-ai/compat`, `pi-ai/oauth`, and `pi-ai/providers/all` use the one host compatibility
+module. `@pi-rs/cli` resolves to the same host SDK. Neither `pi-tui` namespace is aliased. The host also maps `typebox` and `@sinclair/typebox`, including supported subpaths
 such as `/compile` and `/value`, to the single TypeBox runtime bundled by the host. Subpath aliases
 take precedence over package-root aliases so resolution cannot produce paths such as
 `build/index.mjs/value`.

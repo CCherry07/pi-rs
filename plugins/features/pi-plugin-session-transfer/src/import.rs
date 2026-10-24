@@ -139,10 +139,7 @@ fn migrate_legacy(source: &Path, destination: &Path, version: u32) -> Result<usi
     let header = convert_header(&header_value, version)?;
     let raw_entries = &values[1..];
     validate_legacy_tree(raw_entries)?;
-    let raw_by_id = raw_entries
-        .iter()
-        .map(|entry| Ok((entry_id(entry)?.to_string(), entry)))
-        .collect::<Result<HashMap<_, _>, SessionError>>()?;
+    let mut converted_by_id = HashMap::new();
 
     let mut mutations = Vec::new();
     let mut facts = Vec::new();
@@ -151,17 +148,16 @@ fn migrate_legacy(source: &Path, destination: &Path, version: u32) -> Result<usi
         let id = entry_id(raw)?.to_string();
         let parent_id = optional_string(raw, "parentId")?.map(str::to_string);
         let timestamp_ms = legacy_timestamp(raw, "timestamp")?;
-        let entry = convert_entry(raw, &raw_by_id)?;
-        mutations.push(SessionMutation::Entry {
-            lane: None,
-            record: SessionRecord {
-                id,
-                seq,
-                parent_id,
-                timestamp_ms,
-                entry,
-            },
-        });
+        let entry = convert_entry(raw, &converted_by_id)?;
+        let record = SessionRecord {
+            id,
+            seq,
+            parent_id,
+            timestamp_ms,
+            entry,
+        };
+        converted_by_id.insert(record.id.clone(), record.clone());
+        mutations.push(SessionMutation::Entry { lane: None, record });
         seq = seq.saturating_add(1);
         collect_fact(raw, &mut facts)?;
     }
@@ -333,7 +329,7 @@ fn validate_legacy_tree(entries: &[Value]) -> Result<(), SessionError> {
 
 fn convert_entry(
     raw: &Value,
-    raw_by_id: &HashMap<String, &Value>,
+    converted_by_id: &HashMap<String, SessionRecord>,
 ) -> Result<SessionEntry, SessionError> {
     let entry_type = require_string(raw, "type")?;
     match entry_type {
@@ -354,13 +350,25 @@ fn convert_entry(
             provider: ProviderId::new(require_string(raw, "provider")?),
             model_id: require_string(raw, "modelId")?.into(),
         })),
-        "compaction" => Ok(SessionEntry::Compaction(CompactionEntry {
-            summary: require_string(raw, "summary")?.to_string(),
-            retained_tail: retained_tail(raw, raw_by_id)?,
-            tokens_before: require_u64(raw, "tokensBefore")?,
-            details: raw.get("details").cloned(),
-            usage: raw.get("usage").map(parse_usage).transpose()?,
-        })),
+        "context_edit" => Ok(SessionEntry::ContextEdit(
+            serde_json::from_value(raw.clone())
+                .map_err(|error| SessionError::InvalidPayload(error.to_string()))?,
+        )),
+        "compaction" => {
+            let (retained_tail, retained_entry_ids) = retained_tail(raw, converted_by_id)?;
+            Ok(SessionEntry::Compaction(CompactionEntry {
+                retained_entry_ids,
+                retained_tail,
+                summary: require_string(raw, "summary")?.to_string(),
+                tokens_before: require_u64(raw, "tokensBefore")?,
+                details: raw.get("details").cloned(),
+                usage: raw
+                    .get("usage")
+                    .filter(|value| !value.is_null())
+                    .map(parse_usage)
+                    .transpose()?,
+            }))
+        }
         "branch_summary" => Ok(SessionEntry::BranchSummary(BranchSummaryEntry {
             from_id: require_string(raw, "fromId")?.to_string(),
             summary: require_string(raw, "summary")?.to_string(),
@@ -411,72 +419,49 @@ fn collect_fact(raw: &Value, facts: &mut Vec<SessionFact>) -> Result<(), Session
 
 fn retained_tail(
     compaction: &Value,
-    raw_by_id: &HashMap<String, &Value>,
-) -> Result<Vec<AgentMessage>, SessionError> {
-    let first_kept = require_string(compaction, "firstKeptEntryId")?;
-    let mut path = Vec::<&Value>::new();
+    converted_by_id: &HashMap<String, SessionRecord>,
+) -> Result<(Vec<AgentMessage>, Vec<Option<String>>), SessionError> {
+    let Some(first_kept) = optional_string(compaction, "firstKeptEntryId")? else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let mut path = Vec::new();
     let mut current = optional_string(compaction, "parentId")?;
-    let mut visited = HashSet::new();
     while let Some(id) = current {
-        if !visited.insert(id.to_string()) {
-            return Err(SessionError::InvalidEntry(format!(
-                "cycle in legacy compaction ancestry at {id}"
-            )));
-        }
-        let entry = raw_by_id.get(id).ok_or_else(|| {
+        let entry = converted_by_id.get(id).ok_or_else(|| {
             SessionError::InvalidEntry(format!("legacy compaction references missing parent {id}"))
         })?;
-        path.push(*entry);
-        current = optional_string(entry, "parentId")?;
+        path.push(entry.clone());
+        current = entry.parent_id.as_deref();
     }
     path.reverse();
     let start = path
         .iter()
-        .position(|entry| entry_id(entry).ok() == Some(first_kept))
+        .position(|entry| entry.id == first_kept)
         .ok_or_else(|| {
             SessionError::InvalidEntry(format!(
                 "legacy compaction firstKeptEntryId {first_kept} is not an ancestor"
             ))
         })?;
+    let retained = path[start..]
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<HashSet<_>>();
     let mut messages = Vec::new();
-    for entry in &path[start..] {
-        messages.extend(legacy_context_messages(entry)?);
-    }
-    Ok(messages)
-}
-
-fn legacy_context_messages(raw: &Value) -> Result<Vec<AgentMessage>, SessionError> {
-    let timestamp = legacy_timestamp(raw, "timestamp")?;
-    match require_string(raw, "type")? {
-        "message" => {
-            let mut value = raw.get("message").cloned().ok_or_else(|| {
-                SessionError::InvalidEntry("message is missing payload".to_string())
-            })?;
-            normalize_agent_message(&mut value)?;
-            Ok(vec![AgentMessage::custom(value)?])
+    let mut ids = Vec::new();
+    for entry in pi_session::project_session_entries(
+        &path,
+        &pi_session::SessionContextBuildOptions::default(),
+    ) {
+        if retained.contains(entry.source_entry.id.as_str())
+            && !matches!(entry.source_entry.entry, SessionEntry::Compaction(_))
+        {
+            for message in entry.messages {
+                ids.push(Some(entry.source_entry.id.clone()));
+                messages.push(message);
+            }
         }
-        "custom_message" => Ok(vec![AgentMessage::custom(json!({
-            "role": "custom",
-            "customType": require_string(raw, "customType")?,
-            "content": raw.get("content").cloned().unwrap_or_else(|| json!([])),
-            "display": raw.get("display").and_then(Value::as_bool).unwrap_or(false),
-            "details": raw.get("details").cloned(),
-            "timestamp": timestamp,
-        }))?]),
-        "branch_summary" => Ok(vec![AgentMessage::custom(json!({
-            "role": "branchSummary",
-            "summary": require_string(raw, "summary")?,
-            "fromId": require_string(raw, "fromId")?,
-            "timestamp": timestamp,
-        }))?]),
-        "compaction" => Ok(vec![AgentMessage::custom(json!({
-            "role": "compactionSummary",
-            "summary": require_string(raw, "summary")?,
-            "tokensBefore": require_u64(raw, "tokensBefore")?,
-            "timestamp": timestamp,
-        }))?]),
-        _ => Ok(Vec::new()),
     }
+    Ok((messages, ids))
 }
 
 fn normalize_agent_message(value: &mut Value) -> Result<(), SessionError> {
@@ -793,5 +778,53 @@ mod tests {
 
         assert!(validate_session_import(&legacy).is_ok());
         assert!(validate_session_import(&current).is_ok());
+    }
+    #[test]
+    fn imports_context_edits_across_repeated_and_retain_none_compactions() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("v3-edits.jsonl");
+        let destination = directory.path().join("v4.jsonl");
+        let mut values = vec![
+            json!({"type":"session","version":3,"id":"edits","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}),
+        ];
+        let mut parent = Value::Null;
+        for (index, mut entry) in [
+            json!({"type":"message","message":{"role":"user","content":"original","timestamp":1,"unknown":"preserved"}}),
+            json!({"type":"context_edit","targetId":"e0","replacement":{"content":"first edit"}}),
+            json!({"type":"compaction","summary":"one","firstKeptEntryId":"e0","tokensBefore":4}),
+            json!({"type":"context_edit","targetId":"e0","replacement":{"content":"second edit"}}),
+            json!({"type":"compaction","summary":"two","firstKeptEntryId":"e0","tokensBefore":4}),
+            json!({"type":"context_edit","targetId":"e0","replacement":{"content":"third edit"}}),
+        ].into_iter().enumerate() {
+            entry["id"] = json!(format!("e{index}")); entry["parentId"] = parent;
+            entry["timestamp"] = json!("2025-01-01T00:00:01Z"); parent = entry["id"].clone(); values.push(entry);
+        }
+        write_legacy(&source, &values);
+        import_session_file(&source, &destination).unwrap();
+        let (log, _) = SessionLog::open(&destination).unwrap();
+        let messages = log.context().unwrap().messages;
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&messages[1]).unwrap()["content"],
+            "third edit"
+        );
+        assert_eq!(
+            serde_json::to_value(&messages[1]).unwrap()["unknown"],
+            "preserved"
+        );
+        values.push(json!({"id":"none","parentId":parent,"timestamp":"2025-01-01T00:00:02Z","type":"compaction","summary":"only summary","firstKeptEntryId":null,"tokensBefore":4}));
+        write_legacy(&source, &values);
+        let empty_destination = directory.path().join("none.jsonl");
+        import_session_file(&source, &empty_destination).unwrap();
+        assert_eq!(
+            SessionLog::open(empty_destination)
+                .unwrap()
+                .0
+                .context()
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
     }
 }

@@ -237,17 +237,17 @@ fn expand_export(
         PluginKind::Plugin => (
             quote!(::pi_plugin::native::NativePluginKind::Plugin as u32),
             quote!(::pi_plugin::Plugin),
-            Ident::new("pi_plugin_create_v24", proc_macro2::Span::call_site()),
-            quote!(::pi_plugin::native::PluginCreateV24),
+            Ident::new("pi_plugin_create_v26", proc_macro2::Span::call_site()),
+            quote!(::pi_plugin::native::PluginCreateV26),
         ),
         PluginKind::Provider => (
             quote!(::pi_plugin::native::NativePluginKind::Provider as u32),
             quote!(::pi_plugin::ProviderPlugin),
             Ident::new(
-                "pi_provider_plugin_create_v24",
+                "pi_provider_plugin_create_v26",
                 proc_macro2::Span::call_site(),
             ),
-            quote!(::pi_plugin::native::ProviderPluginCreateV24),
+            quote!(::pi_plugin::native::ProviderPluginCreateV26),
         ),
     };
 
@@ -367,6 +367,7 @@ fn inject_agent_hook_interests(
             "agent_start" => quote!(AgentStart),
             "agent_end" => quote!(AgentEnd),
             "agent_settled" => quote!(AgentSettled),
+            "agent_before_settle" => quote!(AgentBeforeSettle),
             "turn_start" => quote!(TurnStart),
             "turn_end" => quote!(TurnEnd),
             "message_start" => quote!(MessageStart),

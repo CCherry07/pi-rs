@@ -9,6 +9,9 @@ const RUST_PLUGINS_LABEL: &str = " rust plugins:   ";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct UiAreas {
+    pub(super) header: Rect,
+    pub(super) above_editor: Rect,
+    pub(super) below_editor: Rect,
     pub(super) transcript: Rect,
     pub(super) context: Rect,
     pub(super) composer: Rect,
@@ -36,7 +39,9 @@ pub(super) fn cached_transcript_layout(
     gutter: u16,
     appearance: TerminalAppearance,
 ) -> Arc<CachedTranscriptLayout> {
+    let show_startup_header = app.show_startup_header && !app.extension_surface.has_header();
     let show_working_placeholder = app.streaming_assistant.is_none()
+        && !app.extension_surface.hide_working()
         && !app.compacting
         && (app.working_started_at.is_some()
             || app.awaiting_assistant
@@ -47,15 +52,17 @@ pub(super) fn cached_transcript_layout(
         appearance,
         working_elapsed_width: format_elapsed_compact(app.working_elapsed_seconds()).len(),
         tools_expanded: app.tools_expanded,
+        hide_working: app.extension_surface.hide_working(),
+        extension_revision: app.extension_surface.transcript_revision(),
     };
     {
         let mut cache = app.transcript_layout_cache.borrow_mut();
         if cache.transcript != app.transcript
-            || cache.show_startup_header != app.show_startup_header
+            || cache.show_startup_header != show_startup_header
             || cache.show_working_placeholder != show_working_placeholder
         {
             cache.transcript.clone_from(&app.transcript);
-            cache.show_startup_header = app.show_startup_header;
+            cache.show_startup_header = show_startup_header;
             cache.show_working_placeholder = show_working_placeholder;
             cache.entries.clear();
         }
@@ -65,11 +72,12 @@ pub(super) fn cached_transcript_layout(
     }
 
     let working_placeholder = show_working_placeholder.then(|| TranscriptItem::Assistant {
+        thinking: String::new(),
         text: String::new(),
         streaming: true,
         error: None,
     });
-    let startup_height = if app.show_startup_header {
+    let startup_height = if show_startup_header {
         usize::from(startup_header_height(app, width, gutter))
     } else {
         0
@@ -81,54 +89,79 @@ pub(super) fn cached_transcript_layout(
             .len()
             .saturating_add(usize::from(show_working_placeholder)),
     );
-    for item in app.transcript.iter().chain(working_placeholder.iter()) {
+    for (index, item) in app
+        .transcript
+        .iter()
+        .chain(working_placeholder.iter())
+        .enumerate()
+    {
+        let rendered = app.extension_surface.transcript_lines(index);
+        let extension_index = rendered.as_ref().map(|_| index);
+        if matches!(item, TranscriptItem::Custom { message: false, .. }) && rendered.is_none() {
+            continue;
+        }
+        if rendered.as_ref().is_some_and(Vec::is_empty) {
+            continue;
+        }
+        if app.extension_surface.hide_working()
+            && rendered.is_none()
+            && matches!(item, TranscriptItem::Assistant { text, streaming: true, error: None, .. } if text.is_empty())
+        {
+            continue;
+        }
         if next_start > 0 {
             next_start = next_start.saturating_add(1);
         }
-        let is_user = matches!(item, TranscriptItem::User(_));
-        let streaming = matches!(
-            item,
-            TranscriptItem::Assistant {
-                streaming: true,
-                ..
-            }
-        );
-        let working = matches!(
-            item,
-            TranscriptItem::Assistant {
-                text,
-                streaming: true,
-                ..
-            } if text.is_empty()
-        );
-        let (user_text, lines, content_height, code_background_rows) =
-            if let TranscriptItem::User(text) = item {
-                let content_height = Paragraph::new(text.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(user_text_width)
-                    .max(1);
-                (Some(text.clone()), Vec::new(), content_height, Vec::new())
-            } else {
-                let lines = transcript_item_lines(
-                    item,
-                    appearance,
-                    0,
-                    app.tools_expanded,
-                    app.working_elapsed_seconds(),
-                );
-                let code_background_rows = wrapped_line_background_ranges(
-                    &lines,
-                    width.max(1),
-                    code_block_background(appearance),
-                );
-                let content_height = Paragraph::new(lines.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(width.max(1))
-                    .max(1);
-                (None, lines, content_height, code_background_rows)
-            };
+        let is_user = rendered.is_none() && matches!(item, TranscriptItem::User(_));
+        let streaming = rendered.is_none()
+            && matches!(
+                item,
+                TranscriptItem::Assistant {
+                    streaming: true,
+                    ..
+                }
+            );
+        let working = rendered.is_none()
+            && matches!(
+                item,
+                TranscriptItem::Assistant {
+                    text,
+                    streaming: true,
+                    ..
+                } if text.is_empty()
+            );
+        let (user_text, lines, content_height, code_background_rows) = if let Some(lines) = rendered
+        {
+            let height = lines.len();
+            (None, lines, height, Vec::new())
+        } else if let TranscriptItem::User(text) = item {
+            let content_height = Paragraph::new(text.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(user_text_width)
+                .max(1);
+            (Some(text.clone()), Vec::new(), content_height, Vec::new())
+        } else {
+            let lines = transcript_item_lines(
+                item,
+                appearance,
+                0,
+                app.tools_expanded,
+                app.working_elapsed_seconds(),
+            );
+            let code_background_rows = wrapped_line_background_ranges(
+                &lines,
+                width.max(1),
+                code_block_background(appearance),
+            );
+            let content_height = Paragraph::new(lines.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(width.max(1))
+                .max(1);
+            (None, lines, content_height, code_background_rows)
+        };
         let height = content_height.saturating_add(usize::from(is_user) * 2);
         blocks.push(CachedTranscriptBlock {
+            extension_index,
             user_text,
             lines,
             streaming,
@@ -198,6 +231,9 @@ pub(super) fn ui_areas(root: Rect, app: &App) -> UiAreas {
             gutter,
             ..UiAreas::default()
         };
+    }
+    if app.extension_surface.has_regions() {
+        return extension_areas(root, app);
     }
     let content_width = root
         .width
@@ -269,6 +305,7 @@ pub(super) fn ui_areas(root: Rect, app: &App) -> UiAreas {
             context: areas[2],
             footer: areas[3],
             gutter,
+            ..UiAreas::default()
         }
     } else {
         UiAreas {
@@ -277,23 +314,21 @@ pub(super) fn ui_areas(root: Rect, app: &App) -> UiAreas {
             composer: areas[2],
             footer: areas[3],
             gutter,
+            ..UiAreas::default()
         }
     }
 }
 
 pub(super) fn draw(frame: &mut ratatui::Frame<'_>, app: &App, palette: UiPalette) {
     let root = frame.area();
+    app.extension_surface.set_palette(palette);
     if root.is_empty() {
         return;
     }
-    if let Some(prompt) = &app.multi_selection_prompt {
-        draw_multi_selection_prompt(frame, prompt);
-    } else if let Some(prompt) = &app.selection_prompt {
-        draw_selection_prompt(frame, &prompt.title, &prompt.options, prompt.selected);
-    } else if let Some(prompt) = &app.confirmation_prompt {
-        draw_confirmation_prompt(frame, &prompt.title, &prompt.message);
-    } else if let Some(prompt) = &app.trust_prompt {
+    if let Some(prompt) = &app.trust_prompt {
         draw_project_trust_prompt(frame, &prompt.cwd, &prompt.options, prompt.selected);
+    } else if app.extension_surface.has_regions() && app.active_bottom_view().is_none() {
+        draw_extension_layout(frame, app, palette);
     } else {
         let areas = ui_areas(root, app);
         let suggestions = suggestions_for_app(app);
@@ -320,249 +355,6 @@ pub(super) fn draw(frame: &mut ratatui::Frame<'_>, app: &App, palette: UiPalette
             selection_background(palette.terminal_appearance),
         );
     }
-}
-
-pub(super) fn draw_multi_selection_prompt(
-    frame: &mut ratatui::Frame<'_>,
-    prompt: &MultiSelectionPromptState,
-) {
-    let root = frame.area();
-    frame.render_widget(Clear, root);
-    let area = inset(root, horizontal_gutter(root.width).saturating_add(1));
-    let visible = prompt.visible_indices();
-    let sort_label = prompt
-        .sort_modes
-        .get(prompt.sort_mode)
-        .map_or("default", |(label, _)| label.as_str());
-    let focus_label = match prompt.focus {
-        MultiSelectionFocus::Search => "search",
-        MultiSelectionFocus::List => "list",
-        MultiSelectionFocus::Filters => "filters",
-    };
-    let mut lines = vec![
-        Line::from(Span::styled(
-            prompt.title.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::default(),
-        Line::from(format!(
-            "{focus_label}: {}{}",
-            prompt.query,
-            if prompt.focus == MultiSelectionFocus::Search {
-                "▏"
-            } else {
-                ""
-            }
-        )),
-        Line::from(Span::styled(
-            format!(
-                "{} visible · {} total · {} selected · sort: {sort_label}",
-                visible.len(),
-                prompt.options.len(),
-                prompt.selected.len()
-            ),
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-    if !prompt.categories.is_empty() {
-        let categories = prompt
-            .categories
-            .iter()
-            .filter(|(id, _)| prompt.active_categories.contains(id))
-            .map(|(id, _)| format!("[{id}]"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        lines.push(Line::from(Span::styled(
-            format!("filters: {categories}"),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-    lines.push(Line::default());
-
-    let reserved_rows = 10usize
-        .saturating_add(prompt.summary_lines.len())
-        .saturating_add(if prompt.focus == MultiSelectionFocus::Filters {
-            prompt.categories.len().saturating_add(2)
-        } else {
-            0
-        });
-    let max_visible = usize::from(area.height)
-        .saturating_sub(reserved_rows)
-        .clamp(1, 14);
-    let start = prompt
-        .cursor
-        .saturating_sub(max_visible / 2)
-        .min(visible.len().saturating_sub(max_visible));
-    let end = (start + max_visible).min(visible.len());
-    if visible.is_empty() {
-        lines.push(Line::from("No skills match the current filters/search."));
-    } else {
-        for (position, option_index) in visible[start..end].iter().enumerate() {
-            let absolute_position = start + position;
-            let cursor = if absolute_position == prompt.cursor {
-                "›"
-            } else {
-                " "
-            };
-            let check = if prompt.selected.contains(option_index) {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            let style = if absolute_position == prompt.cursor {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(Span::styled(
-                format!("{cursor} {check} {}", prompt.options[*option_index].label),
-                style,
-            )));
-        }
-        if start > 0 || end < visible.len() {
-            lines.push(Line::from(Span::styled(
-                format!("Showing {}-{end} of {}", start + 1, visible.len()),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-        if let Some(option_index) = visible.get(prompt.cursor) {
-            lines.push(Line::default());
-            lines.extend(
-                prompt.options[*option_index]
-                    .detail_lines
-                    .iter()
-                    .map(|line| Line::from(line.clone())),
-            );
-        }
-    }
-
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        "Last action",
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-    lines.extend(
-        prompt
-            .summary_lines
-            .iter()
-            .map(|line| Line::from(line.clone())),
-    );
-
-    if prompt.pending_action.is_some() {
-        lines.extend([
-            Line::default(),
-            Line::from(Span::styled(
-                "Confirm delete: y yes · n no · esc cancel",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ]);
-    } else if prompt.focus == MultiSelectionFocus::Filters {
-        lines.push(Line::default());
-        let draft = prompt
-            .pending_categories
-            .as_ref()
-            .unwrap_or(&prompt.active_categories);
-        lines.extend(
-            prompt
-                .categories
-                .iter()
-                .enumerate()
-                .map(|(index, (id, label))| {
-                    let cursor = if index == prompt.filter_cursor {
-                        "›"
-                    } else {
-                        " "
-                    };
-                    let check = if draft.contains(id) { "[x]" } else { "[ ]" };
-                    Line::from(format!("{cursor} {check} {label}"))
-                }),
-        );
-        lines.push(Line::from(Span::styled(
-            "space toggle · enter apply · esc cancel",
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        let actions = prompt
-            .actions
-            .iter()
-            .map(|action| {
-                format!(
-                    "{} {}{}",
-                    action.key,
-                    action.label,
-                    if action.enabled { "" } else { " (disabled)" }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" · ");
-        lines.extend([
-            Line::default(),
-            Line::from(Span::styled(
-                "↑↓ move · space select · / search · s sort · f filters · a all · n none · esc close",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(Span::styled(
-                actions,
-                Style::default().fg(Color::DarkGray),
-            )),
-        ]);
-    }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-}
-
-pub(super) fn draw_selection_prompt(
-    frame: &mut ratatui::Frame<'_>,
-    title: &str,
-    options: &[String],
-    selected: usize,
-) {
-    let root = frame.area();
-    frame.render_widget(Clear, root);
-    let area = inset(root, horizontal_gutter(root.width).saturating_add(1));
-    let mut lines = vec![
-        Line::from(Span::styled(
-            title.to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::default(),
-    ];
-    lines.extend(options.iter().enumerate().map(|(index, option)| {
-        let marker = if index == selected { "›" } else { " " };
-        let style = if index == selected {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        Line::from(Span::styled(format!("{marker} {option}"), style))
-    }));
-    lines.extend([
-        Line::default(),
-        Line::from(Span::styled(
-            "↑/↓ choose · enter select · esc cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ]);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
-}
-
-pub(super) fn draw_confirmation_prompt(frame: &mut ratatui::Frame<'_>, title: &str, message: &str) {
-    let root = frame.area();
-    frame.render_widget(Clear, root);
-    let area = inset(root, horizontal_gutter(root.width).saturating_add(1));
-    let lines = vec![
-        Line::from(Span::styled(
-            title.to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::default(),
-        Line::from(message.to_string()),
-        Line::default(),
-        Line::from(Span::styled(
-            "enter confirm · esc cancel",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 pub(super) fn draw_bottom_pane_view(
@@ -1013,6 +805,13 @@ pub(super) fn draw_transcript(
                     .scroll((u16::try_from(content_scroll).unwrap_or(u16::MAX), 0)),
                 Rect::new(content_area.x, screen_y, content_area.width, visible_height),
             );
+            if let Some(index) = block.extension_index {
+                app.extension_surface.record_transcript_graphics(
+                    index,
+                    Rect::new(content_area.x, screen_y, content_area.width, visible_height),
+                    content_scroll,
+                );
+            }
         }
     }
 
@@ -1833,6 +1632,10 @@ pub(super) fn restore_terminal_writer(
     disable_raw: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<()> {
     let mut first_error = None;
+    record_terminal_cleanup_error(
+        &mut first_error,
+        write!(writer, "\x1b]9;4;0;0\x07\x1b]7501;state=clear\x1b\\"),
+    );
     if fullscreen {
         record_terminal_cleanup_error(&mut first_error, leave_fullscreen(writer));
     } else if let Err(error) = write!(writer, "\r\n") {
@@ -1912,7 +1715,7 @@ pub(super) fn transcript_item_lines(
                 )));
             }
         }
-        TranscriptItem::Notice(text) => {
+        TranscriptItem::Notice(text) | TranscriptItem::Custom { fallback: text, .. } => {
             push_plain_text(&mut lines, text, "  ");
             for line in &mut lines {
                 for span in &mut line.spans {
@@ -1924,6 +1727,7 @@ pub(super) fn transcript_item_lines(
             text,
             streaming,
             error,
+            ..
         } => {
             lines.extend(render_assistant_markdown_at(
                 text,
@@ -2372,4 +2176,97 @@ pub(super) fn truncate_start(text: &str, max_width: usize) -> String {
     }
     tail.reverse();
     format!("…{}", tail.into_iter().collect::<String>())
+}
+
+pub(super) fn extension_surface_areas(root: Rect, app: &App) -> Vec<pi_plugin::UiSurfaceArea> {
+    use pi_plugin::UiRegionPlacement as P;
+    let areas = extension_areas(root, app);
+    [
+        (P::Header, areas.header),
+        (P::AboveEditor, areas.above_editor),
+        (P::Editor, areas.composer),
+        (P::BelowEditor, areas.below_editor),
+        (P::Footer, areas.footer),
+    ]
+    .into_iter()
+    .map(|(placement, area)| pi_plugin::UiSurfaceArea {
+        placement,
+        row: area.y,
+        column: area.x,
+        width: area.width,
+        height: area.height,
+    })
+    .collect()
+}
+
+fn extension_areas(root: Rect, app: &App) -> UiAreas {
+    use pi_plugin::UiRegionPlacement as P;
+    let ui = &app.extension_surface;
+    let editor = ui.height(P::Editor, root.height.saturating_sub(2));
+    let header = ui.height(P::Header, root.height / 3);
+    let above = ui.height(P::AboveEditor, root.height / 3);
+    let below = ui.height(P::BelowEditor, root.height / 3);
+    let footer = ui.height(P::Footer, root.height / 3).max(1);
+    let composer = editor.max(3);
+    let suggestions = suggestions_for_app(app);
+    let context = if editor == 0 {
+        suggestions
+            .len()
+            .max(app.queue.steering.len() + app.queue.follow_up.len())
+            .min(5) as u16
+    } else {
+        0
+    };
+    let transcript = desired_transcript_height(app, root.width, horizontal_gutter(root.width)).min(
+        root.height
+            .saturating_sub(header + above + below + footer + composer + context),
+    );
+    let areas = Layout::vertical([
+        Constraint::Length(header),
+        Constraint::Length(transcript),
+        Constraint::Length(above),
+        Constraint::Length(context),
+        Constraint::Length(composer),
+        Constraint::Length(below),
+        Constraint::Length(footer),
+        Constraint::Min(0),
+    ])
+    .split(root);
+    UiAreas {
+        header: areas[0],
+        transcript: areas[1],
+        above_editor: areas[2],
+        context: areas[3],
+        composer: areas[4],
+        below_editor: areas[5],
+        footer: areas[6],
+        gutter: horizontal_gutter(root.width),
+    }
+}
+fn draw_extension_layout(frame: &mut ratatui::Frame<'_>, app: &App, palette: UiPalette) {
+    use pi_plugin::UiRegionPlacement as P;
+    let areas = extension_areas(frame.area(), app);
+    let ui = &app.extension_surface;
+    ui.draw_regions(frame, P::Header, areas.header);
+    draw_transcript(frame, areas.transcript, app, areas.gutter, palette);
+    ui.draw_regions(frame, P::AboveEditor, areas.above_editor);
+    draw_context_panel(
+        frame,
+        areas.context,
+        app,
+        &suggestions_for_app(app),
+        palette,
+    );
+    if ui.height(P::Editor, frame.area().height) > 0 {
+        ui.draw_regions(frame, P::Editor, areas.composer);
+    } else {
+        draw_composer(frame, areas.composer, app, palette);
+    }
+    ui.draw_regions(frame, P::BelowEditor, areas.below_editor);
+    if ui.height(P::Footer, frame.area().height) > 0 {
+        ui.draw_regions(frame, P::Footer, areas.footer);
+    } else {
+        draw_footer(frame, areas.footer, app, palette);
+    }
+    ui.draw_overlays(frame);
 }

@@ -327,9 +327,9 @@ impl Plugin for HermesMemoryPlugin {
         &self,
         context: AgentPluginContext,
         event: TurnEndEvent,
-    ) -> Result<(), PluginError> {
+    ) -> Result<pi_plugin::BoundaryResult, PluginError> {
         if context.session.execution_origin()? != pi_plugin::SessionExecutionOrigin::User {
-            return Ok(());
+            return Ok(pi_plugin::BoundaryResult::default());
         }
         let mut activities = self
             .activity
@@ -357,7 +357,7 @@ impl Plugin for HermesMemoryPlugin {
                 && event.message.content.iter().any(
                     |b| matches!(b, pi_core::ContentBlock::Text(t) if !t.text.trim().is_empty()),
                 );
-        Ok(())
+        Ok(pi_plugin::BoundaryResult::default())
     }
 
     async fn agent_settled(

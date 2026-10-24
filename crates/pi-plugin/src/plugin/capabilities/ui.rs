@@ -5,64 +5,26 @@ use async_trait::async_trait;
 use super::types::unbound;
 use super::{NoticeLevel, PluginContextHandle, PluginContextResult, PresentationMode};
 
-/// One row in a frontend-owned searchable multi-selection surface.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UiMultiSelectOption {
-    pub label: String,
-    pub search_text: String,
-    pub category: Option<String>,
-    pub detail_lines: Vec<String>,
-    pub read_only: bool,
-    /// Lexicographically sortable keys for each configured sort mode.
-    ///
-    /// Keys are compared in order, so frontends can reproduce stable
-    /// multi-column ordering without understanding plugin-specific fields.
-    pub sort_values: Vec<Vec<String>>,
-}
-
-/// One action exposed by a frontend-owned multi-selection surface.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UiMultiSelectAction {
-    pub id: String,
-    pub key: char,
-    pub label: String,
-    pub enabled: bool,
-    /// Optional in-panel confirmation text. `{count}`, `{plural}`, and
-    /// `{read_only_note}` are expanded from the current selection.
-    pub confirmation: Option<String>,
-}
-
-/// Presentation-neutral configuration for a searchable multi-selector.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UiMultiSelectRequest {
-    pub title: String,
-    pub options: Vec<UiMultiSelectOption>,
-    pub actions: Vec<UiMultiSelectAction>,
-    /// `(id, label)` pairs used by the optional category filter panel.
-    pub categories: Vec<(String, String)>,
-    /// `(label, descending)` pairs matching each option's `sort_values`.
-    pub sort_modes: Vec<(String, bool)>,
-    pub initially_selected: Vec<usize>,
-    pub initial_query: String,
-    pub initial_active_categories: Vec<String>,
-    pub initial_sort_mode: usize,
-    pub summary_lines: Vec<String>,
-}
-
-/// Semantic action returned by a searchable multi-selector.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UiMultiSelectResponse {
-    pub selected: Vec<usize>,
-    pub action_id: String,
-    pub query: String,
-    pub active_categories: Vec<String>,
-    pub sort_mode: usize,
-}
-
 /// Product-presentation access implemented by the owning product layer.
 #[doc(hidden)]
 #[async_trait]
 pub trait UiContextAccess: Send + Sync {
+    /// Releases frontend surfaces when this generation loses its capabilities.
+    fn ui_retire(&self) {}
+
+    fn ui_surface_snapshot(&self) -> PluginContextResult<super::UiSurfaceSnapshot> {
+        unbound()
+    }
+    fn ui_command(&self, _owner: String, _command: super::UiCommand) -> PluginContextResult<()> {
+        unbound()
+    }
+    async fn ui_surface_exchange(
+        &self,
+        _frame: super::UiSurfaceFrame,
+    ) -> PluginContextResult<super::UiSurfaceEvent> {
+        unbound()
+    }
+
     fn mode(&self) -> PluginContextResult<PresentationMode> {
         unbound()
     }
@@ -72,25 +34,6 @@ pub trait UiContextAccess: Send + Sync {
     }
 
     fn ui_notify(&self, _level: NoticeLevel, _message: String) -> PluginContextResult<()> {
-        unbound()
-    }
-
-    async fn ui_confirm(&self, _title: String, _message: String) -> PluginContextResult<bool> {
-        unbound()
-    }
-
-    async fn ui_select(
-        &self,
-        _title: String,
-        _options: Vec<String>,
-    ) -> PluginContextResult<Option<usize>> {
-        unbound()
-    }
-
-    async fn ui_multi_select(
-        &self,
-        _request: UiMultiSelectRequest,
-    ) -> PluginContextResult<Option<UiMultiSelectResponse>> {
         unbound()
     }
 }
@@ -114,6 +57,20 @@ impl UiContext {
         self.handle.access()?.has_ui()
     }
 
+    /// Runs a Rust component through the same declarative document/event protocol as JavaScript UI.
+    ///
+    /// The future owns the component: completion, cancellation and dropping the future close
+    /// its surface. Noninteractive modes return `None`. An expired generation returns `Retired`.
+    /// Rendering and event callbacks must be short and nonblocking; use the component's waker
+    /// for background updates. The frontend owns each node's layout, input and editing state.
+    pub async fn custom<C: crate::UiComponent>(
+        &self,
+        component: C,
+        signal: crate::AbortSignal,
+    ) -> PluginContextResult<Option<C::Output>> {
+        crate::ui::run_component(self.handle.clone(), component, signal).await
+    }
+
     pub fn notify(
         &self,
         level: NoticeLevel,
@@ -131,8 +88,13 @@ impl UiContext {
         title: impl Into<String>,
         message: impl Into<String>,
     ) -> PluginContextResult<bool> {
-        let access = self.handle.access()?;
-        access.ui_confirm(title.into(), message.into()).await
+        Ok(self
+            .select(
+                format!("{}\n{}", title.into(), message.into()),
+                vec!["Yes".into(), "No".into()],
+            )
+            .await?
+            == Some(0))
     }
 
     /// Requests one semantic choice from the active product UI.
@@ -144,8 +106,57 @@ impl UiContext {
         title: impl Into<String>,
         options: Vec<String>,
     ) -> PluginContextResult<Option<usize>> {
-        let access = self.handle.access()?;
-        access.ui_select(title.into(), options).await
+        self.handle.access()?;
+        if options.is_empty() {
+            return Ok(None);
+        }
+        let (_, signal) = crate::AbortHandle::new();
+        self.custom(
+            crate::ui::Selection {
+                title: title.into(),
+                options,
+            },
+            signal,
+        )
+        .await
+    }
+
+    /// Requests one line of text using the shared Rust-owned editor state.
+    pub async fn input(
+        &self,
+        title: impl Into<String>,
+        placeholder: impl Into<String>,
+    ) -> PluginContextResult<Option<String>> {
+        let (_, signal) = crate::AbortHandle::new();
+        self.custom(
+            crate::ui::TextEntry {
+                title: title.into(),
+                prefill: String::new(),
+                placeholder: placeholder.into(),
+                multiline: false,
+            },
+            signal,
+        )
+        .await
+    }
+
+    /// Requests multiline text. Enter inserts a newline and Ctrl+Enter submits.
+    pub async fn editor(
+        &self,
+        title: impl Into<String>,
+        prefill: impl Into<String>,
+    ) -> PluginContextResult<Option<String>> {
+        let (_, signal) = crate::AbortHandle::new();
+        self.custom(
+            crate::ui::TextEntry {
+                title: title.into(),
+                prefill: prefill.into(),
+                placeholder: String::new(),
+                multiline: true,
+            },
+            signal,
+        )
+        .await
     }
 
     /// Requests a searchable multi-selection and one semantic batch action.
@@ -154,8 +165,10 @@ impl UiContext {
     /// the frontend. `None` means the user dismissed the surface.
     pub async fn multi_select(
         &self,
-        request: UiMultiSelectRequest,
-    ) -> PluginContextResult<Option<UiMultiSelectResponse>> {
-        self.handle.access()?.ui_multi_select(request).await
+        request: super::UiMultiSelectRequest,
+    ) -> PluginContextResult<Option<super::UiMultiSelectResponse>> {
+        let (_, signal) = crate::AbortHandle::new();
+        self.custom(crate::ui::MultiSelection { request }, signal)
+            .await
     }
 }

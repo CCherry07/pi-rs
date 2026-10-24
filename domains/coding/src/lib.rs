@@ -7,7 +7,7 @@ mod credentials;
 mod dynamic_providers;
 mod features;
 mod generation;
-mod host;
+mod pi;
 pub mod plugins;
 mod project_trust;
 mod prompt;
@@ -20,7 +20,7 @@ mod test_support;
 pub use credentials::{StoredCredential, read_credentials, read_stored_credential};
 pub use features::Features;
 pub use generation::ProductSessionFactory;
-pub use host::{Pi, PiBuilder};
+pub use pi::{Pi, PiBuilder};
 pub use pi_plugin_memory_hermes::curator;
 pub use project_trust::{
     ProjectTrustError, ProjectTrustEvaluation, ProjectTrustOption, ProjectTrustPromptRequest,

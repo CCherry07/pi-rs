@@ -52,7 +52,7 @@
     "zod": "4.1.11"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",

@@ -12,10 +12,6 @@ const PI_COMPATIBILITY_ENTRYPOINTS = [
   'pi-ai',
 ] as const
 
-const PI_TUI_PACKAGE_NAMES: readonly string[] = Object.freeze(
-  PI_PACKAGE_SCOPES.map(scope => `${scope}/pi-tui`),
-)
-
 const TYPEBOX_PACKAGE_NAMES = ['typebox', '@sinclair/typebox'] as const
 const TYPEBOX_PACKAGE_SUBPATHS = [
   '/compile',
@@ -29,23 +25,26 @@ const TYPEBOX_PACKAGE_SUBPATHS = [
   '',
 ] as const
 
-export interface CompatibilityModulePaths {
-  pi: string
-  tui: string
+export interface CompatibilityModules {
+  pi: object
 }
 
 /** Resolves extension peers to the runtimes owned by the host. */
 export class CompatibilityResolver {
   readonly aliases: Readonly<Record<string, string>>
+  readonly virtualModules: Readonly<Record<string, object>>
 
-  constructor(require: NodeRequire, modules: CompatibilityModulePaths) {
-    const entries: [string, string][] = [
+  constructor(require: NodeRequire, modules: CompatibilityModules) {
+    // Share host SDK helpers so callbacks retain the owning generation context.
+    this.virtualModules = Object.freeze(Object.fromEntries([
+      ['@pi-rs/cli', modules.pi],
       ...PI_PACKAGE_SCOPES.flatMap(scope =>
         PI_COMPATIBILITY_ENTRYPOINTS.map(
-          (entrypoint): [string, string] => [`${scope}/${entrypoint}`, modules.pi],
+          (entrypoint) => [`${scope}/${entrypoint}`, modules.pi],
         ),
       ),
-      ...PI_TUI_PACKAGE_NAMES.map((packageName): [string, string] => [packageName, modules.tui]),
+    ]))
+    const entries: [string, string][] = [
       ...TYPEBOX_PACKAGE_NAMES.flatMap((packageName) =>
         TYPEBOX_PACKAGE_SUBPATHS.map(
           (subpath): [string, string] => [

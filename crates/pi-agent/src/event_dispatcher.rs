@@ -45,6 +45,7 @@ pub(crate) struct AgentEventDispatcher {
     run_id: RunId,
     cwd: PathBuf,
     turn_index: AtomicU64,
+    turn_control: Arc<dyn crate::AgentTurnControl>,
 }
 
 impl AgentEventDispatcher {
@@ -54,6 +55,7 @@ impl AgentEventDispatcher {
         plugins: Arc<PluginDriver>,
         run_id: RunId,
         cwd: PathBuf,
+        turn_control: Arc<dyn crate::AgentTurnControl>,
     ) -> Self {
         Self {
             state,
@@ -62,6 +64,7 @@ impl AgentEventDispatcher {
             run_id,
             cwd,
             turn_index: AtomicU64::new(0),
+            turn_control,
         }
     }
 
@@ -150,6 +153,9 @@ impl AgentEventDispatcher {
                         &self.cwd,
                         signal,
                         TurnEndEvent {
+                            boundary: None,
+                            message_entry_id: None,
+                            tool_result_entry_ids: Vec::new(),
                             turn_index,
                             message: Arc::clone(message),
                             tool_results: tool_results.clone(),
@@ -271,7 +277,35 @@ impl AgentEventSink for AgentEventDispatcher {
         signal: AbortSignal,
     ) -> Result<AgentEvent, EventError> {
         self.reduce(&event);
-        if let Some(message) = self.dispatch_plugin(&event, &signal).await {
+        let handled = if let AgentEvent::TurnEnd {
+            message,
+            tool_results,
+        } = &event
+        {
+            let handled = self
+                .turn_control
+                .dispatch_turn_end(
+                    self.run_id.clone(),
+                    TurnEndEvent {
+                        boundary: None,
+                        message_entry_id: None,
+                        tool_result_entry_ids: Vec::new(),
+                        turn_index: self.turn_index.load(Ordering::Relaxed),
+                        message: Arc::clone(message),
+                        tool_results: tool_results.clone(),
+                    },
+                    signal.clone(),
+                )
+                .await
+                .map_err(|error| EventError(error.to_string()))?;
+            if handled {
+                self.turn_index.fetch_add(1, Ordering::Relaxed);
+            }
+            handled
+        } else {
+            false
+        };
+        if !handled && let Some(message) = self.dispatch_plugin(&event, &signal).await {
             event = AgentEvent::MessageEnd { message };
             let mut state = self
                 .state

@@ -44,17 +44,17 @@ pub trait PluginProviderMutationAccess: Send + Sync {
 /// graphical interaction remains outside this crate.
 #[async_trait]
 pub trait PluginUiBridge: Send + Sync {
-    async fn confirm(&self, title: String, message: String) -> Result<bool, String>;
-
-    async fn select(&self, _title: String, _options: Vec<String>) -> Result<Option<usize>, String> {
-        Err("interactive selection is unavailable".to_string())
+    fn surface_snapshot(&self) -> Result<pi_plugin::UiSurfaceSnapshot, String> {
+        Err("extension surfaces unavailable".into())
     }
-
-    async fn multi_select(
+    fn ui_command(&self, _owner: String, _command: pi_plugin::UiCommand) -> Result<(), String> {
+        Err("extension surfaces unavailable".into())
+    }
+    async fn surface_exchange(
         &self,
-        _request: pi_plugin::UiMultiSelectRequest,
-    ) -> Result<Option<pi_plugin::UiMultiSelectResponse>, String> {
-        Err("interactive multi-selection is unavailable".to_string())
+        _frame: pi_plugin::UiSurfaceFrame,
+    ) -> Result<pi_plugin::UiSurfaceEvent, String> {
+        Err("extension surfaces unavailable".into())
     }
 }
 
@@ -168,6 +168,7 @@ pub struct PiPluginContext {
     runtime: tokio::runtime::Handle,
     provider_mutations: Option<Arc<dyn PluginProviderMutationAccess>>,
     ui_bridge: Option<Arc<dyn PluginUiBridge>>,
+    ui_owners: Mutex<std::collections::HashSet<String>>,
     provider_reload_gate: Arc<tokio::sync::Mutex<()>>,
     model_scope_patterns: Vec<String>,
 }
@@ -186,6 +187,7 @@ impl PiPluginContext {
             runtime: tokio::runtime::Handle::current(),
             provider_mutations: None,
             ui_bridge: None,
+            ui_owners: Mutex::default(),
             provider_reload_gate: Arc::new(tokio::sync::Mutex::new(())),
             model_scope_patterns: Vec::new(),
         }
@@ -267,54 +269,91 @@ impl PiPluginContext {
 
 #[async_trait]
 impl UiContextAccess for PiPluginContext {
+    fn ui_retire(&self) {
+        if let Some(bridge) = &self.ui_bridge {
+            for owner in self
+                .ui_owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .drain()
+            {
+                let _ = bridge.ui_command(
+                    owner,
+                    pi_plugin::UiCommand::Surface(pi_plugin::UiSurfaceCommand::Close),
+                );
+            }
+        }
+    }
+
+    fn ui_surface_snapshot(&self) -> Result<pi_plugin::UiSurfaceSnapshot, PluginContextError> {
+        self.ui_bridge
+            .as_ref()
+            .ok_or_else(|| {
+                PluginContextError::Unavailable("extension surfaces unavailable".into())
+            })?
+            .surface_snapshot()
+            .map_err(context_failed)
+    }
+    fn ui_command(
+        &self,
+        owner: String,
+        command: pi_plugin::UiCommand,
+    ) -> Result<(), PluginContextError> {
+        self.ui_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(owner.clone());
+        let closes_surface = matches!(
+            command,
+            pi_plugin::UiCommand::Surface(pi_plugin::UiSurfaceCommand::Close)
+        );
+        self.ui_bridge
+            .as_ref()
+            .ok_or_else(|| {
+                PluginContextError::Unavailable("extension surfaces unavailable".into())
+            })?
+            .ui_command(owner.clone(), command)
+            .map_err(context_failed)?;
+        if closes_surface {
+            self.ui_owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&owner);
+        }
+        Ok(())
+    }
+    async fn ui_surface_exchange(
+        &self,
+        frame: pi_plugin::UiSurfaceFrame,
+    ) -> Result<pi_plugin::UiSurfaceEvent, PluginContextError> {
+        if !matches!(self.mode, PresentationMode::Tui) {
+            return Ok(pi_plugin::UiSurfaceEvent::Closed);
+        }
+        self.ui_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(frame.owner.clone());
+        self.ui_bridge
+            .as_ref()
+            .ok_or_else(|| {
+                PluginContextError::Unavailable("extension surfaces unavailable".into())
+            })?
+            .surface_exchange(frame)
+            .await
+            .map_err(context_failed)
+    }
+
     fn mode(&self) -> Result<PresentationMode, PluginContextError> {
         Ok(self.mode)
     }
 
     fn has_ui(&self) -> Result<bool, PluginContextError> {
-        Ok(matches!(self.mode, PresentationMode::Tui))
+        Ok(matches!(self.mode, PresentationMode::Tui) && self.ui_bridge.is_some())
     }
 
     fn ui_notify(&self, level: NoticeLevel, message: String) -> Result<(), PluginContextError> {
         self.session()?.notify_plugin(message, level);
         Ok(())
-    }
-
-    async fn ui_confirm(&self, title: String, message: String) -> Result<bool, PluginContextError> {
-        if !matches!(self.mode, PresentationMode::Tui) {
-            return Ok(false);
-        }
-        let bridge = self.ui_bridge.as_ref().ok_or_else(|| {
-            PluginContextError::Unavailable("interactive confirmation is not configured".into())
-        })?;
-        bridge.confirm(title, message).await.map_err(context_failed)
-    }
-
-    async fn ui_select(
-        &self,
-        title: String,
-        options: Vec<String>,
-    ) -> Result<Option<usize>, PluginContextError> {
-        if !matches!(self.mode, PresentationMode::Tui) || options.is_empty() {
-            return Ok(None);
-        }
-        let bridge = self.ui_bridge.as_ref().ok_or_else(|| {
-            PluginContextError::Unavailable("interactive selection is not configured".into())
-        })?;
-        bridge.select(title, options).await.map_err(context_failed)
-    }
-
-    async fn ui_multi_select(
-        &self,
-        request: pi_plugin::UiMultiSelectRequest,
-    ) -> Result<Option<pi_plugin::UiMultiSelectResponse>, PluginContextError> {
-        if !matches!(self.mode, PresentationMode::Tui) {
-            return Ok(None);
-        }
-        let bridge = self.ui_bridge.as_ref().ok_or_else(|| {
-            PluginContextError::Unavailable("interactive multi-selection is not configured".into())
-        })?;
-        bridge.multi_select(request).await.map_err(context_failed)
     }
 }
 
@@ -1100,6 +1139,7 @@ fn session_entry_view(record: &SessionRecord) -> Result<SessionEntryView, Plugin
         SessionEntryType::Compaction => SessionEntryKind::Compaction,
         SessionEntryType::BranchSummary => SessionEntryKind::BranchSummary,
         SessionEntryType::Custom => SessionEntryKind::Custom,
+        SessionEntryType::ContextEdit => SessionEntryKind::ContextEdit,
     };
     Ok(SessionEntryView::new(
         record.id.clone(),

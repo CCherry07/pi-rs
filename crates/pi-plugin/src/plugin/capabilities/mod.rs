@@ -8,8 +8,16 @@
 mod epoch;
 mod models;
 mod session;
+mod surface;
 mod types;
 mod ui;
+pub use surface::{
+    UiAppAction, UiCommand, UiCompletion, UiHostOperation, UiHostRequest, UiInteraction,
+    UiMultiSelectAction, UiMultiSelectOption, UiMultiSelectRequest, UiMultiSelectResponse, UiNode,
+    UiNodeKind, UiOverlayOptions, UiProductCommand, UiRegion, UiRegionPlacement, UiShortcut,
+    UiSurfaceArea, UiSurfaceCommand, UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot, UiTone,
+    UiTranscriptItem, UiTranscriptRender,
+};
 
 use async_trait::async_trait;
 
@@ -30,10 +38,7 @@ pub use types::{
     NewSessionOptions, NoticeLevel, PluginContextError, PluginContextResult, PluginContextScope,
     PresentationMode, ScopedModel, SendMessageOptions, SendUserMessageOptions,
 };
-pub use ui::{
-    UiContext, UiContextAccess, UiMultiSelectAction, UiMultiSelectOption, UiMultiSelectRequest,
-    UiMultiSelectResponse,
-};
+pub use ui::{UiContext, UiContextAccess};
 
 /// Dependency-inward aggregate implemented by the Pi-owned context Adapter.
 ///

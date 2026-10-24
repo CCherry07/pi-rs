@@ -461,6 +461,7 @@ pub enum SessionEntryKind {
     Compaction,
     BranchSummary,
     Custom,
+    ContextEdit,
     Unknown(String),
 }
 

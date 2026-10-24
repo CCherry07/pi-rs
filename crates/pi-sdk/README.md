@@ -75,7 +75,9 @@ Session capabilities available to plugins and tools refer to that exact managed 
 they support the same history, model, and event operations used by the Coding product.
 The `projects` module remains available for applications that want durable project definitions.
 
-The configured model starts fresh sessions. Resume restores the saved selection unless
+The configured model starts fresh sessions. An options-level `initial_model` request (including
+domain-supplied settings defaults) is resolved before the first model record and provider request.
+Resume restores the saved selection unless
 `AgentSessionOptions::initial_model` explicitly overrides it, and reload retains the live model.
 Session history, workspace, tool selection, lazy first-assistant persistence, queues, and
 generation replacement use the shared session implementation and v4 storage schema.
