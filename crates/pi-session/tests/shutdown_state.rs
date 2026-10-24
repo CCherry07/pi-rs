@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use pi_agent::AgentOptions;
@@ -6,10 +7,10 @@ use pi_plugin::Plugin;
 use pi_plugin::{PluginContext, PresentationMode};
 use pi_runtime::PiRuntime;
 use pi_session::{
-    AgentSessionOptions, LaneRecordEntry, MultiSessionManager, PiPluginContext,
+    AgentSessionOptions, LaneRecordEntry, MultiSessionManager, PiPluginContext, PiSession,
     PluginContextBinding, PluginError, PreparedSessionGeneration, SessionError,
-    SessionGenerationFactory, SessionGenerationRequest, SessionLog, SessionPluginContext,
-    SessionShutdownEvent, SessionStartEvent,
+    SessionGenerationFactory, SessionGenerationRequest, SessionHeader, SessionPluginContext,
+    SessionShutdownEvent, SessionStartEvent, SessionStore,
 };
 use pi_test_support::ScriptedProviderPlugin;
 use serde_json::{Value, json};
@@ -96,6 +97,27 @@ impl SessionGenerationFactory for CheckpointFactory {
     }
 }
 
+async fn fixture_session(
+    manager: &MultiSessionManager,
+    cwd: &Path,
+    path: &Path,
+    materialized: bool,
+) -> PiSession {
+    if materialized {
+        let log =
+            SessionStore::create(path, SessionHeader::new("checkpoint-session", cwd)).unwrap();
+        manager
+            .open_session(pi_session::SessionSource::Store(log), Default::default())
+            .await
+            .unwrap()
+    } else {
+        manager
+            .create_session(pi_session::CreateSessionOptions::new(cwd, path))
+            .await
+            .unwrap()
+    }
+}
+
 #[tokio::test]
 async fn shutdown_checkpoint_is_available_when_reopening() {
     let directory = tempfile::tempdir().unwrap();
@@ -105,13 +127,12 @@ async fn shutdown_checkpoint_is_available_when_reopening() {
         ..CheckpointFactory::default()
     };
     let manager = MultiSessionManager::new(factory.clone());
-    let session = manager
-        .create_session(directory.path(), &path)
+    let session = fixture_session(&manager, directory.path(), &path, true).await;
+    manager.close_session(&session).await.unwrap();
+    let _reopened = manager
+        .open_session(&path, Default::default())
         .await
         .unwrap();
-    session.current().log().materialize().unwrap();
-    manager.close_session(&session).await.unwrap();
-    let _reopened = manager.open_session(&path).await.unwrap();
     assert!(factory.starts.lock().unwrap()[1].iter().any(|entry| {
         entry["customType"] == "checkpoint-fixture" && entry["data"]["saved"] == true
     }));
@@ -124,18 +145,12 @@ async fn reload_retains_shutdown_records_and_continuous_log_sequences() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
         let manager = MultiSessionManager::new(CheckpointFactory::default());
-        let session = manager
-            .create_session(directory.path(), &path)
-            .await
-            .unwrap();
-        if materialized {
-            session.current().log().materialize().unwrap();
-        }
+        let session = fixture_session(&manager, directory.path(), &path, materialized).await;
         session.reload().await.unwrap();
         let current = session.current();
         assert_eq!(
             current
-                .log()
+                .history()
                 .load()
                 .unwrap()
                 .records
@@ -148,7 +163,7 @@ async fn reload_retains_shutdown_records_and_continuous_log_sequences() {
         current.append_custom_entry("after-reload", None).unwrap();
         assert_eq!(path.exists(), materialized);
         if materialized {
-            SessionLog::open(&path).expect("reload must not reuse an already written sequence");
+            SessionStore::open(&path).expect("reload must not reuse an already written sequence");
         }
         manager.shutdown().await.unwrap();
     }
@@ -164,13 +179,7 @@ async fn reload_start_sees_the_previous_plugins_shutdown_checkpoint() {
             ..CheckpointFactory::default()
         };
         let manager = MultiSessionManager::new(factory.clone());
-        let session = manager
-            .create_session(directory.path(), &path)
-            .await
-            .unwrap();
-        if materialized {
-            session.current().log().materialize().unwrap();
-        }
+        let session = fixture_session(&manager, directory.path(), &path, materialized).await;
         session.reload().await.unwrap();
         assert!(
             factory.starts.lock().unwrap()[1]
@@ -193,14 +202,15 @@ async fn cancelled_shutdown_retires_the_plugin_context_after_its_final_write() {
         ..CheckpointFactory::default()
     });
     let owner = manager
-        .create_session(directory.path(), directory.path().join("session.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("session.jsonl"),
+        ))
         .await
         .unwrap();
     let session = owner.current();
     let retained = pi_plugin::CommandContextParts::new(
-        session
-            .runtime()
-            .plugin_context_handle(pi_plugin::PluginContextScope::Command),
+        session.plugin_context(pi_plugin::PluginContextScope::Command),
     );
     let shutdown = tokio::spawn({
         let manager = manager.clone();
@@ -221,7 +231,7 @@ async fn cancelled_shutdown_retires_the_plugin_context_after_its_final_write() {
             .is_err()
     );
     session.shutdown().await;
-    let entries = session.log().load().unwrap().entries;
+    let entries = session.history().load().unwrap().entries;
     assert_eq!(entries.iter().filter(|entry| matches!(
         &entry.entry,
         pi_session::SessionEntry::Custom(custom) if custom.custom_type == "checkpoint-fixture"
@@ -239,11 +249,7 @@ async fn resuming_the_current_file_keeps_shutdown_writes_and_sequence_ownership(
             ..CheckpointFactory::default()
         };
         let manager = MultiSessionManager::new(factory.clone());
-        let session = manager
-            .create_session(directory.path(), &path)
-            .await
-            .unwrap();
-        session.current().log().materialize().unwrap();
+        let session = fixture_session(&manager, directory.path(), &path, true).await;
         let target = if alias {
             directory.path().join(".").join("session.jsonl")
         } else {
@@ -260,7 +266,7 @@ async fn resuming_the_current_file_keeps_shutdown_writes_and_sequence_ownership(
             .current()
             .append_custom_entry("after-resume", None)
             .unwrap();
-        SessionLog::open(&path).unwrap();
+        SessionStore::open(&path).unwrap();
         manager.shutdown().await.unwrap();
     }
 }

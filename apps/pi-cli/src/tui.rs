@@ -22,8 +22,9 @@ use pi_core::{
 use pi_plugin::CommandSpec;
 use pi_session::{
     AgentSession, AgentSessionEvent, AgentSessionSnapshot, EntryOrder, EntryQuery, ForkPosition,
-    PiSession, QueueSnapshot, SessionEntry, SessionInput, SessionRuntimeInventory,
-    ShellExecutionOptions, SubmitOutcome, aggregate_document_usage, current_session_context_tokens,
+    PiSession, PromptOutcome, QueueSnapshot, SessionEntry, SessionInput, SessionResetReason,
+    SessionRuntimeInventory, SessionUpdate, ShellExecutionOptions, aggregate_document_usage,
+    current_session_context_tokens,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -737,7 +738,7 @@ impl App {
         let mut transcript = Vec::new();
         let mut session_tokens = 0;
         let mut context_tokens = Some(latest_context_usage(&snapshot.agent.messages).tokens);
-        if let Ok(document) = session.log().load()
+        if let Ok(document) = session.history().load()
             && let Ok(branch) = document.branch()
         {
             for record in &branch {
@@ -804,7 +805,7 @@ impl App {
             && bash_line.is_none()
             && !compacting;
         let session_choices =
-            discover_session_choices(session.log().path(), session.runtime().cwd());
+            discover_session_choices(session.history().path(), session.catalog().cwd());
         let (tree_choices, fork_choices) = session_entry_choices(session);
         let input_history = InputHistory::from_transcript(&transcript);
         let registered_plugins =
@@ -818,8 +819,8 @@ impl App {
             input_history,
             status: status.to_string(),
             queue: snapshot.queue.clone(),
-            command_specs: session.runtime().command_specs(),
-            model_specs: session.runtime().available_models(),
+            command_specs: session.catalog().command_specs(),
+            model_specs: session.catalog().available_models(),
             registered_plugins,
             session_choices,
             tree_choices,
@@ -838,7 +839,7 @@ impl App {
             provider: snapshot.agent.provider_id.to_string(),
             model: snapshot.agent.model_id.to_string(),
             thinking: snapshot.agent.thinking_level.as_str().to_string(),
-            cwd: session.runtime().cwd().display().to_string(),
+            cwd: session.catalog().cwd().display().to_string(),
             session_name: snapshot.name.clone(),
             session_tokens,
             context_tokens,
@@ -1477,10 +1478,10 @@ async fn run_loop(
     {
         palette = selected;
     }
-    let mut session_changes = session_handle.subscribe();
-    let mut session = session_handle.current();
-    let mut subscription = session.subscribe();
-    let mut app = app_for_session(&session, &subscription.snapshot, &agent_dir);
+    let mut observation = session_handle.observe();
+    let mut session = observation.current();
+    let mut app = app_for_session(&session, observation.snapshot(), &agent_dir);
+    app.epoch = observation.version().epoch;
     let (effect_sender, mut effect_receiver) = tokio::sync::mpsc::unbounded_channel();
     let (paste_sender, mut paste_receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut paste_pending = false;
@@ -1605,18 +1606,26 @@ async fn run_loop(
                     None => app.quit = true,
                 }
             }
-            session_event = subscription.events.recv() => match session_event {
-                Ok(event) if event.revision > subscription.snapshot.revision => {
-                    subscription.snapshot.revision = event.revision;
+            session_update = observation.recv() => match session_update {
+                Some(SessionUpdate::Event { event, .. }) => {
                     app.update(AppMessage::SessionEvent {
-                        event: Box::new(event.event),
+                        event: Box::new(event),
                         snapshot: Box::new(session.snapshot()),
                     });
                 }
-                Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    let snapshot = session.snapshot();
-                    subscription.snapshot = snapshot.clone();
+                Some(SessionUpdate::Reset { version, reason: SessionResetReason::Replacement, snapshot }) => {
+                    session = observation.current();
+                    let tools_expanded = app.tools_expanded;
+                    let extension_surface = std::mem::take(&mut app.extension_surface);
+                    app = app_for_session(&session, &snapshot, &agent_dir);
+                    app.extension_surface = extension_surface;
+                    app.epoch = version.epoch;
+                    app.tools_expanded = tools_expanded;
+                    app.status = generation_status_override
+                        .take()
+                        .unwrap_or_else(|| "Session generation replaced".to_string());
+                }
+                Some(SessionUpdate::Reset { reason: SessionResetReason::Lagged { .. }, snapshot, .. }) => {
                     let input = std::mem::take(&mut app.input);
                     let input_history = std::mem::take(&mut app.input_history);
                     let epoch = app.epoch;
@@ -1636,7 +1645,7 @@ async fn run_loop(
                     recovered.extension_surface = std::mem::take(&mut app.extension_surface);
                     app = recovered;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => app.update(AppMessage::Quit),
+                None => app.update(AppMessage::Quit),
             },
             Some(done) = effect_receiver.recv() => {
                 let current_epoch = done.epoch == app.epoch;
@@ -1681,7 +1690,7 @@ async fn run_loop(
                                 operation,
                                 terminal,
                                 &mut clipboard,
-                                session.runtime().cwd(),
+                                session.catalog().cwd(),
                                 surface_requests.external_editor.as_deref(),
                             )
                             .await;
@@ -1795,24 +1804,6 @@ async fn run_loop(
 
             _ = animation_tick.tick(), if app.has_active_animation() => {
                 app.update(AppMessage::AnimationTick);
-            }
-            changed = session_changes.changed() => {
-                if changed.is_err() {
-                    app.quit = true;
-                    continue;
-                }
-                session = session_handle.current();
-                subscription = session.subscribe();
-                let next_epoch = app.epoch.saturating_add(1);
-                let tools_expanded = app.tools_expanded;
-                let extension_surface = std::mem::take(&mut app.extension_surface);
-                app = app_for_session(&session, &subscription.snapshot, &agent_dir);
-                app.extension_surface = extension_surface;
-                app.epoch = next_epoch;
-                app.tools_expanded = tools_expanded;
-                app.status = generation_status_override
-                    .take()
-                    .unwrap_or_else(|| "Session generation replaced".to_string());
             }
         }
         if let Some(request) = app.pending_auth.take() {
@@ -1986,9 +1977,9 @@ fn command_suggestions(input: &str, command_specs: &[CommandSpec]) -> Vec<Comman
 fn session_entry_choices(
     session: &AgentSession,
 ) -> (Vec<SessionEntryChoice>, Vec<SessionEntryChoice>) {
-    let current = session.log().leaf_id();
+    let current = session.history().leaf_id();
     let records = session
-        .log()
+        .history()
         .find_entries(&EntryQuery {
             order: EntryOrder::OldestFirst,
             ..EntryQuery::default()
@@ -2248,7 +2239,7 @@ mod tests {
     use super::*;
     use pi_session::{
         AgentSessionOptions, CompactionEntry, MultiSessionManager, PreparedSessionGeneration,
-        SessionGenerationRequest, SessionHeader, SessionLog, SessionRecord,
+        SessionGenerationRequest, SessionHeader, SessionRecord, SessionStore,
     };
     use ratatui::backend::TestBackend;
     use ratatui::{TerminalOptions, Viewport};
@@ -2596,7 +2587,10 @@ mod tests {
             });
             let path = directory.path().join("session.jsonl");
             let handle = sessions
-                .create_session(directory.path(), &path)
+                .create_session(pi_session::CreateSessionOptions::new(
+                    directory.path(),
+                    &path,
+                ))
                 .await
                 .unwrap();
             let session = handle.current();
@@ -2624,7 +2618,7 @@ mod tests {
                     .unwrap()
                     .contains(&image.data)
             );
-            let document = session.log().load().unwrap();
+            let document = session.history().load().unwrap();
             assert!(
                 matches!(document.messages()[0].as_standard(), Some(Message::User(user)) if
                 user.content.iter().any(|block| matches!(block, ContentBlock::Image(actual) if actual == &image)))
@@ -2672,7 +2666,10 @@ mod tests {
             ))
         });
         let runtime = sessions
-            .create_session(directory.path(), directory.path().join("session.jsonl"))
+            .create_session(pi_session::CreateSessionOptions::new(
+                directory.path(),
+                directory.path().join("session.jsonl"),
+            ))
             .await
             .unwrap();
         let session = runtime.current();
@@ -2695,7 +2692,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(named, "Session name set: release polish");
-        assert_eq!(session.log().name().as_deref(), Some("release polish"));
+        assert_eq!(session.history().name().as_deref(), Some("release polish"));
         assert!(info.contains("Session Info"));
         assert!(info.contains("Name: release polish"));
         assert!(info.contains("Messages: 0"));
@@ -4754,9 +4751,13 @@ mod tests {
             })
             .build()
             .unwrap();
-        let session = AgentSession::create(runtime, directory.path().join("session.jsonl"))
-            .await
-            .unwrap();
+        let session = AgentSession::create(
+            runtime,
+            directory.path().join("session.jsonl"),
+            Default::default(),
+        )
+        .await
+        .unwrap();
 
         let app = App::new(&session, &session.snapshot());
         let suggestions = command_suggestions("/skill:", &app.command_specs);
@@ -4834,7 +4835,7 @@ mod tests {
     async fn resumed_app_restores_all_entry_usage_and_unknown_compacted_context() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
-        let log = SessionLog::create(&path, SessionHeader::new("usage-resume", directory.path()))
+        let log = SessionStore::create(&path, SessionHeader::new("usage-resume", directory.path()))
             .unwrap();
         let assistant = Message::assistant(pi_core::AssistantMessage {
             content: vec![ContentBlock::Text(pi_core::TextContent::new("answer"))],
@@ -4894,14 +4895,16 @@ mod tests {
             .system_prompt(pi_runtime::SystemPrompt::Final("test".to_string()))
             .build()
             .unwrap();
-        let session = AgentSession::open(runtime, &path).await.unwrap();
+        let session = AgentSession::open(runtime, &path, Default::default())
+            .await
+            .unwrap();
 
         let mut app = App::new(&session, &session.snapshot());
 
         assert_eq!(app.session_tokens, 114);
         assert_eq!(app.context_tokens, None);
         let mut stale_snapshot = session.snapshot();
-        stale_snapshot.agent.messages = vec![assistant];
+        stale_snapshot.agent.messages = Arc::new(vec![assistant]);
         app.sync_snapshot(&stale_snapshot);
         assert_eq!(app.context_tokens, None);
         session.shutdown().await;
@@ -4944,9 +4947,13 @@ mod tests {
             .system_prompt(pi_runtime::SystemPrompt::Final("test".to_string()))
             .build()
             .unwrap();
-        let session = AgentSession::create(runtime, directory.path().join("session.jsonl"))
-            .await
-            .unwrap();
+        let session = AgentSession::create(
+            runtime,
+            directory.path().join("session.jsonl"),
+            Default::default(),
+        )
+        .await
+        .unwrap();
         let mut app = App::new(&session, &session.snapshot());
         app.input.set_text("/model");
         assert!(activate_bottom_view_for_command(&mut app, "/model"));
@@ -4973,7 +4980,7 @@ mod tests {
         std::fs::create_dir_all(&other_cwd).unwrap();
 
         let current_path = sessions.join("current.jsonl");
-        let current = pi_session::SessionLog::create(
+        let current = pi_session::SessionStore::create(
             &current_path,
             pi_session::SessionHeader::new("current", &cwd),
         )
@@ -4986,7 +4993,7 @@ mod tests {
             .unwrap();
 
         let previous_path = sessions.join("previous.jsonl");
-        let previous = pi_session::SessionLog::create(
+        let previous = pi_session::SessionStore::create(
             &previous_path,
             pi_session::SessionHeader::new("previous", &cwd),
         )
@@ -5001,7 +5008,7 @@ mod tests {
             .set_name(Some("Resume polish".to_string()))
             .unwrap();
 
-        pi_session::SessionLog::create(
+        pi_session::SessionStore::create(
             sessions.join("other.jsonl"),
             pi_session::SessionHeader::new("other", &other_cwd),
         )

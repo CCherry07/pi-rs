@@ -241,7 +241,10 @@ async fn assert_manager_closed(manager: &MultiSessionManager) {
     assert!(manager.sessions().is_empty());
     let directory = tempfile::tempdir().unwrap();
     let result = manager
-        .create_session(directory.path(), directory.path().join("closed.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("closed.jsonl"),
+        ))
         .await;
     assert!(matches!(
         result,

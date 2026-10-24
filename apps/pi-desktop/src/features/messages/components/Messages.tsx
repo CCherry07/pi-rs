@@ -16,13 +16,6 @@ import {
   WorkingIndicator,
 } from "./MessageRows";
 import { useMessagesViewState } from "./useMessagesViewState";
-import { DesktopItemView, DesktopWorkspacePanels, useDesktopItemMatcher } from "../../extensions/ExtensionHost";
-import type { DesktopViewHost } from "../../extensions/types";
-import { RelatedSessionView } from "./RelatedSessionView";
-import { Markdown } from "./Markdown";
-import { useDesktopWidgets } from "../hooks/useDesktopWidgets";
-import { runDesktopCommand } from "@services/tauri";
-import { DesktopExtensionControls } from "../../app/components/DesktopExtensions";
 import { ThreadConversationsContext } from "@threads/contexts/ThreadConversations";
 import { ThreadContextBanner } from "./ThreadContextBanner";
 
@@ -47,9 +40,8 @@ type MessagesProps = {
   onQuoteMessage?: (text: string) => void;
   onForkMessage?: (entryId: string) => void;
   embedded?: boolean;
-  /** Frozen inherited history must never expand into live child conversations. */
+  /** Inherited snapshots must not recursively show their origin banner. */
   snapshot?: boolean;
-  ancestorThreadIds?: readonly string[];
 };
 
 export const Messages = memo(function Messages({
@@ -74,9 +66,8 @@ export const Messages = memo(function Messages({
   onForkMessage,
   embedded = false,
   snapshot = false,
-  ancestorThreadIds = [],
 }: MessagesProps) {
-  const { t, i18n } = useTranslation("messages");
+  const { t } = useTranslation("messages");
   const messageScopeId = useId();
   const conversations = useContext(ThreadConversationsContext);
   const inheritance = !snapshot && threadId
@@ -93,29 +84,6 @@ export const Messages = memo(function Messages({
     },
     [onOpenThreadLink, workspaceId],
   );
-
-  const widgetSnapshot = useDesktopWidgets(workspaceId, snapshot ? null : threadId);
-  const hasDesktopView = useDesktopItemMatcher();
-  const standaloneItem = useCallback((item: ConversationItem) => !snapshot && item.kind === "tool" && hasDesktopView(item), [snapshot, hasDesktopView]);
-  const threadPath = threadId ? [...ancestorThreadIds, threadId] : ancestorThreadIds;
-  const desktopHost: DesktopViewHost = {
-    workspaceId, threadId, locale: i18n.language, readOnly: snapshot || embedded, frozen: snapshot,
-    widgets: widgetSnapshot.widgets,
-    runCommand: async (name,args) => {
-      if(!workspaceId || !threadId || !widgetSnapshot.scopeToken) throw new Error("This session is not ready for commands");
-      await runDesktopCommand(workspaceId,threadId,name,args,widgetSnapshot.scopeToken);
-    },
-    sessionStatus: reference => {
-      const id=reference.sessionId;
-      const status=id?conversations?.threadStatusById[id]:undefined;
-      return status ? {isProcessing:status.isProcessing,totalTokens:id?conversations?.tokenUsageByThread[id]?.totalTokens??undefined:undefined}:undefined;
-    },
-    renderMarkdown: value => <Markdown value={value} workspacePath={workspacePath} onOpenFileLink={openFileLink} onOpenFileLinkMenu={showFileLinkMenu} onOpenThreadLink={handleOpenThreadLink} />,
-    renderSession: reference => <RelatedSessionView reference={reference} workspaceId={workspaceId} threadId={threadId} ancestors={threadPath}
-      renderConversation={conversation => <Messages {...conversation} embedded ancestorThreadIds={threadPath} workspaceId={workspaceId}
-        workspacePath={workspacePath} openTargets={openTargets} selectedOpenAppId={selectedOpenAppId}
-        codeBlockCopyUseModifier={codeBlockCopyUseModifier} showMessageFilePath={showMessageFilePath} onOpenThreadLink={onOpenThreadLink}/>} />,
-  };
 
   const {
     bottomRef,
@@ -135,7 +103,6 @@ export const Messages = memo(function Messages({
     planFollowup,
     dismissPlanFollowup,
   } = useMessagesViewState({
-    standaloneItem,
     items,
     threadId,
     isThinking,
@@ -226,7 +193,6 @@ export const Messages = memo(function Messages({
     if (item.kind === "tool") {
       const isExpanded = expandedItems.has(item.id);
       return (
-        <DesktopItemView key={item.id} host={desktopHost} item={item} expanded={isExpanded} onToggle={() => toggleExpanded(item.id)} fallback={
         <ToolRow
           key={item.id}
           item={item}
@@ -238,7 +204,7 @@ export const Messages = memo(function Messages({
           onOpenFileLinkMenu={showFileLinkMenu}
           onOpenThreadLink={handleOpenThreadLink}
           onRequestAutoScroll={requestAutoScroll}
-        />} />
+        />
       );
     }
     if (item.kind === "explore") {
@@ -255,7 +221,6 @@ export const Messages = memo(function Messages({
       onScroll={updateAutoScroll}
     >
       <div className="messages-inner">
-        {!embedded && !snapshot && <><DesktopExtensionControls /><DesktopWorkspacePanels host={desktopHost} /></>}
         {inheritance && (
           <ThreadContextBanner
             inheritance={inheritance}

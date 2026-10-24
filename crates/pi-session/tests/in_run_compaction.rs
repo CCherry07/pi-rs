@@ -10,8 +10,8 @@ use pi_plugin::Plugin;
 use pi_runtime::{PiRuntime, SystemPrompt};
 use pi_session::{
     AgentSession, AgentSessionOptions, CompactionEntry, CompactionSettings, PluginError,
-    SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionEntry, SessionLog,
-    SessionPluginContext,
+    SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionEntry, SessionPluginContext,
+    SessionStore,
 };
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn, TestToolsPlugin};
 use serde_json::json;
@@ -96,7 +96,7 @@ async fn threshold_compaction_between_tool_turns_resumes_with_composed_turn_cont
             let session_path = session_path.clone();
             async move {
                 prepare_calls.fetch_add(1, Ordering::SeqCst);
-                let (_, document) = SessionLog::open(&session_path).unwrap();
+                let (_, document) = SessionStore::open(&session_path).unwrap();
                 assert!(
                     document
                         .entries
@@ -127,7 +127,7 @@ async fn threshold_compaction_between_tool_turns_resumes_with_composed_turn_cont
         .system_prompt(generic_system_prompt())
         .build()
         .unwrap();
-    let session = AgentSession::create_with_options(
+    let session = AgentSession::create(
         runtime,
         &session_path,
         AgentSessionOptions::default()
@@ -142,7 +142,11 @@ async fn threshold_compaction_between_tool_turns_resumes_with_composed_turn_cont
     .unwrap();
 
     session.prompt("seed old history").await.unwrap();
-    let outcome = session.prompt("run the large tool").await.unwrap();
+    let pi_session::PromptOutcome::Agent(outcome) =
+        session.prompt("run the large tool").await.unwrap()
+    else {
+        panic!("expected an agent run");
+    };
     let requests = provider.requests();
 
     assert_eq!(prepare_calls.load(Ordering::SeqCst), 1);
@@ -154,12 +158,12 @@ async fn threshold_compaction_between_tool_turns_resumes_with_composed_turn_cont
             if matches!(message.content.first(), Some(ContentBlock::Text(text)) if text.text == "finished after compaction")
     ));
     assert_eq!(
-        session.snapshot().agent.messages,
-        outcome.final_context.messages
+        session.snapshot().agent.messages.as_ref(),
+        &outcome.final_context.messages
     );
     assert_eq!(
         session
-            .log()
+            .history()
             .load()
             .unwrap()
             .entries
@@ -197,7 +201,7 @@ async fn failed_in_run_compaction_is_best_effort_and_does_not_stop_the_agent() {
         .system_prompt(generic_system_prompt())
         .build()
         .unwrap();
-    let session = AgentSession::create_with_options(
+    let session = AgentSession::create(
         runtime,
         directory.path().join("session.jsonl"),
         AgentSessionOptions::default()
@@ -212,7 +216,11 @@ async fn failed_in_run_compaction_is_best_effort_and_does_not_stop_the_agent() {
     .unwrap();
 
     session.prompt("seed old history").await.unwrap();
-    let outcome = session.prompt("run the large tool").await.unwrap();
+    let pi_session::PromptOutcome::Agent(outcome) =
+        session.prompt("run the large tool").await.unwrap()
+    else {
+        panic!("expected an agent run");
+    };
     let requests = provider.requests();
 
     assert_eq!(requests.len(), 4);
@@ -231,7 +239,7 @@ async fn failed_in_run_compaction_is_best_effort_and_does_not_stop_the_agent() {
     ));
     assert!(
         !session
-            .log()
+            .history()
             .load()
             .unwrap()
             .entries
@@ -276,11 +284,15 @@ async fn permanent_turn_control_does_not_keep_a_dropped_session_alive() {
         .system_prompt(generic_system_prompt())
         .build()
         .unwrap();
-    let session = AgentSession::create(runtime, directory.path().join("session-lifetime.jsonl"))
-        .await
-        .unwrap();
+    let agent = runtime.agent().clone();
+    let session = AgentSession::create(
+        runtime,
+        directory.path().join("session-lifetime.jsonl"),
+        Default::default(),
+    )
+    .await
+    .unwrap();
     let weak_session = Arc::downgrade(&session);
-    let agent = session.runtime().agent().clone();
 
     drop(session);
 

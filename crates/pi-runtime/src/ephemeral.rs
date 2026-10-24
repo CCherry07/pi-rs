@@ -259,8 +259,8 @@ impl PiRuntime {
                 active_tools: parent.active_tools,
                 messages: if request.inherit_history {
                     match request.history_tail {
-                        Some(tail) => digest_history(parent.messages, tail),
-                        None => parent.messages,
+                        Some(tail) => digest_history(parent.messages.as_ref().clone(), tail),
+                        None => parent.messages.as_ref().clone(),
                     }
                 } else {
                     Vec::new()

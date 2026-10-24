@@ -6,14 +6,15 @@
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 20px;
+  gap: 32px;
   justify-content: flex-start;
   justify-self: stretch;
   align-self: stretch;
   max-width: none;
   margin: 0;
   text-align: left;
-  padding: calc(36px + var(--home-scroll-offset, 0px)) 32px 24px;
+  padding: calc(clamp(48px, 10vh, 96px) + var(--home-scroll-offset, 0px)) 32px 32px;
+  background: var(--surface-messages);
   overflow-y: auto;
   overflow-x: hidden;
 }
@@ -31,17 +32,19 @@
   text-align: center;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 12px;
+  padding: 16px 0 24px;
 }
 
 .home-title {
-  font-size: 44px;
+  font-size: 48px;
   font-weight: 600;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.055em;
+  color: var(--text-strong);
 }
 
 .home-subtitle {
-  font-size: 16px;
+  font-size: 14px;
   color: var(--text-muted);
 }
 
@@ -236,7 +239,7 @@
   background: linear-gradient(135deg, rgba(98, 176, 255, 0.15), transparent 60%),
     var(--surface-card);
   border: 1px solid var(--border-subtle);
-  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-card);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -320,7 +323,7 @@
     radial-gradient(circle at top, rgba(62, 156, 255, 0.16), transparent 60%),
     var(--surface-card);
   border: 1px solid var(--border-subtle);
-  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-card);
 }
 
 .home-usage-chart-nav {
@@ -557,24 +560,12 @@
 .home-latest-card {
   position: relative;
   padding: 14px 14px 16px;
-  border-radius: 16px;
-  background:
-    linear-gradient(135deg, rgba(100, 200, 255, 0.12), transparent 60%),
-    var(--surface-card);
+  border-radius: 10px;
+  background: var(--surface-card);
   border: 1px solid var(--border-subtle);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
+  box-shadow: none;
   overflow: hidden;
   text-align: left;
-}
-
-.home-latest-card::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 16px;
-  border: 1px solid var(--border-strong);
-  opacity: 0.4;
-  pointer-events: none;
 }
 
 .home-latest-card-button {
@@ -586,8 +577,8 @@
 }
 
 .home-latest-card-button:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.24);
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
 }
 
 .home-latest-card-button:focus-visible {
@@ -643,8 +634,7 @@
   justify-content: space-between;
   gap: 6px;
   margin-bottom: 10px;
-  flex-direction: column;
-  align-items: flex-start;
+  flex-wrap: wrap;
 }
 
 .home-latest-label {

@@ -24,7 +24,7 @@
 
   --ds-toast-bg: var(--ds-surface-overlay);
   --ds-toast-border: var(--ds-border-subtle);
-  --ds-toast-shadow: 0 16px 32px rgba(0, 0, 0, 0.25);
+  --ds-toast-shadow: var(--shadow-popover);
   --ds-toast-title: var(--ds-text-subtle);
   --ds-toast-body: var(--text);
 
@@ -34,14 +34,14 @@
 
   --ds-popover-bg: var(--surface-popover);
   --ds-popover-border: var(--border-muted);
-  --ds-popover-shadow: 0 14px 34px rgba(0, 0, 0, 0.3);
+  --ds-popover-shadow: var(--shadow-popover);
   --ds-popover-item-text: var(--text-muted);
   --ds-popover-item-text-active: var(--text-stronger);
 
   --ds-diff-lib-bg-light: rgba(255, 255, 255, 0.35);
   --ds-diff-lib-bg-dark: rgba(10, 12, 16, 0.35);
-  --ds-diff-lib-bg-system-light: rgba(255, 255, 255, 0.35);
-  --ds-diff-lib-bg-system-dark: rgba(10, 12, 16, 0.35);
+  --ds-diff-lib-bg-system-light: var(--surface-command);
+  --ds-diff-lib-bg-system-dark: var(--surface-command);
 
   /* Global layer scale (keep numeric so it works with z-index + calc()). */
   --ds-layer-modal: 10000;

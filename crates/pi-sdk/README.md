@@ -7,7 +7,7 @@ and transactional session generation lifecycle. The Coding product's defaults li
 Supply the model, complete base prompt, and plugin factories explicitly:
 
 ```rust,ignore
-use pi_sdk::{AgentHarness, ModelSelection};
+use pi_sdk::{AgentHarness, CreateSessionOptions, ModelSelection};
 
 let harness = AgentHarness::builder(
     ModelSelection::new("my-provider", "my-model"),
@@ -18,9 +18,9 @@ let harness = AgentHarness::builder(
 .build();
 
 let session = harness.sessions()
-    .create_session(workspace_directory, session_file)
+    .create_session(CreateSessionOptions::new(workspace_directory, session_file))
     .await?;
-session.current().submit("Where is order ORD-42?").await?;
+session.current().prompt("Where is order ORD-42?").await?;
 session.reload().await?;
 harness.sessions().shutdown().await?;
 ```
@@ -69,8 +69,10 @@ are dropped; explicit harness defaults remain strict. The same recovery plan rep
 after generation validation succeeds. Fresh isolated sessions render their inherited or requested
 selection. Restoring unchanged tool selections reuses the validated prompt and inspection options.
 
-Each new session receives its workspace and JSONL path from the caller. Use
-`create_session_with_workspace` for multiple roots and optional application metadata.
+Each new session receives its workspace and JSONL path through `CreateSessionOptions`.
+Its `workspace`, `session_id`, `metadata`, and `generation_overlay` fields can be combined.
+Use `open_session(path, OpenSessionOptions::default())` to resume a saved session, or pass
+`SessionSource::Store(store)` when the history store has already been opened.
 Session capabilities available to plugins and tools refer to that exact managed session;
 they support the same history, model, and event operations used by the Coding product.
 The `projects` module remains available for applications that want durable project definitions.

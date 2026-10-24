@@ -171,24 +171,7 @@ same exchange; it does not use a product-specific prompt channel. JavaScript slo
 are convenience adapters over the same `UiSurfaceFrame` interface. Native plugins keep persistent
 business state in `UiComponent` rather than learning a second UI lifecycle.
 
-## Desktop presentation state / 桌面展示状态
-
-Backend plugins can publish a bounded, durable JSON value for a separately packaged React view.
-`WidgetPublisher` owns the `pi.ui.widget` entry envelope, namespaced-key and 256 KiB checks,
-successful-write duplicate suppression, and null tombstones. The plugin owns the value schema and
-any history/current-runtime merge policy:
-
-```rust
-use pi_plugin::desktop::WidgetPublisher;
-
-let mut progress = WidgetPublisher::new("example.progress")?;
-progress.publish(&context.session, &serde_json::json!({"completed": 3, "total": 5}))?;
-progress.remove(&context.session)?;
-```
-
-Keep one publisher per key and session. A publisher intentionally does not recover business state
-or authorize commands; React packages decode values through `@pi-rs/desktop-sdk`, and registered
-native commands remain the executable interface.
+## Context lifetime / 上下文生命周期
 
 Contexts are generation-bound capabilities. A context retained after its runtime generation is
 replaced returns `PluginContextError::Retired`; it never follows a stale native plugin into a

@@ -2,11 +2,11 @@
   background: transparent;
   border: none;
   border-radius: 0;
-  margin: 0 12px;
+  margin: 0 18px;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 14px;
   -webkit-app-region: no-drag;
   height: 100%;
   min-height: 0;
@@ -42,7 +42,7 @@
 .plan-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 12px;
   overflow-y: auto;
   min-height: 0;
   padding-right: 2px;
@@ -60,6 +60,9 @@
 }
 
 .plan-step-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
   font-family: var(--code-font-family);
   font-size: 11px;
   color: var(--text-faint);
@@ -67,11 +70,11 @@
 }
 
 .plan-step.inProgress .plan-step-status {
-  color: #86b7ff;
+  color: var(--status-warning);
 }
 
 .plan-step.completed .plan-step-status {
-  color: #47d488;
+  color: var(--status-success);
 }
 
 .plan-step-text {

@@ -104,8 +104,8 @@ Completed tasks remain immutable and queryable for a documented retention period
 
 Current code has an important distinction:
 
-- `AgentSession::submit` interprets registered slash commands and active submissions can steer an existing run.
-- `AgentSession::prompt_messages` is a managed literal message path, but deliberately bypasses both command dispatch and input hooks.
+- `AgentSession::prompt` interprets registered slash commands and active submissions can steer an existing run.
+- `AgentSession::run_messages` is a managed literal message path, but deliberately bypasses both command dispatch and input hooks.
 - Runtime hook-only preparation is not itself a managed run Interface and must not be invoked directly by the Adapter.
 
 For a text-only inbound first delivery, use the structured managed path with explicitly documented input-hook bypass and a dedicated restricted generation. If input hooks are required, add one protocol-neutral literal-submission policy in `pi-session`, preserving the same policy for queues; do not add an A2A-specific runtime entry or stitch preprocessing/execution across generations.
@@ -148,7 +148,7 @@ Deterministic fixtures must cover message-only responses; terminal and input/aut
 - `plugins/features/pi-plugin-subagents/src/runtime.rs`: owned parent-child collaboration; not a remote transport.
 - `crates/pi-acp/src/lib.rs`: sibling external Adapter accepting MultiSessionManager.
 - `plugins/features/pi-plugin-mcp/src/lib.rs` and `src/plugin.rs`: feature-owned external integration and management tools.
-- `crates/pi-session/src/agent_session.rs`: submit, prompt_messages, queues and complete-run settlement.
+- `crates/pi-session/src/agent_session.rs`: prompt, run_messages, queues and complete-run settlement.
 - `crates/pi-session/src/event.rs`: race-free snapshot/subscription, AgentEnd retry flag and AgentSettled.
 - `crates/pi-runtime/src/lib.rs`: structured submission's intentional command/input-hook bypass.
 - `crates/pi-agent/src/tool_scheduler.rs` and `src/agent_loop.rs`: tool termination and continuation behavior.

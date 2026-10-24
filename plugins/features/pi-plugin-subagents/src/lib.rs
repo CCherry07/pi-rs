@@ -2,8 +2,8 @@
 
 mod catalog;
 mod collaboration;
+mod commands;
 mod config;
-mod desktop;
 mod fork_context;
 mod launch_context;
 mod launch_plan;
@@ -95,7 +95,7 @@ impl Plugin for SubagentsPlugin {
                 kind,
             )))?;
         }
-        desktop::register_commands(context, &self.runtime)?;
+        commands::register_commands(context, &self.runtime)?;
         Ok(())
     }
 
@@ -180,7 +180,6 @@ impl Plugin for SubagentsPlugin {
         context: &SessionPluginContext,
         _event: &SessionShutdownEvent,
     ) -> Result<(), PluginError> {
-        self.runtime.suspend_desktop(&context.identity().id);
         self.runtime.close_owner(&context.identity().id);
         self.runtime.drain_monitors(&context.identity().id).await;
         self.runtime.forget_session(&context.identity().id);

@@ -23,7 +23,8 @@ language-model reasoning. Replace the provider factory and order-service impleme
 connect a real application. The service owns its access checks and business rules.
 
 Session storage uses a temporary directory removed when the example exits. An application
-supplies a durable JSONL path and can reopen it through `host.sessions().open_session(path)`.
+supplies a durable JSONL path and can reopen it through
+`host.sessions().open_session(path, Default::default())`.
 No Coding tools, project resources, settings, or credentials are discovered by the SDK.
 
 SDK integration tests cover actual tool-result continuation, saved-session resume, independent

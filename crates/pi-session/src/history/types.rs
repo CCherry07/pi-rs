@@ -1,0 +1,838 @@
+//! Durable Pi v4 session values, errors, and wire-compatible extension types.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use pi_core::{Usage, UsageCost};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+pub use pi_core::session::*;
+
+pub const SESSION_SCHEMA_VERSION: u32 = 4;
+pub const MAIN_LANE: &str = "main";
+
+#[derive(Debug, thiserror::Error)]
+pub enum HistoryError {
+    #[error("session I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("invalid session JSON at line {line}: {message}")]
+    InvalidJson { line: usize, message: String },
+    #[error("session header is missing or is not the first line")]
+    MissingHeader,
+    #[error("unsupported session schema version: {0}")]
+    UnsupportedSchema(u32),
+    #[error("session id already exists: {0}")]
+    AlreadyExists(String),
+    #[error("session entry was not found: {0}")]
+    NotFound(String),
+    #[error("invalid session entry: {0}")]
+    InvalidEntry(String),
+    #[error("invalid durable payload: {0}")]
+    InvalidPayload(String),
+    #[error("invalid lane: {0}")]
+    InvalidLane(String),
+    #[error("invalid session query: {0}")]
+    InvalidQuery(String),
+    #[error("invalid fork target: {0}")]
+    InvalidForkTarget(String),
+    #[error("session storage failed: {0}")]
+    Storage(String),
+}
+
+impl From<SessionWireError> for HistoryError {
+    fn from(error: SessionWireError) -> Self {
+        match error {
+            SessionWireError::InvalidPayload(message) => Self::InvalidPayload(message),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HeaderKind {
+    Header,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionHeader {
+    pub kind: HeaderKind,
+    pub version: u32,
+    pub id: String,
+    pub created_at: i64,
+    pub cwd: PathBuf,
+    #[serde(
+        default,
+        deserialize_with = "strict_optional::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parent_session_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "strict_optional::deserialize",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub metadata: Option<Map<String, Value>>,
+}
+
+impl SessionHeader {
+    /// Reads a full saved workspace, falling back only when metadata is absent.
+    pub fn workspace(&self) -> Result<pi_core::WorkspaceSpec, crate::history::HistoryError> {
+        let Some(value) = self
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("pi-rs.workspace"))
+        else {
+            return Ok(pi_core::WorkspaceSpec::from_cwd(&self.cwd));
+        };
+        if value.get("schemaVersion").and_then(Value::as_u64) != Some(1) {
+            return Err(crate::history::HistoryError::InvalidPayload(
+                "unsupported workspace schemaVersion".into(),
+            ));
+        }
+        let spec: pi_core::WorkspaceSpec =
+            serde_json::from_value(value.clone()).map_err(|error| {
+                crate::history::HistoryError::InvalidPayload(format!(
+                    "invalid workspace metadata: {error}"
+                ))
+            })?;
+        if spec.cwd() != self.cwd {
+            return Err(crate::history::HistoryError::InvalidPayload(
+                "workspace executionDir disagrees with session cwd".into(),
+            ));
+        }
+        Ok(spec)
+    }
+
+    pub fn set_workspace(
+        &mut self,
+        workspace: &pi_core::WorkspaceSpec,
+    ) -> Result<(), crate::history::HistoryError> {
+        if workspace.cwd() != self.cwd {
+            return Err(crate::history::HistoryError::InvalidPayload(
+                "workspace executionDir disagrees with session cwd".into(),
+            ));
+        }
+        let mut value = serde_json::to_value(workspace)
+            .map_err(|error| crate::history::HistoryError::InvalidPayload(error.to_string()))?;
+        value["schemaVersion"] = Value::from(1);
+        self.metadata
+            .get_or_insert_with(Map::new)
+            .insert("pi-rs.workspace".into(), value);
+        Ok(())
+    }
+
+    pub fn new(id: impl Into<String>, cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            kind: HeaderKind::Header,
+            version: SESSION_SCHEMA_VERSION,
+            id: id.into(),
+            created_at: crate::history::now_ms(),
+            cwd: cwd.into(),
+            parent_session_id: None,
+            metadata: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationKind {
+    Run,
+    Compaction,
+    Navigation,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum OperationIntent {
+    Run {
+        original_prompt: Vec<AgentMessage>,
+        initial_messages: Vec<ProvisionedEntry>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        system_prompt_override: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resume_data: Option<HashMap<String, Value>>,
+    },
+    Compaction {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        custom_instructions: Option<String>,
+        result_entry_id: String,
+    },
+    Navigation {
+        target_id: Option<String>,
+        summarize: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        custom_instructions: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary_entry_id: Option<String>,
+    },
+}
+
+impl OperationIntent {
+    pub fn kind(&self) -> OperationKind {
+        match self {
+            Self::Run { .. } => OperationKind::Run,
+            Self::Compaction { .. } => OperationKind::Compaction,
+            Self::Navigation { .. } => OperationKind::Navigation,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationOutcome {
+    Completed,
+    Aborted,
+    Failed,
+    Declined,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepKind {
+    Assistant,
+    Compaction,
+    BranchSummary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum QueueKind {
+    Steer,
+    FollowUp,
+    NextRun,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolReplay {
+    Never,
+    Safe,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionStopReason {
+    Stop,
+    Length,
+    ToolUse,
+    Error,
+    Aborted,
+    Deferred,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUsage {
+    pub input: i64,
+    pub output: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<i64>,
+    pub total_tokens: i64,
+    #[serde(default)]
+    pub cost: UsageCost,
+}
+
+impl From<&Usage> for SessionUsage {
+    fn from(usage: &Usage) -> Self {
+        Self {
+            input: saturating_i64(usage.input),
+            output: saturating_i64(usage.output),
+            cache_read: saturating_i64(usage.cache_read),
+            cache_write: saturating_i64(usage.cache_write),
+            cache_write_1h: usage.cache_write_1h.map(saturating_i64),
+            reasoning: usage.reasoning.map(saturating_i64),
+            total_tokens: saturating_i64(usage.total_tokens),
+            cost: usage.cost.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "cause",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum UsageAttribution {
+    Assistant {
+        run_id: String,
+        entry_id: String,
+        attempt: u32,
+        stop_reason: SessionStopReason,
+    },
+    Compaction {
+        run_id: String,
+        entry_id: String,
+        attempt: u32,
+        stop_reason: SessionStopReason,
+    },
+    BranchSummary {
+        run_id: String,
+        entry_id: String,
+        attempt: u32,
+        stop_reason: SessionStopReason,
+    },
+    DeferredFetch {
+        run_id: String,
+        entry_id: String,
+        attempt: u32,
+        stop_reason: SessionStopReason,
+    },
+    Tool {
+        run_id: String,
+        entry_id: String,
+        tool_call_id: String,
+    },
+    Hook {
+        run_id: String,
+        entry_id: String,
+    },
+    Adjustment {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        entry_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        details: Option<Value>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageRecord {
+    pub usage: SessionUsage,
+    #[serde(flatten)]
+    pub attribution: UsageAttribution,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum LaneRecordEntry {
+    OperationStarted {
+        source_leaf_id: Option<String>,
+        intent: OperationIntent,
+    },
+    AbortRequested {
+        run_id: String,
+    },
+    OperationFinished {
+        run_id: String,
+        outcome: OperationOutcome,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<OperationError>,
+    },
+    StepAttempt {
+        run_id: String,
+        step: StepKind,
+        attempt: u32,
+        result_entry_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        compaction_reason: Option<CompactionReason>,
+    },
+    ToolStarted {
+        run_id: String,
+        assistant_entry_id: String,
+        tool_index: usize,
+        tool_call_id: String,
+        tool_name: String,
+        effective_args: Map<String, Value>,
+        result_entry_id: String,
+        replay: ToolReplay,
+    },
+    QueueEnqueued {
+        queue: QueueKind,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        target: ProvisionedEntry,
+    },
+    QueueCancelled {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        entry_id: String,
+    },
+    WriteDeferred {
+        run_id: String,
+        target: ProvisionedEntry,
+    },
+    Usage(UsageRecord),
+}
+
+impl LaneRecordEntry {
+    pub fn record_type(&self) -> LaneRecordType {
+        match self {
+            Self::OperationStarted { .. } => LaneRecordType::OperationStarted,
+            Self::AbortRequested { .. } => LaneRecordType::AbortRequested,
+            Self::OperationFinished { .. } => LaneRecordType::OperationFinished,
+            Self::StepAttempt { .. } => LaneRecordType::StepAttempt,
+            Self::ToolStarted { .. } => LaneRecordType::ToolStarted,
+            Self::QueueEnqueued { .. } => LaneRecordType::QueueEnqueued,
+            Self::QueueCancelled { .. } => LaneRecordType::QueueCancelled,
+            Self::WriteDeferred { .. } => LaneRecordType::WriteDeferred,
+            Self::Usage(_) => LaneRecordType::Usage,
+        }
+    }
+
+    pub fn run_id(&self) -> Option<&str> {
+        match self {
+            Self::OperationStarted { .. } => None,
+            Self::AbortRequested { run_id }
+            | Self::OperationFinished { run_id, .. }
+            | Self::StepAttempt { run_id, .. }
+            | Self::ToolStarted { run_id, .. }
+            | Self::WriteDeferred { run_id, .. } => Some(run_id),
+            Self::QueueEnqueued { run_id, .. } | Self::QueueCancelled { run_id, .. } => {
+                run_id.as_deref()
+            }
+            Self::Usage(record) => match &record.attribution {
+                UsageAttribution::Assistant { run_id, .. }
+                | UsageAttribution::Compaction { run_id, .. }
+                | UsageAttribution::BranchSummary { run_id, .. }
+                | UsageAttribution::DeferredFetch { run_id, .. }
+                | UsageAttribution::Tool { run_id, .. }
+                | UsageAttribution::Hook { run_id, .. } => Some(run_id),
+                UsageAttribution::Adjustment { run_id, .. } => run_id.as_deref(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneRecordType {
+    OperationStarted,
+    AbortRequested,
+    OperationFinished,
+    StepAttempt,
+    ToolStarted,
+    QueueEnqueued,
+    QueueCancelled,
+    WriteDeferred,
+    Usage,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewLaneRecord {
+    pub id: String,
+    pub lane: String,
+    #[serde(flatten)]
+    pub record: LaneRecordEntry,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaneRecord {
+    pub id: String,
+    pub seq: u64,
+    pub lane: String,
+    #[serde(rename = "timestamp", with = "iso_timestamp_ms")]
+    pub timestamp_ms: i64,
+    #[serde(flatten)]
+    pub record: LaneRecordEntry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanePointer {
+    pub lane: String,
+    pub leaf_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "fact",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum SessionFact {
+    Name {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    Label {
+        target_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum SessionMutation {
+    Entry {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        lane: Option<String>,
+        #[serde(flatten)]
+        record: SessionRecord,
+    },
+    Record {
+        #[serde(flatten)]
+        record: LaneRecord,
+    },
+    Lane {
+        seq: u64,
+        lane: String,
+        #[serde(deserialize_with = "required_nullable::deserialize")]
+        leaf_id: Option<String>,
+    },
+    Fact {
+        seq: u64,
+        #[serde(flatten)]
+        fact: SessionFact,
+    },
+}
+
+impl SessionMutation {
+    pub fn seq(&self) -> u64 {
+        match self {
+            Self::Entry { record, .. } => record.seq,
+            Self::Record { record } => record.seq,
+            Self::Lane { seq, .. } | Self::Fact { seq, .. } => *seq,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum LogItem {
+    Entry {
+        seq: u64,
+        entry: SessionRecord,
+    },
+    Record {
+        seq: u64,
+        record: LaneRecord,
+    },
+    Lane {
+        seq: u64,
+        lane: String,
+        leaf_id: Option<String>,
+    },
+    Fact {
+        seq: u64,
+        #[serde(flatten)]
+        fact: SessionFact,
+    },
+}
+
+impl LogItem {
+    pub fn seq(&self) -> u64 {
+        match self {
+            Self::Entry { seq, .. }
+            | Self::Record { seq, .. }
+            | Self::Lane { seq, .. }
+            | Self::Fact { seq, .. } => *seq,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EntryOrder {
+    OldestFirst,
+    #[default]
+    NewestFirst,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EntryQuery {
+    pub entry_type: Option<SessionEntryType>,
+    pub custom_type: Option<String>,
+    pub order: EntryOrder,
+    pub limit: Option<usize>,
+    pub after_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BranchQuery {
+    pub start: Option<String>,
+    pub stop_at_type: Option<SessionEntryType>,
+    pub stop_at_id: Option<String>,
+    pub entries: EntryQuery,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordQuery {
+    pub lane: Option<String>,
+    pub record_type: Option<LaneRecordType>,
+    pub run_id: Option<String>,
+    pub operation_kind: Option<OperationKind>,
+    pub after_seq: Option<u64>,
+    pub order: EntryOrder,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionStats {
+    pub message_count: u64,
+    pub cached_tokens: i64,
+    pub uncached_tokens: i64,
+    pub total_tokens: i64,
+    pub cost_total: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionDocument {
+    pub header: SessionHeader,
+    pub entries: Vec<SessionRecord>,
+    pub records: Vec<LaneRecord>,
+    pub lanes: Vec<LanePointer>,
+    pub log: Vec<LogItem>,
+    pub name: Option<String>,
+    pub labels: HashMap<String, String>,
+    pub stats: SessionStats,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonlSessionMetadata {
+    pub id: String,
+    pub created_at: i64,
+    pub cwd: PathBuf,
+    pub path: PathBuf,
+    pub modified_at: f64,
+    pub source_format: u32,
+    pub parent_session_id: Option<String>,
+    pub metadata: Option<Map<String, Value>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForkOptions {
+    Branch {
+        entry_id: Option<String>,
+        position: Option<ForkPosition>,
+    },
+    Tree,
+}
+
+impl Default for ForkOptions {
+    fn default() -> Self {
+        Self::Branch {
+            entry_id: None,
+            position: None,
+        }
+    }
+}
+
+fn saturating_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use pi_core::{Message, UserMessage};
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn serde_shapes_match_the_typescript_v4_codec() {
+        let header = SessionHeader {
+            kind: HeaderKind::Header,
+            version: 4,
+            id: "session".to_string(),
+            created_at: 1_700_000_000_000,
+            cwd: "/workspace/project".into(),
+            parent_session_id: Some("parent".to_string()),
+            metadata: Some(serde_json::from_value(json!({"owner": "agent"})).unwrap()),
+        };
+        assert_eq!(
+            serde_json::to_value(header).unwrap(),
+            json!({
+                "kind": "header",
+                "version": 4,
+                "id": "session",
+                "createdAt": 1_700_000_000_000_i64,
+                "cwd": "/workspace/project",
+                "parentSessionId": "parent",
+                "metadata": {"owner": "agent"}
+            })
+        );
+
+        let entry = SessionMutation::Entry {
+            lane: Some("main".to_string()),
+            record: SessionRecord {
+                id: "entry-1".to_string(),
+                seq: 1,
+                parent_id: None,
+                timestamp_ms: 1_700_000_000_123,
+                entry: SessionEntry::Custom(CustomEntry {
+                    custom_type: "note".to_string(),
+                    data: Some(json!({"text": "hello"})),
+                }),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(entry).unwrap(),
+            json!({
+                "kind": "entry",
+                "lane": "main",
+                "type": "custom",
+                "id": "entry-1",
+                "seq": 1,
+                "parentId": null,
+                "timestamp": "2023-11-14T22:13:20.123Z",
+                "customType": "note",
+                "data": {"text": "hello"}
+            })
+        );
+
+        let started = SessionMutation::Record {
+            record: LaneRecord {
+                id: "run-1".to_string(),
+                seq: 2,
+                lane: "main".to_string(),
+                timestamp_ms: 1_700_000_000_124,
+                record: LaneRecordEntry::OperationStarted {
+                    source_leaf_id: None,
+                    intent: OperationIntent::Run {
+                        original_prompt: Vec::new(),
+                        initial_messages: Vec::new(),
+                        system_prompt_override: None,
+                        resume_data: None,
+                    },
+                },
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(started).unwrap(),
+            json!({
+                "kind": "record",
+                "type": "operation_started",
+                "id": "run-1",
+                "seq": 2,
+                "lane": "main",
+                "timestamp": "2023-11-14T22:13:20.124Z",
+                "sourceLeafId": null,
+                "intent": {"kind": "run", "originalPrompt": [], "initialMessages": []}
+            })
+        );
+
+        let legacy_numeric: SessionMutation = serde_json::from_value(json!({
+            "kind": "entry",
+            "lane": "main",
+            "type": "custom",
+            "id": "legacy-entry",
+            "seq": 4,
+            "parentId": null,
+            "timestamp": 1_700_000_000_125_i64,
+            "customType": "legacy"
+        }))
+        .unwrap();
+        let SessionMutation::Entry { record, .. } = legacy_numeric else {
+            panic!("expected entry mutation");
+        };
+        assert_eq!(record.timestamp_ms, 1_700_000_000_125);
+
+        assert_eq!(
+            serde_json::to_value(SessionMutation::Fact {
+                seq: 3,
+                fact: SessionFact::Name { name: None },
+            })
+            .unwrap(),
+            json!({"kind": "fact", "seq": 3, "fact": "name"})
+        );
+    }
+
+    #[test]
+    fn decodes_typescript_user_string_content_and_v4_message_entry() {
+        let mutation: SessionMutation = serde_json::from_value(json!({
+            "kind": "entry",
+            "lane": "main",
+            "type": "message",
+            "id": "message",
+            "seq": 1,
+            "parentId": null,
+            "timestamp": 10,
+            "message": {"role": "user", "content": "hello", "timestamp": 9}
+        }))
+        .unwrap();
+        let SessionMutation::Entry { record, .. } = mutation else {
+            panic!("expected entry mutation")
+        };
+        let SessionEntry::Message(message) = record.entry else {
+            panic!("expected message entry")
+        };
+        assert!(matches!(
+            message.message.as_standard(),
+            Some(Message::User(UserMessage { content, timestamp_ms: 9 })) if content.len() == 1
+        ));
+
+        let extension = json!({
+            "role": "custom",
+            "customType": "notice",
+            "content": "plugin context",
+            "display": true,
+            "details": {"source": "plugin"},
+            "timestamp": 11
+        });
+        let decoded: AgentMessage = serde_json::from_value(extension.clone()).unwrap();
+        assert_eq!(decoded.role(), "custom");
+        assert_eq!(serde_json::to_value(decoded).unwrap(), extension);
+
+        let future_standard = json!({
+            "role": "user",
+            "content": "keep the compact string form",
+            "timestamp": 12,
+            "futureField": {"preserved": true}
+        });
+        let decoded: AgentMessage = serde_json::from_value(future_standard.clone()).unwrap();
+        assert!(matches!(decoded.as_standard(), Some(Message::User(_))));
+        assert_eq!(serde_json::to_value(decoded).unwrap(), future_standard);
+    }
+
+    #[test]
+    fn timestamp_decoder_keeps_canonical_numeric_and_offset_compatibility() {
+        for (timestamp, expected) in [
+            (json!(123), 123),
+            (json!("1970-01-01T00:00:00Z"), 0),
+            (json!("1970-01-01T00:00:00.123Z"), 123),
+            (json!("1970-01-01T01:00:00+01:00"), 0),
+        ] {
+            let mutation: SessionMutation = serde_json::from_value(json!({
+                "kind": "entry",
+                "type": "custom",
+                "id": "timestamp-entry",
+                "seq": 1,
+                "parentId": null,
+                "timestamp": timestamp,
+                "customType": "timestamp-test"
+            }))
+            .unwrap();
+            let SessionMutation::Entry { record, .. } = mutation else {
+                panic!("expected entry mutation");
+            };
+            assert_eq!(record.timestamp_ms, expected);
+        }
+    }
+}

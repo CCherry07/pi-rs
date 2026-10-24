@@ -66,7 +66,9 @@ pub struct AgentStateSnapshot {
     pub model_id: ModelId,
     pub thinking_level: ThinkingLevel,
     pub active_tools: Vec<String>,
-    pub messages: Vec<Message>,
+    /// Immutable history shared by snapshots. Stream updates only replace the
+    /// live stream handle; committed message changes use copy-on-write.
+    pub messages: Arc<Vec<Message>>,
     pub is_running: bool,
     pub streaming_message: Option<AssistantStream>,
     pub pending_tool_calls: HashSet<ToolCallId>,
@@ -143,6 +145,52 @@ pub struct AgentConfigurationPatch {
     pub provider_id: Option<ProviderId>,
     pub model_id: Option<ModelId>,
     pub thinking_level: Option<ThinkingLevel>,
+}
+
+/// A fully validated configuration change that reserves the idle Agent until
+/// it is committed or dropped. Preparing and dropping never change live state.
+#[must_use = "commit the prepared configuration or drop it to leave the Agent unchanged"]
+pub struct PreparedAgentConfiguration<'a> {
+    inner: &'a AgentInner,
+    _run_guard: tokio::sync::MutexGuard<'a, ()>,
+    candidate: AgentStateSnapshot,
+    runtime: Option<Arc<AgentRuntime>>,
+    convert_to_llm: Option<ConvertToLlm>,
+}
+
+impl PreparedAgentConfiguration<'_> {
+    pub fn configuration(&self) -> &AgentStateSnapshot {
+        &self.candidate
+    }
+
+    /// Publishes only prepared values; no validation or fallible work remains.
+    pub fn commit(self) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(runtime) = self.runtime {
+            *self
+                .inner
+                .runtime
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = runtime;
+            *self
+                .inner
+                .effective_prompt
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+        if let Some(converter) = self.convert_to_llm {
+            *self
+                .inner
+                .convert_to_llm
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = converter;
+        }
+        state.snapshot = self.candidate;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -344,7 +392,7 @@ impl Agent {
             model_id: options.model_id.clone(),
             thinking_level: options.thinking_level,
             active_tools: options.active_tools.clone(),
-            messages: options.messages.clone(),
+            messages: Arc::new(options.messages.clone()),
             is_running: false,
             streaming_message: None,
             pending_tool_calls: HashSet::new(),
@@ -378,6 +426,11 @@ impl Agent {
     where
         F: FnOnce(Arc<dyn AgentTurnControl>) -> Arc<dyn AgentTurnControl>,
     {
+        let _run_guard = self
+            .inner
+            .run_gate
+            .try_lock()
+            .map_err(|_| AgentError::ConfigureWhileRunning)?;
         let state = self
             .inner
             .state
@@ -507,15 +560,12 @@ impl Agent {
     }
 
     pub fn state(&self) -> AgentStateSnapshot {
-        let mut snapshot = self
-            .inner
+        self.inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .snapshot
-            .clone();
-        snapshot.system_prompt = self.runtime().system_prompt().to_string();
-        snapshot
+            .clone()
     }
 
     /// Last effective run prompt, including plugin contributions, without re-running hooks.
@@ -618,8 +668,21 @@ impl Agent {
     }
 
     pub fn configure(&self, patch: AgentConfigurationPatch) -> Result<(), AgentError> {
+        self.prepare_configuration(patch)?.commit();
+        Ok(())
+    }
+
+    pub fn prepare_configuration(
+        &self,
+        patch: AgentConfigurationPatch,
+    ) -> Result<PreparedAgentConfiguration<'_>, AgentError> {
+        let run_guard = self
+            .inner
+            .run_gate
+            .try_lock()
+            .map_err(|_| AgentError::ConfigureWhileRunning)?;
         let runtime = self.runtime();
-        let mut state = self
+        let state = self
             .inner
             .state
             .lock()
@@ -630,50 +693,47 @@ impl Agent {
         if let Some(tools) = &patch.active_tools {
             validate_active_tools(tools, &runtime)?;
         }
-        if let Some(system_prompt) = patch.system_prompt {
-            *self
-                .inner
-                .effective_prompt
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-            state.snapshot.system_prompt = system_prompt.clone();
-            *self
-                .inner
-                .runtime
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                Arc::new(runtime.with_system_prompt(system_prompt));
+        if let Some(provider_id) = &patch.provider_id
+            && runtime.registries().provider(provider_id).is_none()
+        {
+            return Err(AgentError::InvalidConfiguration(format!(
+                "unknown provider: {provider_id}"
+            )));
         }
+        let mut candidate = state.snapshot.clone();
+        let next_runtime = patch.system_prompt.map(|system_prompt| {
+            candidate.system_prompt = system_prompt.clone();
+            Arc::new(runtime.with_system_prompt(system_prompt))
+        });
         if let Some(active_tools) = patch.active_tools {
-            state.snapshot.active_tools = active_tools;
+            candidate.active_tools = active_tools;
         }
         if let Some(provider_id) = patch.provider_id {
-            if runtime.registries().provider(&provider_id).is_none() {
-                return Err(AgentError::InvalidConfiguration(format!(
-                    "unknown provider: {provider_id}"
-                )));
-            }
-            state.snapshot.provider_id = provider_id;
+            candidate.provider_id = provider_id;
         }
         if let Some(model_id) = patch.model_id {
-            state.snapshot.model_id = model_id;
+            candidate.model_id = model_id;
         }
         if let Some(thinking_level) = patch.thinking_level {
-            state.snapshot.thinking_level = thinking_level;
+            candidate.thinking_level = thinking_level;
         }
-        if let Some(convert_to_llm) = patch.convert_to_llm {
-            *self
-                .inner
-                .convert_to_llm
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = convert_to_llm;
-        }
-        Ok(())
+        Ok(PreparedAgentConfiguration {
+            inner: &self.inner,
+            _run_guard: run_guard,
+            candidate,
+            runtime: next_runtime,
+            convert_to_llm: patch.convert_to_llm,
+        })
     }
 
     /// Replace projected conversation messages between provider runs, preserving queued input,
     /// the effective activity prompt and the current model/tool configuration.
     pub fn replace_context_messages(&self, messages: Vec<Message>) -> Result<(), AgentError> {
+        let _run_guard = self
+            .inner
+            .run_gate
+            .try_lock()
+            .map_err(|_| AgentError::ConfigureWhileRunning)?;
         let mut state = self
             .inner
             .state
@@ -682,7 +742,7 @@ impl Agent {
         if state.snapshot.is_running {
             return Err(AgentError::ConfigureWhileRunning);
         }
-        state.snapshot.messages = messages;
+        state.snapshot.messages = Arc::new(messages);
         Ok(())
     }
 
@@ -690,6 +750,11 @@ impl Agent {
     /// dependencies. Restore is only available while idle and validates the
     /// selected provider and tools against the active runtime generation.
     pub fn restore(&self, restored: AgentRestoreState) -> Result<(), AgentError> {
+        let _run_guard = self
+            .inner
+            .run_gate
+            .try_lock()
+            .map_err(|_| AgentError::ConfigureWhileRunning)?;
         let runtime = self.runtime();
         let mut state = self
             .inner
@@ -709,7 +774,7 @@ impl Agent {
             model_id: restored.model_id,
             thinking_level: restored.thinking_level,
             active_tools: restored.active_tools,
-            messages: restored.messages,
+            messages: Arc::new(restored.messages),
             is_running: false,
             streaming_message: None,
             pending_tool_calls: HashSet::new(),
@@ -757,6 +822,11 @@ impl Agent {
     }
 
     pub fn reset(&self) -> Result<(), AgentError> {
+        let _run_guard = self
+            .inner
+            .run_gate
+            .try_lock()
+            .map_err(|_| AgentError::ResetWhileRunning)?;
         if self.is_running() {
             return Err(AgentError::ResetWhileRunning);
         }
@@ -765,7 +835,7 @@ impl Agent {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.snapshot.messages.clear();
+        state.snapshot.messages = Arc::default();
         state.snapshot.streaming_message = None;
         state.snapshot.pending_tool_calls.clear();
         state.snapshot.error_message = None;
@@ -778,6 +848,11 @@ impl Agent {
     /// product-owned retry. Persistence remains the session layer's concern,
     /// and pending steering/follow-up queues are deliberately preserved.
     pub fn remove_last_failed_assistant(&self) -> Result<bool, AgentError> {
+        let _run_guard = self
+            .inner
+            .run_gate
+            .try_lock()
+            .map_err(|_| AgentError::ConfigureWhileRunning)?;
         if self.is_running() {
             return Err(AgentError::ConfigureWhileRunning);
         }
@@ -792,7 +867,7 @@ impl Agent {
                 if matches!(message.stop_reason, pi_core::StopReason::Error | pi_core::StopReason::Length)
         );
         if failed {
-            state.snapshot.messages.pop();
+            Arc::make_mut(&mut state.snapshot.messages).pop();
             state.snapshot.error_message = None;
         }
         Ok(failed)
@@ -899,7 +974,7 @@ impl Agent {
             system_prompt: hook
                 .system_prompt
                 .unwrap_or_else(|| runtime.system_prompt().to_string()),
-            messages: snapshot.messages,
+            messages: snapshot.messages.as_ref().clone(),
             active_tools: snapshot.active_tools,
         };
         let config = AgentLoopConfig {

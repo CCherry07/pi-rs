@@ -22,6 +22,10 @@ name = "session_commit"
 harness = false
 
 [[bench]]
+name = "session_stream"
+harness = false
+
+[[bench]]
 name = "generation_reload"
 harness = false
 

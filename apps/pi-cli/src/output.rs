@@ -3,8 +3,8 @@ use std::sync::Arc;
 use pi_core::{ContentBlock, Message};
 use pi_rpc::json_wire::{session_event_json, session_header_json};
 use pi_session::{
-    AgentSessionEvent, PiSession, RevisionedAgentSessionEvent, SessionInput, ShellExecutionOptions,
-    SubmitOutcome,
+    AgentSessionEvent, PiSession, PromptOutcome, RevisionedAgentSessionEvent, SessionInput,
+    ShellExecutionOptions,
 };
 use serde_json::Value;
 
@@ -36,7 +36,7 @@ pub(crate) async fn run_print(
         return Ok(());
     }
     let mut subscription = session.subscribe();
-    let submission = session.submit(input);
+    let submission = session.prompt(input);
     tokio::pin!(submission);
     let outcome = loop {
         tokio::select! {
@@ -59,7 +59,7 @@ pub(crate) async fn run_print(
         }
     };
     match outcome {
-        SubmitOutcome::Agent(outcome) => {
+        PromptOutcome::Agent(outcome) => {
             if let Some(text) = outcome.new_messages.iter().rev().find_map(assistant_text) {
                 print!("{text}");
                 if !text.ends_with('\n') {
@@ -67,8 +67,8 @@ pub(crate) async fn run_print(
                 }
             }
         }
-        SubmitOutcome::Handled => {}
-        SubmitOutcome::Queued { .. } => {
+        PromptOutcome::Handled => {}
+        PromptOutcome::Queued { .. } => {
             return Err("print mode cannot leave a queued prompt".to_string());
         }
         _ => return Err("unsupported submission outcome".to_string()),
@@ -91,7 +91,7 @@ fn print_extension_notice(
 pub(crate) async fn run_json(session_handle: PiSession, input: SessionInput) -> Result<(), String> {
     let session = session_handle.current();
     let mut subscription = session.subscribe();
-    emit(session_header_json(&session.log().header())?);
+    emit(session_header_json(&session.history().header())?);
     let worker = {
         let session = Arc::clone(&session);
         tokio::spawn(async move {
@@ -112,7 +112,7 @@ pub(crate) async fn run_json(session_handle: PiSession, input: SessionInput) -> 
                     .await
                     .map(|_| ())
             } else {
-                session.submit(input).await.map(|_| ())
+                session.prompt(input).await.map(|_| ())
             }
         })
     };

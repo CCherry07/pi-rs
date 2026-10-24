@@ -191,7 +191,10 @@ async fn one_preparation_and_instance_span_both_hook_families_and_transactional_
         },
     });
     let session = manager
-        .create_session(directory.path(), directory.path().join("session.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("session.jsonl"),
+        ))
         .await
         .unwrap();
     session.current().prompt("first").await.unwrap();
@@ -208,21 +211,15 @@ async fn one_preparation_and_instance_span_both_hook_families_and_transactional_
         .set_name(Some("shared driver".into()))
         .await
         .unwrap();
-    let driver = previous.runtime().plugin_driver();
-    // Product callers see Session failures through the same runtime diagnostic API.
-    assert_eq!(
-        previous.runtime().plugin_diagnostics(),
-        driver.diagnostics()
-    );
-    let diagnostics = driver.take_diagnostics();
+    // Session hook failures are visible through the read-only product catalog.
+    let diagnostics = previous.catalog().plugin_diagnostics();
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].plugin_id.as_str(), "unified-fixture");
     assert_eq!(
         diagnostics[0].generation,
-        Some(previous.runtime().generation())
+        Some(previous.catalog().generation())
     );
     assert_eq!(diagnostics[0].hook, SessionHook::InfoChanged.into());
-    assert!(driver.diagnostics().is_empty());
 
     project_trusted.store(true, Ordering::SeqCst);
     std::fs::write(&config, "invalid json").unwrap();
@@ -255,7 +252,7 @@ async fn one_preparation_and_instance_span_both_hook_families_and_transactional_
     std::fs::write(&config, r#"{"enabled":false}"#).unwrap();
     session.reload().await.unwrap();
     session.current().prompt("disabled").await.unwrap();
-    assert!(session.current().runtime().plugin_order().is_empty());
+    assert!(session.current().catalog().plugin_order().is_empty());
     assert_eq!(
         observations.events.lock().unwrap().last(),
         Some(&(3, "shutdown"))
@@ -278,11 +275,14 @@ async fn explicit_override_can_enable_a_plugin_disabled_in_its_own_config() {
         },
     });
     let session = manager
-        .create_session(directory.path(), directory.path().join("session.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("session.jsonl"),
+        ))
         .await
         .unwrap();
     assert_eq!(
-        session.current().runtime().plugin_order(),
+        session.current().catalog().plugin_order(),
         [PluginId::new("unified-fixture")]
     );
     manager.shutdown().await.unwrap();

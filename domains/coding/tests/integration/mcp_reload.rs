@@ -5,9 +5,50 @@ use std::sync::{Arc, RwLock};
 use axum::response::IntoResponse;
 use pi_coding::{Config, Pi};
 use pi_core::{AbortHandle, ContentBlock, CustomMessage, CustomMessageContent, TextContent};
-use pi_plugin::{ToolContext, ToolUpdateSink};
+use pi_plugin::{ContextParts, EphemeralSessionRequest, PluginContextScope};
 use pi_session::PiSession;
 use serde_json::{Value, json};
+
+// A deterministic local provider drives the public Session tool-execution capability.
+async fn fixture_provider_response(axum::Json(request): axum::Json<Value>) -> impl IntoResponse {
+    let completed = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["role"] == "tool");
+    let (delta, reason) = if completed {
+        (json!({"role": "assistant", "content": "done"}), "stop")
+    } else {
+        let name = request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|tool| {
+                let name = tool["function"]["name"].as_str()?;
+                name.starts_with("mcp__fixture__").then_some(name)
+            })
+            .expect("fixture MCP tool in provider request");
+        (
+            json!({"role": "assistant", "tool_calls": [{
+                "index": 0, "id": "fixture-call", "type": "function",
+                "function": {"name": name, "arguments": "{}"}
+            }]}),
+            "tool_calls",
+        )
+    };
+    let chunk = json!({
+        "id": "fixture", "object": "chat.completion.chunk", "model": "test",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": null}]
+    });
+    let end = json!({
+        "id": "fixture", "object": "chat.completion.chunk", "model": "test",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": reason}]
+    });
+    (
+        [("content-type", "text/event-stream")],
+        format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"),
+    )
+}
 
 struct McpFixture {
     directory: tempfile::TempDir,
@@ -60,6 +101,10 @@ impl McpFixture {
                 }
             }),
         );
+        let router = router.route(
+            "/v1/chat/completions",
+            axum::routing::post(fixture_provider_response),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
         let server_task = tokio::spawn(async move {
@@ -76,13 +121,29 @@ impl McpFixture {
         )
         .unwrap();
         Self::write_servers(&agent.join("mcp.json"), &url, enabled);
+        fs::write(
+            agent.join("models.json"),
+            json!({"providers": {"fixture": {
+                "baseUrl": url.replace("/mcp", "/v1"),
+                "api": "openai-completions",
+                "apiKey": "fixture",
+                "models": [{"id": "test", "contextWindow": 100000, "maxTokens": 1024}]
+            }}})
+            .to_string(),
+        )
+        .unwrap();
         let mut config = Config::new(project.clone(), agent.clone());
+        config.provider = "fixture".into();
+        config.model = Some("test".into());
         config.discover_extensions = false;
         config.trust_override = Some(false);
         let pi = Pi::builder(config).build().unwrap();
         let session = pi
             .sessions()
-            .create_session(&project, agent.join("session.jsonl"))
+            .create_session(pi_session::CreateSessionOptions::new(
+                &project,
+                agent.join("session.jsonl"),
+            ))
             .await
             .unwrap();
         Self {
@@ -118,7 +179,7 @@ impl McpFixture {
         let session = self.session.current();
         assert_eq!(
             session
-                .runtime()
+                .catalog()
                 .tool_specs()
                 .iter()
                 .any(|tool| tool.name == name),
@@ -127,8 +188,9 @@ impl McpFixture {
         );
         assert_eq!(
             session
-                .runtime()
-                .active_tools()
+                .snapshot()
+                .agent
+                .active_tools
                 .iter()
                 .any(|tool| tool == name),
             expected,
@@ -138,24 +200,45 @@ impl McpFixture {
 
     async fn invoke(&self, name: &str, expected: &str) {
         let session = self.session.current();
-        let tool = session
-            .runtime()
-            .agent()
-            .runtime()
-            .registries()
-            .tool(name)
-            .unwrap();
-        let (_, signal) = AbortHandle::new();
-        let (updates, _) = ToolUpdateSink::channel();
-        let result = tool
-            .execute(
-                ToolContext::standalone(self.directory.path().to_path_buf(), signal),
-                "call".into(),
-                json!({}),
-                updates,
+        let context = ContextParts::new(session.plugin_context(PluginContextScope::Base));
+        let outcome = context
+            .session
+            .run_ephemeral(
+                EphemeralSessionRequest {
+                    system_prompt: Some("Call the fixture tool once.".into()),
+                    origin: "mcp-reload-test".into(),
+                    inherit_history: false,
+                    history_tail: None,
+                    messages: vec![pi_core::Message::User(pi_core::UserMessage::text(
+                        "call", 1,
+                    ))],
+                    tools: vec![name.into()],
+                    plugins: Vec::new(),
+                    model: None,
+                    thinking_level: None,
+                    max_tool_iterations: 2,
+                    max_input_tokens: None,
+                    compaction: None,
+                    // The first request initializes the native certificate store as well as HTTP.
+                    timeout: std::time::Duration::from_secs(30),
+                },
+                AbortHandle::new().1,
             )
             .await
             .unwrap();
+        assert_eq!(
+            outcome.status,
+            pi_plugin::EphemeralSessionStatus::Completed,
+            "{outcome:?}"
+        );
+        let result = outcome
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                pi_core::Message::ToolResult(result) => Some(result),
+                _ => None,
+            })
+            .expect("fixture tool result");
         assert_eq!(
             result.content,
             vec![ContentBlock::Text(TextContent::new(expected))]
@@ -181,7 +264,7 @@ async fn mcp_reload_activates_a_newly_enabled_server() {
     fixture
         .session
         .current()
-        .submit("/mcp reload")
+        .prompt("/mcp reload")
         .await
         .unwrap();
     fixture.assert_tool("mcp__fixture__echo", true);
@@ -272,10 +355,20 @@ async fn mcp_reload_connection_failure_keeps_the_previous_connection_usable() {
 async fn mcp_removal_allows_resuming_a_session_that_used_the_old_tool() {
     let mut fixture = McpFixture::new(true).await;
     fixture.assert_tool("mcp__fixture__echo", true);
-    let path = fixture.session.current().log().path().to_path_buf();
-    // Persist the existing configuration to exercise the same restore path as
-    // a prior response without making any provider requests in this test.
-    fixture.session.current().log().materialize().unwrap();
+    let path = fixture.session.current().history().path().to_path_buf();
+    // Persist a real local-provider turn using the MCP tool before removing it.
+    let pi_session::PromptOutcome::Agent(outcome) = fixture
+        .session
+        .current()
+        .prompt("initialize persisted session")
+        .await
+        .unwrap()
+    else {
+        panic!("expected an agent run");
+    };
+    assert!(outcome.new_messages.iter().any(|message| matches!(message,
+        pi_core::Message::ToolResult(result) if result.tool_name == "mcp__fixture__echo" && !result.is_error
+    )));
     fixture
         .pi
         .sessions()
@@ -283,7 +376,12 @@ async fn mcp_removal_allows_resuming_a_session_that_used_the_old_tool() {
         .await
         .unwrap();
     fixture.set_enabled(false);
-    fixture.session = fixture.pi.sessions().open_session(path).await.unwrap();
+    fixture.session = fixture
+        .pi
+        .sessions()
+        .open_session(path, Default::default())
+        .await
+        .unwrap();
     fixture.assert_tool("mcp__fixture__echo", false);
     fixture.shutdown().await;
 }

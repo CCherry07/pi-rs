@@ -74,7 +74,6 @@ pub use tool::{Tool, ToolContext, ToolError, ToolUpdateSink};
 
 pub use prepare::{PrepareContext, PrepareError, PrepareResult};
 
-pub mod desktop;
 pub mod ui;
 pub use ui::{UiComponent, UiComponentUpdate, UiComponentWaker};
 /// Native export contracts; enable only when building or loading a native plugin.

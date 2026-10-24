@@ -2,7 +2,7 @@ use std::hint::black_box;
 
 use pi_bench::{BenchConfig, BenchResult, BenchmarkReport, fixture_hash, measure, parameter_map};
 use pi_core::{Message, UserMessage};
-use pi_session::{SessionEntry, SessionHeader, SessionLog};
+use pi_session::{SessionEntry, SessionHeader, SessionStore};
 use tempfile::TempDir;
 
 fn main() -> BenchResult<()> {
@@ -77,7 +77,7 @@ fn main() -> BenchResult<()> {
 
 struct DeferredCommitFixture {
     _directory: TempDir,
-    log: SessionLog,
+    log: SessionStore,
     initial_entries: usize,
     appended_entries: usize,
     payload: String,
@@ -87,7 +87,7 @@ struct DeferredCommitFixture {
 impl DeferredCommitFixture {
     fn create(initial_entries: usize, payload_bytes: usize) -> BenchResult<Self> {
         let directory = tempfile::tempdir()?;
-        let log = SessionLog::create_deferred(
+        let log = SessionStore::create_deferred(
             directory.path().join("session.jsonl"),
             SessionHeader::new("bench-commit", directory.path()),
         )?;

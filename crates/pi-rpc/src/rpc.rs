@@ -10,8 +10,8 @@ use pi_agent::QueueMode;
 use pi_core::{ContentBlock, ImageContent, Message, ModelSpec, StopReason, ThinkingLevel};
 use pi_session::{
     AgentMessage, AgentSession, AgentSessionReplacement, ForkPosition, PiSession, SessionDocument,
-    SessionEntry, SessionInput, SessionRecord, ShellExecutionOptions, aggregate_document_usage,
-    current_session_context_tokens,
+    SessionEntry, SessionInput, SessionRecord, SessionResetReason, SessionUpdate,
+    ShellExecutionOptions, aggregate_document_usage, current_session_context_tokens,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -335,44 +335,42 @@ pub async fn run(session: PiSession, export_html: HtmlExporter) -> Result<(), St
 }
 
 async fn forward_events(session: PiSession, output: RpcOutput) {
-    let mut replacements = session.subscribe();
-    loop {
-        let current = Arc::clone(&replacements.borrow_and_update());
-        let mut subscription = current.subscribe();
-        loop {
-            tokio::select! {
-                changed = replacements.changed() => {
-                    if changed.is_err() {
-                        return;
-                    }
-                    break;
-                }
-                event = subscription.events.recv() => match event {
-                    Ok(event) if event.revision > subscription.snapshot.revision => {
-                        match session_event_json(event.event, &current) {
-                            Ok(Some(value)) => {
-                                if output.emit(value).await.is_err() {
-                                    return;
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(error) => {
-                                let _ = output.emit(json!({
-                                    "type":"extension_error",
-                                    "extensionPath":"pi-rs/json-wire",
-                                    "event":"projection",
-                                    "error":error,
-                                })).await;
-                            }
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        subscription.snapshot = current.snapshot();
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+    let mut observation = session.observe();
+    while let Some(update) = observation.recv().await {
+        let value = match update {
+            SessionUpdate::Event { event, .. } => {
+                match session_event_json(event, &observation.current()) {
+                    Ok(value) => value,
+                    Err(error) => Some(json!({
+                        "type":"extension_error",
+                        "extensionPath":"pi-rs/json-wire",
+                        "event":"projection",
+                        "error":error,
+                    })),
                 }
             }
+            SessionUpdate::Reset {
+                reason: SessionResetReason::Lagged { missed_events },
+                ..
+            } => {
+                // The Pi wire has no snapshot-reset event. Make the gap visible so
+                // clients can re-read get_state/get_messages instead of assuming replay.
+                Some(json!({
+                    "type":"extension_error",
+                    "extensionPath":"pi-rs/session",
+                    "event":"subscription",
+                    "error":format!("Session event stream missed {missed_events} events; refresh with get_state and get_messages."),
+                }))
+            }
+            SessionUpdate::Reset {
+                reason: SessionResetReason::Replacement,
+                ..
+            } => None,
+        };
+        if let Some(value) = value
+            && output.emit(value).await.is_err()
+        {
+            return;
         }
     }
 }
@@ -503,14 +501,14 @@ async fn handle_command(
         }
         RpcCommand::NewSession { parent_session, .. } => {
             let current = session.current();
-            let path = new_session_path(current.log().path());
+            let path = new_session_path(current.history().path());
             let replacement = match parent_session {
                 Some(parent) => {
                     session
-                        .new_session_with_parent(current.runtime().cwd(), &path, parent)
+                        .new_session_with_parent(current.catalog().cwd(), &path, parent)
                         .await
                 }
-                None => session.new_session(current.runtime().cwd(), &path).await,
+                None => session.new_session(current.catalog().cwd(), &path).await,
             }
             .map_err(|error| error.to_string())?;
             Ok(Some(
@@ -523,7 +521,7 @@ async fn handle_command(
         } => {
             let current = session.current();
             let model = current
-                .runtime()
+                .catalog()
                 .model(&provider.clone().into(), &model_id.clone().into())
                 .ok_or_else(|| format!("Model not found: {provider}/{model_id}"))?;
             current
@@ -533,7 +531,7 @@ async fn handle_command(
         }
         RpcCommand::CycleModel { .. } => {
             let current = session.current();
-            let models = current.runtime().available_models();
+            let models = current.catalog().available_models();
             if models.is_empty() {
                 return Ok(Some(Value::Null));
             }
@@ -555,7 +553,7 @@ async fn handle_command(
         RpcCommand::GetAvailableModels { .. } => {
             let models = session
                 .current()
-                .runtime()
+                .catalog()
                 .available_models()
                 .iter()
                 .map(model_json)
@@ -605,7 +603,10 @@ async fn handle_command(
                 .compact(custom_instructions)
                 .await
                 .map_err(|error| error.to_string())?;
-            let document = current.log().load().map_err(|error| error.to_string())?;
+            let document = current
+                .history()
+                .load()
+                .map_err(|error| error.to_string())?;
             let record = document
                 .entries
                 .iter()
@@ -673,7 +674,7 @@ async fn handle_command(
         RpcCommand::Fork { entry_id, .. } => {
             let selected_text = session
                 .current()
-                .log()
+                .history()
                 .get_entry(&entry_id)
                 .and_then(|record| user_entry_text(&record));
             let replacement = session
@@ -688,7 +689,7 @@ async fn handle_command(
         RpcCommand::CloneSession { .. } => {
             let leaf = session
                 .current()
-                .log()
+                .history()
                 .leaf_id()
                 .ok_or_else(|| "Cannot clone session: no current entry selected".to_string())?;
             let replacement = session
@@ -702,7 +703,7 @@ async fn handle_command(
         RpcCommand::GetForkMessages { .. } => {
             let document = session
                 .current()
-                .log()
+                .history()
                 .load()
                 .map_err(|error| error.to_string())?;
             let messages = document
@@ -717,7 +718,7 @@ async fn handle_command(
         RpcCommand::GetEntries { since, .. } => {
             let document = session
                 .current()
-                .log()
+                .history()
                 .load()
                 .map_err(|error| error.to_string())?;
             let start = match since {
@@ -741,7 +742,7 @@ async fn handle_command(
         RpcCommand::GetTree { .. } => {
             let document = session
                 .current()
-                .log()
+                .history()
                 .load()
                 .map_err(|error| error.to_string())?;
             Ok(Some(json!({
@@ -770,7 +771,7 @@ async fn handle_command(
         RpcCommand::GetCommands { .. } => {
             let commands = session
                 .current()
-                .runtime()
+                .catalog()
                 .command_specs()
                 .into_iter()
                 .map(|command| {
@@ -794,7 +795,7 @@ async fn handle_command(
 
 fn spawn_prompt(session: Arc<AgentSession>, message: String, images: Vec<ImageContent>) {
     tokio::spawn(async move {
-        let _ = session.submit(session_input(message, images)).await;
+        let _ = session.prompt(session_input(message, images)).await;
     });
 }
 
@@ -825,7 +826,7 @@ fn session_input(text: String, images: Vec<ImageContent>) -> SessionInput {
 fn state_json(session: &AgentSession) -> Result<Value, String> {
     let snapshot = session.snapshot();
     let model = session
-        .runtime()
+        .catalog()
         .model(&snapshot.agent.provider_id, &snapshot.agent.model_id)
         .map(|model| model_json(&model))
         .transpose()?;
@@ -836,8 +837,8 @@ fn state_json(session: &AgentSession) -> Result<Value, String> {
         "isCompacting": snapshot.compaction.is_some(),
         "steeringMode": queue_mode_name(session.steering_mode()),
         "followUpMode": queue_mode_name(session.follow_up_mode()),
-        "sessionFile": session.log().is_materialized().then(|| session.log().path()),
-        "sessionId": session.log().header().id,
+        "sessionFile": session.history().is_materialized().then(|| session.history().path()),
+        "sessionId": session.history().header().id,
         "sessionName": snapshot.name,
         "autoCompactionEnabled": session.auto_compaction_enabled(),
         "messageCount": snapshot.agent.messages.len(),
@@ -847,7 +848,7 @@ fn state_json(session: &AgentSession) -> Result<Value, String> {
 
 fn available_thinking_levels(session: &AgentSession) -> Vec<ThinkingLevel> {
     let state = session.snapshot().agent;
-    let Some(model) = session.runtime().model(&state.provider_id, &state.model_id) else {
+    let Some(model) = session.catalog().model(&state.provider_id, &state.model_id) else {
         return ThinkingLevel::ALL.to_vec();
     };
     model.supported_thinking_levels()
@@ -919,7 +920,10 @@ fn error_response(id: Option<&str>, command: &str, error: &str) -> Value {
 }
 
 fn session_stats_json(session: &AgentSession) -> Result<Value, String> {
-    let document = session.log().load().map_err(|error| error.to_string())?;
+    let document = session
+        .history()
+        .load()
+        .map_err(|error| error.to_string())?;
     let mut user_messages = 0usize;
     let mut assistant_messages = 0usize;
     let mut tool_results = 0usize;
@@ -943,8 +947,8 @@ fn session_stats_json(session: &AgentSession) -> Result<Value, String> {
     }
     let usage = aggregate_document_usage(&document);
     let mut value = json!({
-        "sessionFile":session.log().is_materialized().then(|| session.log().path()),
-        "sessionId":session.log().header().id,
+        "sessionFile":session.history().is_materialized().then(|| session.history().path()),
+        "sessionId":session.history().header().id,
         "userMessages":user_messages,
         "assistantMessages":assistant_messages,
         "toolCalls":tool_calls,
@@ -971,7 +975,8 @@ fn session_stats_json(session: &AgentSession) -> Result<Value, String> {
             .snapshot()
             .agent
             .messages
-            .into_iter()
+            .iter()
+            .cloned()
             .map(AgentMessage::from)
             .collect::<Vec<_>>();
         let tokens = current_session_context_tokens(&branch, &messages).map(|usage| usage.tokens);
@@ -1029,7 +1034,7 @@ fn last_assistant_text(session: &AgentSession) -> Option<String> {
         .snapshot()
         .agent
         .messages
-        .into_iter()
+        .iter()
         .rev()
         .find_map(|message| match message {
             Message::Assistant(message)

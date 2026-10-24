@@ -67,12 +67,13 @@ impl Pi {
             _ => return Err("new session identity already exists".into()),
         };
         self.sessions
-            .create_session_with_workspace(
+            .create_session(pi_session::CreateSessionOptions {
                 workspace,
                 path,
-                Some(id),
-                Some(project.session_metadata()),
-            )
+                session_id: Some(id),
+                metadata: Some(project.session_metadata()),
+                generation_overlay: Default::default(),
+            })
             .await
             .map_err(|error| error.to_string())
     }
@@ -164,13 +165,19 @@ mod tests {
         let first_path = directory.path().join("first.jsonl");
         let first = host
             .sessions()
-            .create_session(directory.path(), &first_path)
+            .create_session(pi_session::CreateSessionOptions::new(
+                directory.path(),
+                &first_path,
+            ))
             .await
             .unwrap();
         let second_path = directory.path().join("second.jsonl");
         let second = host
             .sessions()
-            .create_session(directory.path(), &second_path)
+            .create_session(pi_session::CreateSessionOptions::new(
+                directory.path(),
+                &second_path,
+            ))
             .await
             .unwrap();
 
@@ -200,10 +207,14 @@ mod tests {
             .unwrap();
         let sessions = host.session_manager();
         let cwd = directory.path().to_path_buf();
-        let session =
-            tokio::spawn(
-                async move { sessions.create_session(&cwd, cwd.join("task.jsonl")).await },
-            );
+        let session = tokio::spawn(async move {
+            sessions
+                .create_session(pi_session::CreateSessionOptions::new(
+                    &cwd,
+                    cwd.join("task.jsonl"),
+                ))
+                .await
+        });
         let prompt = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             host.next_project_trust_prompt(),
@@ -222,7 +233,7 @@ mod tests {
         assert!(
             !handle
                 .current()
-                .runtime()
+                .catalog()
                 .command_specs()
                 .iter()
                 .any(|command| command.name.contains("desktop-probe"))
@@ -251,13 +262,13 @@ mod tests {
         ));
         host.projects().upsert(project.clone()).unwrap();
         let first = host.create_project_session(&project.id).await.unwrap();
-        let first_spec = first.current().runtime().workspace().spec().clone();
+        let first_spec = first.current().catalog().workspace().spec().clone();
         assert_eq!(first_spec.roots().len(), 2);
         assert!(!first.path().exists());
         assert!(
             !first
                 .current()
-                .runtime()
+                .catalog()
                 .command_specs()
                 .iter()
                 .any(|command| command.name.contains("shared-only"))
@@ -265,15 +276,20 @@ mod tests {
         project.roots.pop();
         host.projects().upsert(project.clone()).unwrap();
         first.reload().await.unwrap();
-        assert_eq!(first.current().runtime().workspace().spec(), &first_spec);
+        assert_eq!(first.current().catalog().workspace().spec(), &first_spec);
         let second = host.create_project_session(&project.id).await.unwrap();
-        assert_eq!(second.current().runtime().workspace().roots().len(), 1);
-        first.current().log().materialize().unwrap();
+        assert_eq!(second.current().catalog().workspace().roots().len(), 1);
         let path = first.path();
+        let header = first.current().history().header();
         host.sessions().close_session(&first).await.unwrap();
+        pi_session::SessionStore::create(&path, header).unwrap();
         host.projects().remove(&project.id).unwrap();
-        let resumed = host.sessions().open_session(path).await.unwrap();
-        assert_eq!(resumed.current().runtime().workspace().spec(), &first_spec);
+        let resumed = host
+            .sessions()
+            .open_session(path, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(resumed.current().catalog().workspace().spec(), &first_spec);
         host.sessions().shutdown().await.unwrap();
     }
 }

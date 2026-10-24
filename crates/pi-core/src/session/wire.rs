@@ -15,6 +15,15 @@ pub enum SessionWireError {
     InvalidPayload(String),
 }
 
+/// Position of a fork relative to its selected history entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ForkPosition {
+    #[default]
+    Before,
+    At,
+}
+
 /// Pi's extensible agent-level message. Standard provider messages retain
 /// their typed representation; extension-defined roles are preserved as JSON.
 #[derive(Debug, Clone)]

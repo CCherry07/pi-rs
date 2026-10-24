@@ -1289,6 +1289,8 @@ test('builds command context from the native query notify and request capability
           id: 'session-before',
           createdAt: 1_700_000_000_000,
           cwd: root,
+          parentSessionId: 'parent-id',
+          legacyParentSessionPath: '/sessions/parent.jsonl',
         },
         systemPrompt: 'native prompt',
         systemPromptOptions: { cwd: root, selectedTools: ['read'] },

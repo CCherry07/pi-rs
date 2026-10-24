@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use pi_core::{ContentBlock, Message, ModelId, ModelSpec, ProviderId, ThinkingLevel};
-use pi_plugin::{CommandSpec, IsolatedSessionId};
+use pi_plugin::CommandSpec;
 use pi_session::{
     aggregate_document_usage, current_session_context_tokens, AgentSession,
-    AgentSessionReplacement, AgentSessionSubscription, ExactSessionIdResolution, ForkPosition,
-    IsolatedSessionObservation, JsonlSessionRepo, MultiSessionManager, PiSession, SessionDocument,
-    SessionEntry, SessionLog,
+    AgentSessionReplacement, AgentSessionSnapshot, ExactSessionIdResolution, ForkPosition,
+    JsonlSessionRepo, MultiSessionManager, PiSession, SessionDocument, SessionEntry,
+    SessionObservation, SessionUpdate,
 };
 
 pub(crate) struct SessionScope {
@@ -41,15 +41,6 @@ pub(crate) struct SessionStore {
     sessions: Arc<RwLock<HashMap<String, PiSession>>>,
     drafts: Arc<tokio::sync::Mutex<HashMap<String, PiSession>>>,
     open_gate: Arc<tokio::sync::Mutex<()>>,
-    observed_isolated: Arc<RwLock<HashMap<String, ObservedIsolatedSession>>>,
-}
-
-#[derive(Clone)]
-pub(crate) struct ObservedIsolatedSession {
-    pub(crate) observation: IsolatedSessionObservation,
-    pub(crate) parent_thread_id: String,
-    pub(crate) agent: String,
-    pub(crate) nickname: Option<String>,
 }
 
 pub(crate) struct StoredIsolatedSession {
@@ -60,71 +51,34 @@ pub(crate) struct StoredIsolatedSession {
 }
 
 pub(crate) struct LiveSession {
-    source: LiveSessionSource,
-    pub(crate) subscription: AgentSessionSubscription,
-    pub(crate) changes: Option<tokio::sync::watch::Receiver<Arc<AgentSession>>>,
-}
-
-enum LiveSessionSource {
-    Primary(Arc<AgentSession>),
-    Isolated(IsolatedSessionObservation),
+    observation: SessionObservation,
+    pub(crate) snapshot: AgentSessionSnapshot,
 }
 
 impl LiveSession {
-    pub(crate) fn replace(&mut self, session: Arc<AgentSession>) {
-        self.subscription = session.subscribe();
-        self.source = LiveSessionSource::Primary(session);
-    }
-
-    pub(crate) fn refresh_subscription(&mut self) {
-        // Keep the existing receiver: snapshot replacement covers message data,
-        // but queued lifecycle/error/notice events still need to be delivered.
-        self.subscription.snapshot = match &self.source {
-            LiveSessionSource::Primary(session) => session.subscribe().snapshot,
-            LiveSessionSource::Isolated(observation) => observation.subscribe().snapshot,
-        };
-    }
-
-    pub(crate) fn primary(&self) -> Option<&Arc<AgentSession>> {
-        match &self.source {
-            LiveSessionSource::Primary(session) => Some(session),
-            LiveSessionSource::Isolated(_) => None,
+    pub(crate) async fn recv(&mut self) -> Option<SessionUpdate> {
+        let update = self.observation.recv().await?;
+        if let SessionUpdate::Reset { snapshot, .. } = &update {
+            self.snapshot = (**snapshot).clone();
         }
+        Some(update)
     }
 
-    pub(crate) fn presentation_snapshot(&self) -> pi_session::AgentSessionSnapshot {
-        let snapshot = &self.subscription.snapshot;
-        match &self.source {
-            LiveSessionSource::Isolated(observation) => observation
-                .document()
-                .ok()
-                .map(|document| {
-                    super::isolated_projection::separate_inherited_context(snapshot, &document)
-                })
-                .unwrap_or_else(|| snapshot.clone()),
-            LiveSessionSource::Primary(_) => snapshot.clone(),
-        }
+    pub(crate) fn refresh_snapshot(&mut self) {
+        // Keep queued lifecycle, error and notice events while refreshing message data.
+        self.snapshot = self.session().snapshot();
+    }
+
+    pub(crate) fn session(&self) -> Arc<AgentSession> {
+        self.observation.current()
     }
 
     pub(crate) fn cwd(&self) -> PathBuf {
-        match &self.source {
-            LiveSessionSource::Primary(session) => session.runtime().cwd().to_path_buf(),
-            LiveSessionSource::Isolated(observation) => observation.cwd(),
-        }
+        self.session().catalog().cwd().to_path_buf()
     }
 
     pub(crate) fn token_usage(&self) -> SessionTokenUsage {
-        match &self.source {
-            LiveSessionSource::Primary(session) => token_usage(session),
-            LiveSessionSource::Isolated(observation) => observation
-                .usage_snapshot()
-                .map(|snapshot| SessionTokenUsage {
-                    total_tokens: Some(snapshot.usage.total_tokens),
-                    context_tokens: snapshot.context_tokens,
-                    model_context_window: snapshot.model_context_window,
-                })
-                .unwrap_or_default(),
-        }
+        token_usage(&self.session())
     }
 }
 
@@ -138,7 +92,7 @@ pub(crate) struct SessionTokenUsage {
 
 pub(crate) fn token_usage(session: &AgentSession) -> SessionTokenUsage {
     let model_context_window = session.active_context_window();
-    let Ok(document) = session.log().load() else {
+    let Ok(document) = session.history().load() else {
         return SessionTokenUsage {
             model_context_window,
             ..SessionTokenUsage::default()
@@ -194,7 +148,6 @@ impl SessionStore {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             drafts: Arc::default(),
             open_gate: Arc::new(tokio::sync::Mutex::new(())),
-            observed_isolated: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -229,7 +182,7 @@ impl SessionStore {
         drafts: &mut HashMap<String, PiSession>,
     ) -> Result<Arc<AgentSession>, String> {
         if let Some(session) = drafts.get(&scope.key) {
-            if session.current().runtime().workspace().spec() == &scope.workspace {
+            if session.current().catalog().workspace().spec() == &scope.workspace {
                 return Ok(session.current());
             }
         }
@@ -269,7 +222,7 @@ impl SessionStore {
         scope: SessionScope,
     ) -> Result<Arc<AgentSession>, String> {
         let current = self.prepare_scoped(scope).await?;
-        self.reload(&current.log().header().id).await
+        self.reload(&current.history().header().id).await
     }
 
     pub(crate) async fn reload(&self, id: &str) -> Result<Arc<AgentSession>, String> {
@@ -292,7 +245,7 @@ impl SessionStore {
     ) -> Result<Arc<AgentSession>, String> {
         let mut drafts = self.drafts.lock().await;
         let current = self.prepare_locked(scope, &mut drafts).await?;
-        drafts.retain(|_, session| session.id() != current.log().header().id);
+        drafts.retain(|_, session| session.id() != current.history().header().id);
         Ok(current)
     }
 
@@ -304,17 +257,18 @@ impl SessionStore {
         {
             ExactSessionIdResolution::New { path, .. } => path,
             ExactSessionIdResolution::Existing(_) => {
-                return Err(format!("generated duplicate Pi session id: {session_id}"))
+                return Err(format!("generated duplicate Pi session id: {session_id}"));
             }
         };
         let session = self
             .manager
-            .create_session_with_workspace(
-                scope.workspace.clone(),
+            .create_session(pi_session::CreateSessionOptions {
+                workspace: scope.workspace.clone(),
                 path,
-                Some(session_id),
-                scope.metadata.clone(),
-            )
+                session_id: Some(session_id),
+                metadata: scope.metadata.clone(),
+                generation_overlay: Default::default(),
+            })
             .await
             .map_err(|error| error.to_string())?;
         self.sessions
@@ -325,7 +279,7 @@ impl SessionStore {
     }
 
     pub(crate) async fn command_catalog(&self, id: &str) -> Result<Vec<CommandSpec>, String> {
-        Ok(self.open(id).await?.runtime().command_specs())
+        Ok(self.open(id).await?.catalog().command_specs())
     }
 
     // Keys are stable frontend-handle identities, not replaceable JSONL IDs.
@@ -348,12 +302,12 @@ impl SessionStore {
             .handle(id)
             .ok_or_else(|| format!("Pi session is not open: {id}"))?;
         let current = handle.current();
-        if current.log().header().id != id {
+        if current.history().header().id != id {
             return Err(format!("Pi session was replaced: {id}"));
         }
         let cwd = std::fs::canonicalize(cwd).map_err(|error| error.to_string())?;
         let session_cwd =
-            std::fs::canonicalize(current.runtime().cwd()).map_err(|error| error.to_string())?;
+            std::fs::canonicalize(current.catalog().cwd()).map_err(|error| error.to_string())?;
         if cwd != session_cwd {
             return Err("Selected thread does not belong to the selected workspace".into());
         }
@@ -395,12 +349,12 @@ impl SessionStore {
                     .handle(id)
                     .ok_or_else(|| format!("Pi session is not open: {id}"))?;
                 let session = handle.current();
-                let header = session.log().header();
+                let header = session.history().header();
                 let project_id = pi_sdk::projects::session_project_id(header.metadata.as_ref());
                 let expected = pi_sdk::projects::session_project_id(scope.metadata.as_ref());
                 let matches_scope = match (project_id, expected) {
                     (Some(actual), Some(expected)) => actual == expected,
-                    _ => session.runtime().cwd() == scope.workspace.cwd(),
+                    _ => session.catalog().cwd() == scope.workspace.cwd(),
                 };
                 if header.id != id || !matches_scope {
                     return Err("Selected thread does not belong to the selected workspace".into());
@@ -409,9 +363,9 @@ impl SessionStore {
             }
             None => self.prepare_scoped(scope).await?,
         };
-        let state = session.runtime().agent().state();
+        let state = session.snapshot().agent;
         let catalog = SessionModelCatalog {
-            models: session.runtime().available_models(),
+            models: session.catalog().available_models(),
             selected_provider: state.provider_id,
             selected_model: state.model_id,
             selected_thinking: state.thinking_level,
@@ -427,7 +381,7 @@ impl SessionStore {
         let path = self.find_path(id)?;
         let session = self
             .manager
-            .open_session(path)
+            .open_session(path, Default::default())
             .await
             .map_err(|error| error.to_string())?;
         let current = session.current();
@@ -439,23 +393,6 @@ impl SessionStore {
     }
 
     pub(crate) async fn abort(&self, id: &str) -> Result<(), String> {
-        if let Some(observed) = self.observed_isolated(id) {
-            let owner = self
-                .manager
-                .sessions()
-                .into_iter()
-                .find(|session| session.id() == observed.parent_thread_id)
-                .ok_or_else(|| {
-                    format!(
-                        "cannot stop isolated Pi session {id}: owner {} is no longer active",
-                        observed.parent_thread_id
-                    )
-                })?;
-            owner
-                .abort_isolated_session(observed.observation.isolated_id())
-                .map_err(|error| error.to_string())?;
-            return Ok(());
-        }
         self.open(id).await?.abort();
         Ok(())
     }
@@ -487,7 +424,7 @@ impl SessionStore {
                 .map_err(|error| error.to_string());
         }
         let path = self.find_path(id)?;
-        let (log, _) = SessionLog::open(path).map_err(|error| error.to_string())?;
+        let (log, _) = pi_session::SessionStore::open(path).map_err(|error| error.to_string())?;
         log.set_name(Some(name)).map_err(|error| error.to_string())
     }
 
@@ -574,7 +511,7 @@ impl SessionStore {
         });
         let path = active
             .as_ref()
-            .map(|session| session.current().log().path().to_path_buf())
+            .map(|session| session.current().history().path().to_path_buf())
             .map_or_else(|| self.find_path_with_archived(id, include_archived), Ok)?;
         if let Some(session) = active {
             self.manager
@@ -589,65 +526,11 @@ impl SessionStore {
         let (_, handle) = self
             .handle(id)
             .ok_or_else(|| format!("unknown Pi session: {id}"))?;
-        let mut changes = handle.subscribe();
-        let current = Arc::clone(&changes.borrow_and_update());
+        let observation = handle.observe();
         Ok(LiveSession {
-            subscription: current.subscribe(),
-            source: LiveSessionSource::Primary(current),
-            changes: Some(changes),
+            snapshot: observation.snapshot().clone(),
+            observation,
         })
-    }
-
-    pub(crate) fn subscribe_isolated(
-        &self,
-        owner_id: &str,
-        isolated_id: &str,
-        agent: &str,
-        nickname: Option<&str>,
-    ) -> Result<(IsolatedSessionObservation, LiveSession), String> {
-        let id = IsolatedSessionId::new(isolated_id.to_string());
-        let observation = if let Some((_, owner)) = self.handle(owner_id) {
-            owner
-                .observe_isolated_session(&id)
-                .map_err(|error| error.to_string())?
-        } else if let Some(owner) = self
-            .observed_isolated
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(owner_id)
-            .cloned()
-        {
-            owner.observation.observe_isolated_session(&id)?
-        } else {
-            return Err(format!("unknown Pi session: {owner_id}"));
-        };
-        let session_id = observation.session_id();
-        self.observed_isolated
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                session_id,
-                ObservedIsolatedSession {
-                    observation: observation.clone(),
-                    parent_thread_id: owner_id.to_string(),
-                    agent: agent.to_string(),
-                    nickname: nickname.map(str::to_string),
-                },
-            );
-        let live = LiveSession {
-            subscription: observation.subscribe(),
-            source: LiveSessionSource::Isolated(observation.clone()),
-            changes: None,
-        };
-        Ok((observation, live))
-    }
-
-    pub(crate) fn observed_isolated(&self, id: &str) -> Option<ObservedIsolatedSession> {
-        self.observed_isolated
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(id)
-            .cloned()
     }
 
     pub(crate) fn read_isolated(&self, id: &str) -> Result<StoredIsolatedSession, String> {
@@ -655,10 +538,10 @@ impl SessionStore {
             .into_iter()
             .find(|path| path_is_isolated(path) && session_id_matches(path, id))
             .ok_or_else(|| format!("unknown isolated Pi session: {id}"))?;
-        let document = SessionLog::read(&path).map_err(|error| error.to_string())?;
+        let document = pi_session::SessionStore::read(&path).map_err(|error| error.to_string())?;
         let owner_path = isolated_owner_path(&path)
             .ok_or_else(|| format!("invalid isolated session path: {}", path.display()))?;
-        let owner = SessionLog::read(&owner_path).ok();
+        let owner = pi_session::SessionStore::read(&owner_path).ok();
         let parent_thread_id = document
             .isolated_parent_session_id()
             .map_err(|error| error.to_string())?
@@ -679,48 +562,17 @@ impl SessionStore {
 
     /// Read the current branch without creating or promoting a managed session.
     pub(crate) fn document(&self, id: &str) -> Result<SessionDocument, String> {
-        if let Some(observed) = self.observed_isolated(id) {
-            return observed
-                .observation
-                .document()
-                .map_err(|error| error.to_string());
-        }
         if let Some((_, session)) = self.handle(id) {
             return session
                 .current()
-                .log()
+                .history()
                 .load()
                 .map_err(|error| error.to_string());
         }
         if let Ok(stored) = self.read_isolated(id) {
             return Ok(stored.document);
         }
-        SessionLog::read(self.find_path(id)?).map_err(|error| error.to_string())
-    }
-
-    /// Validate a view's explicit owner hint against durable ancestry or live
-    /// host observations. Business payloads cannot manufacture a parent link.
-    pub(crate) fn validate_observation_owner(
-        &self,
-        scope: &str,
-        owner: &str,
-    ) -> Result<(), String> {
-        let mut current = owner.to_string();
-        let mut visited = std::collections::HashSet::new();
-        for _ in 0..64 {
-            if current == scope {
-                return Ok(());
-            }
-            if !visited.insert(current.clone()) {
-                break;
-            }
-            current = if let Some(observed) = self.observed_isolated(&current) {
-                observed.parent_thread_id
-            } else {
-                self.read_isolated(&current)?.parent_thread_id
-            };
-        }
-        Err("Related session owner is outside the current session tree".into())
+        pi_session::SessionStore::read(self.find_path(id)?).map_err(|error| error.to_string())
     }
 
     pub(crate) fn list_project(
@@ -812,7 +664,7 @@ impl SessionStore {
 }
 
 fn session_summary(path: &Path) -> Result<SessionSummary, String> {
-    let document = SessionLog::read(path).map_err(|error| error.to_string())?;
+    let document = pi_session::SessionStore::read(path).map_err(|error| error.to_string())?;
     let id = document.header.id.clone();
     let updated_at_ms = std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
@@ -913,7 +765,7 @@ fn session_companion_directory(path: &Path) -> PathBuf {
 }
 
 fn session_id_matches(path: &Path, id: &str) -> bool {
-    SessionLog::read(path).is_ok_and(|document| document.header.id == id)
+    pi_session::SessionStore::read(path).is_ok_and(|document| document.header.id == id)
 }
 
 fn session_files(root: &Path) -> Result<Vec<PathBuf>, String> {

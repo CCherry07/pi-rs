@@ -7,6 +7,7 @@ use pi_session::{
     SessionContextBuildOptions, SessionDocument, SessionEntry,
 };
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 use super::{thread_from_snapshot, SessionTokenUsage};
 
@@ -22,7 +23,10 @@ pub(super) fn separate_inherited_context(
     // Match a complete historical context, never a timestamp or text alone.
     let hidden = inherited_mask(document, &inherited, &own.agent.messages)
         .unwrap_or_else(|| unrecognized_context_mask(document, &inherited, &own.agent.messages));
-    for (message, inherited) in own.agent.messages.iter_mut().zip(&hidden) {
+    for (message, inherited) in Arc::make_mut(&mut own.agent.messages)
+        .iter_mut()
+        .zip(&hidden)
+    {
         if *inherited {
             *message = Message::custom(CustomMessage {
                 custom_type: "pi.desktop.inherited".into(),
@@ -186,7 +190,7 @@ pub(super) fn attach_context_origin(
     });
     thread["inheritedContext"] = inherited.map_or(Value::Null, |seed| {
         let mut inherited_snapshot = snapshot.clone();
-        inherited_snapshot.agent.messages = runtime_messages(seed.messages);
+        inherited_snapshot.agent.messages = Arc::new(runtime_messages(seed.messages));
         inherited_snapshot.agent.streaming_message = None;
         inherited_snapshot.agent.is_running = false;
         let projected = thread_from_snapshot(
@@ -206,12 +210,12 @@ pub(super) fn attach_context_origin(
 mod tests {
     use super::*;
     use pi_core::UserMessage;
-    use pi_session::{CustomEntry, SessionHeader, SessionLog};
+    use pi_session::{CustomEntry, SessionHeader};
 
     #[test]
     fn changed_context_fails_closed_without_hiding_identifiable_child_messages() {
         let directory = tempfile::tempdir().unwrap();
-        let log = SessionLog::create(
+        let log = pi_session::SessionStore::create(
             directory.path().join("child.jsonl"),
             SessionHeader::new("child", directory.path()),
         )
@@ -242,7 +246,7 @@ mod tests {
                     model_id: pi_core::ModelId::new("test"),
                     thinking_level: pi_core::ThinkingLevel::Off,
                     active_tools: Vec::new(),
-                    messages: vec![changed_parent, own.clone()],
+                    messages: Arc::new(vec![changed_parent, own.clone()]),
                     is_running: false,
                     streaming_message: None,
                     pending_tool_calls: Default::default(),
@@ -259,6 +263,7 @@ mod tests {
                 matches!(&projected.agent.messages[0], Message::Custom(custom) if !custom.display)
             );
             assert_eq!(projected.agent.messages[1], own);
+            assert!(matches!(&snapshot.agent.messages[0], Message::User(_)));
             assert_eq!(
                 projected.agent.messages.len(),
                 snapshot.agent.messages.len()
@@ -269,7 +274,7 @@ mod tests {
     #[test]
     fn empty_legacy_fork_snapshot_is_explicit_and_unknown_boundary_stays_null() {
         let directory = tempfile::tempdir().unwrap();
-        let log = SessionLog::create(
+        let log = pi_session::SessionStore::create(
             directory.path().join("child.jsonl"),
             SessionHeader::new("child", directory.path()),
         )
@@ -297,7 +302,7 @@ mod tests {
     #[test]
     fn reordered_extension_tail_does_not_expose_inherited_items_between_own_messages() {
         let directory = tempfile::tempdir().unwrap();
-        let log = SessionLog::create(
+        let log = pi_session::SessionStore::create(
             directory.path().join("child.jsonl"),
             SessionHeader::new("child", directory.path()),
         )
@@ -317,6 +322,7 @@ mod tests {
         log.append_session_record(SessionEntry::Compaction(pi_session::CompactionEntry {
             summary: "mixed summary".into(),
             retained_tail: vec![own, inherited],
+            retained_entry_ids: Vec::new(),
             tokens_before: 10,
             details: None,
             usage: None,

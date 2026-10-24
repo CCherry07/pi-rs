@@ -25,6 +25,80 @@ use crate::{
     EventError, FnTurnControl,
 };
 
+#[test]
+fn invalid_configuration_patch_never_applies_an_earlier_field() {
+    let (agent, _) = build_agent(
+        [],
+        vec![Arc::new(pi_test_support::TestToolsPlugin::new())],
+        AgentOptions {
+            system_prompt: "original prompt".into(),
+            active_tools: vec!["echo".into()],
+            ..AgentOptions::default()
+        },
+    );
+    let before = agent.state();
+    let result = agent.configure(AgentConfigurationPatch {
+        system_prompt: Some("changed prompt".into()),
+        active_tools: Some(vec!["delay".into()]),
+        provider_id: Some(ProviderId::new("missing")),
+        model_id: Some(ModelId::new("changed-model")),
+        thinking_level: Some(ThinkingLevel::High),
+        convert_to_llm: Some(crate::ConvertToLlm::new(|messages| async { messages })),
+    });
+    assert!(result.is_err());
+    let after = agent.state();
+    assert_eq!(after.system_prompt, before.system_prompt);
+    assert_eq!(after.active_tools, before.active_tools);
+    assert_eq!(after.provider_id, before.provider_id);
+    assert_eq!(after.model_id, before.model_id);
+    assert_eq!(after.thinking_level, before.thinking_level);
+    assert!(agent.convert_to_llm().is_default());
+}
+
+#[tokio::test]
+async fn prepared_configuration_reserves_the_agent_and_can_be_discarded() {
+    let (agent, _) = build_agent([], vec![], AgentOptions::default());
+    let prepared = agent
+        .prepare_configuration(AgentConfigurationPatch {
+            model_id: Some(ModelId::new("candidate")),
+            ..AgentConfigurationPatch::default()
+        })
+        .unwrap();
+    assert_eq!(prepared.configuration().model_id.as_str(), "candidate");
+    // Read-only observations remain available before commit. Competing writes
+    // fail at admission rather than blocking on the prepared configuration.
+    assert_eq!(agent.state().model_id.as_str(), "test");
+    assert!(!agent.is_running());
+    assert!(agent.configure(AgentConfigurationPatch::default()).is_err());
+    assert!(agent.reset().is_err());
+    assert!(agent.replace_context_messages(Vec::new()).is_err());
+    assert!(agent.remove_last_failed_assistant().is_err());
+    assert!(
+        agent
+            .restore(AgentRestoreState {
+                system_prompt: None,
+                provider_id: ProviderId::new("scripted"),
+                model_id: ModelId::new("restored"),
+                thinking_level: ThinkingLevel::Off,
+                active_tools: Vec::new(),
+                messages: Vec::new(),
+            })
+            .is_err()
+    );
+    assert!(agent.prompt("must not start").await.is_err());
+    drop(prepared);
+    assert_eq!(agent.state().model_id.as_str(), "test");
+    agent
+        .prepare_configuration(AgentConfigurationPatch {
+            model_id: Some(ModelId::new("committed")),
+            ..AgentConfigurationPatch::default()
+        })
+        .unwrap()
+        .commit();
+    assert_eq!(agent.state().model_id.as_str(), "committed");
+    agent.reset().unwrap();
+}
+
 fn build_agent(
     turns: impl IntoIterator<Item = ScriptedTurn>,
     plugins: Vec<Arc<dyn Plugin>>,
@@ -561,7 +635,7 @@ fn state_defaults_configuration_restore_and_subscriptions_are_explicit() {
         })
         .unwrap();
     assert_eq!(agent.state().system_prompt, "restored prompt");
-    assert_eq!(agent.state().messages, vec![restored]);
+    assert_eq!(agent.state().messages.as_ref(), &vec![restored]);
     assert_eq!(observed.load(Ordering::SeqCst), 0);
 }
 

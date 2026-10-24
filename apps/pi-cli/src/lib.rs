@@ -25,7 +25,7 @@ use pi_js_plugin::JsPluginHost;
 use pi_plugin::PresentationMode;
 use pi_session::{
     ExactSessionIdResolution, JsonlSessionRepo, MultiSessionManager, PiSession,
-    PluginContextBinding, SessionInput, SessionLog,
+    PluginContextBinding, SessionInput, SessionStore,
 };
 use pi_settings::{SettingsContext, SettingsManager};
 use tokio::sync::mpsc;
@@ -236,17 +236,17 @@ async fn run(
         }
     }
     let session_exists = !cli.acp && config.session_path.exists();
-    let resumed_log = if session_exists {
-        let log =
-            SessionLog::open_handle(&config.session_path).map_err(|error| error.to_string())?;
-        let header = log.header();
+    let resumed_store = if session_exists {
+        let store =
+            SessionStore::open_handle(&config.session_path).map_err(|error| error.to_string())?;
+        let header = store.header();
         config.cwd = std::fs::canonicalize(&header.cwd).map_err(|error| {
             format!(
                 "cannot access resumed session cwd {}: {error}",
                 header.cwd.display()
             )
         })?;
-        Some(log)
+        Some(store)
     } else {
         None
     };
@@ -320,14 +320,17 @@ async fn run(
         return finish_run(result, shutdown);
     }
     let startup = async {
-        if let Some(log) = resumed_log {
-            sessions.open_session_from_log(log).await
-        } else if let Some(session_id) = create_session_id {
+        if let Some(store) = resumed_store {
             sessions
-                .create_session_with_id(&cwd, &session_path, session_id)
+                .open_session(pi_session::SessionSource::Store(store), Default::default())
                 .await
         } else {
-            sessions.create_session(&cwd, &session_path).await
+            sessions
+                .create_session(pi_session::CreateSessionOptions {
+                    session_id: create_session_id,
+                    ..pi_session::CreateSessionOptions::new(&cwd, &session_path)
+                })
+                .await
         }
         .map_err(|error| error.to_string())
     };
@@ -347,7 +350,7 @@ async fn run(
     if curator_command.is_some()
         && !session
             .current()
-            .runtime()
+            .catalog()
             .command_specs()
             .iter()
             .any(|s| s.name == "curator")

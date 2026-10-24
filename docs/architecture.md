@@ -3,8 +3,7 @@
 ## Scope
 
 `codex/agent` owns the agent runtime, plugins, CLI/TUI, Node host, and evaluation tooling.
-`codex/desktop` builds on that branch and adds `apps/orbit`, `apps/pi-desktop`,
-`packages/pi-desktop-sdk`, and `plugins/features/pi-plugin-subagents/desktop`. Desktop-specific
+`codex/desktop` builds on that branch and adds `apps/orbit` and `apps/pi-desktop`. Desktop-specific
 paths and architecture described below refer to the desktop branch. Shared Rust presentation
 values and plugin hooks remain runtime contracts; the desktop branch retains those crates as
 local dependencies. Runtime updates flow from `codex/agent` into `codex/desktop`.
@@ -91,8 +90,9 @@ by that crate and are excluded from traversal. Dev-only fixtures are otherwise p
 guard runs in both the workspace suite and `scripts/test-core.sh` and reports the dependency path
 when an edge violates either rule.
 
-`pi-session` owns operation admission, cancellation, event ordering, persistence and compaction
-cut points. `AgentSessionOptions` selects a shell executor and compaction policy. Defaults have no
+`pi-session` owns operation admission, cancellation, event ordering and persistence/compaction
+cut points; its internal `history` module owns durable mutations and storage.
+`AgentSessionOptions` selects a shell executor and compaction policy. Defaults have no
 shell executor and use `GenericCompactionPolicy`; `domains/coding/src/session` supplies
 `CodingShellExecutor` and `CodingCompactionPolicy`, including shell defaults, Coding summary text,
 and read/write/edit tracking. The shell request/result types and old `bashExecution` projections
@@ -106,6 +106,82 @@ contracts are unchanged.
 and a scripted provider through the generic SDK. SDK integration tests exercise tool continuation,
 capability binding, resume, preserved model/workspace/tool selection, failed reload rollback and
 absence of implicit Coding resources. It needs no model credentials or network.
+
+## Session modules
+
+Session behavior has four owners inside the `pi-session` crate. The first three are domain Modules;
+the Plugin Adapter binds executable capability contracts to them. The arrows below show the main
+call/dependency direction.
+
+```mermaid
+flowchart TD
+    Frontends["CLI / TUI / RPC / ACP / Desktop / SDK"] --> Management
+    Frontends --> Runtime
+    subgraph Session["pi-session"]
+        Adapter["Plugin Adapter<br/>PiPluginContext · plugin/"] --> Management
+        Adapter --> Runtime
+        Management["Session Management<br/>MultiSessionManager / PiSession<br/>management/"] --> Runtime
+        Management --> History
+        Runtime["Session Runtime<br/>AgentSession · runtime/"] --> History
+        History["Session History<br/>history/<br/>SessionStore / SessionDocument / projection / reducer"]
+    end
+    Runtime --> Agent["PiRuntime / Agent<br/>immutable generations and Agent loop"]
+    History --> Core["pi-core / pi-utils"]
+```
+
+| Module | Owns | Does not own |
+| --- | --- | --- |
+| Session History | v4 JSONL, one mutation sequence, trees/lanes, queries, context projection, isolated provenance, pure recovery reduction | Agent execution, plugin capability contracts, shell execution, frontends |
+| Session Runtime | one generation's input, activity, queues, delivery, retry, compaction, context activation, configuration, semantic events | generation replacement, managed child ownership, product discovery/defaults |
+| Session Management | stable handles, unique active paths, generation preparation/publication, isolated child lifetime, cross-generation observation | transcript reduction, input delivery policy, terminal/UI rendering |
+| Plugin Adapter | generation-bound native/JS capabilities, model/session/UI adaptation, typed/wire conversion | durable state, run admission and timing, a second runtime lifecycle |
+
+`AgentSession` remains the runtime object; no public `SessionRuntime` wrapper is added around
+`PiRuntime`. The private `SessionSlot` replaces the old internal `AgentSessionRuntime` name and
+owns the current generation plus its factory. `SessionGenerationFactory` remains the injected
+product seam, implemented by the generic SDK and Coding composition. Runtime initial/restored
+configuration values live in `runtime/options`, so Session Runtime does not import Management or
+the concrete Plugin Adapter. It dispatches only `pi-plugin` contracts.
+
+History lives in `crates/pi-session/src/history/`; it uses `pi-core` and `pi-utils` values without
+importing Runtime, Management or plugin contracts. Its implementation modules are private, and
+`pi-session` re-exports its public values. This is an internal module seam within one crate;
+Cargo dependency checks apply to `pi-session` as a whole.
+`SessionStore` is the mutable history owner, `SessionHistory` is its read-only view, and
+`SessionDocument` is a complete history snapshot. Rust callers use `pi_session::SessionStore` in
+place of `SessionLog` and pass prepared stores with `SessionSource::Store`. Direct storage operations
+return `HistoryError`; runtime and managed operations use `SessionError` with explicit
+variant-preserving conversion. `ForkPosition` is a shared `pi-core` value re-exported through its
+existing plugin/session paths. These are Rust Interface changes, with no v4 schema or plugin-wire
+change.
+
+`PiSession::observe()` captures a generation and initial snapshot, then returns `SessionUpdate`:
+`Event` carries `(epoch, revision)` and a product event; `Reset` carries the same cursor, a full
+snapshot and either `Replacement` or `Lagged`. A replacement increments the epoch even on reload
+of the same session ID. Revisions are monotonic within an epoch and can have gaps from direct
+snapshot refreshes. Event revision assignment and broadcast publication share one lock.
+The observer prefers a published replacement over queued old-generation events and filters
+revisions already represented by its subscription/reset snapshot. It uses the existing watch
+channel without a forwarding task or another transcript reducer. Closing the managed handle wakes
+observers, drains final events and ends the stream even while callers retain a `PiSession`.
+
+Lag recovery restores current state; it cannot replay missed transient notices/errors. TUI and
+Desktop rehydrate their presentation, and RPC reports a subscription gap through its existing
+`extension_error` wire event so clients can query state/messages. Desktop's own message refresh
+keeps the observation cursor unchanged: covered message deltas can be skipped while pending
+lifecycle, error and notice events are still projected. Run-scoped ACP/print subscriptions remain
+pinned to their original generation. Low-level `subscribe()` remains available for those callers.
+
+Plugin message delivery is planned and admitted by Session Runtime. It distinguishes durable-run
+acceptance from activity idleness, queues before-settle continuations, carries image attachments
+through text preprocessing, and takes the activity gate when an asynchronous custom append must
+wait. Background deliveries retain their originating generation and report failures as semantic
+plugin notices. The Plugin Adapter only converts capability options and errors.
+
+The decomposition preserves lazy first-assistant materialization, shared in-memory logs across
+reload, shutdown-hook checkpoint writes, ordered lifecycle hooks, and assistant/tool-result
+pairing before the next provider request. History performs pure interrupted-state reduction;
+Session Runtime applies accepted recovery writes. It does not replay external tool side effects.
 
 ## Workspace
 
@@ -555,16 +631,15 @@ Modules remain responsible for session behavior. `MultiSessionManager`
 owns the runtime factory, manager shutdown, and a private table of active handles. `PiSession` is the
 cloneable per-frontend handle for current-session events and new/resume/fork/reload transitions.
 There is deliberately no public `SessionRegistry`: duplicate-path checks and handle bookkeeping are
-implementation details of `MultiSessionManager`. `AgentSessionRuntime` and its storage target are
+implementation details of `MultiSessionManager`. `SessionSlot` and its storage target are
 crate-private implementation details of the lower-level replacement transaction inside each
 `PiSession`; frontend adapters cannot bypass the managed Interface, and runtime failures use the
 shared public `SessionError` vocabulary.
-Inside `pi-session`, the private `journal` Module owns the durable v4 implementation: shared
-mutation sequencing, validation, state projection, reducer recovery, JSONL persistence, legacy
-import, and repositories. The crate root re-exports the stable
-session Interface, so this locality does not add another public lifecycle or cross-crate seam.
-The print and NDJSON Adapters pin `PiSession::current()` for one invocation; the longer-lived TUI and
-RPC adapters watch the handle's replacement stream. This keeps generation changes behind the same
+The internal History module owns shared mutation sequencing, validation, state projection, pure recovery
+reduction, JSONL persistence and repositories. The `pi-session` crate root re-exports its values
+and `SessionStore` for existing import paths. Legacy import remains in SessionTransferPlugin.
+The print, NDJSON and ACP run Adapters pin `PiSession::current()` for one invocation; TUI, RPC and
+Desktop use `PiSession::observe()` for managed events. This keeps generation changes behind one
 Interface while preventing a single in-flight submission from crossing generations.
 
 `apps/pi-desktop` is an experimental desktop Adapter that provides workspace, thread, Git, file,
@@ -616,7 +691,7 @@ no new runtime lifecycle or command registry is introduced. The Desktop Adapter 
 custom-prompt expansion. Completion and dispatch share that priority, hiding conflicting runtime
 names while the composer displays a visible collision warning. These UI actions are intentional Desktop divergences (notably `/resume` refreshes the
 thread and `/fast` remains a UI-only setting rather than a native provider service tier).
-All other runtime commands pass through `AgentSession.submit` once, including transformation and
+All other runtime commands pass through `AgentSession.prompt` once, including transformation and
 input hooks; Tauri returns the real handled/queued/completed receipt rather than fabricating an
 in-progress turn. Product events continue streaming while the IPC call awaits completion. Handled
 receipts do not require AgentStart/Settled and cannot stall local queue draining. Plugin notices
@@ -655,62 +730,27 @@ identify managed handles separately from replaceable JSONL IDs: an old saved ID 
 but is never silently routed to a different current session. Failed replacement publishes no swap
 and keeps the old subscription/catalog. Only native registered commands are supported; Desktop
 keeps legacy Pi JavaScript runtime extension discovery/hosting disabled and does not emulate TUI
-widgets, argument completion callbacks, interactive dialogs, or CLI-only frontend commands. Its
-separate React presentation extension interface is described below.
+widgets, argument completion callbacks, interactive dialogs, or CLI-only frontend commands.
 Desktop image attachments are decoded from data URLs by the Adapter and enter the same
-`SessionInput` Interface as text; submit, steer, and follow-up processing preserve those images
+`SessionInput` Interface as text; prompt, steer, and follow-up processing preserve those images
 through input hooks, durable queue records, and provider projection.
 
-### Desktop React extensions and shared presentation
+### Desktop presentation
 
-This is a deliberate Rust/Desktop product design borrowing legacy Pi's tool renderer and common
-component approach, not binary compatibility with Pi's TUI component factories. The author interface
-in `packages/pi-desktop-sdk` supports tool-result/custom-message renderers and workspace panels.
-A plugin writes React and CSS directly and can optionally use ToolCard, StatusBadge, Markdown,
-SessionView and InlineCommandForm. Headless `defineWidgetChannel` / `useWidget` and
-`usePluginCommand` modules own decoding and asynchronous interaction mechanics while accepting
-plugin-defined adapters. The host registry matches exact tool/custom-message identities without business-name
-switches; renderer failures and missing packages fall back to ordinary transcript items. Frozen
-inherited snapshots do not execute plugin renderers. Generic registered renderers are displayed
-outside collapsed tool groups.
+Desktop uses app-owned components for tool results and displayed custom plugin messages.
+The React desktop SDK, extension discovery/reload, custom views, widget publisher and dedicated
+presentation IPC (including live child-view observation) have been removed. This is a deliberate
+Desktop product change; Rust embedding through `pi-sdk`, native plugin execution and Pi's terminal
+presentation interfaces remain separate.
 
-Read-only discovery in the Desktop-owned `pi_runtime::desktop_extensions::catalog` module reads
-bundled ESM/CSS packages from the agent `desktop-extensions` directory and trusted project
-`.pi/desktop-extensions`, consuming the shared `pi-coding::ProjectTrustService` decision. Manifest
-validation, resource containment, byte limits, hashing and presentation DTOs remain in the app,
-not the headless SDK. It does not grant trust or prepare a session. Native manifests, dynamic-library
-ABI and installation are unchanged; combined native/desktop packaging is future work. The local
-builder bundles dependencies while binding React/ReactDOM/JSX imports to the desktop's exact React
-instance. Third-party packages can replace a complete bundled definition with the same identity.
-Duplicate package IDs or renderer targets reject the complete candidate.
+Subagent results use the ordinary tool/custom-message transcript. The native plugin still registers
+`subagents:interrupt` and `subagents:followup`, validates direct-child ownership and processes those
+commands through the existing session prompt pipeline. Opening a child session reads its saved
+transcript and read-only inherited context snapshot. No presentation code owns execution state.
 
-The presentation registry is immutable after publication. Complete candidates load and validate before
-swap; failures preserve the working generation, while trust revocation removes project code even if
-another package is broken. A UI-only reload remounts views and retires their cancellation signals
-without replacing native runtime state. Native replacement requests a presentation reload and fresh
-widget snapshots, and retains native lifecycle behavior (including child shutdown). Trusted React code
-shares the webview; this is not a sandbox and module-global side effects cannot be rolled back.
-
-Asynchronous UI state reuses the existing session custom-entry seam: `pi.ui.widget` entries contain
-`{key,value}`, where keys are namespaced and null removes a key. Values are opaque JSON, capped at
-256 KiB. No new Pi v4 record variant or provider message is added. The active branch supplies the
-latest state; durable record sequence numbers order snapshot/live merges and tombstones. The host
-forwards generic `thread/widgetUpdated` events. Plugins own schemas, coalescing, historical migration
-and business interpretation; executable React and transient component state are never persisted.
-The Rust author interface `pi_plugin::desktop::WidgetPublisher` owns key/size validation,
-duplicate suppression, tombstones and the entry envelope; a plugin-owned projection Module still
-decides what to publish and how restored history relates to current executable ownership.
-Subagents publish bounded task snapshots independently of the already-completed spawn tool. On
-native reload/resume, the feature runtime restores durable agent ownership before republishing it;
-the desktop consumes that live projection and never infers control authority from widget history.
-
-Desktop controls invoke exact registered plugin commands through `AgentSession::invoke_command`.
-The interface validates registration/lifecycle then follows the existing submit pipeline once,
-including active-run command processing, transforms and input hooks. Unknown names never become
-model prompts. The subagent plugin registers its own interrupt/follow-up commands and validates
-direct-child ownership. UI callbacks are bound to their view lifetime; IPC also checks an opaque
-scope token tied to the exact managed AgentSession instance, so a late old-generation request cannot
-act on a replacement with the same stored session ID. Generic session previews remain read-only.
+Saved `pi.ui.widget` custom records remain opaque journal data and are not rewritten, rendered or
+used to authorize commands. Subagents no longer publish those records; their native recovery
+checkpoints and ownership restoration continue through the existing runtime.
 
 `pi-rpc` is one external protocol-adapter Module above this session Interface. Its Pi JSON
 projector is the single erasure seam for both `--json` and Pi RPC: it emits the coding-agent v3
@@ -884,11 +924,11 @@ session. Ordinary resume still gives an explicit model request priority over the
 Product wiring installs one unified Plugin set and an independent ProviderPlugin set through
 the runtime generation builder. AgentSession retains the exact same PluginDriver and supplies
 Session identity and generation through `SessionDispatchContext` on each dispatch. It has no separate
-driver, plugin registration or construction surface. Each `PiSession` uses `AgentSessionRuntime` for cross-system atomicity. The injected
+driver, plugin registration or construction surface. Each `PiSession` uses `SessionSlot` for cross-system atomicity. The injected
 `SessionGenerationFactory` receives only resolved generation context—cwd, journal path, start reason,
 reload model, optional fresh-session state, and the transient overlay—and returns a
 `PreparedSessionGeneration` containing `PiRuntime`, session options, and staged product activation.
-`AgentSessionRuntime` alone resolves Create/Open/Reuse targets, opens or reuses the `SessionLog`,
+`SessionSlot` alone resolves Create/Open/Reuse targets, opens or reuses the `SessionStore`,
 applies fresh-session state, injects parent/session identity, and constructs the `AgentSession`.
 Adapters therefore do not duplicate storage and recovery branches. The resulting session carries
 registration inventory as generation-local metadata; it is not persisted into Pi v4 session data
@@ -949,7 +989,7 @@ Plugin driver, without another plugin lifecycle. Parent agent/session hooks do n
 Agent entry does not run the product `input` pipeline or emit `agent_settled` or Session
 lifecycle events. This is a capability boundary, not a sandbox for trusted native code.
 
-The fork has no SessionLog, managed handle, frontend forwarding, or external worker. Completion,
+The fork has no SessionStore, managed handle, frontend forwarding, or external worker. Completion,
 timeout, cancellation, and dropping the future release its private plugin instances and abort its
 provider/tool signal. Stateful attachments are fresh per invocation, not shared through request clones.
 Cleanup uses plugin-owned RAII, since cancellation or dropping the future can bypass `agent_end`.
@@ -1311,7 +1351,7 @@ Configuration-form `pi.registerProvider(name, config)` and `pi.unregisterProvide
 same native capability without mutating a published registry. Load-time registrations are validated
 as part of the JavaScript manifest. Runtime calls stage ordered mutations in the generation-external
 `DynamicProviderOverlay`; `ProductSessionFactory` combines load-time registrations and staged
-mutations and prepares the complete replacement product generation. `AgentSessionRuntime` binds
+mutations and prepares the complete replacement product generation. `SessionSlot` binds
 that generation to the session log and commits the overlay only on activation. It is an internal
 implementation detail; JavaScript and other frontend Adapters request replacement through
 `PiSession`. Failure drops the staged batch and preserves the current generation. Calls made during
@@ -1681,7 +1721,63 @@ for examples and the standalone-Agent boundary.
 
 ## Agent layering
 
-`Agent` is the stateful façade. It owns transcript state, active-run cancellation, steering/follow-up queues, subscriptions, and low-level run idleness. It is an `Arc`-backed cloneable handle so another task can call `abort`, `steer`, or `follow_up` while a prompt is running. Continuing from an assistant tail first consumes one steering batch as the new prompt and suppresses only the loop's initial duplicate steering poll; later steering remains queued until the first response completes. Follow-up is consumed only when no steering is available. `AgentSession` owns product settlement because only it can establish that retry, compaction, and queued-continuation policy has also finished; it dispatches the generation's `agent_settled` plugin hook before publishing `AgentSessionEvent::AgentSettled`.
+`Agent` is the stateful façade. It owns transcript state, active-run cancellation, steering/follow-up queues, subscriptions, and low-level run idleness. It is an `Arc`-backed cloneable handle so another task can call `abort`, `steer`, or `follow_up` while a prompt is running. Continuing from an assistant tail first consumes one steering batch as the new prompt and suppresses only the loop's initial duplicate steering poll; later steering remains queued until the first response completes. Follow-up is consumed only when no steering is available.
+
+`AgentSession` owns the complete product activity in a private Activity Module: operation admission,
+phase, durable run identity, pending delivery, cancellation handles, and idle notification. Its
+Open/Transitioning/Closed lifecycle remains independent. `prompt` accepts user text and images,
+returning `PromptOutcome::Agent`, `Handled`, or `Queued`; it uses steering when a durable run is
+accepting live messages. `run_messages` accepts structured messages and waits for a complete
+`AgentLoopOutcome`. Both share preparation, run records, retry/compaction, settlement, and telemetry.
+Text commands execute once before activity admission because a command may replace the session;
+structured messages skip
+text preprocessing. Admitted input preparation, provider runs, retry waits, compaction, and
+`agent_before_settle` all remain busy. Finishing the durable run closes live delivery, while the
+activity stays Settling through the generation's `agent_settled` callbacks and publication of
+`AgentSessionEvent::AgentSettled`.
+
+Session `is_idle()` and `wait_for_idle()` read this same activity state. Plugin delivery planning
+uses the distinct `accepts_live_messages()` condition: a durable run can receive input during
+`agent_before_settle` even though the low-level Agent is already idle. Replacement first blocks
+new admissions, cancels the complete activity (including stage-specific and shell cancellation),
+and waits for settlement. The Manager continues to own the replacement transaction. Arbitrary
+dropped prompt futures are not automatically taken over by a background executor.
+
+The private `runtime/` implementation gives orchestration and stateful rules distinct owners.
+`run` owns the product run loop, while `delivery` owns plugin message admission and timing. `activity` owns durable run creation/closure, queue persistence and
+acknowledgement as well as admission and cancellation; neither the orchestration nor the event
+bridge can mutate its state directly. `context` owns activation and snapshot publication
+for edits, retry omissions, custom messages, isolated context, compaction and tree navigation.
+It uses the journal's existing projection and the Agent's existing transcript, with no second
+message reducer. In-turn writes remain pending until the next turn and are reconciled after the
+Agent returns; before-settle writes activate immediately. Both paths finish reconciliation before
+settled callbacks. Boundary hooks only prepare and validate proposals. `lifecycle` binds and activates
+sessions, `recovery` prepares interrupted journal repair, and `bridge` translates ordered Agent
+observations into persistence acknowledgements and product events. These are private Modules,
+not additional runtime layers or plugin lifecycles.
+
+Managed frontend callers use `PiSession::observe()`; generation-pinned callers query
+`AgentSession::snapshot()/subscribe()`, `catalog()`, and `history()`. The concrete catalog
+and history views expose immutable queries without `Deref`, mutable owners, or a raw runtime/log
+escape. Configuration, execution, and history changes go through Session; whole-session reload
+goes through `PiSession`. Current tool selection comes from `snapshot().agent.active_tools`;
+`catalog().tool_specs()` describes registered tools. Callers use `set_name()` and `shutdown()`;
+the synchronous name adapter and manager-selected shutdown reasons stay crate-private. The Manager
+reuses in-memory logs with its prepared recovery plan. Adapters obtain generation-scoped plugin
+capabilities explicitly through `plugin_context(scope)`. Independent `Agent`, `PiRuntime`, and
+`SessionStore` embeddings remain supported. This is a Rust Interface change; native plugin contracts
+and JS/RPC wire formats are unchanged.
+
+Agent and runtime configuration use prepared values. Preparation validates the whole patch,
+resolves tools and provider selection, and renders any dynamic prompt before publishing changes.
+A prepared runtime change retains its generation lease and configuration admission guard until
+commit or drop, excluding execution, reload, and competing configuration changes. Session holds
+its operation guard across `prepare -> journal batch -> infallible memory commit -> snapshot and
+events`. Model changes and a necessary thinking clamp share one batch in that order; unchanged
+thinking adds no record. Tool deduplication retains first-occurrence order. Validation or a
+deterministic journal write failure leaves configuration, journal memory, and product events
+unchanged. This uses the existing JSONL recovery protocol, not a new multi-line power-loss
+atomicity guarantee.
 
 `AgentLoop` is a stateless single-run engine over an `AgentContext` snapshot. It emits lifecycle
 events, invokes a provider, delegates stream assembly and tool execution, polls steering after each
@@ -1712,8 +1808,8 @@ remain in agent state and events but are omitted from provider input unless a ca
 converter. Conversion can be configured between runs through `AgentConfigurationPatch` and is
 captured once for each run.
 
-`pi-session` owns the coding-agent projection. Session creation, open and reuse install its
-runtime-message converter when the caller has not supplied one. It maps typed custom messages to
+Session History owns the pure session-to-context projection. Session Runtime installs the
+Agent-specific runtime-message converter during creation, open and reuse when the caller has not supplied one. It maps typed custom messages to
 user content at the provider boundary, while session context construction handles summaries, bash
 output and unknown wire roles. Explicit caller converters take precedence. Ephemeral agents inherit
 the parent's converter so inherited session context has the same provider meaning. Configuration
@@ -1745,6 +1841,17 @@ ABI 13 adds inherited prompt/history, guarded dispatch and invocation observatio
 detached compaction, execution origin and typed run-local state. Older native artifacts are rejected
 before constructor resolution.
 
+`AgentStateSnapshot.messages` shares an `Arc<Vec<Message>>` through the Agent-to-Session bridge and
+the product EventHub. The Agent remains the only transcript reducer. Stream chunks update the
+stream handle and revision without copying historical messages; append and message-end hook
+replacement use copy-on-write, while reset and context replacement install a new history. Holding
+an old snapshot therefore preserves its completed history, with copying paid at mutation points.
+AgentContext, provider input, and run outcomes retain their owning contracts through explicit
+conversion. Initial subscription and lag recovery retain the revision protocol; navigation and
+compaction refresh the public context snapshot as well as the underlying Agent. The
+`pi-bench/session_stream` workload measures this bridge at 64/1,024/4,096 history messages and
+16/256 deltas; pointer-sharing regressions establish the absence of per-chunk history copying.
+
 Cancellation and exceptional termination close the same observable lifecycle as Pi. A cancellation
 that races with turn entry first commits the prompt and already-drained steering, then emits an
 aborted assistant `message_start`/`message_end`, `turn_end`, and `agent_end`. Errors escaping the
@@ -1753,8 +1860,9 @@ still returns the originating `Err`; recovery emission continues past listener f
 reducers can observe as much of the terminal sequence as possible.
 
 Provider streaming starts a typed `pi.ai.request` span and records normalized response metadata,
-usage, chunk count, first-chunk latency, error status, and terminal reason. Product `submit` owns the
-outer `pi.harness.run` span. `pi-telemetry` also exposes the complete exact harness span vocabulary
+usage, chunk count, first-chunk latency, error status, and terminal reason. The shared Session
+submission flow owns the outer `pi.harness.run` span for all three input entry points.
+`pi-telemetry` also exposes the complete exact harness span vocabulary
 for compaction, navigation, checkpoints, turns, steps, tools, hooks, sleeps, event handlers, and
 session writes so new orchestration can remain compile-time constrained instead of emitting
 unstructured maps.
@@ -1780,13 +1888,25 @@ Unknown, invalid, blocked, and truncated tool calls produce error tool-result me
 
 ## Session persistence and restore
 
-`pi-session` follows the v4 implementation in
-`legacy/pi/packages/agent/src/harness/session`. A JSONL file starts with the exact v4 header and is
-followed by four mutation kinds: tree entries, lane records, lane pointers, and global facts. Every
+Session History preserves the existing Rust v4 storage contract. The current local behavior
+oracle, `legacy/pi/packages/coding-agent/src/core/session-manager.ts`, uses schema version 3;
+it is a reference for product behavior and legacy import, not evidence of a current upstream v4
+implementation. A Rust v4 JSONL file starts with its versioned header and is followed by four
+mutation kinds: tree entries, lane records, lane pointers, and global facts. Every
 mutation consumes one shared, consecutive `seq`. Entry and record IDs share one namespace.
 Top-level entry and lane-record timestamps serialize as Pi-compatible ISO 8601 strings. The decoder
 also accepts the millisecond-number representation emitted by earlier pi-rs v4 builds; nested agent
 message timestamps keep their millisecond wire shape.
+
+Parent-session ancestry is represented only by `parentSessionId`. The optional
+`legacyParentSessionPath` header field has been removed; older v4 files remain readable because
+unknown header fields are ignored, and new headers never serialize it. Pi-compatible new-session
+APIs still accept a parent file path, but the manager resolves it to an active session's ID (including
+an unsaved session) or reads the saved v4 parent without modifying its file before generation
+preparation. An unreadable or invalid parent fails the replacement. `AgentSessionOptions` carries
+only `parent_session_id`. Pi v3 JSON/JS header projections omit the path-based `parentSession`
+property. This is a deliberate Rust storage/API divergence from the upstream v3 path representation;
+ordinary forks continue to record their source session ID.
 
 Entries form an immutable parent-linked tree. Named lanes are durable pointers into that tree and
 remain available after moving away from their prior leaves. Lane records hold operation starts and
@@ -1800,7 +1920,7 @@ session tree rather than only the selected branch, so resume and navigation do n
 was already billed. The signed v4 usage ledger remains the storage-level statistics contract for
 operation-attributed usage and adjustments.
 
-`SessionLog` is the concrete durable storage Adapter. It owns atomic mutation persistence,
+`SessionStore` is the concrete durable storage Adapter. It owns atomic mutation persistence,
 branch/tree fork semantics, and shares `SessionState` projection and payload/query validation inside
 the private `journal` Module. A branch fork copies only the selected message path and applicable
 facts; a tree fork copies all entries, lanes, and applicable facts. Neither copies operation
@@ -1839,7 +1959,7 @@ shape.
 Materialized session documents are revision-scoped immutable read views. The first document read
 after a successful mutation projects the journal state; all later readers of the same revision
 share that `Arc<SessionDocument>`. Applying the next validated mutation invalidates the cached view,
-while existing readers retain a coherent snapshot. The owning `SessionLog::load` API remains as a
+while existing readers retain a coherent snapshot. The owning `SessionStore::load` API remains as a
 compatibility adapter for callers that require an independently owned document; runtime and plugin
 read paths should use the shared view so repeated context, usage, and branch queries do not clone
 the full session.
@@ -1858,8 +1978,9 @@ full tree/record view required by the reducer.
 `JsonlSessionRepo::resolve_exact_id` owns the CLI's project-scoped session identity lookup and Pi
 directory/filename layout. Resolution is read-only: an existing ID yields its metadata, while a
 missing ID yields a timestamped `..._<id>.jsonl` target without creating a directory. The chosen ID
-then enters `MultiSessionManager::create_session_with_id`; its internal runtime target injects the ID
-into the new session header after generation preparation. The product factory never sees the
+then enters `MultiSessionManager::create_session` through `CreateSessionOptions::session_id`;
+its internal runtime target injects the ID into the new session header after generation preparation.
+The product factory never sees the
 storage target, keeping the adapter thin and deferred persistence intact.
 
 `SessionDocument::context()` derives model, thinking level, and active tools from the entire selected
@@ -1898,18 +2019,18 @@ JSONL loading repairs only a syntactically torn final append, using a sibling te
 atomic rename. A complete schema-invalid final line and every malformed middle line are hard errors.
 A valid final line missing its newline receives the newline before further appends.
 
-New agent sessions use a deferred `SessionLog`: the header and exact encoded mutations accumulate
+New agent sessions use a deferred `SessionStore`: the header and exact encoded mutations accumulate
 in memory until the first assistant `message_end`, then are written together as one JSONL file.
 Startup followed by quit, interruption before that event, and shell-only use therefore leave no
 empty session in the resume list. Existing/opened logs remain immediately durable, and an unsaved
 log cannot be forked. Whole-session reload reuses the in-memory log so reloading plugins and
 resources does not accidentally create or discard an unsaved session.
-The same shared `SessionLog` is reused for already-materialized sessions: candidate preparation and
+The same shared `SessionStore` is reused for already-materialized sessions: candidate preparation and
 old-plugin shutdown must share one mutation sequence. Final shutdown checkpoints and usage records
 therefore remain visible to the next generation instead of being overwritten by an independently
 opened journal with an older sequence. Resuming the already-active file, including a canonical path
 alias, follows the same ownership rule.
-The CLI also retains the fully validated `SessionLog` used to recover the persisted cwd and hands
+The CLI also retains the fully validated `SessionStore` used to recover the persisted cwd and hands
 that handle to `MultiSessionManager`; generation construction does not replay the same JSONL file a
 second time. Settled sessions keep recovery query-first: the header is read directly, queue and
 operation state come from indexed entries plus the record ledger, and runtime context walks only
@@ -1939,14 +2060,16 @@ same-ID deferred-target correction before appending it. Recovery validation reso
 target, so resume reconstructs the transformed user, assistant, or tool-result message rather than
 the pre-hook value while ordinary display-text metadata remains intact.
 
-`AgentSession::create` and `AgentSession::open` adapt the v4 tree to `PiRuntime` and return the
-session's stable `Arc<AgentSession>` identity. Configuration changes are v4 entries and completed
+`AgentSession::create(runtime, path, options)` and `AgentSession::open(runtime, path, options)`
+adapt the v4 tree to `PiRuntime` and return the activated session's stable `Arc<AgentSession>`
+identity. Configuration changes are v4 entries and completed
 messages are persisted on `message_end`; generation-local prompts and resource diagnostics are not
 duplicated into session storage. Opening restores data state only; executable plugins and resources
 always come from the supplied runtime. Checkout, branch summaries, and compaction rebuild runtime
 context immediately.
-`prepare_create` and `prepare_open` expose the same shared identity as a `PreparedAgentSession` whose
-`session_start` event is deferred, allowing a host to order replacement lifecycle events correctly.
+Preparation and `PreparedAgentSession` are crate-private. The Manager binds capabilities during
+preparation and activates the new session after old-session shutdown. Generation factories provide
+bindings through `PreparedSessionGeneration::bind_session`; callers do not activate sessions.
 
 `pi-session::compaction` ports the Harness `retainedTail` algorithm: provider usage plus trailing
 heuristics estimate context size, cut points never begin at a tool result, oversized turns receive a
@@ -2007,12 +2130,17 @@ including on cancellation; repeated shutdown cannot run those hooks again. This 
 Pi's shutdown-before-extension-invalidation order while retaining Rust's transactional preparation.
 
 Plugin-context scalar and point queries use narrow reads owned by `Agent`, `AgentSession`, and
-`SessionLog`: current model/thinking/running state does not clone the transcript, activity checks do
+`SessionStore`: current model/thinking/running state does not clone the transcript, activity checks do
 not clone the frontend snapshot, and session id/name/label/entry/header reads do not reconstruct a
 `SessionDocument`. Coherent multi-entry inspection remains the explicit `SessionSnapshot` path.
 
 `MultiSessionManager` is the multi-session product Module above `AgentSession`. It owns the injected
-`SessionGenerationFactory` and keeps its active-session map private. Ordinary acquisition,
+`SessionGenerationFactory` and keeps its active-session map private. Its public acquisition Interface
+is `create_session(CreateSessionOptions)` and `open_session(source, OpenSessionOptions)`.
+Creation options combine workspace, path, optional ID/header metadata, and generation overlay;
+opening accepts a path or `SessionSource::Store` without replaying an already-loaded journal.
+Open options apply only to a newly acquired handle, preserving reuse of already-active paths.
+Ordinary acquisition,
 replacement, close, and shutdown operations remain exclusive. UUID-addressed isolated-session
 preparations share the read side of that lifecycle gate, so parallel tool calls can build children
 concurrently while still excluding replacement, close, and shutdown. Opening an already-active
@@ -2328,7 +2456,7 @@ are preserved. Provider-neutral storage, retrieval and record contracts remain a
 memory implementations can use ordinary plugin factories without adding a new lifecycle.
 
 The plugin-facing custom-entry capability permits an atomic extension-state append while the Agent
-itself owns the prompt operation. `SessionLog` still assigns the shared mutation sequence; busy
+itself owns the prompt operation. `SessionStore` still assigns the shared mutation sequence; busy
 compaction, switch, fork, and tree operations remain rejected. This preserves Pi extension-state
 semantics without weakening other session mutation gates. The ordinary capability continues to
 return only success, while the concrete first-party `AgentSession::append_custom_record` Interface
@@ -2341,7 +2469,7 @@ Pi core workflow policy. It creates a fresh `PiSession` through the same
 handle with `wait` and `abort`. Optional initial active tools, model, and thinking level inherit
 from the caller when omitted. `MultiSessionManager` resolves those values into one complete
 `AgentSessionInitialState`, rejects any tool selection outside the caller's active-tool ceiling,
-and passes it through the generation request for product-policy validation. `AgentSessionRuntime`
+and passes it through the generation request for product-policy validation. `SessionSlot`
 applies that state before session construction, so the first provider request and the initial Pi v4
 model/thinking/tool records agree. The generation
 overlay also marks the child as `SessionExecutionOrigin::Subagent` before any hook runs. That
@@ -2588,7 +2716,7 @@ Rust Desktop presentation design, not parity with Pi's subprocess-based example 
 The other five tools use ordinary tool presentation. There is no
 workflow-item or legacy-tool projection. Isolated child files remain outside top-level resume
 discovery; live control remains with the owning session.
-Each `PiSession` has one replaceable current `AgentSession`. Its internal `AgentSessionRuntime`
+Each `PiSession` has one replaceable current `AgentSession`. Its internal `SessionSlot`
 accepts one validated `ResolvedSessionTransition` under the manager lifecycle write guard, dispatches
 `session_before_switch` or `session_before_fork`, settles the active agent, prepares the complete
 next product generation, binds it to the target session log, emits old `session_shutdown`, emits
@@ -2600,7 +2728,7 @@ closes stale `AgentSession` handles so they reject later mutations. New,
 resume, reload, and fork use this transaction. Fork creates a Pi v4 branch copy before
 preparation and removes it if candidate preparation fails.
 
-`pi-session` owns v4 storage and exposes `SessionLog::main_branch_snapshot`, a read-only projection
+Session History owns v4 storage and exposes `SessionStore::main_branch_snapshot`, a read-only projection
 of the active branch, lane pointer, name, and labels into consistently sequenced mutations. It has
 no import-specific manager method, transition variant, destination policy, or compatibility codec.
 The first-party `SessionTransferPlugin` owns `/export`, `/import`, and `/share`, including JSONL and
@@ -2610,9 +2738,11 @@ parent-session provenance from the exported header without changing the source l
 
 The transfer plugin also owns session-file inspection and coding-agent v1/v2/v3 conversion. Native
 v4 files are copied and validated; legacy files are converted into a new v4 destination while
-preserving source files, tree IDs and parents, timestamps, parent-session paths, custom messages,
+preserving source files, tree IDs and parents, timestamps, custom messages,
 compaction context, and unknown agent-message extensions. v1 compaction indices become entry IDs,
 v2 hook messages become custom messages, and v3 retained tails are materialized explicitly.
+Legacy `parentSession` / `branchedFrom` paths are retained only inside the opaque import
+`sourceHeader` metadata; they are not promoted into runtime parent-session ancestry.
 Import checks the source format, requests confirmation through semantic `UiContext`, stages a unique
 destination, then uses the existing command-session `switch` capability. A cancelled switch or
 failed conversion/preparation removes the staged file. Import uses Pi's resume lifecycle reasons;

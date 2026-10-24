@@ -63,7 +63,10 @@ async fn default_converter_filters_custom_messages_without_changing_agent_histor
     assert_eq!(requests[1].messages, expected);
     assert_eq!(&outcome.final_context.messages[..history.len()], history);
     assert_eq!(outcome.new_messages[0], notification);
-    assert_eq!(agent.state().messages, outcome.final_context.messages);
+    assert_eq!(
+        agent.state().messages.as_ref(),
+        &outcome.final_context.messages
+    );
     assert!(events.lock().unwrap().iter().any(|event| matches!(
         event, AgentEvent::MessageEnd { message } if message == &notification
     )));
@@ -210,7 +213,10 @@ async fn agent_options_compose_plugin_transform_and_conversion_on_every_turn() {
         roles(&outcome.final_context.messages),
         ["user", "assistant", "toolResult", "assistant"]
     );
-    assert_eq!(agent.state().messages, outcome.final_context.messages);
+    assert_eq!(
+        agent.state().messages.as_ref(),
+        &outcome.final_context.messages
+    );
 }
 
 #[tokio::test]

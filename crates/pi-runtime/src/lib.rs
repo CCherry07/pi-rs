@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use futures::StreamExt;
 use pi_agent::{
     Agent, AgentConfigurationPatch, AgentLoopOutcome, AgentOptions, AgentRestoreState,
-    AgentRuntime, PromptInput, StreamAssembler,
+    AgentRuntime, AgentStateSnapshot, PreparedAgentConfiguration, PromptInput, StreamAssembler,
 };
 use pi_core::{
     AbortHandle, AbortSignal, AssistantMessage, ContentBlock, ImageContent, Message, ModelId,
@@ -69,6 +69,43 @@ pub struct RuntimeCompletionRequest {
     pub thinking_level: ThinkingLevel,
     pub thinking_budgets: Option<ThinkingBudgets>,
     pub max_output_tokens: Option<u64>,
+}
+
+/// A selection change prepared against one immutable runtime generation.
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeConfigurationPatch {
+    pub model: Option<ModelSelection>,
+    pub thinking_level: Option<ThinkingLevel>,
+    pub active_tools: Option<Vec<String>>,
+}
+
+/// Reserves generation and Agent configuration until journal persistence has
+/// succeeded. Dropping this value leaves configuration and prompt metadata intact.
+#[must_use = "commit the prepared configuration or drop it to roll back"]
+pub struct PreparedRuntimeConfiguration<'a> {
+    _reload_guard: tokio::sync::MutexGuard<'a, ()>,
+    agent: PreparedAgentConfiguration<'a>,
+    generation: Arc<RuntimeGeneration>,
+    prompt_options: Option<Option<serde_json::Value>>,
+}
+
+impl PreparedRuntimeConfiguration<'_> {
+    pub fn configuration(&self) -> &AgentStateSnapshot {
+        self.agent.configuration()
+    }
+
+    /// The caller may persist this configuration before publishing it. No
+    /// fallible work or callbacks run after persistence.
+    pub fn commit(self) {
+        if let Some(options) = self.prompt_options {
+            *self
+                .generation
+                .prompt_options
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = options;
+        }
+        self.agent.commit();
+    }
 }
 
 /// Retry policy for standalone completions such as compaction and abandoned-
@@ -994,53 +1031,87 @@ impl PiRuntime {
         self.agent.state().active_tools
     }
 
-    /// Atomically updates active tools and a dynamic base prompt. Exact final
-    /// prompts retain their text. The agent must be idle.
+    /// Prepares all selection and dynamic-prompt changes without modifying
+    /// live state, then reserves the generation and Agent for an infallible commit.
+    pub fn prepare_configuration(
+        &self,
+        patch: RuntimeConfigurationPatch,
+    ) -> Result<PreparedRuntimeConfiguration<'_>, RuntimeError> {
+        let reload_guard = self
+            .reload_lock
+            .try_lock()
+            .map_err(|_| RuntimeError::Busy)?;
+        let generation = self.current_generation();
+        let runtime = self.agent.runtime();
+        let registries = runtime.registries();
+        if let Some(model) = &patch.model
+            && registries.provider(&model.provider).is_none()
+        {
+            return Err(RuntimeError::Provider(format!(
+                "provider not found: {}",
+                model.provider
+            )));
+        }
+        let mut prompt_options = None;
+        let mut system_prompt = None;
+        let active_tools = if let Some(tools) = patch.active_tools {
+            let mut unique = std::collections::HashSet::new();
+            let tools = tools
+                .into_iter()
+                .filter(|tool| unique.insert(tool.clone()))
+                .collect::<Vec<_>>();
+            let unknown = tools
+                .iter()
+                .filter(|tool| registries.tool(tool).is_none())
+                .cloned()
+                .collect::<Vec<_>>();
+            if !unknown.is_empty() {
+                return Err(RuntimeError::UnknownTools(unknown.join(", ")));
+            }
+            let output = generation
+                .prompt
+                .as_ref()
+                .map(|prompt| assemble_prompt(prompt, &tools, &self.workspace, registries))
+                .transpose()?;
+            prompt_options = Some(output.as_ref().and_then(|output| output.options.clone()));
+            system_prompt = output.map(|output| output.system_prompt);
+            Some(tools)
+        } else {
+            None
+        };
+        let (provider_id, model_id) = patch
+            .model
+            .map(|model| (Some(model.provider), Some(model.model_id)))
+            .unwrap_or_default();
+        let agent = self
+            .agent
+            .prepare_configuration(AgentConfigurationPatch {
+                system_prompt,
+                active_tools,
+                provider_id,
+                model_id,
+                thinking_level: patch.thinking_level,
+                ..AgentConfigurationPatch::default()
+            })
+            .map_err(|error| RuntimeError::Agent(error.to_string()))?;
+        Ok(PreparedRuntimeConfiguration {
+            _reload_guard: reload_guard,
+            agent,
+            generation,
+            prompt_options,
+        })
+    }
+
+    /// Atomically updates active tools and a dynamic base prompt.
     pub fn set_active_tools(
         &self,
         tools: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<(), RuntimeError> {
-        let _reload_guard = self
-            .reload_lock
-            .try_lock()
-            .map_err(|_| RuntimeError::Busy)?;
-        let mut unique = std::collections::HashSet::new();
-        let tools = tools
-            .into_iter()
-            .map(Into::into)
-            .filter(|tool| unique.insert(tool.clone()))
-            .collect::<Vec<String>>();
-        let unknown = tools
-            .iter()
-            .filter(|tool| self.agent.runtime().registries().tool(tool).is_none())
-            .cloned()
-            .collect::<Vec<_>>();
-        if !unknown.is_empty() {
-            return Err(RuntimeError::UnknownTools(unknown.join(", ")));
-        }
-        let generation = self.current_generation();
-        let mut stored_prompt = generation
-            .prompt_options
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let runtime = self.agent.runtime();
-        let output = generation
-            .prompt
-            .as_ref()
-            .map(|prompt| assemble_prompt(prompt, &tools, &self.workspace, runtime.registries()))
-            .transpose()?;
-        let (system_prompt, prompt_options) = match output {
-            Some(output) => (Some(output.system_prompt), output.options),
-            None => (None, None),
-        };
-        self.agent
-            .configure(AgentConfigurationPatch {
-                active_tools: Some(tools),
-                system_prompt,
-                ..AgentConfigurationPatch::default()
-            })
-            .map_err(|error| RuntimeError::Agent(error.to_string()))?;
-        *stored_prompt = prompt_options;
+        self.prepare_configuration(RuntimeConfigurationPatch {
+            active_tools: Some(tools.into_iter().map(Into::into).collect()),
+            ..RuntimeConfigurationPatch::default()
+        })?
+        .commit();
         Ok(())
     }
 
@@ -1049,37 +1120,24 @@ impl PiRuntime {
         provider_id: ProviderId,
         model_id: ModelId,
     ) -> Result<(), RuntimeError> {
-        let _reload_guard = self
-            .reload_lock
-            .try_lock()
-            .map_err(|_| RuntimeError::Busy)?;
-        let runtime = self.agent.runtime();
-        let registries = runtime.registries();
-        if registries.has_providers() && registries.provider(&provider_id).is_none() {
-            return Err(RuntimeError::Provider(format!(
-                "provider not found: {provider_id}"
-            )));
-        }
-        self.agent
-            .configure(AgentConfigurationPatch {
-                provider_id: Some(provider_id),
-                model_id: Some(model_id),
-                ..AgentConfigurationPatch::default()
-            })
-            .map_err(|error| RuntimeError::Agent(error.to_string()))
+        self.prepare_configuration(RuntimeConfigurationPatch {
+            model: Some(ModelSelection {
+                provider: provider_id,
+                model_id,
+            }),
+            ..RuntimeConfigurationPatch::default()
+        })?
+        .commit();
+        Ok(())
     }
 
     pub fn set_thinking_level(&self, thinking_level: ThinkingLevel) -> Result<(), RuntimeError> {
-        let _reload_guard = self
-            .reload_lock
-            .try_lock()
-            .map_err(|_| RuntimeError::Busy)?;
-        self.agent
-            .configure(AgentConfigurationPatch {
-                thinking_level: Some(thinking_level),
-                ..AgentConfigurationPatch::default()
-            })
-            .map_err(|error| RuntimeError::Agent(error.to_string()))
+        self.prepare_configuration(RuntimeConfigurationPatch {
+            thinking_level: Some(thinking_level),
+            ..RuntimeConfigurationPatch::default()
+        })?
+        .commit();
+        Ok(())
     }
 
     /// Restores persisted transcript and configuration into the current
@@ -1602,6 +1660,79 @@ fn input_user_message(text: String, images: Vec<ImageContent>, timestamp_ms: i64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn prepared_configuration_pins_generation_and_prompt_until_commit() {
+        let runtime = PiRuntime::builder()
+            .provider_plugin(ScriptedProviderPlugin::scripted([ScriptedTurn::Text(
+                "done".into(),
+            )]))
+            .plugin(TestToolsPlugin::new())
+            .agent_options(AgentOptions {
+                active_tools: vec!["echo".into()],
+                ..AgentOptions::default()
+            })
+            .system_prompt(SystemPrompt::dynamic(|_: &WorkspaceSnapshot| {
+                Ok(PreparedSystemPrompt::new(|context: PromptContext<'_>| {
+                    let tools = context
+                        .active_tools
+                        .iter()
+                        .map(|tool| tool.name.as_str())
+                        .collect::<Vec<_>>();
+                    Ok(PromptOutput {
+                        system_prompt: tools.join(","),
+                        options: Some(serde_json::json!({"tools": tools})),
+                    })
+                }))
+            }))
+            .build()
+            .unwrap();
+        let prepare = || {
+            runtime
+                .prepare_configuration(RuntimeConfigurationPatch {
+                    active_tools: Some(vec!["delay".into(), "delay".into()]),
+                    ..RuntimeConfigurationPatch::default()
+                })
+                .unwrap()
+        };
+        let prepared = prepare();
+        assert_eq!(prepared.configuration().active_tools, ["delay"]);
+        assert_eq!(runtime.active_tools(), ["echo"]);
+        assert_eq!(runtime.agent().state().system_prompt, "echo");
+        assert_eq!(
+            runtime.prompt_options().unwrap()["tools"],
+            serde_json::json!(["echo"])
+        );
+        assert!(matches!(
+            runtime.set_thinking_level(ThinkingLevel::High),
+            Err(RuntimeError::Busy)
+        ));
+        assert!(
+            runtime
+                .agent()
+                .configure(AgentConfigurationPatch::default())
+                .is_err()
+        );
+        let mut reload = Box::pin(runtime.reload());
+        assert!(futures::poll!(&mut reload).is_pending());
+        drop(reload);
+        drop(prepared);
+        assert_eq!(runtime.active_tools(), ["echo"]);
+        assert_eq!(runtime.agent().state().system_prompt, "echo");
+
+        let prepared = prepare();
+        let mut prompt = Box::pin(runtime.prompt("start after commit"));
+        assert!(futures::poll!(&mut prompt).is_pending());
+        prepared.commit();
+        prompt.await.unwrap();
+        assert_eq!(runtime.active_tools(), ["delay"]);
+        assert_eq!(
+            runtime.prompt_options().unwrap()["tools"],
+            serde_json::json!(["delay"])
+        );
+        runtime.reload().await.unwrap();
+        assert_eq!(runtime.active_tools(), ["delay"]);
+    }
     use pi_agent::{AgentEventListener, AgentOptions};
     use pi_core::{
         AgentEvent, ContentBlock, CustomMessage, CustomMessageContent, Message, PluginId,
@@ -2435,8 +2566,8 @@ mod tests {
                 if text.text == "rewritten assistant"))
         );
         assert_eq!(
-            runtime.agent().state().messages,
-            outcome.final_context.messages
+            runtime.agent().state().messages.as_ref(),
+            &outcome.final_context.messages
         );
         assert!(runtime.plugin_diagnostics().iter().any(|diagnostic| {
             diagnostic.plugin_id == PluginId::new("wrong-message-end-role")
@@ -3434,7 +3565,7 @@ mod tests {
                 model_id: state.model_id,
                 thinking_level: state.thinking_level,
                 active_tools: state.active_tools,
-                messages: state.messages,
+                messages: state.messages.as_ref().clone(),
             })
             .unwrap();
         assert_eq!(renders.lock().unwrap().len(), 1);

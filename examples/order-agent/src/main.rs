@@ -8,7 +8,7 @@ use pi_core::{
     ToolResult, ToolSpec,
 };
 use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
-use pi_sdk::AgentHarness;
+use pi_sdk::{AgentHarness, CreateSessionOptions};
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::{Value, json};
 
@@ -95,10 +95,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage = tempfile::tempdir()?;
     let session = harness
         .sessions()
-        .create_session(storage.path(), storage.path().join("order.jsonl"))
+        .create_session(CreateSessionOptions::new(
+            storage.path(),
+            storage.path().join("order.jsonl"),
+        ))
         .await?;
-    session.current().submit("Where is order ORD-42?").await?;
-    for message in &session.current().runtime().agent().state().messages {
+    session.current().prompt("Where is order ORD-42?").await?;
+    for message in session.current().snapshot().agent.messages.iter() {
         if let Message::Assistant(assistant) = message {
             for block in &assistant.content {
                 if let ContentBlock::Text(text) = block {

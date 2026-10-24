@@ -13,7 +13,6 @@ const TRUST_REQUIRING_PI_RESOURCES: &[&str] = &[
     "mcp.json",
     "settings.json",
     "extensions",
-    "desktop-extensions",
     "plugins",
     "plugins.json",
     "plugins.lock",
@@ -540,6 +539,14 @@ mod tests {
             fs::write(root.path().join(".pi").join(resource), "{}").unwrap();
             assert!(has_trust_requiring_project_resources(root.path()).unwrap());
         }
+    }
+
+    #[test]
+    fn retired_desktop_extensions_do_not_require_trust() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".pi/desktop-extensions/example")).unwrap();
+
+        assert!(!has_trust_requiring_project_resources(root.path()).unwrap());
     }
 
     #[test]

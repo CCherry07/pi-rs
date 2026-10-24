@@ -391,10 +391,9 @@ mod tests {
     use pi_runtime::{PiRuntime, SystemPrompt};
     use pi_session::{
         AgentSessionOptions, MultiSessionManager, PiPluginContext, PiSession, PluginContextBinding,
-        PluginUiBridge, PreparedSessionGeneration, SessionBeforeSwitchEvent,
+        PluginUiBridge, PreparedSessionGeneration, PromptOutcome, SessionBeforeSwitchEvent,
         SessionBeforeSwitchResult, SessionError, SessionGenerationFactory,
         SessionGenerationRequest, SessionPluginContext, SessionShutdownEvent, SessionStartEvent,
-        SubmitOutcome,
     };
     use pi_test_support::ScriptedProviderPlugin;
 
@@ -620,19 +619,24 @@ mod tests {
             uploader: uploader.clone(),
             lifecycle: lifecycle.clone(),
         });
+        let initial_path = session_directory.join("current.jsonl");
+        let initial_log = pi_session::SessionStore::create(
+            &initial_path,
+            pi_session::SessionHeader::new("transfer-fixture", &workspace),
+        )
+        .unwrap();
+        initial_log
+            .append_message(Message::User(UserMessage::text("portable conversation", 1)))
+            .unwrap();
+        drop(initial_log);
         let handle = sessions
-            .create_session(&workspace, session_directory.join("current.jsonl"))
+            .open_session(&initial_path, Default::default())
             .await
             .unwrap();
         let current = handle.current();
-        current
-            .log()
-            .append_message(Message::User(UserMessage::text("portable conversation", 1)))
-            .unwrap();
-        current.log().materialize().unwrap();
         assert_eq!(
             current
-                .runtime()
+                .catalog()
                 .command_specs()
                 .into_iter()
                 .map(|spec| spec.name)
@@ -644,17 +648,17 @@ mod tests {
         let html = export_directory.join("portable session.html");
         assert!(matches!(
             current
-                .submit(format!("/export \"{}\"", jsonl.display()))
+                .prompt(format!("/export \"{}\"", jsonl.display()))
                 .await
                 .unwrap(),
-            SubmitOutcome::Handled
+            PromptOutcome::Handled
         ));
         assert!(matches!(
             current
-                .submit(format!("/export \"{}\"", html.display()))
+                .prompt(format!("/export \"{}\"", html.display()))
                 .await
                 .unwrap(),
-            SubmitOutcome::Handled
+            PromptOutcome::Handled
         ));
         assert!(
             std::fs::read_to_string(&html)
@@ -663,8 +667,8 @@ mod tests {
         );
 
         assert!(matches!(
-            current.submit("/share").await.unwrap(),
-            SubmitOutcome::Handled
+            current.prompt("/share").await.unwrap(),
+            PromptOutcome::Handled
         ));
         assert!(
             uploader
@@ -679,16 +683,19 @@ mod tests {
         let previous_path = handle.path();
         let import = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            current.submit(format!("/import \"{}\"", jsonl.display())),
+            current.prompt(format!("/import \"{}\"", jsonl.display())),
         )
         .await
         .expect("plugin import should not deadlock")
         .unwrap();
-        assert!(matches!(import, SubmitOutcome::Handled));
+        assert!(matches!(import, PromptOutcome::Handled));
         assert_ne!(handle.path(), previous_path);
         assert!(handle.path().starts_with(&session_directory));
         assert!(jsonl.exists(), "import keeps the portable source file");
-        assert_eq!(handle.current().log().load().unwrap().messages().len(), 1);
+        assert_eq!(
+            handle.current().history().load().unwrap().messages().len(),
+            1
+        );
         assert!(current.is_closed());
         assert_eq!(
             *lifecycle.events.lock().unwrap(),
@@ -730,7 +737,7 @@ mod tests {
                 )
                 .unwrap();
             } else {
-                pi_session::SessionLog::create(
+                pi_session::SessionStore::create(
                     &source,
                     pi_session::SessionHeader::new("portable", directory.path()),
                 )
@@ -747,7 +754,10 @@ mod tests {
                 lifecycle: lifecycle.clone(),
             });
             let handle = sessions
-                .create_session(directory.path(), session_directory.join("current.jsonl"))
+                .create_session(pi_session::CreateSessionOptions::new(
+                    directory.path(),
+                    session_directory.join("current.jsonl"),
+                ))
                 .await
                 .unwrap();
             let current = handle.current();
@@ -759,11 +769,11 @@ mod tests {
                 .store(fail_prepare, Ordering::Release);
 
             let result = current
-                .submit(format!("/import {}", source.display()))
+                .prompt(format!("/import {}", source.display()))
                 .await;
 
             if cancel_switch {
-                assert!(matches!(result.unwrap(), SubmitOutcome::Handled));
+                assert!(matches!(result.unwrap(), PromptOutcome::Handled));
             } else {
                 assert!(result.is_err());
             }
@@ -783,7 +793,7 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(&session_directory).unwrap();
         let source = directory.path().join("source.jsonl");
-        let source_log = pi_session::SessionLog::create(
+        let source_log = pi_session::SessionStore::create(
             &source,
             pi_session::SessionHeader::new("source", &workspace),
         )
@@ -800,7 +810,10 @@ mod tests {
             lifecycle: Arc::new(RecordingLifecycle::default()),
         });
         let handle = sessions
-            .create_session(&workspace, session_directory.join("current.jsonl"))
+            .create_session(pi_session::CreateSessionOptions::new(
+                &workspace,
+                session_directory.join("current.jsonl"),
+            ))
             .await
             .unwrap();
         let original = handle.path();
@@ -808,10 +821,10 @@ mod tests {
         assert!(matches!(
             handle
                 .current()
-                .submit(format!("/import {}", source.display()))
+                .prompt(format!("/import {}", source.display()))
                 .await
                 .unwrap(),
-            SubmitOutcome::Handled
+            PromptOutcome::Handled
         ));
         assert_eq!(handle.path(), original);
         assert_eq!(

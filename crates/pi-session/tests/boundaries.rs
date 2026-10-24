@@ -7,7 +7,7 @@ use pi_plugin::{
 use pi_runtime::{PiRuntime, SystemPrompt};
 use pi_session::{
     AgentSession, AgentSessionOptions, CompactionEntry, CompactionSettings, ContextEditEntry,
-    ContextEditReplacement, CustomMessageEntry, SessionEntry, SessionLog,
+    ContextEditReplacement, CustomMessageEntry, SessionEntry, SessionStore,
 };
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::json;
@@ -141,7 +141,7 @@ async fn turn_boundary_commits_edits_before_the_next_request_and_chains_previews
     let path = dir.path().join("session.jsonl");
     let persisted = path.clone();
     let first = BoundaryPlugin::turn("first", move |event| {
-        let (_, document) = SessionLog::open(&persisted).unwrap();
+        let (_, document) = SessionStore::open(&persisted).unwrap();
         assert!(
             document
                 .entries
@@ -178,7 +178,7 @@ async fn turn_boundary_commits_edits_before_the_next_request_and_chains_previews
         }
         BoundaryResult::default()
     });
-    let session = AgentSession::create_with_options(
+    let session = AgentSession::create(
         runtime(provider_plugin, vec![first, second], false),
         &path,
         options(),
@@ -189,7 +189,7 @@ async fn turn_boundary_commits_edits_before_the_next_request_and_chains_previews
     assert_eq!(provider.requests().len(), 2);
     assert!(text(&provider.requests()[1].messages).contains("edited answer"));
     assert!(text(&provider.requests()[1].messages).contains("continue work"));
-    let (_, document) = SessionLog::open(&path).unwrap();
+    let (_, document) = SessionStore::open(&path).unwrap();
     assert!(document.entries.iter().any(|entry| matches!(&entry.entry, SessionEntry::Message(value) if serde_json::to_string(value).unwrap().contains("first"))));
 }
 
@@ -232,7 +232,7 @@ async fn before_settle_continues_once_and_settled_fires_after_the_last_run() {
         ScriptedTurn::Text("verified".into()),
     ]);
     let provider = p.provider();
-    let session = AgentSession::create_with_options(
+    let session = AgentSession::create(
         runtime(p, vec![plugin], false),
         dir.path().join("s.jsonl"),
         options().retry(pi_session::AutoRetrySettings {
@@ -284,7 +284,7 @@ async fn invalid_drafts_are_atomic_and_later_handlers_can_repair_them() {
         });
         let p = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("answer".into())]);
         let provider = p.provider();
-        let session = AgentSession::create_with_options(
+        let session = AgentSession::create(
             runtime(p, vec![first, second], false),
             dir.path().join("s.jsonl"),
             options(),
@@ -293,7 +293,7 @@ async fn invalid_drafts_are_atomic_and_later_handlers_can_repair_them() {
         .unwrap();
         session.prompt("start").await.unwrap();
         assert_eq!(provider.requests().len(), 1);
-        let entries = session.log().branch_entries().unwrap();
+        let entries = session.history().branch_entries().unwrap();
         let wire = serde_json::to_string(&entries).unwrap();
         assert!(!wire.contains("must not leak"));
         assert_eq!(wire.contains("repaired"), repair);
@@ -309,7 +309,7 @@ async fn invalid_continuation_and_controller_stop_cannot_spin() {
         });
         let p = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".into())]);
         let provider = p.provider();
-        let session = AgentSession::create_with_options(
+        let session = AgentSession::create(
             runtime(p, vec![plugin], stop),
             dir.path().join("s.jsonl"),
             options(),
@@ -321,7 +321,7 @@ async fn invalid_continuation_and_controller_stop_cannot_spin() {
         if !stop {
             assert!(
                 session
-                    .runtime()
+                    .catalog()
                     .plugin_diagnostics()
                     .iter()
                     .any(|d| d.message.contains("without runnable"))
@@ -335,11 +335,11 @@ async fn edits_are_branch_local_survive_resume_and_preserve_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     let p = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("answer".into())]);
-    let session = AgentSession::create_with_options(runtime(p, vec![], false), &path, options())
+    let session = AgentSession::create(runtime(p, vec![], false), &path, options())
         .await
         .unwrap();
     session.prompt("original").await.unwrap();
-    let branch = session.log().branch_entries().unwrap();
+    let branch = session.history().branch_entries().unwrap();
     let target = branch
         .iter()
         .find(
@@ -353,7 +353,7 @@ async fn edits_are_branch_local_survive_resume_and_preserve_metadata() {
         .edit_context(&target, replacement("replacement"))
         .unwrap();
     let edited_leaf = session
-        .log()
+        .history()
         .branch_entries()
         .unwrap()
         .last()
@@ -361,17 +361,17 @@ async fn edits_are_branch_local_survive_resume_and_preserve_metadata() {
         .id
         .clone();
     session.edit_context(&target, None).unwrap();
-    assert!(!text(&session.runtime().agent().state().messages).contains("replacement"));
+    assert!(!text(&session.snapshot().agent.messages).contains("replacement"));
     session.checkout(Some(&original_leaf)).await.unwrap();
-    assert!(text(&session.runtime().agent().state().messages).contains("original"));
+    assert!(text(&session.snapshot().agent.messages).contains("original"));
     session.checkout(Some(&edited_leaf)).await.unwrap();
     assert!(
-        text(&session.runtime().agent().state().messages).contains("replacement"),
+        text(&session.snapshot().agent.messages).contains("replacement"),
         "snapshot={:?} context={:?}",
         session.snapshot().agent.messages,
-        session.log().context().unwrap()
+        session.history().context().unwrap()
     );
-    let (log, _) = SessionLog::open(&path).unwrap();
+    let (log, _) = SessionStore::open(&path).unwrap();
     assert!(
         serde_json::to_string(&log.context().unwrap().messages)
             .unwrap()
@@ -385,7 +385,7 @@ async fn edits_are_branch_local_survive_resume_and_preserve_metadata() {
 async fn editing_retained_messages_after_repeated_compaction_keeps_provenance() {
     let dir = tempfile::tempdir().unwrap();
     let p = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("answer".into())]);
-    let session = AgentSession::create_with_options(
+    let session = AgentSession::create(
         runtime(p, vec![], false),
         dir.path().join("s.jsonl"),
         options(),
@@ -394,7 +394,7 @@ async fn editing_retained_messages_after_repeated_compaction_keeps_provenance() 
     .unwrap();
     session.prompt("keep me").await.unwrap();
     let target = session
-        .log()
+        .history()
         .branch_entries()
         .unwrap()
         .iter()
@@ -406,7 +406,7 @@ async fn editing_retained_messages_after_repeated_compaction_keeps_provenance() 
         .clone();
     for replacement_text in ["first edit", "second edit"] {
         let retained_tail = session
-            .log()
+            .history()
             .context()
             .unwrap()
             .messages
@@ -431,10 +431,10 @@ async fn editing_retained_messages_after_repeated_compaction_keeps_provenance() 
             text(&session.snapshot().agent.messages).contains(replacement_text),
             "expected={replacement_text} snapshot={:?} branch={:?}",
             session.snapshot().agent.messages,
-            session.log().branch_entries().unwrap()
+            session.history().branch_entries().unwrap()
         );
     }
-    let (_, document) = SessionLog::open(session.log().path()).unwrap();
+    let (_, document) = SessionStore::open(session.history().path()).unwrap();
     let context = pi_session::build_session_context(
         &document
             .branch()
@@ -484,7 +484,7 @@ async fn abort_during_before_settle_signals_the_hook_and_prevents_another_reques
         .system_prompt(SystemPrompt::Final("test".into()))
         .build()
         .unwrap();
-    let session = AgentSession::create_with_options(runtime, dir.path().join("s.jsonl"), options())
+    let session = AgentSession::create(runtime, dir.path().join("s.jsonl"), options())
         .await
         .unwrap();
     let run_session = session.clone();
@@ -493,11 +493,15 @@ async fn abort_during_before_settle_signals_the_hook_and_prevents_another_reques
         .await
         .unwrap();
     session.abort();
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), run)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let pi_session::PromptOutcome::Agent(outcome) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("expected an agent run");
+    };
     assert_eq!(outcome.stop, pi_agent::AgentLoopStop::Aborted);
     assert_eq!(provider.requests().len(), 1);
 }
@@ -532,7 +536,7 @@ async fn explicit_boundary_continuation_delivers_steering_before_deferred_follow
         ScriptedTurn::Text("third".into()),
     ]);
     let provider = p.provider();
-    let session = AgentSession::create_with_options(
+    let session = AgentSession::create(
         runtime(p, vec![plugin], false),
         dir.path().join("s.jsonl"),
         options(),
@@ -552,7 +556,7 @@ async fn explicit_boundary_continuation_delivers_steering_before_deferred_follow
 #[test]
 fn content_edits_preserve_wire_metadata_and_reject_cross_branch_batches() {
     let dir = tempfile::tempdir().unwrap();
-    let log = SessionLog::create(
+    let log = SessionStore::create(
         dir.path().join("s.jsonl"),
         pi_session::SessionHeader::new("s", dir.path()),
     )
@@ -597,7 +601,7 @@ async fn tool_results_are_durable_and_editable_before_the_next_provider_request(
             return BoundaryResult::default();
         }
         assert_eq!(event.tool_result_entry_ids.len(), 1);
-        let (log, _) = SessionLog::open(&durable_path).unwrap();
+        let (log, _) = SessionStore::open(&durable_path).unwrap();
         assert!(
             log.get_entry(event.message_entry_id.as_ref().unwrap())
                 .is_some()
@@ -633,14 +637,14 @@ async fn tool_results_are_durable_and_editable_before_the_next_provider_request(
         .system_prompt(SystemPrompt::Final("test".into()))
         .build()
         .unwrap();
-    let session = AgentSession::create_with_options(runtime, &path, options())
+    let session = AgentSession::create(runtime, &path, options())
         .await
         .unwrap();
     session.prompt("use tool").await.unwrap();
     let requests = provider.requests();
     assert_eq!(requests.len(), 2);
     assert!(requests[1].messages.iter().any(|message| matches!(message, Message::ToolResult(value) if serde_json::to_string(value).unwrap().contains("sanitized result"))));
-    assert!(session.log().branch_entries().unwrap().iter().any(|entry| matches!(&entry.entry, SessionEntry::Message(m) if m.message.role()=="toolResult" && serde_json::to_string(&m.message).unwrap().contains("secret"))));
+    assert!(session.history().branch_entries().unwrap().iter().any(|entry| matches!(&entry.entry, SessionEntry::Message(m) if m.message.role()=="toolResult" && serde_json::to_string(&m.message).unwrap().contains("secret"))));
 }
 
 struct BoundaryCompactionProbe {
@@ -759,7 +763,7 @@ async fn edits_invalidate_stale_usage_and_unsent_boundary_input_survives_compact
             .system_prompt(SystemPrompt::Final("test".into()))
             .build()
             .unwrap();
-        let session = AgentSession::create_with_options(
+        let session = AgentSession::create(
             runtime,
             dir.path().join("s.jsonl"),
             AgentSessionOptions::default()
@@ -836,7 +840,7 @@ async fn boundary_compaction_previews_and_commits_retained_edits_or_summary_only
             ScriptedTurn::Text("done".into()),
         ]);
         let provider = p.provider();
-        let session = AgentSession::create_with_options(
+        let session = AgentSession::create(
             runtime(p, vec![plugin], false),
             dir.path().join("s.jsonl"),
             options(),

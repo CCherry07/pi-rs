@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use pi_core::{ContentBlock, CustomMessageContent, Message};
 use pi_session::{
-    AgentMessage, AgentSession, SessionDocument, SessionEntry, SessionError, SessionLog,
+    AgentMessage, AgentSession, SessionDocument, SessionEntry, SessionError, SessionStore,
 };
 use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
 use serde_json::Value;
@@ -58,42 +58,69 @@ pub fn export_jsonl(
 ) -> Result<PathBuf, String> {
     let destination = requested_path.map_or_else(
         || {
-            session
-                .runtime()
-                .cwd()
-                .join(format!("pi-rs-session-{}.jsonl", session.log().header().id))
+            session.catalog().cwd().join(format!(
+                "pi-rs-session-{}.jsonl",
+                session.history().header().id
+            ))
         },
-        |path| resolve_user_path(session.runtime().cwd(), path),
+        |path| resolve_user_path(session.catalog().cwd(), path),
     );
-    export_branch(session.log(), &destination).map_err(|error| error.to_string())
+    export_history(session.history(), &destination).map_err(|error| error.to_string())
 }
 
 /// Exports the active branch from an existing materialized session file.
 pub fn export_jsonl_file(source: &Path, destination: &Path) -> Result<PathBuf, String> {
-    let (log, _) = SessionLog::open(source).map_err(|error| error.to_string())?;
-    export_branch(&log, destination).map_err(|error| error.to_string())
+    let (store, _) = SessionStore::open(source).map_err(|error| error.to_string())?;
+    export_branch(&store, destination).map_err(|error| error.to_string())
 }
 
 /// Writes the active branch as a portable v4 file, replacing its destination atomically.
-pub fn export_branch(log: &SessionLog, destination: &Path) -> Result<PathBuf, SessionError> {
-    if !log.is_materialized() {
+pub fn export_branch(store: &SessionStore, destination: &Path) -> Result<PathBuf, SessionError> {
+    export_snapshot(
+        store.is_materialized(),
+        store.path(),
+        store.header(),
+        || store.main_branch_snapshot().map_err(Into::into),
+        destination,
+    )
+}
+
+fn export_history(
+    history: pi_session::SessionHistory<'_>,
+    destination: &Path,
+) -> Result<PathBuf, SessionError> {
+    export_snapshot(
+        history.is_materialized(),
+        history.path(),
+        history.header(),
+        || history.main_branch_snapshot(),
+        destination,
+    )
+}
+
+fn export_snapshot(
+    materialized: bool,
+    source: &Path,
+    mut header: pi_session::SessionHeader,
+    snapshot: impl FnOnce() -> Result<Vec<pi_session::SessionMutation>, SessionError>,
+    destination: &Path,
+) -> Result<PathBuf, SessionError> {
+    if !materialized {
         return Err(SessionError::Storage(
             "nothing to export yet; wait for the first assistant response".to_string(),
         ));
     }
-    if destination == log.path()
+    if destination == source
         || std::fs::canonicalize(destination)
-            .is_ok_and(|path| std::fs::canonicalize(log.path()).is_ok_and(|source| source == path))
+            .is_ok_and(|path| std::fs::canonicalize(source).is_ok_and(|source| source == path))
     {
         return Err(SessionError::Storage(
             "cannot export over the active session file".to_string(),
         ));
     }
-    let mutations = log.main_branch_snapshot()?;
-    let mut header = log.header();
+    let mutations = snapshot()?;
     header.created_at = pi_utils::time::unix_timestamp_ms();
     header.parent_session_id = None;
-    header.legacy_parent_session_path = None;
     atomic_write_with(destination, |file| {
         serde_json::to_writer(&mut *file, &header)?;
         file.write_all(b"\n")?;
@@ -112,21 +139,24 @@ pub fn export_html(
 ) -> Result<PathBuf, String> {
     let destination = requested_path.map_or_else(
         || {
-            session
-                .runtime()
-                .cwd()
-                .join(format!("pi-rs-session-{}.html", session.log().header().id))
+            session.catalog().cwd().join(format!(
+                "pi-rs-session-{}.html",
+                session.history().header().id
+            ))
         },
-        |path| resolve_user_path(session.runtime().cwd(), path),
+        |path| resolve_user_path(session.catalog().cwd(), path),
     );
     export_html_to(session, &destination)
 }
 
 pub fn export_html_to(session: &AgentSession, destination: &Path) -> Result<PathBuf, String> {
-    if !session.log().is_materialized() {
+    if !session.history().is_materialized() {
         return Err("nothing to export yet; start a conversation first".to_string());
     }
-    let document = session.log().load().map_err(|error| error.to_string())?;
+    let document = session
+        .history()
+        .load()
+        .map_err(|error| error.to_string())?;
     let rendered = render_document_html(&document).map_err(|error| error.to_string())?;
     atomic_write(destination, rendered.as_bytes()).map_err(|error| error.to_string())?;
     Ok(destination.to_path_buf())
@@ -134,7 +164,8 @@ pub fn export_html_to(session: &AgentSession, destination: &Path) -> Result<Path
 
 /// Renders an existing materialized session file as standalone HTML.
 pub fn export_html_file(source: &Path, destination: &Path) -> Result<PathBuf, String> {
-    let (_, document) = pi_session::SessionLog::open(source).map_err(|error| error.to_string())?;
+    let (_, document) =
+        pi_session::SessionStore::open(source).map_err(|error| error.to_string())?;
     let rendered = render_document_html(&document).map_err(|error| error.to_string())?;
     atomic_write(destination, rendered.as_bytes()).map_err(|error| error.to_string())?;
     Ok(destination.to_path_buf())
@@ -520,7 +551,7 @@ fn home_directory() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use pi_core::{AssistantMessage, StopReason, Usage, UserMessage};
-    use pi_session::{SessionHeader, SessionLog};
+    use pi_session::{SessionHeader, SessionStore};
 
     use super::*;
 
@@ -530,7 +561,7 @@ mod tests {
         let source = directory.path().join("source.jsonl");
         let destination = directory.path().join("portable.jsonl");
         let log =
-            SessionLog::create_deferred(&source, SessionHeader::new("source", directory.path()))
+            SessionStore::create_deferred(&source, SessionHeader::new("source", directory.path()))
                 .unwrap();
         log.append_message(Message::User(UserMessage::text("pending", 1)))
             .unwrap();
@@ -547,7 +578,7 @@ mod tests {
         let export_path = directory.path().join("portable.jsonl");
         let mut source_header = SessionHeader::new("source", directory.path());
         source_header.parent_session_id = Some("parent-session".to_string());
-        let log = SessionLog::create(&source_path, source_header).unwrap();
+        let log = SessionStore::create(&source_path, source_header).unwrap();
         let root = log
             .append_message(Message::User(UserMessage::text("root", 1)))
             .unwrap();
@@ -564,7 +595,7 @@ mod tests {
 
         assert_eq!(export_branch(&log, &export_path).unwrap(), export_path);
 
-        let (_, document) = SessionLog::open(&export_path).unwrap();
+        let (_, document) = SessionStore::open(&export_path).unwrap();
         assert_eq!(document.header.id, log.header().id);
         assert_eq!(document.header.parent_session_id, None);
         assert_eq!(document.name.as_deref(), Some("portable name"));
@@ -584,8 +615,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let source_path = directory.path().join("source.jsonl");
         let export_path = directory.path().join("portable.jsonl");
-        let log = SessionLog::create(&source_path, SessionHeader::new("source", directory.path()))
-            .unwrap();
+        let log =
+            SessionStore::create(&source_path, SessionHeader::new("source", directory.path()))
+                .unwrap();
         log.append_message(Message::User(UserMessage::text("root", 1)))
             .unwrap();
         let custom = log
@@ -594,7 +626,7 @@ mod tests {
 
         assert_eq!(export_branch(&log, &export_path).unwrap(), export_path);
 
-        let (_, document) = SessionLog::open(&export_path).unwrap();
+        let (_, document) = SessionStore::open(&export_path).unwrap();
         assert!(document.entries.iter().any(|entry| entry.id == custom));
         assert_eq!(document.branch().unwrap().len(), 2);
     }
@@ -604,18 +636,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
         let log =
-            SessionLog::create(&path, SessionHeader::new("source", directory.path())).unwrap();
+            SessionStore::create(&path, SessionHeader::new("source", directory.path())).unwrap();
 
         let error = export_branch(&log, &path).unwrap_err();
 
         assert!(error.to_string().contains("active session file"));
-        assert!(SessionLog::open(path).is_ok());
+        assert!(SessionStore::open(path).is_ok());
     }
 
     #[test]
     fn html_export_renders_markdown_and_escapes_active_content() {
         let directory = tempfile::tempdir().unwrap();
-        let log = SessionLog::create(
+        let log = SessionStore::create(
             directory.path().join("session.jsonl"),
             SessionHeader::new("html", directory.path()),
         )

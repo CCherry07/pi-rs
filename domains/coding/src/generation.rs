@@ -499,11 +499,17 @@ command = "fixture-command"
             .with_plugin_context(PresentationMode::Tui, binding);
         let sessions = pi_session::MultiSessionManager::new(factory);
         let first = sessions
-            .create_session(&first_cwd, agent_dir.join("first.jsonl"))
+            .create_session(pi_session::CreateSessionOptions::new(
+                &first_cwd,
+                agent_dir.join("first.jsonl"),
+            ))
             .await
             .unwrap();
         let second = sessions
-            .create_session(&second_cwd, agent_dir.join("second.jsonl"))
+            .create_session(pi_session::CreateSessionOptions::new(
+                &second_cwd,
+                agent_dir.join("second.jsonl"),
+            ))
             .await
             .unwrap();
         let first_id = first.id();
@@ -512,8 +518,7 @@ command = "fixture-command"
         let context = pi_plugin::CommandContextParts::new(
             first
                 .current()
-                .runtime()
-                .plugin_context_handle(pi_plugin::PluginContextScope::Command),
+                .plugin_context(pi_plugin::PluginContextScope::Command),
         );
         let replacement = context
             .session
@@ -681,14 +686,17 @@ command = "fixture-command"
 
         let manager = MultiSessionManager::new(factory.clone());
         let session = manager
-            .create_session(&project, &session_path)
+            .create_session(pi_session::CreateSessionOptions::new(
+                &project,
+                &session_path,
+            ))
             .await
             .unwrap();
 
         assert!(
             session
                 .current()
-                .runtime()
+                .catalog()
                 .has_provider(&ProviderId::new("activation-provider"))
         );
         assert!(
@@ -746,7 +754,10 @@ command = "fixture-command"
                 .with_js_plugin_host(host.clone());
         let manager = MultiSessionManager::new(factory);
         let session = manager
-            .create_session(&project, &config.session_path)
+            .create_session(pi_session::CreateSessionOptions::new(
+                &project,
+                &config.session_path,
+            ))
             .await
             .unwrap();
 

@@ -4,7 +4,6 @@ import errorSoundUrl from "@/assets/error-notification.mp3";
 import { MainAppShell } from "@app/components/MainAppShell";
 import { useThreads } from "@threads/hooks/useThreads";
 import { ThreadConversationsContext } from "@threads/contexts/ThreadConversations";
-import { DesktopExtensions } from "./DesktopExtensions";
 import { usePullRequestComposer } from "@/features/git/hooks/usePullRequestComposer";
 import { useAutoExitEmptyDiff } from "@/features/git/hooks/useAutoExitEmptyDiff";
 import { isMissingRepo } from "@/features/git/utils/repoErrors";
@@ -1561,5 +1560,5 @@ export default function MainApp() {
     },
   });
 
-  return <DesktopExtensions workspaceId={activeWorkspace?.id ?? null}><MainAppShell {...mainAppShellProps} /></DesktopExtensions>;
+  return <MainAppShell {...mainAppShellProps} />;
 }

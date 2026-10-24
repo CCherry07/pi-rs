@@ -1,9 +1,9 @@
 .panel-tabs {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px;
-  border-radius: 999px;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 9px;
   background: var(--surface-control);
   border: 1px solid var(--border-subtle);
 }
@@ -13,7 +13,7 @@
   align-items: center;
   gap: 0;
   padding: 6px 8px;
-  border-radius: 999px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-subtle);
   box-shadow: none;
@@ -27,8 +27,9 @@
 }
 
 .panel-tab.is-active {
-  background: var(--surface-control-hover);
+  background: var(--surface-card);
   color: var(--text-emphasis);
+  box-shadow: 0 1px 3px var(--shadow-accent);
 }
 
 .panel-tab:focus-visible {
@@ -42,6 +43,6 @@
 }
 
 .panel-tab-icon svg {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
 }

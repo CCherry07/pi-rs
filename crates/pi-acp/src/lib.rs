@@ -295,7 +295,10 @@ impl AcpState {
             .join(format!("{}.jsonl", uuid::Uuid::now_v7()));
         let session = match self
             .manager
-            .create_session_with_overlay(&cwd, path, overlay)
+            .create_session(pi_session::CreateSessionOptions {
+                generation_overlay: overlay,
+                ..pi_session::CreateSessionOptions::new(&cwd, path)
+            })
             .await
         {
             Ok(session) => session,
@@ -384,7 +387,12 @@ impl AcpState {
             PermissionGate::attach(overlay, self.options.tool_permission_timeout);
         let session = match self
             .manager
-            .open_session_with_overlay(&stored.path, overlay)
+            .open_session(
+                &stored.path,
+                pi_session::OpenSessionOptions {
+                    generation_overlay: overlay,
+                },
+            )
             .await
         {
             Ok(session) => session,
@@ -424,7 +432,7 @@ impl AcpState {
         let mut sessions = self.scan_sessions().await?;
         let active = self.sessions.lock().await;
         for managed in active.values() {
-            let header = managed.session.current().log().header();
+            let header = managed.session.current().history().header();
             sessions.entry(header.id.clone()).or_insert(StoredSession {
                 header,
                 path: managed.session.path(),
@@ -560,7 +568,7 @@ impl AcpState {
         let agent = managed.session.current();
         let mut subscription = agent.subscribe();
         let initial_revision = subscription.snapshot.revision;
-        let prompt = agent.prompt_messages(messages);
+        let prompt = agent.run_messages(messages);
         tokio::pin!(prompt);
         loop {
             tokio::select! {
@@ -804,7 +812,7 @@ fn replay_transcript(
     connection: &ConnectionTo<agent_client_protocol::Client>,
 ) -> agent_client_protocol::Result<()> {
     let id = session.id();
-    let document = session.current().log().load().map_err(internal_error)?;
+    let document = session.current().history().load().map_err(internal_error)?;
     for record in document.branch().map_err(internal_error)? {
         let SessionEntry::Message(entry) = &record.entry else {
             continue;
@@ -1020,10 +1028,10 @@ fn tool_kind(name: &str) -> acp::ToolKind {
 
 fn session_config_options(session: &PiSession) -> Vec<acp::SessionConfigOption> {
     let current = session.current();
-    let state = current.runtime().agent().state();
+    let state = current.snapshot().agent;
     let mut grouped = BTreeMap::<String, Vec<acp::SessionConfigSelectOption>>::new();
     let mut current_model_is_listed = false;
-    for model in current.runtime().available_models() {
+    for model in current.catalog().available_models() {
         current_model_is_listed |=
             model.provider == state.provider_id && model.id == state.model_id;
         grouped.entry(model.provider.to_string()).or_default().push(
@@ -1358,7 +1366,7 @@ mod tests {
                     started = observed_manager
                         .sessions()
                         .iter()
-                        .any(|session| session.current().runtime().agent().state().is_running);
+                        .any(|session| session.current().snapshot().agent.is_running);
                     if started {
                         break;
                     }

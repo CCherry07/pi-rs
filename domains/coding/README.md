@@ -17,12 +17,15 @@ callers managing MCP files use `pi_plugin_mcp::McpLibrary` directly.
 ```rust
 use pi_plugin::PresentationMode;
 use pi_coding::{Pi, Config};
+use pi_session::CreateSessionOptions;
 
 let config = Config::new(cwd, agent_dir);
 let pi = Pi::builder(config)
     .presentation_mode(PresentationMode::Rpc)
     .build()?;
-let session = pi.sessions().create_session(cwd, session_path).await?;
+let session = pi.sessions()
+    .create_session(CreateSessionOptions::new(cwd, session_path))
+    .await?;
 ```
 
 ## Internal responsibilities

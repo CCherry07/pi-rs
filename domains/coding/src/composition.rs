@@ -1206,7 +1206,12 @@ mod tests {
         .unwrap();
         let path = directory.path().join("resume.jsonl");
 
-        let original = AgentSession::create(
+        pi_session::SessionStore::create(
+            &path,
+            pi_session::SessionHeader::new("resume", directory.path()),
+        )
+        .unwrap();
+        let original = AgentSession::open(
             build_test_runtime(
                 &app_config(directory.path(), None),
                 true,
@@ -1216,17 +1221,17 @@ mod tests {
             )
             .unwrap(),
             &path,
+            Default::default(),
         )
         .await
         .unwrap();
         original
             .set_model(ProviderId::new("catalog-provider"), ModelId::new("beta"))
             .unwrap();
-        original.log().materialize().unwrap();
         original.shutdown().await;
 
         let config = app_config(directory.path(), Some("alpha"));
-        let resumed = AgentSession::open_with_options(
+        let resumed = AgentSession::open(
             build_test_runtime(&config, true, &NativePlugins::default(), None, None).unwrap(),
             &path,
             AgentSessionOptions::default().initial_model(initial_model_request(
@@ -1237,7 +1242,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let state = resumed.runtime().agent().state();
+        let state = resumed.snapshot().agent;
 
         assert_eq!(state.provider_id.as_str(), "catalog-provider");
         assert_eq!(state.model_id.as_str(), "alpha");

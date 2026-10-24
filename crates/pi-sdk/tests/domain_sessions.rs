@@ -177,10 +177,16 @@ async fn order_tool_continues_and_resumes_without_coding_resources() {
     let path = directory.path().join("sessions/order.jsonl");
     let session = harness
         .sessions()
-        .create_session_with_workspace(workspace.clone(), &path, None, None)
+        .create_session(pi_session::CreateSessionOptions {
+            workspace: workspace.clone(),
+            path: path.clone(),
+            session_id: None,
+            metadata: None,
+            generation_overlay: Default::default(),
+        })
         .await
         .unwrap();
-    let id = session.current().log().id().to_owned();
+    let id = session.current().history().id().to_owned();
     assert!(!path.exists());
     assert!(
         session
@@ -192,7 +198,7 @@ async fn order_tool_continues_and_resumes_without_coding_resources() {
             .contains("shell execution is not configured")
     );
     assert!(!path.exists());
-    session.current().submit("Where is ORD-42?").await.unwrap();
+    session.current().prompt("Where is ORD-42?").await.unwrap();
     assert!(path.exists());
     let requests = fixture.provider(0).requests();
     assert_eq!(requests.len(), 2);
@@ -207,11 +213,11 @@ async fn order_tool_continues_and_resumes_without_coding_resources() {
     assert!(
         session
             .current()
-            .runtime()
+            .catalog()
             .resource_diagnostics()
             .is_empty()
     );
-    assert!(session.current().runtime().command_specs().is_empty());
+    assert!(session.current().catalog().command_specs().is_empty());
     assert_eq!(fixture.lookups.lock().unwrap()[0].session_id, id);
     assert_eq!(fixture.lookups.lock().unwrap()[0].workspace, workspace);
     harness.sessions().shutdown().await.unwrap();
@@ -219,14 +225,14 @@ async fn order_tool_continues_and_resumes_without_coding_resources() {
     let resumed_harness = fixture.harness();
     let resumed = resumed_harness
         .sessions()
-        .open_session(&path)
+        .open_session(&path, Default::default())
         .await
         .unwrap();
-    assert_eq!(resumed.current().log().id(), id);
-    assert_eq!(resumed.current().runtime().workspace().spec(), &workspace);
+    assert_eq!(resumed.current().history().id(), id);
+    assert_eq!(resumed.current().catalog().workspace().spec(), &workspace);
     resumed
         .current()
-        .submit("Check the order again.")
+        .prompt("Check the order again.")
         .await
         .unwrap();
     let requests = fixture.provider(1).requests();
@@ -245,15 +251,16 @@ async fn reload_rebuilds_plugins_and_retains_model_workspace_and_conversation() 
     let harness = fixture.harness();
     let session = harness
         .sessions()
-        .create_session_with_workspace(
-            workspace.clone(),
-            directory.path().join("session.jsonl"),
-            None,
-            None,
-        )
+        .create_session(pi_session::CreateSessionOptions {
+            workspace: workspace.clone(),
+            path: directory.path().join("session.jsonl"),
+            session_id: None,
+            metadata: None,
+            generation_overlay: Default::default(),
+        })
         .await
         .unwrap();
-    session.current().submit("Where is ORD-42?").await.unwrap();
+    session.current().prompt("Where is ORD-42?").await.unwrap();
     session
         .current()
         .set_model(ProviderId::new("scripted"), ModelId::new("custom-model"))
@@ -262,19 +269,13 @@ async fn reload_rebuilds_plugins_and_retains_model_workspace_and_conversation() 
     session.reload().await.unwrap();
     assert!(!Arc::ptr_eq(&previous, &session.current()));
     assert_eq!(fixture.instances.load(Ordering::SeqCst), 2);
-    assert_eq!(session.current().log().id(), previous.log().id());
-    assert_eq!(session.current().runtime().workspace().spec(), &workspace);
+    assert_eq!(session.current().history().id(), previous.history().id());
+    assert_eq!(session.current().catalog().workspace().spec(), &workspace);
     assert_eq!(
-        session
-            .current()
-            .runtime()
-            .agent()
-            .state()
-            .model_id
-            .as_str(),
+        session.current().snapshot().agent.model_id.as_str(),
         "custom-model"
     );
-    session.current().submit("Look it up again.").await.unwrap();
+    session.current().prompt("Look it up again.").await.unwrap();
     assert_eq!(
         fixture.provider(1).requests()[0].model.as_str(),
         "custom-model"
@@ -284,7 +285,7 @@ async fn reload_rebuilds_plugins_and_retains_model_workspace_and_conversation() 
 
     fixture.fail.store(true, Ordering::SeqCst);
     let previous = session.current();
-    let saved = std::fs::read(previous.log().path()).unwrap();
+    let saved = std::fs::read(previous.history().path()).unwrap();
     assert!(
         session
             .reload()
@@ -294,8 +295,8 @@ async fn reload_rebuilds_plugins_and_retains_model_workspace_and_conversation() 
             .contains("order service configuration")
     );
     assert!(Arc::ptr_eq(&previous, &session.current()));
-    assert_eq!(std::fs::read(previous.log().path()).unwrap(), saved);
-    session.current().submit("Continue.").await.unwrap();
+    assert_eq!(std::fs::read(previous.history().path()).unwrap(), saved);
+    session.current().prompt("Continue.").await.unwrap();
     assert_eq!(fixture.provider(1).requests().len(), 3);
     harness.sessions().shutdown().await.unwrap();
 }
@@ -308,26 +309,29 @@ async fn unsaved_reload_stays_in_memory_and_sessions_have_distinct_capabilities(
     let path = directory.path().join("first.jsonl");
     let first = harness
         .sessions()
-        .create_session(directory.path(), &path)
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            &path,
+        ))
         .await
         .unwrap();
-    let id = first.current().log().id().to_owned();
+    let id = first.current().history().id().to_owned();
     first.reload().await.unwrap();
     assert!(!path.exists());
-    assert_eq!(first.current().log().id(), id);
+    assert_eq!(first.current().history().id(), id);
     let second = harness
         .sessions()
-        .create_session(
+        .create_session(pi_session::CreateSessionOptions::new(
             directory.path().join("second"),
             directory.path().join("second.jsonl"),
-        )
+        ))
         .await
         .unwrap();
-    first.current().submit("Check my order.").await.unwrap();
-    second.current().submit("Check my order.").await.unwrap();
+    first.current().prompt("Check my order.").await.unwrap();
+    second.current().prompt("Check my order.").await.unwrap();
     let lookups = fixture.lookups.lock().unwrap().clone();
     assert_eq!(lookups[0].session_id, id);
-    assert_eq!(lookups[1].session_id, second.current().log().id());
+    assert_eq!(lookups[1].session_id, second.current().history().id());
     assert_ne!(lookups[0].session_id, lookups[1].session_id);
     assert_ne!(lookups[0].workspace, lookups[1].workspace);
     harness.sessions().shutdown().await.unwrap();
@@ -341,7 +345,10 @@ async fn missing_provider_fails_before_creating_a_resume_entry() {
         AgentHarness::builder(ModelSelection::new("missing", "model"), "Explicit prompt").build();
     let result = harness
         .sessions()
-        .create_session(directory.path(), &path)
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            &path,
+        ))
         .await;
     assert!(
         result
@@ -367,18 +374,24 @@ async fn explicit_tool_selection_and_later_changes_survive_reload() {
         .build();
     let session = harness
         .sessions()
-        .create_session(directory.path(), directory.path().join("empty.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("empty.jsonl"),
+        ))
         .await
         .unwrap();
-    assert!(session.current().runtime().active_tools().is_empty());
+    assert!(session.current().snapshot().agent.active_tools.is_empty());
     session.reload().await.unwrap();
-    assert!(session.current().runtime().active_tools().is_empty());
+    assert!(session.current().snapshot().agent.active_tools.is_empty());
     session
         .current()
         .set_active_tools(["lookup_order"])
         .unwrap();
     session.reload().await.unwrap();
-    assert_eq!(session.current().runtime().active_tools(), ["lookup_order"]);
+    assert_eq!(
+        session.current().snapshot().agent.active_tools,
+        ["lookup_order"]
+    );
     harness.sessions().shutdown().await.unwrap();
 }
 
@@ -400,21 +413,18 @@ async fn initial_model_options_apply_before_the_first_request_and_reload_keeps_l
     let path = directory.path().join("requested.jsonl");
     let session = harness
         .sessions()
-        .create_session(directory.path(), &path)
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            &path,
+        ))
         .await
         .unwrap();
     assert_eq!(
-        session
-            .current()
-            .runtime()
-            .agent()
-            .state()
-            .model_id
-            .as_str(),
+        session.current().snapshot().agent.model_id.as_str(),
         "requested"
     );
     assert!(!path.exists());
-    session.current().submit("first turn").await.unwrap();
+    session.current().prompt("first turn").await.unwrap();
     assert_eq!(
         providers.lock().unwrap()[0].requests()[0].model.as_str(),
         "requested"
@@ -424,15 +434,6 @@ async fn initial_model_options_apply_before_the_first_request_and_reload_keeps_l
         .set_model("scripted".into(), "live".into())
         .unwrap();
     session.reload().await.unwrap();
-    assert_eq!(
-        session
-            .current()
-            .runtime()
-            .agent()
-            .state()
-            .model_id
-            .as_str(),
-        "live"
-    );
+    assert_eq!(session.current().snapshot().agent.model_id.as_str(), "live");
     harness.sessions().shutdown().await.unwrap();
 }

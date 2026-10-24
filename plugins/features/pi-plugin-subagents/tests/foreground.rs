@@ -18,6 +18,21 @@ use pi_session::{
 use pi_test_support::{ScriptedProvider, ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::{Value, json};
 
+type RecordedRuntimes = Arc<Mutex<std::collections::HashMap<String, PiRuntime>>>;
+
+#[derive(Clone)]
+struct TestSession {
+    session: pi_session::PiSession,
+    runtimes: RecordedRuntimes,
+}
+
+impl std::ops::Deref for TestSession {
+    type Target = pi_session::PiSession;
+    fn deref(&self) -> &Self::Target {
+        &self.session
+    }
+}
+
 type RecordedProviders = Arc<Mutex<Vec<(usize, Arc<ScriptedProvider>)>>>;
 
 struct TestModelCatalogPlugin;
@@ -40,6 +55,7 @@ struct TestFactory {
     subagents: SubagentRuntime,
     binding: PluginContextBinding,
     providers: RecordedProviders,
+    runtimes: RecordedRuntimes,
     root_turns: Vec<ScriptedTurn>,
     child_turns: Vec<ScriptedTurn>,
     agent_paths: Vec<PathBuf>,
@@ -51,6 +67,7 @@ impl TestFactory {
             subagents: SubagentRuntime::default(),
             binding: PluginContextBinding::new(),
             providers: Arc::new(Mutex::new(Vec::new())),
+            runtimes: Arc::default(),
             root_turns: Vec::new(),
             child_turns: child_turns.into_iter().collect(),
             agent_paths: Vec::new(),
@@ -154,15 +171,31 @@ impl SessionGenerationFactory for TestFactory {
             })
             .build()?;
         let options = AgentSessionOptions::default();
-        Ok(PreparedSessionGeneration::new(runtime, options)
-            .bind_session(move |session| plugin_context.bind_generation_session(session)))
+        let captured = runtime.clone();
+        let runtimes = Arc::clone(&self.runtimes);
+        Ok(
+            PreparedSessionGeneration::new(runtime, options).bind_session(move |session| {
+                runtimes
+                    .lock()
+                    .unwrap()
+                    .insert(session.history().id().to_owned(), captured);
+                plugin_context.bind_generation_session(session);
+            }),
+        )
     }
 }
 
-async fn invoke(root: &pi_session::PiSession, name: &str, input: Value) -> pi_core::ToolResult {
+async fn invoke(root: &TestSession, name: &str, input: Value) -> pi_core::ToolResult {
     let session = root.current();
-    let tool = session
-        .runtime()
+    // The fixture retains its composed runtime; production Session exposes no mutable owner.
+    let runtime = root
+        .runtimes
+        .lock()
+        .unwrap()
+        .get(&root.id())
+        .unwrap()
+        .clone();
+    let tool = runtime
         .agent()
         .runtime()
         .registries()
@@ -172,7 +205,7 @@ async fn invoke(root: &pi_session::PiSession, name: &str, input: Value) -> pi_co
     let context = pi_plugin::ToolContext::with_plugin_context(
         root.cwd(),
         signal,
-        session.runtime().context_parts(),
+        pi_plugin::ContextParts::new(session.plugin_context(pi_plugin::PluginContextScope::Base)),
     );
     tokio::time::timeout(
         std::time::Duration::from_secs(3),
@@ -203,34 +236,38 @@ fn tool_text(result: &ToolResult) -> String {
 async fn root(
     factory: TestFactory,
     directory: &tempfile::TempDir,
-) -> (MultiSessionManager, pi_session::PiSession) {
+) -> (MultiSessionManager, TestSession) {
+    let runtimes = Arc::clone(&factory.runtimes);
     let manager = MultiSessionManager::new(factory);
     let root = manager
-        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("parent.jsonl"),
+        ))
         .await
         .unwrap();
-    (manager, root)
+    (
+        manager,
+        TestSession {
+            session: root,
+            runtimes,
+        },
+    )
 }
 
-fn desktop_widget(root: &pi_session::PiSession) -> Value {
-    root.current()
-        .log()
-        .load()
-        .unwrap()
-        .entries
-        .iter()
-        .rev()
-        .find_map(|entry| {
-            let value = serde_json::to_value(entry).unwrap();
-            (value["customType"] == "pi.ui.widget" && value["data"]["key"] == "subagents.tasks")
-                .then(|| value["data"]["value"].clone())
-        })
-        .expect("subagent widget snapshot")
+fn assert_no_desktop_widgets(root: &pi_session::PiSession) {
+    let document = root.current().history().load().unwrap();
+    assert!(
+        document
+            .entries
+            .iter()
+            .all(|entry| { serde_json::to_value(entry).unwrap()["customType"] != "pi.ui.widget" })
+    );
 }
 
 fn joined_reports(root: &pi_session::PiSession) -> Vec<Value> {
     root.current()
-        .log()
+        .history()
         .load()
         .unwrap()
         .entries
@@ -251,11 +288,7 @@ fn joined_reports(root: &pi_session::PiSession) -> Vec<Value> {
         .collect()
 }
 
-async fn wait_for_agent_state(
-    root: &pi_session::PiSession,
-    agent_id: &str,
-    expected: &str,
-) -> Value {
+async fn wait_for_agent_state(root: &TestSession, agent_id: &str, expected: &str) -> Value {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
     loop {
         let snapshot = invoke(root, "list_agents", json!({})).await;
@@ -278,7 +311,7 @@ async fn wait_for_agent_state(
 }
 
 #[tokio::test]
-async fn desktop_commands_publish_final_state_without_reusing_tool_call_state() {
+async fn native_commands_preserve_agent_control_without_desktop_state() {
     let directory = tempfile::tempdir().unwrap();
     let (manager, root) = root(
         TestFactory::new([
@@ -295,59 +328,58 @@ async fn desktop_commands_publish_final_state_without_reusing_tool_call_state() 
     )
     .await;
     let id = spawn.details.as_ref().unwrap()["agentId"].as_str().unwrap();
-    let started = desktop_widget(&root);
-    assert_eq!(started["agents"][id]["state"], "running");
-    assert_eq!(started["agents"][id]["task"], "review task");
+    let started = wait_for_agent_state(&root, id, "running").await;
     assert_eq!(
-        started["agents"][id]["session"]["sessionId"],
+        started["childSessionId"],
         spawn.details.as_ref().unwrap()["sessionId"]
     );
-    assert_eq!(started["liveAgentIds"], json!([id]));
 
     let stopped = root
         .current()
-        .submit(pi_session::SessionInput::new(format!(
+        .prompt(pi_session::SessionInput::new(format!(
             "/subagents:interrupt {}",
             json!({"target":id}),
         )))
         .await
         .unwrap();
-    assert!(matches!(stopped, pi_session::SubmitOutcome::Handled));
+    assert!(matches!(stopped, pi_session::PromptOutcome::Handled));
     invoke(
         &root,
         "wait_agent",
         json!({"targets":[id],"timeoutMs":2000}),
     )
     .await;
-    assert_eq!(desktop_widget(&root)["agents"][id]["state"], "interrupted");
+    wait_for_agent_state(&root, id, "interrupted").await;
 
-    root.current()
-        .submit(pi_session::SessionInput::new(format!(
+    let followed_up = root
+        .current()
+        .prompt(pi_session::SessionInput::new(format!(
             "/subagents:followup {}",
             json!({"target":id,"task":"continue"}),
         )))
         .await
         .unwrap();
+    assert!(matches!(followed_up, pi_session::PromptOutcome::Handled));
     invoke(
         &root,
         "wait_agent",
         json!({"targets":[id],"timeoutMs":2000}),
     )
     .await;
-    let completed = desktop_widget(&root);
-    assert_eq!(completed["agents"][id]["state"], "idle");
-    assert_eq!(completed["liveAgentIds"], json!([id]));
-    assert!(
-        completed["agents"][id].get("lastReport").is_none(),
-        "widgets never duplicate child transcripts"
-    );
+    let completed = wait_for_agent_state(&root, id, "idle").await;
+    assert_eq!(completed["childSessionId"], started["childSessionId"]);
+    assert_no_desktop_widgets(&root);
     manager.shutdown().await.unwrap();
 }
 
 #[tokio::test]
-async fn desktop_commands_reject_foreign_agents_and_reload_restores_live_ownership() {
+async fn native_commands_reject_foreign_agents_and_reload_restores_ownership() {
     let directory = tempfile::tempdir().unwrap();
-    let (manager, root) = root(TestFactory::new([ScriptedTurn::WaitForAbort]), &directory).await;
+    let (manager, root) = root(
+        TestFactory::new([ScriptedTurn::WaitForAbort, ScriptedTurn::WaitForAbort]),
+        &directory,
+    )
+    .await;
     let spawn = invoke(
         &root,
         "spawn_agent",
@@ -356,12 +388,15 @@ async fn desktop_commands_reject_foreign_agents_and_reload_restores_live_ownersh
     .await;
     let id = spawn.details.as_ref().unwrap()["agentId"].as_str().unwrap();
     let other = manager
-        .create_session(directory.path(), directory.path().join("other.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("other.jsonl"),
+        ))
         .await
         .unwrap();
     let error = other
         .current()
-        .submit(pi_session::SessionInput::new(format!(
+        .prompt(pi_session::SessionInput::new(format!(
             "/subagents:interrupt {}",
             json!({"target":id}),
         )))
@@ -369,28 +404,18 @@ async fn desktop_commands_reject_foreign_agents_and_reload_restores_live_ownersh
         .unwrap_err();
     assert!(error.to_string().contains("not a direct child"));
     root.reload().await.unwrap();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        let restored = invoke(&root, "list_agents", json!({})).await;
-        if restored.details.as_ref().unwrap()["agents"][0]["state"] == "interrupted" {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "reloaded child ownership was not restored"
-        );
-        tokio::task::yield_now().await;
-    }
-    let restored = desktop_widget(&root);
-    assert_eq!(restored["liveAgentIds"], json!([id]));
+    let restored = wait_for_agent_state(&root, id, "interrupted").await;
+    assert_eq!(restored["id"], id);
     root.current()
-        .submit(pi_session::SessionInput::new(format!(
+        .prompt(pi_session::SessionInput::new(format!(
             "/subagents:followup {}",
             json!({"target":id,"task":"continue"}),
         )))
         .await
         .unwrap();
     invoke(&root, "interrupt_agent", json!({"target":id})).await;
+    wait_for_agent_state(&root, id, "interrupted").await;
+    assert_no_desktop_widgets(&root);
     manager.shutdown().await.unwrap();
 }
 
@@ -524,7 +549,7 @@ async fn child_message_sent_before_parent_wait_is_not_lost() {
     let running_root = root.current();
     let root_turn = tokio::spawn(async move { running_root.prompt("hold parent open").await });
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    while !root.current().runtime().agent().is_running()
+    while !root.current().snapshot().agent.is_running
         || !providers
             .lock()
             .unwrap()
@@ -558,7 +583,10 @@ async fn child_message_sent_before_parent_wait_is_not_lost() {
         .expect("spawned child session");
 
     let sent = invoke(
-        &child,
+        &TestSession {
+            session: child.clone(),
+            runtimes: Arc::clone(&root.runtimes),
+        },
         "send_message",
         json!({"target":"parent","message":"CHILD_READY"}),
     )
@@ -597,7 +625,7 @@ async fn child_message_sent_before_parent_wait_is_not_lost() {
 
     let record = root
         .current()
-        .log()
+        .history()
         .load()
         .unwrap()
         .entries
@@ -641,9 +669,12 @@ async fn child_message_to_an_idle_parent_is_durable_before_projection() {
         .find(|session| session.id() == child_session_id)
         .expect("spawned child session");
 
-    assert!(!root.current().runtime().agent().is_running());
+    assert!(!root.current().snapshot().agent.is_running);
     let sent = invoke(
-        &child,
+        &TestSession {
+            session: child.clone(),
+            runtimes: Arc::clone(&root.runtimes),
+        },
         "send_message",
         json!({"target":"parent","message":"WAKE_IDLE_PARENT"}),
     )
@@ -653,7 +684,7 @@ async fn child_message_to_an_idle_parent_is_durable_before_projection() {
         .unwrap();
     assert!(
         root.current()
-            .log()
+            .history()
             .load()
             .unwrap()
             .entries
@@ -700,7 +731,10 @@ async fn parent_message_sent_before_child_wait_is_not_lost() {
         .unwrap();
 
     let waited = invoke(
-        &child,
+        &TestSession {
+            session: child.clone(),
+            runtimes: Arc::clone(&root.runtimes),
+        },
         "wait_agent",
         json!({"targets":["parent"],"mode":"any","timeoutMs":200}),
     )
@@ -936,12 +970,12 @@ async fn profile_without_model_or_thinking_inherits_the_parent_selection() {
         .find(|session| session.id() == child_session_id)
         .expect("spawned child session");
     let child_session = child.current();
-    let agent = child_session.runtime().agent();
+    let agent = child_session.snapshot().agent;
     assert_eq!(
-        agent.model_selection(),
+        (agent.provider_id, agent.model_id),
         (ProviderId::new("scripted"), ModelId::new("test"))
     );
-    assert_eq!(agent.thinking_level(), pi_core::ThinkingLevel::Off);
+    assert_eq!(agent.thinking_level, pi_core::ThinkingLevel::Off);
     manager.shutdown().await.unwrap();
 }
 
@@ -1024,7 +1058,7 @@ async fn completed_reports_join_the_parent_context_unless_detached() {
             tokio::time::Instant::now() < deadline,
             "completed report did not join the parent context: agents={:?}, entries={:?}",
             invoke(&root, "list_agents", json!({})).await.details,
-            root.current().log().load().unwrap().entries
+            root.current().history().load().unwrap().entries
         );
         tokio::task::yield_now().await;
     }
@@ -1150,7 +1184,10 @@ async fn process_restart_reattaches_completed_agent_for_a_new_turn() {
         &directory,
     )
     .await;
-    root.current().log().materialize().unwrap();
+    root.current()
+        .prompt("initialize persisted parent")
+        .await
+        .unwrap();
     let spawn = invoke(
         &root,
         "spawn_agent",
@@ -1180,8 +1217,15 @@ async fn process_restart_reattaches_completed_agent_for_a_new_turn() {
 
     let factory = TestFactory::new([ScriptedTurn::Text("after restart".into())]);
     let providers = factory.providers.clone();
+    let runtimes = Arc::clone(&factory.runtimes);
     let manager = MultiSessionManager::new(factory);
-    let root = manager.open_session(&parent_path).await.unwrap();
+    let root = TestSession {
+        session: manager
+            .open_session(&parent_path, Default::default())
+            .await
+            .unwrap(),
+        runtimes,
+    };
     let restored = wait_for_agent_state(&root, &agent_id, "idle").await;
     assert_eq!(restored["childSessionId"], child_session_id);
     assert_eq!(restored["lastReport"]["summary"], "before restart");
@@ -1214,7 +1258,10 @@ async fn process_restart_interrupts_running_turn_but_replays_queued_launches_onl
     let directory = tempfile::tempdir().unwrap();
     let parent_path = directory.path().join("parent.jsonl");
     let (manager, root) = root(TestFactory::new([ScriptedTurn::WaitForAbort]), &directory).await;
-    root.current().log().materialize().unwrap();
+    root.current()
+        .prompt("initialize persisted parent")
+        .await
+        .unwrap();
     let mut ids = Vec::new();
     for index in 0..9 {
         let spawn = invoke(
@@ -1248,8 +1295,15 @@ async fn process_restart_interrupts_running_turn_but_replays_queued_launches_onl
 
     let factory = TestFactory::new([ScriptedTurn::Text("recovered queued task".into())]);
     let providers = factory.providers.clone();
+    let runtimes = Arc::clone(&factory.runtimes);
     let manager = MultiSessionManager::new(factory);
-    let root = manager.open_session(&parent_path).await.unwrap();
+    let root = TestSession {
+        session: manager
+            .open_session(&parent_path, Default::default())
+            .await
+            .unwrap(),
+        runtimes,
+    };
     let interrupted = wait_for_agent_state(&root, &ids[0], "interrupted").await;
     assert_eq!(interrupted["lastReport"]["outcome"], "interrupted");
     assert!(

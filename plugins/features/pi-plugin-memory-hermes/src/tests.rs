@@ -161,6 +161,7 @@ async fn session(
     plugin: Arc<HermesMemoryPlugin>,
     turns: Vec<ScriptedTurn>,
 ) -> (
+    pi_session::MultiSessionManager,
     Arc<pi_session::AgentSession>,
     Arc<pi_test_support::ScriptedProvider>,
 ) {
@@ -196,12 +197,13 @@ async fn session_with_setup(
     origin: pi_plugin::SessionExecutionOrigin,
     model: Option<pi_core::ModelSpec>,
 ) -> (
+    pi_session::MultiSessionManager,
     Arc<pi_session::AgentSession>,
     Arc<pi_test_support::ScriptedProvider>,
 ) {
     use pi_session::{
-        AgentSession, AgentSessionOptions, PiPluginContext, PluginContextBinding,
-        SessionStartReason,
+        AgentSessionOptions, MultiSessionManager, PiPluginContext, PluginContextBinding,
+        PreparedSessionGeneration, SessionGenerationRequest,
     };
     let scripted = ScriptedProviderPlugin::scripted(turns);
     let provider = scripted.provider();
@@ -237,19 +239,25 @@ async fn session_with_setup(
         builder
     };
     let runtime = builder.build().unwrap();
-    let options = AgentSessionOptions::default();
-    let prepared =
-        AgentSession::prepare_create_with_options(runtime, root.join("session.jsonl"), options)
-            .await
-            .unwrap();
-    access.bind_generation_session(prepared.session());
-    let session = prepared
-        .activate(SessionStartEvent {
-            reason: SessionStartReason::Startup,
-            previous_session_file: None,
-        })
-        .await;
-    (session, provider)
+    let manager = MultiSessionManager::new(move |_: SessionGenerationRequest| {
+        let runtime = runtime.clone();
+        let access = access.clone();
+        async move {
+            Ok(
+                PreparedSessionGeneration::new(runtime, AgentSessionOptions::default())
+                    .bind_session(move |session| access.bind_generation_session(session)),
+            )
+        }
+    });
+    let session = manager
+        .create_session(pi_session::CreateSessionOptions::new(
+            root,
+            root.join("session.jsonl"),
+        ))
+        .await
+        .unwrap()
+        .current();
+    (manager, session, provider)
 }
 
 async fn settled(plugin: &HermesMemoryPlugin) {
@@ -283,7 +291,7 @@ async fn automatic_review_compacts_long_history_and_only_adds_parent_usage_accou
             ..HermesMemoryConfig::default()
         },
     );
-    let (session, provider) = session_with_setup(
+    let (_manager, session, provider) = session_with_setup(
         root.path(),
         plugin.clone(),
         vec![
@@ -311,9 +319,9 @@ async fn automatic_review_compacts_long_history_and_only_adds_parent_usage_accou
     let large_history = "older investigation ".repeat(20_000);
     session.prompt(large_history.clone()).await.unwrap();
     session.prompt("Finish the verification.").await.unwrap();
-    let parent_messages = session.runtime().agent().state().messages;
+    let parent_messages = session.snapshot().agent.messages;
     let journal_path = root.path().join("session.jsonl");
-    let parent_entries = session.log().load().unwrap().entries;
+    let parent_entries = session.history().load().unwrap().entries;
     settled(&plugin).await;
 
     let requests = provider.requests();
@@ -324,7 +332,7 @@ async fn automatic_review_compacts_long_history_and_only_adds_parent_usage_accou
     );
     assert_eq!(
         requests[3].messages[..parent_messages.len()],
-        parent_messages
+        parent_messages[..]
     );
     assert_eq!(requests[3].system_prompt, requests[2].system_prompt);
     assert_eq!(requests[3].tools, requests[2].tools);
@@ -347,8 +355,8 @@ async fn automatic_review_compacts_long_history_and_only_adds_parent_usage_accou
         plugin.store.entries(MemoryTarget::Memory).unwrap(),
         vec!["Validate Rust changes with cargo test."]
     );
-    assert_eq!(session.runtime().agent().state().messages, parent_messages);
-    let document = session.log().load().unwrap();
+    assert_eq!(session.snapshot().agent.messages, parent_messages);
+    let document = session.history().load().unwrap();
     assert_eq!(document.entries, parent_entries);
     let review_usage = document
         .records
@@ -397,7 +405,7 @@ async fn consolidation_failure_cap_spans_tool_iterations_and_resets_for_a_new_re
         },
     );
     let failed_write = || call("memory", json!({"action":"remove","old_text":"missing"}));
-    let (session, provider) = session(
+    let (_manager, session, provider) = session(
         root.path(),
         plugin.clone(),
         vec![
@@ -489,7 +497,7 @@ async fn subagents_receive_read_only_memory_context_without_autonomous_reviews()
         json!({"action":"add","content":"The workspace uses Cargo."}),
     )];
     turns.extend((0..6).map(|_| ScriptedTurn::Text("Child task completed.".into())));
-    let (session, provider) = session_with_setup(
+    let (_manager, session, provider) = session_with_setup(
         root.path(),
         plugin.clone(),
         turns,
@@ -581,7 +589,7 @@ async fn memory_failure_budget_is_shared_across_targets_but_not_between_invocati
             ]}),
         )
     };
-    let (session, provider) = session(
+    let (_manager, session, provider) = session(
         root.path(),
         plugin.clone(),
         vec![
@@ -621,11 +629,12 @@ async fn memory_failure_budget_is_shared_across_targets_but_not_between_invocati
         Duration::from_secs(5),
     )
     .unwrap();
-    let result = session
-        .runtime()
-        .run_ephemeral(request, AbortHandle::new().1)
-        .await
-        .unwrap();
+    let result =
+        pi_plugin::ContextParts::new(session.plugin_context(pi_plugin::PluginContextScope::Base))
+            .session
+            .run_ephemeral(request, AbortHandle::new().1)
+            .await
+            .unwrap();
     assert_eq!(result.status, EphemeralSessionStatus::Completed);
     let results = result
         .messages
@@ -680,7 +689,7 @@ async fn background_review_preserves_context_reads_and_writes_skills_without_ses
             FailureOptions::default(),
         )
         .unwrap();
-    let (session, provider) = session(
+    let (_manager, session, provider) = session(
         root.path(),
         plugin.clone(),
         vec![
@@ -739,9 +748,8 @@ async fn background_review_preserves_context_reads_and_writes_skills_without_ses
     );
     assert!(
         !session
-            .runtime()
-            .agent()
-            .state()
+            .snapshot()
+            .agent
             .messages
             .iter()
             .any(|m| matches!(m, Message::ToolResult(r) if r.tool_name == "memory"))
@@ -785,7 +793,7 @@ async fn manual_refine_bypasses_automatic_gate_records_usage_and_reports_verbose
         },
         ..Usage::default()
     };
-    let (session, provider) = session(
+    let (_manager, session, provider) = session(
         root.path(),
         plugin.clone(),
         vec![
@@ -809,16 +817,16 @@ async fn manual_refine_bypasses_automatic_gate_records_usage_and_reports_verbose
         .unwrap();
     settled(&plugin).await;
     assert_eq!(provider.requests().len(), 1, "automatic review is disabled");
-    let parent_messages = session.runtime().agent().state().messages;
-    let parent_entries = session.log().load().unwrap().entries;
+    let parent_messages = session.snapshot().agent.messages;
+    let parent_entries = session.history().load().unwrap().entries;
     let mut subscription = session.subscribe();
 
     assert!(matches!(
         session
-            .submit("/refine save my terse-response preference")
+            .prompt("/refine save my terse-response preference")
             .await
             .unwrap(),
-        pi_session::SubmitOutcome::Handled
+        pi_session::PromptOutcome::Handled
     ));
     settled(&plugin).await;
 
@@ -827,8 +835,8 @@ async fn manual_refine_bypasses_automatic_gate_records_usage_and_reports_verbose
     let request_json = serde_json::to_string(&requests[1].messages).unwrap();
     assert!(request_json.contains("save my terse-response preference"));
     assert!(request_json.contains("explicitly requested"));
-    assert_eq!(session.runtime().agent().state().messages, parent_messages);
-    let document = session.log().load().unwrap();
+    assert_eq!(session.snapshot().agent.messages, parent_messages);
+    let document = session.history().load().unwrap();
     assert_eq!(document.entries, parent_entries);
     assert_eq!(
         plugin.store.entries(MemoryTarget::Memory).unwrap(),
@@ -887,7 +895,7 @@ async fn bare_manual_refine_runs_with_reviews_disabled_and_honors_notifications_
             ..HermesMemoryConfig::default()
         },
     );
-    let (session, provider) = session(
+    let (_manager, session, provider) = session(
         root.path(),
         plugin.clone(),
         vec![
@@ -906,8 +914,8 @@ async fn bare_manual_refine_runs_with_reviews_disabled_and_honors_notifications_
     let mut subscription = session.subscribe();
 
     assert!(matches!(
-        session.submit("/refine").await.unwrap(),
-        pi_session::SubmitOutcome::Handled
+        session.prompt("/refine").await.unwrap(),
+        pi_session::PromptOutcome::Handled
     ));
     settled(&plugin).await;
 
@@ -966,7 +974,7 @@ async fn manual_refine_records_completed_usage_when_a_later_review_call_fails() 
         },
         ..Usage::default()
     };
-    let (session, _) = session(
+    let (_manager, session, _) = session(
         root.path(),
         plugin.clone(),
         vec![
@@ -984,12 +992,12 @@ async fn manual_refine_records_completed_usage_when_a_later_review_call_fails() 
     let mut subscription = session.subscribe();
 
     assert!(matches!(
-        session.submit("/refine").await.unwrap(),
-        pi_session::SubmitOutcome::Handled
+        session.prompt("/refine").await.unwrap(),
+        pi_session::PromptOutcome::Handled
     ));
     settled(&plugin).await;
 
-    let document = session.log().load().unwrap();
+    let document = session.history().load().unwrap();
     let (usage, details) = document
         .records
         .iter()
@@ -1040,7 +1048,7 @@ async fn many_internal_turns_do_not_trigger_memory_review_before_user_request_se
             ..HermesMemoryConfig::default()
         },
     );
-    let (session, provider) = session(
+    let (_manager, session, provider) = session(
         root.path(),
         plugin.clone(),
         vec![
@@ -1071,7 +1079,7 @@ async fn new_user_request_cancels_the_background_provider() {
             ..HermesMemoryConfig::default()
         },
     );
-    let (session, provider) = session(
+    let (_manager, session, provider) = session(
         root.path(),
         plugin.clone(),
         vec![
@@ -1575,7 +1583,7 @@ async fn frozen_memory_changes_only_for_a_new_session_snapshot() {
             FailureOptions::default(),
         )
         .unwrap();
-    let (session, provider) = session(
+    let (_manager, session, provider) = session(
         root.path(),
         plugin.clone(),
         vec![
@@ -1623,7 +1631,7 @@ async fn foreground_skills_require_adoption_and_pins_protect_managed_skills() {
             ..HermesMemoryConfig::default()
         },
     );
-    let (session, _) = session(root.path(), plugin.clone(), vec![create(), ScriptedTurn::Text("created".into()),
+    let (_manager, session, _) = session(root.path(), plugin.clone(), vec![create(), ScriptedTurn::Text("created".into()),
         call("skill_view", json!({"name":"cargo-validation"})),
         call("skill_manage", json!({"action":"patch","name":"cargo-validation","old_string":"cargo check","new_string":"cargo test"})),
         ScriptedTurn::Text("reviewed".into()),

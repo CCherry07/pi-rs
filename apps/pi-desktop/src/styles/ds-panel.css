@@ -3,7 +3,7 @@
   flex-direction: column;
   gap: var(--ds-panel-gap);
   background: transparent;
-  padding: 12px 12px 0;
+  padding: 16px 16px 0;
   -webkit-app-region: no-drag;
   min-height: 0;
   flex: 1;
@@ -24,8 +24,6 @@
 
 .app.reduced-transparency .ds-panel {
   background: var(--surface-right-panel);
-  border: 1px solid var(--ds-border-subtle);
-  border-radius: 14px;
 }
 
 .ds-panel-header {

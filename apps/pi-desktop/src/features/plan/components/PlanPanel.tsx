@@ -1,5 +1,8 @@
 import type { TurnPlan } from "../../../types";
 import { useTranslation } from "react-i18next";
+import Check from "lucide-react/dist/esm/icons/check";
+import Circle from "lucide-react/dist/esm/icons/circle";
+import CircleDot from "lucide-react/dist/esm/icons/circle-dot";
 
 type PlanPanelProps = {
   plan: TurnPlan | null;
@@ -15,14 +18,14 @@ function formatProgress(plan: TurnPlan) {
   return `${completed}/${total}`;
 }
 
-function statusLabel(status: TurnPlan["steps"][number]["status"]) {
+function statusIcon(status: TurnPlan["steps"][number]["status"]) {
   if (status === "completed") {
-    return "[x]";
+    return <Check size={14} />;
   }
   if (status === "inProgress") {
-    return "[>]";
+    return <CircleDot size={14} />;
   }
-  return "[ ]";
+  return <Circle size={14} />;
 }
 
 export function PlanPanel({ plan, isProcessing }: PlanPanelProps) {
@@ -48,7 +51,7 @@ export function PlanPanel({ plan, isProcessing }: PlanPanelProps) {
           {steps.map((step, index) => (
             <li key={`${step.step}-${index}`} className={`plan-step ${step.status}`}>
               <span className="plan-step-status" aria-hidden>
-                {statusLabel(step.status)}
+                {statusIcon(step.status)}
               </span>
               <span className="plan-step-text">{step.step}</span>
             </li>

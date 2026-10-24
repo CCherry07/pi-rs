@@ -291,7 +291,7 @@ function mergeConsecutiveExploreRuns(items: ToolGroupItem[]): ToolGroupItem[] {
   return result;
 }
 
-export function buildToolGroups(items: ConversationItem[], standaloneItem?: (item: ConversationItem) => boolean): MessageListEntry[] {
+export function buildToolGroups(items: ConversationItem[]): MessageListEntry[] {
   const entries: MessageListEntry[] = [];
   let buffer: ToolGroupItem[] = [];
 
@@ -329,7 +329,7 @@ export function buildToolGroups(items: ConversationItem[], standaloneItem?: (ite
   };
 
   items.forEach((item) => {
-    if (standaloneItem?.(item) || (item.kind === "tool" && item.toolType === "collabToolCall")) {
+    if (item.kind === "tool" && item.toolType === "collabToolCall") {
       flush();
       entries.push({ kind: "item", item });
       return;
@@ -434,6 +434,7 @@ export function buildToolSummary(
           firstStringField(args, ["query", "pattern", "text"]) ||
           (args ? "" : item.detail) ||
           toolIdentity,
+        output: item.output || "",
       };
     }
     if (toolName.toLowerCase().includes("read")) {
@@ -444,6 +445,7 @@ export function buildToolSummary(
         label: i18n.t("toolSummary.read", { ns: "messages" }),
         value: basename(targetPath) || toolIdentity,
         detail: targetPath && targetPath !== basename(targetPath) ? targetPath : "",
+        output: item.output || "",
       };
     }
     if (toolIdentity) {
@@ -451,6 +453,7 @@ export function buildToolSummary(
         label: "",
         value: toolIdentity,
         detail: item.detail || "",
+        output: item.output || "",
       };
     }
   }

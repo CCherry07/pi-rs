@@ -131,7 +131,10 @@ async fn bounded<T>(future: impl Future<Output = T>) -> T {
 
 async fn owner(manager: &MultiSessionManager, directory: &tempfile::TempDir) -> PiSession {
     manager
-        .create_session(directory.path(), directory.path().join("owner.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("owner.jsonl"),
+        ))
         .await
         .unwrap()
 }
@@ -240,7 +243,7 @@ async fn cancelled_isolated_launch_drains_the_started_prompt_before_finishing() 
     probe.release_settled.notify_one();
     bounded(manager.shutdown()).await.unwrap();
     assert!(probe.finished.load(Ordering::SeqCst));
-    assert!(!child.current().runtime().agent().is_running());
+    assert!(!child.current().snapshot().agent.is_running);
     assert!(child.current().is_closed());
 }
 

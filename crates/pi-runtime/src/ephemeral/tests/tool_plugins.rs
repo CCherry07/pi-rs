@@ -363,7 +363,7 @@ async fn private_plugins_receive_normal_agent_hooks_in_order_without_parent_or_s
         runtime.agent().effective_system_prompt(),
         "Parent instructions"
     );
-    assert_eq!(runtime.agent().state().messages, history);
+    assert_eq!(runtime.agent().state().messages.as_ref(), &history);
 }
 
 #[tokio::test]

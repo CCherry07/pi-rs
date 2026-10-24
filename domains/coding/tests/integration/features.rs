@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use pi_coding::{Config, Features, Pi};
-use pi_core::{AbortHandle, RunId};
+use pi_core::PluginId;
 use pi_plugin::BeforeAgentStartEvent;
 use pi_session::{AgentSession, PiSession};
 use serde_json::json;
@@ -110,19 +110,33 @@ async fn create_session(config: Config) -> (Pi, PiSession) {
     let cwd = config.cwd.clone();
     let path = config.session_path.clone();
     let pi = Pi::builder(config).build().unwrap();
-    let session = pi.sessions().create_session(cwd, path).await.unwrap();
+    let overlay = pi_session::SessionGenerationOverlay::new().with_plugin(|| Arc::new(PromptProbe));
+    let session = pi
+        .sessions()
+        .create_session(pi_session::CreateSessionOptions {
+            generation_overlay: overlay,
+            ..pi_session::CreateSessionOptions::new(cwd, path)
+        })
+        .await
+        .unwrap();
+    assert!(!session.current().history().is_materialized());
     (pi, session)
 }
 
 fn assert_feature_registrations(session: &AgentSession, features: &Features) {
-    let runtime = session.runtime();
-    let tools = runtime
+    let catalog = session.catalog();
+    let tools = catalog
         .tool_specs()
         .into_iter()
         .map(|tool| tool.name)
         .collect::<BTreeSet<_>>();
-    let active = runtime.active_tools().into_iter().collect::<BTreeSet<_>>();
-    let commands = runtime
+    let active = session
+        .snapshot()
+        .agent
+        .active_tools
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let commands = catalog
         .command_specs()
         .into_iter()
         .map(|command| command.name)
@@ -177,7 +191,7 @@ fn assert_feature_registrations(session: &AgentSession, features: &Features) {
         ("session-transfer", features.session_transfer),
         ("schedule", features.schedule),
     ];
-    let plugins = runtime.plugin_order();
+    let plugins = catalog.plugin_order();
     let actual = plugins
         .iter()
         .map(|id| id.as_str())
@@ -190,31 +204,47 @@ fn assert_feature_registrations(session: &AgentSession, features: &Features) {
     assert_eq!(actual, expected, "feature agent plugin registration order");
 }
 
+// Observe the real ordered preparation hooks, then cancel before any provider I/O.
+struct PromptProbe;
+#[pi_plugin::plugin]
+impl pi_plugin::Plugin for PromptProbe {
+    fn id(&self) -> PluginId {
+        PluginId::new("feature-prompt-probe")
+    }
+    async fn before_agent_start(
+        &self,
+        context: pi_plugin::AgentPluginContext,
+        event: BeforeAgentStartEvent,
+    ) -> Result<pi_plugin::BeforeAgentStartPatch, pi_plugin::PluginError> {
+        context
+            .session
+            .append_entry("feature-prompt-probe", Some(json!(event.system_prompt)))?;
+        context.session.abort()?;
+        Ok(Default::default())
+    }
+}
+
 async fn projected_prompt(session: &AgentSession) -> String {
-    let runtime = session.runtime();
-    let state = runtime.agent().state();
-    let (_, signal) = AbortHandle::new();
-    // Exercise the real generation's bound hook driver without a provider request.
-    let patch = runtime
-        .agent()
-        .runtime()
-        .plugins()
-        .before_agent_start(
-            &RunId::new("features-fixture"),
-            runtime.cwd(),
-            &signal,
-            BeforeAgentStartEvent {
-                system_prompt: state.system_prompt,
-                input_messages: Vec::new(),
-                active_tools: state.active_tools,
-                provider_id: state.provider_id,
-                model_id: state.model_id,
-            },
-        )
+    session
+        .prompt("Inspect assembled prompt without provider I/O")
         .await
         .unwrap();
-    assert!(runtime.plugin_diagnostics().is_empty());
-    patch.system_prompt.unwrap()
+    assert!(session.catalog().plugin_diagnostics().is_empty());
+    session
+        .history()
+        .branch_entries()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.entry {
+            pi_session::SessionEntry::Custom(custom)
+                if custom.custom_type == "feature-prompt-probe" =>
+            {
+                custom.data.as_ref()?.as_str().map(str::to_owned)
+            }
+            _ => None,
+        })
+        .expect("prompt probe must run")
 }
 
 #[test]
@@ -239,10 +269,10 @@ async fn default_features_retain_existing_product_registrations_and_skill_prompt
             .await
             .contains(SKILL_NAME)
     );
-    assert!(!session.current().log().is_materialized());
+    assert!(session.current().history().is_materialized());
     session.reload().await.unwrap();
     assert_feature_registrations(&session.current(), &Features::all());
-    assert!(!session.current().log().is_materialized());
+    assert!(session.current().history().is_materialized());
     pi.sessions().shutdown().await.unwrap();
 }
 
@@ -253,14 +283,14 @@ async fn no_features_remove_feature_plugins_tools_commands_and_skill_prompt() {
     config.features = Features::none();
     let (pi, session) = create_session(config).await;
     assert_feature_registrations(&session.current(), &Features::none());
-    assert!(session.current().runtime().command_specs().is_empty());
+    assert!(session.current().catalog().command_specs().is_empty());
     assert!(
         !projected_prompt(&session.current())
             .await
             .contains(SKILL_NAME)
     );
     assert!(!pi.agent_dir().join("pi-hermes-memory").exists());
-    assert!(!session.current().log().is_materialized());
+    assert!(session.current().history().is_materialized());
     pi.sessions().shutdown().await.unwrap();
 }
 
@@ -330,7 +360,10 @@ async fn disabled_memory_skips_invalid_configuration_on_create_and_reload() {
         let enabled = Pi::builder(enabled_config).build().unwrap();
         let error = match enabled
             .sessions()
-            .create_session(&config.cwd, &config.session_path)
+            .create_session(pi_session::CreateSessionOptions::new(
+                &config.cwd,
+                &config.session_path,
+            ))
             .await
         {
             Ok(_) => panic!("enabled memory accepted invalid configuration {invalid}"),
@@ -435,7 +468,7 @@ async fn reload_preserves_feature_selection_while_refreshing_enabled_resources()
         assert!(!Arc::ptr_eq(&original, &reloaded));
         assert!(original.is_closed());
         assert_feature_registrations(&reloaded, &features);
-        let commands = reloaded.runtime().command_specs();
+        let commands = reloaded.catalog().command_specs();
         assert_eq!(
             commands
                 .iter()
@@ -443,13 +476,14 @@ async fn reload_preserves_feature_selection_while_refreshing_enabled_resources()
             skills,
         );
         assert!(!commands.iter().any(|spec| spec.name == "sdk-feature-added"));
+        assert!(!reloaded.history().is_materialized());
         assert_eq!(
             projected_prompt(&reloaded)
                 .await
                 .contains("sdk-feature-added"),
             skills
         );
-        assert!(!reloaded.log().is_materialized());
+        assert!(reloaded.history().is_materialized());
         assert!(!pi.agent_dir().join("pi-hermes-memory").exists());
         pi.sessions().shutdown().await.unwrap();
     }
@@ -515,7 +549,10 @@ async fn settings_features_can_be_reenabled_without_mutating_other_sessions_or_d
     let (pi, session) = create_session(config).await;
     let other = pi
         .sessions()
-        .create_session(&cwd, pi.agent_dir().join("sessions/other.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            &cwd,
+            pi.agent_dir().join("sessions/other.jsonl"),
+        ))
         .await
         .unwrap();
     assert_feature_registrations(&session.current(), &Features::none());
@@ -524,7 +561,7 @@ async fn settings_features_can_be_reenabled_without_mutating_other_sessions_or_d
 
     for enabled in [true, false, true] {
         let previous = session.current();
-        let previous_plugins = previous.runtime().plugin_order();
+        let previous_plugins = previous.catalog().plugin_order();
         let expected = if enabled {
             Features::all()
         } else {
@@ -536,7 +573,7 @@ async fn settings_features_can_be_reenabled_without_mutating_other_sessions_or_d
         } else {
             write_features(&settings_path, expected);
         }
-        assert_eq!(session.current().runtime().plugin_order(), previous_plugins);
+        assert_eq!(session.current().catalog().plugin_order(), previous_plugins);
         session.reload().await.unwrap();
         assert!(!Arc::ptr_eq(&previous, &session.current()));
         assert!(previous.is_closed());
@@ -548,7 +585,7 @@ async fn settings_features_can_be_reenabled_without_mutating_other_sessions_or_d
                 .contains(SKILL_NAME),
             enabled
         );
-        assert!(!session.current().log().is_materialized());
+        assert!(session.current().history().is_materialized());
         assert_eq!(fs::read(&memory_path).unwrap(), memory_config);
         assert!(
             pi.agent_dir()
@@ -561,7 +598,10 @@ async fn settings_features_can_be_reenabled_without_mutating_other_sessions_or_d
     // New sessions use the current settings too, rather than the first generation's selection.
     let fresh = pi
         .sessions()
-        .create_session(&cwd, pi.agent_dir().join("sessions/fresh.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            &cwd,
+            pi.agent_dir().join("sessions/fresh.jsonl"),
+        ))
         .await
         .unwrap();
     assert_feature_registrations(&fresh.current(), &Features::all());
