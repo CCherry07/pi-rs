@@ -78,7 +78,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
 
 
 class TerminalHarness:
-    def __init__(self, directory: Path, env: dict[str, str]):
+    def __init__(self, directory: Path, env: dict[str, str], extensions=None):
         self.directory = directory
         self.output = directory / "evidence.json"
         self.pid, self.master = pty.fork()
@@ -93,8 +93,8 @@ class TerminalHarness:
                     "--agent-dir",
                     str(directory / "agent"),
                     "--no-extensions",
-                    "--extension",
-                    str(package / "test/fixtures/ui-runtime.ts"),
+                    *[argument for extension in (extensions or [package / "test/fixtures/ui-runtime.ts"])
+                      for argument in ("--extension", str(extension))],
                 ],
                 env,
             )
@@ -325,6 +325,13 @@ with tempfile.TemporaryDirectory(prefix="pi-ui-pty-") as temporary:
         terminal.send(b"\t\r")
         terminal.until(b"UI_PTY_COMPLETE_DONE")
 
+        terminal.send(b"/ui-custom\r")
+        terminal.until(b"UI_PTY_CUSTOM")
+        terminal.resize(20, 48)
+        terminal.until_evidence(lambda evidence: 48 in evidence.get("customWidths", []))
+        terminal.send("\x1b[200~你好\x1b[201~\x1b[D啊\r".encode())
+        terminal.until(b"UI_PTY_CUSTOM_DONE")
+
         terminal.send(b"/ui-working\r")
         terminal.until(b"UI_PTY_WORKING")
         terminal.until(b"UI_PTY_TOOL_CALL")
@@ -344,6 +351,8 @@ with tempfile.TemporaryDirectory(prefix="pi-ui-pty-") as temporary:
         assert evidence["entryData"] == {"retained": 43} and evidence["entryId"], evidence
         assert evidence["shortcut"] and evidence["activated"], evidence
         assert evidence["completion"] == "hello from Rust", evidence
+        assert evidence["custom"] == "你啊好" and evidence["customDisposals"] == 1, evidence
+        assert 60 in evidence["customWidths"] and 48 in evidence["customWidths"], evidence
         assert evidence["toolResolver"] and evidence["toolCall"]["argsComplete"], evidence
         assert evidence["toolCall"]["executionStarted"] and evidence["toolCall"]["outputPad"] == 0, evidence
         assert evidence["toolCall"]["showImages"] is True and evidence["toolCall"]["args"] == {"value": "streamed"}, evidence

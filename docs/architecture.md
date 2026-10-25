@@ -479,6 +479,11 @@ owns layout/rendering, and `tui/components` owns stateful input/selector adapter
 terminal-presentation seam, not a new core/runtime message protocol. This is a presentation and input-
 routing choice, not a claim that Pi implements Codex-only accounts, usage limits, permissions, or
 remote services. Terminal styling, view routing, and selector state remain owned by `apps/pi-cli`.
+Both editor and startup submissions defer the working indicator for slash commands until agent
+events arrive, matching Pi's separation of command handling from agent execution. Ordinary prompts
+retain immediate feedback; image-bearing startup input follows the prompt path. Command dispatch
+does not clear or restart progress for an already-running agent, and compaction and shell work keep
+their own event-driven status.
 
 Fullscreen text selection is a TUI-owned deep Module. `ScreenTextSurface::capture(buffer)` accepts
 only the complete final Ratatui buffer, hiding cell-width normalization, wide-character continuation
@@ -621,6 +626,18 @@ explicit native/JS/MCP plugins, general context resources, and read-only skill-f
 independent. This is deliberate pi-rs composition policy, not Cargo dependency pruning or a plugin
 security boundary. In particular disabling skills/templates removes their built-in plugin, unlike
 legacy Pi's `noSkills`/`noPromptTemplates` automatic-discovery suppression, which retains explicit paths.
+Coding's factory-backed `FeaturesPlugin` always registers `/features [global|project]`, even when
+every optional feature is disabled. The command selects a settings scope and edits allowed flags
+through ordinary native `UiComponent` / `Select` nodes; the TUI owns rendering and keyboard state.
+The editor observes selection changes to target its `Space` shortcut. Space toggles the focused
+flag, Enter submits the complete draft, and Escape discards it; no extra save row is needed.
+Project scope requires the generation's existing trust decision. The editor shows global defaults
+or the project's effective selection, preserves the host ceiling, and submits only changed flags
+to `SettingsManager::patch_features`. Cancellation and an unchanged selection do not write or
+reload. A successful save uses the existing command-session reload capability and the replacement
+context for its notice. If reload fails, the saved selection remains available for a retry while
+the old generation stays active. This command is a deliberate pi-rs addition; legacy Pi has no
+corresponding feature-selection command.
 Reload requests include the previous generation's registered tool names, including inactive tools.
 Coding uses this neutral snapshot to activate newly available default tools when a feature is enabled,
 through the existing `additional_active_tools` policy. Previously registered built-in tools retain
@@ -1524,6 +1541,9 @@ validation failures are localized rather than rejecting unrelated current settin
 Settings persistence is a narrow field patch, not whole-object serialization. The package manager
 locks a stable sibling lock file, rereads the latest on-disk object, refuses to overwrite malformed
 JSON, replaces only `packages`, and commits through a synced temporary file and atomic rename.
+Feature edits use that same locked transaction to merge a typed `FeatureSettingsPatch` into
+`features`, retaining unknown feature keys and unedited flags. A non-object `features` value is
+rejected on write rather than replaced. An empty patch creates no file.
 Project writes require the same trust decision used for reads. This lets the JS package manager,
 trust bootstrap, and runtime factory share one settings authority without making `pi-core` depend
 on filesystem or product policy.
@@ -2875,13 +2895,14 @@ leaving settings, switching sections or discarding a dirty draft requires confir
 
 ## Shared plugin UI
 
-`pi-plugin` defines semantic `UiNode` trees, `UiSurfaceFrame` documents, interactions and one
-`UiCommand` transport envelope. Native ABI 30 separates surface lifecycle, product presentation
-and host-operation commands within that envelope; ABI 29 replaced preformatted rows, cursors,
-terminal escape payloads and raw input forwarding with the declarative protocol. It has no Ratatui
-dependency. This is a deliberate breaking Rust product design: upstream `Component.render(width)`,
-editor subclasses, JS themes and raw terminal callbacks are not supported. Their replacements
-are described in [plugin UI](plugin-ui.md).
+`pi-plugin` defines `UiNode` trees, `UiSurfaceFrame` documents, interactions and one `UiCommand`
+transport envelope, without a Ratatui dependency. ABI 31 adds the `Custom` leaf and ordered
+`CustomInput` events for plugin-drawn content. ABI 30 separates surface lifecycle, product
+presentation and host-operation commands. Semantic controls remain the default; the Node host
+also adapts upstream `Component.render(width)` through `PiComponentAdapter`. It pins one
+`@earendil-works/pi-tui` dependency and resolves both supported Pi package scopes to that instance.
+The upstream terminal loop is never started. Supported interfaces and remaining differences are
+described in [plugin UI](plugin-ui.md).
 
 Availability is a property of the complete presentation adapter, not the mode label alone:
 `hasUI` is true only for TUI mode with an installed `PluginUiBridge`. Print, JSON, RPC, ACP and the
@@ -2891,9 +2912,12 @@ current Desktop adapter report it unavailable.
 completion selection, terminal input and rendering for both Rust and JavaScript plugins. Input and
 Editor reuse `ComposerInput`, Select/completions reuse `SelectionList`, and Markdown uses the app's
 Rust Markdown renderer. Node IDs preserve local state through document updates; a different ID or
-kind mounts fresh state. Ordinary typing, cursor movement, focus and scrolling run locally even
-while a plugin callback is busy. The bridge emits semantic change/submit/activate/cancel/shortcut
-notifications after applying input. Queued changes coalesce; submissions retain their order.
+kind mounts fresh state. For semantic controls, ordinary typing, cursor movement, focus and
+scrolling run locally even while a plugin callback is busy. The bridge emits semantic
+change/submit/activate/cancel/shortcut notifications after applying input. Queued changes coalesce;
+submissions retain their order. A `Custom` component owns its internal editing state in JS and
+receives encoded keyboard/paste events through `CustomInput`; its interaction requires a Node
+round trip. Rust still owns region focus, clipping, composition and physical terminal output.
 
 The CLI keeps the complete presentation implementation under `tui/extensions/`: `bridge` adapts
 generation capabilities into the frontend channel, `surface` owns protocol state and reduces each
@@ -2922,21 +2946,38 @@ and closes the surface on completion, cancellation, error, panic or drop. The ge
 `PluginContextEpoch` closes tracked owners at retirement; late owners cannot remount. Failed reload
 preparation leaves live UI intact. UI state is transient and is never serialized into session JSONL.
 
-The Node host retains only component descriptions, business callbacks, transcript projection and
-lifetime/transport bookkeeping. It owns no terminal, layout, editor or theme engine. Message, entry,
-Markdown and tool renderers produce semantic trees. Rust validates and renders those trees in the
-same component runtime, preserving transcript fingerprints, partial details and normal transcript
-scrolling. Rust encodes images and links from final clipped rectangles; plugins never send escape
-sequences. Images use Kitty or iTerm protocols with alt text on unsupported terminals.
+`ExtensionUI` owns mounts and one completion/cancellation path for both `custom(node)` and
+`custom(factory)`. The factory defaults to the editor region; `overlay: true` requests an overlay.
+`PiComponentAdapter` owns the component, local input target, rendered lines and cursor conversion.
+It disposes once, including when an asynchronous factory resolves after cancellation. Component
+render/input errors settle their own custom operation without retiring unrelated mounts.
+`ExtensionTranscript` reuses that adapter within its existing row cache, retains separate call/result
+components for `lastComponent`, and invalidates on width changes and explicit redraw requests.
+Rows release components on replacement, removal and retirement. There is no additional UI manager,
+transport or plugin lifecycle.
+
+Message, entry and tool renderers may return semantic trees or Pi components; Markdown transformers
+still return text. `Custom` carries styled lines, optional local cursor coordinates and input flags.
+Rust parses SGR styling into cells and clips the pre-laid-out rows without wrapping or executing
+their escape sequences. Rust encodes semantic Image and Link nodes from final clipped rectangles;
+images use Kitty or iTerm protocols with alt text on unsupported terminals. Arbitrary JS terminal
+control, upstream editor subclasses and the complete upstream theme engine remain unsupported.
 
 The rich searchable multi-selector is a `UiNodeKind::MultiSelect` control in this same runtime.
 `UiContext::multi_select` and `ctx.ui.multiSelect` are wrappers around `custom`; there is no
 independent multi-selection request channel or app-level prompt state.
 
+Standard select/confirm/input/editor helpers compose the same Panel and control nodes in native
+Rust and JavaScript. They use compact centered overlays (up to 60 cells), separate multiline
+descriptions from the title, and include keyboard hints. Rust owns rounded borders, padding,
+selection markers and a dimmed modal backdrop. This is a deliberate product presentation choice; upstream Pi places these
+dialogs in its editor region. Input and result semantics are unchanged.
+
 The app services the same channel during `session_start`, before the session frontend exists,
 then transfers the component state, pending events and input decoder to the full TUI. The native
-input stream retains Unicode, IME/bracketed paste and fragmented terminal-reply decoding; raw
-bytes no longer cross the plugin seam. Rust owns title, progress/program status, clipboard,
+input stream retains Unicode, IME/bracketed paste and fragmented terminal-reply decoding. Only
+focused `Custom` nodes receive reconstructed key/paste sequences; terminal replies remain local.
+Rust owns title, progress/program status, clipboard,
 suspend and external editor execution, including terminal restore/reacquisition. Built-in
 light/dark/system palette selection affects the shared renderer. Editor configuration stays in
 Rust; JS generation preparation no longer receives theme paths or external-editor configuration.

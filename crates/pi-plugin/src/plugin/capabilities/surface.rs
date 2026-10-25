@@ -75,6 +75,18 @@ pub enum UiNodeKind {
         #[serde(default)]
         tone: UiTone,
     },
+    /// Plugin-drawn content in a frontend-owned region.
+    /// Frontends parse styling and clip these rows; they never write them as terminal commands.
+    Custom {
+        lines: Vec<String>,
+        #[serde(default)]
+        interactive: bool,
+        #[serde(default)]
+        key_release: bool,
+        /// Component-local (row, column), in terminal cells.
+        #[serde(default)]
+        cursor: Option<(u16, u16)>,
+    },
     Markdown {
         text: String,
     },
@@ -451,11 +463,21 @@ impl Default for UiSurfaceSnapshot {
     rename_all_fields = "camelCase"
 )]
 pub enum UiInteraction {
-    Change { value: serde_json::Value },
-    Submit { value: serde_json::Value },
+    Change {
+        value: serde_json::Value,
+    },
+    Submit {
+        value: serde_json::Value,
+    },
     Activate,
     Cancel,
-    Shortcut { key: String },
+    Shortcut {
+        key: String,
+    },
+    /// Keyboard/paste input delivered only to a focused custom component.
+    CustomInput {
+        data: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

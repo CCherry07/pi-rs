@@ -35,7 +35,11 @@ test("standard dialogs publish semantic trees and receive Rust selection results
   await tick();
   const region = app.frames.at(-1)!.regions[0]!;
   assert.equal(region.placement, "overlay");
-  assert.deepEqual(region.root, { id: "dialog", type: "column", gap: 0, children: [{ id: "title", type: "text", text: "环境", tone: "accent" }, { id: "value", type: "select", options: ["测试", "生产"], initialSelected: 0 }] });
+  assert.equal(region.overlay?.width, 60);
+  assert.deepEqual(region.root, { id: "dialog", type: "panel", title: "环境", child: { id: "body", type: "column", gap: 1, children: [
+    { id: "value", type: "select", options: ["测试", "生产"], initialSelected: 0 },
+    { id: "hint", type: "text", text: "↑↓ move · enter select · esc cancel", tone: "muted" },
+  ] } });
   assert.equal("lines" in region, false);
   app.interaction({ type: "submit", value: 1 });
   assert.equal(await result, "生产");

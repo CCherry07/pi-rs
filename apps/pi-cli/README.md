@@ -252,6 +252,7 @@ Common commands:
 | `/name [name]`                | Show or set the session name                                          |
 | `/session`                    | Show session path, ID, messages, tokens, and cost                     |
 | `/reload`                     | Atomically rebuild plugins, models, resources, and session extensions |
+| `/features [global\|project]` | Select optional capabilities, save, and reload the current session    |
 | `/trust`                      | Review or change trust for the current project                        |
 | `/copy`                       | Copy the last completed assistant response                            |
 | `/clear`                      | Clear the visible transcript without deleting the session             |
@@ -264,6 +265,9 @@ New product sessions default to `medium`; selectors show only levels supported b
 and an explicitly requested unsupported level clamps upward first, then downward.
 
 Plugin-provided commands are added to the same command palette as built-in commands and skills.
+Submitting a slash command does not show `Working...` while it opens a selector or changes settings.
+If the command starts an agent turn, including skill or prompt-template expansion, runtime events
+start the normal working indicator. Ordinary prompts keep immediate submission feedback.
 
 Key bindings:
 
@@ -668,7 +672,18 @@ under `~/.agents/skills` are also supported.
 
 ## Runtime feature switches
 
-Set `features` in `<agent-dir>/settings.json` (normally `~/.pi/agent/settings.json`) or the
+Run `/features` to choose global defaults or settings for the trusted project. Use `↑` / `↓`
+to navigate, `Space` to toggle a capability, and `Enter` to save and reload. `Esc` cancels
+without writing settings. `/features global` and `/features project` open that scope directly;
+untrusted projects can edit only global defaults. All six capabilities can be disabled, and
+`/features` remains available to turn them back on.
+
+Only changed flags are saved, preserving other settings and inherited defaults. Global changes
+still respect project overrides. Saving reloads the current session; other open sessions retain
+their current capabilities. If reload fails, the selection stays saved and the current session
+remains active; fix the reported configuration error and run `/reload` to retry.
+
+You can also set `features` in `<agent-dir>/settings.json` (normally `~/.pi/agent/settings.json`) or the
 trusted project's `.pi/settings.json`:
 
 ```json

@@ -272,6 +272,24 @@ impl Default for FeatureSettings {
     }
 }
 
+/// Only edited feature flags are written; omitted fields retain their value or inheritance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeatureSettingsPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subagents: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_templates: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_transfer: Option<bool>,
+}
+
 /// Validated values from one raw document or the effective deep merge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsValues {
@@ -527,6 +545,47 @@ impl SettingsManager {
             message: error.to_string(),
         })?;
         match store::replace_top_level(&path, "packages", value) {
+            Ok(document) => {
+                self.state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .last_valid
+                    .insert(path, document);
+                Ok(self.load(context))
+            }
+            Err(error) => {
+                self.record_write_error(scope, &path, &error);
+                Err(error)
+            }
+        }
+    }
+
+    /// Patches individual feature flags in one scope under the settings file lock.
+    /// Unknown features, unedited flags and all other settings survive the write.
+    pub fn patch_features(
+        &self,
+        context: &SettingsContext,
+        scope: SettingsScope,
+        patch: FeatureSettingsPatch,
+    ) -> Result<SettingsSnapshot, SettingsError> {
+        if scope == SettingsScope::Project && !context.project_trusted {
+            return Err(SettingsError::ProjectNotTrusted);
+        }
+        if patch == FeatureSettingsPatch::default() {
+            return Ok(self.load(context));
+        }
+        let path = match scope {
+            SettingsScope::Global => self.global_path(),
+            SettingsScope::Project => self.project_path(&context.cwd),
+        };
+        let value = serde_json::to_value(patch).map_err(|error| SettingsError::Encode {
+            path: path.clone(),
+            message: error.to_string(),
+        })?;
+        let Value::Object(fields) = value else {
+            unreachable!("feature patches serialize as objects");
+        };
+        match store::patch_object(&path, "features", fields) {
             Ok(document) => {
                 self.state
                     .lock()

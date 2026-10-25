@@ -555,13 +555,10 @@ pub(super) fn submit_editor(
     }
     app.input.clear();
     app.command_palette.get_mut().reset();
-    app.awaiting_assistant = true;
-    app.working_started_at = Some(Instant::now());
-    app.status = "Working...".to_string();
     spawn_effect(
+        app,
         Arc::clone(session),
         session_handle.clone(),
-        app.epoch,
         input,
         mode,
         sender.clone(),
@@ -982,14 +979,22 @@ pub(super) fn incomplete_command_status(
 }
 
 pub(super) fn spawn_effect(
+    app: &mut App,
     session: Arc<AgentSession>,
     session_handle: PiSession,
-    epoch: u64,
     input: impl Into<SessionInput>,
     mode: EffectMode,
     sender: tokio::sync::mpsc::UnboundedSender<EffectDone>,
 ) {
     let input = input.into();
+    // Commands may only open UI or update settings. Their actual agent work, if
+    // any, starts the indicator through runtime events instead of submission.
+    if !input.text().trim_start().starts_with('/') || !input.images().is_empty() {
+        app.awaiting_assistant = true;
+        app.working_started_at = Some(Instant::now());
+        app.status = "Working...".to_string();
+    }
+    let epoch = app.epoch;
     tokio::spawn(async move {
         let refresh_transcript = input.images().is_empty() && input.text().starts_with("/tree ");
         let status = run_effect(&session_handle, &session, input, mode).await;

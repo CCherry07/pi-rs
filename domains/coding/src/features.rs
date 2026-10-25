@@ -1,3 +1,7 @@
+mod command;
+
+pub(crate) use command::FeaturesPlugin;
+
 /// Host ceiling for first-party product features.
 ///
 /// All features are enabled by default to preserve the standard Pi product.

@@ -29,6 +29,7 @@ use crate::configuration::{apply_settings, initial_model_request, session_option
 use crate::dynamic_providers::{
     DynamicProviderCandidate, DynamicProviderOverlay, DynamicProviderPreparation,
 };
+use crate::features::FeaturesPlugin;
 use crate::project_trust::ProjectTrustService;
 use crate::runtime_inventory::{configured_native_plugin_ids, javascript_inventory_labels};
 
@@ -296,6 +297,11 @@ impl SessionGenerationFactory for ProductSessionFactory {
             None
         };
         let components = GenerationComponents {
+            features: FeaturesPlugin::new(
+                self.settings.clone(),
+                SettingsContext::new(&config.cwd, project_trusted),
+                config.features,
+            ),
             native: &native_plugins,
             javascript: js_generation.as_ref(),
             mcp: local_mcp.as_ref(),

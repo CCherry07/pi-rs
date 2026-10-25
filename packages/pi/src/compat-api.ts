@@ -87,3 +87,4 @@ export type {
   UiNode, UiTone, UiInteraction, UiComponentEvent, UiMultiSelectAction, UiMultiSelectOption,
   UiMultiSelectRequest, UiMultiSelectResponse,
 } from "./extension-ui-frame.js";
+export { PiTheme as Theme, piTheme as theme, getEditorTheme, getSelectListTheme, getMarkdownTheme } from "./pi-component-adapter.js";

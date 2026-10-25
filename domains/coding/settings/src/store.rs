@@ -12,6 +12,35 @@ pub(crate) fn replace_top_level(
     key: &str,
     value: Value,
 ) -> Result<Map<String, Value>, SettingsError> {
+    update_document(path, |current| {
+        current.insert(key.to_string(), value);
+        Ok(())
+    })
+}
+
+pub(crate) fn patch_object(
+    path: &Path,
+    key: &str,
+    fields: Map<String, Value>,
+) -> Result<Map<String, Value>, SettingsError> {
+    update_document(path, |current| {
+        let object = current
+            .entry(key.to_string())
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| SettingsError::InvalidDocument {
+                path: path.to_path_buf(),
+                message: format!("{key} must be an object"),
+            })?;
+        object.extend(fields);
+        Ok(())
+    })
+}
+
+fn update_document(
+    path: &Path,
+    update: impl FnOnce(&mut Map<String, Value>) -> Result<(), SettingsError>,
+) -> Result<Map<String, Value>, SettingsError> {
     let parent = path
         .parent()
         .ok_or_else(|| SettingsError::InvalidDocument {
@@ -25,7 +54,7 @@ pub(crate) fn replace_top_level(
     })?;
     let guard = FileGuard::acquire(&lock_path(path))?;
     let mut current = document::read(path)?;
-    current.insert(key.to_string(), value);
+    update(&mut current)?;
     persist(path, &current)?;
     drop(guard);
     Ok(current)

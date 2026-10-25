@@ -1,11 +1,12 @@
 import { writeFileSync, renameSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
+import { Container, Input, Text } from "@earendil-works/pi-tui";
 import type { PiExtensionApi, PiExtensionContext } from "../../src/extension-api.js";
 import type { UiNode } from "../../src/extension-ui-frame.js";
 const text = (id: string, value: string): UiNode => ({ id, type: "text", text: value });
 const redPixelPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 
-/** End-to-end fixture: JavaScript only supplies nodes and consumes semantic events. */
+/** End-to-end fixture for semantic controls and adapted Pi components on the same surface. */
 export default function (pi: PiExtensionApi) {
   const evidence: Record<string, any> = { toolResults: [] };
   const save = () => {
@@ -82,8 +83,29 @@ export default function (pi: PiExtensionApi) {
     ] });
     ctx.ui.setWidget("completion-done", text("completion-done", "UI_PTY_COMPLETE_DONE")); save();
   } });
+  pi.registerCommand("ui-custom", { description: "Pi component input over the shared surface", handler: async (_args, ctx) => {
+    clearWidgets(ctx, ["completion-done"]);
+    evidence.customWidths = [];
+    evidence.customDisposals = 0;
+    evidence.custom = await ctx.ui.custom<string | undefined>((tui, theme, _keys, done) => {
+      const container = new Container();
+      const input = new Input();
+      input.onSubmit = done;
+      input.onEscape = () => done(undefined);
+      container.addChild(new Text(theme.fg("accent", "UI_PTY_CUSTOM"), 0, 0));
+      container.addChild(input);
+      tui.setFocus(input);
+      return {
+        render(width) { evidence.customWidths.push(width); save(); return container.render(width); },
+        invalidate() { container.invalidate(); },
+        dispose() { evidence.customDisposals++; save(); },
+      };
+    });
+    save();
+    ctx.ui.setWidget("custom-done", text("done", "UI_PTY_CUSTOM_DONE"));
+  } });
   pi.registerCommand("ui-working", { description: "Working and tool presentation", handler: (_args, ctx) => {
-    clearWidgets(ctx, ["update-done", "completion-done"]);
+    clearWidgets(ctx, ["update-done", "completion-done", "custom-done"]);
     ctx.ui.setProgress(true); ctx.ui.setProgramStatus({ state: "working", text: "UI_PTY_PROGRAM_WORKING", progress: 25 });
     evidence.workingRequested = true; save(); pi.sendUserMessage("run the ui_tool with value streamed");
   } });

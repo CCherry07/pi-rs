@@ -14,6 +14,7 @@ use tokio::sync::oneshot;
 
 use super::super::UiPalette;
 use super::bridge::SurfaceRequest;
+mod custom;
 mod owners;
 mod runtime;
 
@@ -556,6 +557,65 @@ mod tests {
         native.input(key(KeyCode::Down), &UiSurfaceSnapshot::default());
         js.input(key(KeyCode::Down), &UiSurfaceSnapshot::default());
         assert_eq!(visible(&native), visible(&js));
+    }
+
+    #[test]
+    fn modal_panels_dim_the_composer_without_dimming_the_selected_option() {
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::widgets::Block;
+        for modal in [false, true] {
+            let mut frame = description(
+                "dialog",
+                1,
+                UiNodeKind::Panel {
+                    title: "Tasks".into(),
+                    child: Box::new(UiNode::new(
+                        "choice",
+                        UiNodeKind::Select {
+                            options: vec!["View all tasks".into(), "Create task".into()],
+                            initial_selected: 0,
+                        },
+                    )),
+                },
+            );
+            frame.regions[0].overlay = Some(pi_plugin::UiOverlayOptions {
+                width: Some(40),
+                modal,
+                ..Default::default()
+            });
+            let mut surface = ExtensionSurface::default();
+            let _pending = mount(&mut surface, frame);
+            let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+            let composer_background = Color::Rgb(30, 30, 30);
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        Block::default().style(Style::default().bg(composer_background)),
+                        frame.area(),
+                    );
+                    surface.draw_overlays(frame);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(
+                buffer[(0, 0)].bg,
+                if modal {
+                    Color::Reset
+                } else {
+                    composer_background
+                }
+            );
+            assert_eq!(buffer[(0, 0)].modifier.contains(Modifier::DIM), modal);
+            let selected = buffer
+                .content
+                .iter()
+                .find(|cell| cell.symbol() == "›")
+                .unwrap();
+            assert_eq!(selected.fg, Color::Cyan);
+            assert!(!selected.modifier.contains(Modifier::DIM));
+            surface.input(key(KeyCode::Down), &UiSurfaceSnapshot::default());
+            assert!(visible_at(&surface, 80, 16).contains("› Create task"));
+        }
     }
 
     #[test]

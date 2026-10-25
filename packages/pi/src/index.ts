@@ -60,4 +60,5 @@ export type {
   UiMultiSelectOption, UiMultiSelectRequest, UiMultiSelectResponse,
 } from "./extension-ui-frame.js";
 export type { UiMount, MountOptions, DialogOptions, UiTheme } from "./extension-ui.js";
+export type { CustomOptions, CustomFactory, CustomTui, PiComponent, PiTheme } from "./pi-component-adapter.js";
 export type { MessageRenderer, EntryRenderer, MarkdownTransformer, ToolRenderers, ToolRenderContext, ToolRendererResolver } from "./extension-ui-transcript.js";

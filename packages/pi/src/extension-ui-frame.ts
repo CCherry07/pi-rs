@@ -16,6 +16,7 @@ export interface UiMultiSelectResponse {
 }
 export type UiNode = { id: string } & (
   | { type: "text"; text: string; tone?: UiTone }
+  | { type: "custom"; lines: string[]; interactive?: boolean; keyRelease?: boolean; cursor?: [number, number] | null }
   | { type: "markdown"; text: string }
   | { type: "link"; text: string; url: string }
   | { type: "column" | "row"; children: UiNode[]; gap?: number }
@@ -70,6 +71,7 @@ export const uiMultiSelectResponseSchema: z.ZodType<UiMultiSelectResponse> = z.s
 });
 const node: z.ZodType<UiNode> = z.lazy(() => z.discriminatedUnion("type", [
   z.strictObject({ id, type: z.literal("text"), text: z.string(), tone: z.enum(["default", "accent", "muted", "success", "warning", "error"]).default("default") }),
+  z.strictObject({ id, type: z.literal("custom"), lines: z.array(z.string()), interactive: z.boolean().default(false), keyRelease: z.boolean().default(false), cursor: z.tuple([cells, cells]).nullish() }),
   z.strictObject({ id, type: z.literal("markdown"), text: z.string() }),
   z.strictObject({ id, type: z.literal("link"), text: z.string(), url: z.string() }),
   z.strictObject({ id, type: z.literal("column"), children: z.array(node), gap: cells.default(0) }),
@@ -111,6 +113,7 @@ export const uiInteractionSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("activate") }),
   z.strictObject({ type: z.literal("cancel") }),
   z.strictObject({ type: z.literal("shortcut"), key: z.string() }),
+  z.strictObject({ type: z.literal("customInput"), data: z.string() }),
 ]);
 export type UiInteraction = z.infer<typeof uiInteractionSchema>;
 export const uiEventSchema = z.discriminatedUnion("type", [

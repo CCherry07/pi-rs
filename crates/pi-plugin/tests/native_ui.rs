@@ -511,21 +511,15 @@ async fn standard_selector_uses_shared_nodes_and_returns_validated_index() {
             .await
     });
     let (frame, response) = next(&mut frames).await;
-    let UiNodeKind::Column { children, .. } = &frame.regions[0].root.kind else {
-        panic!("selector is a shared column");
+    let UiNodeKind::Panel { title, child } = &frame.regions[0].root.kind else {
+        panic!("selector is a shared panel");
+    };
+    assert_eq!(title, "Environment");
+    let UiNodeKind::Column { children, .. } = &child.kind else {
+        panic!("selector content is a shared column");
     };
     assert_eq!(
         children[0],
-        UiNode::new(
-            "title",
-            UiNodeKind::Text {
-                text: "Environment".into(),
-                tone: UiTone::Accent
-            }
-        )
-    );
-    assert_eq!(
-        children[1],
         UiNode::new(
             "value",
             UiNodeKind::Select {
@@ -577,11 +571,14 @@ async fn native_text_and_multi_selection_helpers_use_shared_nodes() {
     let ui = epoch.context().ui;
     let input = tokio::spawn(async move { ui.input("Name", "Type a name").await });
     let (frame, response) = next(&mut frames).await;
-    let UiNodeKind::Column { children, .. } = &frame.regions[0].root.kind else {
-        panic!("input is a shared column")
+    let UiNodeKind::Panel { child, .. } = &frame.regions[0].root.kind else {
+        panic!("input is a shared panel")
+    };
+    let UiNodeKind::Column { children, .. } = &child.kind else {
+        panic!("input content is a shared column")
     };
     assert!(matches!(
-        &children[1].kind,
+        &children[0].kind,
         UiNodeKind::Input { placeholder, .. } if placeholder == "Type a name"
     ));
     response

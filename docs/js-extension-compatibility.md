@@ -87,30 +87,34 @@ context can immediately query and operate on the reloaded generation.
 ## UI and registrations
 
 Interactive Node/NAPI sessions with an installed frontend bridge expose `ctx.hasUI = true` and use
-the shared Rust component runtime. TUI mode without a bridge reports false. This is a breaking UI
-API redesign, not compatibility with Pi's JavaScript TUI classes.
-`@pi-rs/cli` exports the declarative UI types. No upstream TUI or Coding Agent npm runtime is
-installed by the host. Node 22.19+ is required.
+the shared Rust component runtime. TUI mode without a bridge reports false. `@pi-rs/cli` exports
+the declarative UI types and supports Pi `custom(factory)` components through `PiComponentAdapter`.
+The host pins `@earendil-works/pi-tui` and aliases both supported Pi scopes to it. It does not start
+the upstream terminal loop or install the Coding Agent npm runtime. Node 22.19+ is required.
 
 | UI capability | Interactive support |
 | --- | --- |
-| `select`, `confirm`, `input`, `editor` | Native Rust controls, prefill, cancellation, timeout and AbortSignal, including during `session_start`. Editor Enter inserts a newline; Ctrl+Enter submits. |
-| `mount`, `custom` | Semantic tree, stable node IDs, update/unmount/focus, inline slots and centered modal/nonmodal overlays. `custom` resolves submit/activate and cancellation. |
+| `select`, `confirm`, `input`, `editor` | Shared compact panels with titles, padding, selection markers and keyboard hints; width is capped at 60 cells and the terminal width. Native Rust input, prefill, cancellation, timeout and AbortSignal work during `session_start` too. Editor Enter inserts a newline; Ctrl+Enter submits. |
+| `mount`, `custom` | Semantic trees, stable node IDs, update/unmount/focus and slots. `custom(factory)` also accepts Pi components, defaults to the editor region and supports static centered overlays. Both custom forms share completion and cancellation. |
 | Layout and controls | Text, Link, Markdown, Column, Row, Panel, Spacer, Scroll, Select, Input, Editor, Button, Progress and Image. Rust owns measurement, clipping, focus, scrolling, edits and completions. |
 | Rich selection | Searchable/filterable/sortable multi-selection is a shared semantic node exposed by `ctx.ui.multiSelect`; native Rust uses the same node through `UiContext::multi_select`. |
 | Widgets/header/footer/status | Node trees in native slots, replacement and keyed status text. Business data is supplied by the plugin. |
-| Input/shortcuts | Semantic events; Rust handles ordinary keys, paste, mouse selection, focus and registered shortcuts. Raw terminal/input interception is removed. |
-| Themes | Shared built-in light/dark/system palettes. Upstream JS theme classes, JSON theme discovery/watchers and custom keybinding files are removed. |
-| Transcript renderers | Message, entry, Markdown-transformer, tool-call/partial/final and resolver callbacks return nodes. Tool metadata retains arguments, details, shared state, output padding, image policy and duration. |
+| Input/shortcuts | Rust handles semantic control input and registered shortcuts. Focused Custom nodes receive reconstructed keyboard/paste events, with component-local listeners and focus in JS. Terminal control and global interception remain unavailable. |
+| Themes | Shared built-in light/dark/system palettes; Pi formatting helpers use terminal palette colors. Complete upstream themes, JSON discovery/watchers and custom keybinding files remain unsupported. |
+| Transcript renderers | Message, entry and tool callbacks return nodes or Pi components; Markdown transformers return text. Tool metadata retains arguments, details, shared state, separate call/result `lastComponent`, output padding, image policy and duration. |
 | System operations | Rust-owned title, progress/program status, clipboard, suspend and external editor. Image data is decoded/encoded by Rust for Kitty/iTerm; Link becomes a clipped terminal hyperlink. |
 | Editor/working state | Read/replace/paste composer text, tool expansion, working message/visibility and hidden-thinking labels. Custom editor UI uses the shared Editor node. |
 
-Stable node IDs preserve Rust editing state across description changes. Ordinary editing does not
-wait for JS. Removed/replaced nodes cannot receive queued events; retained nodes keep valid queued
+Stable node IDs preserve Rust editing state across description changes. Semantic controls edit
+locally; Pi components process their internal state in JS. Removed/replaced nodes cannot receive queued events; retained nodes keep valid queued
 submissions. Unmount, cancellation, host failure and generation retirement settle pending dialogs
 and release callbacks. Failed generation preparation preserves live UI. Print/JSON/RPC use inactive
 UI defaults (notifications remain active). The CLI TUI is the current renderer; Desktop reports UI
 unavailable until it provides its own semantic-surface adapter.
+
+This adapter is a compatibility subset. Widget/header/footer component factories, custom editor
+subclasses, component mouse callbacks, dynamic overlay options/handles and arbitrary terminal
+operations are not supported. Use the existing semantic surfaces and host operations where available.
 
 See [the shared plugin UI contract](plugin-ui.md) for usage and deliberate API changes.
 

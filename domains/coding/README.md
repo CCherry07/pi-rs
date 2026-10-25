@@ -50,6 +50,12 @@ on lifecycle, trust and transactional preparation.
 ## Runtime features
 
 `settings.json` selects first-party features for CLI, Desktop, and other Coding entry points.
+The interactive `/features` command chooses a scope and edits these flags. `/features global`
+and `/features project` open a scope directly. `Space` toggles the focused capability; `Enter`
+saves and reloads the current session; `Esc` cancels. Cancellation
+keeps the current settings. Only edited flags are written, preserving other settings and
+project inheritance. The command remains registered when every optional feature is disabled.
+
 Global settings live in `<agent-dir>/settings.json` (normally `~/.pi/agent/settings.json`);
 trusted `<cwd>/.pi/settings.json` overrides individual fields:
 

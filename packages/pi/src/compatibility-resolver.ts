@@ -27,6 +27,7 @@ const TYPEBOX_PACKAGE_SUBPATHS = [
 
 export interface CompatibilityModules {
   pi: object
+  tui: object
 }
 
 /** Resolves extension peers to the runtimes owned by the host. */
@@ -38,6 +39,7 @@ export class CompatibilityResolver {
     // Share host SDK helpers so callbacks retain the owning generation context.
     this.virtualModules = Object.freeze(Object.fromEntries([
       ['@pi-rs/cli', modules.pi],
+      ...PI_PACKAGE_SCOPES.map(scope => [`${scope}/pi-tui`, modules.tui]),
       ...PI_PACKAGE_SCOPES.flatMap(scope =>
         PI_COMPATIBILITY_ENTRYPOINTS.map(
           (entrypoint) => [`${scope}/${entrypoint}`, modules.pi],

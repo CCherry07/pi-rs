@@ -35,6 +35,7 @@ use crate::configuration::{
     initial_model_request, settings_queue_mode, settings_thinking_budgets, settings_thinking_level,
 };
 use crate::dynamic_providers::DynamicProviderCandidate;
+use crate::features::FeaturesPlugin;
 use crate::{Config, expand_tilde_path};
 
 const BUILTIN_TOOL_NAMES: [&str; 17] = [
@@ -60,6 +61,7 @@ const BUILTIN_TOOL_NAMES: [&str; 17] = [
 /// Borrowed, already-prepared components for unified runtime registration.
 /// Configuration, runtime capabilities and activation guards are deliberately separate.
 pub(crate) struct GenerationComponents<'a> {
+    pub(crate) features: FeaturesPlugin,
     pub(crate) native: &'a NativePlugins,
     pub(crate) javascript: Option<&'a JsPluginGeneration>,
     pub(crate) mcp: Option<&'a Arc<dyn pi_plugin::Plugin>>,
@@ -121,6 +123,10 @@ impl GenerationComponents<'_> {
         );
 
         let builder = PiRuntime::builder()
+            .plugin_factory({
+                let features = self.features.clone();
+                move || features.clone()
+            })
             .supplemental_diagnostics(config.settings_diagnostics.clone())
             .completion_retry_policy(CompletionRetryPolicy {
                 enabled: config.runtime_settings.retry.enabled,
@@ -372,6 +378,11 @@ mod tests {
         codex_credentials: Option<pi_plugin_openai::CodexCredentials>,
     ) -> Result<PiRuntime, RuntimeError> {
         GenerationComponents {
+            features: FeaturesPlugin::new(
+                pi_settings::SettingsManager::new(&config.agent_dir),
+                pi_settings::SettingsContext::new(&config.cwd, project_trusted),
+                config.features,
+            ),
             native: native_plugins,
             javascript: js_generation,
             mcp: None,
@@ -394,6 +405,11 @@ mod tests {
     ) -> Result<PiRuntime, RuntimeError> {
         let memory = prepare_memory(config, false).map_err(RuntimeError::Build)?;
         GenerationComponents {
+            features: FeaturesPlugin::new(
+                pi_settings::SettingsManager::new(&config.agent_dir),
+                pi_settings::SettingsContext::new(&config.cwd, false),
+                config.features,
+            ),
             native: &NativePlugins::default(),
             javascript: None,
             mcp: None,
@@ -428,6 +444,11 @@ mod tests {
                 let memory = prepare_memory(&config, false).unwrap().unwrap();
                 let provider = Arc::downgrade(&memory);
                 let components = GenerationComponents {
+                    features: FeaturesPlugin::new(
+                        pi_settings::SettingsManager::new(&config.agent_dir),
+                        pi_settings::SettingsContext::new(&config.cwd, false),
+                        config.features,
+                    ),
                     native: &NativePlugins::default(),
                     javascript: None,
                     mcp: None,

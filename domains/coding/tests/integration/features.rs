@@ -9,6 +9,8 @@ use pi_plugin::BeforeAgentStartEvent;
 use pi_session::{AgentSession, PiSession};
 use serde_json::json;
 
+mod command;
+
 const CORE_TOOLS: &[&str] = &[
     "read",
     "grep",
@@ -283,7 +285,16 @@ async fn no_features_remove_feature_plugins_tools_commands_and_skill_prompt() {
     config.features = Features::none();
     let (pi, session) = create_session(config).await;
     assert_feature_registrations(&session.current(), &Features::none());
-    assert!(session.current().catalog().command_specs().is_empty());
+    assert_eq!(
+        session
+            .current()
+            .catalog()
+            .command_specs()
+            .iter()
+            .map(|spec| spec.name.as_str())
+            .collect::<Vec<_>>(),
+        ["features"]
+    );
     assert!(
         !projected_prompt(&session.current())
             .await

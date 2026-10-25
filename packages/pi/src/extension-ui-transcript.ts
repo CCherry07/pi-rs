@@ -1,11 +1,12 @@
 import { z } from "zod";
 import { uiNodeSchema, type UiNode, type UiSnapshot } from "./extension-ui-frame.js";
+import { PiComponentAdapter, piTheme, withPiTheme, type PiComponent, type PiTheme } from "./pi-component-adapter.js";
 
 export interface PresentationContext {
   expanded: boolean;
   outputPad: number;
 }
-export type MessageRenderer = (entry: Record<string, unknown>, context: PresentationContext) => UiNode | undefined;
+export type MessageRenderer = (entry: Record<string, unknown>, context: PresentationContext, theme: PiTheme) => UiNode | PiComponent | undefined;
 export type EntryRenderer = MessageRenderer;
 export type MarkdownTransformer = (
   text: string,
@@ -15,6 +16,7 @@ export interface ToolRenderContext extends PresentationContext {
   args: Record<string, unknown>;
   toolCallId: string;
   invalidate(): void;
+  lastComponent: PiComponent | undefined;
   state: unknown;
   cwd: string;
   executionStarted: boolean;
@@ -25,17 +27,23 @@ export interface ToolRenderContext extends PresentationContext {
   durationMs: number | undefined;
 }
 export interface ToolRenderers {
-  renderCall?(args: Record<string, unknown>, context: ToolRenderContext): UiNode;
-  renderResult?(result: Record<string, unknown>, context: ToolRenderContext): UiNode;
+  renderCall?(args: Record<string, unknown>, theme: PiTheme & ToolRenderContext, context: ToolRenderContext): UiNode | PiComponent | undefined;
+  renderResult?(result: Record<string, unknown>, options: ToolRenderContext, theme: PiTheme, context: ToolRenderContext): UiNode | PiComponent | undefined;
 }
 export type ToolRendererResolver = (name: string, next: () => ToolRenderers | undefined) => ToolRenderers | undefined;
 const callback = z.custom<(...args: never[]) => unknown>((value) => typeof value === "function", "expected a presentation function");
 const toolsSchema = z.object({ renderCall: callback.optional(), renderResult: callback.optional() });
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
 const text = (value: unknown): string => typeof value === "string" ? value : "";
-interface Row { state: unknown; revision: number; signature?: string; node?: UiNode }
+interface Row { state: unknown; revision: number; signature?: string; node?: UiNode; components: Map<string, PiComponentAdapter> }
+function disposeRow(row: Row) {
+  for (const component of row.components.values()) {
+    try { component.dispose(); } catch { /* A faulty cleanup must not keep other components alive. */ }
+  }
+  row.components.clear();
+}
 
-/** Plugin callbacks produce semantic content. Rust alone lays out and renders these nodes. */
+/** Rows retain callback state and Pi components; Rust owns transcript composition and rendering. */
 export class ExtensionTranscript {
   readonly #messages = new Map<string, MessageRenderer>();
   readonly #entries = new Map<string, EntryRenderer>();
@@ -75,35 +83,51 @@ export class ExtensionTranscript {
     if (payload.error) children.push({ id: "error", type: "text", text: text(payload.error), tone: "error" });
     return { id: "content", type: "column", children };
   }
-  #tool(payload: Record<string, unknown>, row: Row, expanded: boolean): UiNode | undefined {
+  #presentation(row: Row, slot: string, value: unknown, width: number): UiNode | undefined {
+    let component = row.components.get(slot);
+    if (!component) { component = new PiComponentAdapter(slot); row.components.set(slot, component); }
+    return component.present(value, width);
+  }
+  #tool(payload: Record<string, unknown>, row: Row, expanded: boolean, width: number): UiNode | undefined {
     const renderers = this.#resolve(text(payload.name));
     if (!renderers) return undefined;
     const args = record(payload.args);
     const result = record(payload.result);
-    const context: ToolRenderContext = {
+    const context = withPiTheme<ToolRenderContext>({
       args, toolCallId: text(payload.toolCallId), state: row.state, cwd: text(payload.cwd),
-      invalidate: () => { if (!this.#retired) { row.revision++; this.wake(); } },
+      lastComponent: row.components.get("call")?.component,
+      invalidate: () => {
+        if (this.#retired) return;
+        for (const component of row.components.values()) component.invalidate();
+        row.revision++; this.wake();
+      },
       executionStarted: Boolean(payload.executionStarted), argsComplete: Boolean(payload.argsComplete),
       isPartial: Boolean(payload.isPartial), expanded, showImages: this.showImages,
       isError: Boolean(payload.isError), outputPad: this.outputPad,
       durationMs: !payload.isPartial && typeof result.durationMs === "number" ? result.durationMs : undefined,
-    };
-    const children: UiNode[] = [renderers.renderCall?.(args, context) ?? { id: "call", type: "text", text: `${text(payload.name)} ${JSON.stringify(args)}`, tone: "accent" }];
+    });
+    const call = renderers.renderCall?.(args, context, context);
+    const children: UiNode[] = [this.#presentation(row, "call", call, width) ?? { id: "call", type: "text", text: `${text(payload.name)} ${JSON.stringify(args)}`, tone: "accent" }];
+    row.state = context.state;
     if (payload.result) {
       const fallback = Array.isArray(result.content) ? result.content.map((block) => text(record(block).text)).filter(Boolean).join("\n") : "";
-      children.push(renderers.renderResult?.(result, context) ?? { id: "result", type: "text", text: expanded ? fallback : fallback.split("\n").slice(0, 10).join("\n") });
+      const resultContext: ToolRenderContext = { ...context, lastComponent: row.components.get("result")?.component };
+      const rendered = renderers.renderResult?.(result, resultContext, piTheme, resultContext);
+      children.push(this.#presentation(row, "result", rendered, width) ?? { id: "result", type: "text", text: expanded ? fallback : fallback.split("\n").slice(0, 10).join("\n") });
+      row.state = resultContext.state;
     }
-    row.state = context.state;
     return { id: "content", type: "column", children };
   }
-  #present(payload: Record<string, unknown>, row: Row, expanded: boolean): UiNode | undefined {
+  #present(payload: Record<string, unknown>, row: Row, expanded: boolean, width: number): UiNode | undefined {
     const kind = text(payload.kind);
     if (kind === "user" || kind === "assistant") return this.#message(payload, kind);
     if (kind === "customMessage" || kind === "customEntry") {
       const entry = record(payload.entry);
-      return (kind === "customMessage" ? this.#messages : this.#entries).get(text(entry.customType))?.(entry, { expanded, outputPad: this.outputPad });
+      const renderer = (kind === "customMessage" ? this.#messages : this.#entries).get(text(entry.customType));
+      const rendered = renderer?.(entry, { expanded, outputPad: this.outputPad }, piTheme);
+      return this.#presentation(row, "content", rendered, width);
     }
-    return kind === "tool" ? this.#tool(payload, row, expanded) : undefined;
+    return kind === "tool" ? this.#tool(payload, row, expanded, width) : undefined;
   }
   render(snapshot: UiSnapshot) {
     if (this.#retired) return [];
@@ -115,17 +139,23 @@ export class ExtensionTranscript {
       const identity = kind === "tool" ? `tool:${text(item.payload.toolCallId)}` : `${kind}:${text(entry.id) || item.index}`;
       alive.add(identity);
       let row = this.#rows.get(identity);
-      if (!row) { row = { state: {}, revision: 0 }; this.#rows.set(identity, row); }
-      const signature = [item.fingerprint, snapshot.toolsExpanded, this.#revision, row.revision].join(":");
+      if (!row) { row = { state: {}, revision: 0, components: new Map() }; this.#rows.set(identity, row); }
+      const width = snapshot.transcriptWidth || snapshot.columns;
+      const signature = [item.fingerprint, snapshot.toolsExpanded, width, this.#revision, row.revision].join(":");
       if (row.signature !== signature) {
-        const node = this.#present(item.payload, row, snapshot.toolsExpanded);
+        const node = this.#present(item.payload, row, snapshot.toolsExpanded, width);
         row.node = node === undefined ? undefined : uiNodeSchema.parse(node);
         row.signature = signature;
       }
       if (row.node) output.push({ index: item.index, fingerprint: item.fingerprint, root: row.node });
     }
-    for (const identity of this.#rows.keys()) if (!alive.has(identity)) this.#rows.delete(identity);
+    for (const [identity, row] of this.#rows) if (!alive.has(identity)) { this.#rows.delete(identity); disposeRow(row); }
     return output;
   }
-  dispose() { this.#retired = true; this.#rows.clear(); }
+  dispose() {
+    if (this.#retired) return;
+    this.#retired = true;
+    for (const row of this.#rows.values()) disposeRow(row);
+    this.#rows.clear();
+  }
 }

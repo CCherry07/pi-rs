@@ -3,6 +3,7 @@ import { basename } from 'node:path'
 
 import { createJiti } from 'jiti'
 import { z } from 'zod'
+import * as piTui from '@earendil-works/pi-tui'
 
 import * as compatibilityApi from './compat-api.js'
 import { CompatibilityResolver } from './compatibility-resolver.js'
@@ -36,6 +37,7 @@ import {
 const require = createRequire(import.meta.url)
 const compatibilityResolver = new CompatibilityResolver(require, {
   pi: compatibilityApi,
+  tui: piTui,
 })
 
 const jsonObjectSchema = z.looseObject({})

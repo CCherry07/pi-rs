@@ -1487,13 +1487,10 @@ async fn run_loop(
     let mut paste_pending = false;
     if let Some(prompt) = initial_prompt {
         app.input_history.record(prompt.text());
-        app.awaiting_assistant = true;
-        app.working_started_at = Some(Instant::now());
-        app.status = "Working...".to_string();
         spawn_effect(
+            &mut app,
             Arc::clone(&session),
             session_handle.clone(),
-            app.epoch,
             prompt,
             EffectMode::Submit,
             effect_sender.clone(),
@@ -3208,6 +3205,206 @@ mod tests {
             "the transcript should acknowledge submission before any provider event arrives"
         );
         assert!(render_app(&app, 80, 12).contains("Working... (5s • esc to interrupt)"));
+    }
+
+    #[tokio::test]
+    async fn slash_commands_do_not_show_working_before_agent_execution() {
+        struct Commands;
+        #[pi_plugin::plugin]
+        impl pi_plugin::Plugin for Commands {
+            fn id(&self) -> pi_core::PluginId {
+                pi_core::PluginId::new("command-feedback")
+            }
+            fn register(
+                &self,
+                context: &mut pi_plugin::RegisterContext<'_>,
+            ) -> pi_plugin::Result<()> {
+                context.register_command(Arc::new(LocalCommand(false)))?;
+                context.register_command(Arc::new(LocalCommand(true)))
+            }
+        }
+        struct LocalCommand(bool);
+        #[async_trait::async_trait]
+        impl pi_plugin::Command for LocalCommand {
+            fn spec(&self) -> CommandSpec {
+                CommandSpec {
+                    name: if self.0 { "ask" } else { "inspect" }.into(),
+                    description: "Command feedback fixture".into(),
+                    argument_hint: None,
+                }
+            }
+            async fn execute(
+                &self,
+                _: pi_plugin::CommandContext,
+                _: String,
+            ) -> Result<pi_plugin::CommandOutcome, pi_plugin::CommandError> {
+                Ok(if self.0 {
+                    pi_plugin::CommandOutcome::TransformInput("hello".into())
+                } else {
+                    pi_plugin::CommandOutcome::Handled
+                })
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let plugin = Arc::new(pi_test_support::ScriptedProviderPlugin::scripted(
+            (0..5).map(|_| pi_test_support::ScriptedTurn::Text("done".into())),
+        ));
+        let provider = plugin.provider();
+        let sessions = MultiSessionManager::new(move |request: SessionGenerationRequest| {
+            let plugin = plugin.clone();
+            async move {
+                let runtime = pi_runtime::PiRuntime::builder()
+                    .provider_plugin_arc(plugin)
+                    .plugin(Commands)
+                    .agent_options(pi_agent::AgentOptions {
+                        provider_id: ProviderId::new("scripted"),
+                        model_id: ModelId::new("test"),
+                        cwd: request.cwd,
+                        ..pi_agent::AgentOptions::default()
+                    })
+                    .system_prompt(pi_runtime::SystemPrompt::Final("test".into()))
+                    .build()?;
+                Ok(PreparedSessionGeneration::new(
+                    runtime,
+                    AgentSessionOptions::default(),
+                ))
+            }
+        });
+        let handle = sessions
+            .create_session(pi_session::CreateSessionOptions::new(
+                directory.path(),
+                directory.path().join("session.jsonl"),
+            ))
+            .await
+            .unwrap();
+        let session = handle.current();
+        let (trust, _) = ProjectTrustService::new(
+            &directory.path().join("agent"),
+            Some(false),
+            false,
+            pi_settings::DefaultProjectTrust::Ask,
+        )
+        .unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut clipboard = RecordingClipboard::default();
+
+        for from_editor in [true, false] {
+            for (input, starts_agent) in [
+                ("/help", false),
+                ("/session", false),
+                ("/inspect", false),
+                ("/ask", true),
+                ("hello", true),
+            ] {
+                let mut app = App::new(&session, &session.snapshot());
+                let mut events = session.subscribe().events;
+                let requests_before = provider.requests().len();
+                if from_editor {
+                    app.input.set_text(input);
+                    submit_editor(
+                        &mut app,
+                        &session,
+                        &handle,
+                        &trust,
+                        &sender,
+                        &mut clipboard,
+                        EffectMode::Submit,
+                    );
+                } else {
+                    spawn_effect(
+                        &mut app,
+                        session.clone(),
+                        handle.clone(),
+                        input,
+                        EffectMode::Submit,
+                        sender.clone(),
+                    );
+                }
+                let screen = render_app(&app, 100, 24);
+                let immediate_feedback = input == "hello";
+                assert_eq!(
+                    screen.contains("Working..."),
+                    immediate_feedback,
+                    "{input}, from_editor={from_editor}:\n{screen}"
+                );
+                assert_eq!(app.awaiting_assistant, immediate_feedback, "{input}");
+                assert_eq!(app.has_active_animation(), immediate_feedback, "{input}");
+                let done = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(done.status.is_ok(), "{:?}", done.status);
+                let mut saw_agent_start = false;
+                while let Ok(event) = events.try_recv() {
+                    let is_start = matches!(
+                        &event.event,
+                        AgentSessionEvent::Agent(event) if matches!(event.as_ref(), AgentEvent::AgentStart)
+                    );
+                    app.apply_session_event(event.event);
+                    if is_start {
+                        saw_agent_start = true;
+                        assert!(
+                            render_app(&app, 100, 24).contains("Working..."),
+                            "{input} should show actual agent work"
+                        );
+                        assert!(app.has_active_animation());
+                    }
+                }
+                assert_eq!(saw_agent_start, starts_agent, "{input}");
+                assert_eq!(
+                    provider.requests().len() - requests_before,
+                    usize::from(starts_agent),
+                    "{input}"
+                );
+                app.update(AppMessage::EffectCompleted(done));
+                app.sync_snapshot(&session.snapshot());
+                assert!(!render_app(&app, 100, 24).contains("Working..."), "{input}");
+            }
+        }
+
+        let mut app = App::new(&session, &session.snapshot());
+        app.apply_agent_event(AgentEvent::AgentStart);
+        let started_at = app.working_started_at;
+        let status = app.status.clone();
+        app.input.set_text("/help");
+        submit_editor(
+            &mut app,
+            &session,
+            &handle,
+            &trust,
+            &sender,
+            &mut clipboard,
+            EffectMode::Submit,
+        );
+        assert_eq!(
+            app.working_started_at, started_at,
+            "commands must not restart an existing timer"
+        );
+        assert_eq!(app.status, status);
+        assert!(app.has_active_animation());
+        assert!(receiver.recv().await.unwrap().status.is_ok());
+
+        let mut app = App::new(&session, &session.snapshot());
+        let prompt = SessionInput::new("/help").with_images([pi_core::ImageContent {
+            data: "fixture".into(),
+            mime_type: "image/png".into(),
+        }]);
+        spawn_effect(
+            &mut app,
+            session.clone(),
+            handle.clone(),
+            prompt,
+            EffectMode::Submit,
+            sender.clone(),
+        );
+        assert!(render_app(&app, 100, 24).contains("Working..."));
+        assert!(receiver.recv().await.unwrap().status.is_ok());
+        assert_eq!(
+            provider.requests().len(),
+            5,
+            "image-bearing startup input remains a prompt"
+        );
+        sessions.shutdown().await.unwrap();
     }
 
     #[test]

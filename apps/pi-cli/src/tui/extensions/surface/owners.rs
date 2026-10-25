@@ -8,7 +8,11 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use pi_plugin::{
     UiInteraction, UiRegion, UiRegionPlacement, UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot,
 };
-use ratatui::{layout::Rect, widgets::Clear};
+use ratatui::{
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    widgets::Clear,
+};
 use tokio::sync::oneshot;
 
 use super::super::super::UiPalette;
@@ -426,6 +430,17 @@ impl SurfaceOwners {
                 .iter()
                 .filter(|region| region.placement == UiRegionPlacement::Overlay)
             {
+                if region.overlay.as_ref().is_none_or(|options| options.modal) {
+                    let backdrop = Style::default()
+                        .fg(Color::DarkGray)
+                        .bg(Color::Reset)
+                        .remove_modifier(Modifier::all())
+                        .add_modifier(Modifier::DIM);
+                    for cell in &mut frame.buffer_mut().content {
+                        cell.set_style(backdrop);
+                    }
+                    graphics.occlude(root);
+                }
                 let width = region
                     .overlay
                     .as_ref()

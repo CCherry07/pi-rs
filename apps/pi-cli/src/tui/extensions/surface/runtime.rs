@@ -10,7 +10,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap},
 };
 use serde_json::json;
 
@@ -466,6 +466,7 @@ enum Control {
     Select(Box<SelectState>),
     MultiSelect(Box<MultiSelectState>),
     Button,
+    Custom,
     Scroll(ScrollState),
 }
 
@@ -567,6 +568,7 @@ impl TreeRuntime {
                 order.push(node.id.clone());
                 let make = || {
                     let mut list = SelectionList::default();
+                    list.set_highlight_marker("› ");
                     list.set_rows(options.iter().cloned().map(Line::from).collect());
                     list.select(*initial_selected);
                     Control::Select(Box::new(SelectState {
@@ -604,6 +606,13 @@ impl TreeRuntime {
                 order.push(node.id.clone());
                 self.controls.insert(node.id.clone(), Control::Button);
             }
+            N::Custom {
+                interactive: true, ..
+            } => {
+                present.insert(node.id.clone());
+                order.push(node.id.clone());
+                self.controls.insert(node.id.clone(), Control::Custom);
+            }
             _ => {}
         }
     }
@@ -626,6 +635,18 @@ impl TreeRuntime {
         root: &UiNode,
         event: &Event,
     ) -> (bool, Option<(String, UiInteraction)>) {
+        if let Some(id) = &self.focused
+            && let Some(UiNode {
+                kind: UiNodeKind::Custom { key_release, .. },
+                ..
+            }) = find_node(root, id)
+            && let Some(data) = super::custom::input(event, *key_release)
+        {
+            return (
+                true,
+                Some((id.clone(), UiInteraction::CustomInput { data })),
+            );
+        }
         if let Event::Mouse(mouse) = event {
             use crossterm::event::{MouseButton, MouseEventKind};
             if matches!(
@@ -893,6 +914,7 @@ impl TreeRuntime {
                     (false, None)
                 }
             }
+            Control::Custom => (false, None),
             Control::Button => {
                 if matches!(event, Event::Key(key) if matches!(key.code, KeyCode::Enter | KeyCode::Char(' ')))
                 {
@@ -949,6 +971,26 @@ impl TreeRuntime {
         }
         use UiNodeKind as N;
         match &node.kind {
+            N::Custom {
+                lines,
+                interactive,
+                cursor,
+                ..
+            } => {
+                if *interactive {
+                    self.hit_areas.push((node.id.clone(), area));
+                }
+                frame.render_widget(Paragraph::new(super::custom::lines(lines)), area);
+                if active
+                    && self.focused.as_ref() == Some(&node.id)
+                    && let Some((row, column)) = cursor
+                    && *row < area.height
+                    && *column < area.width
+                {
+                    let cell = &mut frame.buffer_mut()[(area.x + column, area.y + row)];
+                    cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+                }
+            }
             N::Column { children, gap } => {
                 let mut y = area.y;
                 for child in children {
@@ -987,8 +1029,19 @@ impl TreeRuntime {
             N::Panel { title, child } => {
                 let block = Block::default()
                     .borders(Borders::ALL)
-                    .title(title.clone())
-                    .border_style(Style::default().fg(palette.accent));
+                    .border_type(BorderType::Rounded)
+                    .padding(Padding::uniform(1))
+                    .title(if title.is_empty() {
+                        Line::default()
+                    } else {
+                        Line::from(Span::styled(
+                            format!(" {title} "),
+                            Style::default()
+                                .fg(palette.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ))
+                    })
+                    .border_style(Style::default().fg(Color::DarkGray));
                 let inner = block.inner(area);
                 frame.render_widget(block, area);
                 self.draw(child, frame, inner, palette, active);
@@ -1076,6 +1129,7 @@ impl TreeRuntime {
                     state.list.set_highlight_style(
                         Style::default()
                             .fg(palette.accent)
+                            .bg(palette.composer_background.unwrap_or(Color::Reset))
                             .add_modifier(Modifier::BOLD),
                     );
                     state.list.view(frame, area);
@@ -1396,6 +1450,7 @@ fn draw_multi_select(
 pub(super) fn measure(node: &UiNode, width: u16, palette: UiPalette) -> u16 {
     use UiNodeKind as N;
     let height = match &node.kind {
+        N::Custom { lines, .. } => lines.len(),
         N::Column { children, gap } => children
             .iter()
             .map(|child| usize::from(measure(child, width, palette)))
@@ -1408,7 +1463,7 @@ pub(super) fn measure(node: &UiNode, width: u16, palette: UiPalette) -> u16 {
             .max()
             .unwrap_or(0),
         N::Panel { child, .. } => {
-            usize::from(measure(child, width.saturating_sub(2), palette)).saturating_add(2)
+            usize::from(measure(child, width.saturating_sub(4), palette)).saturating_add(4)
         }
         N::Spacer { height } | N::Image { height, .. } | N::Scroll { height, .. } => {
             usize::from(*height)
@@ -1442,6 +1497,7 @@ fn tone_style(tone: UiTone, palette: UiPalette) -> Style {
 
 fn lines(node: &UiNode, _width: u16, palette: UiPalette) -> Vec<Line<'static>> {
     match &node.kind {
+        UiNodeKind::Custom { lines, .. } => super::custom::lines(lines),
         UiNodeKind::Text { text, tone } => text
             .split('\n')
             .map(|line| Line::from(Span::styled(line.to_owned(), tone_style(*tone, palette))))
@@ -1549,6 +1605,51 @@ mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn custom_wire_content_clips_without_reflow_and_receives_focused_input() {
+        let root: UiNode = serde_json::from_value(serde_json::json!({
+            "id": "plugin",
+            "type": "custom",
+            "lines": ["\u{1b}[31mabcdefgh\u{1b}[0m", "你好"],
+            "interactive": true,
+            "cursor": [1, 2]
+        }))
+        .unwrap();
+        let palette = UiPalette::from_background(None);
+        let mut tree = TreeRuntime::default();
+        tree.reconcile(&root);
+        let mut terminal = Terminal::new(TestBackend::new(12, 5)).unwrap();
+        let area = Rect::new(2, 1, 6, 2);
+        terminal
+            .draw(|frame| tree.render(&root, frame, area, palette, true))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(measure(&root, area.width, palette), 2);
+        assert_eq!(buffer[(2, 1)].symbol(), "a");
+        assert_eq!(buffer[(7, 1)].symbol(), "f");
+        assert_eq!(buffer[(8, 1)].symbol(), " ");
+        assert_eq!(buffer[(2, 2)].symbol(), "你");
+        assert_eq!(buffer[(2, 1)].fg, Color::Indexed(1));
+        assert!(buffer[(4, 2)].modifier.contains(Modifier::REVERSED));
+        let (consumed, event) = tree.input(
+            &root,
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        );
+        assert!(consumed);
+        let (id, input) = event.unwrap();
+        assert_eq!(id, "plugin");
+        assert_eq!(
+            serde_json::to_value(input).unwrap(),
+            serde_json::json!({ "type": "customInput", "data": "\u{1b}" })
+        );
+        assert_eq!(
+            tree.input(&root, &Event::Paste("你好".into())).1.unwrap().1,
+            UiInteraction::CustomInput {
+                data: "\u{1b}[200~你好\u{1b}[201~".into()
+            }
+        );
+    }
 
     #[test]
     fn scrolling_clips_images_and_translates_links_with_the_same_paint_layout() {

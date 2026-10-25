@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getAgentDir, withAgentDir } from "./extension-ui-paths.js";
 import { ExtensionTranscript } from "./extension-ui-transcript.js";
+import { PiComponentAdapter, customLayout, getKeybindings, piTheme, type CustomOptions, type CustomFactory } from "./pi-component-adapter.js";
 import {
   uiCommandSchema, uiEventSchema, uiMultiSelectResponseSchema, uiNodeSchema, uiSnapshotSchema,
   type UiCommand, type UiHostOperation, type UiNode, type UiSnapshot, type UiComponentEvent,
@@ -23,7 +24,13 @@ export interface UiMount {
   unmount(): void;
 }
 type NodeIdentities = Map<string, { type: UiNode["type"] }>;
-interface Mounted { region: UiRegion; nodes: NodeIdentities; onEvent?: (event: UiComponentEvent) => void; cleanup(): void }
+interface Mounted {
+  region: UiRegion;
+  nodes: NodeIdentities;
+  render?(snapshot: UiSnapshot): Pick<UiRegion, "root" | "overlay"> | undefined;
+  onEvent?: (event: UiComponentEvent) => void;
+  cleanup(): void;
+}
 function nodeIdentities(root: UiNode, previous?: NodeIdentities): NodeIdentities {
   const nodes: NodeIdentities = new Map();
   const visit = (node: UiNode) => {
@@ -36,7 +43,7 @@ function nodeIdentities(root: UiNode, previous?: NodeIdentities): NodeIdentities
   return nodes;
 }
 interface ExtensionUIOptions { agentDir?: string; outputPad?: 0 | 1; showImages?: boolean }
-/** Generation-owned transport and callbacks. All widget state, layout and input belong to Rust. */
+/** Generation-owned mounts and transport. Rust owns regions; Pi components own their local state. */
 export class ExtensionUI {
   readonly owner = randomUUID();
   readonly transcript: ExtensionTranscript;
@@ -63,6 +70,7 @@ export class ExtensionUI {
   }
   run<T>(callback: () => T): T { return withAgentDir(this.#agentDir, callback); }
   get nativeContext() { return this.#native; }
+  get theme() { return piTheme; }
   bind(native: NativeExtensionContext) { this.#assertActive(); this.#native = native; }
   activate() { if (this.#shortcuts.size || this.transcript.active || this.#regions.size) this.#wake(); }
   #assertActive() { if (this.#retired) throw new Error("Extension UI generation retired"); }
@@ -99,6 +107,14 @@ export class ExtensionUI {
   #changed() { this.#wake(); }
   #frame() {
     const snapshot = this.#query();
+    for (const [id, state] of this.#regions) {
+      if (!state.render) continue;
+      const rendered = this.run(() => state.render!(snapshot));
+      if (!rendered || this.#regions.get(id) !== state) continue;
+      const root = uiNodeSchema.parse(rendered.root);
+      state.region = { ...state.region, root, overlay: rendered.overlay };
+      state.nodes = nodeIdentities(root, state.nodes);
+    }
     const transcript = this.run(() => this.transcript.render(snapshot));
     const regions = [...this.#regions.values()].map(({ region }) => region);
     if (this.#statuses.size) regions.push({ id: "_statuses", placement: "footer", root: { id: "statuses", type: "text", text: [...this.#statuses.values()].join(" · "), tone: "muted" } });
@@ -145,6 +161,9 @@ export class ExtensionUI {
   }
 
   mount(node: UiNode, options: MountOptions = {}): UiMount {
+    return this.#mount(node, options);
+  }
+  #mount(node: UiNode, options: MountOptions, render?: Mounted["render"], onUnmount?: () => void): UiMount {
     this.#assertActive();
     const id = options.id ?? randomUUID();
     const parsed = uiNodeSchema.parse(node);
@@ -162,8 +181,9 @@ export class ExtensionUI {
     const state: Mounted = {
       region: { id, placement: options.placement ?? "aboveEditor", root: parsed, ...(options.overlay ? { overlay: options.overlay } : {}) },
       nodes: nodeIdentities(parsed),
+      render,
       onEvent: options.onEvent,
-      cleanup: () => { clearTimeout(timer); options.signal?.removeEventListener("abort", unmount); },
+      cleanup: () => { clearTimeout(timer); options.signal?.removeEventListener("abort", unmount); onUnmount?.(); },
     };
     if (!options.signal?.aborted) {
       this.#regions.set(id, state);
@@ -178,56 +198,92 @@ export class ExtensionUI {
       unmount,
     });
   }
-  custom(node: UiNode, options: MountOptions = {}): Promise<unknown | undefined> {
+  custom<T>(factory: CustomFactory<T>, options?: CustomOptions): Promise<T | undefined>;
+  custom(node: UiNode, options?: MountOptions): Promise<unknown | undefined>;
+  custom(node: UiNode | CustomFactory, options: MountOptions | CustomOptions = {}): Promise<unknown | undefined> {
     this.#assertActive();
     if (options.signal?.aborted) return Promise.resolve(undefined);
     return new Promise((resolve, reject) => {
       let mount: UiMount | undefined;
       let timer: ReturnType<typeof setTimeout> | undefined;
       let settled = false;
-      const finish = (value?: unknown) => {
+      const adapter = typeof node === "function" ? new PiComponentAdapter("custom-content") : undefined;
+      const finish = (value?: unknown, error?: unknown) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         options.signal?.removeEventListener("abort", cancel);
         this.#pending.delete(cancel);
-        mount?.unmount();
-        resolve(value);
+        try { mount?.unmount(); } catch (cleanupError) { error ??= cleanupError; }
+        try { this.run(() => adapter?.dispose()); } catch (disposeError) { error ??= disposeError; }
+        if (error !== undefined) reject(error); else resolve(value);
       };
       const cancel = () => finish();
       this.#pending.add(cancel);
       options.signal?.addEventListener("abort", cancel, { once: true });
       if (options.timeout !== undefined) timer = setTimeout(cancel, options.timeout);
+      const show = (root: UiNode, settings: MountOptions, render?: Mounted["render"]) => {
+        if (settled) return;
+        mount = this.#mount(root, {
+          ...settings, signal: undefined, timeout: undefined,
+          placement: settings.placement ?? "overlay",
+          onEvent: event => {
+            if (settled) return;
+            try {
+              settings.onEvent?.(event);
+              if (event.event.type === "cancel") finish();
+              else if (event.event.type === "submit") finish(event.event.value);
+              else if (event.event.type === "activate") finish(event.nodeId);
+              else if (event.event.type === "customInput" && adapter) {
+                adapter.handleInput(event.event.data);
+                if (!settled) this.#changed();
+              }
+            } catch (error) { finish(undefined, error); }
+          },
+        }, render, cancel);
+        if (settled) mount.unmount();
+      };
       try {
-        mount = this.mount(node, { ...options, signal: undefined, timeout: undefined, placement: options.placement ?? "overlay", onEvent: (event) => {
-          options.onEvent?.(event);
-          if (event.event.type === "cancel") finish();
-          else if (event.event.type === "submit") finish(event.event.value);
-          else if (event.event.type === "activate") finish(event.nodeId);
-        } });
-      } catch (error) {
-        settled = true;
-        clearTimeout(timer);
-        options.signal?.removeEventListener("abort", cancel);
-        this.#pending.delete(cancel);
-        mount?.unmount();
-        reject(error);
-      }
+        if (typeof node !== "function") { show(node, options as MountOptions); return; }
+        const component = adapter!;
+        const created = this.run(() => node(component.tui(() => this.#query(), () => this.#changed()), this.theme, getKeybindings(), value => finish(value)));
+        void Promise.resolve(created).then(value => {
+          this.run(() => component.setComponent(value));
+          if (settled) return;
+          const render: NonNullable<Mounted["render"]> = snapshot => {
+            if (settled) return;
+            try {
+              const layout = customLayout(snapshot, options as CustomOptions);
+              return { root: component.render(layout.width, true), overlay: layout.overlay };
+            } catch (error) { finish(undefined, error); return; }
+          };
+          const snapshot = this.#query();
+          const initial = this.run(() => render(snapshot));
+          if (initial) show(initial.root, customLayout(snapshot, options as CustomOptions), render);
+        }).catch(error => finish(undefined, error));
+      } catch (error) { finish(undefined, error); }
     });
   }
+  #dialog(title: string, control: UiNode, hint: string, opts?: DialogOptions) {
+    const [heading = "", ...description] = title.split("\n");
+    const children: UiNode[] = [];
+    if (description.length) children.push({ id: "description", type: "text", text: description.join("\n") });
+    children.push(control, { id: "hint", type: "text", text: hint, tone: "muted" });
+    return this.custom({ id: "dialog", type: "panel", title: heading, child: { id: "body", type: "column", gap: 1, children } }, { ...opts, overlay: { width: 60 } });
+  }
   async select(title: string, options: string[], opts?: DialogOptions): Promise<string | undefined> {
-    const result = await this.custom({ type: "column", id: "dialog", children: [{ type: "text", id: "title", text: title, tone: "accent" }, { type: "select", id: "value", options }] }, opts);
+    const result = await this.#dialog(title, { type: "select", id: "value", options }, "↑↓ move · enter select · esc cancel", opts);
     return typeof result === "number" && Number.isInteger(result) ? options[result] : undefined;
   }
   async confirm(title: string, message: string, opts?: DialogOptions): Promise<boolean> {
     return await this.select(`${title}\n${message}`, ["Yes", "No"], opts) === "Yes";
   }
   async input(title: string, placeholder = "", opts?: DialogOptions): Promise<string | undefined> {
-    const result = await this.custom({ type: "column", id: "dialog", children: [{ type: "text", id: "title", text: title, tone: "accent" }, { type: "input", id: "value", initialValue: "", placeholder }] }, opts);
+    const result = await this.#dialog(title, { type: "input", id: "value", initialValue: "", placeholder }, "enter submit · esc cancel", opts);
     return typeof result === "string" ? result : undefined;
   }
   async editor(title: string, prefill = "", opts?: DialogOptions): Promise<string | undefined> {
-    const result = await this.custom({ type: "column", id: "dialog", children: [{ type: "text", id: "title", text: title, tone: "accent" }, { type: "editor", id: "value", initialValue: prefill }] }, opts);
+    const result = await this.#dialog(title, { type: "editor", id: "value", initialValue: prefill }, "ctrl+enter submit · esc cancel", opts);
     return typeof result === "string" ? result : undefined;
   }
   async multiSelect(request: UiMultiSelectRequest, opts?: DialogOptions): Promise<UiMultiSelectResponse | undefined> {
@@ -287,6 +343,6 @@ export class ExtensionUI {
     for (const mounted of this.#regions.values()) mounted.cleanup();
     this.#regions.clear();
     this.#shortcuts.clear();
-    this.transcript.dispose();
+    this.run(() => this.transcript.dispose());
   }
 }
