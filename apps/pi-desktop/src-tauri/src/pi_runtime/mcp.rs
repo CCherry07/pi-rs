@@ -17,7 +17,7 @@ async fn library(
         Some(id) => Some(workspace_path(state, &id).await?),
         None => None,
     };
-    let agent_dir = pi.info.agent_dir.clone();
+    let agent_dir = pi.agent_dir.clone();
     let trust = pi.project_trust.clone();
     tokio::task::spawn_blocking(move || desktop_library(&agent_dir, cwd.as_deref(), &trust))
         .await

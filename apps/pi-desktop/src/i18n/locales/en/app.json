@@ -106,7 +106,6 @@
     "resizeSidebar": "Resize sidebar",
     "resizeChatDiff": "Resize chat/diff split",
     "resizeRightPanel": "Resize right panel",
-    "resizePlan": "Resize plan panel",
     "resizeProjects": "Resize projects",
     "windowControls": "Window controls",
     "minimize": "Minimize window",
@@ -118,8 +117,7 @@
     "noWorkspace": "No workspace selected",
     "chooseForChat": "Choose a project to start chatting.",
     "chooseForDiff": "Select a project to inspect diffs.",
-    "queuePausedForAnswers": "Paused — waiting for your answers.",
-    "queuePausedForPlan": "Paused — waiting for plan accept/changes."
+    "queuePausedForAnswers": "Paused — waiting for your answers."
   },
   "nav": {
     "primary": "Primary",
@@ -199,13 +197,6 @@
     "setApp": "Set app name in Settings",
     "selectEditor": "Select editor"
   },
-  "planReady": {
-    "title": "Plan ready",
-    "description": "Start building from this plan, or describe changes to the plan.",
-    "placeholder": "Describe what you want to change in the plan...",
-    "sendChanges": "Send changes",
-    "implement": "Implement this plan"
-  },
   "inputRequest": {
     "aria": "User input requested",
     "title": "Input requested",
@@ -267,9 +258,6 @@
     "question": "Question",
     "questionNamed": "Question — {{name}}",
     "inputNeeded": "Your input is needed.",
-    "planReady": "Plan ready",
-    "planReadyNamed": "Plan ready — {{name}}",
-    "planReadyBody": "Plan is ready. Open Pi to respond.",
     "agentComplete": "Agent Complete",
     "agentFinished": "Your agent has finished its task.",
     "agentError": "Agent Error",

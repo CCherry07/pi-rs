@@ -106,7 +106,6 @@
     "resizeSidebar": "调整侧边栏大小",
     "resizeChatDiff": "调整对话与差异视图的分隔位置",
     "resizeRightPanel": "调整右侧面板大小",
-    "resizePlan": "调整计划面板大小",
     "resizeProjects": "调整项目面板大小",
     "windowControls": "窗口控制",
     "minimize": "最小化窗口",
@@ -118,8 +117,7 @@
     "noWorkspace": "未选择工作区",
     "chooseForChat": "请选择一个项目以开始对话。",
     "chooseForDiff": "请选择一个项目以查看差异。",
-    "queuePausedForAnswers": "已暂停——正在等待你的回答。",
-    "queuePausedForPlan": "已暂停——正在等待接受或修改计划。"
+    "queuePausedForAnswers": "已暂停——正在等待你的回答。"
   },
   "nav": {
     "primary": "主导航",
@@ -199,13 +197,6 @@
     "setApp": "请在设置中配置应用名称",
     "selectEditor": "选择编辑器"
   },
-  "planReady": {
-    "title": "计划已就绪",
-    "description": "可以开始按计划构建，也可以说明需要修改的内容。",
-    "placeholder": "描述你想如何修改计划...",
-    "sendChanges": "发送修改意见",
-    "implement": "执行此计划"
-  },
   "inputRequest": {
     "aria": "需要用户输入",
     "title": "请求输入",
@@ -267,9 +258,6 @@
     "question": "问题",
     "questionNamed": "问题 — {{name}}",
     "inputNeeded": "需要你的输入。",
-    "planReady": "计划已就绪",
-    "planReadyNamed": "计划已就绪 — {{name}}",
-    "planReadyBody": "计划已就绪，请打开 Pi 进行响应。",
     "agentComplete": "智能体已完成",
     "agentFinished": "智能体已完成任务。",
     "agentError": "智能体出错",

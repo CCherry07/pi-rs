@@ -89,27 +89,6 @@ export function useThreadItemEvents({
     ],
   );
 
-  const handleToolOutputDelta = useCallback(
-    (threadId: string, itemId: string, delta: string) => {
-      markProcessing(threadId, true);
-      dispatch({ type: "appendToolOutput", threadId, itemId, delta });
-      safeMessageActivity();
-    },
-    [dispatch, markProcessing, safeMessageActivity],
-  );
-
-  const handleTerminalInteraction = useCallback(
-    (threadId: string, itemId: string, stdin: string) => {
-      if (!stdin) {
-        return;
-      }
-      const normalized = stdin.replace(/\r\n/g, "\n");
-      const suffix = normalized.endsWith("\n") ? "" : "\n";
-      handleToolOutputDelta(threadId, itemId, `\n[stdin]\n${normalized}${suffix}`);
-    },
-    [handleToolOutputDelta],
-  );
-
   const onAgentMessageDelta = useCallback(
     ({
       workspaceId,
@@ -201,20 +180,6 @@ export function useThreadItemEvents({
     [handleItemUpdate],
   );
 
-  const onReasoningSummaryDelta = useCallback(
-    (_workspaceId: string, threadId: string, itemId: string, delta: string) => {
-      dispatch({ type: "appendReasoningSummary", threadId, itemId, delta });
-    },
-    [dispatch],
-  );
-
-  const onReasoningSummaryBoundary = useCallback(
-    (_workspaceId: string, threadId: string, itemId: string) => {
-      dispatch({ type: "appendReasoningSummaryBoundary", threadId, itemId });
-    },
-    [dispatch],
-  );
-
   const onReasoningTextDelta = useCallback(
     (_workspaceId: string, threadId: string, itemId: string, delta: string) => {
       dispatch({ type: "appendReasoningContent", threadId, itemId, delta });
@@ -222,45 +187,11 @@ export function useThreadItemEvents({
     [dispatch],
   );
 
-  const onPlanDelta = useCallback(
-    (_workspaceId: string, threadId: string, itemId: string, delta: string) => {
-      dispatch({ type: "appendPlanDelta", threadId, itemId, delta });
-    },
-    [dispatch],
-  );
-
-  const onCommandOutputDelta = useCallback(
-    (_workspaceId: string, threadId: string, itemId: string, delta: string) => {
-      handleToolOutputDelta(threadId, itemId, delta);
-    },
-    [handleToolOutputDelta],
-  );
-
-  const onTerminalInteraction = useCallback(
-    (_workspaceId: string, threadId: string, itemId: string, stdin: string) => {
-      handleTerminalInteraction(threadId, itemId, stdin);
-    },
-    [handleTerminalInteraction],
-  );
-
-  const onFileChangeOutputDelta = useCallback(
-    (_workspaceId: string, threadId: string, itemId: string, delta: string) => {
-      handleToolOutputDelta(threadId, itemId, delta);
-    },
-    [handleToolOutputDelta],
-  );
-
   return {
     onAgentMessageDelta,
     onAgentMessageCompleted,
     onItemStarted,
     onItemCompleted,
-    onReasoningSummaryDelta,
-    onReasoningSummaryBoundary,
     onReasoningTextDelta,
-    onPlanDelta,
-    onCommandOutputDelta,
-    onTerminalInteraction,
-    onFileChangeOutputDelta,
   };
 }

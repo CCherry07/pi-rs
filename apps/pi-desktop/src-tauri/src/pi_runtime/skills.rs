@@ -53,7 +53,7 @@ pub(crate) async fn pi_skill_library_list(
         Some(id) => Some(workspace_path(&state, &id).await?),
         None => None,
     };
-    let agent_dir = pi.info.agent_dir.clone();
+    let agent_dir = pi.agent_dir.clone();
     let trust = pi.project_trust.clone();
     let gate = pi.skill_mutation_gate.clone();
     tokio::task::spawn_blocking(move || {
@@ -81,7 +81,7 @@ pub(crate) async fn pi_skill_library_operation(
         Some(id) => Some(workspace_path(&state, &id).await?),
         None => None,
     };
-    let agent_dir = pi.info.agent_dir.clone();
+    let agent_dir = pi.agent_dir.clone();
     let trust = pi.project_trust.clone();
     let gate = pi.skill_mutation_gate.clone();
     tokio::task::spawn_blocking(move || {

@@ -70,15 +70,14 @@ type DesktopLayoutProps = {
   messagesNode: ReactNode;
   gitDiffViewerNode: ReactNode;
   gitDiffPanelNode: ReactNode;
-  planPanelNode: ReactNode;
   composerNode: ReactNode;
   terminalDockNode: ReactNode;
   debugPanelNode: ReactNode;
-  hasActivePlan: boolean;
   onSidebarResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
-  onChatDiffSplitPositionResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
+  onChatDiffSplitPositionResizeStart: (
+    event: MouseEvent<HTMLDivElement>,
+  ) => void;
   onRightPanelResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
-  onPlanPanelResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
 };
 
 export function DesktopLayout({
@@ -96,20 +95,19 @@ export function DesktopLayout({
   messagesNode,
   gitDiffViewerNode,
   gitDiffPanelNode,
-  planPanelNode,
   composerNode,
   terminalDockNode,
   debugPanelNode,
-  hasActivePlan,
   onSidebarResizeStart,
   onRightPanelResizeStart,
-  onPlanPanelResizeStart,
   onChatDiffSplitPositionResizeStart,
 }: DesktopLayoutProps) {
   const { t } = useTranslation("app");
   const diffLayerRef = useRef<HTMLDivElement | null>(null);
   const chatLayerRef = useRef<HTMLDivElement | null>(null);
-  const chatPaneNode = <ChatPane messagesNode={messagesNode} composerNode={composerNode} />;
+  const chatPaneNode = (
+    <ChatPane messagesNode={messagesNode} composerNode={composerNode} />
+  );
   const diffLayerActive = isActiveLayer(centerMode, "diff");
   const chatLayerActive = isActiveLayer(centerMode, "chat");
   const showDiffViewer = shouldRenderDiffViewer({
@@ -157,8 +155,13 @@ export function DesktopLayout({
 
         {showWorkspace && (
           <>
-            <MainTopbar leftNode={topbarLeftNode} actionsNode={topbarActionsNode} />
-            <div className={`content${splitChatDiffView ? " content-split" : ""}`}>
+            <MainTopbar
+              leftNode={topbarLeftNode}
+              actionsNode={topbarActionsNode}
+            />
+            <div
+              className={`content${splitChatDiffView ? " content-split" : ""}`}
+            >
               {splitChatDiffView ? (
                 <>
                   <div
@@ -197,7 +200,9 @@ export function DesktopLayout({
                       layer: "diff",
                       isActive: diffLayerActive,
                     })}
-                    aria-hidden={!splitChatDiffView ? !diffLayerActive : undefined}
+                    aria-hidden={
+                      !splitChatDiffView ? !diffLayerActive : undefined
+                    }
                     ref={diffLayerRef}
                   >
                     {showDiffViewer ? gitDiffViewerNode : null}
@@ -208,7 +213,9 @@ export function DesktopLayout({
                       layer: "chat",
                       isActive: chatLayerActive,
                     })}
-                    aria-hidden={!splitChatDiffView ? !chatLayerActive : undefined}
+                    aria-hidden={
+                      !splitChatDiffView ? !chatLayerActive : undefined
+                    }
                     ref={chatLayerRef}
                   >
                     {chatPaneNode}
@@ -224,17 +231,9 @@ export function DesktopLayout({
               aria-label={t("layout.resizeRightPanel")}
               onMouseDown={onRightPanelResizeStart}
             />
-            <div className={`right-panel ${hasActivePlan ? "" : "plan-collapsed"}`}>
+            <div className="right-panel">
               <div className="right-panel-drag-strip" />
               <div className="right-panel-top">{gitDiffPanelNode}</div>
-              <div
-                className="right-panel-divider"
-                role="separator"
-                aria-orientation="horizontal"
-                aria-label={t("layout.resizePlan")}
-                onMouseDown={onPlanPanelResizeStart}
-              />
-              <div className="right-panel-bottom">{planPanelNode}</div>
             </div>
             {terminalDockNode}
             {debugPanelNode}

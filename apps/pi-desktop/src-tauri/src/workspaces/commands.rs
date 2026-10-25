@@ -14,9 +14,7 @@ use super::git::{
 #[cfg(target_os = "macos")]
 use super::macos::get_open_app_icon_inner;
 use super::settings::apply_workspace_settings_update;
-use super::worktree::{
-    sanitize_worktree_name, unique_worktree_path, unique_worktree_path_for_rename,
-};
+use super::worktree::{sanitize_worktree_name, unique_worktree_path_for_rename};
 
 use crate::git_utils::resolve_git_root;
 use crate::shared::worktree_groups::delivery::{DeliveryOverview, DeliveryPreview};
@@ -154,84 +152,6 @@ pub(crate) async fn add_clone(
     )
     .await?;
     state.project_info(info).await
-}
-
-#[tauri::command]
-pub(crate) async fn add_worktree(
-    parent_id: String,
-    branch: String,
-    name: Option<String>,
-    copy_agents_md: Option<bool>,
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> Result<WorkspaceInfo, String> {
-    let source = state.project(&parent_id).await?.resolve()?;
-    let parent = state
-        .workspaces
-        .lock()
-        .await
-        .get(&parent_id)
-        .cloned()
-        .ok_or("parent workspace not found")?;
-    require_legacy_worktree_source(&source, &parent)?;
-    let copy_agents_md = copy_agents_md.unwrap_or(true);
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|err| format!("Failed to resolve app data dir: {err}"))?;
-
-    let info = workspaces_core::add_worktree_core(
-        parent_id,
-        branch,
-        name,
-        copy_agents_md,
-        &data_dir,
-        &state.workspaces,
-        &state.app_settings,
-        &state.storage_path,
-        sanitize_worktree_name,
-        |root, name| Ok(unique_worktree_path(root, name)),
-        |root, branch| {
-            let root = root.clone();
-            let branch = branch.to_string();
-            async move { git_branch_exists(&root, &branch).await }
-        },
-        None::<fn(&PathBuf, &str) -> std::future::Ready<Result<Option<String>, String>>>,
-        |root, args| {
-            workspaces_core::run_git_command_unit(root, args, |repo, args_owned| {
-                run_git_command_owned(repo, args_owned)
-            })
-        },
-    )
-    .await?;
-    state.project_info(info).await
-}
-
-fn require_legacy_worktree_source(
-    source: &pi_core::WorkspaceSpec,
-    parent: &WorkspaceEntry,
-) -> Result<(), String> {
-    const USE_PREVIEW: &str =
-        "Use the worktree preview flow to select repositories and preserve project directories";
-    if source.roots().len() != 1 || source.cwd() != source.primary_root().path {
-        return Err(USE_PREVIEW.into());
-    }
-    let legacy_path =
-        std::fs::canonicalize(&parent.path).map_err(|error| format!("{USE_PREVIEW}: {error}"))?;
-    if source.cwd() != legacy_path {
-        return Err(USE_PREVIEW.into());
-    }
-    let repository = git2::Repository::discover(resolve_git_root(parent)?)
-        .map_err(|error| format!("{USE_PREVIEW}: {error}"))?;
-    let workdir = repository
-        .workdir()
-        .ok_or_else(|| format!("{USE_PREVIEW}: bare repositories have no working directory"))?
-        .canonicalize()
-        .map_err(|error| format!("{USE_PREVIEW}: {error}"))?;
-    if workdir != legacy_path {
-        return Err(USE_PREVIEW.into());
-    }
-    Ok(())
 }
 
 #[tauri::command]
@@ -696,64 +616,6 @@ pub(crate) async fn update_workspace_project(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn legacy_worktree_creation_requires_one_root_at_the_selected_checkout_base() {
-        let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
-        let repo_path = base.join("repo");
-        git2::Repository::init(&repo_path).unwrap();
-        std::fs::create_dir(repo_path.join("src")).unwrap();
-        let mut parent = WorkspaceEntry {
-            id: "parent".into(),
-            name: "Parent".into(),
-            path: repo_path.to_string_lossy().into_owned(),
-            kind: crate::types::WorkspaceKind::Main,
-            parent_id: None,
-            worktree: None,
-            settings: Default::default(),
-        };
-        let source = pi_core::WorkspaceSpec::from_cwd(&repo_path);
-        assert!(require_legacy_worktree_source(&source, &parent).is_ok());
-
-        let mut multiple_roots = source.roots().to_vec();
-        multiple_roots.push(pi_core::WorkspaceRoot::external(
-            "other",
-            "Other",
-            base.join("other"),
-        ));
-        let multiple = pi_core::WorkspaceSpec::new(
-            multiple_roots,
-            source.primary_root_id().clone(),
-            &repo_path,
-        )
-        .unwrap();
-        let execution_below_root = pi_core::WorkspaceSpec::new(
-            source.roots().to_vec(),
-            source.primary_root_id().clone(),
-            repo_path.join("src"),
-        )
-        .unwrap();
-        let changed_root = pi_core::WorkspaceSpec::from_cwd(base.join("changed-project"));
-        for source in [&multiple, &execution_below_root, &changed_root] {
-            assert!(require_legacy_worktree_source(source, &parent)
-                .unwrap_err()
-                .contains("preview"));
-        }
-
-        parent.path = repo_path.join("src").to_string_lossy().into_owned();
-        let subdirectory = pi_core::WorkspaceSpec::from_cwd(&parent.path);
-        assert!(require_legacy_worktree_source(&subdirectory, &parent)
-            .unwrap_err()
-            .contains("preview"));
-
-        parent.path = repo_path.to_string_lossy().into_owned();
-        git2::Repository::init(repo_path.join("nested")).unwrap();
-        parent.settings.git_root = Some("nested".into());
-        assert!(require_legacy_worktree_source(&source, &parent)
-            .unwrap_err()
-            .contains("preview"));
-    }
 
     #[test]
     fn legacy_worktree_rename_uses_current_project_label() {

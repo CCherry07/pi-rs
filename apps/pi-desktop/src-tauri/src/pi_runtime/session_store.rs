@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+
+mod index;
+pub(crate) use index::{SessionListOptions, SessionListQuery, SessionPage, SessionSortKey};
 
 use pi_core::{ContentBlock, Message, ModelId, ModelSpec, ProviderId, ThinkingLevel};
-use pi_plugin::CommandSpec;
 use pi_session::{
     aggregate_document_usage, current_session_context_tokens, AgentSession,
     AgentSessionReplacement, AgentSessionSnapshot, ExactSessionIdResolution, ForkPosition,
@@ -41,6 +43,7 @@ pub(crate) struct SessionStore {
     sessions: Arc<RwLock<HashMap<String, PiSession>>>,
     drafts: Arc<tokio::sync::Mutex<HashMap<String, PiSession>>>,
     open_gate: Arc<tokio::sync::Mutex<()>>,
+    index: Arc<Mutex<index::SessionIndex>>,
 }
 
 pub(crate) struct StoredIsolatedSession {
@@ -135,6 +138,7 @@ pub(crate) struct SessionSummary {
     pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) cwd: PathBuf,
+    pub(crate) created_at_ms: i64,
     pub(crate) updated_at_ms: i64,
     pub(crate) model: Option<String>,
     pub(crate) message_count: usize,
@@ -148,6 +152,7 @@ impl SessionStore {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             drafts: Arc::default(),
             open_gate: Arc::new(tokio::sync::Mutex::new(())),
+            index: Arc::default(),
         }
     }
 
@@ -276,10 +281,6 @@ impl SessionStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(uuid::Uuid::now_v7().to_string(), session.clone());
         Ok(session)
-    }
-
-    pub(crate) async fn command_catalog(&self, id: &str) -> Result<Vec<CommandSpec>, String> {
-        Ok(self.open(id).await?.catalog().command_specs())
     }
 
     // Keys are stable frontend-handle identities, not replaceable JSONL IDs.
@@ -575,31 +576,42 @@ impl SessionStore {
         pi_session::SessionStore::read(self.find_path(id)?).map_err(|error| error.to_string())
     }
 
+    pub(crate) fn list_pages(
+        &self,
+        projects: &[pi_sdk::projects::Project],
+        queries: &[SessionListQuery],
+        options: SessionListOptions,
+    ) -> Result<Vec<SessionPage>, String> {
+        let mut index = self
+            .index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        index.refresh(&self.agent_dir.join("sessions"))?;
+        index.pages(projects, queries, options)
+    }
+
+    #[cfg(test)]
     pub(crate) fn list_project(
         &self,
         project: &pi_sdk::projects::Project,
         projects: &[pi_sdk::projects::Project],
         archived: bool,
     ) -> Result<Vec<SessionSummary>, String> {
-        let mut summaries = Vec::new();
-        for path in session_files(&self.agent_dir.join("sessions"))? {
-            if path_is_archived(&path) != archived {
-                continue;
-            }
-            let Ok(summary) = session_summary(&path) else {
-                continue;
-            };
-            let belongs = match &summary.project_id {
-                Some(id) => id == &project.id,
-                None => pi_sdk::projects::project_for_legacy_cwd(projects, &summary.cwd)
-                    .is_some_and(|candidate| candidate.id == project.id),
-            };
-            if belongs {
-                summaries.push(summary);
-            }
-        }
-        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at_ms));
-        Ok(summaries)
+        Ok(self
+            .list_pages(
+                projects,
+                &[SessionListQuery {
+                    workspace_id: project.id.clone(),
+                    cursor: None,
+                }],
+                SessionListOptions {
+                    archived,
+                    sort: SessionSortKey::UpdatedAt,
+                    limit: usize::MAX,
+                },
+            )?
+            .remove(0)
+            .summaries)
     }
 
     #[cfg(test)]
@@ -699,6 +711,7 @@ fn session_summary(path: &Path) -> Result<SessionSummary, String> {
         id,
         title,
         cwd: document.header.cwd,
+        created_at_ms: document.header.created_at,
         updated_at_ms,
         model,
         message_count,

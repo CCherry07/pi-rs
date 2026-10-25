@@ -209,8 +209,6 @@ export type ThreadListOrganizeMode =
   | "by_project"
   | "by_project_activity"
   | "threads_only";
-
-export type ServiceTier = "fast" | "flex";
 export type ThemePreference = "system" | "light" | "dark" | "dim";
 export type UiLocale = "system" | "en" | "zh-CN";
 export type FollowUpMessageBehavior = "queue" | "steer";
@@ -280,7 +278,6 @@ export type AppSettings = {
   commitMessageModelId: string | null;
   steerEnabled: boolean;
   followUpMessageBehavior: FollowUpMessageBehavior;
-  pauseQueuedMessagesWhenResponseRequired: boolean;
   dictationEnabled: boolean;
   dictationModelId: string;
   dictationPreferredLanguage: string | null;
@@ -403,19 +400,6 @@ export type ThreadTokenUsage = {
   totalTokens: number | null;
   contextTokens: number | null;
   modelContextWindow: number | null;
-};
-
-export type TurnPlanStepStatus = "pending" | "inProgress" | "completed";
-
-export type TurnPlanStep = {
-  step: string;
-  status: TurnPlanStepStatus;
-};
-
-export type TurnPlan = {
-  turnId: string;
-  explanation: string | null;
-  steps: TurnPlanStep[];
 };
 
 export type QueuedMessage = {

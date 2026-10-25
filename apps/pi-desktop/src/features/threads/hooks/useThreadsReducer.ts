@@ -5,7 +5,6 @@ import type {
   ThreadContextInheritance,
   ThreadSummary,
   ThreadTokenUsage,
-  TurnPlan,
 } from "@/types";
 import { CHAT_SCROLLBACK_DEFAULT } from "@utils/chatScrollback";
 import { reduceThreadItems } from "./threadReducer/threadItemsSlice";
@@ -36,9 +35,7 @@ export type ThreadState = {
   threadListCursorByWorkspace: Record<string, string | null>;
   threadSortKeyByWorkspace: Record<string, ThreadListSortKey>;
   activeTurnIdByThread: Record<string, string | null>;
-  turnDiffByThread: Record<string, string>;
   tokenUsageByThread: Record<string, ThreadTokenUsage>;
-  planByThread: Record<string, TurnPlan | null>;
   lastAgentMessageByThread: Record<string, { text: string; timestamp: number }>;
 };
 
@@ -57,7 +54,11 @@ export type ThreadAction =
       timestamp: number;
     }
   | { type: "setThreadCommands"; threadId: string; commands: RuntimeCommand[] }
-  | { type: "setThreadContextInheritance"; threadId: string; contextInheritance: ThreadContextInheritance | null }
+  | {
+      type: "setThreadContextInheritance";
+      threadId: string;
+      contextInheritance: ThreadContextInheritance | null;
+    }
   | { type: "setMaxItemsPerThread"; maxItemsPerThread: number | null }
   | { type: "ensureThread"; workspaceId: string; threadId: string }
   | { type: "hideThread"; workspaceId: string; threadId: string }
@@ -71,8 +72,19 @@ export type ThreadAction =
     }
   | { type: "markUnread"; threadId: string; hasUnread: boolean }
   | { type: "addAssistantMessage"; threadId: string; text: string }
-  | { type: "addNotice"; threadId: string; itemId: string; text: string; level: string }
-  | { type: "setThreadName"; workspaceId: string; threadId: string; name: string }
+  | {
+      type: "addNotice";
+      threadId: string;
+      itemId: string;
+      text: string;
+      level: string;
+    }
+  | {
+      type: "setThreadName";
+      workspaceId: string;
+      threadId: string;
+      name: string;
+    }
   | {
       type: "mergeThreadSummary";
       workspaceId: string;
@@ -119,42 +131,18 @@ export type ThreadAction =
       item: ConversationItem;
       hasCustomName?: boolean;
     }
-  | { type: "setThreadItems"; threadId: string; items: ConversationItem[]; contextInheritance?: ThreadContextInheritance | null }
   | {
-      type: "hydrateThreadItems";
+      type: "setThreadItems";
       threadId: string;
       items: ConversationItem[];
-      itemsAtRequest: ConversationItem[];
-      contextInheritance?: {
-        atRequest: ThreadContextInheritance | null | undefined;
-        value: ThreadContextInheritance | null;
-      };
-      activity?: {
-        statusAtRequest: ThreadActivityStatus | undefined;
-        activeTurnIdAtRequest: string | null | undefined;
-        isProcessing: boolean;
-        turnId: string | null;
-        timestamp: number;
-      };
-      usage?: {
-        atRequest: ThreadTokenUsage | undefined;
-        value: ThreadTokenUsage;
-      };
+      contextInheritance?: ThreadContextInheritance | null;
     }
   | {
-      type: "appendReasoningSummary";
+      type: "appendReasoningContent";
       threadId: string;
       itemId: string;
       delta: string;
     }
-  | {
-      type: "appendReasoningSummaryBoundary";
-      threadId: string;
-      itemId: string;
-    }
-  | { type: "appendReasoningContent"; threadId: string; itemId: string; delta: string }
-  | { type: "appendPlanDelta"; threadId: string; itemId: string; delta: string }
-  | { type: "appendToolOutput"; threadId: string; itemId: string; delta: string }
   | {
       type: "setThreads";
       workspaceId: string;
@@ -162,6 +150,7 @@ export type ThreadAction =
       sortKey: ThreadListSortKey;
       preserveAnchors?: boolean;
     }
+  | { type: "appendThreads"; workspaceId: string; threads: ThreadSummary[] }
   | {
       type: "setThreadListLoading";
       workspaceId: string;
@@ -182,11 +171,12 @@ export type ThreadAction =
       workspaceId: string;
       cursor: string | null;
     }
-  | { type: "setThreadTokenUsage"; threadId: string; tokenUsage: ThreadTokenUsage }
+  | {
+      type: "setThreadTokenUsage";
+      threadId: string;
+      tokenUsage: ThreadTokenUsage;
+    }
   | { type: "setActiveTurnId"; threadId: string; turnId: string | null }
-  | { type: "setThreadTurnDiff"; threadId: string; diff: string }
-  | { type: "setThreadPlan"; threadId: string; plan: TurnPlan | null }
-  | { type: "clearThreadPlan"; threadId: string }
   | {
       type: "setLastAgentMessage";
       threadId: string;
@@ -212,13 +202,14 @@ export const initialState: ThreadState = {
   threadListCursorByWorkspace: {},
   threadSortKeyByWorkspace: {},
   activeTurnIdByThread: {},
-  turnDiffByThread: {},
   tokenUsageByThread: {},
-  planByThread: {},
   lastAgentMessageByThread: {},
 };
 
-type ThreadSliceReducer = (state: ThreadState, action: ThreadAction) => ThreadState;
+type ThreadSliceReducer = (
+  state: ThreadState,
+  action: ThreadAction,
+) => ThreadState;
 
 const threadSliceReducers: ThreadSliceReducer[] = [
   reduceThreadLifecycle,
@@ -227,59 +218,51 @@ const threadSliceReducers: ThreadSliceReducer[] = [
   reduceThreadSnapshots,
 ];
 
-export function threadReducer(state: ThreadState, action: ThreadAction): ThreadState {
-  if (action.type === "hydrateThreadItems") {
-    let next = reduceThreadItems(state, action);
-    const { activity, usage, contextInheritance, threadId } = action;
-    if (contextInheritance && state.contextInheritanceByThread[threadId] === contextInheritance.atRequest) {
-      next = reduceThreadSnapshots(next, {
-        type: "setThreadContextInheritance", threadId, contextInheritance: contextInheritance.value,
-      });
-    }
-    if (activity && state.threadStatusById[threadId] === activity.statusAtRequest &&
-        state.activeTurnIdByThread[threadId] === activity.activeTurnIdAtRequest) {
-      next = reduceThreadLifecycle(next, {
-        type: "markProcessing", threadId,
-        isProcessing: activity.isProcessing, timestamp: activity.timestamp,
-      });
-      next = reduceThreadLifecycle(next, {
-        type: "setActiveTurnId", threadId, turnId: activity.turnId,
-      });
-    }
-    const currentUsage = state.tokenUsageByThread[threadId];
-    if (usage && currentUsage === usage.atRequest &&
-        (currentUsage?.totalTokens == null ||
-          (usage.value.totalTokens !== null && usage.value.totalTokens >= currentUsage.totalTokens))) {
-      next = reduceThreadSnapshots(next, {
-        type: "setThreadTokenUsage", threadId, tokenUsage: usage.value,
-      });
-    }
-    return next;
-  }
+export function threadReducer(
+  state: ThreadState,
+  action: ThreadAction,
+): ThreadState {
   if (action.type === "replaceThread") {
     // Keep transient notices on reload without duplicating persisted snapshot errors.
     const snapshotIds = new Set(action.items.map((item) => item.id));
-    const notices = action.previousThreadId === action.threadId
-      ? (state.itemsByThread[action.threadId] ?? []).filter(
-          (item) => item.kind === "tool" && item.toolType === "notice" && !snapshotIds.has(item.id),
-        )
-      : [];
+    const notices =
+      action.previousThreadId === action.threadId
+        ? (state.itemsByThread[action.threadId] ?? []).filter(
+            (item) =>
+              item.kind === "tool" &&
+              item.toolType === "notice" &&
+              !snapshotIds.has(item.id),
+          )
+        : [];
     let next = reduceThreadItems(state, {
-      type: "setThreadItems", threadId: action.threadId, items: [...action.items, ...notices],
+      type: "setThreadItems",
+      threadId: action.threadId,
+      items: [...action.items, ...notices],
       contextInheritance: action.contextInheritance ?? null,
     });
     next = reduceThreadLifecycle(next, {
-      type: "markProcessing", threadId: action.threadId,
-      isProcessing: action.isProcessing, timestamp: action.timestamp,
+      type: "markProcessing",
+      threadId: action.threadId,
+      isProcessing: action.isProcessing,
+      timestamp: action.timestamp,
     });
     return {
       ...next,
-      commandsByThread: { ...next.commandsByThread, [action.threadId]: action.commands },
-      activeTurnIdByThread: { ...next.activeTurnIdByThread, [action.threadId]: action.turnId },
+      commandsByThread: {
+        ...next.commandsByThread,
+        [action.threadId]: action.commands,
+      },
+      activeTurnIdByThread: {
+        ...next.activeTurnIdByThread,
+        [action.threadId]: action.turnId,
+      },
       activeThreadIdByWorkspace: {
         ...next.activeThreadIdByWorkspace,
-        [action.workspaceId]: state.activeThreadIdByWorkspace[action.workspaceId] === action.previousThreadId
-          ? action.threadId : state.activeThreadIdByWorkspace[action.workspaceId] ?? null,
+        [action.workspaceId]:
+          state.activeThreadIdByWorkspace[action.workspaceId] ===
+          action.previousThreadId
+            ? action.threadId
+            : (state.activeThreadIdByWorkspace[action.workspaceId] ?? null),
       },
     };
   }

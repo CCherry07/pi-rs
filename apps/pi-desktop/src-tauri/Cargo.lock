@@ -4087,7 +4087,6 @@ dependencies = [
  "dotenvy",
  "fix-path-env",
  "fs2",
- "futures-util",
  "git2",
  "ignore",
  "libc",
@@ -4122,7 +4121,6 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
- "toml_edit 0.20.2",
  "uuid",
  "whisper-rs",
 ]

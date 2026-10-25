@@ -16,11 +16,10 @@ import { Messages } from "../features/messages/components/Messages";
 import { DiffRow } from "../features/messages/components/MessageRows";
 import { Markdown } from "../features/messages/components/Markdown";
 import { Composer } from "../features/composer/components/Composer";
-import { PlanPanel } from "../features/plan/components/PlanPanel";
 import { HomeLatestAgentsSection } from "../features/home/components/HomeLatestAgentsSection";
 import { ModalShell } from "../features/design-system/components/modal/ModalShell";
 import { PanelFrame, PanelHeader, PanelMeta } from "../features/design-system/components/panel/PanelPrimitives";
-import { changedFiles, conversation, inventoryFor, plan, projects, sampleDiff, threads } from "./fixtures";
+import { changedFiles, conversation, inventoryFor, projects, sampleDiff, threads } from "./fixtures";
 import "../styles/app.css";
 import "./preview.css";
 
@@ -54,7 +53,6 @@ function Preview() {
   const [branch, setBranch] = useState("feat/thread-search");
   const [model, setModel] = useState("gpt-6-astra");
   const [effort, setEffort] = useState("high");
-  const [tier, setTier] = useState<"fast" | "flex" | null>(null);
   const [running, setRunning] = useState(false);
   const [settings, setSettings] = useState(false);
   const [reducedTransparency, setReducedTransparency] = useState(false);
@@ -119,7 +117,7 @@ function Preview() {
     ]}
     selectedModelId={model} onSelectModel={setModel}
     reasoningOptions={["low", "medium", "high"]} selectedEffort={effort} onSelectEffort={setEffort}
-    selectedServiceTier={tier} onSelectServiceTier={setTier} reasoningSupported
+    reasoningSupported
     skills={[{ name: "code-review", description: "检查代码变更与潜在问题" }]}
     prompts={[]} files={[]} draftText={draft} onDraftChange={setDraft}
     textareaRef={textareaRef} dictationEnabled={false} sendLabel="发送"
@@ -205,7 +203,7 @@ function Preview() {
       </div>
     </header>
     <div className={`app layout-desktop${sidebarHidden ? " sidebar-collapsed" : ""}${panelHidden ? " right-panel-collapsed" : ""}${reducedTransparency ? " reduced-transparency" : ""}`}
-      style={{ "--sidebar-width": "248px", "--right-panel-width": "300px", "--plan-panel-height": "184px", "--sidebar-top-padding": "24px" } as CSSProperties}>
+      style={{ "--sidebar-width": "248px", "--right-panel-width": "300px", "--sidebar-top-padding": "24px" } as CSSProperties}>
       <DesktopLayout sidebarNode={sidebar} updateToastNode={null} errorToastsNode={null} homeNode={home}
         showHome={screen === "home"} showWorkspace={screen === "chat"}
         topbarLeftNode={<div className="preview-heading">
@@ -228,9 +226,9 @@ function Preview() {
         messagesNode={<Messages items={[...sampleMessages, ...extraMessages]} threadId={`preview-${activeThread}`} snapshot
           isThinking={running} lastDurationMs={running ? null : 18400} openTargets={[]} selectedOpenAppId="" onQuoteMessage={setDraft} />}
         gitDiffViewerNode={<div className="diff-viewer"><div className="preview-diff-heading"><FileCode2 size={17} /><strong>{selectedFile.name}</strong><span>差异预览</span></div><DiffRow item={{ id: "preview-diff", kind: "diff", title: selectedFile.name, diff: sampleDiff }} /></div>}
-        gitDiffPanelNode={rightPanel} planPanelNode={<PlanPanel plan={plan} isProcessing={running} />} composerNode={composer}
-        terminalDockNode={null} debugPanelNode={null} hasActivePlan
-        onSidebarResizeStart={noop} onChatDiffSplitPositionResizeStart={noop} onRightPanelResizeStart={noop} onPlanPanelResizeStart={noop}
+        gitDiffPanelNode={rightPanel} composerNode={composer}
+        terminalDockNode={null} debugPanelNode={null}
+        onSidebarResizeStart={noop} onChatDiffSplitPositionResizeStart={noop} onRightPanelResizeStart={noop}
       />
       {settings && <ModalShell className="settings-overlay" cardClassName="settings-window" ariaLabel="外观规范" onBackdropClick={() => setSettings(false)}>
         <div className="settings-titlebar"><span className="settings-title">外观规范</span><button type="button" ref={settingsCloseRef} className="ghost icon-button" aria-label="关闭外观规范" onClick={() => setSettings(false)}><X size={16} /></button></div>

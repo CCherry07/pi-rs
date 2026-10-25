@@ -64,7 +64,6 @@ function buildDefaultSettings(): AppSettings {
     commitMessageModelId: null,
     steerEnabled: true,
     followUpMessageBehavior: "queue",
-    pauseQueuedMessagesWhenResponseRequired: true,
     dictationEnabled: false,
     dictationModelId: "base",
     dictationPreferredLanguage: null,

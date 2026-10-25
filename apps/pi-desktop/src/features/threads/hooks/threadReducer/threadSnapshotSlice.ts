@@ -39,30 +39,6 @@ export function reduceThreadSnapshots(
           [action.threadId]: action.tokenUsage,
         },
       };
-    case "setThreadTurnDiff":
-      return {
-        ...state,
-        turnDiffByThread: {
-          ...state.turnDiffByThread,
-          [action.threadId]: action.diff,
-        },
-      };
-    case "setThreadPlan":
-      return {
-        ...state,
-        planByThread: {
-          ...state.planByThread,
-          [action.threadId]: action.plan,
-        },
-      };
-    case "clearThreadPlan":
-      return {
-        ...state,
-        planByThread: {
-          ...state.planByThread,
-          [action.threadId]: null,
-        },
-      };
     default:
       return state;
   }

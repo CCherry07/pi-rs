@@ -3,12 +3,9 @@ import type { Dispatch, MutableRefObject } from "react";
 import type {
   PiEvent,
   CollabAgentRef,
-  ConversationItem,
   DebugEntry,
-  TurnPlan,
 } from "@/types";
 import { getPiEventRawMethod } from "@utils/piEvents";
-import { useThreadHookEvents } from "./useThreadHookEvents";
 import { useThreadItemEvents } from "./useThreadItemEvents";
 import { useThreadTurnEvents } from "./useThreadTurnEvents";
 import type { ThreadAction } from "./useThreadsReducer";
@@ -16,8 +13,6 @@ import type { ThreadAction } from "./useThreadsReducer";
 type ThreadEventHandlersOptions = {
   activeThreadId: string | null;
   dispatch: Dispatch<ThreadAction>;
-  getItemsForThread: (threadId: string) => ConversationItem[];
-  planByThreadRef: MutableRefObject<Record<string, TurnPlan | null>>;
   getCustomName: (workspaceId: string, threadId: string) => string | undefined;
   isThreadHidden: (workspaceId: string, threadId: string) => boolean;
   setThreadLoaded: (threadId: string, isLoaded: boolean) => void;
@@ -52,8 +47,6 @@ type ThreadEventHandlersOptions = {
 export function useThreadEventHandlers({
   activeThreadId,
   dispatch,
-  getItemsForThread,
-  planByThreadRef,
   getCustomName,
   isThreadHidden,
   setThreadLoaded,
@@ -69,59 +62,13 @@ export function useThreadEventHandlers({
   hydrateSubagentThreads,
   pendingInterruptsRef,
 }: ThreadEventHandlersOptions) {
-  const {
-    onHookStarted: handleHookStarted,
-    onHookCompleted: handleHookCompleted,
-  } = useThreadHookEvents({
-    dispatch,
-    getItemsForThread,
-    safeMessageActivity,
-  });
-  const onHookStarted = useCallback(
-    ({
-      workspaceId,
-      threadId,
-      turnId,
-      run,
-    }: {
-      workspaceId: string;
-      threadId: string;
-      turnId: string | null;
-      run: Record<string, unknown>;
-    }) => {
-      handleHookStarted(workspaceId, threadId, turnId, run);
-    },
-    [handleHookStarted],
-  );
-  const onHookCompleted = useCallback(
-    ({
-      workspaceId,
-      threadId,
-      turnId,
-      run,
-    }: {
-      workspaceId: string;
-      threadId: string;
-      turnId: string | null;
-      run: Record<string, unknown>;
-    }) => {
-      handleHookCompleted(workspaceId, threadId, turnId, run);
-    },
-    [handleHookCompleted],
-  );
 
   const {
     onAgentMessageDelta,
     onAgentMessageCompleted,
     onItemStarted,
     onItemCompleted,
-    onReasoningSummaryDelta,
-    onReasoningSummaryBoundary,
     onReasoningTextDelta,
-    onPlanDelta,
-    onCommandOutputDelta,
-    onTerminalInteraction,
-    onFileChangeOutputDelta,
   } = useThreadItemEvents({
     activeThreadId,
     dispatch,
@@ -142,14 +89,10 @@ export function useThreadEventHandlers({
     onTurnStarted,
     onTurnCompleted,
     onThreadStatusChanged,
-    onThreadClosed,
-    onTurnPlanUpdated,
-    onTurnDiffUpdated,
     onThreadTokenUsageUpdated,
     onTurnError,
   } = useThreadTurnEvents({
     dispatch,
-    planByThreadRef,
     getCustomName,
     isThreadHidden,
     setThreadLoaded,
@@ -178,20 +121,12 @@ export function useThreadEventHandlers({
 
   const handlers = useMemo(
     () => ({
-      onHookStarted,
-      onHookCompleted,
       onPiEvent,
       onAgentMessageDelta,
       onAgentMessageCompleted,
       onItemStarted,
       onItemCompleted,
-      onReasoningSummaryDelta,
-      onReasoningSummaryBoundary,
       onReasoningTextDelta,
-      onPlanDelta,
-      onCommandOutputDelta,
-      onTerminalInteraction,
-      onFileChangeOutputDelta,
       onThreadStarted,
       onThreadNameUpdated,
       onThreadArchived,
@@ -199,27 +134,16 @@ export function useThreadEventHandlers({
       onTurnStarted,
       onTurnCompleted,
       onThreadStatusChanged,
-      onThreadClosed,
-      onTurnPlanUpdated,
-      onTurnDiffUpdated,
       onThreadTokenUsageUpdated,
       onTurnError,
     }),
     [
-      onHookStarted,
-      onHookCompleted,
       onPiEvent,
       onAgentMessageDelta,
       onAgentMessageCompleted,
       onItemStarted,
       onItemCompleted,
-      onReasoningSummaryDelta,
-      onReasoningSummaryBoundary,
       onReasoningTextDelta,
-      onPlanDelta,
-      onCommandOutputDelta,
-      onTerminalInteraction,
-      onFileChangeOutputDelta,
       onThreadStarted,
       onThreadNameUpdated,
       onThreadArchived,
@@ -227,9 +151,6 @@ export function useThreadEventHandlers({
       onTurnStarted,
       onTurnCompleted,
       onThreadStatusChanged,
-      onThreadClosed,
-      onTurnPlanUpdated,
-      onTurnDiffUpdated,
       onThreadTokenUsageUpdated,
       onTurnError,
     ],

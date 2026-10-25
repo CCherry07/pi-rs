@@ -53,14 +53,12 @@ response. Background generation uses separate sessions. Failed reloads leave the
 catalog and event subscription intact. Successful native session navigation changes the selected
 thread identity; the old saved thread is not silently rebound to the new session.
 
-Desktop actions `/compact`, `/fast`, `/fork`, `/new`, `/resume`, and `/status` retain priority
-(case-insensitive exact command names) in both completion and dispatch. `/prompts:*` remains
-the Desktop custom-prompt namespace. Conflicting runtime names are hidden, not advertised with
-an execution path that runs another command. In particular `/resume` refreshes the Desktop
-thread, and `/fast` retains the imported UI setting; the native adapter does not forward a
-service-tier setting to providers. These are Desktop presentation choices, not Pi TUI parity.
+Desktop actions `/compact` and `/reload` retain priority (case-insensitive exact command
+names) in both completion and dispatch. `/prompts:*` remains the Desktop custom-prompt
+namespace. Conflicting runtime names are hidden and the composer shows a collision warning.
+The imported Fast toggle and its unused service-tier state have been removed.
 
-Other slash commands go through `AgentSession.submit` exactly once; a handled command need not
+Other slash commands go through `AgentSession.prompt` exactly once; a handled command need not
 start an agent turn or create a session file. Tauri waits for the real submit receipt while Pi
 product events stream independently. The local follow-up queue retains Desktop queue/steer
 intent; steering uses native preprocessing and handled commands do not stall queue draining.
@@ -74,8 +72,32 @@ notices) are not replayed. The composer visibly warns when Desktop action names 
 Only commands registered by the Rust runtime (including built-in feature plugins and loaded
 native plugins) are exposed. The Desktop does not host legacy Pi JavaScript runtime extensions,
 TUI widgets, argument-completion callbacks, or interactive extension dialogs. CLI-only
-frontend commands such as `/reload` are not implicitly registered here; a native command may
-use the runtime reload/navigation capabilities. Project native plugins use shared Pi project trust.
+frontend commands are not implicitly registered here. Desktop's `/reload` invokes managed
+session replacement; native commands may also use the runtime reload/navigation capabilities. Project native plugins use shared Pi project trust.
+
+## Session lists and rendering
+
+Session listing batches all requested Projects in one native scan. The native index reuses JSONL
+summaries when the path, modification time and size are unchanged, and refreshes changed or moved
+files. Lists follow the stored Project identity, so editing a Project's directories does not hide
+its existing conversations. Legacy sessions use the shared unambiguous-directory fallback.
+
+Both active and archived lists support cursors. Creation sorting uses the session header timestamp;
+activity sorting uses the file modification time, with the session ID breaking ties. A cursor is
+scoped to its Project, archive state and sort order. Older pages append to current UI state, and
+superseded list requests cannot overwrite a newer refresh or sort selection.
+
+Streaming text updates preserve unchanged row references. The selected conversation receives its
+own inherited-context snapshot directly; background conversation updates do not replace its message
+array. Same-ID replacements invalidate pending resume responses. The unused Plan panel and handlers
+for events with no native producer have been removed; native tools and plugin messages continue to
+render through the shared transcript components.
+
+Body Markdown images use Desktop's asset protocol for absolute file paths and `file://` URLs;
+relative image paths resolve against the current workspace. Image data URLs are supported only
+in image elements, independently of ordinary-link filtering. Images scale down to fit the message.
+Native tool-result image blocks are preserved in both live events and restored history. Their
+thumbnails stay visible outside collapsed tool groups and open through the shared image preview.
 
 ## Adding a workspace
 

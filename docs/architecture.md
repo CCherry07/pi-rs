@@ -669,21 +669,28 @@ discovery, and one projection Module translates Pi lifecycle events into the UI'
 channel; there is no external app-server protocol or child-process boundary. Registered
 workspaces are immediately usable by path; the Adapter has no per-workspace connection lifecycle.
 Tool projections preserve canonical tool identity, arguments, structured result details and
-cumulative partial results. Desktop does not parse subagent result schemas. Plugin-owned React
-renderers use common ToolCard, StatusBadge, Markdown and SessionView interfaces. The subagent
-renderer lives in `plugins/features/pi-plugin-subagents/desktop`, including translations, styles,
-legacy payload compatibility and controls; it is bundled as an overridable default extension.
-SessionView explicitly observes a referenced related session through the generic session capability,
-loads a read-only transcript into shared thread state, and protects against recursive ancestor
-embedding. It does not create a primary session or attach a second composer. Collapsing only
-unmounts presentation, and failed snapshot loads expose retry. Business state and agent-to-session
-mapping remain in the plugin. Desktop does not reconstruct live agent-tree control after restart.
+cumulative partial results. Tool-result image blocks are projected as image data URLs in live
+updates and restored snapshots, alongside the text output and structured details. The frontend
+preserves these images through item normalization, keeps their previews outside collapsed tool
+groups, and uses the shared image viewer. Desktop renders native tool results and displayed custom
+plugin messages through app-owned components. Subagent controls remain native commands, with ownership checked by
+the plugin. Directly opened child sessions show saved history and a separate inherited-context
+snapshot; presentation does not own live agent execution state.
 Desktop session creation delegates path construction to `JsonlSessionRepo`, so its project-scoped
 `<timestamp>_<session-id>.jsonl` filename, v4 header ID, and projected frontend thread ID share one
 identity just as they do in Pi.
 Archive and unarchive preserve that project-relative path and companion session tree. An unarchive
 event includes a freshly projected summary from the restored JSONL so the desktop rebuilds the
 title, model, message count, and timestamps instead of publishing an empty thread placeholder.
+Session listing batches requested Projects in one blocking task and scans session paths once per
+batch. A shared index caches parsed JSONL summaries by path, modification time and file size, pruning
+removed paths and refreshing changed files. Stored Project IDs own association; legacy cwd fallback
+uses the shared unambiguous Project resolution rule. The frontend does not re-filter those results
+against the Project's current directories. Both active and archived listings use keyset cursors bound
+to Project, archive state and sort key, with session IDs breaking timestamp ties. Creation order uses
+the v4 header timestamp; activity order uses the file modification time. This changes no session wire
+format or persistence rule. Superseded frontend requests are discarded, and older pages merge with
+current state so concurrent new sessions survive pagination.
 The model selector reads the generation-local catalogue from `pi-coding` and sends the exact
 provider/model identity back to `AgentSession`; thinking selection is constrained by that model's
 declared levels and persisted through the session configuration entries. The Adapter exposes no
@@ -703,11 +710,11 @@ completion and execution use the same generation; background prompt sessions rem
 Both the workspace home input and the conversation composer receive its registered commands
 and skills. The existing first-assistant-response persistence rule keeps an unused draft out of
 resume history. Closing/reopening the app rebuilds drafts through the normal runtime factory;
-no new runtime lifecycle or command registry is introduced. The Desktop Adapter retains case-insensitive exact-name priority for its six UI actions
-(`/compact`, `/fast`, `/fork`, `/new`, `/resume`, `/status`) and reserves `/prompts:*` for its
+no new runtime lifecycle or command registry is introduced. The Desktop Adapter retains
+case-insensitive exact-name priority for `/compact` and `/reload` and reserves `/prompts:*` for
 custom-prompt expansion. Completion and dispatch share that priority, hiding conflicting runtime
-names while the composer displays a visible collision warning. These UI actions are intentional Desktop divergences (notably `/resume` refreshes the
-thread and `/fast` remains a UI-only setting rather than a native provider service tier).
+names while the composer displays a visible collision warning. The imported Fast toggle and its
+unused service-tier state have been removed.
 All other runtime commands pass through `AgentSession.prompt` once, including transformation and
 input hooks; Tauri returns the real handled/queued/completed receipt rather than fabricating an
 in-progress turn. Product events continue streaming while the IPC call awaits completion. Handled
@@ -2702,18 +2709,13 @@ message. These additions are native ABI 20; bounded fork turns are native ABI 21
 Adapter does not change the native plugin ABI. They add no Pi v4 record variant: messages, queue
 records, assistant/tool pairs, and usage adjustments continue through the existing session schema.
 
-The desktop's plugin-owned subagent renderer supplies generic related-session references to
-SessionView. It observes the child read-only and embeds a collapsible conversation in the parent
-transcript. Views consume shared thread state and generic event forwarders; hydration does not select
-a thread or change the parent composer. Snapshot reads merge without overwriting newer live items,
-activity or usage; replacement invalidates pending reads. The Desktop projection uses current-context message ordinals and block indices for
+The Desktop projection uses current-context message ordinals and block indices for
 both snapshot and live item IDs, including invisible messages in the ordinal count. Stream updates
 carry cumulative block text so a snapshot ahead of queued events cannot duplicate text. Prompt
 boundaries, compaction and missed-event recovery reset projection state from an authoritative
 subscription snapshot rather than merging ordinals across different contexts. Snapshot refresh
 retains the event receiver: covered message/tool updates are skipped while queued lifecycle,
-error, usage and notice events still run. SessionView reinstalls observers from generic references without executing tools again, and
-snapshot errors remain distinct notice items. Actual
+error, usage and notice events still run. Snapshot errors remain distinct notice items. Actual
 generation replacement retains its existing latest-generation subscription swap. These are
 frontend projection identities, not
 persisted Pi entry IDs or a change to the Pi v4 wire schema. Child presentation separates context
@@ -2731,9 +2733,11 @@ Provider context, billing and fork/fresh execution semantics are unchanged.
 Desktop keeps this snapshot outside the shared live item array and exposes it through a collapsed,
 read-only provenance banner. It reads the child's captured seed, never the current parent thread;
 later parent updates cannot alter it. Inherited collaboration records use static tool disclosures
-rather than loading live descendant conversations. The existing parent card still expands the
-child's independent chat, without selecting a thread or creating a composer. This is a deliberate
-Rust Desktop presentation design, not parity with Pi's subprocess-based example extension.
+rather than loading live descendant conversations. The selected conversation receives its own
+inherited-context snapshot directly, without a shared conversation Context or child-view loader.
+Streaming reducers preserve untouched row objects; authoritative replacement invalidates pending
+resume hydration, including same-ID replacement. This is a deliberate Rust Desktop presentation
+design, not parity with Pi's subprocess-based example extension.
 The other five tools use ordinary tool presentation. There is no
 workflow-item or legacy-tool projection. Isolated child files remain outside top-level resume
 discovery; live control remains with the owning session.
@@ -2871,8 +2875,8 @@ come from their existing owners. A trust-store read may acquire its existing loc
 `pi-plugin-skills::management::SkillLibrary` owns file discovery, validation and mutation
 beside the existing skill parser/collision policy. Diagnostics remain visible as editable
 file rows. The Tauri Adapter exposes fresh list/read and create/import/save/trash operations,
-serializes management requests off the async executor, and does not reuse the command-only
-`pi_skills_list` completion response. React owns only presentation and transient drafts.
+serializes management requests off the async executor, and keeps file management separate from the
+live session's `command_specs()` used for completion. React owns only presentation and transient drafts.
 Browsing does not invoke activity observers or update Curator metadata.
 
 Editing preserves the complete source (including unknown frontmatter), checks a SHA-256

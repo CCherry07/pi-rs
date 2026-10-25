@@ -6,7 +6,6 @@ import type { QueuedMessage } from "../../../types";
 
 type ComposerQueueProps = {
   queuedMessages: QueuedMessage[];
-  pausedReason?: string | null;
   steerAvailable?: boolean;
   onSteerQueued?: (item: QueuedMessage) => void;
   onEditQueued?: (item: QueuedMessage) => void;
@@ -15,7 +14,6 @@ type ComposerQueueProps = {
 
 export function ComposerQueue({
   queuedMessages,
-  pausedReason = null,
   steerAvailable = false,
   onSteerQueued,
   onEditQueued,
@@ -29,9 +27,6 @@ export function ComposerQueue({
   return (
     <div className="composer-queue">
       <div className="composer-queue-title">{t("composer.queueTitle")}</div>
-      {pausedReason ? (
-        <div className="composer-queue-hint">{pausedReason}</div>
-      ) : null}
       <div className="composer-queue-list">
         {queuedMessages.map((item) => (
           <div key={item.id} className="composer-queue-item">

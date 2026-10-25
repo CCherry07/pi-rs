@@ -1,14 +1,12 @@
 import { useEffect, useRef } from "react";
 import type { WorkspaceInfo } from "../../../types";
 
-const INITIAL_THREAD_LIST_MAX_PAGES = 6;
-
 type WorkspaceRestoreOptions = {
   workspaces: WorkspaceInfo[];
   hasLoaded: boolean;
   listThreadsForWorkspaces: (
     workspaces: WorkspaceInfo[],
-    options?: { preserveState?: boolean; maxPages?: number },
+    options?: { preserveState?: boolean },
   ) => Promise<void>;
 };
 
@@ -32,8 +30,6 @@ export function useWorkspaceRestore({
     pending.forEach((workspace) => {
       restoredWorkspaces.current.add(workspace.id);
     });
-    void listThreadsForWorkspaces(pending, {
-      maxPages: INITIAL_THREAD_LIST_MAX_PAGES,
-    });
+    void listThreadsForWorkspaces(pending);
   }, [hasLoaded, listThreadsForWorkspaces, workspaces]);
 }

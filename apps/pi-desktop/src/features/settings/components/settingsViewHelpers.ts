@@ -1,35 +1,15 @@
-import i18n from "@/i18n";
 import type {
   AppSettings,
   OpenAppTarget,
-  WorkspaceInfo,
 } from "@/types";
 import type { OpenAppDraft, ShortcutDrafts } from "./settingsTypes";
 import { SETTINGS_MOBILE_BREAKPOINT_PX } from "./settingsViewConstants";
-
-export const normalizeOverrideValue = (value: string): string | null => {
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-};
 
 export const normalizeWorktreeSetupScript = (
   value: string | null | undefined,
 ): string | null => {
   const next = value ?? "";
   return next.trim().length > 0 ? next : null;
-};
-
-export const buildWorkspaceOverrideDrafts = (
-  projects: WorkspaceInfo[],
-  prev: Record<string, string>,
-  getValue: (workspace: WorkspaceInfo) => string | null | undefined,
-): Record<string, string> => {
-  const next: Record<string, string> = {};
-  projects.forEach((workspace) => {
-    const existing = prev[workspace.id];
-    next[workspace.id] = existing ?? getValue(workspace) ?? "";
-  });
-  return next;
 };
 
 export const isNarrowSettingsViewport = (): boolean => {
@@ -109,43 +89,3 @@ export const buildShortcutDrafts = (appSettings: AppSettings): ShortcutDrafts =>
   cycleWorkspaceNext: appSettings.cycleWorkspaceNextShortcut ?? "",
   cycleWorkspacePrev: appSettings.cycleWorkspacePrevShortcut ?? "",
 });
-
-type EditorContentMetaInput = {
-  isLoading: boolean;
-  isSaving: boolean;
-  exists: boolean;
-  truncated: boolean;
-  isDirty: boolean;
-};
-
-export const buildEditorContentMeta = ({
-  isLoading,
-  isSaving,
-  exists,
-  truncated,
-  isDirty,
-}: EditorContentMetaInput) => {
-  const status = isLoading
-    ? i18n.t("loading", { ns: "common" })
-    : isSaving
-      ? i18n.t("saving", { ns: "common" })
-      : exists
-        ? ""
-        : i18n.t("notFound", { ns: "common" });
-  const metaParts: string[] = [];
-  if (status) {
-    metaParts.push(status);
-  }
-  if (truncated) {
-    metaParts.push(i18n.t("truncated", { ns: "common" }));
-  }
-
-  return {
-    meta: metaParts.join(" · "),
-    saveLabel: exists
-      ? i18n.t("actions.save", { ns: "common" })
-      : i18n.t("actions.create", { ns: "common" }),
-    saveDisabled: isLoading || isSaving || !isDirty,
-    refreshDisabled: isLoading || isSaving,
-  };
-};

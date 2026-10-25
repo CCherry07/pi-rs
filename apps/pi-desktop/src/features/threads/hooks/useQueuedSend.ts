@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { resolveDesktopCommand as parseSlashCommand, type DesktopCommand as SlashCommandKind } from "@/utils/desktopCommands";
+import {
+  resolveDesktopCommand as parseSlashCommand,
+  type DesktopCommand as SlashCommandKind,
+} from "@/utils/desktopCommands";
 import type {
   ComposerSendIntent,
   FollowUpMessageBehavior,
@@ -11,7 +14,6 @@ type UseQueuedSendOptions = {
   activeThreadId: string | null;
   activeTurnId: string | null;
   isProcessing: boolean;
-  queueFlushPaused?: boolean;
   steerEnabled: boolean;
   followUpMessageBehavior: FollowUpMessageBehavior;
   sendUserMessage: (
@@ -32,10 +34,7 @@ type UseQueuedSendResult = {
     images?: string[],
     submitIntent?: ComposerSendIntent,
   ) => Promise<void>;
-  queueMessage: (
-    text: string,
-    images?: string[],
-  ) => Promise<void>;
+  queueMessage: (text: string, images?: string[]) => Promise<void>;
   steerQueuedMessage: (threadId: string, item: QueuedMessage) => Promise<void>;
   removeQueuedMessage: (threadId: string, messageId: string) => void;
 };
@@ -44,7 +43,6 @@ export function useQueuedSend({
   activeThreadId,
   activeTurnId,
   isProcessing,
-  queueFlushPaused = false,
   steerEnabled,
   followUpMessageBehavior,
   sendUserMessage,
@@ -63,16 +61,19 @@ export function useQueuedSend({
   >({});
 
   const activeQueue = useMemo(
-    () => (activeThreadId ? queuedByThread[activeThreadId] ?? [] : []),
+    () => (activeThreadId ? (queuedByThread[activeThreadId] ?? []) : []),
     [activeThreadId, queuedByThread],
   );
 
-  const enqueueMessage = useCallback((threadId: string, item: QueuedMessage) => {
-    setQueuedByThread((prev) => ({
-      ...prev,
-      [threadId]: [...(prev[threadId] ?? []), item],
-    }));
-  }, []);
+  const enqueueMessage = useCallback(
+    (threadId: string, item: QueuedMessage) => {
+      setQueuedByThread((prev) => ({
+        ...prev,
+        [threadId]: [...(prev[threadId] ?? []), item],
+      }));
+    },
+    [],
+  );
 
   const removeQueuedMessage = useCallback(
     (threadId: string, messageId: string) => {
@@ -86,12 +87,15 @@ export function useQueuedSend({
     [],
   );
 
-  const prependQueuedMessage = useCallback((threadId: string, item: QueuedMessage) => {
-    setQueuedByThread((prev) => ({
-      ...prev,
-      [threadId]: [item, ...(prev[threadId] ?? [])],
-    }));
-  }, []);
+  const prependQueuedMessage = useCallback(
+    (threadId: string, item: QueuedMessage) => {
+      setQueuedByThread((prev) => ({
+        ...prev,
+        [threadId]: [item, ...(prev[threadId] ?? [])],
+      }));
+    },
+    [],
+  );
 
   const createQueuedItem = useCallback(
     (text: string, images: string[]): QueuedMessage => ({
@@ -114,10 +118,7 @@ export function useQueuedSend({
         return;
       }
     },
-    [
-      startCompact,
-      startReload,
-    ],
+    [startCompact, startReload],
   );
 
   const handleSend = useCallback(
@@ -158,8 +159,8 @@ export function useQueuedSend({
         return;
       }
       const sendResult = await sendUserMessage(trimmed, nextImages, {
-          sendIntent: effectiveIntent,
-        });
+        sendIntent: effectiveIntent,
+      });
       if (
         sendResult.status === "steer_failed" &&
         activeThreadId &&
@@ -183,10 +184,7 @@ export function useQueuedSend({
   );
 
   const queueMessage = useCallback(
-    async (
-      text: string,
-      images: string[] = [],
-    ) => {
+    async (text: string, images: string[] = []) => {
       const trimmed = text.trim();
       const command = parseSlashCommand(trimmed);
       const nextImages = command ? [] : images;
@@ -200,12 +198,7 @@ export function useQueuedSend({
       enqueueMessage(activeThreadId, item);
       clearActiveImages();
     },
-    [
-      activeThreadId,
-      clearActiveImages,
-      createQueuedItem,
-      enqueueMessage,
-    ],
+    [activeThreadId, clearActiveImages, createQueuedItem, enqueueMessage],
   );
 
   const steerQueuedMessage = useCallback(
@@ -252,15 +245,10 @@ export function useQueuedSend({
       setInFlightByThread((prev) => ({ ...prev, [activeThreadId]: null }));
       setHasStartedByThread((prev) => ({ ...prev, [activeThreadId]: false }));
     }
-  }, [
-    activeThreadId,
-    hasStartedByThread,
-    inFlightByThread,
-    isProcessing,
-  ]);
+  }, [activeThreadId, hasStartedByThread, inFlightByThread, isProcessing]);
 
   useEffect(() => {
-    if (!activeThreadId || isProcessing || queueFlushPaused) {
+    if (!activeThreadId || isProcessing) {
       return;
     }
     if (inFlightByThread[activeThreadId]) {
@@ -288,12 +276,18 @@ export function useQueuedSend({
         // Handled commands have no AgentStart/Settled cycle. A completed
         // submission may also settle before React observes isProcessing=true.
         if (result.status !== "sent") {
-          setInFlightByThread((prev) => prev[threadId]?.id === nextItem.id
-            ? { ...prev, [threadId]: null } : prev);
+          setInFlightByThread((prev) =>
+            prev[threadId]?.id === nextItem.id
+              ? { ...prev, [threadId]: null }
+              : prev,
+          );
         }
       } catch {
-        setInFlightByThread((prev) => prev[threadId]?.id === nextItem.id
-          ? { ...prev, [threadId]: null } : prev);
+        setInFlightByThread((prev) =>
+          prev[threadId]?.id === nextItem.id
+            ? { ...prev, [threadId]: null }
+            : prev,
+        );
         prependQueuedMessage(threadId, nextItem);
       }
     })();
@@ -301,7 +295,6 @@ export function useQueuedSend({
     activeThreadId,
     inFlightByThread,
     isProcessing,
-    queueFlushPaused,
     prependQueuedMessage,
     queuedByThread,
     runSlashCommand,

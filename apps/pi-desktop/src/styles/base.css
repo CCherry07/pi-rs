@@ -252,11 +252,9 @@ button.window-caption-control:focus-visible,
   .commit-button-spinner,
   .sidebar-refresh-icon.spinning,
   .worktree-deleting-spinner,
-  .sidebar-account-spinner,
   .settings-agents-generate-loader,
   .composer-action-spinner,
-  .compact-chat-refresh-icon.spinning,
-  .home-usage-refresh-icon.spinning {
+  .compact-chat-refresh-icon.spinning {
     animation-duration: var(--ds-spinner-dur) !important;
     animation-iteration-count: infinite !important;
   }

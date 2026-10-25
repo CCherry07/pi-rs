@@ -1,7 +1,6 @@
 .app.layout-compact .sidebar-resizer,
 .app.layout-compact .right-panel-resizer,
-.app.layout-compact .right-panel,
-.app.layout-compact .right-panel-divider {
+.app.layout-compact .right-panel {
   display: none;
 }
 
@@ -37,10 +36,6 @@
   bottom: auto;
   margin-top: 8px;
   align-self: flex-start;
-}
-
-.app.layout-compact .sidebar-account-popover {
-  bottom: calc(100% + 8px);
 }
 
 .compact-topbar {

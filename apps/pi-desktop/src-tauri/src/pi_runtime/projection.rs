@@ -617,6 +617,7 @@ fn tool_result_item(
         cwd,
     );
     item["details"] = json!(result.details);
+    item["images"] = json!(super::content_image_urls(&result.content));
     item
 }
 
@@ -1522,6 +1523,65 @@ mod tests {
         assert_eq!(projected[0]["text"], "/skill:review");
         assert_eq!(projected[1]["type"], "image");
         assert!(!json!(projected).to_string().contains("expanded skill body"));
+    }
+
+    #[test]
+    fn live_tool_result_images_survive_projection() {
+        for name in ["read", "bash"] {
+            for status in ["inProgress", "completed", "failed"] {
+                let mut result = ToolResult::text("Read image file [image/png]");
+                result
+                    .content
+                    .push(ContentBlock::Image(pi_core::ImageContent {
+                        data: "aW1hZ2U=".into(),
+                        mime_type: "image/png".into(),
+                    }));
+                let item = tool_result_item(
+                    "image-call",
+                    name,
+                    json!({ "path": "/tmp/image.png" }),
+                    status,
+                    &result,
+                    "/project",
+                );
+                assert_eq!(item["images"], json!(["data:image/png;base64,aW1hZ2U="]));
+            }
+        }
+    }
+
+    #[test]
+    fn restored_tool_result_images_survive_projection() {
+        for name in ["read", "bash"] {
+            let result = Message::tool_result(pi_core::ToolResultMessage {
+                tool_call_id: pi_core::ToolCallId::new("image-call"),
+                tool_name: name.into(),
+                content: vec![
+                    block_text("Read image file [image/png]"),
+                    ContentBlock::Image(pi_core::ImageContent {
+                        data: "aW1hZ2U=".into(),
+                        mime_type: "image/png".into(),
+                    }),
+                ],
+                details: None,
+                usage: None,
+                added_tool_names: None,
+                is_error: false,
+                timestamp_ms: 1,
+            });
+            let thread = super::super::thread_from_snapshot(
+                &snapshot(vec![result]),
+                "parent",
+                std::path::Path::new("/project"),
+                Default::default(),
+                json!("pi-rs"),
+                None,
+                Default::default(),
+            );
+            assert_eq!(
+                thread["turns"][0]["items"][0]["images"],
+                json!(["data:image/png;base64,aW1hZ2U="])
+            );
+        }
     }
 
     #[test]

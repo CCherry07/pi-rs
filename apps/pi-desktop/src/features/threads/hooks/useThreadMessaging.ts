@@ -7,7 +7,6 @@ import type {
   CustomPromptOption,
   DebugEntry,
   SendMessageResult,
-  ServiceTier,
   WorkspaceInfo,
 } from "@/types";
 import {
@@ -17,10 +16,12 @@ import {
   interruptTurn as interruptTurnService,
 } from "@services/tauri";
 import { expandCustomPromptText } from "@utils/customPrompts";
-import { asString, extractRpcErrorMessage } from "@threads/utils/threadNormalize";
+import {
+  asString,
+  extractRpcErrorMessage,
+} from "@threads/utils/threadNormalize";
 import type { ThreadAction, ThreadState } from "./useThreadsReducer";
 import {
-  buildTurnStartPayload,
   isStaleSteerTurnError,
   resolveSendMessageOptions,
   type SendMessageOptions,
@@ -31,7 +32,6 @@ type UseThreadMessagingOptions = {
   activeThreadId: string | null;
   model?: string | null;
   effort?: string | null;
-  serviceTier?: ServiceTier | null | undefined;
   steerEnabled: boolean;
   customPrompts: CustomPromptOption[];
   threadStatusById: ThreadState["threadStatusById"];
@@ -58,7 +58,6 @@ export function useThreadMessaging({
   activeThreadId,
   model,
   effort,
-  serviceTier,
   steerEnabled,
   customPrompts,
   threadStatusById,
@@ -89,7 +88,10 @@ export function useThreadMessaging({
       }
       let finalText = messageText;
       if (!options?.skipPromptExpansion) {
-        const promptExpansion = expandCustomPromptText(messageText, customPrompts);
+        const promptExpansion = expandCustomPromptText(
+          messageText,
+          customPrompts,
+        );
         if (promptExpansion && "error" in promptExpansion) {
           pushThreadErrorMessage(threadId, promptExpansion.error);
           safeMessageActivity();
@@ -102,7 +104,6 @@ export function useThreadMessaging({
       const {
         resolvedModel,
         resolvedEffort,
-        resolvedServiceTier,
         sendIntent,
         shouldSteer,
         requestMode,
@@ -111,7 +112,6 @@ export function useThreadMessaging({
         defaults: {
           model,
           effort,
-          serviceTier,
           steerEnabled,
           isProcessing,
           activeTurnId,
@@ -125,7 +125,6 @@ export function useThreadMessaging({
           text_length: String(finalText.length),
           model: resolvedModel ?? "unknown",
           effort: resolvedEffort ?? "unknown",
-          service_tier: resolvedServiceTier ?? "default",
           send_intent: sendIntent,
         },
       });
@@ -140,7 +139,8 @@ export function useThreadMessaging({
       });
       markProcessing(threadId, true);
       const submissionRevision = getStatusRevision(threadId);
-      const ownsStatus = () => getStatusRevision(threadId) === submissionRevision;
+      const ownsStatus = () =>
+        getStatusRevision(threadId) === submissionRevision;
       const clearOwnedStatus = () => {
         if (ownsStatus()) {
           markProcessing(threadId, false);
@@ -161,31 +161,24 @@ export function useThreadMessaging({
           images,
           model: resolvedModel,
           effort: resolvedEffort,
-          serviceTier: resolvedServiceTier,
           sendIntent,
           threadCustomName: customThreadName,
         },
       });
       try {
         const response: Record<string, unknown> = shouldSteer
-          ? (await steerTurnService(
+          ? ((await steerTurnService(
               workspace.id,
               threadId,
               activeTurnId ?? "",
               finalText,
               images,
-            )) as Record<string, unknown>
-          : (await sendUserMessageService(
-            workspace.id,
-            threadId,
-            finalText,
-            buildTurnStartPayload({
+            )) as Record<string, unknown>)
+          : ((await sendUserMessageService(workspace.id, threadId, finalText, {
               model: resolvedModel,
               effort: resolvedEffort,
-              serviceTier: resolvedServiceTier,
               images,
-            }),
-          )) as Record<string, unknown>;
+            })) as Record<string, unknown>);
 
         const rpcError = extractRpcErrorMessage(response);
 
@@ -193,7 +186,10 @@ export function useThreadMessaging({
           id: `${Date.now()}-${requestMode === "steer" ? "server-turn-steer" : "server-turn-start"}`,
           timestamp: Date.now(),
           source: "server",
-          label: requestMode === "steer" ? "turn/steer response" : "turn/start response",
+          label:
+            requestMode === "steer"
+              ? "turn/steer response"
+              : "turn/start response",
           payload: response,
         });
         if (rpcError) {
@@ -222,23 +218,36 @@ export function useThreadMessaging({
           safeMessageActivity();
           return { status: "steer_failed" };
         }
-        const result = (response?.result ?? response) as Record<string, unknown>;
-        if (result.status === "handled" || result.status === "completed" || result.status === "queued") {
-          if (result.isRunning === false || (result.isRunning === undefined && result.status !== "queued")) {
+        const result = (response?.result ?? response) as Record<
+          string,
+          unknown
+        >;
+        if (
+          result.status === "handled" ||
+          result.status === "completed" ||
+          result.status === "queued"
+        ) {
+          if (
+            result.isRunning === false ||
+            (result.isRunning === undefined && result.status !== "queued")
+          ) {
             clearOwnedStatus();
           }
           return { status: result.status };
         }
         if (requestMode === "steer") {
-          const steeredTurnId = asString(result?.turnId ?? result?.turn_id ?? "");
+          const steeredTurnId = asString(
+            result?.turnId ?? result?.turn_id ?? "",
+          );
           if (steeredTurnId && ownsStatus()) {
             setActiveTurnId(threadId, steeredTurnId);
           }
           return { status: "sent" };
         }
-        const turn = (result?.turn ?? response?.turn ?? null) as
-          | Record<string, unknown>
-          | null;
+        const turn = (result?.turn ?? response?.turn ?? null) as Record<
+          string,
+          unknown
+        > | null;
         const turnId = asString(turn?.id ?? "");
         if (!turnId) {
           clearOwnedStatus();
@@ -254,7 +263,8 @@ export function useThreadMessaging({
         }
         return { status: "sent" };
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
         if (requestMode !== "steer" || isStaleSteerTurnError(errorMessage)) {
           clearOwnedStatus();
         }
@@ -262,7 +272,8 @@ export function useThreadMessaging({
           id: `${Date.now()}-${requestMode === "steer" ? "client-turn-steer-error" : "client-turn-start-error"}`,
           timestamp: Date.now(),
           source: "error",
-          label: requestMode === "steer" ? "turn/steer error" : "turn/start error",
+          label:
+            requestMode === "steer" ? "turn/steer error" : "turn/start error",
           payload: errorMessage,
         });
         pushThreadErrorMessage(
@@ -282,7 +293,6 @@ export function useThreadMessaging({
       customPrompts,
       dispatch,
       effort,
-      serviceTier,
       activeTurnIdByThread,
       getCustomName,
       getStatusRevision,
@@ -311,7 +321,10 @@ export function useThreadMessaging({
       if (!messageText && images.length === 0) {
         return { status: "blocked" };
       }
-      const promptExpansion = expandCustomPromptText(messageText, customPrompts);
+      const promptExpansion = expandCustomPromptText(
+        messageText,
+        customPrompts,
+      );
       if (promptExpansion && "error" in promptExpansion) {
         if (activeThreadId) {
           pushThreadErrorMessage(activeThreadId, promptExpansion.error);
@@ -441,7 +454,8 @@ export function useThreadMessaging({
       if (!activeWorkspace) {
         return;
       }
-      const threadId = activeThreadId ?? (await ensureThreadForActiveWorkspace());
+      const threadId =
+        activeThreadId ?? (await ensureThreadForActiveWorkspace());
       if (!threadId) {
         return;
       }

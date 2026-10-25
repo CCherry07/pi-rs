@@ -1,30 +1,20 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
-import type {
-  AppSettings,
-  ComposerSendIntent,
-  ServiceTier,
-} from "@/types";
+import type { AppSettings, ComposerSendIntent } from "@/types";
 import { useThreadRunParams } from "@threads/hooks/useThreadRunParams";
 import {
-  buildThreadRunSeedPatch,
-  createPendingThreadSeed,
   NO_THREAD_SCOPE_SUFFIX,
   resolveThreadRunState,
-  type PendingNewThreadSeed,
 } from "@threads/utils/threadRunParamsSeed";
 import { makeThreadRunParamsKey } from "@threads/utils/threadStorage";
 import { useThreadRunOrchestration } from "./useThreadRunOrchestration";
 
 type SetState<T> = Dispatch<SetStateAction<T>>;
 
-type PersistThreadRunParams = (
-  patch: {
-    modelId?: string | null;
-    effort?: string | null;
-    serviceTier?: ServiceTier | null | undefined;
-  },
-) => void;
+type PersistThreadRunParams = (patch: {
+  modelId?: string | null;
+  effort?: string | null;
+}) => void;
 
 type UseThreadSelectionHandlersOrchestrationParams = {
   appSettingsLoading: boolean;
@@ -33,7 +23,6 @@ type UseThreadSelectionHandlersOrchestrationParams = {
   activeThreadIdRef: MutableRefObject<string | null>;
   setSelectedModelId: (id: string | null) => void;
   setSelectedEffort: (effort: string | null) => void;
-  setSelectedServiceTier: (tier: ServiceTier | null | undefined) => void;
   persistThreadRunParams: PersistThreadRunParams;
 };
 
@@ -49,17 +38,18 @@ type UseThreadRunSyncOrchestrationParams = {
     "lastComposerModelId" | "lastComposerReasoningEffort"
   >;
   threadRunParamsVersion: number;
-  getThreadRunParams: ReturnType<typeof useThreadRunParams>["getThreadRunParams"];
-  patchThreadRunParams: ReturnType<typeof useThreadRunParams>["patchThreadRunParams"];
+  getThreadRunParams: ReturnType<
+    typeof useThreadRunParams
+  >["getThreadRunParams"];
+  patchThreadRunParams: ReturnType<
+    typeof useThreadRunParams
+  >["patchThreadRunParams"];
   setThreadRunSelectionKey: SetState<string | null>;
   setPreferredModelId: SetState<string | null>;
   setPreferredEffort: SetState<string | null>;
-  setPreferredServiceTier: SetState<ServiceTier | null | undefined>;
   activeThreadIdRef: MutableRefObject<string | null>;
-  pendingNewThreadSeedRef: MutableRefObject<PendingNewThreadSeed | null>;
   selectedModelId: string | null;
   resolvedEffort: string | null;
-  selectedServiceTier: ServiceTier | null | undefined;
 };
 
 type MainTab = "home" | "projects" | "chat" | "git" | "log";
@@ -73,8 +63,6 @@ type SendOrQueueHandler = (
 type UseThreadUiOrchestrationParams = {
   activeWorkspaceId: string | null | undefined;
   activeThreadId: string | null;
-  selectedServiceTier: ServiceTier | null | undefined;
-  pendingNewThreadSeedRef: MutableRefObject<PendingNewThreadSeed | null>;
   runWithDraftStart: (runner: () => Promise<void>) => Promise<void>;
   handleComposerSend: SendOrQueueHandler;
   clearDraftState: () => void;
@@ -92,7 +80,9 @@ type UseThreadUiOrchestrationParams = {
 export function useThreadRunBootstrapOrchestration({
   activeWorkspaceId,
 }: UseThreadRunBootstrapOrchestrationParams) {
-  const activeWorkspaceIdForParamsRef = useRef<string | null>(activeWorkspaceId ?? null);
+  const activeWorkspaceIdForParamsRef = useRef<string | null>(
+    activeWorkspaceId ?? null,
+  );
 
   useEffect(() => {
     activeWorkspaceIdForParamsRef.current = activeWorkspaceId ?? null;
@@ -111,12 +101,9 @@ export function useThreadRunSyncOrchestration({
   setThreadRunSelectionKey,
   setPreferredModelId,
   setPreferredEffort,
-  setPreferredServiceTier,
   activeThreadIdRef,
-  pendingNewThreadSeedRef,
   selectedModelId,
   resolvedEffort,
-  selectedServiceTier,
 }: UseThreadRunSyncOrchestrationParams) {
   useLayoutEffect(() => {
     const workspaceId = activeWorkspaceId ?? null;
@@ -131,20 +118,17 @@ export function useThreadRunSyncOrchestration({
       workspaceId,
       threadId ?? NO_THREAD_SCOPE_SUFFIX,
     );
-    const noThreadStored = getThreadRunParams(workspaceId, NO_THREAD_SCOPE_SUFFIX);
     const resolved = resolveThreadRunState({
       workspaceId,
       threadId,
       lastComposerModelId: appSettings.lastComposerModelId,
       lastComposerReasoningEffort: appSettings.lastComposerReasoningEffort,
       stored,
-      noThreadStored,
     });
 
     setThreadRunSelectionKey(resolved.scopeKey);
     setPreferredModelId(resolved.preferredModelId);
     setPreferredEffort(resolved.preferredEffort);
-    setPreferredServiceTier(resolved.preferredServiceTier);
   }, [
     activeThreadId,
     activeWorkspaceId,
@@ -153,11 +137,9 @@ export function useThreadRunSyncOrchestration({
     getThreadRunParams,
     setPreferredEffort,
     setPreferredModelId,
-    setPreferredServiceTier,
     setThreadRunSelectionKey,
     threadRunParamsVersion,
     activeThreadIdRef,
-    pendingNewThreadSeedRef,
   ]);
 
   const seededThreadParamsRef = useRef(new Set<string>());
@@ -180,20 +162,10 @@ export function useThreadRunSyncOrchestration({
     }
 
     seededThreadParamsRef.current.add(key);
-    const pendingSeed = pendingNewThreadSeedRef.current;
-    patchThreadRunParams(
-      workspaceId,
-      threadId,
-      buildThreadRunSeedPatch({
-        workspaceId,
-        selectedModelId,
-        resolvedEffort,
-        pendingSeed,
-      }),
-    );
-    if (pendingSeed?.workspaceId === workspaceId) {
-      pendingNewThreadSeedRef.current = null;
-    }
+    patchThreadRunParams(workspaceId, threadId, {
+      modelId: selectedModelId,
+      effort: resolvedEffort,
+    });
   }, [
     activeThreadId,
     activeWorkspaceId,
@@ -201,30 +173,6 @@ export function useThreadRunSyncOrchestration({
     patchThreadRunParams,
     resolvedEffort,
     selectedModelId,
-    pendingNewThreadSeedRef,
-  ]);
-
-  useEffect(() => {
-    const workspaceId = activeWorkspaceId ?? null;
-    const threadId = activeThreadId ?? null;
-    if (!workspaceId || !threadId || selectedServiceTier === undefined) {
-      return;
-    }
-
-    const noThreadStored = getThreadRunParams(workspaceId, NO_THREAD_SCOPE_SUFFIX);
-    if (noThreadStored?.serviceTier !== undefined) {
-      return;
-    }
-
-    patchThreadRunParams(workspaceId, NO_THREAD_SCOPE_SUFFIX, {
-      serviceTier: selectedServiceTier,
-    });
-  }, [
-    activeThreadId,
-    activeWorkspaceId,
-    getThreadRunParams,
-    patchThreadRunParams,
-    selectedServiceTier,
   ]);
 }
 
@@ -235,7 +183,6 @@ export function useThreadSelectionHandlersOrchestration({
   activeThreadIdRef,
   setSelectedModelId,
   setSelectedEffort,
-  setSelectedServiceTier,
   persistThreadRunParams,
 }: UseThreadSelectionHandlersOrchestrationParams) {
   const handleSelectModel = useCallback(
@@ -266,7 +213,8 @@ export function useThreadSelectionHandlersOrchestration({
 
   const handleSelectEffort = useCallback(
     (raw: string | null) => {
-      const next = typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
+      const next =
+        typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
       setSelectedEffort(next);
       const hasActiveThread = Boolean(activeThreadIdRef.current);
       if (!appSettingsLoading && !hasActiveThread) {
@@ -274,7 +222,10 @@ export function useThreadSelectionHandlersOrchestration({
           if (current.lastComposerReasoningEffort === next) {
             return current;
           }
-          const nextSettings = { ...current, lastComposerReasoningEffort: next };
+          const nextSettings = {
+            ...current,
+            lastComposerReasoningEffort: next,
+          };
           void queueSaveSettings(nextSettings);
           return nextSettings;
         });
@@ -291,26 +242,15 @@ export function useThreadSelectionHandlersOrchestration({
     ],
   );
 
-  const handleSelectServiceTier = useCallback(
-    (tier: ServiceTier | null | undefined) => {
-      setSelectedServiceTier(tier);
-      persistThreadRunParams({ serviceTier: tier });
-    },
-    [persistThreadRunParams, setSelectedServiceTier],
-  );
-
   return {
     handleSelectModel,
     handleSelectEffort,
-    handleSelectServiceTier,
   };
 }
 
 export function useThreadUiOrchestration({
   activeWorkspaceId,
   activeThreadId,
-  selectedServiceTier,
-  pendingNewThreadSeedRef,
   runWithDraftStart,
   handleComposerSend,
   clearDraftState,
@@ -324,29 +264,13 @@ export function useThreadUiOrchestration({
   clearDraftForThread,
   removeImagesForThread,
 }: UseThreadUiOrchestrationParams) {
-  const rememberPendingNewThreadSeed = useCallback(() => {
-    pendingNewThreadSeedRef.current = createPendingThreadSeed({
-      activeThreadId: activeThreadId ?? null,
-      activeWorkspaceId: activeWorkspaceId ?? null,
-      selectedServiceTier,
-    });
-  }, [
-    activeThreadId,
-    activeWorkspaceId,
-    pendingNewThreadSeedRef,
-    selectedServiceTier,
-  ]);
-
   const handleComposerSendWithDraftStart = useCallback(
-    (
-      text: string,
-      images: string[],
-      submitIntent?: ComposerSendIntent,
-    ) => {
-      rememberPendingNewThreadSeed();
-      return runWithDraftStart(() => handleComposerSend(text, images, submitIntent));
+    (text: string, images: string[], submitIntent?: ComposerSendIntent) => {
+      return runWithDraftStart(() =>
+        handleComposerSend(text, images, submitIntent),
+      );
     },
-    [handleComposerSend, rememberPendingNewThreadSeed, runWithDraftStart],
+    [handleComposerSend, runWithDraftStart],
   );
 
   const handleSelectWorkspaceInstance = useCallback(

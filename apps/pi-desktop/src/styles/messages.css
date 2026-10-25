@@ -1266,6 +1266,11 @@
   margin-top: 8px;
 }
 
+.markdown img {
+  max-width: 100%;
+  height: auto;
+}
+
 .markdown pre {
   margin: 0;
   white-space: pre-wrap;

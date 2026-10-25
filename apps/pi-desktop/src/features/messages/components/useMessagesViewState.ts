@@ -7,11 +7,9 @@ import {
   useState,
 } from "react";
 import type { ConversationItem } from "../../../types";
-import { isPlanReadyTaggedMessage } from "../../../utils/internalPlanReadyMessages";
 import {
   SCROLL_THRESHOLD_PX,
   buildToolGroups,
-  computePlanFollowupState,
   parseReasoning,
   scrollKeyForItems,
 } from "../utils/messageRenderUtils";
@@ -32,10 +30,6 @@ type UseMessagesViewStateArgs = {
   items: ConversationItem[];
   threadId: string | null;
   isThinking: boolean;
-  activeUserInputRequestId: string | number | null;
-  hasVisibleUserInputRequest: boolean;
-  onPlanAccept?: () => void;
-  onPlanSubmitChanges?: (changes: string) => void;
   onQuoteMessage?: (text: string) => void;
 };
 
@@ -43,31 +37,25 @@ export function useMessagesViewState({
   items,
   threadId,
   isThinking,
-  activeUserInputRequestId,
-  hasVisibleUserInputRequest,
-  onPlanAccept,
-  onPlanSubmitChanges,
   onQuoteMessage,
 }: UseMessagesViewStateArgs) {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const autoScrollRef = useRef(true);
   const copyTimeoutRef = useRef<number | null>(null);
-  const manuallyToggledExpandedRef = useRef<Set<string>>(new Set());
 
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
   const [collapsedToolGroups, setCollapsedToolGroups] = useState<Set<string>>(
     new Set(),
   );
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-  const [dismissedPlanFollowupByThread, setDismissedPlanFollowupByThread] =
-    useState<Record<string, string>>({});
 
-  const scrollKey = `${scrollKeyForItems(items)}-${activeUserInputRequestId ?? "no-input"}`;
+  const scrollKey = scrollKeyForItems(items);
 
   const isNearBottom = useCallback(
     (node: HTMLDivElement) =>
-      node.scrollHeight - node.scrollTop - node.clientHeight <= SCROLL_THRESHOLD_PX,
+      node.scrollHeight - node.scrollTop - node.clientHeight <=
+      SCROLL_THRESHOLD_PX,
     [],
   );
 
@@ -119,7 +107,6 @@ export function useMessagesViewState({
   }, []);
 
   const toggleExpanded = useCallback((id: string) => {
-    manuallyToggledExpandedRef.current.add(id);
     setExpandedItems((prev) => {
       const next = new Set(prev);
       if (next.has(id)) {
@@ -162,7 +149,10 @@ export function useMessagesViewState({
   );
 
   const handleQuoteMessage = useCallback(
-    (item: Extract<ConversationItem, { kind: "message" }>, selectedText?: string) => {
+    (
+      item: Extract<ConversationItem, { kind: "message" }>,
+      selectedText?: string,
+    ) => {
       if (!onQuoteMessage) {
         return;
       }
@@ -206,13 +196,6 @@ export function useMessagesViewState({
   const visibleItems = useMemo(
     () =>
       items.filter((item) => {
-        if (
-          item.kind === "message" &&
-          item.role === "user" &&
-          isPlanReadyTaggedMessage(item.text)
-        ) {
-          return false;
-        }
         if (item.kind !== "reasoning") {
           return true;
         }
@@ -221,70 +204,10 @@ export function useMessagesViewState({
     [items, reasoningMetaById],
   );
 
-  useEffect(() => {
-    for (let index = visibleItems.length - 1; index >= 0; index -= 1) {
-      const item = visibleItems[index];
-      if (
-        item.kind === "tool" &&
-        item.toolType === "plan" &&
-        (item.output ?? "").trim().length > 0
-      ) {
-        if (manuallyToggledExpandedRef.current.has(item.id)) {
-          return;
-        }
-        setExpandedItems((prev) => {
-          if (prev.has(item.id)) {
-            return prev;
-          }
-          const next = new Set(prev);
-          next.add(item.id);
-          return next;
-        });
-        return;
-      }
-    }
-  }, [visibleItems]);
-
-  const groupedItems = useMemo(() => buildToolGroups(visibleItems), [visibleItems]);
-
-  const planFollowup = useMemo(() => {
-    if (!onPlanAccept || !onPlanSubmitChanges) {
-      return { shouldShow: false, planItemId: null };
-    }
-
-    const candidate = computePlanFollowupState({
-      threadId,
-      items,
-      isThinking,
-      hasVisibleUserInputRequest,
-    });
-
-    if (threadId && candidate.planItemId) {
-      if (dismissedPlanFollowupByThread[threadId] === candidate.planItemId) {
-        return { ...candidate, shouldShow: false };
-      }
-    }
-
-    return candidate;
-  }, [
-    dismissedPlanFollowupByThread,
-    hasVisibleUserInputRequest,
-    isThinking,
-    items,
-    onPlanAccept,
-    onPlanSubmitChanges,
-    threadId,
-  ]);
-
-  const dismissPlanFollowup = useCallback(() => {
-    if (!threadId || !planFollowup.planItemId) {
-      return;
-    }
-    setDismissedPlanFollowupByThread((prev) => ({
-      ...prev,
-      [threadId]: planFollowup.planItemId!,
-    }));
-  }, [planFollowup.planItemId, threadId]);
+  const groupedItems = useMemo(
+    () => buildToolGroups(visibleItems),
+    [visibleItems],
+  );
 
   return {
     bottomRef,
@@ -301,7 +224,5 @@ export function useMessagesViewState({
     reasoningMetaById,
     latestReasoningLabel,
     groupedItems,
-    planFollowup,
-    dismissPlanFollowup,
   };
 }

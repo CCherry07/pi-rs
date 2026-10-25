@@ -1,10 +1,9 @@
-import type { ComposerSendIntent, ServiceTier } from "@/types";
+import type { ComposerSendIntent } from "@/types";
 
 export type SendMessageOptions = {
   skipPromptExpansion?: boolean;
   model?: string | null;
   effort?: string | null;
-  serviceTier?: ServiceTier | null | undefined;
   sendIntent?: ComposerSendIntent;
 };
 
@@ -13,7 +12,6 @@ type ResolveSendMessageOptionsArgs = {
   defaults: {
     model?: string | null;
     effort?: string | null;
-    serviceTier?: ServiceTier | null | undefined;
     steerEnabled: boolean;
     isProcessing: boolean;
     activeTurnId: string | null;
@@ -23,17 +21,9 @@ type ResolveSendMessageOptionsArgs = {
 export type ResolvedSendMessageOptions = {
   resolvedModel?: string | null;
   resolvedEffort?: string | null;
-  resolvedServiceTier?: ServiceTier | null | undefined;
   sendIntent: ComposerSendIntent;
   shouldSteer: boolean;
   requestMode: "start" | "steer";
-};
-
-export type TurnStartPayload = {
-  model?: string | null;
-  effort?: string | null;
-  serviceTier?: ServiceTier | null | undefined;
-  images?: string[];
 };
 
 export function isStaleSteerTurnError(message: string): boolean {
@@ -55,11 +45,11 @@ export function resolveSendMessageOptions({
     options?.model !== undefined ? options.model : defaults.model;
   const resolvedEffort =
     options?.effort !== undefined ? options.effort : defaults.effort;
-  const resolvedServiceTier =
-    options?.serviceTier !== undefined ? options.serviceTier : defaults.serviceTier;
   const sendIntent = options?.sendIntent ?? "default";
   const canSteerCurrentTurn =
-    defaults.isProcessing && defaults.steerEnabled && Boolean(defaults.activeTurnId);
+    defaults.isProcessing &&
+    defaults.steerEnabled &&
+    Boolean(defaults.activeTurnId);
   const shouldSteer =
     sendIntent === "steer"
       ? canSteerCurrentTurn
@@ -70,31 +60,8 @@ export function resolveSendMessageOptions({
   return {
     resolvedModel,
     resolvedEffort,
-    resolvedServiceTier,
     sendIntent,
     shouldSteer,
     requestMode: shouldSteer ? "steer" : "start",
   };
-}
-
-export function buildTurnStartPayload({
-  model,
-  effort,
-  serviceTier,
-  images,
-}: {
-  model?: string | null;
-  effort?: string | null;
-  serviceTier?: ServiceTier | null | undefined;
-  images: string[];
-}): TurnStartPayload {
-  const payload: TurnStartPayload = {
-    model,
-    effort,
-    images,
-  };
-  if (serviceTier !== undefined) {
-    payload.serviceTier = serviceTier;
-  }
-  return payload;
 }

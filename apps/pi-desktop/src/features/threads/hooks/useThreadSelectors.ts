@@ -1,10 +1,9 @@
 import { useMemo } from "react";
 import type { ConversationItem } from "@/types";
 import type { ThreadState } from "./useThreadsReducer";
-import {
-  getActiveItemsForThread,
-  getActiveThreadIdForWorkspace,
-} from "./threadSelectorsHelpers";
+import { enrichConversationItemsWithThreads } from "@utils/threadItems";
+
+const EMPTY_ITEMS: ConversationItem[] = [];
 
 type UseThreadSelectorsOptions = {
   activeWorkspaceId: string | null;
@@ -19,23 +18,19 @@ export function useThreadSelectors({
   itemsByThread,
   threadsByWorkspace,
 }: UseThreadSelectorsOptions) {
-  const activeThreadId = useMemo(
-    () => getActiveThreadIdForWorkspace(activeWorkspaceId, activeThreadIdByWorkspace),
-    [activeThreadIdByWorkspace, activeWorkspaceId],
-  );
-
+  const activeThreadId = activeWorkspaceId
+    ? (activeThreadIdByWorkspace[activeWorkspaceId] ?? null)
+    : null;
+  const items = activeThreadId
+    ? (itemsByThread[activeThreadId] ?? EMPTY_ITEMS)
+    : EMPTY_ITEMS;
   const activeWorkspaceThreads = activeWorkspaceId
     ? threadsByWorkspace[activeWorkspaceId]
     : undefined;
-
-  const activeItems = useMemo<ConversationItem[]>(
+  const activeItems = useMemo(
     () =>
-      getActiveItemsForThread({
-        activeThreadId,
-        itemsByThread,
-        threads: activeWorkspaceThreads,
-      }),
-    [activeThreadId, activeWorkspaceThreads, itemsByThread],
+      enrichConversationItemsWithThreads(items, activeWorkspaceThreads ?? []),
+    [items, activeWorkspaceThreads],
   );
 
   return { activeThreadId, activeItems };

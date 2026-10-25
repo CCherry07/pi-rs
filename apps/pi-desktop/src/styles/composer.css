@@ -39,12 +39,6 @@
   color: var(--text-fainter);
 }
 
-.composer-queue-hint {
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--text-faint);
-}
-
 .composer-queue-list {
   display: flex;
   flex-direction: column;
@@ -774,65 +768,9 @@
   opacity: 0.9;
 }
 
-.composer-select-wrap--model:has(.composer-fast-indicator)::after {
-  right: 30px;
-}
-
 .composer-select-wrap:has(.composer-select:focus)::after {
   border-right-color: var(--text-strong);
   border-bottom-color: var(--text-strong);
-}
-
-.composer-plan-toggle-wrap {
-  padding: 2px 8px;
-}
-
-.composer-plan-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.composer-plan-toggle-input {
-  margin: 0;
-  width: 12px;
-  height: 12px;
-  accent-color: var(--message-link-color);
-  cursor: pointer;
-}
-
-.composer-plan-toggle-icon {
-  display: inline-flex;
-  width: 16px;
-  height: 16px;
-  color: var(--text-muted);
-}
-
-.composer-plan-toggle-icon svg {
-  width: 16px;
-  height: 16px;
-}
-
-.composer-plan-toggle-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  line-height: 1;
-}
-
-.composer-plan-toggle:has(.composer-plan-toggle-input:checked) .composer-plan-toggle-icon,
-.composer-plan-toggle:has(.composer-plan-toggle-input:checked) .composer-plan-toggle-label {
-  color: var(--text-strong);
-}
-
-.composer-plan-toggle-input:disabled {
-  cursor: not-allowed;
-}
-
-.composer-plan-toggle:has(.composer-plan-toggle-input:disabled) .composer-plan-toggle-icon,
-.composer-plan-toggle:has(.composer-plan-toggle-input:disabled) .composer-plan-toggle-label {
-  opacity: 0.6;
 }
 
 .composer-icon {
@@ -860,38 +798,6 @@
 .composer-icon--model,
 .composer-icon--effort {
   transform: translateY(1px);
-}
-
-.composer-fast-indicator {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border: 0;
-  border-radius: 999px;
-  color: var(--text-muted);
-  background: transparent;
-  cursor: pointer;
-}
-
-.composer-fast-indicator:hover:not(:disabled),
-.composer-fast-indicator:focus-visible {
-  color: var(--text-strong);
-  background: var(--surface-control-hover);
-}
-
-.composer-fast-indicator--active,
-.composer-fast-indicator--active:hover:not(:disabled),
-.composer-fast-indicator--active:focus-visible {
-  color: var(--accent-warning-strong, #b45309);
-  background: color-mix(in srgb, var(--accent-warning-strong, #b45309) 16%, transparent);
-}
-
-.composer-fast-indicator:disabled {
-  cursor: default;
-  opacity: 0.5;
 }
 
 .composer-select {

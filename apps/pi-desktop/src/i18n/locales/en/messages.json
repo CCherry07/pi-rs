@@ -56,10 +56,7 @@
     "exportMarkdown": "Export .md",
     "exportDialogTitle": "Export plan as Markdown",
     "exportFailed": "Plan export failed",
-    "exportUnavailable": "Unable to export plan.",
-    "title": "Plan",
-    "waiting": "Waiting on a plan...",
-    "empty": "No active plan."
+    "exportUnavailable": "Unable to export plan."
   },
   "explore": {
     "exploring": "Exploring",
@@ -174,10 +171,8 @@
       "stop": "Stop dictation",
       "start": "Start dictation"
     },
-    "plan": "Plan",
     "model": "Model",
     "noModels": "No models",
-    "fastModeToggle": "Toggle Fast mode",
     "thinkingMode": "Thinking mode",
     "default": "Default",
     "tokenUsageUnknown": "Token usage unavailable",

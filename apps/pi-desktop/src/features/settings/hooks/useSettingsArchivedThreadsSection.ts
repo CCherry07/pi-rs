@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ask } from "@tauri-apps/plugin-dialog";
 import type { ThreadSummary, WorkspaceInfo } from "@/types";
 import {
   deleteThread,
-  listArchivedThreads,
+  listThreads,
+  type ThreadListRequest,
   unarchiveThread,
 } from "@services/tauri";
 
@@ -26,10 +27,6 @@ export type SettingsArchivedThreadsSectionProps = {
   onRestoreThread: (entry: ArchivedThreadEntry) => Promise<void>;
   onDeleteThread: (entry: ArchivedThreadEntry) => Promise<void>;
   onDeleteAllThreads: () => Promise<void>;
-};
-
-type ThreadListResponse = {
-  data?: unknown;
 };
 
 const toErrorMessage = (error: unknown) =>
@@ -66,7 +63,8 @@ const parseThreadSummary = (value: unknown): ThreadSummary | null => {
     id,
     name: rawName.trim(),
     updatedAt,
-    createdAt: typeof record.createdAt === "number" ? record.createdAt : undefined,
+    createdAt:
+      typeof record.createdAt === "number" ? record.createdAt : undefined,
     messageCount,
     modelId: typeof record.modelId === "string" ? record.modelId : null,
     effort: typeof record.effort === "string" ? record.effort : null,
@@ -82,13 +80,16 @@ export const useSettingsArchivedThreadsSection = ({
 }): SettingsArchivedThreadsSectionProps => {
   const { t } = useTranslation("settings");
   const { t: tCommon } = useTranslation("common");
-  const [archivedThreads, setArchivedThreads] = useState<ArchivedThreadEntry[]>([]);
+  const [archivedThreads, setArchivedThreads] = useState<ArchivedThreadEntry[]>(
+    [],
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyThreadActions, setBusyThreadActions] = useState<
     Record<string, ArchivedThreadAction>
   >({});
   const [deletingAll, setDeletingAll] = useState(false);
+  const listingRevision = useRef(0);
 
   const setThreadAction = (
     key: string,
@@ -106,6 +107,7 @@ export const useSettingsArchivedThreadsSection = ({
   };
 
   const loadArchivedThreads = useCallback(async () => {
+    const revision = ++listingRevision.current;
     if (!enabled || projects.length === 0) {
       setArchivedThreads([]);
       setLoading(false);
@@ -115,39 +117,47 @@ export const useSettingsArchivedThreadsSection = ({
 
     setLoading(true);
     setError(null);
-    const results = await Promise.allSettled(
-      projects.map(async (workspace) => {
-        const response = await listArchivedThreads(
-          workspace.id,
-          null,
-          200,
-          "updated_at",
-        ) as ThreadListResponse;
-        const rows = Array.isArray(response.data) ? response.data : [];
-        return rows.flatMap((row): ArchivedThreadEntry[] => {
-          const summary = parseThreadSummary(row);
-          if (!summary) {
-            return [];
-          }
-          return [{
-            ...summary,
-            workspaceId: workspace.id,
-            workspaceName: workspace.name,
-            workspacePath: workspace.path,
-          }];
-        });
-      }),
-    );
-
     const nextThreads: ArchivedThreadEntry[] = [];
     const failures: string[] = [];
-    results.forEach((result) => {
-      if (result.status === "fulfilled") {
-        nextThreads.push(...result.value);
-      } else {
-        failures.push(toErrorMessage(result.reason));
+    const byId = new Map(
+      projects.map((workspace) => [workspace.id, workspace]),
+    );
+    let requests: ThreadListRequest[] = projects.map(({ id }) => ({
+      workspaceId: id,
+    }));
+    try {
+      while (requests.length) {
+        const pages = await listThreads(requests, {
+          limit: 200,
+          sortKey: "updated_at",
+          archived: true,
+        });
+        if (revision !== listingRevision.current) return;
+        requests = [];
+        for (const page of pages) {
+          const workspace = byId.get(page.workspaceId);
+          if (!workspace) continue;
+          for (const row of page.data) {
+            const summary = parseThreadSummary(row);
+            if (summary)
+              nextThreads.push({
+                ...summary,
+                workspaceId: workspace.id,
+                workspaceName: workspace.name,
+                workspacePath: workspace.path,
+              });
+          }
+          if (page.nextCursor)
+            requests.push({
+              workspaceId: workspace.id,
+              cursor: page.nextCursor,
+            });
+        }
       }
-    });
+    } catch (error) {
+      failures.push(toErrorMessage(error));
+    }
+    if (revision !== listingRevision.current) return;
     nextThreads.sort((left, right) => right.updatedAt - left.updatedAt);
     setArchivedThreads(nextThreads);
     setError(
@@ -159,10 +169,11 @@ export const useSettingsArchivedThreadsSection = ({
   }, [enabled, projects, t]);
 
   useEffect(() => {
-    if (enabled) {
-      void loadArchivedThreads();
-    }
-  }, [enabled, loadArchivedThreads]);
+    void loadArchivedThreads();
+    return () => {
+      listingRevision.current += 1;
+    };
+  }, [loadArchivedThreads]);
 
   const handleRestoreThread = async (entry: ArchivedThreadEntry) => {
     const key = entryKey(entry);

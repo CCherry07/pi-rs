@@ -16,7 +16,7 @@ async fn library(
         None => None,
     };
     Ok(PluginLibrary::new(
-        pi.info.agent_dir.clone(),
+        pi.agent_dir.clone(),
         cwd,
         pi.project_trust.clone(),
     ))

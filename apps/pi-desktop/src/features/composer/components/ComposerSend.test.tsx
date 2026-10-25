@@ -36,8 +36,6 @@ type HarnessProps = {
   isProcessing?: boolean;
   followUpMessageBehavior?: FollowUpMessageBehavior;
   steerAvailable?: boolean;
-  selectedServiceTier?: "fast" | "flex" | null;
-  onSelectServiceTier?: (tier: "fast" | "flex" | null) => void;
 };
 
 function ComposerHarness({
@@ -45,8 +43,6 @@ function ComposerHarness({
   isProcessing = false,
   followUpMessageBehavior = "queue",
   steerAvailable = false,
-  selectedServiceTier = null,
-  onSelectServiceTier = () => {},
 }: HarnessProps) {
   const [draftText, setDraftText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -65,8 +61,6 @@ function ComposerHarness({
       reasoningOptions={[]}
       selectedEffort={null}
       onSelectEffort={() => {}}
-      selectedServiceTier={selectedServiceTier}
-      onSelectServiceTier={onSelectServiceTier}
       reasoningSupported={false}
       skills={[]}
       prompts={[]}
@@ -108,35 +102,6 @@ describe("Composer send triggers", () => {
 
     expect(onSend).toHaveBeenCalledTimes(1);
     expect(onSend).toHaveBeenCalledWith("from button", [], "default");
-  });
-
-  it("toggles Fast mode and its active styling from the lightning button", () => {
-    const onSend = vi.fn();
-    function FastModeHarness() {
-      const [serviceTier, setServiceTier] = useState<"fast" | "flex" | null>(null);
-      return (
-        <ComposerHarness
-          onSend={onSend}
-          selectedServiceTier={serviceTier}
-          onSelectServiceTier={setServiceTier}
-        />
-      );
-    }
-    render(<FastModeHarness />);
-
-    let button = screen.getByRole("button", { name: "Toggle Fast mode" });
-    expect(button.getAttribute("aria-pressed")).toBe("false");
-    expect(button.classList.contains("composer-fast-indicator--active")).toBe(false);
-    fireEvent.click(button);
-
-    button = screen.getByRole("button", { name: "Toggle Fast mode" });
-    expect(button.getAttribute("aria-pressed")).toBe("true");
-    expect(button.classList.contains("composer-fast-indicator--active")).toBe(true);
-    fireEvent.click(button);
-
-    button = screen.getByRole("button", { name: "Toggle Fast mode" });
-    expect(button.getAttribute("aria-pressed")).toBe("false");
-    expect(button.classList.contains("composer-fast-indicator--active")).toBe(false);
   });
 
   it("blurs the textarea after Enter send on mobile", () => {

@@ -132,7 +132,6 @@ export type TextFileResponse = {
   truncated: boolean;
 };
 
-export type GlobalAgentsResponse = TextFileResponse;
 export type AgentMdResponse = TextFileResponse;
 type FileScope = "workspace" | "global";
 type FileKind = "agents";
@@ -156,14 +155,6 @@ async function fileWrite(
 
 export async function readImageAsDataUrl(path: string): Promise<string> {
   return invoke<string>("read_image_as_data_url", { path });
-}
-
-export async function readGlobalAgentsMd(): Promise<GlobalAgentsResponse> {
-  return fileRead("global", "agents");
-}
-
-export async function writeGlobalAgentsMd(content: string): Promise<void> {
-  return fileWrite("global", "agents", content);
 }
 
 export async function addWorkspace(path: string): Promise<WorkspaceInfo> {
@@ -530,7 +521,6 @@ export async function sendUserMessage(
   options?: {
     model?: string | null;
     effort?: string | null;
-    serviceTier?: "fast" | "flex" | null | undefined;
     images?: string[];
   },
 ) {
@@ -543,9 +533,6 @@ export async function sendUserMessage(
     effort: options?.effort ?? null,
     images,
   };
-  if (options?.serviceTier !== undefined) {
-    payload.serviceTier = options.serviceTier;
-  }
   return invoke("pi_send_user_message", payload);
 }
 
@@ -758,10 +745,6 @@ export async function generateRunMetadata(workspaceId: string, prompt: string) {
     workspaceId,
     prompt,
   });
-}
-
-export async function getSkillsList(workspaceId: string, threadId?: string) {
-  return invoke<any>("pi_skills_list", { workspaceId, threadId });
 }
 
 export async function getPromptsList(workspaceId: string) {
@@ -990,22 +973,22 @@ export async function closeTerminalSession(
   return invoke("terminal_close", { workspaceId, terminalId });
 }
 
-export async function listThreads(
-  workspaceId: string,
-  cursor?: string | null,
-  limit?: number | null,
-  sortKey?: "created_at" | "updated_at" | null,
-) {
-  return invoke<any>("pi_list_threads", { workspaceId, cursor, limit, sortKey });
-}
+export type ThreadListRequest = { workspaceId: string; cursor?: string | null };
+export type ThreadListPage = {
+  workspaceId: string;
+  data: Record<string, unknown>[];
+  nextCursor: string | null;
+};
 
-export async function listArchivedThreads(
-  workspaceId: string,
-  cursor?: string | null,
-  limit?: number | null,
-  sortKey?: "created_at" | "updated_at" | null,
-) {
-  return invoke<any>("pi_list_archived_threads", { workspaceId, cursor, limit, sortKey });
+export function listThreads(
+  requests: ThreadListRequest[],
+  options: {
+    limit?: number;
+    sortKey?: "created_at" | "updated_at";
+    archived?: boolean;
+  } = {},
+): Promise<ThreadListPage[]> {
+  return invoke("pi_list_threads", { requests, ...options });
 }
 
 export async function resumeThread(workspaceId: string, threadId: string) {
@@ -1014,14 +997,6 @@ export async function resumeThread(workspaceId: string, threadId: string) {
 
 export async function readThread(workspaceId: string, threadId: string) {
   return invoke<any>("pi_read_thread", { workspaceId, threadId });
-}
-
-export async function threadLiveSubscribe(workspaceId: string, threadId: string) {
-  return invoke<any>("pi_thread_live_subscribe", { workspaceId, threadId });
-}
-
-export async function threadLiveUnsubscribe(workspaceId: string, threadId: string) {
-  return invoke<any>("pi_thread_live_unsubscribe", { workspaceId, threadId });
 }
 
 export async function archiveThread(workspaceId: string, threadId: string) {

@@ -1,4 +1,4 @@
-import type { ConversationItem, ThreadSummary, TurnPlan, WorkspaceInfo } from "../types";
+import type { ConversationItem, ThreadSummary, WorkspaceInfo } from "../types";
 import type { GitInventory } from "../features/git/gitContext";
 
 // Presentation fixtures only. This entry never opens projects or calls a provider.
@@ -41,15 +41,6 @@ export const conversation: ConversationItem[] = [
   { id: "tool-1", kind: "tool", toolType: "commandExecution", title: "npm run typecheck", detail: "npm run typecheck", status: "completed", output: "> pi-desktop typecheck\n> tsc --noEmit\n\nProcess exited with code 0", durationMs: 1420 },
   { id: "assistant-2", kind: "message", role: "assistant", text: "### 更轻盈的会话搜索\n\n搜索入口已经放在项目标题旁边。输入时即时筛选，清空后恢复完整列表；项目分组和当前会话都会保留。\n\n```tsx\nconst visibleThreads = threads.filter((thread) =>\n  thread.name.toLocaleLowerCase().includes(query),\n);\n```\n\n你可以点击左侧的搜索图标，体验筛选效果。" },
 ];
-export const plan: TurnPlan = {
-  turnId: "preview-turn",
-  explanation: null,
-  steps: [
-    { step: "梳理侧栏与会话结构", status: "completed" },
-    { step: "接入标题筛选", status: "completed" },
-    { step: "检查键盘与空状态", status: "completed" },
-  ],
-};
 export const changedFiles = [
   { name: "Sidebar.tsx", path: "src/features/app/components", added: 18, removed: 4 },
   { name: "threadSearchUtils.ts", path: "src/features/app/components", added: 12, removed: 2 },

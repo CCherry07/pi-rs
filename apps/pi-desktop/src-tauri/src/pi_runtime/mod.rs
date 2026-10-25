@@ -18,7 +18,6 @@ use pi_session::{
     AgentSession, AgentSessionSnapshot, BranchQuery, EntryOrder, EntryQuery, PromptOutcome,
     QueueSnapshot, SessionEntry, SessionInput, SessionRecord,
 };
-use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 
@@ -26,26 +25,17 @@ use crate::backend::events::PiEvent;
 use crate::state::AppState;
 
 use session_store::{
-    content_text, document_token_usage, token_usage, SessionModelCatalog, SessionScope,
-    SessionStore, SessionSummary, SessionTokenUsage, StoredIsolatedSession,
+    content_text, document_token_usage, token_usage, SessionListOptions, SessionListQuery,
+    SessionModelCatalog, SessionScope, SessionSortKey, SessionStore, SessionSummary,
+    SessionTokenUsage, StoredIsolatedSession,
 };
 
 pub(crate) struct PiRuntimeState {
     store: SessionStore,
-    info: PiDesktopInfo,
+    agent_dir: PathBuf,
     forwarders: projection::ForwarderRegistry,
     project_trust: pi_coding::ProjectTrustService,
     skill_mutation_gate: skills::SkillMutationGate,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PiDesktopInfo {
-    agent_dir: PathBuf,
-    provider: String,
-    model: String,
-    ready: bool,
-    reason: Option<String>,
 }
 
 pub(crate) fn create_state() -> Result<PiRuntimeState, String> {
@@ -54,35 +44,16 @@ pub(crate) fn create_state() -> Result<PiRuntimeState, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let mut config = Config::new(cwd, agent_dir.clone());
     config.discover_extensions = false;
-    let ready = config.api_key.is_some() || !config.base_url.contains("api.openai.com");
-    let info = PiDesktopInfo {
-        agent_dir: agent_dir.clone(),
-        provider: config.provider.clone(),
-        model: config
-            .model
-            .clone()
-            .unwrap_or_else(|| config.fallback_model.clone()),
-        ready,
-        reason: (!ready).then(|| {
-            "Set OPENAI_API_KEY or configure a local OPENAI_BASE_URL before sending a prompt"
-                .to_string()
-        }),
-    };
     let sdk = Pi::builder(config)
         .presentation_mode(PresentationMode::Rpc)
         .build()?;
     Ok(PiRuntimeState {
         project_trust: sdk.project_trust().clone(),
         skill_mutation_gate: skills::SkillMutationGate::default(),
-        store: SessionStore::new(sdk.session_manager(), agent_dir),
-        info,
+        store: SessionStore::new(sdk.session_manager(), agent_dir.clone()),
+        agent_dir,
         forwarders: projection::ForwarderRegistry::default(),
     })
-}
-
-#[tauri::command]
-pub(crate) fn pi_desktop_info(state: State<'_, PiRuntimeState>) -> PiDesktopInfo {
-    state.info.clone()
 }
 
 #[tauri::command]
@@ -152,38 +123,6 @@ pub(crate) async fn pi_read_thread(
 }
 
 #[tauri::command]
-pub(crate) async fn pi_thread_live_subscribe(
-    workspace_id: String,
-    thread_id: String,
-    pi: State<'_, PiRuntimeState>,
-    app: AppHandle,
-) -> Result<Value, String> {
-    if pi.store.read_isolated(&thread_id).is_ok() {
-        return Ok(json!({
-            "subscriptionId": format!("{workspace_id}:{thread_id}"),
-            "state": "snapshot"
-        }));
-    }
-    pi.store.open(&thread_id).await?;
-    ensure_forwarder(&app, &pi, &workspace_id, thread_id.clone()).await?;
-    Ok(json!({
-        "subscriptionId": format!("{workspace_id}:{thread_id}"),
-        "state": "live"
-    }))
-}
-
-#[tauri::command]
-pub(crate) async fn pi_thread_live_unsubscribe(
-    workspace_id: String,
-    thread_id: String,
-) -> Result<Value, String> {
-    Ok(json!({
-        "ok": true,
-        "subscriptionId": format!("{workspace_id}:{thread_id}")
-    }))
-}
-
-#[tauri::command]
 pub(crate) async fn pi_fork_thread(
     workspace_id: String,
     thread_id: String,
@@ -199,46 +138,36 @@ pub(crate) async fn pi_fork_thread(
 
 #[tauri::command]
 pub(crate) async fn pi_list_threads(
-    workspace_id: String,
-    _cursor: Option<String>,
+    requests: Vec<SessionListQuery>,
     limit: Option<u32>,
-    _sort_key: Option<String>,
+    sort_key: Option<SessionSortKey>,
+    archived: Option<bool>,
     state: State<'_, AppState>,
     pi: State<'_, PiRuntimeState>,
 ) -> Result<Value, String> {
-    let project = state.project(&workspace_id).await?;
-    let mut sessions = pi
-        .store
-        .list_project(&project, &state.projects().await?, false)?;
-    if let Some(limit) = limit {
-        sessions.truncate(limit as usize);
-    }
-    Ok(json!({
-        "data": sessions.iter().map(summary_thread).collect::<Vec<_>>(),
-        "nextCursor": null
-    }))
-}
-
-#[tauri::command]
-pub(crate) async fn pi_list_archived_threads(
-    workspace_id: String,
-    _cursor: Option<String>,
-    limit: Option<u32>,
-    _sort_key: Option<String>,
-    state: State<'_, AppState>,
-    pi: State<'_, PiRuntimeState>,
-) -> Result<Value, String> {
-    let project = state.project(&workspace_id).await?;
-    let mut sessions = pi
-        .store
-        .list_project(&project, &state.projects().await?, true)?;
-    if let Some(limit) = limit {
-        sessions.truncate(limit as usize);
-    }
-    Ok(json!({
-        "data": sessions.iter().map(summary_thread).collect::<Vec<_>>(),
-        "nextCursor": null
-    }))
+    let projects = state.projects().await?;
+    let store = pi.store.clone();
+    let pages = tokio::task::spawn_blocking(move || {
+        store.list_pages(
+            &projects,
+            &requests,
+            SessionListOptions {
+                archived: archived.unwrap_or(false),
+                sort: sort_key.unwrap_or_default(),
+                limit: limit.unwrap_or(20).clamp(1, 500) as usize,
+            },
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    Ok(json!(pages
+        .into_iter()
+        .map(|page| json!({
+            "workspaceId": page.workspace_id,
+            "data": page.summaries.iter().map(summary_thread).collect::<Vec<_>>(),
+            "nextCursor": page.next_cursor,
+        }))
+        .collect::<Vec<_>>()))
 }
 
 #[tauri::command]
@@ -371,7 +300,6 @@ pub(crate) async fn pi_send_user_message(
     text: String,
     model: Option<String>,
     effort: Option<String>,
-    _service_tier: Option<Option<String>>,
     images: Option<Vec<String>>,
     pi: State<'_, PiRuntimeState>,
     app: AppHandle,
@@ -485,37 +413,6 @@ pub(crate) async fn pi_model_list(
         })).collect::<Vec<_>>(),
         "selectedThinkingLevel": selected_thinking.as_str()
     }))
-}
-
-#[tauri::command]
-pub(crate) async fn pi_skills_list(
-    workspace_id: String,
-    thread_id: Option<String>,
-    state: State<'_, AppState>,
-    pi: State<'_, PiRuntimeState>,
-) -> Result<Value, String> {
-    let commands = match thread_id {
-        Some(id) => pi.store.command_catalog(&id).await?,
-        None => pi
-            .store
-            .prepare_scoped(SessionScope::project(&state.project(&workspace_id).await?)?)
-            .await?
-            .catalog()
-            .command_specs(),
-    };
-    let skills = commands
-        .into_iter()
-        .filter_map(|command| {
-            command.name.strip_prefix("skill:").map(|name| {
-                json!({
-                    "name": name,
-                    "path": "",
-                    "description": command.description
-                })
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(json!({ "data": [{ "skills": skills }] }))
 }
 
 #[tauri::command]
@@ -741,7 +638,7 @@ fn summary_thread(summary: &SessionSummary) -> Value {
         "name": summary.title,
         "preview": summary.title,
         "cwd": summary.cwd,
-        "createdAt": summary.updated_at_ms,
+        "createdAt": summary.created_at_ms,
         "updatedAt": summary.updated_at_ms,
         "model": summary.model,
         "source": "pi-rs",
@@ -1125,7 +1022,7 @@ fn thread_from_snapshot(
                     result.tool_call_id.as_str(),
                     &name,
                     arguments,
-                    &content_text(&result.content),
+                    &result.content,
                     result.is_error,
                     result.details.as_ref(),
                     historical_context,
@@ -1141,7 +1038,7 @@ fn thread_from_snapshot(
             &tool_id,
             &name,
             arguments,
-            "",
+            &[],
             false,
             None,
             historical_context,
@@ -1185,13 +1082,15 @@ fn historical_tool_item(
     id: &str,
     name: &str,
     arguments: Value,
-    output: &str,
+    content: &[ContentBlock],
     is_error: bool,
     details: Option<&Value>,
     context: HistoricalToolContext<'_>,
 ) -> Value {
     let HistoricalToolContext { cwd } = context;
     let status = if is_error { "failed" } else { "completed" };
+    let output = content_text(content);
+    let images = content_image_urls(content);
     if name == "bash" {
         let command = arguments
             .get("command")
@@ -1206,7 +1105,8 @@ fn historical_tool_item(
             "command": command,
             "cwd": cwd,
             "status": status,
-            "aggregatedOutput": output
+            "aggregatedOutput": output,
+            "images": images
         })
     } else {
         json!({
@@ -1218,9 +1118,22 @@ fn historical_tool_item(
             "arguments": arguments,
             "status": status,
             "result": output,
-            "details": details
+            "details": details,
+            "images": images
         })
     }
+}
+
+fn content_image_urls(blocks: &[ContentBlock]) -> Vec<String> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Image(image) => {
+                Some(format!("data:{};base64,{}", image.mime_type, image.data))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn user_content_with_display(blocks: &[ContentBlock], display_text: Option<&str>) -> Vec<Value> {
@@ -1656,13 +1569,7 @@ mod tests {
         }
         let pi = PiRuntimeState {
             store: scripted_store(agent_dir.clone()),
-            info: PiDesktopInfo {
-                agent_dir: agent_dir.clone(),
-                provider: "scripted".into(),
-                model: "desktop-test".into(),
-                ready: true,
-                reason: None,
-            },
+            agent_dir: agent_dir.clone(),
             forwarders: Default::default(),
             project_trust: pi_coding::ProjectTrustService::new(
                 &agent_dir,
@@ -2182,7 +2089,7 @@ mod tests {
         let mut live = store.subscribe(&id).unwrap();
         for _ in 0..3 {
             assert_eq!(
-                store.command_catalog(&id).await.unwrap()[0].description,
+                store.open(&id).await.unwrap().catalog().command_specs()[0].description,
                 "generation 1"
             );
         }
@@ -2202,7 +2109,7 @@ mod tests {
         let next = observe_latest(&mut live).await;
         assert!(!Arc::ptr_eq(&first, &next));
         assert_eq!(
-            store.command_catalog(&id).await.unwrap()[0].description,
+            store.open(&id).await.unwrap().catalog().command_specs()[0].description,
             "generation 2"
         );
         fixture.fail_reload.store(true, SeqCst);
@@ -2220,7 +2127,7 @@ mod tests {
             pi_session::AgentSessionEvent::PluginNotice { .. }
         ));
         assert_eq!(
-            store.command_catalog(&id).await.unwrap()[0].description,
+            store.open(&id).await.unwrap().catalog().command_specs()[0].description,
             "generation 2"
         );
     }
@@ -2540,7 +2447,9 @@ mod tests {
             "call-1",
             "spawn_agent",
             json!({"agent": "reviewer", "task": "Review the parser"}),
-            "review complete",
+            &[ContentBlock::Text(pi_core::TextContent::new(
+                "review complete",
+            ))],
             false,
             Some(&json!({
                 "agent": "reviewer",
@@ -2759,13 +2668,7 @@ mod tests {
             .clone(),
             skill_mutation_gate: Arc::new(std::sync::Mutex::new(())),
             store: scripted_store(directory.path().join("agent")),
-            info: PiDesktopInfo {
-                agent_dir: directory.path().join("agent"),
-                provider: "scripted".to_string(),
-                model: "desktop-test".to_string(),
-                ready: true,
-                reason: None,
-            },
+            agent_dir: directory.path().join("agent"),
             forwarders: Arc::new(Mutex::new(HashSet::new())),
         };
 
