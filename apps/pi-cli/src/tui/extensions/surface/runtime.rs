@@ -470,6 +470,17 @@ enum Control {
     Scroll(ScrollState),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CustomMouseArea {
+    pub(super) node: String,
+    pub(super) instance: String,
+    pub(super) bounds: Rect,
+    pub(super) origin_x: i32,
+    pub(super) origin_y: i32,
+    pub(super) width: u16,
+    pub(super) height: u16,
+}
+
 #[derive(Default)]
 pub(super) struct TreeRuntime {
     controls: HashMap<String, Control>,
@@ -478,6 +489,7 @@ pub(super) struct TreeRuntime {
     hit_areas: Vec<(String, Rect)>,
     scroll_areas: Vec<(String, Rect)>,
     paint_nodes: Vec<(String, Rect)>,
+    custom_mouse_areas: Vec<CustomMouseArea>,
 }
 
 impl TreeRuntime {
@@ -491,6 +503,7 @@ impl TreeRuntime {
         }
         self.order = order;
         self.hit_areas.retain(|(id, _)| present.contains(id));
+        self.custom_mouse_areas.retain(|area| matches!(find_node(root, &area.node), Some(UiNode { kind: UiNodeKind::Custom { mouse: true, instance_id, .. }, .. }) if *instance_id == area.instance));
     }
 
     fn reconcile_node(
@@ -607,10 +620,12 @@ impl TreeRuntime {
                 self.controls.insert(node.id.clone(), Control::Button);
             }
             N::Custom {
-                interactive: true, ..
-            } => {
+                interactive, mouse, ..
+            } if *interactive || *mouse => {
                 present.insert(node.id.clone());
-                order.push(node.id.clone());
+                if *interactive {
+                    order.push(node.id.clone());
+                }
                 self.controls.insert(node.id.clone(), Control::Custom);
             }
             _ => {}
@@ -628,6 +643,20 @@ impl TreeRuntime {
 
     pub(super) fn interactive(&self) -> bool {
         !self.order.is_empty()
+    }
+
+    pub(super) fn custom_mouse_at(&self, column: u16, row: u16) -> Option<CustomMouseArea> {
+        self.custom_mouse_areas
+            .iter()
+            .rev()
+            .find(|area| area.bounds.contains((column, row).into()))
+            .cloned()
+    }
+
+    pub(super) fn has_mouse_target(&self, target: &CustomMouseArea) -> bool {
+        self.custom_mouse_areas
+            .iter()
+            .any(|area| area.node == target.node && area.instance == target.instance)
     }
 
     pub(super) fn input(
@@ -674,6 +703,16 @@ impl TreeRuntime {
                 .map(|(id, area)| (id.clone(), *area));
             if let Some((id, area)) = hit {
                 if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    // A mouse-capable custom node decides focus in its correlated reply.
+                    if matches!(
+                        find_node(root, &id),
+                        Some(UiNode {
+                            kind: UiNodeKind::Custom { mouse: true, .. },
+                            ..
+                        })
+                    ) {
+                        return (false, None);
+                    }
                     self.focused = Some(id.clone());
                     match self.controls.get_mut(&id) {
                         Some(Control::Button) => {
@@ -937,6 +976,7 @@ impl TreeRuntime {
         self.hit_areas.clear();
         self.scroll_areas.clear();
         self.paint_nodes.clear();
+        self.custom_mouse_areas.clear();
         self.draw(node, frame, area, palette, active);
     }
 
@@ -974,11 +1014,24 @@ impl TreeRuntime {
             N::Custom {
                 lines,
                 interactive,
+                mouse,
+                instance_id,
                 cursor,
                 ..
             } => {
-                if *interactive {
+                if *interactive || *mouse {
                     self.hit_areas.push((node.id.clone(), area));
+                }
+                if *mouse {
+                    self.custom_mouse_areas.push(CustomMouseArea {
+                        node: node.id.clone(),
+                        instance: instance_id.clone(),
+                        bounds: area,
+                        origin_x: i32::from(area.x),
+                        origin_y: i32::from(area.y),
+                        width: area.width,
+                        height: area.height,
+                    });
                 }
                 frame.render_widget(Paragraph::new(super::custom::lines(lines)), area);
                 if active
@@ -1062,6 +1115,7 @@ impl TreeRuntime {
                     self.hit_areas.len(),
                     self.scroll_areas.len(),
                     self.paint_nodes.len(),
+                    self.custom_mouse_areas.len(),
                 );
                 let mut terminal = Terminal::new(TestBackend::new(area.width, content_height))
                     .expect("memory scroll viewport");
@@ -1076,6 +1130,18 @@ impl TreeRuntime {
                 }
                 transform_areas(&mut self.hit_areas, starts.0, area, offset);
                 transform_areas(&mut self.scroll_areas, starts.1, area, offset);
+                let mouse_areas = self
+                    .custom_mouse_areas
+                    .drain(starts.3..)
+                    .filter_map(|mut target| {
+                        let bounds = scrolled_area(target.bounds, area, offset, false)?;
+                        target.origin_x += i32::from(area.x);
+                        target.origin_y += i32::from(area.y) - i32::from(offset);
+                        target.bounds = bounds;
+                        Some(target)
+                    })
+                    .collect::<Vec<_>>();
+                self.custom_mouse_areas.extend(mouse_areas);
                 let painted: Vec<_> = self
                     .paint_nodes
                     .drain(starts.2..)

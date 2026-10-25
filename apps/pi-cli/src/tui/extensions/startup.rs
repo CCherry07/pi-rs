@@ -122,6 +122,7 @@ fn handle_input(
     let packet = event.map_err(|error| error.to_string())?;
     let mut current = snapshot(receiver);
     if let Some(Event::Resize(columns, rows)) = packet.event {
+        surface.cancel_mouse();
         current.columns = columns;
         current.rows = rows;
         store_snapshot(receiver, current.clone());
@@ -166,6 +167,7 @@ fn render(
         })
         .map_err(|error| error.to_string())?;
     let paint = surface.prepare_frame(completed.buffer);
+    receiver.publish_regions(surface);
     paint
         .emit(terminal.terminal_mut())
         .map_err(|error| error.to_string())
@@ -195,6 +197,7 @@ pub(crate) async fn during_startup<T>(
     let mut clipboard = SystemClipboard::default();
 
     let result = loop {
+        let mouse_deadline = surface.mouse_deadline();
         tokio::select! {
             result = &mut startup => break result,
             request = receiver.recv_live() => {
@@ -224,8 +227,16 @@ pub(crate) async fn during_startup<T>(
                     .await?;
                 }
             }
-            event = input.next(), if terminal.is_some() && surface.can_accept_input() => {
-                handle_input(event, receiver, &mut surface)?;
+            event = async {
+                if let Some((event, forwarded)) = surface.pop_input() {
+                    (Some(Ok(super::super::input::InputPacket { event: Some(event), data: None })), forwarded)
+                } else { (input.next().await, false) }
+            }, if terminal.is_some() && surface.can_accept_input() => {
+                // There is no app-level selection/scroll fallback during startup.
+                if !event.1 { handle_input(event.0, receiver, &mut surface)?; }
+            }
+            _ = tokio::time::sleep_until(mouse_deadline.unwrap_or_else(std::time::Instant::now).into()), if mouse_deadline.is_some() => {
+                surface.expire_mouse();
             }
         }
         if let Some(frontend) = terminal.as_mut() {

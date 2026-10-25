@@ -9,6 +9,8 @@ pub use serde_json::Value as PluginOptionsValue;
 
 /// Version of the trusted Rust-ABI plugin contract.
 ///
+/// ABI 33 adds correlated custom mouse events/results and retained component identities.
+/// ABI 32 adds overlay placement, visibility, focus release and region layout snapshots.
 /// ABI 31 adds plugin-drawn Custom content and its CustomInput interaction.
 /// ABI 30 separates surface lifecycle, product presentation and host-operation commands behind
 /// one typed UI transport envelope.
@@ -42,7 +44,7 @@ pub use serde_json::Value as PluginOptionsValue;
 /// tool argument preparation.
 /// Hosts must reject older artifacts before resolving their Rust-ABI
 /// constructors.
-pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 31;
+pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 33;
 pub const BUILD_FINGERPRINT: &str = env!("PI_PLUGIN_BUILD_FINGERPRINT");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

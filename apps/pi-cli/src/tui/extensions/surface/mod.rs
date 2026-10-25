@@ -15,6 +15,9 @@ use tokio::sync::oneshot;
 use super::super::UiPalette;
 use super::bridge::SurfaceRequest;
 mod custom;
+#[cfg(test)]
+mod mouse_tests;
+mod overlay;
 mod owners;
 mod runtime;
 
@@ -46,6 +49,19 @@ pub(in crate::tui) enum Effect {
         owner: String,
         command: UiProductCommand,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum InputDisposition {
+    Ignored,
+    Handled,
+    Deferred,
+}
+
+impl InputDisposition {
+    pub(in crate::tui) fn consumed(self) -> bool {
+        self != Self::Ignored
+    }
 }
 
 impl Default for ExtensionSurface {
@@ -89,9 +105,23 @@ impl ExtensionSurface {
                     self.focus(&owner, &region_id, &node_id);
                     None
                 }
+                UiSurfaceCommand::Unfocus { region_id, target } => {
+                    self.owners.unfocus(&owner, &region_id, target.as_ref());
+                    None
+                }
+                UiSurfaceCommand::MouseResult { id, result } => {
+                    self.owners.mouse_result(&owner, id, result, snapshot);
+                    None
+                }
                 UiSurfaceCommand::Close => unreachable!("close handled before owner admission"),
             },
             SurfaceRequest::Command(owner, UiCommand::Host(UiHostRequest { id, operation })) => {
+                if matches!(
+                    &operation,
+                    UiHostOperation::ExternalEditor { .. } | UiHostOperation::Suspend
+                ) {
+                    self.cancel_mouse();
+                }
                 Some(Effect::HostOperation {
                     owner,
                     id,
@@ -129,8 +159,11 @@ impl ExtensionSurface {
     pub(in crate::tui) fn transcript_revision(&self) -> u64 {
         self.transcript_revision
     }
-    pub(in crate::tui) fn pop_forwarded(&mut self) -> Option<Event> {
-        self.forwarded.pop_front()
+    pub(in crate::tui) fn pop_input(&mut self) -> Option<(Event, bool)> {
+        self.forwarded
+            .pop_front()
+            .map(|event| (event, true))
+            .or_else(|| self.owners.pop_mouse_input())
     }
     pub(in crate::tui) fn forward(&mut self, event: Event) {
         self.forwarded.push_back(event);
@@ -139,6 +172,7 @@ impl ExtensionSurface {
         self.graphics.borrow_mut().set_enabled(enabled);
     }
     pub(in crate::tui) fn begin_frame(&self) {
+        self.owners.begin_frame();
         self.graphics.borrow_mut().begin();
     }
     pub(in crate::tui) fn reset_graphics(&self) {
@@ -203,26 +237,43 @@ impl ExtensionSurface {
     }
     #[cfg(test)]
     pub(in crate::tui) fn input(&mut self, event: Event, snapshot: &UiSurfaceSnapshot) -> bool {
-        self.input_packet(Some(event), None, snapshot)
+        self.input_packet(Some(event), None, snapshot).consumed()
     }
     pub(in crate::tui) fn input_packet(
         &mut self,
         event: Option<Event>,
         _raw: Option<&str>,
         snapshot: &UiSurfaceSnapshot,
-    ) -> bool {
-        event.is_some_and(|event| self.owners.input(&event, snapshot))
+    ) -> InputDisposition {
+        event.map_or(InputDisposition::Ignored, |event| {
+            self.owners.input_packet(&event, snapshot)
+        })
     }
-    // Local input and editing never wait for a JavaScript callback. Change events coalesce until
-    // observed, while semantic submissions remain ordered in the owner's exchange queue.
+    // The terminal loop stays live while a custom mouse reply is pending. Only ordered input is
+    // deferred; provider output, painting, cancellation and terminal events continue normally.
     pub(in crate::tui) fn can_accept_input(&self) -> bool {
         true
+    }
+    pub(in crate::tui) fn mouse_deadline(&self) -> Option<std::time::Instant> {
+        self.owners.mouse_deadline()
+    }
+    pub(in crate::tui) fn expire_mouse(&mut self) {
+        self.owners.expire_mouse(std::time::Instant::now());
+    }
+    pub(in crate::tui) fn cancel_mouse(&mut self) {
+        self.owners.cancel_mouse();
+    }
+    pub(in crate::tui) fn take_mouse_selection_reset(&mut self) -> bool {
+        self.owners.take_mouse_selection_reset()
     }
     pub(in crate::tui) fn focus(&mut self, owner: &str, region_id: &str, node_id: &str) {
         self.owners.focus(owner, region_id, node_id);
     }
     pub(in crate::tui) fn accepts(&self, owner: &str) -> bool {
         self.owners.accepts(owner)
+    }
+    pub(in crate::tui) fn region_snapshots(&self) -> Vec<pi_plugin::UiRegionSnapshot> {
+        self.owners.snapshots()
     }
     pub(in crate::tui) fn retire(&mut self, owner: String) {
         self.owners.retire(owner);
@@ -430,6 +481,228 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn hidden_overlays_keep_edits_and_restore_focus_across_owners() {
+        let input = || UiNodeKind::Input {
+            initial_value: String::new(),
+            placeholder: String::new(),
+            completions: Vec::new(),
+        };
+        let mut surface = ExtensionSurface::default();
+        let mut lower = mount(&mut surface, description("lower", 1, input()));
+        let mut upper_frame = description("upper", 1, input());
+        let mut upper = mount(&mut surface, upper_frame.clone());
+        assert!(surface.input(key(KeyCode::Char('b')), &UiSurfaceSnapshot::default()));
+        assert!(matches!(
+            upper.try_recv().unwrap(),
+            UiSurfaceEvent::Interaction {
+                event: UiInteraction::Change { .. },
+                ..
+            }
+        ));
+        upper_frame.revision = 2;
+        upper_frame.regions[0].overlay = Some(pi_plugin::UiOverlayOptions {
+            hidden: true,
+            ..Default::default()
+        });
+        let _hidden = mount(&mut surface, upper_frame.clone());
+        assert!(
+            surface
+                .region_snapshots()
+                .iter()
+                .any(|region| region.owner == "lower" && region.focused)
+        );
+        assert!(surface.input(key(KeyCode::Char('a')), &UiSurfaceSnapshot::default()));
+        assert!(matches!(
+            lower.try_recv().unwrap(),
+            UiSurfaceEvent::Interaction {
+                event: UiInteraction::Change { .. },
+                ..
+            }
+        ));
+        upper_frame.revision = 3;
+        upper_frame.regions[0].overlay.as_mut().unwrap().hidden = false;
+        let mut shown = mount(&mut surface, upper_frame);
+        assert!(
+            surface
+                .region_snapshots()
+                .iter()
+                .any(|region| region.owner == "upper" && region.focused)
+        );
+        surface.input(key(KeyCode::Enter), &UiSurfaceSnapshot::default());
+        assert!(
+            matches!(shown.try_recv().unwrap(), UiSurfaceEvent::Interaction { event: UiInteraction::Submit { value }, .. } if value == json!("b"))
+        );
+        surface.retire("upper".into());
+        assert!(
+            surface
+                .region_snapshots()
+                .iter()
+                .any(|region| region.owner == "lower" && region.focused)
+        );
+    }
+
+    #[test]
+    fn passive_overlays_can_be_focused_raised_and_released_to_the_composer() {
+        let input = || UiNodeKind::Input {
+            initial_value: String::new(),
+            placeholder: String::new(),
+            completions: Vec::new(),
+        };
+        let mut surface = ExtensionSurface::default();
+        let _lower = mount(&mut surface, description("lower", 1, input()));
+        let mut passive = description("passive", 1, input());
+        passive.regions[0].overlay = Some(pi_plugin::UiOverlayOptions {
+            non_capturing: true,
+            modal: false,
+            ..Default::default()
+        });
+        let _passive = mount(&mut surface, passive);
+        assert!(
+            surface
+                .region_snapshots()
+                .iter()
+                .any(|region| region.owner == "lower" && region.focused)
+        );
+        surface.focus("passive", "dialog", "control");
+        assert!(
+            surface
+                .region_snapshots()
+                .iter()
+                .any(|region| region.owner == "passive" && region.focused)
+        );
+        visible(&surface);
+        assert!(
+            surface
+                .region_snapshots()
+                .iter()
+                .all(|region| region.bounds.is_some())
+        );
+        surface.handle_request(
+            SurfaceRequest::Command(
+                "passive".into(),
+                UiCommand::Surface(UiSurfaceCommand::Unfocus {
+                    region_id: "dialog".into(),
+                    target: None,
+                }),
+            ),
+            &UiSurfaceSnapshot::default(),
+        );
+        assert!(
+            surface
+                .region_snapshots()
+                .iter()
+                .any(|region| region.owner == "lower" && region.focused)
+        );
+        surface.handle_request(
+            SurfaceRequest::Command(
+                "lower".into(),
+                UiCommand::Surface(UiSurfaceCommand::Unfocus {
+                    region_id: "dialog".into(),
+                    target: Some(pi_plugin::UiFocusTarget::App),
+                }),
+            ),
+            &UiSurfaceSnapshot::default(),
+        );
+        assert!(!surface.input(key(KeyCode::Char('c')), &UiSurfaceSnapshot::default()));
+        assert!(
+            surface
+                .region_snapshots()
+                .iter()
+                .all(|region| !region.focused)
+        );
+    }
+
+    #[test]
+    fn unfocus_transfers_only_the_callers_current_focus_to_a_visible_target() {
+        let mut surface = ExtensionSurface::default();
+        let mut frame = description(
+            "owner",
+            1,
+            UiNodeKind::Input {
+                initial_value: String::new(),
+                placeholder: String::new(),
+                completions: Vec::new(),
+            },
+        );
+        for id in ["passive", "target"] {
+            let mut region = frame.regions[0].clone();
+            region.id = id.into();
+            region.overlay = Some(pi_plugin::UiOverlayOptions {
+                non_capturing: true,
+                modal: false,
+                ..Default::default()
+            });
+            frame.regions.push(region);
+        }
+        let mut receiver = mount(&mut surface, frame.clone());
+        let transfer = |surface: &mut ExtensionSurface, source: &str, target: &str| {
+            surface.handle_request(
+                SurfaceRequest::Command(
+                    "owner".into(),
+                    UiCommand::Surface(UiSurfaceCommand::Unfocus {
+                        region_id: source.into(),
+                        target: Some(pi_plugin::UiFocusTarget::Region {
+                            region_id: target.into(),
+                        }),
+                    }),
+                ),
+                &UiSurfaceSnapshot::default(),
+            );
+        };
+        let focused = |surface: &ExtensionSurface| {
+            surface
+                .region_snapshots()
+                .into_iter()
+                .find(|region| region.focused)
+                .map(|region| region.region_id)
+        };
+        transfer(&mut surface, "passive", "target");
+        assert_eq!(focused(&surface).as_deref(), Some("dialog"));
+        surface.focus("owner", "passive", "control");
+        transfer(&mut surface, "passive", "target");
+        assert_eq!(focused(&surface).as_deref(), Some("target"));
+        surface.input(key(KeyCode::Char('t')), &UiSurfaceSnapshot::default());
+        assert!(
+            matches!(receiver.try_recv().unwrap(), UiSurfaceEvent::Interaction { region_id, .. } if region_id == "target")
+        );
+        frame.revision = 2;
+        frame.regions[1].overlay.as_mut().unwrap().hidden = true;
+        let _next = mount(&mut surface, frame);
+        transfer(&mut surface, "target", "passive");
+        assert_eq!(focused(&surface).as_deref(), Some("target"));
+    }
+
+    #[test]
+    fn hiding_an_overlay_discards_its_queued_input() {
+        let mut surface = ExtensionSurface::default();
+        let mut frame = description(
+            "owner",
+            1,
+            UiNodeKind::Input {
+                initial_value: String::new(),
+                placeholder: String::new(),
+                completions: Vec::new(),
+            },
+        );
+        let mut first = mount(&mut surface, frame.clone());
+        surface.input(key(KeyCode::Char('a')), &UiSurfaceSnapshot::default());
+        first.try_recv().unwrap();
+        surface.input(key(KeyCode::Enter), &UiSurfaceSnapshot::default());
+        frame.revision = 2;
+        frame.regions[0].overlay = Some(pi_plugin::UiOverlayOptions {
+            hidden: true,
+            ..Default::default()
+        });
+        let mut hidden = mount(&mut surface, frame);
+        assert!(matches!(
+            hidden.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(!surface.input(key(KeyCode::Enter), &UiSurfaceSnapshot::default()));
+        assert!(!surface.has_regions());
     }
 
     #[test]

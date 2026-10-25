@@ -431,15 +431,15 @@ mod tests {
             &self,
             frame: pi_plugin::UiSurfaceFrame,
         ) -> Result<pi_plugin::UiSurfaceEvent, String> {
-            let pi_plugin::UiNodeKind::Column { children, .. } = &frame.regions[0].root.kind else {
-                panic!("expected dialog column");
+            let pi_plugin::UiNodeKind::Panel { title, child } = &frame.regions[0].root.kind else {
+                panic!("expected dialog panel");
             };
-            let pi_plugin::UiNodeKind::Text { text, .. } = &children[0].kind else {
-                panic!("expected dialog title");
+            let pi_plugin::UiNodeKind::Column { children, .. } = &child.kind else {
+                panic!("expected dialog content");
             };
-            let (title, message) = text
-                .split_once('\n')
-                .expect("confirmation title and message");
+            let pi_plugin::UiNodeKind::Text { text: message, .. } = &children[0].kind else {
+                panic!("expected confirmation description");
+            };
             self.requests
                 .lock()
                 .unwrap()

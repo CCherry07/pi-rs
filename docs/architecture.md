@@ -1391,8 +1391,9 @@ provides runtime-neutral extension SDK aliases for both the `@earendil-works` an
 coverage, not a claim that every upstream JavaScript runtime export is reimplemented. It keeps one
 host ABI in a generation and prevents npm from installing a second Pi product runtime beside an
 extension. Plugin UI uses the shared declarative `pi-plugin` contract. Rust and JavaScript
-plugins submit the same component trees to the app-owned Rust renderer. The host has no `pi-tui`
-alias, upstream TUI dependency, JS component renderer, or maintained upstream source copy.
+plugins submit the same component trees to the app-owned Rust renderer. Both `pi-tui` scopes
+resolve to a pinned upstream component dependency; `PiComponentAdapter` carries rendered lines
+through the shared `Custom` node without starting an upstream terminal loop or maintaining a source copy.
 Other missing modules remain fatal.
 
 The same Module exposes one management dispatcher,
@@ -2896,7 +2897,9 @@ leaving settings, switching sections or discarding a dirty draft requires confir
 ## Shared plugin UI
 
 `pi-plugin` defines `UiNode` trees, `UiSurfaceFrame` documents, interactions and one `UiCommand`
-transport envelope, without a Ratatui dependency. ABI 31 adds the `Custom` leaf and ordered
+transport envelope, without a Ratatui dependency. ABI 33 adds custom mouse requests/results and
+retained component identities. ABI 32 adds overlay placement/visibility,
+focus release and per-region painted bounds/focus snapshots. ABI 31 adds the `Custom` leaf and ordered
 `CustomInput` events for plugin-drawn content. ABI 30 separates surface lifecycle, product
 presentation and host-operation commands. Semantic controls remain the default; the Node host
 also adapts upstream `Component.render(width)` through `PiComponentAdapter`. It pins one
@@ -2919,6 +2922,32 @@ submissions retain their order. A `Custom` component owns its internal editing s
 receives encoded keyboard/paste events through `CustomInput`; its interaction requires a Node
 round trip. Rust still owns region focus, clipping, composition and physical terminal output.
 
+Mounted Custom nodes opt into mouse input independently of keyboard interaction. Their
+`instanceId` identifies a retained component across rendered revisions and changes on replacement.
+The surface's private mouse Module hit-tests the painted, clipped rectangles while retaining the
+unclipped content origins, including scroll offsets. It sends cell-based `CustomMouse` requests;
+the owner answers each request with a correlated `MouseResult`. The adapter also answers discarded
+requests as cancelled. Only a matching live owner, request and component may apply a reply;
+an intervening focus change cannot be overwritten by a late focus request.
+
+Rust owns press/release/click synthesis, consecutive click counts, capture, overlay occlusion and
+global focus. `PiComponentAdapter` delegates nested hit testing to the pinned Pi components and
+retains nested targets behind opaque IDs, including the keyboard-delegating container. A handled
+press keeps its target through release; capture also routes input outside its bounds, where local
+coordinates may be negative. Ordinary content reflow preserves the original gesture transform:
+selecting a setting can change its description height before release. Declined events use native controls and then app fallback subject to
+modal boundaries. An event awaiting a reply never starts app selection or scrolling speculatively.
+Widget/header/footer factories use this same adapter without acquiring keyboard focus on mount.
+
+The terminal loop keeps rendering and processing product events while ordered pointer/keyboard
+input waits for a mouse result. Ctrl+C/Ctrl+D remain available. The pending input queue is bounded
+at 1024 events; a two-second deadline, overflow, hiding, replacement, retirement,
+terminal focus loss, resize or terminal takeover cancels the affected gesture. Cancelled
+mouse input is not replayed as an app click, and stale replies are ignored. These cancellation and
+deadline rules are deliberate host behavior for the asynchronous bridge; Pi's component callback
+itself remains synchronous. High-frequency events retain their order rather than being silently
+coalesced. Mouse callbacks are available in mounted regions, not transcript-only renderers.
+
 The CLI keeps the complete presentation implementation under `tui/extensions/`: `bridge` adapts
 generation capabilities into the frontend channel, `surface` owns protocol state and reduces each
 request to an optional product `Effect`, `host` owns physical terminal/OS operations, `startup`
@@ -2927,7 +2956,7 @@ private rendering implementations. Startup and the normal run loop never interpr
 `UiCommand` independently; both consume `surface::Effect`, so owner admission, wake, focus,
 close and retirement policy have one implementation.
 
-`UiSurfaceCommand` contains only wake, close and focus. After owner admission, product commands
+`UiSurfaceCommand` contains wake, close, focus, unfocus and mouse-result replies. After owner admission, product commands
 leave the surface as `Effect::Product { command, .. }` and correlated `UiHostRequest` values
 leave as host effects. Product commands are not translated into a second command vocabulary.
 Startup applies available presentation changes and defers remaining commands through the same
@@ -2950,11 +2979,33 @@ preparation leaves live UI intact. UI state is transient and is never serialized
 `custom(factory)`. The factory defaults to the editor region; `overlay: true` requests an overlay.
 `PiComponentAdapter` owns the component, local input target, rendered lines and cursor conversion.
 It disposes once, including when an asynchronous factory resolves after cancellation. Component
-render/input errors settle their own custom operation without retiring unrelated mounts.
+render/input/mouse errors settle their own custom operation without retiring unrelated mounts.
+Mouse results honor `render: false`; explicit render requests and host refreshes still rerender.
 `ExtensionTranscript` reuses that adapter within its existing row cache, retains separate call/result
 components for `lastComponent`, and invalidates on width changes and explicit redraw requests.
 Rows release components on replacement, removal and retirement. There is no additional UI manager,
 transport or plugin lifecycle.
+
+Persistent widget/header/footer factories also reuse `PiComponentAdapter`. Factories run once;
+refresh/resize rerenders the retained component. Replacement, clearing and retirement dispose it,
+and a failing slot is removed without retiring other mounts. `ExtensionFooter` scopes branch
+polling/subscriptions to its footer lifetime and reads status/provider data through the generation
+context. Custom footers replace automatic status presentation. String-array widgets use the same
+styled `Custom` leaf as factories.
+
+Overlay anchors, positions, margins and offsets are resolved by the app against the final viewport
+and measured content. Surface owners retain hidden region state while excluding it from input and
+painting; hiding also drops its queued interactions. A shared focus target/history restores eligible
+regions when an overlay hides or retires, and explicit focus raises its stacking order. Noncapturing
+overlays do not take focus when shown. `Unfocus` can restore previous focus, release it to the
+composer or target another visible region of the same owner. Rust verifies that the source still
+has focus before applying the transfer, so background components cannot steal focus by releasing it.
+Both startup and the active loop publish region bounds immediately after painting,
+allowing JS handle queries and local component focus appearance to follow Rust state.
+The Node host reevaluates dynamic overlay option functions on refresh/resize; this intentionally
+extends the current local upstream behavior of evaluating the function only when opening.
+Temporary hiding retains the component; permanent handle `hide()` removes the region but leaves
+the custom operation pending until `done`, cancellation or retirement, matching upstream lifetime.
 
 Message, entry and tool renderers may return semantic trees or Pi components; Markdown transformers
 still return text. `Custom` carries styled lines, optional local cursor coordinates and input flags.

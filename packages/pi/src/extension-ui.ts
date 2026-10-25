@@ -1,20 +1,23 @@
 import { randomUUID } from "node:crypto";
 import { getAgentDir, withAgentDir } from "./extension-ui-paths.js";
 import { ExtensionTranscript } from "./extension-ui-transcript.js";
-import { PiComponentAdapter, customLayout, getKeybindings, piTheme, type CustomOptions, type CustomFactory } from "./pi-component-adapter.js";
+import { PiComponentAdapter, customLayout, getKeybindings, piTheme, type CustomOptions, type CustomFactory, type CustomTui, type PiComponent, type PiTheme } from "./pi-component-adapter.js";
+import { ExtensionFooter, type FooterDataProvider } from "./extension-footer.js";
 import {
   uiCommandSchema, uiEventSchema, uiMultiSelectResponseSchema, uiNodeSchema, uiSnapshotSchema,
-  type UiCommand, type UiHostOperation, type UiNode, type UiSnapshot, type UiComponentEvent,
+  type UiCommand, type UiHostOperation, type UiNode, type UiSnapshot, type UiComponentEvent, type UiMouseResult,
   type UiMultiSelectRequest, type UiMultiSelectResponse, type Placement, type UiRegion,
 } from "./extension-ui-frame.js";
 import type { NativeExtensionContext } from "./native-binding.js";
 
 export interface DialogOptions { signal?: AbortSignal; timeout?: number }
 export type UiTheme = "light" | "dark" | "system";
+export type SlotFactory = (tui: CustomTui, theme: PiTheme) => PiComponent;
+export type FooterFactory = (tui: CustomTui, theme: PiTheme, data: FooterDataProvider) => PiComponent;
 export interface MountOptions extends DialogOptions {
   id?: string;
   placement?: Placement;
-  overlay?: { width?: number; maxHeight?: number; modal?: boolean };
+  overlay?: UiRegion["overlay"];
   onEvent?(event: UiComponentEvent): void;
 }
 export interface UiMount {
@@ -30,6 +33,11 @@ interface Mounted {
   render?(snapshot: UiSnapshot): Pick<UiRegion, "root" | "overlay"> | undefined;
   onEvent?: (event: UiComponentEvent) => void;
   cleanup(): void;
+  onError?(error: unknown): void;
+}
+interface SurfaceFrame {
+  owner: string; revision: number; regions: UiRegion[]; hideWorking: boolean; renderTranscript: boolean;
+  transcript: ReturnType<ExtensionTranscript["render"]>; shortcuts: { key: string }[];
 }
 function nodeIdentities(root: UiNode, previous?: NodeIdentities): NodeIdentities {
   const nodes: NodeIdentities = new Map();
@@ -42,23 +50,27 @@ function nodeIdentities(root: UiNode, previous?: NodeIdentities): NodeIdentities
   visit(root);
   return nodes;
 }
-interface ExtensionUIOptions { agentDir?: string; outputPad?: 0 | 1; showImages?: boolean }
+interface ExtensionUIOptions { agentDir?: string; cwd?: string; outputPad?: 0 | 1; showImages?: boolean }
 /** Generation-owned mounts and transport. Rust owns regions; Pi components own their local state. */
 export class ExtensionUI {
   readonly owner = randomUUID();
   readonly transcript: ExtensionTranscript;
   readonly #regions = new Map<string, Mounted>();
+  readonly #components = new Map<string, PiComponentAdapter>();
   readonly #shortcuts = new Map<string, () => Promise<void>>();
   readonly #statuses = new Map<string, string>();
   readonly #pending = new Set<() => void>();
   readonly #hostRequests = new Map<number, { resolve(value: string | undefined): void; reject(error: Error): void }>();
   readonly #agentDir: string;
+  readonly #cwd: string;
   #native?: NativeExtensionContext;
   #running = false;
   #retired = false;
   #revision = 0;
   #lastDocument = "";
   #hostId = 0;
+  #dirty = true;
+  #lastFrame?: SurfaceFrame;
   #workingConfigured = false;
   #workingVisible = true;
   #workingMessage = "Working...";
@@ -66,6 +78,7 @@ export class ExtensionUI {
 
   constructor(options: ExtensionUIOptions = {}) {
     this.#agentDir = options.agentDir ?? getAgentDir();
+    this.#cwd = options.cwd ?? process.cwd();
     this.transcript = new ExtensionTranscript(() => this.#wake(), options.outputPad ?? 1, options.showImages ?? true);
   }
   run<T>(callback: () => T): T { return withAgentDir(this.#agentDir, callback); }
@@ -101,11 +114,14 @@ export class ExtensionUI {
   }
   #wake() {
     if (this.#retired || !this.#native) return;
+    this.#dirty = true;
     if (this.#running) this.#command({ channel: "surface", command: { type: "wake" } });
     else { this.#running = true; void this.#pump(); }
   }
   #changed() { this.#wake(); }
-  #frame() {
+  #frame(): SurfaceFrame {
+    if (!this.#dirty && this.#lastFrame) return this.#lastFrame;
+    this.#dirty = false;
     const snapshot = this.#query();
     for (const [id, state] of this.#regions) {
       if (!state.render) continue;
@@ -117,7 +133,7 @@ export class ExtensionUI {
     }
     const transcript = this.run(() => this.transcript.render(snapshot));
     const regions = [...this.#regions.values()].map(({ region }) => region);
-    if (this.#statuses.size) regions.push({ id: "_statuses", placement: "footer", root: { id: "statuses", type: "text", text: [...this.#statuses.values()].join(" · "), tone: "muted" } });
+    if (this.#statuses.size && !this.#regions.has("footer")) regions.push({ id: "_statuses", placement: "footer", root: { id: "statuses", type: "text", text: [...this.#statuses.values()].join(" · "), tone: "muted" } });
     if (this.#workingConfigured && this.#workingVisible && snapshot.isRunning) regions.push({ id: "_working", placement: "aboveEditor", root: { id: "working", type: "progress", text: this.#workingMessage } });
     const document = {
       regions,
@@ -127,7 +143,7 @@ export class ExtensionUI {
     };
     const signature = JSON.stringify(document);
     if (signature !== this.#lastDocument) { this.#lastDocument = signature; this.#revision++; }
-    return { owner: this.owner, revision: this.#revision, ...document };
+    return this.#lastFrame = { owner: this.owner, revision: this.#revision, ...document };
   }
   async #pump() {
     try {
@@ -138,11 +154,35 @@ export class ExtensionUI {
         const event = uiEventSchema.parse(JSON.parse(await this.#native.request(JSON.stringify({ type: "uiExchange", frame }))));
         if (event.type === "closed") { this.retire(); break; }
         this.#snapshot = event.snapshot;
+        if (event.type !== "interaction" || event.event.type !== "customMouse") this.#dirty = true;
         if (event.type === "hostResult") {
           const request = this.#hostRequests.get(event.id);
           this.#hostRequests.delete(event.id);
           if (event.error) request?.reject(new Error(event.error)); else request?.resolve(event.result ?? undefined);
         } else if (event.type === "interaction") {
+          if (event.event.type === "customMouse") {
+            const request = event.event;
+            let result: UiMouseResult = { handled: false, capture: false, focus: false, cancelled: true };
+            const mounted = this.#regions.get(event.regionId);
+            const sent = sentRegions.get(event.regionId);
+            const adapter = this.#components.get(event.regionId);
+            const identity = mounted?.nodes.get(event.nodeId);
+            try {
+              if (event.revision === frame.revision && mounted && mounted === sent?.mounted && identity && identity === sent.nodes.get(event.nodeId)
+                && !mounted.region.overlay?.hidden && adapter && adapter.instanceId === request.instanceId) {
+                const { wheelDelta, clickCount, ...mouse } = request.event;
+                result = this.run(() => adapter.handleMouse({ ...mouse,
+                  ...(wheelDelta == null ? {} : { wheelDelta }), ...(clickCount == null ? {} : { clickCount }),
+                }, request.target));
+                if (result.render) this.#dirty = true;
+              }
+            } catch (error) {
+              if (mounted?.onError) mounted.onError(error); else this.#report(error);
+            } finally {
+              this.#command({ channel: "surface", command: { type: "mouseResult", id: request.id, result } });
+            }
+            continue;
+          }
           if (event.revision !== frame.revision) continue;
           if (event.event.type === "shortcut") {
             const handler = this.#shortcuts.get(event.event.key);
@@ -163,7 +203,7 @@ export class ExtensionUI {
   mount(node: UiNode, options: MountOptions = {}): UiMount {
     return this.#mount(node, options);
   }
-  #mount(node: UiNode, options: MountOptions, render?: Mounted["render"], onUnmount?: () => void): UiMount {
+  #mount(node: UiNode, options: MountOptions, render?: Mounted["render"], onUnmount?: () => void, onError?: Mounted["onError"]): UiMount {
     this.#assertActive();
     const id = options.id ?? randomUUID();
     const parsed = uiNodeSchema.parse(node);
@@ -175,6 +215,7 @@ export class ExtensionUI {
       active = false;
       const mounted = this.#regions.get(id);
       if (mounted === state) this.#regions.delete(id);
+      this.#components.delete(id);
       state.cleanup();
       this.#changed();
     };
@@ -182,6 +223,7 @@ export class ExtensionUI {
       region: { id, placement: options.placement ?? "aboveEditor", root: parsed, ...(options.overlay ? { overlay: options.overlay } : {}) },
       nodes: nodeIdentities(parsed),
       render,
+      onError,
       onEvent: options.onEvent,
       cleanup: () => { clearTimeout(timer); options.signal?.removeEventListener("abort", unmount); onUnmount?.(); },
     };
@@ -207,6 +249,8 @@ export class ExtensionUI {
       let mount: UiMount | undefined;
       let timer: ReturnType<typeof setTimeout> | undefined;
       let settled = false;
+      let hidden = false;
+      let removed = false;
       const adapter = typeof node === "function" ? new PiComponentAdapter("custom-content") : undefined;
       const finish = (value?: unknown, error?: unknown) => {
         if (settled) return;
@@ -214,6 +258,7 @@ export class ExtensionUI {
         clearTimeout(timer);
         options.signal?.removeEventListener("abort", cancel);
         this.#pending.delete(cancel);
+        if (mount) this.#components.delete(mount.id);
         try { mount?.unmount(); } catch (cleanupError) { error ??= cleanupError; }
         try { this.run(() => adapter?.dispose()); } catch (disposeError) { error ??= disposeError; }
         if (error !== undefined) reject(error); else resolve(value);
@@ -228,7 +273,7 @@ export class ExtensionUI {
           ...settings, signal: undefined, timeout: undefined,
           placement: settings.placement ?? "overlay",
           onEvent: event => {
-            if (settled) return;
+            if (settled || removed || hidden || mount && this.#regions.get(mount.id)?.region.overlay?.hidden) return;
             try {
               settings.onEvent?.(event);
               if (event.event.type === "cancel") finish();
@@ -240,8 +285,9 @@ export class ExtensionUI {
               }
             } catch (error) { finish(undefined, error); }
           },
-        }, render, cancel);
-        if (settled) mount.unmount();
+        }, render, () => { if (!removed) cancel(); }, error => finish(undefined, error));
+        if (settled) { mount.unmount(); return; }
+        if (adapter) this.#components.set(mount.id, adapter);
       };
       try {
         if (typeof node !== "function") { show(node, options as MountOptions); return; }
@@ -250,16 +296,57 @@ export class ExtensionUI {
         void Promise.resolve(created).then(value => {
           this.run(() => component.setComponent(value));
           if (settled) return;
+          let layout: ReturnType<typeof customLayout>;
+          let root: UiNode = { id: "custom-content", type: "custom", lines: [], interactive: true };
           const render: NonNullable<Mounted["render"]> = snapshot => {
             if (settled) return;
             try {
-              const layout = customLayout(snapshot, options as CustomOptions);
-              return { root: component.render(layout.width, true), overlay: layout.overlay };
+              const width = component.component && Reflect.get(component.component, "width");
+              layout = customLayout(snapshot, options as CustomOptions, typeof width === "number" ? width : undefined);
+              if (layout.overlay) layout.overlay.hidden ||= hidden || removed;
+              const regionId = mount?.id;
+              const state = snapshot.regions.find(region => region.owner === this.owner && region.regionId === regionId);
+              const focused = !layout.overlay?.hidden && (state?.focused ?? !layout.overlay?.nonCapturing);
+              component.setVisible(!layout.overlay?.hidden);
+              component.setFocused(focused);
+              if (!layout.overlay?.hidden) root = component.render(layout.width, true, focused);
+              return { root, overlay: layout.overlay };
             } catch (error) { finish(undefined, error); return; }
           };
           const snapshot = this.#query();
           const initial = this.run(() => render(snapshot));
-          if (initial) show(initial.root, customLayout(snapshot, options as CustomOptions), render);
+          if (!initial) return;
+          show(initial.root, layout!, render);
+          if ((options as CustomOptions).overlay && mount && !settled) {
+            const active = () => !settled && !removed;
+            const visible = () => active() && !hidden && !this.#regions.get(mount!.id)?.region.overlay?.hidden;
+            const state = () => this.#query().regions.find(region => region.owner === this.owner && region.regionId === mount!.id);
+            (options as CustomOptions).onHandle?.({
+              hide: () => {
+                if (!active()) return;
+                removed = true;
+                component.setVisible(false);
+                component.setFocused(false);
+                this.#components.delete(mount!.id);
+                mount!.unmount();
+              },
+              setHidden: value => { if (active() && value !== hidden) { hidden = value; component.setVisible(!hidden); this.#changed(); } },
+              isHidden: () => hidden || removed,
+              focus: () => { if (visible()) mount!.focus("custom-content"); },
+              unfocus: settings => {
+                if (!visible()) return;
+                if (settings?.target) {
+                  const target = [...this.#components].find(([, adapter]) => adapter.component === settings.target);
+                  if (!target) throw new Error("Overlay focus target must be a mounted Pi component");
+                  this.#command({ channel: "surface", command: { type: "unfocus", regionId: mount!.id, target: { type: "region", regionId: target[0] } } });
+                } else {
+                  this.#command({ channel: "surface", command: { type: "unfocus", regionId: mount!.id, target: settings?.target === null ? { type: "app" } : undefined } });
+                }
+              },
+              isFocused: () => visible() && (state()?.focused ?? false),
+              getBounds: () => visible() ? state()?.bounds ?? undefined : undefined,
+            });
+          }
         }).catch(error => finish(undefined, error));
       } catch (error) { finish(undefined, error); }
     });
@@ -291,16 +378,75 @@ export class ExtensionUI {
     const parsed = uiMultiSelectResponseSchema.safeParse(result);
     return parsed.success ? parsed.data : undefined;
   }
-  #set(id: string, placement: Placement, node?: UiNode) {
-    this.#assertActive();
-    const parsed = node === undefined ? undefined : uiNodeSchema.parse(node);
-    const old = this.#regions.get(id);
-    if (old) { old.cleanup(); this.#regions.delete(id); }
-    if (parsed) this.mount(parsed, { id, placement }); else this.#changed();
+  #report(error: unknown) {
+    if (!this.#retired) { try { this.notify(`Extension UI: ${String(error)}`, "error"); } catch {} }
   }
-  setWidget(key: string, node?: UiNode, options?: { placement?: "aboveEditor" | "belowEditor" }) { this.#set(`widget:${key}`, options?.placement ?? "aboveEditor", node); }
-  setHeader(node?: UiNode) { this.#set("header", "header", node); }
-  setFooter(node?: UiNode) { this.#set("footer", "footer", node); }
+  #remove(id: string) {
+    const state = this.#regions.get(id);
+    if (!state) return;
+    this.#regions.delete(id);
+    this.#components.delete(id);
+    try { this.run(() => state.cleanup()); } catch (error) { this.#report(error); }
+    this.#changed();
+  }
+  #set(id: string, placement: Placement, content?: UiNode | string[] | SlotFactory | FooterFactory) {
+    this.#assertActive();
+    if (typeof content !== "function") {
+      const node = Array.isArray(content) ? { id: "slot-content", type: "custom", lines: content } : content;
+      const parsed = node === undefined ? undefined : uiNodeSchema.parse(node);
+      this.#remove(id);
+      if (parsed) this.mount(parsed, { id, placement }); else this.#changed();
+      return;
+    }
+    const component = new PiComponentAdapter("slot-content");
+    const footer = placement === "footer" ? new ExtensionFooter({
+      cwd: () => {
+        const cwd: unknown = this.#native ? JSON.parse(this.#native.query('{"type":"cwd"}')) : this.#cwd;
+        return typeof cwd === "string" ? cwd : this.#cwd;
+      },
+      statuses: () => this.#statuses,
+      providerCount: () => {
+        const models: unknown = this.#native ? JSON.parse(this.#native.query('{"type":"availableModels"}')) : [];
+        if (!Array.isArray(models)) return 0;
+        return new Set(models.flatMap((model: unknown) => model && typeof model === "object" && "provider" in model && typeof model.provider === "string" ? [model.provider] : [])).size;
+      },
+      run: callback => this.run(callback), report: error => this.#report(error),
+    }) : undefined;
+    let disposed = false;
+    const cleanup = () => {
+      if (disposed) return;
+      disposed = true;
+      footer?.dispose();
+      this.run(() => component.dispose());
+    };
+    const render = (snapshot: UiSnapshot) => {
+      const width = snapshot.areas.find(area => area.placement === placement)?.width || snapshot.columns;
+      const focused = snapshot.regions.find(region => region.owner === this.owner && region.regionId === id)?.focused ?? false;
+      return { root: component.render(width, false, focused) };
+    };
+    try {
+      const tui = component.tui(() => this.#query(), () => this.#changed());
+      component.setComponent(this.run(() => footer ? (content as FooterFactory)(tui, this.theme, footer) : (content as SlotFactory)(tui, this.theme)));
+      const initial = this.run(() => render(this.#query()));
+      this.#remove(id);
+      this.#mount(initial.root, { id, placement, onEvent: event => {
+        if (event.event.type === "customInput") {
+          try { component.handleInput(event.event.data); this.#changed(); }
+          catch (error) { this.#remove(id); this.#report(error); }
+        }
+      } }, snapshot => {
+        try { return render(snapshot); }
+        catch (error) { this.#remove(id); this.#report(error); return undefined; }
+      }, cleanup, error => { this.#remove(id); this.#report(error); });
+      this.#components.set(id, component);
+    } catch (error) {
+      try { cleanup(); } catch (disposeError) { this.#report(disposeError); }
+      throw error;
+    }
+  }
+  setWidget(key: string, content?: UiNode | string[] | SlotFactory, options?: { placement?: "aboveEditor" | "belowEditor" }) { this.#set(`widget:${key}`, options?.placement ?? "aboveEditor", content); }
+  setHeader(content?: UiNode | SlotFactory) { this.#set("header", "header", content); }
+  setFooter(content?: UiNode | FooterFactory) { this.#set("footer", "footer", content); }
   setStatus(key: string, text?: string) { this.#assertActive(); if (text === undefined) this.#statuses.delete(key); else this.#statuses.set(key, text); this.#changed(); }
   registerShortcut(key: string, handler: () => Promise<void>) { this.#assertActive(); this.#shortcuts.set(key, handler); this.#changed(); }
   notify(message: unknown, level = "info") { this.#assertActive(); this.#native?.notify(JSON.stringify({ type: "uiNotify", message: String(message), level })); }
@@ -340,8 +486,9 @@ export class ExtensionUI {
     this.#pending.clear();
     for (const request of this.#hostRequests.values()) request.reject(new Error("Extension UI generation retired"));
     this.#hostRequests.clear();
-    for (const mounted of this.#regions.values()) mounted.cleanup();
-    this.#regions.clear();
+    for (const id of [...this.#regions.keys()]) this.#remove(id);
+    this.#components.clear();
+    this.#statuses.clear();
     this.#shortcuts.clear();
     this.run(() => this.transcript.dispose());
   }

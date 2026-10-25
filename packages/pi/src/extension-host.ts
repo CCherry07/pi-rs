@@ -665,6 +665,7 @@ export class ExtensionHost {
     const state: GenerationState = {
       ui: new ExtensionUI({
         agentDir: request.agentDir,
+        cwd: request.cwd,
         outputPad: request.outputPad,
         showImages: request.showImages,
       }),

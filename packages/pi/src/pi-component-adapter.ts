@@ -1,5 +1,7 @@
-import { CURSOR_MARKER, getKeybindings, visibleWidth, type Component, type Focusable } from "@earendil-works/pi-tui";
-import { uiNodeSchema, type UiNode, type UiRegion, type UiSnapshot } from "./extension-ui-frame.js";
+import { randomUUID } from "node:crypto";
+import { CURSOR_MARKER, getKeybindings, visibleWidth, type Component, type Focusable, type OverlayOptions, type OverlayHandle, type SettingsListTheme, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import { dispatchMouseEvent, retargetMouseEvent, type TuiMouseDispatchTarget } from "@earendil-works/pi-tui/dist/tui.js";
+import { uiNodeSchema, type UiNode, type UiRegion, type UiSnapshot, type UiOverlayPosition, type UiMouseResult } from "./extension-ui-frame.js";
 
 export type PiComponent = Component & Partial<Focusable> & { dispose?(): void };
 type InputListener = (data: string) => { consume?: boolean; data?: string } | undefined;
@@ -14,7 +16,8 @@ export interface CustomOptions {
   signal?: AbortSignal;
   timeout?: number;
   overlay?: boolean;
-  overlayOptions?: { width?: number | `${number}%`; maxHeight?: number | `${number}%`; nonModal?: boolean };
+  overlayOptions?: (OverlayOptions & { nonModal?: boolean }) | (() => OverlayOptions & { nonModal?: boolean });
+  onHandle?: (handle: OverlayHandle) => void;
 }
 export { getKeybindings };
 
@@ -26,17 +29,26 @@ function isComponent(value: unknown): value is PiComponent {
 export class PiComponentAdapter {
   #component?: PiComponent;
   #focused?: PiComponent | null;
+  #active = false;
   #width = -1;
   #disposed = false;
+  #visible = true;
+  #instanceId = randomUUID();
+  #mouseIds = new WeakMap<Component, number>();
+  #mouseSerial = 0;
+  #mouseTarget?: { id: number; target: TuiMouseDispatchTarget };
   readonly #listeners = new Set<InputListener>();
 
   constructor(private readonly id: string) {}
   get component() { return this.#component; }
+  get instanceId() { return this.#instanceId; }
   setComponent(value: unknown): void {
     if (!isComponent(value)) throw new Error("Pi TUI custom factory must return a Component with render(width)");
     if (this.#disposed) { value.dispose?.(); return; }
     if (value === this.#component) return;
     const previous = this.#component;
+    this.clearMouse();
+    this.#instanceId = randomUUID();
     this.#component = value;
     this.invalidate();
     if (previous) {
@@ -46,11 +58,12 @@ export class PiComponentAdapter {
     }
   }
   invalidate() { this.#width = -1; }
-  render(width: number, interactive = false): UiNode {
+  render(width: number, interactive = false, focused = interactive): UiNode {
     const component = this.#component;
     if (!component || this.#disposed) throw new Error("Pi component is disposed");
     width = Math.max(1, Math.floor(width));
     if (interactive && this.#focused === undefined) this.#focus(component);
+    this.setFocused(focused);
     if (width !== this.#width) { component.invalidate?.(); this.#width = width; }
     const rendered = component.render(width);
     if (!Array.isArray(rendered) || rendered.some(line => typeof line !== "string")) throw new Error("Pi TUI Component.render(width) must return string[]");
@@ -61,7 +74,7 @@ export class PiComponentAdapter {
       // pi-tui's private fake-cursor markers are local styling, not terminal commands.
       return line.replaceAll(CURSOR_MARKER, "").replaceAll("\x1b_pi:fc\x07", "\x1b[7m").replaceAll("\x1b_pi:/fc\x07", "\x1b[27m");
     });
-    return { id: this.id, type: "custom", lines, interactive, keyRelease: Boolean((this.#focused ?? component).wantsKeyRelease), ...(cursor ? { cursor } : {}) };
+    return { id: this.id, type: "custom", lines, interactive: interactive || typeof this.#focused?.handleInput === "function", mouse: typeof component.handleMouse === "function", instanceId: this.#instanceId, keyRelease: Boolean((this.#focused ?? component).wantsKeyRelease), ...(cursor ? { cursor } : {}) };
   }
   present(value: unknown, width: number): UiNode | undefined {
     if (isComponent(value)) { this.setComponent(value); return this.render(width); }
@@ -71,7 +84,12 @@ export class PiComponentAdapter {
   #focus(component: PiComponent | null) {
     if (this.#focused && "focused" in this.#focused) this.#focused.focused = false;
     this.#focused = component;
-    if (component && "focused" in component) component.focused = true;
+    if (component && "focused" in component) component.focused = this.#active;
+  }
+  setFocused(active: boolean) {
+    if (this.#active === active) return;
+    this.#active = active;
+    if (this.#focused && "focused" in this.#focused) this.#focused.focused = active;
   }
   tui(snapshot: () => UiSnapshot, wake: () => void): CustomTui {
     return {
@@ -93,7 +111,37 @@ export class PiComponentAdapter {
     }
     (this.#focused === undefined ? this.#component : this.#focused)?.handleInput?.(data);
   }
+  clearMouse() { this.#mouseTarget = undefined; }
+  setVisible(visible: boolean) { this.#visible = visible; if (!visible) this.clearMouse(); }
+  handleMouse(event: TuiMouseEvent, target?: number | null): UiMouseResult {
+    const empty: UiMouseResult = { handled: false, capture: false, focus: false, cancelled: false };
+    const component = this.#component;
+    if (this.#disposed || !this.#visible || !component) return { ...empty, cancelled: true };
+    const retained = target == null ? undefined : this.#mouseTarget;
+    if (target != null && retained?.id !== target) return { ...empty, cancelled: true };
+    if (event.type === "press" && target == null) this.clearMouse();
+    const result = retained
+      ? dispatchMouseEvent(retained.target.component, retargetMouseEvent(event, retained.target))
+      : dispatchMouseEvent(component, event);
+    if (this.#disposed || !this.#visible || this.#component !== component) return { ...empty, cancelled: true };
+    if (!result) {
+      if (event.type === "click") this.clearMouse();
+      return empty;
+    }
+    let id = this.#mouseIds.get(result.target.component);
+    if (id === undefined) { id = ++this.#mouseSerial; this.#mouseIds.set(result.target.component, id); }
+    if (event.type === "press" || result.capture) this.#mouseTarget = { id, target: result.target };
+    const focusTarget = result.focusTarget ?? result.target.component;
+    const focusChanged = result.focus === true && this.#focused !== focusTarget;
+    if (result.focus) this.#focus(focusTarget);
+    if (event.type === "click") this.clearMouse();
+    return {
+      ...empty, handled: true, capture: Boolean(result.capture), focus: Boolean(result.focus), target: id,
+      render: result.render ?? (focusChanged || ["press", "click", "drag", "wheel"].includes(event.type)),
+    };
+  }
   #release() {
+    this.clearMouse();
     const component = this.#component;
     this.#component = undefined;
     this.#focus(null);
@@ -115,10 +163,36 @@ function dimension(value: number | `${number}%` | undefined, available: number):
   return Math.min(65535, Math.floor(number));
 }
 
-export function customLayout(snapshot: UiSnapshot, options: CustomOptions): { width: number; placement: UiRegion["placement"]; overlay?: UiRegion["overlay"] } {
+export function customLayout(snapshot: UiSnapshot, options: CustomOptions, fallbackWidth?: number): { width: number; placement: UiRegion["placement"]; overlay?: UiRegion["overlay"] } {
   if (!options.overlay) return { width: snapshot.areas.find(area => area.placement === "editor")?.width || snapshot.columns, placement: "editor" };
-  const width = Math.min(snapshot.columns, dimension(options.overlayOptions?.width, snapshot.columns) ?? Math.max(1, snapshot.columns - 4));
-  return { width, placement: "overlay", overlay: { width, maxHeight: dimension(options.overlayOptions?.maxHeight, snapshot.rows) ?? snapshot.rows, modal: !options.overlayOptions?.nonModal } };
+  const opt = (typeof options.overlayOptions === "function" ? options.overlayOptions() : options.overlayOptions) ?? { width: fallbackWidth };
+  const rawMargin = typeof opt.margin === "number" ? { top: opt.margin, right: opt.margin, bottom: opt.margin, left: opt.margin } : opt.margin;
+  const margin = {
+    top: dimension(Math.max(0, rawMargin?.top ?? 0), snapshot.rows)!,
+    right: dimension(Math.max(0, rawMargin?.right ?? 0), snapshot.columns)!,
+    bottom: dimension(Math.max(0, rawMargin?.bottom ?? 0), snapshot.rows)!,
+    left: dimension(Math.max(0, rawMargin?.left ?? 0), snapshot.columns)!,
+  };
+  const availableWidth = Math.max(1, snapshot.columns - margin.left - margin.right);
+  const availableHeight = Math.max(1, snapshot.rows - margin.top - margin.bottom);
+  const width = Math.max(1, Math.min(availableWidth, Math.max(dimension(opt.width, snapshot.columns) ?? Math.min(80, availableWidth), dimension(opt.minWidth, snapshot.columns) ?? 0)));
+  const position = (value?: number | `${number}%`): UiOverlayPosition | undefined => {
+    if (value === undefined) return;
+    if (typeof value === "number") return { type: "cells", value: dimension(value, 0)! };
+    if (!/^\d+(?:\.\d+)?%$/.test(value)) throw new Error(`Invalid overlay position: ${value}`);
+    return { type: "percent", value: Math.min(10_000, Math.round(Number.parseFloat(value) * 100)) };
+  };
+  const offset = (value = 0) => {
+    if (!Number.isFinite(value) || value < -2_147_483_648 || value > 2_147_483_647) throw new Error("Invalid overlay offset");
+    return Math.trunc(value);
+  };
+  return { width, placement: "overlay", overlay: {
+    width, maxHeight: Math.max(1, Math.min(availableHeight, dimension(opt.maxHeight, snapshot.rows) ?? availableHeight)),
+    modal: !opt.nonModal && !opt.nonCapturing, nonCapturing: opt.nonCapturing ?? false,
+    anchor: opt.anchor, offsetX: offset(opt.offsetX), offsetY: offset(opt.offsetY),
+    row: position(opt.row), col: position(opt.col), margin,
+    hidden: opt.visible ? !opt.visible(snapshot.columns, snapshot.rows) : false,
+  } };
 }
 
 const foregrounds: Record<string, number> = {
@@ -170,6 +244,15 @@ export function getSelectListTheme() {
   return { selectedPrefix: (s: string) => piTheme.fg("accent", s), selectedText: (s: string) => piTheme.fg("accent", s), description: (s: string) => piTheme.fg("muted", s), scrollInfo: (s: string) => piTheme.fg("muted", s), noMatch: (s: string) => piTheme.fg("muted", s) };
 }
 export function getEditorTheme() { return { borderColor: (s: string) => piTheme.fg("borderMuted", s), selectList: getSelectListTheme() }; }
+export function getSettingsListTheme(): SettingsListTheme {
+  return {
+    label: (text, selected) => selected ? piTheme.fg("accent", text) : text,
+    value: (text, selected) => piTheme.fg(selected ? "accent" : "muted", text),
+    description: text => piTheme.fg("dim", text),
+    cursor: piTheme.fg("accent", "→ "),
+    hint: text => piTheme.fg("dim", text),
+  };
+}
 export function getMarkdownTheme() {
   return {
     heading: (s: string) => piTheme.fg("mdHeading", s), link: (s: string) => piTheme.fg("mdLink", s), linkUrl: (s: string) => piTheme.fg("mdLinkUrl", s),

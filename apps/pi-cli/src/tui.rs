@@ -1517,23 +1517,26 @@ async fn run_loop(
     let mut generation_status_override = None;
     let (mut surface, mut transcript_viewport_height) =
         render_tui_frame(terminal.terminal_mut(), &app, palette)?;
+    surface_requests.publish_regions(&mut app.extension_surface);
     let mut last_frame_at = Instant::now();
     let mut redraw_pending = false;
     while !app.quit {
         let next_frame_at = last_frame_at
             .checked_add(MIN_FRAME_INTERVAL)
             .unwrap_or(last_frame_at);
+        let mouse_deadline = app.extension_surface.mouse_deadline();
         tokio::select! {
             _ = tokio::time::sleep_until(next_frame_at.into()), if redraw_pending => {
                 (surface, transcript_viewport_height) =
                     render_tui_frame(terminal.terminal_mut(), &app, palette)?;
+                surface_requests.publish_regions(&mut app.extension_surface);
                 last_frame_at = Instant::now();
                 redraw_pending = false;
                 continue;
             }
             (terminal_packet, forwarded) = async {
-                if let Some(event) = app.extension_surface.pop_forwarded() {
-                    (Some(Ok(input::InputPacket { event: Some(event), data: None })), true)
+                if let Some((event, forwarded)) = app.extension_surface.pop_input() {
+                    (Some(Ok(input::InputPacket { event: Some(event), data: None })), forwarded)
                 } else {
                     (events.next().await, false)
                 }
@@ -1543,7 +1546,7 @@ async fn run_loop(
                     Some(Ok(packet)) => {
                         if !forwarded && app.trust_prompt.is_none()
                             && app.active_bottom_view().is_none()
-                            && app.extension_surface.input_packet(packet.event.clone(), packet.data.as_deref(), &snapshot) {
+                            && app.extension_surface.input_packet(packet.event.clone(), packet.data.as_deref(), &snapshot).consumed() {
                                 redraw_pending = true;
                                 continue;
                             }
@@ -1799,9 +1802,19 @@ async fn run_loop(
             }
 
 
+            _ = tokio::time::sleep_until(mouse_deadline.unwrap_or_else(Instant::now).into()), if mouse_deadline.is_some() => {
+                app.extension_surface.expire_mouse();
+            }
+
             _ = animation_tick.tick(), if app.has_active_animation() => {
                 app.update(AppMessage::AnimationTick);
             }
+        }
+        if app.extension_surface.take_mouse_selection_reset() {
+            app.screen_selection = None;
+        }
+        if app.trust_prompt.is_some() || app.active_bottom_view().is_some() {
+            app.extension_surface.cancel_mouse();
         }
         if let Some(request) = app.pending_auth.take() {
             drop(events);
@@ -1841,6 +1854,7 @@ async fn run_loop(
             },
             transcript_width: size.width,
             areas: view::extension_surface_areas(Rect::new(0, 0, size.width, size.height), &app),
+            regions: app.extension_surface.region_snapshots(),
         };
         let mut shared = surface_requests
             .snapshot

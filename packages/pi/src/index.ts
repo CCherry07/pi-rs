@@ -56,9 +56,11 @@ export class PiEvalNodeHost extends PiNodeHost {
 }
 
 export type {
-  UiNode, UiTone, UiCompletion, UiInteraction, UiComponentEvent, UiMultiSelectAction,
+  UiNode, UiTone, UiCompletion, UiInteraction, UiMouseEvent, UiMouseResult, UiComponentEvent, UiMultiSelectAction,
   UiMultiSelectOption, UiMultiSelectRequest, UiMultiSelectResponse,
 } from "./extension-ui-frame.js";
 export type { UiMount, MountOptions, DialogOptions, UiTheme } from "./extension-ui.js";
+export type { SlotFactory, FooterFactory } from "./extension-ui.js";
+export type { FooterDataProvider } from "./extension-footer.js";
 export type { CustomOptions, CustomFactory, CustomTui, PiComponent, PiTheme } from "./pi-component-adapter.js";
 export type { MessageRenderer, EntryRenderer, MarkdownTransformer, ToolRenderers, ToolRenderContext, ToolRendererResolver } from "./extension-ui-transcript.js";

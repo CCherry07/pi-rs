@@ -95,12 +95,14 @@ the upstream terminal loop or install the Coding Agent npm runtime. Node 22.19+ 
 | UI capability | Interactive support |
 | --- | --- |
 | `select`, `confirm`, `input`, `editor` | Shared compact panels with titles, padding, selection markers and keyboard hints; width is capped at 60 cells and the terminal width. Native Rust input, prefill, cancellation, timeout and AbortSignal work during `session_start` too. Editor Enter inserts a newline; Ctrl+Enter submits. |
-| `mount`, `custom` | Semantic trees, stable node IDs, update/unmount/focus and slots. `custom(factory)` also accepts Pi components, defaults to the editor region and supports static centered overlays. Both custom forms share completion and cancellation. |
+| `mount`, `custom` | Semantic trees, stable node IDs, update/unmount/focus and slots. `custom(factory)` also accepts Pi components and defaults to the editor region. Both custom forms share completion and cancellation. |
+| Overlays | Static/dynamic options, width/minWidth/maxHeight, anchors, absolute/percentage positions, margins, offsets and visibility predicates. Handles support hide/show, focus/release, focus queries and actual Rust-rendered bounds. Noncapturing overlays leave existing input focus intact. |
 | Layout and controls | Text, Link, Markdown, Column, Row, Panel, Spacer, Scroll, Select, Input, Editor, Button, Progress and Image. Rust owns measurement, clipping, focus, scrolling, edits and completions. |
 | Rich selection | Searchable/filterable/sortable multi-selection is a shared semantic node exposed by `ctx.ui.multiSelect`; native Rust uses the same node through `UiContext::multi_select`. |
-| Widgets/header/footer/status | Node trees in native slots, replacement and keyed status text. Business data is supplied by the plugin. |
+| Widgets/header/footer/status | Semantic nodes and persistent Pi component factories; widgets also accept string arrays. Replacement/clearing/retirement disposes components. Footer factories receive Git branch subscriptions, extension statuses and available provider count. |
 | Input/shortcuts | Rust handles semantic control input and registered shortcuts. Focused Custom nodes receive reconstructed keyboard/paste events, with component-local listeners and focus in JS. Terminal control and global interception remain unavailable. |
-| Themes | Shared built-in light/dark/system palettes; Pi formatting helpers use terminal palette colors. Complete upstream themes, JSON discovery/watchers and custom keybinding files remain unsupported. |
+| Mouse callbacks | Mounted Pi components and widget/header/footer factories receive `handleMouse`: press, release, move, drag, click and vertical wheel, with nested targets, capture, focus and render results. Rust owns hit testing, clipping, gestures and global focus. Transcript-only renderers remain noninteractive. |
+| Themes | Shared built-in light/dark/system palettes; Pi formatting and editor/selection/Markdown theme helpers use terminal palette colors. `getSettingsListTheme` supplies the theme contract for upstream `SettingsList` components. Complete upstream themes, JSON discovery/watchers and custom keybinding files remain unsupported. |
 | Transcript renderers | Message, entry and tool callbacks return nodes or Pi components; Markdown transformers return text. Tool metadata retains arguments, details, shared state, separate call/result `lastComponent`, output padding, image policy and duration. |
 | System operations | Rust-owned title, progress/program status, clipboard, suspend and external editor. Image data is decoded/encoded by Rust for Kitty/iTerm; Link becomes a clipped terminal hyperlink. |
 | Editor/working state | Read/replace/paste composer text, tool expansion, working message/visibility and hidden-thinking labels. Custom editor UI uses the shared Editor node. |
@@ -112,9 +114,28 @@ and release callbacks. Failed generation preparation preserves live UI. Print/JS
 UI defaults (notifications remain active). The CLI TUI is the current renderer; Desktop reports UI
 unavailable until it provides its own semantic-surface adapter.
 
-This adapter is a compatibility subset. Widget/header/footer component factories, custom editor
-subclasses, component mouse callbacks, dynamic overlay options/handles and arbitrary terminal
-operations are not supported. Use the existing semantic surfaces and host operations where available.
+This adapter is a compatibility subset. Custom editor subclasses,
+complete theme configuration and arbitrary terminal operations are not supported. Use the existing
+semantic surfaces and host operations where available. Dynamic overlay option functions are
+reevaluated on refresh/resize; local upstream currently evaluates them only when opening.
+An overlay's `hide()` removes its region without settling `custom`; completion/cancellation or
+generation retirement still owns disposal. Focus and bounds queries use the latest frontend
+snapshot. Native plugins must be rebuilt for UI ABI 33.
+
+Mouse coordinates are zero-based terminal cells, with component-local and screen coordinates;
+captured local coordinates may be negative. `capture` and `focus` imply `handled`. A handled press
+retains its component until release, with a click emitted only when the pointer did not move.
+The JS adapter retains the concrete nested mouse target and preserves keyboard-delegating
+containers. `render: false` suppresses callback-driven rendering, while explicit requests and host
+refreshes remain effective. Mouse-only slots do not take keyboard focus on mount.
+
+The host waits for mouse results asynchronously and preserves subsequent input order. A gesture
+retains its original coordinate transform across ordinary content reflow, including a settings
+description changing height on press. The rest of the Rust terminal loop keeps running. Hiding/removing a component, resize,
+focus loss or generation retirement cancels its gesture. A two-second reply timeout or the bounded
+input queue overflowing also cancels it; Ctrl+C/Ctrl+D remain available. Cancelled/failed requests
+do not click through to app controls, and replies from replaced mounts cannot steal focus. These
+deadline/cancellation rules are host additions to Pi's synchronous mouse callback contract.
 
 See [the shared plugin UI contract](plugin-ui.md) for usage and deliberate API changes.
 
@@ -139,7 +160,8 @@ retirement.
 The host provides runtime-neutral SDK aliases for both
 `@earendil-works` and `@mariozechner`: `pi-coding-agent`, `pi-agent-core`, `pi-ai`,
 `pi-ai/compat`, `pi-ai/oauth`, and `pi-ai/providers/all` use the one host compatibility
-module. `@pi-rs/cli` resolves to the same host SDK. Neither `pi-tui` namespace is aliased. The host also maps `typebox` and `@sinclair/typebox`, including supported subpaths
+module. `@pi-rs/cli` resolves to the same host SDK. Both `pi-tui` namespaces resolve to the pinned
+`@earendil-works/pi-tui` dependency. The host also maps `typebox` and `@sinclair/typebox`, including supported subpaths
 such as `/compile` and `/value`, to the single TypeBox runtime bundled by the host. Subpath aliases
 take precedence over package-root aliases so resolution cannot produce paths such as
 `build/index.mjs/value`.
