@@ -426,11 +426,6 @@ pub(crate) struct AppSettings {
         rename = "followUpMessageBehavior"
     )]
     pub(crate) follow_up_message_behavior: String,
-    #[serde(
-        default = "default_pause_queued_messages_when_response_required",
-        rename = "pauseQueuedMessagesWhenResponseRequired"
-    )]
-    pub(crate) pause_queued_messages_when_response_required: bool,
     #[serde(default = "default_dictation_enabled", rename = "dictationEnabled")]
     pub(crate) dictation_enabled: bool,
     #[serde(default = "default_dictation_model_id", rename = "dictationModelId")]
@@ -706,10 +701,6 @@ fn default_follow_up_message_behavior() -> String {
     "queue".to_string()
 }
 
-fn default_pause_queued_messages_when_response_required() -> bool {
-    true
-}
-
 fn default_dictation_enabled() -> bool {
     false
 }
@@ -922,8 +913,6 @@ impl Default for AppSettings {
             commit_message_model_id: None,
             steer_enabled: true,
             follow_up_message_behavior: default_follow_up_message_behavior(),
-            pause_queued_messages_when_response_required:
-                default_pause_queued_messages_when_response_required(),
             dictation_enabled: false,
             dictation_model_id: default_dictation_model_id(),
             dictation_preferred_language: None,
@@ -1067,7 +1056,6 @@ mod tests {
         assert!(settings.commit_message_prompt.contains("{diff}"));
         assert!(settings.steer_enabled);
         assert_eq!(settings.follow_up_message_behavior, "queue");
-        assert!(settings.pause_queued_messages_when_response_required);
         assert!(!settings.dictation_enabled);
         assert_eq!(settings.dictation_model_id, "base");
         assert!(settings.dictation_preferred_language.is_none());

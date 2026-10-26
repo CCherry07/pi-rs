@@ -22,8 +22,9 @@ use pi_core::{
 use pi_plugin::CommandSpec;
 use pi_session::{
     AgentSession, AgentSessionEvent, AgentSessionSnapshot, EntryOrder, EntryQuery, ForkPosition,
-    PiSession, QueueSnapshot, SessionEntry, SessionInput, SessionRuntimeInventory,
-    ShellExecutionOptions, SubmitOutcome, aggregate_document_usage, current_session_context_tokens,
+    PiSession, PromptOutcome, QueueSnapshot, SessionEntry, SessionInput, SessionResetReason,
+    SessionRuntimeInventory, SessionUpdate, ShellExecutionOptions, aggregate_document_usage,
+    current_session_context_tokens,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -737,7 +738,7 @@ impl App {
         let mut transcript = Vec::new();
         let mut session_tokens = 0;
         let mut context_tokens = Some(latest_context_usage(&snapshot.agent.messages).tokens);
-        if let Ok(document) = session.log().load()
+        if let Ok(document) = session.history().load()
             && let Ok(branch) = document.branch()
         {
             for record in &branch {
@@ -804,7 +805,7 @@ impl App {
             && bash_line.is_none()
             && !compacting;
         let session_choices =
-            discover_session_choices(session.log().path(), session.runtime().cwd());
+            discover_session_choices(session.history().path(), session.catalog().cwd());
         let (tree_choices, fork_choices) = session_entry_choices(session);
         let input_history = InputHistory::from_transcript(&transcript);
         let registered_plugins =
@@ -818,8 +819,8 @@ impl App {
             input_history,
             status: status.to_string(),
             queue: snapshot.queue.clone(),
-            command_specs: session.runtime().command_specs(),
-            model_specs: session.runtime().available_models(),
+            command_specs: session.catalog().command_specs(),
+            model_specs: session.catalog().available_models(),
             registered_plugins,
             session_choices,
             tree_choices,
@@ -838,7 +839,7 @@ impl App {
             provider: snapshot.agent.provider_id.to_string(),
             model: snapshot.agent.model_id.to_string(),
             thinking: snapshot.agent.thinking_level.as_str().to_string(),
-            cwd: session.runtime().cwd().display().to_string(),
+            cwd: session.catalog().cwd().display().to_string(),
             session_name: snapshot.name.clone(),
             session_tokens,
             context_tokens,
@@ -1477,22 +1478,19 @@ async fn run_loop(
     {
         palette = selected;
     }
-    let mut session_changes = session_handle.subscribe();
-    let mut session = session_handle.current();
-    let mut subscription = session.subscribe();
-    let mut app = app_for_session(&session, &subscription.snapshot, &agent_dir);
+    let mut observation = session_handle.observe();
+    let mut session = observation.current();
+    let mut app = app_for_session(&session, observation.snapshot(), &agent_dir);
+    app.epoch = observation.version().epoch;
     let (effect_sender, mut effect_receiver) = tokio::sync::mpsc::unbounded_channel();
     let (paste_sender, mut paste_receiver) = tokio::sync::mpsc::unbounded_channel();
     let mut paste_pending = false;
     if let Some(prompt) = initial_prompt {
         app.input_history.record(prompt.text());
-        app.awaiting_assistant = true;
-        app.working_started_at = Some(Instant::now());
-        app.status = "Working...".to_string();
         spawn_effect(
+            &mut app,
             Arc::clone(&session),
             session_handle.clone(),
-            app.epoch,
             prompt,
             EffectMode::Submit,
             effect_sender.clone(),
@@ -1519,23 +1517,26 @@ async fn run_loop(
     let mut generation_status_override = None;
     let (mut surface, mut transcript_viewport_height) =
         render_tui_frame(terminal.terminal_mut(), &app, palette)?;
+    surface_requests.publish_regions(&mut app.extension_surface);
     let mut last_frame_at = Instant::now();
     let mut redraw_pending = false;
     while !app.quit {
         let next_frame_at = last_frame_at
             .checked_add(MIN_FRAME_INTERVAL)
             .unwrap_or(last_frame_at);
+        let mouse_deadline = app.extension_surface.mouse_deadline();
         tokio::select! {
             _ = tokio::time::sleep_until(next_frame_at.into()), if redraw_pending => {
                 (surface, transcript_viewport_height) =
                     render_tui_frame(terminal.terminal_mut(), &app, palette)?;
+                surface_requests.publish_regions(&mut app.extension_surface);
                 last_frame_at = Instant::now();
                 redraw_pending = false;
                 continue;
             }
             (terminal_packet, forwarded) = async {
-                if let Some(event) = app.extension_surface.pop_forwarded() {
-                    (Some(Ok(input::InputPacket { event: Some(event), data: None })), true)
+                if let Some((event, forwarded)) = app.extension_surface.pop_input() {
+                    (Some(Ok(input::InputPacket { event: Some(event), data: None })), forwarded)
                 } else {
                     (events.next().await, false)
                 }
@@ -1545,7 +1546,7 @@ async fn run_loop(
                     Some(Ok(packet)) => {
                         if !forwarded && app.trust_prompt.is_none()
                             && app.active_bottom_view().is_none()
-                            && app.extension_surface.input_packet(packet.event.clone(), packet.data.as_deref(), &snapshot) {
+                            && app.extension_surface.input_packet(packet.event.clone(), packet.data.as_deref(), &snapshot).consumed() {
                                 redraw_pending = true;
                                 continue;
                             }
@@ -1605,18 +1606,26 @@ async fn run_loop(
                     None => app.quit = true,
                 }
             }
-            session_event = subscription.events.recv() => match session_event {
-                Ok(event) if event.revision > subscription.snapshot.revision => {
-                    subscription.snapshot.revision = event.revision;
+            session_update = observation.recv() => match session_update {
+                Some(SessionUpdate::Event { event, .. }) => {
                     app.update(AppMessage::SessionEvent {
-                        event: Box::new(event.event),
+                        event: Box::new(event),
                         snapshot: Box::new(session.snapshot()),
                     });
                 }
-                Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    let snapshot = session.snapshot();
-                    subscription.snapshot = snapshot.clone();
+                Some(SessionUpdate::Reset { version, reason: SessionResetReason::Replacement, snapshot }) => {
+                    session = observation.current();
+                    let tools_expanded = app.tools_expanded;
+                    let extension_surface = std::mem::take(&mut app.extension_surface);
+                    app = app_for_session(&session, &snapshot, &agent_dir);
+                    app.extension_surface = extension_surface;
+                    app.epoch = version.epoch;
+                    app.tools_expanded = tools_expanded;
+                    app.status = generation_status_override
+                        .take()
+                        .unwrap_or_else(|| "Session generation replaced".to_string());
+                }
+                Some(SessionUpdate::Reset { reason: SessionResetReason::Lagged { .. }, snapshot, .. }) => {
                     let input = std::mem::take(&mut app.input);
                     let input_history = std::mem::take(&mut app.input_history);
                     let epoch = app.epoch;
@@ -1636,7 +1645,7 @@ async fn run_loop(
                     recovered.extension_surface = std::mem::take(&mut app.extension_surface);
                     app = recovered;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => app.update(AppMessage::Quit),
+                None => app.update(AppMessage::Quit),
             },
             Some(done) = effect_receiver.recv() => {
                 let current_epoch = done.epoch == app.epoch;
@@ -1681,7 +1690,7 @@ async fn run_loop(
                                 operation,
                                 terminal,
                                 &mut clipboard,
-                                session.runtime().cwd(),
+                                session.catalog().cwd(),
                                 surface_requests.external_editor.as_deref(),
                             )
                             .await;
@@ -1793,27 +1802,19 @@ async fn run_loop(
             }
 
 
+            _ = tokio::time::sleep_until(mouse_deadline.unwrap_or_else(Instant::now).into()), if mouse_deadline.is_some() => {
+                app.extension_surface.expire_mouse();
+            }
+
             _ = animation_tick.tick(), if app.has_active_animation() => {
                 app.update(AppMessage::AnimationTick);
             }
-            changed = session_changes.changed() => {
-                if changed.is_err() {
-                    app.quit = true;
-                    continue;
-                }
-                session = session_handle.current();
-                subscription = session.subscribe();
-                let next_epoch = app.epoch.saturating_add(1);
-                let tools_expanded = app.tools_expanded;
-                let extension_surface = std::mem::take(&mut app.extension_surface);
-                app = app_for_session(&session, &subscription.snapshot, &agent_dir);
-                app.extension_surface = extension_surface;
-                app.epoch = next_epoch;
-                app.tools_expanded = tools_expanded;
-                app.status = generation_status_override
-                    .take()
-                    .unwrap_or_else(|| "Session generation replaced".to_string());
-            }
+        }
+        if app.extension_surface.take_mouse_selection_reset() {
+            app.screen_selection = None;
+        }
+        if app.trust_prompt.is_some() || app.active_bottom_view().is_some() {
+            app.extension_surface.cancel_mouse();
         }
         if let Some(request) = app.pending_auth.take() {
             drop(events);
@@ -1853,6 +1854,7 @@ async fn run_loop(
             },
             transcript_width: size.width,
             areas: view::extension_surface_areas(Rect::new(0, 0, size.width, size.height), &app),
+            regions: app.extension_surface.region_snapshots(),
         };
         let mut shared = surface_requests
             .snapshot
@@ -1986,9 +1988,9 @@ fn command_suggestions(input: &str, command_specs: &[CommandSpec]) -> Vec<Comman
 fn session_entry_choices(
     session: &AgentSession,
 ) -> (Vec<SessionEntryChoice>, Vec<SessionEntryChoice>) {
-    let current = session.log().leaf_id();
+    let current = session.history().leaf_id();
     let records = session
-        .log()
+        .history()
         .find_entries(&EntryQuery {
             order: EntryOrder::OldestFirst,
             ..EntryQuery::default()
@@ -2248,7 +2250,7 @@ mod tests {
     use super::*;
     use pi_session::{
         AgentSessionOptions, CompactionEntry, MultiSessionManager, PreparedSessionGeneration,
-        SessionGenerationRequest, SessionHeader, SessionLog, SessionRecord,
+        SessionGenerationRequest, SessionHeader, SessionRecord, SessionStore,
     };
     use ratatui::backend::TestBackend;
     use ratatui::{TerminalOptions, Viewport};
@@ -2596,7 +2598,10 @@ mod tests {
             });
             let path = directory.path().join("session.jsonl");
             let handle = sessions
-                .create_session(directory.path(), &path)
+                .create_session(pi_session::CreateSessionOptions::new(
+                    directory.path(),
+                    &path,
+                ))
                 .await
                 .unwrap();
             let session = handle.current();
@@ -2624,7 +2629,7 @@ mod tests {
                     .unwrap()
                     .contains(&image.data)
             );
-            let document = session.log().load().unwrap();
+            let document = session.history().load().unwrap();
             assert!(
                 matches!(document.messages()[0].as_standard(), Some(Message::User(user)) if
                 user.content.iter().any(|block| matches!(block, ContentBlock::Image(actual) if actual == &image)))
@@ -2672,7 +2677,10 @@ mod tests {
             ))
         });
         let runtime = sessions
-            .create_session(directory.path(), directory.path().join("session.jsonl"))
+            .create_session(pi_session::CreateSessionOptions::new(
+                directory.path(),
+                directory.path().join("session.jsonl"),
+            ))
             .await
             .unwrap();
         let session = runtime.current();
@@ -2695,7 +2703,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(named, "Session name set: release polish");
-        assert_eq!(session.log().name().as_deref(), Some("release polish"));
+        assert_eq!(session.history().name().as_deref(), Some("release polish"));
         assert!(info.contains("Session Info"));
         assert!(info.contains("Name: release polish"));
         assert!(info.contains("Messages: 0"));
@@ -3211,6 +3219,206 @@ mod tests {
             "the transcript should acknowledge submission before any provider event arrives"
         );
         assert!(render_app(&app, 80, 12).contains("Working... (5s • esc to interrupt)"));
+    }
+
+    #[tokio::test]
+    async fn slash_commands_do_not_show_working_before_agent_execution() {
+        struct Commands;
+        #[pi_plugin::plugin]
+        impl pi_plugin::Plugin for Commands {
+            fn id(&self) -> pi_core::PluginId {
+                pi_core::PluginId::new("command-feedback")
+            }
+            fn register(
+                &self,
+                context: &mut pi_plugin::RegisterContext<'_>,
+            ) -> pi_plugin::Result<()> {
+                context.register_command(Arc::new(LocalCommand(false)))?;
+                context.register_command(Arc::new(LocalCommand(true)))
+            }
+        }
+        struct LocalCommand(bool);
+        #[async_trait::async_trait]
+        impl pi_plugin::Command for LocalCommand {
+            fn spec(&self) -> CommandSpec {
+                CommandSpec {
+                    name: if self.0 { "ask" } else { "inspect" }.into(),
+                    description: "Command feedback fixture".into(),
+                    argument_hint: None,
+                }
+            }
+            async fn execute(
+                &self,
+                _: pi_plugin::CommandContext,
+                _: String,
+            ) -> Result<pi_plugin::CommandOutcome, pi_plugin::CommandError> {
+                Ok(if self.0 {
+                    pi_plugin::CommandOutcome::TransformInput("hello".into())
+                } else {
+                    pi_plugin::CommandOutcome::Handled
+                })
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let plugin = Arc::new(pi_test_support::ScriptedProviderPlugin::scripted(
+            (0..5).map(|_| pi_test_support::ScriptedTurn::Text("done".into())),
+        ));
+        let provider = plugin.provider();
+        let sessions = MultiSessionManager::new(move |request: SessionGenerationRequest| {
+            let plugin = plugin.clone();
+            async move {
+                let runtime = pi_runtime::PiRuntime::builder()
+                    .provider_plugin_arc(plugin)
+                    .plugin(Commands)
+                    .agent_options(pi_agent::AgentOptions {
+                        provider_id: ProviderId::new("scripted"),
+                        model_id: ModelId::new("test"),
+                        cwd: request.cwd,
+                        ..pi_agent::AgentOptions::default()
+                    })
+                    .system_prompt(pi_runtime::SystemPrompt::Final("test".into()))
+                    .build()?;
+                Ok(PreparedSessionGeneration::new(
+                    runtime,
+                    AgentSessionOptions::default(),
+                ))
+            }
+        });
+        let handle = sessions
+            .create_session(pi_session::CreateSessionOptions::new(
+                directory.path(),
+                directory.path().join("session.jsonl"),
+            ))
+            .await
+            .unwrap();
+        let session = handle.current();
+        let (trust, _) = ProjectTrustService::new(
+            &directory.path().join("agent"),
+            Some(false),
+            false,
+            pi_settings::DefaultProjectTrust::Ask,
+        )
+        .unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut clipboard = RecordingClipboard::default();
+
+        for from_editor in [true, false] {
+            for (input, starts_agent) in [
+                ("/help", false),
+                ("/session", false),
+                ("/inspect", false),
+                ("/ask", true),
+                ("hello", true),
+            ] {
+                let mut app = App::new(&session, &session.snapshot());
+                let mut events = session.subscribe().events;
+                let requests_before = provider.requests().len();
+                if from_editor {
+                    app.input.set_text(input);
+                    submit_editor(
+                        &mut app,
+                        &session,
+                        &handle,
+                        &trust,
+                        &sender,
+                        &mut clipboard,
+                        EffectMode::Submit,
+                    );
+                } else {
+                    spawn_effect(
+                        &mut app,
+                        session.clone(),
+                        handle.clone(),
+                        input,
+                        EffectMode::Submit,
+                        sender.clone(),
+                    );
+                }
+                let screen = render_app(&app, 100, 24);
+                let immediate_feedback = input == "hello";
+                assert_eq!(
+                    screen.contains("Working..."),
+                    immediate_feedback,
+                    "{input}, from_editor={from_editor}:\n{screen}"
+                );
+                assert_eq!(app.awaiting_assistant, immediate_feedback, "{input}");
+                assert_eq!(app.has_active_animation(), immediate_feedback, "{input}");
+                let done = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(done.status.is_ok(), "{:?}", done.status);
+                let mut saw_agent_start = false;
+                while let Ok(event) = events.try_recv() {
+                    let is_start = matches!(
+                        &event.event,
+                        AgentSessionEvent::Agent(event) if matches!(event.as_ref(), AgentEvent::AgentStart)
+                    );
+                    app.apply_session_event(event.event);
+                    if is_start {
+                        saw_agent_start = true;
+                        assert!(
+                            render_app(&app, 100, 24).contains("Working..."),
+                            "{input} should show actual agent work"
+                        );
+                        assert!(app.has_active_animation());
+                    }
+                }
+                assert_eq!(saw_agent_start, starts_agent, "{input}");
+                assert_eq!(
+                    provider.requests().len() - requests_before,
+                    usize::from(starts_agent),
+                    "{input}"
+                );
+                app.update(AppMessage::EffectCompleted(done));
+                app.sync_snapshot(&session.snapshot());
+                assert!(!render_app(&app, 100, 24).contains("Working..."), "{input}");
+            }
+        }
+
+        let mut app = App::new(&session, &session.snapshot());
+        app.apply_agent_event(AgentEvent::AgentStart);
+        let started_at = app.working_started_at;
+        let status = app.status.clone();
+        app.input.set_text("/help");
+        submit_editor(
+            &mut app,
+            &session,
+            &handle,
+            &trust,
+            &sender,
+            &mut clipboard,
+            EffectMode::Submit,
+        );
+        assert_eq!(
+            app.working_started_at, started_at,
+            "commands must not restart an existing timer"
+        );
+        assert_eq!(app.status, status);
+        assert!(app.has_active_animation());
+        assert!(receiver.recv().await.unwrap().status.is_ok());
+
+        let mut app = App::new(&session, &session.snapshot());
+        let prompt = SessionInput::new("/help").with_images([pi_core::ImageContent {
+            data: "fixture".into(),
+            mime_type: "image/png".into(),
+        }]);
+        spawn_effect(
+            &mut app,
+            session.clone(),
+            handle.clone(),
+            prompt,
+            EffectMode::Submit,
+            sender.clone(),
+        );
+        assert!(render_app(&app, 100, 24).contains("Working..."));
+        assert!(receiver.recv().await.unwrap().status.is_ok());
+        assert_eq!(
+            provider.requests().len(),
+            5,
+            "image-bearing startup input remains a prompt"
+        );
+        sessions.shutdown().await.unwrap();
     }
 
     #[test]
@@ -4754,9 +4962,13 @@ mod tests {
             })
             .build()
             .unwrap();
-        let session = AgentSession::create(runtime, directory.path().join("session.jsonl"))
-            .await
-            .unwrap();
+        let session = AgentSession::create(
+            runtime,
+            directory.path().join("session.jsonl"),
+            Default::default(),
+        )
+        .await
+        .unwrap();
 
         let app = App::new(&session, &session.snapshot());
         let suggestions = command_suggestions("/skill:", &app.command_specs);
@@ -4834,7 +5046,7 @@ mod tests {
     async fn resumed_app_restores_all_entry_usage_and_unknown_compacted_context() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
-        let log = SessionLog::create(&path, SessionHeader::new("usage-resume", directory.path()))
+        let log = SessionStore::create(&path, SessionHeader::new("usage-resume", directory.path()))
             .unwrap();
         let assistant = Message::assistant(pi_core::AssistantMessage {
             content: vec![ContentBlock::Text(pi_core::TextContent::new("answer"))],
@@ -4894,14 +5106,16 @@ mod tests {
             .system_prompt(pi_runtime::SystemPrompt::Final("test".to_string()))
             .build()
             .unwrap();
-        let session = AgentSession::open(runtime, &path).await.unwrap();
+        let session = AgentSession::open(runtime, &path, Default::default())
+            .await
+            .unwrap();
 
         let mut app = App::new(&session, &session.snapshot());
 
         assert_eq!(app.session_tokens, 114);
         assert_eq!(app.context_tokens, None);
         let mut stale_snapshot = session.snapshot();
-        stale_snapshot.agent.messages = vec![assistant];
+        stale_snapshot.agent.messages = Arc::new(vec![assistant]);
         app.sync_snapshot(&stale_snapshot);
         assert_eq!(app.context_tokens, None);
         session.shutdown().await;
@@ -4944,9 +5158,13 @@ mod tests {
             .system_prompt(pi_runtime::SystemPrompt::Final("test".to_string()))
             .build()
             .unwrap();
-        let session = AgentSession::create(runtime, directory.path().join("session.jsonl"))
-            .await
-            .unwrap();
+        let session = AgentSession::create(
+            runtime,
+            directory.path().join("session.jsonl"),
+            Default::default(),
+        )
+        .await
+        .unwrap();
         let mut app = App::new(&session, &session.snapshot());
         app.input.set_text("/model");
         assert!(activate_bottom_view_for_command(&mut app, "/model"));
@@ -4973,7 +5191,7 @@ mod tests {
         std::fs::create_dir_all(&other_cwd).unwrap();
 
         let current_path = sessions.join("current.jsonl");
-        let current = pi_session::SessionLog::create(
+        let current = pi_session::SessionStore::create(
             &current_path,
             pi_session::SessionHeader::new("current", &cwd),
         )
@@ -4986,7 +5204,7 @@ mod tests {
             .unwrap();
 
         let previous_path = sessions.join("previous.jsonl");
-        let previous = pi_session::SessionLog::create(
+        let previous = pi_session::SessionStore::create(
             &previous_path,
             pi_session::SessionHeader::new("previous", &cwd),
         )
@@ -5001,7 +5219,7 @@ mod tests {
             .set_name(Some("Resume polish".to_string()))
             .unwrap();
 
-        pi_session::SessionLog::create(
+        pi_session::SessionStore::create(
             sessions.join("other.jsonl"),
             pi_session::SessionHeader::new("other", &other_cwd),
         )

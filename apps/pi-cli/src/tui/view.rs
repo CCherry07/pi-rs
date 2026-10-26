@@ -1428,7 +1428,7 @@ pub(super) fn discover_session_choices(
             if canonical_path(&header.cwd) != current_cwd {
                 return None;
             }
-            let (_, document) = pi_session::SessionLog::open(&path).ok()?;
+            let (_, document) = pi_session::SessionStore::open(&path).ok()?;
             let first_message = document
                 .entries
                 .iter()

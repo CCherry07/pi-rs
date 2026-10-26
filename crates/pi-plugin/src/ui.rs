@@ -207,7 +207,7 @@ impl UiComponent for TextEntry {
     type Output = String;
 
     fn render(&mut self) -> PluginContextResult<UiSurfaceFrame> {
-        use crate::{UiNode, UiNodeKind, UiRegion, UiRegionPlacement, UiTone};
+        use crate::{UiNode, UiNodeKind};
         let entry = if self.multiline {
             UiNodeKind::Editor {
                 initial_value: self.prefill.clone(),
@@ -222,30 +222,15 @@ impl UiComponent for TextEntry {
                 completions: Vec::new(),
             }
         };
-        Ok(UiSurfaceFrame {
-            regions: vec![UiRegion {
-                id: "dialog".into(),
-                placement: UiRegionPlacement::Overlay,
-                overlay: None,
-                root: UiNode::new(
-                    "dialog",
-                    UiNodeKind::Column {
-                        gap: 0,
-                        children: vec![
-                            UiNode::new(
-                                "title",
-                                UiNodeKind::Text {
-                                    text: self.title.clone(),
-                                    tone: UiTone::Accent,
-                                },
-                            ),
-                            UiNode::new("value", entry),
-                        ],
-                    },
-                ),
-            }],
-            ..Default::default()
-        })
+        Ok(dialog(
+            &self.title,
+            UiNode::new("value", entry),
+            if self.multiline {
+                "ctrl+enter submit · esc cancel"
+            } else {
+                "enter submit · esc cancel"
+            },
+        ))
     }
 
     fn handle_event(
@@ -318,41 +303,59 @@ impl UiComponent for MultiSelection {
     }
 }
 
+fn dialog(title: &str, control: crate::UiNode, hint: &str) -> UiSurfaceFrame {
+    use crate::{UiNode, UiNodeKind, UiOverlayOptions, UiRegion, UiRegionPlacement, UiTone};
+    let (heading, description) = title.split_once('\n').unwrap_or((title, ""));
+    let mut children = Vec::new();
+    if !description.is_empty() {
+        children.push(UiNode::text("description", description));
+    }
+    children.extend([
+        control,
+        UiNode::new(
+            "hint",
+            UiNodeKind::Text {
+                text: hint.into(),
+                tone: UiTone::Muted,
+            },
+        ),
+    ]);
+    UiSurfaceFrame {
+        regions: vec![UiRegion {
+            id: "dialog".into(),
+            placement: UiRegionPlacement::Overlay,
+            overlay: Some(UiOverlayOptions {
+                width: Some(60),
+                ..Default::default()
+            }),
+            root: UiNode::new(
+                "dialog",
+                UiNodeKind::Panel {
+                    title: heading.into(),
+                    child: Box::new(UiNode::new("body", UiNodeKind::Column { gap: 1, children })),
+                },
+            ),
+        }],
+        ..Default::default()
+    }
+}
+
 impl UiComponent for Selection {
     type Output = usize;
 
     fn render(&mut self) -> PluginContextResult<UiSurfaceFrame> {
-        use crate::{UiNode, UiNodeKind, UiRegion, UiRegionPlacement, UiTone};
-        Ok(UiSurfaceFrame {
-            regions: vec![UiRegion {
-                id: "dialog".into(),
-                placement: UiRegionPlacement::Overlay,
-                overlay: None,
-                root: UiNode::new(
-                    "dialog",
-                    UiNodeKind::Column {
-                        gap: 0,
-                        children: vec![
-                            UiNode::new(
-                                "title",
-                                UiNodeKind::Text {
-                                    text: self.title.clone(),
-                                    tone: UiTone::Accent,
-                                },
-                            ),
-                            UiNode::new(
-                                "value",
-                                UiNodeKind::Select {
-                                    options: self.options.clone(),
-                                    initial_selected: 0,
-                                },
-                            ),
-                        ],
-                    },
-                ),
-            }],
-            ..Default::default()
-        })
+        use crate::{UiNode, UiNodeKind};
+        Ok(dialog(
+            &self.title,
+            UiNode::new(
+                "value",
+                UiNodeKind::Select {
+                    options: self.options.clone(),
+                    initial_selected: 0,
+                },
+            ),
+            "↑↓ move · enter select · esc cancel",
+        ))
     }
 
     fn handle_event(

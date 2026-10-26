@@ -10,7 +10,6 @@ function setup() {
   const { result } = renderHook(() =>
     useThreadTurnEvents({
       dispatch,
-      planByThreadRef: { current: {} },
       getCustomName: () => undefined,
       isThreadHidden: () => false,
       setThreadLoaded,

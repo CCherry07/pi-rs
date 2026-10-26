@@ -24,12 +24,14 @@ type ComposerSuggestionsPopoverProps = {
 };
 
 const isFileSuggestion = (item: AutocompleteItem) => item.group === "Files";
+const isSkillSuggestion = (item: AutocompleteItem) =>
+  item.id.startsWith("skill:") || item.id.startsWith("slash-skill:");
 
 const suggestionIcon = (item: AutocompleteItem) => {
   if (isFileSuggestion(item)) {
     return FileText;
   }
-  if (item.id.startsWith("skill:") || item.id.startsWith("slash-skill:")) {
+  if (isSkillSuggestion(item)) {
     return Wrench;
   }
   if (item.id.startsWith("app:")) {
@@ -131,6 +133,7 @@ export function ComposerSuggestionsPopover({
               <button
                 type="button"
                 className={`composer-suggestion${index === highlightIndex ? " is-active" : ""}`}
+                data-kind={isSkillSuggestion(item) ? "skill" : undefined}
                 role="option"
                 aria-selected={index === highlightIndex}
                 ref={(node) => {

@@ -7,12 +7,12 @@ use pi_plugin::{
 use pi_runtime::{PiRuntime, SystemPrompt};
 use pi_session::{
     AgentSession, AgentSessionOptions, CompactionEntry, CompactionSettings, ContextEditEntry,
-    ContextEditReplacement, CustomMessageEntry, SessionEntry, SessionLog,
+    ContextEditReplacement, CustomMessageEntry, SessionEntry, SessionStore,
 };
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::json;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 type Turn = dyn Fn(TurnEndEvent) -> BoundaryResult + Send + Sync;
 type Settle = dyn Fn(AgentBeforeSettleEvent) -> BoundaryResult + Send + Sync;
@@ -131,6 +131,221 @@ fn text(messages: &[Message]) -> String {
 }
 
 #[tokio::test]
+async fn unchanged_boundary_hooks_share_retained_context_snapshots() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshots = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let plugins = ["one", "two", "three", "four"]
+        .into_iter()
+        .map(|id| {
+            let snapshots = snapshots.clone();
+            BoundaryPlugin::turn(id, move |event| {
+                snapshots
+                    .lock()
+                    .unwrap()
+                    .push(event.boundary.unwrap().context);
+                BoundaryResult::default()
+            })
+        })
+        .collect();
+    let provider = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("answer".into())]);
+    let session = AgentSession::create(
+        runtime(provider, plugins, false),
+        dir.path().join("s.jsonl"),
+        options(),
+    )
+    .await
+    .unwrap();
+    session.prompt("start").await.unwrap();
+    let snapshots = snapshots.lock().unwrap();
+    assert_eq!(snapshots.len(), 4);
+    let first = &snapshots[0];
+    assert!(!first.context_entries.is_empty());
+    for snapshot in &snapshots[1..] {
+        assert_eq!(snapshot, first);
+        assert_eq!(
+            snapshot.context_entries.as_ptr(),
+            first.context_entries.as_ptr()
+        );
+        assert_eq!(
+            snapshot.context_messages.as_ptr(),
+            first.context_messages.as_ptr()
+        );
+        assert_eq!(snapshot.llm_messages.as_ptr(), first.llm_messages.as_ptr());
+    }
+}
+
+#[tokio::test]
+async fn custom_boundary_projectors_still_run_between_every_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let snapshots = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let plugins = ["first", "second"]
+        .into_iter()
+        .map(|id| {
+            let calls = calls.clone();
+            let snapshots = snapshots.clone();
+            BoundaryPlugin::turn(id, move |event| {
+                snapshots.lock().unwrap().push((
+                    calls.load(Ordering::SeqCst),
+                    event.boundary.unwrap().context,
+                ));
+                BoundaryResult::default()
+            })
+        })
+        .collect();
+    let mut options = options();
+    options
+        .context
+        .entry_transforms
+        .push(Arc::new(move |entries| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            entries.to_vec()
+        }));
+    let provider = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("answer".into())]);
+    let session = AgentSession::create(
+        runtime(provider, plugins, false),
+        dir.path().join("s.jsonl"),
+        options,
+    )
+    .await
+    .unwrap();
+    session.prompt("start").await.unwrap();
+    let snapshots = snapshots.lock().unwrap();
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[1].0, snapshots[0].0 + 2);
+    assert!(!Arc::ptr_eq(
+        &snapshots[0].1.context_entries,
+        &snapshots[1].1.context_entries
+    ));
+}
+
+struct SideEffectBoundary {
+    index: usize,
+    seen: AtomicBool,
+    snapshots: Arc<std::sync::Mutex<Vec<pi_plugin::BoundaryContextPreview>>>,
+    session: Arc<std::sync::Mutex<Option<std::sync::Weak<AgentSession>>>>,
+}
+
+#[pi_plugin::plugin]
+impl Plugin for SideEffectBoundary {
+    fn id(&self) -> PluginId {
+        PluginId::new(format!("side-effect-{}", self.index))
+    }
+
+    async fn turn_end(
+        &self,
+        context: AgentPluginContext,
+        event: TurnEndEvent,
+    ) -> Result<BoundaryResult, PluginError> {
+        if self.seen.swap(true, Ordering::SeqCst) {
+            return Ok(BoundaryResult::default());
+        }
+        self.snapshots
+            .lock()
+            .unwrap()
+            .push(event.boundary.unwrap().context);
+        if self.index == 0 {
+            context
+                .session
+                .append_entry("side-effect", Some(json!({"value": 1})))?;
+            return Err(PluginError::Hook {
+                plugin_id: self.id(),
+                hook: "turn_end",
+                message: "after append".into(),
+            });
+        }
+        if self.index == 1 {
+            let session = self
+                .session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .upgrade()
+                .unwrap();
+            session
+                .enqueue_message(
+                    Message::User(pi_core::UserMessage::text("queued by hook", 2)),
+                    pi_session::QueueKind::Steer,
+                )
+                .unwrap();
+        }
+        Ok(BoundaryResult::default())
+    }
+}
+
+#[tokio::test]
+async fn boundary_cache_refreshes_journal_changes_on_error_and_reads_queues_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshots = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let slot = Arc::new(std::sync::Mutex::new(None));
+    let access = Arc::new(pi_session::PiPluginContext::new(
+        pi_plugin::PresentationMode::Print,
+        true,
+        pi_session::PluginContextBinding::new(),
+    ));
+    let provider = ScriptedProviderPlugin::scripted([
+        ScriptedTurn::Text("answer".into()),
+        ScriptedTurn::Text("follow up".into()),
+    ]);
+    let mut builder = PiRuntime::builder()
+        .plugin_context(access.clone())
+        .provider_plugin(provider)
+        .agent_options(AgentOptions {
+            provider_id: ProviderId::new("scripted"),
+            model_id: ModelId::new("test"),
+            ..Default::default()
+        })
+        .system_prompt(SystemPrompt::Final("test".into()));
+    for index in 0..3 {
+        builder = builder.plugin(SideEffectBoundary {
+            index,
+            seen: AtomicBool::new(false),
+            snapshots: snapshots.clone(),
+            session: slot.clone(),
+        });
+    }
+    let session = AgentSession::create(
+        builder.build().unwrap(),
+        dir.path().join("s.jsonl"),
+        options(),
+    )
+    .await
+    .unwrap();
+    *slot.lock().unwrap() = Some(Arc::downgrade(&session));
+    access.bind_generation_session(session.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(10), session.prompt("start"))
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshots = snapshots.lock().unwrap();
+    assert_eq!(snapshots.len(), 3);
+    assert_eq!(
+        snapshots[1].context_entries.len(),
+        snapshots[0].context_entries.len() + 1
+    );
+    assert!(!Arc::ptr_eq(
+        &snapshots[0].context_entries,
+        &snapshots[1].context_entries
+    ));
+    assert!(Arc::ptr_eq(
+        &snapshots[1].context_entries,
+        &snapshots[2].context_entries
+    ));
+    assert!(snapshots[0].pending_messages.is_empty());
+    assert!(snapshots[1].pending_messages.is_empty());
+    assert!(text(&snapshots[2].pending_messages).contains("queued by hook"));
+    assert!(snapshots[2].can_continue);
+    assert!(
+        session
+            .catalog()
+            .plugin_diagnostics()
+            .iter()
+            .any(|error| error.message.contains("after append"))
+    );
+}
+
+#[tokio::test]
 async fn turn_boundary_commits_edits_before_the_next_request_and_chains_previews() {
     let dir = tempfile::tempdir().unwrap();
     let provider_plugin = ScriptedProviderPlugin::scripted([
@@ -141,7 +356,7 @@ async fn turn_boundary_commits_edits_before_the_next_request_and_chains_previews
     let path = dir.path().join("session.jsonl");
     let persisted = path.clone();
     let first = BoundaryPlugin::turn("first", move |event| {
-        let (_, document) = SessionLog::open(&persisted).unwrap();
+        let (_, document) = SessionStore::open(&persisted).unwrap();
         assert!(
             document
                 .entries
@@ -178,7 +393,7 @@ async fn turn_boundary_commits_edits_before_the_next_request_and_chains_previews
         }
         BoundaryResult::default()
     });
-    let session = AgentSession::create_with_options(
+    let session = AgentSession::create(
         runtime(provider_plugin, vec![first, second], false),
         &path,
         options(),
@@ -189,7 +404,7 @@ async fn turn_boundary_commits_edits_before_the_next_request_and_chains_previews
     assert_eq!(provider.requests().len(), 2);
     assert!(text(&provider.requests()[1].messages).contains("edited answer"));
     assert!(text(&provider.requests()[1].messages).contains("continue work"));
-    let (_, document) = SessionLog::open(&path).unwrap();
+    let (_, document) = SessionStore::open(&path).unwrap();
     assert!(document.entries.iter().any(|entry| matches!(&entry.entry, SessionEntry::Message(value) if serde_json::to_string(value).unwrap().contains("first"))));
 }
 
@@ -232,7 +447,7 @@ async fn before_settle_continues_once_and_settled_fires_after_the_last_run() {
         ScriptedTurn::Text("verified".into()),
     ]);
     let provider = p.provider();
-    let session = AgentSession::create_with_options(
+    let session = AgentSession::create(
         runtime(p, vec![plugin], false),
         dir.path().join("s.jsonl"),
         options().retry(pi_session::AutoRetrySettings {
@@ -284,7 +499,7 @@ async fn invalid_drafts_are_atomic_and_later_handlers_can_repair_them() {
         });
         let p = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("answer".into())]);
         let provider = p.provider();
-        let session = AgentSession::create_with_options(
+        let session = AgentSession::create(
             runtime(p, vec![first, second], false),
             dir.path().join("s.jsonl"),
             options(),
@@ -293,7 +508,7 @@ async fn invalid_drafts_are_atomic_and_later_handlers_can_repair_them() {
         .unwrap();
         session.prompt("start").await.unwrap();
         assert_eq!(provider.requests().len(), 1);
-        let entries = session.log().branch_entries().unwrap();
+        let entries = session.history().branch_entries().unwrap();
         let wire = serde_json::to_string(&entries).unwrap();
         assert!(!wire.contains("must not leak"));
         assert_eq!(wire.contains("repaired"), repair);
@@ -309,7 +524,7 @@ async fn invalid_continuation_and_controller_stop_cannot_spin() {
         });
         let p = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".into())]);
         let provider = p.provider();
-        let session = AgentSession::create_with_options(
+        let session = AgentSession::create(
             runtime(p, vec![plugin], stop),
             dir.path().join("s.jsonl"),
             options(),
@@ -321,7 +536,7 @@ async fn invalid_continuation_and_controller_stop_cannot_spin() {
         if !stop {
             assert!(
                 session
-                    .runtime()
+                    .catalog()
                     .plugin_diagnostics()
                     .iter()
                     .any(|d| d.message.contains("without runnable"))
@@ -335,11 +550,11 @@ async fn edits_are_branch_local_survive_resume_and_preserve_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.jsonl");
     let p = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("answer".into())]);
-    let session = AgentSession::create_with_options(runtime(p, vec![], false), &path, options())
+    let session = AgentSession::create(runtime(p, vec![], false), &path, options())
         .await
         .unwrap();
     session.prompt("original").await.unwrap();
-    let branch = session.log().branch_entries().unwrap();
+    let branch = session.history().branch_entries().unwrap();
     let target = branch
         .iter()
         .find(
@@ -353,7 +568,7 @@ async fn edits_are_branch_local_survive_resume_and_preserve_metadata() {
         .edit_context(&target, replacement("replacement"))
         .unwrap();
     let edited_leaf = session
-        .log()
+        .history()
         .branch_entries()
         .unwrap()
         .last()
@@ -361,17 +576,17 @@ async fn edits_are_branch_local_survive_resume_and_preserve_metadata() {
         .id
         .clone();
     session.edit_context(&target, None).unwrap();
-    assert!(!text(&session.runtime().agent().state().messages).contains("replacement"));
+    assert!(!text(&session.snapshot().agent.messages).contains("replacement"));
     session.checkout(Some(&original_leaf)).await.unwrap();
-    assert!(text(&session.runtime().agent().state().messages).contains("original"));
+    assert!(text(&session.snapshot().agent.messages).contains("original"));
     session.checkout(Some(&edited_leaf)).await.unwrap();
     assert!(
-        text(&session.runtime().agent().state().messages).contains("replacement"),
+        text(&session.snapshot().agent.messages).contains("replacement"),
         "snapshot={:?} context={:?}",
         session.snapshot().agent.messages,
-        session.log().context().unwrap()
+        session.history().context().unwrap()
     );
-    let (log, _) = SessionLog::open(&path).unwrap();
+    let (log, _) = SessionStore::open(&path).unwrap();
     assert!(
         serde_json::to_string(&log.context().unwrap().messages)
             .unwrap()
@@ -385,7 +600,7 @@ async fn edits_are_branch_local_survive_resume_and_preserve_metadata() {
 async fn editing_retained_messages_after_repeated_compaction_keeps_provenance() {
     let dir = tempfile::tempdir().unwrap();
     let p = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("answer".into())]);
-    let session = AgentSession::create_with_options(
+    let session = AgentSession::create(
         runtime(p, vec![], false),
         dir.path().join("s.jsonl"),
         options(),
@@ -394,7 +609,7 @@ async fn editing_retained_messages_after_repeated_compaction_keeps_provenance() 
     .unwrap();
     session.prompt("keep me").await.unwrap();
     let target = session
-        .log()
+        .history()
         .branch_entries()
         .unwrap()
         .iter()
@@ -406,7 +621,7 @@ async fn editing_retained_messages_after_repeated_compaction_keeps_provenance() 
         .clone();
     for replacement_text in ["first edit", "second edit"] {
         let retained_tail = session
-            .log()
+            .history()
             .context()
             .unwrap()
             .messages
@@ -431,10 +646,10 @@ async fn editing_retained_messages_after_repeated_compaction_keeps_provenance() 
             text(&session.snapshot().agent.messages).contains(replacement_text),
             "expected={replacement_text} snapshot={:?} branch={:?}",
             session.snapshot().agent.messages,
-            session.log().branch_entries().unwrap()
+            session.history().branch_entries().unwrap()
         );
     }
-    let (_, document) = SessionLog::open(session.log().path()).unwrap();
+    let (_, document) = SessionStore::open(session.history().path()).unwrap();
     let context = pi_session::build_session_context(
         &document
             .branch()
@@ -484,7 +699,7 @@ async fn abort_during_before_settle_signals_the_hook_and_prevents_another_reques
         .system_prompt(SystemPrompt::Final("test".into()))
         .build()
         .unwrap();
-    let session = AgentSession::create_with_options(runtime, dir.path().join("s.jsonl"), options())
+    let session = AgentSession::create(runtime, dir.path().join("s.jsonl"), options())
         .await
         .unwrap();
     let run_session = session.clone();
@@ -493,11 +708,15 @@ async fn abort_during_before_settle_signals_the_hook_and_prevents_another_reques
         .await
         .unwrap();
     session.abort();
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), run)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    let pi_session::PromptOutcome::Agent(outcome) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("expected an agent run");
+    };
     assert_eq!(outcome.stop, pi_agent::AgentLoopStop::Aborted);
     assert_eq!(provider.requests().len(), 1);
 }
@@ -532,7 +751,7 @@ async fn explicit_boundary_continuation_delivers_steering_before_deferred_follow
         ScriptedTurn::Text("third".into()),
     ]);
     let provider = p.provider();
-    let session = AgentSession::create_with_options(
+    let session = AgentSession::create(
         runtime(p, vec![plugin], false),
         dir.path().join("s.jsonl"),
         options(),
@@ -552,7 +771,7 @@ async fn explicit_boundary_continuation_delivers_steering_before_deferred_follow
 #[test]
 fn content_edits_preserve_wire_metadata_and_reject_cross_branch_batches() {
     let dir = tempfile::tempdir().unwrap();
-    let log = SessionLog::create(
+    let log = SessionStore::create(
         dir.path().join("s.jsonl"),
         pi_session::SessionHeader::new("s", dir.path()),
     )
@@ -597,7 +816,7 @@ async fn tool_results_are_durable_and_editable_before_the_next_provider_request(
             return BoundaryResult::default();
         }
         assert_eq!(event.tool_result_entry_ids.len(), 1);
-        let (log, _) = SessionLog::open(&durable_path).unwrap();
+        let (log, _) = SessionStore::open(&durable_path).unwrap();
         assert!(
             log.get_entry(event.message_entry_id.as_ref().unwrap())
                 .is_some()
@@ -633,14 +852,14 @@ async fn tool_results_are_durable_and_editable_before_the_next_provider_request(
         .system_prompt(SystemPrompt::Final("test".into()))
         .build()
         .unwrap();
-    let session = AgentSession::create_with_options(runtime, &path, options())
+    let session = AgentSession::create(runtime, &path, options())
         .await
         .unwrap();
     session.prompt("use tool").await.unwrap();
     let requests = provider.requests();
     assert_eq!(requests.len(), 2);
     assert!(requests[1].messages.iter().any(|message| matches!(message, Message::ToolResult(value) if serde_json::to_string(value).unwrap().contains("sanitized result"))));
-    assert!(session.log().branch_entries().unwrap().iter().any(|entry| matches!(&entry.entry, SessionEntry::Message(m) if m.message.role()=="toolResult" && serde_json::to_string(&m.message).unwrap().contains("secret"))));
+    assert!(session.history().branch_entries().unwrap().iter().any(|entry| matches!(&entry.entry, SessionEntry::Message(m) if m.message.role()=="toolResult" && serde_json::to_string(&m.message).unwrap().contains("secret"))));
 }
 
 struct BoundaryCompactionProbe {
@@ -759,7 +978,7 @@ async fn edits_invalidate_stale_usage_and_unsent_boundary_input_survives_compact
             .system_prompt(SystemPrompt::Final("test".into()))
             .build()
             .unwrap();
-        let session = AgentSession::create_with_options(
+        let session = AgentSession::create(
             runtime,
             dir.path().join("s.jsonl"),
             AgentSessionOptions::default()
@@ -836,7 +1055,7 @@ async fn boundary_compaction_previews_and_commits_retained_edits_or_summary_only
             ScriptedTurn::Text("done".into()),
         ]);
         let provider = p.provider();
-        let session = AgentSession::create_with_options(
+        let session = AgentSession::create(
             runtime(p, vec![plugin], false),
             dir.path().join("s.jsonl"),
             options(),

@@ -126,15 +126,18 @@ async fn first_render_uses_registered_tools_or_the_exact_explicit_selection() {
         };
         let session = harness
             .sessions()
-            .create_session(directory.path(), directory.path().join("session.jsonl"))
+            .create_session(pi_session::CreateSessionOptions::new(
+                directory.path(),
+                directory.path().join("session.jsonl"),
+            ))
             .await
             .unwrap();
-        let expected = session.current().runtime().active_tools();
+        let expected = session.current().snapshot().agent.active_tools;
         assert!(!expected.is_empty());
         assert_eq!(domain.rendered.lock().unwrap()[0].tools, expected);
         assert_eq!(domain.rendered.lock().unwrap().len(), 1);
         assert_eq!(
-            session.current().runtime().prompt_options().unwrap()["tools"],
+            session.current().catalog().prompt_options().unwrap()["tools"],
             json!(expected)
         );
         assert_eq!(domain.prepares.load(Ordering::SeqCst), 1);
@@ -144,7 +147,7 @@ async fn first_render_uses_registered_tools_or_the_exact_explicit_selection() {
         }
         session
             .current()
-            .submit("Use the configured policy.")
+            .prompt("Use the configured policy.")
             .await
             .unwrap();
         assert_eq!(
@@ -164,10 +167,13 @@ async fn first_render_uses_registered_tools_or_the_exact_explicit_selection() {
     let harness = domain.builder().active_tools(Vec::new()).build();
     let session = harness
         .sessions()
-        .create_session(directory.path(), directory.path().join("empty.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("empty.jsonl"),
+        ))
         .await
         .unwrap();
-    assert!(session.current().runtime().active_tools().is_empty());
+    assert!(session.current().snapshot().agent.active_tools.is_empty());
     assert!(domain.rendered.lock().unwrap()[0].tools.is_empty());
     harness.sessions().shutdown().await.unwrap();
 }
@@ -180,30 +186,33 @@ async fn frozen_prompt_inputs_survive_tool_changes_and_turns_until_reload() {
     let harness = domain.builder().build();
     let session = harness
         .sessions()
-        .create_session(directory.path(), directory.path().join("session.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("session.jsonl"),
+        ))
         .await
         .unwrap();
-    session.current().submit("First question.").await.unwrap();
+    session.current().prompt("First question.").await.unwrap();
     policy(directory.path(), "echo-only");
     session.current().set_active_tools(["echo"]).unwrap();
-    session.current().submit("Second question.").await.unwrap();
-    session.current().submit("Third question.").await.unwrap();
+    session.current().prompt("Second question.").await.unwrap();
+    session.current().prompt("Third question.").await.unwrap();
     assert_eq!(domain.prepares.load(Ordering::SeqCst), 1);
     for request in domain.requests(0) {
         assert!(request.system_prompt.starts_with("version-1;"));
     }
     assert_eq!(
-        session.current().runtime().prompt_options().unwrap()["tools"],
+        session.current().catalog().prompt_options().unwrap()["tools"],
         json!(["echo"])
     );
 
     session.reload().await.unwrap();
     assert_eq!(domain.prepares.load(Ordering::SeqCst), 2);
     assert_eq!(domain.registrations.load(Ordering::SeqCst), 2);
-    assert_eq!(session.current().runtime().active_tools(), ["echo"]);
+    assert_eq!(session.current().snapshot().agent.active_tools, ["echo"]);
     session
         .current()
-        .submit("Question after reload.")
+        .prompt("Question after reload.")
         .await
         .unwrap();
     assert!(
@@ -235,27 +244,27 @@ async fn failed_preparation_or_render_preserves_the_live_session_and_journal() {
     let path = directory.path().join("session.jsonl");
     let session = harness
         .sessions()
-        .create_session(directory.path(), &path)
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            &path,
+        ))
         .await
         .unwrap();
-    session.current().submit("Start.").await.unwrap();
+    session.current().prompt("Start.").await.unwrap();
     session.current().set_active_tools(["echo"]).unwrap();
     for invalid in ["invalid-prepare", "invalid-render"] {
         let previous = session.current();
         let saved = std::fs::read(&path).unwrap();
-        let prompt = previous.runtime().agent().state().system_prompt.clone();
+        let prompt = previous.snapshot().agent.system_prompt.clone();
         policy(directory.path(), invalid);
         assert!(session.reload().await.is_err());
         assert!(Arc::ptr_eq(&previous, &session.current()));
         assert_eq!(std::fs::read(&path).unwrap(), saved);
-        assert_eq!(
-            session.current().runtime().agent().state().system_prompt,
-            prompt
-        );
-        assert_eq!(session.current().runtime().active_tools(), ["echo"]);
+        assert_eq!(session.current().snapshot().agent.system_prompt, prompt);
+        assert_eq!(session.current().snapshot().agent.active_tools, ["echo"]);
         session
             .current()
-            .submit("Continue with the valid generation.")
+            .prompt("Continue with the valid generation.")
             .await
             .unwrap();
     }
@@ -270,22 +279,17 @@ async fn failed_preparation_or_render_preserves_the_live_session_and_journal() {
     policy(directory.path(), "echo-only");
     let domain = Domain::default();
     let harness = domain.builder().build();
-    let session = harness.sessions().open_session(&path).await.unwrap();
+    let session = harness
+        .sessions()
+        .open_session(&path, Default::default())
+        .await
+        .unwrap();
     let saved = std::fs::read(&path).unwrap();
-    let prompt = session
-        .current()
-        .runtime()
-        .agent()
-        .state()
-        .system_prompt
-        .clone();
+    let prompt = session.current().snapshot().agent.system_prompt.clone();
     assert!(session.current().set_active_tools(["delay"]).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), saved);
-    assert_eq!(
-        session.current().runtime().agent().state().system_prompt,
-        prompt
-    );
-    assert_eq!(session.current().runtime().active_tools(), ["echo"]);
+    assert_eq!(session.current().snapshot().agent.system_prompt, prompt);
+    assert_eq!(session.current().snapshot().agent.active_tools, ["echo"]);
     harness.sessions().shutdown().await.unwrap();
 }
 
@@ -313,14 +317,20 @@ async fn resume_prepares_current_domain_resources_in_the_saved_workspace_and_res
     let harness = domain.builder().build();
     let session = harness
         .sessions()
-        .create_session_with_workspace(workspace.clone(), &path, None, None)
+        .create_session(pi_session::CreateSessionOptions {
+            workspace: workspace.clone(),
+            path: path.clone(),
+            session_id: None,
+            metadata: None,
+            generation_overlay: Default::default(),
+        })
         .await
         .unwrap();
-    let id = session.current().log().id().to_owned();
+    let id = session.current().history().id().to_owned();
     session.current().set_active_tools(["echo"]).unwrap();
     session
         .current()
-        .submit("Persist this conversation.")
+        .prompt("Persist this conversation.")
         .await
         .unwrap();
     harness.sessions().shutdown().await.unwrap();
@@ -330,12 +340,12 @@ async fn resume_prepares_current_domain_resources_in_the_saved_workspace_and_res
     let resumed_harness = current_domain.builder().build();
     let resumed = resumed_harness
         .sessions()
-        .open_session(&path)
+        .open_session(&path, Default::default())
         .await
         .unwrap();
-    assert_eq!(resumed.current().log().id(), id);
-    assert_eq!(resumed.current().runtime().workspace().spec(), &workspace);
-    assert_eq!(resumed.current().runtime().active_tools(), ["echo"]);
+    assert_eq!(resumed.current().history().id(), id);
+    assert_eq!(resumed.current().catalog().workspace().spec(), &workspace);
+    assert_eq!(resumed.current().snapshot().agent.active_tools, ["echo"]);
     assert!(
         current_domain
             .rendered
@@ -347,7 +357,7 @@ async fn resume_prepares_current_domain_resources_in_the_saved_workspace_and_res
     assert_eq!(current_domain.prepares.load(Ordering::SeqCst), 1);
     resumed
         .current()
-        .submit("Use the current domain policy.")
+        .prompt("Use the current domain policy.")
         .await
         .unwrap();
     assert!(
@@ -370,7 +380,10 @@ async fn unknown_explicit_tools_fail_before_first_render_and_persistence() {
     let path = directory.path().join("session.jsonl");
     let result = harness
         .sessions()
-        .create_session(directory.path(), &path)
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            &path,
+        ))
         .await;
     assert!(result.err().unwrap().to_string().contains("unknown"));
     assert!(domain.rendered.lock().unwrap().is_empty());
@@ -382,7 +395,7 @@ async fn legacy_journal_without_tool_selection_renders_defaults_and_additions_to
     let directory = tempfile::tempdir().unwrap();
     policy(directory.path(), "requires-delay");
     let path = directory.path().join("legacy.jsonl");
-    let log = pi_session::SessionLog::create(
+    let log = pi_session::SessionStore::create(
         &path,
         pi_session::SessionHeader::new("legacy-tools", directory.path()),
     )
@@ -398,9 +411,13 @@ async fn legacy_journal_without_tool_selection_renders_defaults_and_additions_to
                 .additional_active_tools(vec!["delay".into(), "removed-addition".into()]),
         )
         .build();
-    let session = harness.sessions().open_session(&path).await.unwrap();
+    let session = harness
+        .sessions()
+        .open_session(&path, Default::default())
+        .await
+        .unwrap();
     assert_eq!(
-        session.current().runtime().active_tools(),
+        session.current().snapshot().agent.active_tools,
         ["echo", "delay"]
     );
     assert!(
@@ -413,7 +430,7 @@ async fn legacy_journal_without_tool_selection_renders_defaults_and_additions_to
     );
     session
         .current()
-        .submit("Use both configured capabilities.")
+        .prompt("Use both configured capabilities.")
         .await
         .unwrap();
     assert_eq!(
@@ -432,7 +449,7 @@ async fn legacy_journal_keeps_explicit_caller_tools_strict_before_first_render()
     let directory = tempfile::tempdir().unwrap();
     policy(directory.path(), "requires-delay");
     let path = directory.path().join("legacy.jsonl");
-    let log = pi_session::SessionLog::create(
+    let log = pi_session::SessionStore::create(
         &path,
         pi_session::SessionHeader::new("legacy-unknown", directory.path()),
     )
@@ -448,7 +465,10 @@ async fn legacy_journal_keeps_explicit_caller_tools_strict_before_first_render()
                 .additional_active_tools(vec!["delay".into()]),
         )
         .build();
-    let result = harness.sessions().open_session(&path).await;
+    let result = harness
+        .sessions()
+        .open_session(&path, Default::default())
+        .await;
     assert!(
         result
             .err()
@@ -470,7 +490,7 @@ async fn accepted_recovery_writes_determine_first_render_without_mutating_a_reje
 
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("interrupted.jsonl");
-    let log = pi_session::SessionLog::create(
+    let log = pi_session::SessionStore::create(
         &path,
         pi_session::SessionHeader::new("interrupted-tools", directory.path()),
     )
@@ -514,10 +534,16 @@ async fn accepted_recovery_writes_determine_first_render_without_mutating_a_reje
     policy(directory.path(), "invalid-render");
     let domain = Domain::default();
     let harness = domain.builder().build();
-    assert!(harness.sessions().open_session(&path).await.is_err());
+    assert!(
+        harness
+            .sessions()
+            .open_session(&path, Default::default())
+            .await
+            .is_err()
+    );
     assert_eq!(std::fs::read(&path).unwrap(), saved);
     assert!(harness.sessions().sessions().is_empty());
-    let unchanged = pi_session::SessionLog::open_handle(&path).unwrap();
+    let unchanged = pi_session::SessionStore::open_handle(&path).unwrap();
     assert!(unchanged.get_entry("recovered-selection").is_none());
     assert_eq!(
         unchanged
@@ -529,8 +555,12 @@ async fn accepted_recovery_writes_determine_first_render_without_mutating_a_reje
     drop(unchanged);
 
     policy(directory.path(), "delay-only");
-    let session = harness.sessions().open_session(&path).await.unwrap();
-    assert_eq!(session.current().runtime().active_tools(), ["delay"]);
+    let session = harness
+        .sessions()
+        .open_session(&path, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(session.current().snapshot().agent.active_tools, ["delay"]);
     assert_eq!(domain.rendered.lock().unwrap().len(), 1);
     assert!(
         domain
@@ -543,14 +573,14 @@ async fn accepted_recovery_writes_determine_first_render_without_mutating_a_reje
     assert!(
         session
             .current()
-            .log()
+            .history()
             .get_entry("recovered-selection")
             .is_some()
     );
     assert!(
         session
             .current()
-            .log()
+            .history()
             .find_open_operations(MAIN_LANE, None)
             .unwrap()
             .is_empty()

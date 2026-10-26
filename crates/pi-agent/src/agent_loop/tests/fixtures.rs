@@ -348,7 +348,10 @@ impl Plugin for Hooks {
         event: ContextEvent,
     ) -> Result<ContextPatch, PluginError> {
         Ok(ContextPatch {
-            messages: self.context.as_ref().map(|hook| hook(event.messages)),
+            messages: self
+                .context
+                .as_ref()
+                .map(|hook| hook(Arc::unwrap_or_clone(event.messages))),
         })
     }
 

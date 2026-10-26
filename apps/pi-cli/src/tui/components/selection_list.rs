@@ -36,6 +36,13 @@ impl Default for SelectionList {
 }
 
 impl SelectionList {
+    pub(in crate::tui) fn set_highlight_marker(&mut self, marker: &'static str) {
+        self.component.attr(
+            Attribute::HighlightedStr,
+            AttrValue::TextLine(Line::from(marker)),
+        );
+    }
+
     pub(in crate::tui) fn set_highlight_style(&mut self, style: Style) {
         self.component
             .attr(Attribute::HighlightStyle, AttrValue::Style(style));

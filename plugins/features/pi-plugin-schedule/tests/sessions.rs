@@ -119,7 +119,7 @@ async fn create(root: &PiSession, extras: Value) {
         .unwrap()
         .extend(extras.as_object().unwrap().clone());
     root.current()
-        .submit(format!("/schedule create {job}"))
+        .prompt(format!("/schedule create {job}"))
         .await
         .unwrap();
 }
@@ -139,10 +139,13 @@ async fn tool_creation_and_provider_failure_are_recorded() {
     )]);
     let manager = MultiSessionManager::new(factory);
     let root = manager
-        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("parent.jsonl"),
+        ))
         .await
         .unwrap();
-    root.current().submit("Schedule a check").await.unwrap();
+    root.current().prompt("Schedule a check").await.unwrap();
     wait_until(|| database(&agent_dir)["runs"][0]["status"] == "failed").await;
     assert!(
         database(&agent_dir)["runs"][0]["error"]
@@ -165,13 +168,16 @@ async fn due_jobs_wait_for_foreground_work_to_settle() {
     let providers = factory.providers.clone();
     let manager = MultiSessionManager::new(factory);
     let root = manager
-        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("parent.jsonl"),
+        ))
         .await
         .unwrap();
     create(&root, json!({})).await;
     let foreground = tokio::spawn({
         let session = root.current();
-        async move { session.submit("foreground work").await }
+        async move { session.prompt("foreground work").await }
     });
     wait_until(|| !providers.lock().unwrap()[0].requests().is_empty()).await;
     tokio::time::sleep(Duration::from_millis(2100)).await;
@@ -190,11 +196,17 @@ async fn scheduled_work_uses_fresh_session_and_never_reaches_parent_or_recurses(
     let providers = factory.providers.clone();
     let manager = MultiSessionManager::new(factory);
     let root = manager
-        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("parent.jsonl"),
+        ))
         .await
         .unwrap();
     let other = manager
-        .create_session(directory.path(), directory.path().join("other.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("other.jsonl"),
+        ))
         .await
         .unwrap();
     create(&root, json!({})).await;
@@ -210,8 +222,8 @@ async fn scheduled_work_uses_fresh_session_and_never_reaches_parent_or_recurses(
     assert_eq!(db["runs"].as_array().unwrap().len(), 1);
     assert_eq!(db["runs"][0]["output"], "build passed");
     assert!(db["runs"][0]["session_id"].as_str().is_some());
-    assert!(!root.current().log().is_materialized());
-    assert!(!other.current().log().is_materialized());
+    assert!(!root.current().history().is_materialized());
+    assert!(!other.current().history().is_materialized());
     let providers = providers.lock().unwrap().clone();
     assert_eq!(
         providers.iter().map(|p| p.requests().len()).sum::<usize>(),
@@ -234,7 +246,10 @@ async fn successful_reload_cancels_active_work_and_does_not_replay_once() {
     let providers = factory.providers.clone();
     let manager = MultiSessionManager::new(factory);
     let root = manager
-        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("parent.jsonl"),
+        ))
         .await
         .unwrap();
     create(&root, json!({})).await;
@@ -252,7 +267,7 @@ async fn successful_reload_cancels_active_work_and_does_not_replay_once() {
         .unwrap();
     assert_eq!(database(&agent_dir)["runs"][0]["status"], "aborted");
     assert_eq!(database(&agent_dir)["jobs"][0]["enabled"], false);
-    assert!(!root.current().log().is_materialized());
+    assert!(!root.current().history().is_materialized());
     manager.shutdown().await.unwrap();
 }
 
@@ -265,7 +280,10 @@ async fn failed_reload_keeps_old_scheduler_and_timeout_is_recorded() {
     let providers = factory.providers.clone();
     let manager = MultiSessionManager::new(factory);
     let root = manager
-        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("parent.jsonl"),
+        ))
         .await
         .unwrap();
     create(&root, json!({"timeout_seconds":2})).await;
@@ -291,7 +309,10 @@ async fn schedules_survive_quit_and_untrusted_project_store_is_ignored() {
     let factory = Factory::new(agent_dir.clone(), ScriptedTurn::Text("restarted".into()));
     let manager = MultiSessionManager::new(factory.clone());
     let root = manager
-        .create_session(directory.path(), directory.path().join("first.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("first.jsonl"),
+        ))
         .await
         .unwrap();
     create(&root, json!({"paused":true})).await;
@@ -310,17 +331,20 @@ async fn schedules_survive_quit_and_untrusted_project_store_is_ignored() {
     .unwrap();
     let manager = MultiSessionManager::new(factory);
     let root = manager
-        .create_session(directory.path(), directory.path().join("second.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("second.jsonl"),
+        ))
         .await
         .unwrap();
     assert!(
         root.current()
-            .submit("/schedule list project")
+            .prompt("/schedule list project")
             .await
             .is_err()
     );
     root.current()
-        .submit(format!("/schedule run_now {id}"))
+        .prompt(format!("/schedule run_now {id}"))
         .await
         .unwrap();
     wait_until(|| database(&agent_dir)["runs"][0]["status"] == "completed").await;
@@ -335,7 +359,10 @@ async fn shutdown_while_child_is_running_finishes_without_manager_gate_deadlock(
     let providers = factory.providers.clone();
     let manager = MultiSessionManager::new(factory);
     let root = manager
-        .create_session(directory.path(), directory.path().join("parent.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            directory.path(),
+            directory.path().join("parent.jsonl"),
+        ))
         .await
         .unwrap();
     create(&root, json!({})).await;

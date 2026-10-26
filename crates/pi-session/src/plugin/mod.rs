@@ -8,3 +8,12 @@ pub use pi_plugin::{
     SessionStartEvent, SessionStartReason, SessionSwitchReason, SessionTreeEvent,
     SessionTreeSummary, TreePreparation,
 };
+
+mod context;
+mod models;
+mod session;
+mod ui;
+pub use context::{
+    PiPluginContext, PluginContextBinding, PluginProviderMutation, PluginProviderMutationAccess,
+    PluginUiBridge,
+};

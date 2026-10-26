@@ -13,7 +13,6 @@ export function useComposerController({
   activeTurnId,
   activeWorkspaceId,
   isProcessing,
-  queueFlushPaused = false,
   steerEnabled,
   followUpMessageBehavior,
   sendUserMessage,
@@ -24,7 +23,6 @@ export function useComposerController({
   activeTurnId: string | null;
   activeWorkspaceId: string | null;
   isProcessing: boolean;
-  queueFlushPaused?: boolean;
   steerEnabled: boolean;
   followUpMessageBehavior: FollowUpMessageBehavior;
   sendUserMessage: (
@@ -63,7 +61,6 @@ export function useComposerController({
     activeThreadId,
     activeTurnId,
     isProcessing,
-    queueFlushPaused,
     steerEnabled,
     followUpMessageBehavior,
     sendUserMessage,

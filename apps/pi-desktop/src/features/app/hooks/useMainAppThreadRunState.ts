@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import type { ThreadRunParams } from "@threads/utils/threadStorage";
 
 type ThreadRunParamsPatch = Partial<
-  Pick<ThreadRunParams, "modelId" | "effort" | "serviceTier">
+  Pick<ThreadRunParams, "modelId" | "effort">
 >;
 
 type ThreadRunMetadata = {
@@ -33,7 +33,8 @@ export function useMainAppThreadRunState({
       }
 
       const modelId =
-        typeof metadata.modelId === "string" && metadata.modelId.trim().length > 0
+        typeof metadata.modelId === "string" &&
+        metadata.modelId.trim().length > 0
           ? metadata.modelId.trim()
           : null;
       const effort =

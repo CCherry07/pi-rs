@@ -1,6 +1,5 @@
 import { DebugPanel } from "../../../debug/components/DebugPanel";
 import { i18n } from "../../../../i18n";
-import { PlanPanel } from "../../../plan/components/PlanPanel";
 import { TerminalDock } from "../../../terminal/components/TerminalDock";
 import { TerminalPanel } from "../../../terminal/components/TerminalPanel";
 import type {
@@ -12,7 +11,6 @@ export type SecondaryLayoutNodesOptions = LayoutSecondarySurface;
 
 type SecondaryLayoutNodes = Pick<
   LayoutNodesResult,
-  | "planPanelNode"
   | "debugPanelNode"
   | "debugPanelFullNode"
   | "terminalDockNode"
@@ -97,7 +95,6 @@ function buildCompactGitBackNode(
 }
 
 export function buildSecondaryNodes(options: SecondaryLayoutNodesOptions): SecondaryLayoutNodes {
-  const planPanelNode = <PlanPanel {...options.planPanelProps} />;
   const terminalPanelNode = buildTerminalPanelNode(options.terminalState);
 
   const terminalDockNode = (
@@ -124,7 +121,6 @@ export function buildSecondaryNodes(options: SecondaryLayoutNodesOptions): Secon
   const compactGitBackNode = buildCompactGitBackNode(options.compactNavProps);
 
   return {
-    planPanelNode,
     debugPanelNode,
     debugPanelFullNode,
     terminalDockNode,

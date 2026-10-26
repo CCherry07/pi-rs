@@ -11,7 +11,7 @@ use pi_core::{
 use pi_plugin::{
     Plugin, RegisterContext, SessionExecutionOrigin, Tool, ToolContext, ToolError, ToolUpdateSink,
 };
-use pi_session::{QueueKind, SessionGenerationOverlay};
+use pi_session::{PiSession, QueueKind, SessionGenerationOverlay, SessionHeader, SessionStore};
 
 fn write_catalog(agent_dir: &Path, models: &[&str]) {
     std::fs::write(
@@ -53,15 +53,47 @@ fn fixture(root: &Path) -> Pi {
     Pi::builder(config).build().unwrap()
 }
 
+async fn fixture_session(
+    host: &Pi,
+    cwd: &Path,
+    path: &Path,
+    materialized: bool,
+    overlay: SessionGenerationOverlay,
+) -> PiSession {
+    if materialized {
+        SessionStore::create(path, SessionHeader::new("reload-session", cwd)).unwrap();
+        host.sessions()
+            .open_session(
+                path,
+                pi_session::OpenSessionOptions {
+                    generation_overlay: overlay,
+                },
+            )
+            .await
+            .unwrap()
+    } else {
+        host.sessions()
+            .create_session(pi_session::CreateSessionOptions {
+                generation_overlay: overlay,
+                ..pi_session::CreateSessionOptions::new(cwd, path)
+            })
+            .await
+            .unwrap()
+    }
+}
+
 async fn assert_reload_keeps_current_state(materialized: bool) {
     let root = tempfile::tempdir().unwrap();
     let host = fixture(root.path());
     let path = root.path().join("session.jsonl");
-    let session = host
-        .sessions()
-        .create_session(root.path(), &path)
-        .await
-        .unwrap();
+    let session = fixture_session(
+        &host,
+        root.path(),
+        &path,
+        materialized,
+        SessionGenerationOverlay::default(),
+    )
+    .await;
     let original = session.current();
     original
         .set_model(ProviderId::new("reload-fixture"), ModelId::new("beta"))
@@ -73,9 +105,6 @@ async fn assert_reload_keeps_current_state(materialized: bool) {
             QueueKind::NextRun,
         )
         .unwrap();
-    if materialized {
-        original.log().materialize().unwrap();
-    }
     std::fs::write(
         host.agent_dir().join("settings.json"),
         r#"{"steeringMode":"all","followUpMode":"all","defaultThinkingLevel":"minimal"}"#,
@@ -87,16 +116,16 @@ async fn assert_reload_keeps_current_state(materialized: bool) {
     let reloaded = session.current();
     assert!(!Arc::ptr_eq(&original, &reloaded));
     assert!(original.is_closed());
-    assert_eq!(reloaded.log().is_materialized(), materialized);
+    assert_eq!(reloaded.history().is_materialized(), materialized);
     assert_eq!(path.exists(), materialized);
     assert_eq!(reloaded.steering_mode(), QueueMode::All);
     assert_eq!(reloaded.follow_up_mode(), QueueMode::All);
     assert_eq!(reloaded.snapshot().queue.follow_up, ["queued input"]);
     assert_eq!(
-        reloaded.runtime().agent().state().thinking_level,
+        reloaded.snapshot().agent.thinking_level,
         ThinkingLevel::High,
     );
-    assert_eq!(reloaded.runtime().agent().state().model_id.as_str(), "beta");
+    assert_eq!(reloaded.snapshot().agent.model_id.as_str(), "beta");
     host.sessions().shutdown().await.unwrap();
 }
 
@@ -116,7 +145,10 @@ async fn reload_accepts_removal_of_the_startup_model_after_switching_models() {
     let host = fixture(root.path());
     let session = host
         .sessions()
-        .create_session(root.path(), root.path().join("session.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            root.path(),
+            root.path().join("session.jsonl"),
+        ))
         .await
         .unwrap();
     session
@@ -127,16 +159,7 @@ async fn reload_accepts_removal_of_the_startup_model_after_switching_models() {
 
     session.reload().await.unwrap();
 
-    assert_eq!(
-        session
-            .current()
-            .runtime()
-            .agent()
-            .state()
-            .model_id
-            .as_str(),
-        "beta",
-    );
+    assert_eq!(session.current().snapshot().agent.model_id.as_str(), "beta",);
     host.sessions().shutdown().await.unwrap();
 }
 
@@ -146,7 +169,10 @@ async fn reload_keeps_an_explicit_current_model_absent_from_the_catalog() {
     let host = fixture(root.path());
     let session = host
         .sessions()
-        .create_session(root.path(), root.path().join("session.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            root.path(),
+            root.path().join("session.jsonl"),
+        ))
         .await
         .unwrap();
     session
@@ -160,13 +186,7 @@ async fn reload_keeps_an_explicit_current_model_absent_from_the_catalog() {
     session.reload().await.unwrap();
 
     assert_eq!(
-        session
-            .current()
-            .runtime()
-            .agent()
-            .state()
-            .model_id
-            .as_str(),
+        session.current().snapshot().agent.model_id.as_str(),
         "custom-unlisted",
     );
     host.sessions().shutdown().await.unwrap();
@@ -177,41 +197,35 @@ async fn reload_keeps_the_explicit_model_selected_when_resuming_a_session() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("session.jsonl");
     let original_host = fixture(root.path());
-    let original = original_host
-        .sessions()
-        .create_session(root.path(), &path)
-        .await
-        .unwrap();
+    let original = fixture_session(
+        &original_host,
+        root.path(),
+        &path,
+        true,
+        SessionGenerationOverlay::default(),
+    )
+    .await;
     original
         .current()
         .set_model(ProviderId::new("reload-fixture"), ModelId::new("beta"))
         .unwrap();
-    original.current().log().materialize().unwrap();
     original_host.sessions().shutdown().await.unwrap();
 
     let resumed_host = fixture(root.path());
-    let resumed = resumed_host.sessions().open_session(&path).await.unwrap();
+    let resumed = resumed_host
+        .sessions()
+        .open_session(&path, Default::default())
+        .await
+        .unwrap();
     assert_eq!(
-        resumed
-            .current()
-            .runtime()
-            .agent()
-            .state()
-            .model_id
-            .as_str(),
+        resumed.current().snapshot().agent.model_id.as_str(),
         "alpha",
     );
 
     resumed.reload().await.unwrap();
 
     assert_eq!(
-        resumed
-            .current()
-            .runtime()
-            .agent()
-            .state()
-            .model_id
-            .as_str(),
+        resumed.current().snapshot().agent.model_id.as_str(),
         "alpha",
     );
     resumed_host.sessions().shutdown().await.unwrap();
@@ -272,34 +286,27 @@ async fn assert_reload_reconciles_plugin_tools(origin: SessionExecutionOrigin) {
                 move || Arc::new(ReloadTools(tools.lock().unwrap().clone()))
             });
         let path = root.path().join("session.jsonl");
-        let session = host
-            .sessions()
-            .create_session_with_overlay(root.path(), &path, overlay)
-            .await
-            .unwrap();
+        let session = fixture_session(&host, root.path(), &path, materialized, overlay).await;
         session
             .current()
             .set_active_tools(["read", "keep", "obsolete"])
             .unwrap();
-        if materialized {
-            session.current().log().materialize().unwrap();
-        }
         *tools.lock().unwrap() = vec!["keep".to_string(), "added".to_string()];
 
         session.reload().await.unwrap();
 
         let reloaded = session.current();
-        assert_eq!(reloaded.runtime().execution_origin(), origin);
+        assert_eq!(reloaded.catalog().execution_origin(), origin);
         assert!(
             reloaded
-                .runtime()
+                .catalog()
                 .tool_specs()
                 .iter()
                 .any(|tool| tool.name == "added")
         );
         assert!(
             reloaded
-                .runtime()
+                .catalog()
                 .tool_specs()
                 .iter()
                 .all(|tool| tool.name != "obsolete")
@@ -308,10 +315,10 @@ async fn assert_reload_reconciles_plugin_tools(origin: SessionExecutionOrigin) {
             SessionExecutionOrigin::User => vec!["read", "keep", "added"],
             SessionExecutionOrigin::Subagent => vec!["read", "keep"],
         };
-        assert_eq!(reloaded.runtime().active_tools(), expected);
+        assert_eq!(reloaded.snapshot().agent.active_tools, expected);
         assert_eq!(
             reloaded
-                .log()
+                .history()
                 .load()
                 .unwrap()
                 .context()

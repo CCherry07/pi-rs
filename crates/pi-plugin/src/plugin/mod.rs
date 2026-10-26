@@ -31,11 +31,12 @@ mod provider;
 
 pub use agent::{
     AgentEndEvent, AgentHook, AgentHookInterests, AgentPluginContext, AgentSettledEvent,
-    AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch, ContextEvent, ContextPatch,
-    InputContext, InputEvent, InputPatch, InputSource, InputStreamingBehavior, MessageEndEvent,
-    MessageEndPatch, MessageStartEvent, MessageUpdateEvent, Plugin, PluginDriver, RegisterContext,
-    ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolExecutionEndEvent, ToolExecutionStartEvent,
-    ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch, TurnEndEvent, TurnStartEvent,
+    AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch, ContextEvent, ContextHookBatch,
+    ContextPatch, InputContext, InputEvent, InputPatch, InputSource, InputStreamingBehavior,
+    MessageEndEvent, MessageEndPatch, MessageStartEvent, MessageUpdateEvent, Plugin, PluginDriver,
+    RegisterContext, ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolExecutionEndEvent,
+    ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch,
+    TurnEndEvent, TurnStartEvent,
 };
 pub use capabilities::{
     CommandContextParts, CommandModelsContext, CommandSessionContext, CompactOptions, ContextParts,
@@ -51,10 +52,12 @@ pub use capabilities::{
     SendMessageOptions, SendUserMessageOptions, SessionContext, SessionContextAccess,
     SessionEntryKind, SessionEntryView, SessionExecutionOrigin, SessionReplacement,
     SessionSnapshot, UiAppAction, UiCommand, UiCompletion, UiContext, UiContextAccess,
-    UiHostOperation, UiHostRequest, UiInteraction, UiMultiSelectAction, UiMultiSelectOption,
-    UiMultiSelectRequest, UiMultiSelectResponse, UiNode, UiNodeKind, UiOverlayOptions,
-    UiProductCommand, UiRegion, UiRegionPlacement, UiShortcut, UiSurfaceArea, UiSurfaceCommand,
-    UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot, UiTone, UiTranscriptItem,
+    UiFocusTarget, UiHostOperation, UiHostRequest, UiInteraction, UiMouseButton, UiMouseEvent,
+    UiMouseEventKind, UiMouseResult, UiMultiSelectAction, UiMultiSelectOption,
+    UiMultiSelectRequest, UiMultiSelectResponse, UiNode, UiNodeKind, UiOverlayAnchor,
+    UiOverlayMargin, UiOverlayOptions, UiOverlayPosition, UiProductCommand, UiRegion,
+    UiRegionBounds, UiRegionPlacement, UiRegionSnapshot, UiShortcut, UiSurfaceArea,
+    UiSurfaceCommand, UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot, UiTone, UiTranscriptItem,
     UiTranscriptRender, UnavailablePluginContext,
 };
 pub use provider::{

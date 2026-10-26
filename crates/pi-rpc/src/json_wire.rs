@@ -27,17 +27,13 @@ pub fn session_header_json(header: &SessionHeader) -> Result<Value, String> {
     .map_err(|error| format!("invalid session timestamp: {error}"))?
     .format(&Rfc3339)
     .map_err(|error| format!("cannot format session timestamp: {error}"))?;
-    let mut value = json!({
+    Ok(json!({
         "type": "session",
         "version": 3,
         "id": header.id,
         "timestamp": timestamp,
         "cwd": header.cwd,
-    });
-    if let Some(parent) = header.legacy_parent_session_path.as_ref() {
-        value["parentSession"] = json!(parent);
-    }
-    Ok(value)
+    }))
 }
 
 /// Returns `None` for Rust-only diagnostic/shell lifecycle events that have no
@@ -79,7 +75,10 @@ pub fn session_event_json(
             object.insert("aborted".to_string(), json!(aborted));
             object.insert("willRetry".to_string(), json!(will_retry));
             if let Some(record) = result {
-                let document = session.log().load().map_err(|error| error.to_string())?;
+                let document = session
+                    .history()
+                    .load()
+                    .map_err(|error| error.to_string())?;
                 object.insert(
                     "result".to_string(),
                     compaction_result_json(&record, &document)?,
@@ -113,7 +112,10 @@ pub fn session_event_json(
             Value::Object(object)
         }
         AgentSessionEvent::EntryAppended { entry } => {
-            let document = session.log().load().map_err(|error| error.to_string())?;
+            let document = session
+                .history()
+                .load()
+                .map_err(|error| error.to_string())?;
             json!({"type":"entry_appended","entry":session_entry_json(&entry, &document)?})
         }
         AgentSessionEvent::SessionInfoChanged { name } => {
@@ -527,7 +529,7 @@ mod tests {
         AssistantMessage, AssistantStreamId, AssistantStreamView, Message, TextContent, ToolCall,
         Usage, UserMessage,
     };
-    use pi_session::{HeaderKind, SESSION_SCHEMA_VERSION, SessionLog};
+    use pi_session::{HeaderKind, SESSION_SCHEMA_VERSION, SessionStore};
 
     use super::*;
 
@@ -578,8 +580,7 @@ mod tests {
             id: "session".to_string(),
             created_at: 1_735_689_600_000,
             cwd: PathBuf::from("/tmp/project"),
-            parent_session_id: None,
-            legacy_parent_session_path: Some(PathBuf::from("/tmp/parent.jsonl")),
+            parent_session_id: Some("parent-id".to_string()),
             metadata: None,
         })
         .unwrap();
@@ -587,7 +588,7 @@ mod tests {
         assert_eq!(value["type"], "session");
         assert_eq!(value["version"], 3);
         assert_eq!(value["timestamp"], "2025-01-01T00:00:00Z");
-        assert_eq!(value["parentSession"], "/tmp/parent.jsonl");
+        assert!(value.get("parentSession").is_none());
         assert!(value.get("kind").is_none());
     }
 
@@ -669,7 +670,7 @@ mod tests {
     #[test]
     fn session_entry_wire_keeps_v3_tree_identity_and_iso_timestamp() {
         let directory = tempfile::tempdir().unwrap();
-        let log = SessionLog::create(
+        let log = SessionStore::create(
             directory.path().join("session.jsonl"),
             SessionHeader::new("session", directory.path()),
         )

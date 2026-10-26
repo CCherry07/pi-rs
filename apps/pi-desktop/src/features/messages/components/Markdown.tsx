@@ -15,6 +15,7 @@ import {
 } from "../utils/messageFileLinks";
 import type { ParsedFileLocation } from "../../../utils/fileLinks";
 import { highlightLine } from "../../../utils/syntax";
+import { resolveMarkdownImageSource } from "../utils/markdownImages";
 
 type MarkdownProps = {
   value: string;
@@ -272,7 +273,7 @@ function CodeBlock({ className, value, copyUseModifier }: CodeBlockProps) {
 
   const handleCopy = async (event: MouseEvent<HTMLButtonElement>) => {
     try {
-      const shouldFence = copyUseModifier ? event.altKey : true;
+      const shouldFence = copyUseModifier && event.altKey;
       const nextValue = shouldFence ? fencedValue : value;
       await navigator.clipboard.writeText(nextValue);
       setCopied(true);
@@ -533,7 +534,10 @@ export function Markdown({
     <div className={className}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkFileLinks]}
-        urlTransform={(url) => {
+        urlTransform={(url, key, node) => {
+          if (key === "src" && node.tagName === "img") {
+            return resolveMarkdownImageSource(url, workspacePath);
+          }
           const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(url);
           // Keep file-like hrefs intact before scheme sanitization runs, otherwise
           // Windows absolute paths such as C:/repo/file.ts look like unknown schemes.

@@ -4015,7 +4015,7 @@ dependencies = [
 
 [[package]]
 name = "pi-coding"
-version = "0.8.4"
+version = "0.8.6"
 dependencies = [
  "async-trait",
  "fs2",
@@ -4023,7 +4023,6 @@ dependencies = [
  "pi-core",
  "pi-js-package-manager",
  "pi-js-plugin",
- "pi-memory-loader",
  "pi-plugin",
  "pi-plugin-anthropic",
  "pi-plugin-azure-openai",
@@ -4088,7 +4087,6 @@ dependencies = [
  "dotenvy",
  "fix-path-env",
  "fs2",
- "futures-util",
  "git2",
  "ignore",
  "libc",
@@ -4123,14 +4121,13 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
- "toml_edit 0.20.2",
  "uuid",
  "whisper-rs",
 ]
 
 [[package]]
 name = "pi-js-package-manager"
-version = "0.8.4"
+version = "0.8.6"
 dependencies = [
  "futures",
  "glob",
@@ -4166,23 +4163,11 @@ dependencies = [
 
 [[package]]
 name = "pi-media"
-version = "0.8.4"
+version = "0.8.6"
 dependencies = [
  "base64 0.22.1",
  "image",
  "pi-core",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "pi-memory-loader"
-version = "0.8.4"
-dependencies = [
- "async-trait",
- "pi-core",
- "pi-plugin",
- "serde",
- "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -4199,6 +4184,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -4405,7 +4391,7 @@ dependencies = [
 
 [[package]]
 name = "pi-plugin-mcp"
-version = "0.8.4"
+version = "0.8.6"
 dependencies = [
  "async-trait",
  "fs2",
@@ -4425,14 +4411,13 @@ dependencies = [
 
 [[package]]
 name = "pi-plugin-memory-hermes"
-version = "0.8.4"
+version = "0.8.6"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
  "fs2",
  "pi-core",
- "pi-memory-loader",
  "pi-plugin",
  "pi-plugin-skills",
  "pi-session",
@@ -4497,6 +4482,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64 0.22.1",
+ "fs2",
  "futures",
  "pi-core",
  "pi-plugin",
@@ -4505,6 +4491,8 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "tempfile",
+ "time",
  "tokio",
  "tokio-tungstenite",
 ]
@@ -4688,7 +4676,7 @@ dependencies = [
 
 [[package]]
 name = "pi-sdk"
-version = "0.8.4"
+version = "0.8.6"
 dependencies = [
  "async-trait",
  "fs2",
@@ -4725,7 +4713,7 @@ dependencies = [
 
 [[package]]
 name = "pi-settings"
-version = "0.8.4"
+version = "0.8.6"
 dependencies = [
  "fs2",
  "serde",

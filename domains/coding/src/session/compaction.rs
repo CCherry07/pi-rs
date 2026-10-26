@@ -358,13 +358,10 @@ mod tests {
         };
         let options =
             crate::configuration::session_options(&settings, InitialModelRequest::default());
-        let session = AgentSession::create_with_options(
-            runtime,
-            directory.path().join("session.jsonl"),
-            options,
-        )
-        .await
-        .unwrap();
+        let session =
+            AgentSession::create(runtime, directory.path().join("session.jsonl"), options)
+                .await
+                .unwrap();
         session
             .prompt("Read context.txt before completing the task.")
             .await

@@ -2,14 +2,11 @@ import { useMemo, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import type {
   AppSettings,
-  ConversationItem,
   DebugEntry,
   ModelOption,
-  ServiceTier,
   ThreadSummary,
   WorkspaceInfo,
 } from "@/types";
-import { computePlanFollowupState } from "@/features/messages/utils/messageRenderUtils";
 import { useComposerController } from "@app/hooks/useComposerController";
 import { useComposerInsert } from "@app/hooks/useComposerInsert";
 import { useWorkspaceFileListing } from "@app/hooks/useWorkspaceFileListing";
@@ -37,7 +34,6 @@ type UseMainAppComposerWorkspaceStateArgs = {
   };
   thread: {
     activeThreadId: string | null;
-    activeItems: ConversationItem[];
     activeTurnIdByThread: Record<string, string | null | undefined>;
     threadStatusById: Record<
       string,
@@ -50,13 +46,11 @@ type UseMainAppComposerWorkspaceStateArgs = {
     AppSettings,
     | "steerEnabled"
     | "followUpMessageBehavior"
-    | "pauseQueuedMessagesWhenResponseRequired"
   >;
   models: {
     models: ModelOption[];
     selectedModelId: string | null;
     resolvedEffort: string | null;
-    selectedServiceTier: ServiceTier | null | undefined;
   };
   refs: {
     composerInputRef: RefObject<HTMLTextAreaElement | null>;
@@ -104,7 +98,6 @@ export function useMainAppComposerWorkspaceState({
   } = workspace;
   const {
     activeThreadId,
-    activeItems,
     activeTurnIdByThread,
     threadStatusById,
   } = thread;
@@ -112,7 +105,6 @@ export function useMainAppComposerWorkspaceState({
     models: modelOptions,
     selectedModelId,
     resolvedEffort,
-    selectedServiceTier,
   } = models;
   const { composerInputRef, workspaceHomeTextareaRef } = refs;
   const {
@@ -158,38 +150,11 @@ export function useMainAppComposerWorkspaceState({
     isStartingDraftThread;
   const activeTurnId = activeThreadId ? activeTurnIdByThread[activeThreadId] ?? null : null;
   const steerAvailable = settings.steerEnabled && Boolean(activeTurnId);
-  const isPlanReadyAwaitingResponse = useMemo(
-    () =>
-      computePlanFollowupState({
-        threadId: activeThreadId,
-        items: activeItems,
-        isThinking: isProcessing,
-        hasVisibleUserInputRequest: false,
-      }).shouldShow,
-    [
-      activeItems,
-      activeThreadId,
-      isProcessing,
-    ],
-  );
-
-  const queueFlushPaused = Boolean(
-    settings.pauseQueuedMessagesWhenResponseRequired &&
-      activeThreadId &&
-      isPlanReadyAwaitingResponse,
-  );
-
-  const queuePausedReason =
-    queueFlushPaused && isPlanReadyAwaitingResponse
-        ? t("layout.queuePausedForPlan")
-        : null;
-
   const composerState = useComposerController({
     activeThreadId,
     activeTurnId,
     activeWorkspaceId,
     isProcessing,
-    queueFlushPaused,
     steerEnabled: settings.steerEnabled,
     followUpMessageBehavior: settings.followUpMessageBehavior,
     sendUserMessage,
@@ -202,7 +167,6 @@ export function useMainAppComposerWorkspaceState({
     models: modelOptions,
     selectedModelId,
     effort: resolvedEffort,
-    serviceTier: selectedServiceTier,
     seedThreadRunParams,
     requestWorktree,
     startThreadForWorkspace,
@@ -268,7 +232,6 @@ export function useMainAppComposerWorkspaceState({
     isProcessing,
     activeTurnId,
     steerAvailable,
-    queuePausedReason,
     canInsertComposerText,
     handleInsertComposerText,
     recentThreadInstances,

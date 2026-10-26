@@ -12,6 +12,32 @@ import {
 } from "./threadItems";
 
 describe("threadItems", () => {
+  it("clears images when the final tool result explicitly replaces them", () => {
+    const base = {
+      id: "image-call",
+      type: "mcpToolCall",
+      toolName: "read",
+      server: "pi",
+      tool: "read",
+      result: "Image result",
+      status: "inProgress",
+    };
+    const partial = buildConversationItem({
+      ...base,
+      images: ["data:image/png;base64,aW1hZ2U="],
+    });
+    const final = buildConversationItem({
+      ...base,
+      images: [],
+      status: "completed",
+    });
+    if (!partial || !final) throw new Error("Expected tool results");
+
+    const updated = upsertItem([partial], final)[0];
+    if (updated.kind !== "tool") throw new Error("Expected tool item");
+    expect(updated.images).toEqual([]);
+  });
+
   it("preserves plugin message identity, Markdown and images in live and saved items", () => {
     const custom = {
       id: "custom-2-0",

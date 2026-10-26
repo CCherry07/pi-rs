@@ -2,20 +2,11 @@ import type { PiEvent } from "../types";
 
 export const SUPPORTED_PI_EVENT_METHODS = [
   "error",
-  "hook/completed",
-  "hook/started",
   "item/agentMessage/delta",
-  "item/commandExecution/outputDelta",
-  "item/commandExecution/terminalInteraction",
   "item/completed",
-  "item/fileChange/outputDelta",
-  "item/plan/delta",
-  "item/reasoning/summaryPartAdded",
-  "item/reasoning/summaryTextDelta",
   "item/reasoning/textDelta",
   "item/started",
   "thread/archived",
-  "thread/closed",
   "thread/deleted",
   "thread/name/updated",
   "thread/notice",
@@ -25,8 +16,6 @@ export const SUPPORTED_PI_EVENT_METHODS = [
   "thread/tokenUsage/updated",
   "thread/unarchived",
   "turn/completed",
-  "turn/diff/updated",
-  "turn/plan/updated",
   "turn/started",
 ] as const;
 

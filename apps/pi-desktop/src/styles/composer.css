@@ -1,10 +1,10 @@
 .composer {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   -webkit-app-region: no-drag;
-  padding: 10px var(--main-panel-padding) 20px;
-  border-top: 1px solid var(--cm-border-default);
+  padding: 18px var(--main-panel-padding) 18px;
+  border-top: none;
   background: var(--cm-surface-composer);
   backdrop-filter: blur(18px) saturate(1.1);
   -webkit-backdrop-filter: blur(18px) saturate(1.1);
@@ -37,12 +37,6 @@
   text-transform: uppercase;
   letter-spacing: 0.1em;
   color: var(--text-fainter);
-}
-
-.composer-queue-hint {
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--text-faint);
 }
 
 .composer-queue-list {
@@ -122,11 +116,17 @@
 .composer-input-area {
   position: relative;
   min-width: 0;
-  border: 1px solid var(--cm-border-heavy);
-  background: var(--cm-surface-panel-elevated);
-  border-radius: 20px;
-  padding: 10px 12px 10px 10px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-card);
+  border-radius: 16px;
+  padding: 14px;
+  box-shadow: var(--shadow-card);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.composer-input-area:focus-within {
+  border-color: var(--border-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--border-accent) 10%, transparent), var(--shadow-card);
 }
 
 .composer-input-area.is-drag-over {
@@ -143,8 +143,8 @@
 .composer-input-actions {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  align-self: center;
+  gap: 6px;
+  align-self: flex-end;
   flex-shrink: 0;
   padding: 0 2px 0 8px;
 }
@@ -166,11 +166,11 @@
 }
 
 .composer-attach {
-  border: 1px solid var(--cm-border-strong);
-  background: var(--cm-surface-panel-solid);
+  border: 1px solid transparent;
+  background: transparent;
   color: var(--text-muted);
   padding: 0;
-  border-radius: 999px;
+  border-radius: 8px;
   cursor: pointer;
   width: 28px;
   height: 28px;
@@ -313,10 +313,16 @@
   background: transparent;
   color: inherit;
   padding: 6px 4px 4px;
+  font-family: var(--ui-font-family);
   font-size: 14px;
   line-height: 1.5;
   -webkit-app-region: no-drag;
   overflow-y: hidden;
+}
+
+.composer textarea::placeholder {
+  color: var(--text-faint);
+  opacity: 1;
 }
 
 .composer textarea:focus {
@@ -328,11 +334,11 @@
   background: var(--cm-surface-panel-strong);
   color: var(--text-strong);
   padding: 0;
-  border-radius: 999px;
+  border-radius: 9px;
   font-size: 12px;
   cursor: pointer;
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -464,6 +470,17 @@
 
 .composer-action.is-stop:hover {
   background: rgba(255, 107, 107, 0.2);
+}
+
+.composer-action.is-send:not(:disabled):not(.is-disabled) {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: var(--accent-foreground);
+}
+
+.composer-action.is-send:not(:disabled):not(.is-disabled):hover {
+  background: var(--accent-primary-hover);
+  border-color: var(--accent-primary-hover);
 }
 
 .composer-action svg {
@@ -605,6 +622,10 @@
   height: 14px;
 }
 
+.composer-suggestion[data-kind="skill"] .composer-suggestion-icon {
+  color: var(--text-skill);
+}
+
 .composer-suggestion-icon-image {
   width: 14px;
   height: 14px;
@@ -645,8 +666,8 @@
 .composer-bar {
   display: flex;
   align-items: center;
-  padding-top: 10px;
-  border-top: 1px solid var(--cm-border-strong);
+  padding-top: 2px;
+  border-top: none;
   gap: 12px;
 }
 
@@ -685,7 +706,7 @@
     radial-gradient(circle, var(--surface-context-core) 54%, transparent 56%),
     conic-gradient(
       from 180deg,
-      hsl(calc(120deg * var(--context-free) / 100), 80%, 55%)
+      hsl(calc(112deg * var(--context-free) / 100), 30%, 52%)
         calc(var(--context-free) * 1%),
       var(--border-strong) 0
     );
@@ -747,65 +768,9 @@
   opacity: 0.9;
 }
 
-.composer-select-wrap--model:has(.composer-fast-indicator)::after {
-  right: 30px;
-}
-
 .composer-select-wrap:has(.composer-select:focus)::after {
   border-right-color: var(--text-strong);
   border-bottom-color: var(--text-strong);
-}
-
-.composer-plan-toggle-wrap {
-  padding: 2px 8px;
-}
-
-.composer-plan-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.composer-plan-toggle-input {
-  margin: 0;
-  width: 12px;
-  height: 12px;
-  accent-color: var(--message-link-color);
-  cursor: pointer;
-}
-
-.composer-plan-toggle-icon {
-  display: inline-flex;
-  width: 16px;
-  height: 16px;
-  color: var(--text-muted);
-}
-
-.composer-plan-toggle-icon svg {
-  width: 16px;
-  height: 16px;
-}
-
-.composer-plan-toggle-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  line-height: 1;
-}
-
-.composer-plan-toggle:has(.composer-plan-toggle-input:checked) .composer-plan-toggle-icon,
-.composer-plan-toggle:has(.composer-plan-toggle-input:checked) .composer-plan-toggle-label {
-  color: var(--text-strong);
-}
-
-.composer-plan-toggle-input:disabled {
-  cursor: not-allowed;
-}
-
-.composer-plan-toggle:has(.composer-plan-toggle-input:disabled) .composer-plan-toggle-icon,
-.composer-plan-toggle:has(.composer-plan-toggle-input:disabled) .composer-plan-toggle-label {
-  opacity: 0.6;
 }
 
 .composer-icon {
@@ -833,38 +798,6 @@
 .composer-icon--model,
 .composer-icon--effort {
   transform: translateY(1px);
-}
-
-.composer-fast-indicator {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border: 0;
-  border-radius: 999px;
-  color: var(--text-muted);
-  background: transparent;
-  cursor: pointer;
-}
-
-.composer-fast-indicator:hover:not(:disabled),
-.composer-fast-indicator:focus-visible {
-  color: var(--text-strong);
-  background: var(--surface-control-hover);
-}
-
-.composer-fast-indicator--active,
-.composer-fast-indicator--active:hover:not(:disabled),
-.composer-fast-indicator--active:focus-visible {
-  color: var(--accent-warning-strong, #b45309);
-  background: color-mix(in srgb, var(--accent-warning-strong, #b45309) 16%, transparent);
-}
-
-.composer-fast-indicator:disabled {
-  cursor: default;
-  opacity: 0.5;
 }
 
 .composer-select {

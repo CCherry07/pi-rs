@@ -16,6 +16,18 @@ _Avoid_: SessionManager, AgentSession
 One concrete generation of an active coding-agent conversation.
 _Avoid_: PiSession
 
+**SessionStore**:
+The mutable owner of one session's recorded history, shared by generations that continue that history.
+_Avoid_: SessionLog
+
+**SessionHistory**:
+A read-only view of a session's recorded history and selected branch.
+_Avoid_: SessionStore, SessionDocument
+
+**SessionDocument**:
+A complete history snapshot captured from a session at a point in time.
+_Avoid_: SessionStore, SessionHistory, SessionSnapshot
+
 **PluginContext**:
 The generation-scoped capability source shared by Rust plugins and Pi-compatible extensions.
 _Avoid_: ProductContext, AgentPluginContext

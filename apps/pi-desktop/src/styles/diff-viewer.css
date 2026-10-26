@@ -462,6 +462,11 @@
   --diffs-font-size: var(--code-font-size, 11px);
   --diffs-line-height: var(--code-line-height, 1.28);
   --diffs-tab-size: 2;
+  --diffs-addition-color-override: var(--diff-added-text);
+  --diffs-deletion-color-override: var(--diff-removed-text);
+  --diffs-modified-color-override: var(--text-accent);
+  --diffs-bg-addition-override: color-mix(in srgb, var(--diff-added) 12%, var(--surface-command));
+  --diffs-bg-deletion-override: color-mix(in srgb, var(--diff-removed) 12%, var(--surface-command));
 }
 
 .diff-viewer-output-flat {
@@ -670,11 +675,11 @@
 }
 
 .diff-viewer-raw-line-add {
-  background: rgba(46, 160, 67, 0.25);
+  background: color-mix(in srgb, var(--diff-added) 13%, transparent);
 }
 
 .diff-viewer-raw-line-del {
-  background: rgba(248, 81, 73, 0.25);
+  background: color-mix(in srgb, var(--diff-removed) 13%, transparent);
 }
 
 .diff-line-hunk {
@@ -687,11 +692,11 @@
 }
 
 .diff-line-add {
-  background: rgba(46, 160, 67, 0.25);
+  background: color-mix(in srgb, var(--diff-added) 13%, transparent);
 }
 
 .diff-line-del {
-  background: rgba(248, 81, 73, 0.25);
+  background: color-mix(in srgb, var(--diff-removed) 13%, transparent);
 }
 
 .diff-line-meta {

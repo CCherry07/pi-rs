@@ -2,9 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use pi_settings::{
-    DefaultProjectTrust, FeatureSettings, PackageFilter, PackageSource, QueueModeSetting,
-    SettingsContext, SettingsDiagnosticKind, SettingsError, SettingsManager, SettingsScope,
-    TransportSetting,
+    DefaultProjectTrust, FeatureSettings, FeatureSettingsPatch, PackageFilter, PackageSource,
+    QueueModeSetting, SettingsContext, SettingsDiagnosticKind, SettingsError, SettingsManager,
+    SettingsScope, TransportSetting,
 };
 use serde_json::{Value, json};
 
@@ -13,6 +13,123 @@ fn write_json(path: &Path, value: Value) {
     let mut encoded = serde_json::to_string_pretty(&value).unwrap();
     encoded.push('\n');
     fs::write(path, encoded).unwrap();
+}
+
+#[test]
+fn feature_patches_preserve_latest_unedited_fields_and_unknown_features() {
+    let root = tempfile::tempdir().unwrap();
+    let manager = SettingsManager::new(root.path().join("agent"));
+    let context = SettingsContext::new(root.path().join("project"), true);
+    let path = manager.agent_dir().join("settings.json");
+    write_json(&path, json!({"features": {"memory": true}}));
+    manager.load(&context);
+    // Another writer changes unrelated fields after the selector took its snapshot.
+    write_json(
+        &path,
+        json!({
+            "features": {"memory": true, "schedule": false, "futureFeature": {"enabled": true}},
+            "packages": ["npm:example"], "theme": "dark"
+        }),
+    );
+
+    let snapshot = manager
+        .patch_features(
+            &context,
+            SettingsScope::Global,
+            FeatureSettingsPatch {
+                memory: Some(false),
+                subagents: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert!(!snapshot.effective().features.memory);
+    assert!(!snapshot.effective().features.subagents);
+    assert!(!snapshot.effective().features.schedule);
+    let saved: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(
+        saved,
+        json!({
+            "features": {"memory": false, "subagents": false, "schedule": false, "futureFeature": {"enabled": true}},
+            "packages": ["npm:example"], "theme": "dark"
+        })
+    );
+}
+
+#[test]
+fn project_feature_patches_require_trust_and_retain_global_inheritance() {
+    let root = tempfile::tempdir().unwrap();
+    let manager = SettingsManager::new(root.path().join("agent"));
+    let cwd = root.path().join("project");
+    write_json(
+        &manager.agent_dir().join("settings.json"),
+        json!({"features": {"memory": false}}),
+    );
+    let patch = FeatureSettingsPatch {
+        skills: Some(false),
+        ..Default::default()
+    };
+    assert!(matches!(
+        manager.patch_features(
+            &SettingsContext::new(&cwd, false),
+            SettingsScope::Project,
+            patch
+        ),
+        Err(SettingsError::ProjectNotTrusted)
+    ));
+    assert!(!cwd.join(".pi").exists());
+
+    let snapshot = manager
+        .patch_features(
+            &SettingsContext::new(&cwd, true),
+            SettingsScope::Project,
+            patch,
+        )
+        .unwrap();
+    assert!(!snapshot.effective().features.memory);
+    assert!(!snapshot.effective().features.skills);
+    assert_eq!(snapshot.raw_project()["features"], json!({"skills": false}));
+    assert!(snapshot.global().features.skills);
+}
+
+#[test]
+fn feature_patches_refuse_malformed_documents_and_non_object_features() {
+    let root = tempfile::tempdir().unwrap();
+    let manager = SettingsManager::new(root.path());
+    let context = SettingsContext::new(root.path(), false);
+    let path = root.path().join("settings.json");
+    for invalid in ["{", r#"{"features":false}"#, r#"{"features":null}"#] {
+        write_json(&path, json!({"features": {"skills": false}}));
+        manager.load(&context);
+        fs::write(&path, invalid).unwrap();
+        assert!(matches!(
+            manager.patch_features(
+                &context,
+                SettingsScope::Global,
+                FeatureSettingsPatch {
+                    memory: Some(false),
+                    ..Default::default()
+                }
+            ),
+            Err(SettingsError::InvalidDocument { .. })
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), invalid);
+    }
+}
+
+#[test]
+fn empty_feature_patch_does_not_create_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let manager = SettingsManager::new(root.path().join("agent"));
+    manager
+        .patch_features(
+            &SettingsContext::new(root.path(), false),
+            SettingsScope::Global,
+            FeatureSettingsPatch::default(),
+        )
+        .unwrap();
+    assert!(!manager.agent_dir().exists());
 }
 
 #[test]

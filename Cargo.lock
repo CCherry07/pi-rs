@@ -2992,8 +2992,10 @@ dependencies = [
 name = "pi-bench"
 version = "0.8.6"
 dependencies = [
+ "async-trait",
  "pi-agent",
  "pi-core",
+ "pi-js-plugin",
  "pi-plugin",
  "pi-runtime",
  "pi-session",

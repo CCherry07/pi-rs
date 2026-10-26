@@ -3,8 +3,6 @@ import successSoundUrl from "@/assets/success-notification.mp3";
 import errorSoundUrl from "@/assets/error-notification.mp3";
 import { MainAppShell } from "@app/components/MainAppShell";
 import { useThreads } from "@threads/hooks/useThreads";
-import { ThreadConversationsContext } from "@threads/contexts/ThreadConversations";
-import { DesktopExtensions } from "./DesktopExtensions";
 import { usePullRequestComposer } from "@/features/git/hooks/usePullRequestComposer";
 import { useAutoExitEmptyDiff } from "@/features/git/hooks/useAutoExitEmptyDiff";
 import { isMissingRepo } from "@/features/git/utils/repoErrors";
@@ -20,12 +18,11 @@ import { useComposerMenuActions } from "@/features/composer/hooks/useComposerMen
 import { useComposerEditorState } from "@/features/composer/hooks/useComposerEditorState";
 import { useMainAppComposerWorkspaceState } from "@app/hooks/useMainAppComposerWorkspaceState";
 import { useMainAppGitState } from "@app/hooks/useMainAppGitState";
-import { useMainAppLayoutSurfaces } from "@app/hooks/useMainAppLayoutSurfaces";
-import { useMainAppLayoutNodes } from "@app/hooks/useMainAppLayoutNodes";
+import { buildMainAppLayoutSurfaces } from "@app/hooks/useMainAppLayoutSurfaces";
+import { useLayoutNodes } from "@/features/layout/hooks/useLayoutNodes";
 import { useWorkspaceFromUrlPrompt } from "@/features/workspaces/hooks/useWorkspaceFromUrlPrompt";
 import { useWorkspaceController } from "@app/hooks/useWorkspaceController";
 import { useWorkspaceSelection } from "@/features/workspaces/hooks/useWorkspaceSelection";
-import { usePlanReadyActions } from "@app/hooks/usePlanReadyActions";
 import { useThreadRows } from "@app/hooks/useThreadRows";
 import { useInterruptShortcut } from "@app/hooks/useInterruptShortcut";
 import { useArchiveShortcut } from "@app/hooks/useArchiveShortcut";
@@ -38,7 +35,6 @@ import { effectiveCommitMessageModelId } from "@/features/git/utils/commitMessag
 import { useMainAppModals } from "@app/hooks/useMainAppModals";
 import { useMainAppDisplayNodes } from "@app/hooks/useMainAppDisplayNodes";
 import { useMainAppPromptActions } from "@app/hooks/useMainAppPromptActions";
-import { useMainAppShellProps } from "@app/hooks/useMainAppShellProps";
 import { useMainAppSidebarMenuOrchestration } from "@app/hooks/useMainAppSidebarMenuOrchestration";
 import { useMainAppSettingsActions } from "@app/hooks/useMainAppSettingsActions";
 import { useMainAppThreadRunState } from "@app/hooks/useMainAppThreadRunState";
@@ -48,7 +44,6 @@ import { useMainAppWorkspaceLifecycle } from "@app/hooks/useMainAppWorkspaceLife
 import { useMainAppMobileThreadRefresh } from "@app/hooks/useMainAppMobileThreadRefresh";
 import type {
   ComposerEditorSettings,
-  ServiceTier,
   WorkspaceInfo,
 } from "@/types";
 import { useOpenAppIcons } from "@app/hooks/useOpenAppIcons";
@@ -58,7 +53,7 @@ import { useThreadListSortKey } from "@app/hooks/useThreadListSortKey";
 import { useThreadListActions } from "@app/hooks/useThreadListActions";
 import { useTrayRecentThreads } from "@app/hooks/useTrayRecentThreads";
 import { useTauriEvent } from "@app/hooks/useTauriEvent";
-import { useAppBootstrapOrchestration } from "@app/bootstrap/useAppBootstrapOrchestration";
+import { useAppBootstrap } from "@app/bootstrap/useAppBootstrap";
 import {
   useThreadRunBootstrapOrchestration,
   useThreadRunSyncOrchestration,
@@ -109,7 +104,7 @@ export default function MainApp() {
     handleCopyDebug,
     clearDebugEntries,
     shouldReduceTransparency,
-  } = useAppBootstrapOrchestration();
+  } = useAppBootstrap();
   const {
     threadListSortKey,
     setThreadListSortKey,
@@ -170,12 +165,9 @@ export default function MainApp() {
     setPreferredModelId,
     preferredEffort,
     setPreferredEffort,
-    preferredServiceTier,
-    setPreferredServiceTier,
     threadRunSelectionKey,
     setThreadRunSelectionKey,
     activeThreadIdRef,
-    pendingNewThreadSeedRef,
     persistThreadRunParams,
   } = useThreadRunBootstrapOrchestration({
     activeWorkspaceId,
@@ -189,8 +181,6 @@ export default function MainApp() {
     onSidebarResizeStart,
     onChatDiffSplitPositionResizeStart,
     onRightPanelResizeStart,
-    planPanelHeight,
-    onPlanPanelResizeStart,
     terminalPanelHeight,
     onTerminalPanelResizeStart,
     debugPanelHeight,
@@ -262,17 +252,9 @@ export default function MainApp() {
     selectionKey: threadRunSelectionKey,
   });
 
-  const [selectedServiceTier, setSelectedServiceTier] = useState<
-    ServiceTier | null | undefined
-  >(undefined);
-  useEffect(() => {
-    setSelectedServiceTier(preferredServiceTier);
-  }, [preferredServiceTier, threadRunSelectionKey]);
-
   const {
     handleSelectModel,
     handleSelectEffort,
-    handleSelectServiceTier,
   } = useThreadSelectionHandlersOrchestration({
     appSettingsLoading,
     setAppSettings,
@@ -280,7 +262,6 @@ export default function MainApp() {
     activeThreadIdRef,
     setSelectedModelId,
     setSelectedEffort,
-    setSelectedServiceTier,
     persistThreadRunParams,
   });
   const commitMessageModelId = useMemo(
@@ -297,7 +278,6 @@ export default function MainApp() {
     reasoningOptions,
     selectedEffort,
     onSelectEffort: handleSelectEffort,
-    selectedServiceTier: selectedServiceTier ?? null,
     reasoningSupported,
   };
 
@@ -347,7 +327,7 @@ export default function MainApp() {
     setActiveThreadId,
     activeThreadId,
     activeItems,
-    conversationSource,
+    activeContextInheritance,
     threadsByWorkspace,
     threadParentById,
     isSubagentThread,
@@ -358,7 +338,6 @@ export default function MainApp() {
     threadListCursorByWorkspace,
     activeTurnIdByThread,
     tokenUsageByThread,
-    planByThread,
     lastAgentMessageByThread,
     pinnedThreadsVersion,
     interruptTurn,
@@ -386,7 +365,6 @@ export default function MainApp() {
     onDebug: addDebugEntry,
     model: resolvedModel,
     effort: resolvedEffort,
-    serviceTier: selectedServiceTier,
     steerEnabled: appSettings.steerEnabled,
     threadTitleAutogenerationEnabled: appSettings.threadTitleAutogenerationEnabled,
     chatHistoryScrollbackItems: appSettingsLoading
@@ -546,12 +524,9 @@ export default function MainApp() {
     setThreadRunSelectionKey,
     setPreferredModelId,
     setPreferredEffort,
-    setPreferredServiceTier,
     activeThreadIdRef,
-    pendingNewThreadSeedRef,
     selectedModelId,
     resolvedEffort,
-    selectedServiceTier,
   });
 
   const { handleSetThreadListSortKey, handleRefreshAllWorkspaceThreads } =
@@ -897,12 +872,6 @@ export default function MainApp() {
   const activeTokenUsage = activeThreadId
     ? tokenUsageByThread[activeThreadId] ?? null
     : null;
-  const activePlan = activeThreadId
-    ? planByThread[activeThreadId] ?? null
-    : null;
-  const hasActivePlan = Boolean(
-    activePlan && (activePlan.steps.length > 0 || activePlan.explanation)
-  );
   const composerWorkspaceState = useMainAppComposerWorkspaceState({
     view: {
       activeTab,
@@ -922,21 +891,17 @@ export default function MainApp() {
     },
     thread: {
       activeThreadId,
-      activeItems,
       threadStatusById,
       activeTurnIdByThread,
     },
     settings: {
       steerEnabled: appSettings.steerEnabled,
       followUpMessageBehavior: appSettings.followUpMessageBehavior,
-      pauseQueuedMessagesWhenResponseRequired:
-        appSettings.pauseQueuedMessagesWhenResponseRequired,
     },
     models: {
       models,
       selectedModelId,
       resolvedEffort,
-      selectedServiceTier,
     },
     refs: {
       composerInputRef,
@@ -1089,8 +1054,6 @@ export default function MainApp() {
   } = useThreadUiOrchestration({
     activeWorkspaceId,
     activeThreadId,
-    selectedServiceTier,
-    pendingNewThreadSeedRef,
     runWithDraftStart,
     handleComposerSend: handleSend,
     clearDraftState,
@@ -1135,12 +1098,6 @@ export default function MainApp() {
     };
   }, [recordPendingThreadLink]);
 
-  const { handlePlanAccept, handlePlanSubmitChanges } = usePlanReadyActions({
-    activeWorkspace,
-    activeThreadId,
-    sendUserMessageToThread,
-  });
-
   const {
     showGitDetail,
     isThreadOpen,
@@ -1163,7 +1120,6 @@ export default function MainApp() {
     sidebarWidth,
     chatDiffSplitPositionPercent,
     rightPanelWidth,
-    planPanelHeight,
     terminalPanelHeight,
     debugPanelHeight,
     appSettings,
@@ -1317,7 +1273,7 @@ export default function MainApp() {
       : null,
   });
   const { workspaceHomeNode } = displayNodes;
-  const layoutSurfaces = useMainAppLayoutSurfaces({
+  const layoutSurfaces = buildMainAppLayoutSurfaces({
     appSettings: {
       composerCodeBlockCopyUseModifier:
         appSettings.composerCodeBlockCopyUseModifier,
@@ -1356,14 +1312,11 @@ export default function MainApp() {
       Boolean(activeWorkspaceId && activeThreadId) &&
       isSubagentThread(activeWorkspaceId ?? "", activeThreadId ?? ""),
     activeItems,
-    onPlanAccept: handlePlanAccept,
-    onPlanSubmitChanges: handlePlanSubmitChanges,
-    activePlan,
+    activeContextInheritance,
     activeTokenUsage,
     latestAgentRuns,
     isLoadingLatestAgents,
     gitState,
-    selectedServiceTier: selectedServiceTier ?? null,
     composerWorkspaceState,
     promptActions,
     worktreeState,
@@ -1421,7 +1374,6 @@ export default function MainApp() {
     reasoningOptions,
     selectedEffort,
     onSelectEffort: handleSelectEffort,
-    onSelectServiceTier: handleSelectServiceTier,
     reasoningSupported,
     skills,
     runtimeCommands,
@@ -1472,94 +1424,45 @@ export default function MainApp() {
     handleDebugClick,
   });
 
-  const {
-    sidebarNode,
-    messagesNode,
-    composerNode,
-    updateToastNode,
-    errorToastsNode,
-    homeNode,
-    mainHeaderNode,
-    desktopTopbarLeftNode,
-    tabletNavNode,
-    tabBarNode,
-    gitDiffPanelNode,
-    gitDiffViewerNode,
-    planPanelNode,
-    debugPanelNode,
-    debugPanelFullNode,
-    terminalDockNode,
-    compactEmptyChatNode,
-    compactEmptyGitNode,
-    compactGitBackNode,
-  } = useMainAppLayoutNodes(layoutSurfaces);
+  const layoutNodes = useLayoutNodes(layoutSurfaces);
 
-  const mainMessagesNode = showWorkspaceHome ? workspaceHomeNode : (
-    <ThreadConversationsContext.Provider value={conversationSource}>
-      {messagesNode}
-    </ThreadConversationsContext.Provider>
+  return (
+    <MainAppShell
+      appClassName={appClassName}
+      isResizing={isResizing}
+      appStyle={appStyle}
+      appRef={appRef}
+      sidebarToggleProps={sidebarToggleProps}
+      shouldLoadGitHubPanelData={shouldLoadGitHubPanelData}
+      appModalsProps={appModalsProps}
+      gitHubPanelDataProps={{
+        activeWorkspace: gitState.gitWorkspace,
+        gitPanelMode,
+        shouldLoadDiffs,
+        diffSource,
+        selectedPullRequestNumber: selectedPullRequest?.number ?? null,
+        onIssuesChange: handleGitIssuesChange,
+        onPullRequestsChange: handleGitPullRequestsChange,
+        onPullRequestDiffsChange: handleGitPullRequestDiffsChange,
+        onPullRequestCommentsChange: handleGitPullRequestCommentsChange,
+      }}
+      appLayoutProps={{
+        ...layoutNodes,
+        isPhone,
+        isTablet,
+        showHome,
+        showGitDetail,
+        activeTab,
+        tabletTab,
+        centerMode,
+        preloadGitDiffs: appSettings.preloadGitDiffs,
+        splitChatDiffView: appSettings.splitChatDiffView,
+        activeWorkspace: Boolean(activeWorkspace),
+        messagesNode: showWorkspaceHome ? workspaceHomeNode : layoutNodes.messagesNode,
+        onSidebarResizeStart,
+        onChatDiffSplitPositionResizeStart,
+        onRightPanelResizeStart,
+      }}
+    />
   );
-  const mainAppShellProps = useMainAppShellProps({
-    shell: {
-      appClassName,
-      isResizing,
-      appStyle,
-      appRef,
-      sidebarToggleProps,
-      shouldLoadGitHubPanelData,
-      appModalsProps,
-    },
-    gitHubPanelDataProps: {
-      activeWorkspace: gitState.gitWorkspace,
-      gitPanelMode,
-      shouldLoadDiffs,
-      diffSource,
-      selectedPullRequestNumber: selectedPullRequest?.number ?? null,
-      onIssuesChange: handleGitIssuesChange,
-      onPullRequestsChange: handleGitPullRequestsChange,
-      onPullRequestDiffsChange: handleGitPullRequestDiffsChange,
-      onPullRequestCommentsChange: handleGitPullRequestCommentsChange,
-    },
-    appLayout: {
-      isPhone,
-      isTablet,
-      showHome,
-      showGitDetail,
-      activeTab,
-      tabletTab,
-      centerMode,
-      preloadGitDiffs: appSettings.preloadGitDiffs,
-      splitChatDiffView: appSettings.splitChatDiffView,
-      hasActivePlan: hasActivePlan,
-      activeWorkspace: Boolean(activeWorkspace),
-      sidebarNode,
-      messagesNode: mainMessagesNode,
-      composerNode,
-      updateToastNode,
-      errorToastsNode,
-      homeNode,
-      mainHeaderNode,
-      tabletNavNode,
-      tabBarNode,
-      gitDiffPanelNode,
-      gitDiffViewerNode,
-      planPanelNode,
-      debugPanelNode,
-      debugPanelFullNode,
-      terminalDockNode,
-      compactEmptyChatNode,
-      compactEmptyGitNode,
-      compactGitBackNode,
-      onSidebarResizeStart,
-      onChatDiffSplitPositionResizeStart,
-      onRightPanelResizeStart,
-      onPlanPanelResizeStart,
-    },
-    topbar: {
-      isCompact,
-      desktopTopbarLeftNode,
-    },
-  });
-
-  return <DesktopExtensions workspaceId={activeWorkspace?.id ?? null}><MainAppShell {...mainAppShellProps} /></DesktopExtensions>;
 }

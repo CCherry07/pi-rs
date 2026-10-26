@@ -75,6 +75,24 @@ pub enum UiNodeKind {
         #[serde(default)]
         tone: UiTone,
     },
+    /// Plugin-drawn content in a frontend-owned region.
+    /// Frontends parse styling and clip these rows; they never write them as terminal commands.
+    Custom {
+        lines: Vec<String>,
+        #[serde(default)]
+        interactive: bool,
+        /// Receives structured mouse requests independently of keyboard focus.
+        #[serde(default)]
+        mouse: bool,
+        /// Identifies the retained component, independently of its rendered document revision.
+        #[serde(default)]
+        instance_id: String,
+        #[serde(default)]
+        key_release: bool,
+        /// Component-local (row, column), in terminal cells.
+        #[serde(default)]
+        cursor: Option<(u16, u16)>,
+    },
     Markdown {
         text: String,
     },
@@ -310,6 +328,57 @@ pub struct UiOverlayOptions {
     pub max_height: Option<u16>,
     #[serde(default = "default_modal")]
     pub modal: bool,
+    #[serde(default)]
+    pub anchor: UiOverlayAnchor,
+    #[serde(default)]
+    pub offset_x: i32,
+    #[serde(default)]
+    pub offset_y: i32,
+    #[serde(default)]
+    pub row: Option<UiOverlayPosition>,
+    #[serde(default)]
+    pub col: Option<UiOverlayPosition>,
+    #[serde(default)]
+    pub margin: UiOverlayMargin,
+    /// Retain component state without drawing or accepting input.
+    #[serde(default)]
+    pub hidden: bool,
+    /// Showing this overlay does not take keyboard focus.
+    #[serde(default)]
+    pub non_capturing: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UiOverlayAnchor {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    LeftCenter,
+    #[default]
+    Center,
+    RightCenter,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+}
+
+/// Absolute viewport cells or a percentage of the remaining travel after size and margins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum UiOverlayPosition {
+    Cells(u16),
+    /// Hundredths of a percent: 0 is the start, 10_000 is the end.
+    Percent(u16),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct UiOverlayMargin {
+    pub top: u16,
+    pub right: u16,
+    pub bottom: u16,
+    pub left: u16,
 }
 
 fn default_modal() -> bool {
@@ -322,6 +391,14 @@ impl Default for UiOverlayOptions {
             width: None,
             max_height: None,
             modal: true,
+            anchor: UiOverlayAnchor::Center,
+            offset_x: 0,
+            offset_y: 0,
+            row: None,
+            col: None,
+            margin: UiOverlayMargin::default(),
+            hidden: false,
+            non_capturing: false,
         }
     }
 }
@@ -360,6 +437,13 @@ impl UiSurfaceFrame {
         }
         let mut regions = HashSet::new();
         for region in &self.regions {
+            if let Some(options) = &region.overlay {
+                for position in [options.row, options.col].into_iter().flatten() {
+                    if matches!(position, UiOverlayPosition::Percent(value) if value > 10_000) {
+                        return Err("UI overlay percentage must be between 0 and 100".into());
+                    }
+                }
+            }
             if region.id.trim().is_empty() {
                 return Err("UI region ID must not be empty".into());
             }
@@ -416,6 +500,27 @@ pub struct UiSurfaceSnapshot {
     pub transcript_width: u16,
     #[serde(default)]
     pub areas: Vec<UiSurfaceArea>,
+    #[serde(default)]
+    pub regions: Vec<UiRegionSnapshot>,
+}
+
+/// Last frontend layout and focus of a mounted region, including hidden overlays.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiRegionSnapshot {
+    pub owner: String,
+    pub region_id: String,
+    pub focused: bool,
+    pub bounds: Option<UiRegionBounds>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiRegionBounds {
+    pub row: u16,
+    pub col: u16,
+    pub width: u16,
+    pub height: u16,
 }
 
 /// Read-only geometry of frontend-allocated slots; plugins do not return cell coordinates.
@@ -439,11 +544,74 @@ impl Default for UiSurfaceSnapshot {
             transcript: Vec::new(),
             transcript_width: 0,
             areas: Vec::new(),
+            regions: Vec::new(),
         }
     }
 }
 
-/// Semantic control events, emitted after Rust has updated its local control state.
+/// A component-local mouse event in terminal cells. Captured coordinates may be negative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiMouseEvent {
+    #[serde(rename = "type")]
+    pub kind: UiMouseEventKind,
+    pub button: UiMouseButton,
+    pub x: i32,
+    pub y: i32,
+    pub screen_x: u16,
+    pub screen_y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub shift: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+    #[serde(default)]
+    pub wheel_delta: Option<i32>,
+    #[serde(default)]
+    pub click_count: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UiMouseEventKind {
+    Press,
+    Release,
+    Move,
+    Drag,
+    Click,
+    Wheel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UiMouseButton {
+    Left,
+    Middle,
+    Right,
+    None,
+}
+
+/// Reply to one mouse request. Capture and focus imply handled. An opaque target identifies a
+/// nested component retained by the adapter; executable objects never cross the transport.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UiMouseResult {
+    #[serde(default)]
+    pub handled: bool,
+    #[serde(default)]
+    pub capture: bool,
+    #[serde(default)]
+    pub focus: bool,
+    #[serde(default)]
+    pub render: Option<bool>,
+    #[serde(default)]
+    pub target: Option<u64>,
+    /// The mount disappeared or the callback failed. Never replay this event into the app.
+    #[serde(default)]
+    pub cancelled: bool,
+}
+
+/// Semantic control notifications and requests to plugin-owned custom components.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -451,11 +619,29 @@ impl Default for UiSurfaceSnapshot {
     rename_all_fields = "camelCase"
 )]
 pub enum UiInteraction {
-    Change { value: serde_json::Value },
-    Submit { value: serde_json::Value },
+    Change {
+        value: serde_json::Value,
+    },
+    Submit {
+        value: serde_json::Value,
+    },
     Activate,
     Cancel,
-    Shortcut { key: String },
+    Shortcut {
+        key: String,
+    },
+    /// Keyboard/paste input delivered only to a focused custom component.
+    CustomInput {
+        data: String,
+    },
+    /// Must be answered with MouseResult, including when an adapter discards a stale request.
+    CustomMouse {
+        id: u64,
+        instance_id: String,
+        #[serde(default)]
+        target: Option<u64>,
+        event: UiMouseEvent,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -510,7 +696,35 @@ pub enum UiCommand {
 pub enum UiSurfaceCommand {
     Wake,
     Close,
-    Focus { region_id: String, node_id: String },
+    Focus {
+        region_id: String,
+        node_id: String,
+    },
+    Unfocus {
+        region_id: String,
+        #[serde(default)]
+        target: Option<UiFocusTarget>,
+    },
+    MouseResult {
+        id: u64,
+        result: UiMouseResult,
+    },
+}
+
+/// Explicit focus destination when releasing a region. Omission restores eligible prior focus.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum UiFocusTarget {
+    App,
+    /// Another visible region belonging to the same surface owner.
+    Region {
+        region_id: String,
+    },
 }
 
 /// Product presentation commands executed outside the surface runtime.

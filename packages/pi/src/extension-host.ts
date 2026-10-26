@@ -3,6 +3,7 @@ import { basename } from 'node:path'
 
 import { createJiti } from 'jiti'
 import { z } from 'zod'
+import * as piTui from '@earendil-works/pi-tui'
 
 import * as compatibilityApi from './compat-api.js'
 import { CompatibilityResolver } from './compatibility-resolver.js'
@@ -24,6 +25,7 @@ import {
   type ProviderRegistrationManifest,
   type SessionPluginManifest,
   type StreamHookBatchInvocation,
+  type ContextHookBatchInvocation,
   type StreamUpdate,
   type ToolExecutionMode,
   type ToolManifest,
@@ -36,6 +38,7 @@ import {
 const require = createRequire(import.meta.url)
 const compatibilityResolver = new CompatibilityResolver(require, {
   pi: compatibilityApi,
+  tui: piTui,
 })
 
 const jsonObjectSchema = z.looseObject({})
@@ -83,7 +86,12 @@ const commandInvocationPayloadSchema = z.looseObject({
 })
 const hookInvocationPayloadSchema = z.looseObject({
   context: extensionContextInputSchema,
-  event: jsonObjectSchema,
+  // Internal stream events have lazy getters. Validate their shape without
+  // enumerating properties or replacing the object shared by this hook batch.
+  event: z.custom<Record<string, unknown>>(
+    value => typeof value === 'object' && value !== null && !Array.isArray(value),
+    'expected an event object',
+  ),
 })
 const beforeAgentStartResultSchema = z.looseObject({
   message: z.looseObject({
@@ -283,15 +291,20 @@ interface GenerationState {
   streams: Map<string, AssistantStreamState>
 }
 
+interface AssistantStreamChunk {
+  readonly text: string
+  readonly previous?: AssistantStreamChunk
+}
+
 type AssistantStreamBlock =
-  | { kind: 'text'; base: Record<string, unknown>; chunks: string[] }
-  | { kind: 'thinking'; base: Record<string, unknown>; chunks: string[] }
-  | { kind: 'toolCall'; base: Record<string, unknown>; argumentChunks: string[] }
+  | { kind: 'text'; base: Record<string, unknown>; chunks: AssistantStreamChunk | undefined }
+  | { kind: 'thinking'; base: Record<string, unknown>; chunks: AssistantStreamChunk | undefined }
+  | { kind: 'toolCall'; base: Record<string, unknown>; argumentChunks: AssistantStreamChunk | undefined }
   | { kind: 'static'; base: Record<string, unknown> }
 
 interface AssistantStreamState {
-  header: Record<string, unknown>
-  content: (AssistantStreamBlock | undefined)[]
+  readonly header: Record<string, unknown>
+  readonly content: readonly (AssistantStreamBlock | undefined)[]
 }
 
 interface ExtensionEventBus {
@@ -382,11 +395,11 @@ function streamBlock(value: unknown): AssistantStreamBlock {
   const base = { ...value }
   switch (value.type) {
     case 'text':
-      return { kind: 'text', base, chunks: [typeof value.text === 'string' ? value.text : ''] }
+      return { kind: 'text', base, chunks: { text: typeof value.text === 'string' ? value.text : '' } }
     case 'thinking':
-      return { kind: 'thinking', base, chunks: [typeof value.thinking === 'string' ? value.thinking : ''] }
+      return { kind: 'thinking', base, chunks: { text: typeof value.thinking === 'string' ? value.thinking : '' } }
     case 'toolCall':
-      return { kind: 'toolCall', base, argumentChunks: [] }
+      return { kind: 'toolCall', base, argumentChunks: undefined }
     default:
       return { kind: 'static', base }
   }
@@ -417,92 +430,112 @@ function setOptional(target: Record<string, unknown>, key: string, value: unknow
   else target[key] = value
 }
 
-function applyStreamUpdate(state: AssistantStreamState, update: StreamUpdate): void {
+function withStreamBlock(state: AssistantStreamState, index: number, block: AssistantStreamBlock): AssistantStreamState {
+  const content = state.content.slice()
+  content[index] = block
+  return { header: state.header, content }
+}
+
+function joinStreamChunks(chunk: AssistantStreamChunk | undefined): string {
+  const parts: string[] = []
+  for (let current = chunk; current; current = current.previous) parts.push(current.text)
+  return parts.reverse().join('')
+}
+
+// Each event retains its own immutable stream version. Appending a chunk shares
+// the previous prefix without joining/copying it or retaining future deltas.
+function applyStreamUpdate(state: AssistantStreamState, update: StreamUpdate): AssistantStreamState {
   switch (update.type) {
     case 'start': {
       const metadata = update.metadata
-      state.header.api = metadata.api
-      state.header.provider = metadata.provider
-      state.header.model = metadata.model
-      state.header.timestamp = metadata.timestamp
+      const header = { ...state.header, api: metadata.api, provider: metadata.provider, model: metadata.model, timestamp: metadata.timestamp }
       for (const key of ['responseModel', 'responseId', 'diagnostics', 'deferred', 'rawStopReason', 'endTurn']) {
-        setOptional(state.header, key, metadata[key])
+        setOptional(header, key, metadata[key])
       }
-      return
+      return { ...state, header }
     }
-    case 'metadata':
+    case 'metadata': {
+      const header = { ...state.header }
       for (const [key, value] of Object.entries(update.patch)) {
-        if (value !== null) setOptional(state.header, key, value)
+        if (value !== null) setOptional(header, key, value)
       }
-      return
+      return { ...state, header }
+    }
     case 'contentMetadata': {
       const metadata = update.metadata
-      if (metadata.type === 'thinking') {
-        setOptional(requireStreamBlock(state, update.contentIndex, 'thinking').base, 'redacted', metadata.redacted)
-      } else {
-        setOptional(requireStreamBlock(state, update.contentIndex, 'toolCall').base, 'namespace', metadata.namespace)
-      }
-      return
+      const block = requireStreamBlock(state, update.contentIndex, metadata.type === 'thinking' ? 'thinking' : 'toolCall')
+      const base = { ...block.base }
+      if (metadata.type === 'thinking') setOptional(base, 'redacted', metadata.redacted)
+      else setOptional(base, 'namespace', metadata.namespace)
+      return withStreamBlock(state, update.contentIndex, { ...block, base })
     }
     case 'textStart':
-      state.content[update.contentIndex] ??= {
+      return state.content[update.contentIndex] ? state : withStreamBlock(state, update.contentIndex, {
         kind: 'text',
         base: { type: 'text' },
-        chunks: [],
-      }
-      return
-    case 'textDelta':
-      requireStreamBlock(state, update.contentIndex, 'text').chunks.push(update.delta)
-      return
-    case 'textEnd':
-      setOptional(requireStreamBlock(state, update.contentIndex, 'text').base, 'textSignature', update.textSignature)
-      return
+        chunks: undefined,
+      })
+    case 'textDelta': {
+      const block = requireStreamBlock(state, update.contentIndex, 'text')
+      return withStreamBlock(state, update.contentIndex, { ...block, chunks: { text: update.delta, previous: block.chunks } })
+    }
+    case 'textEnd': {
+      const block = requireStreamBlock(state, update.contentIndex, 'text')
+      const base = { ...block.base }
+      setOptional(base, 'textSignature', update.textSignature)
+      return withStreamBlock(state, update.contentIndex, { ...block, base })
+    }
     case 'thinkingStart':
-      state.content[update.contentIndex] ??= {
+      return state.content[update.contentIndex] ? state : withStreamBlock(state, update.contentIndex, {
         kind: 'thinking',
         base: { type: 'thinking' },
-        chunks: [],
-      }
-      return
-    case 'thinkingDelta':
-      requireStreamBlock(state, update.contentIndex, 'thinking').chunks.push(update.delta)
-      return
-    case 'thinkingEnd':
-      setOptional(requireStreamBlock(state, update.contentIndex, 'thinking').base, 'thinkingSignature', update.thinkingSignature)
-      return
+        chunks: undefined,
+      })
+    case 'thinkingDelta': {
+      const block = requireStreamBlock(state, update.contentIndex, 'thinking')
+      return withStreamBlock(state, update.contentIndex, { ...block, chunks: { text: update.delta, previous: block.chunks } })
+    }
+    case 'thinkingEnd': {
+      const block = requireStreamBlock(state, update.contentIndex, 'thinking')
+      const base = { ...block.base }
+      setOptional(base, 'thinkingSignature', update.thinkingSignature)
+      return withStreamBlock(state, update.contentIndex, { ...block, base })
+    }
     case 'toolCallStart':
-      state.content[update.contentIndex] ??= {
+      return state.content[update.contentIndex] ? state : withStreamBlock(state, update.contentIndex, {
         kind: 'toolCall',
         base: { type: 'toolCall', id: update.id, name: update.name, arguments: null },
-        argumentChunks: [],
-      }
-      return
-    case 'toolCallDelta':
-      requireStreamBlock(state, update.contentIndex, 'toolCall').argumentChunks.push(update.argumentsDelta)
-      return
+        argumentChunks: undefined,
+      })
+    case 'toolCallDelta': {
+      const block = requireStreamBlock(state, update.contentIndex, 'toolCall')
+      return withStreamBlock(state, update.contentIndex, {
+        ...block, argumentChunks: { text: update.argumentsDelta, previous: block.argumentChunks },
+      })
+    }
     case 'toolCallEnd': {
       const block = requireStreamBlock(state, update.contentIndex, 'toolCall')
-      const rawArguments = block.argumentChunks.join('')
+      const base = { ...block.base }
+      const rawArguments = joinStreamChunks(block.argumentChunks)
       try {
-        block.base.arguments = rawArguments.length === 0 ? {} : JSON.parse(rawArguments)
+        base.arguments = rawArguments.length === 0 ? {} : JSON.parse(rawArguments)
       } catch {
-        block.base.arguments = null
+        base.arguments = null
       }
-      setOptional(block.base, 'thoughtSignature', update.thoughtSignature)
-      return
+      setOptional(base, 'thoughtSignature', update.thoughtSignature)
+      return withStreamBlock(state, update.contentIndex, { ...block, base })
     }
     case 'done':
-      state.header.usage = structuredClone(update.usage)
-      state.header.stopReason = update.reason
+      return { ...state, header: { ...state.header, usage: structuredClone(update.usage), stopReason: update.reason } }
   }
 }
 
 function materializeStreamBlock(block: AssistantStreamBlock): Record<string, unknown> {
   switch (block.kind) {
     case 'text':
-      return { ...structuredClone(block.base), text: block.chunks.join('') }
+      return { ...structuredClone(block.base), text: joinStreamChunks(block.chunks) }
     case 'thinking':
-      return { ...structuredClone(block.base), thinking: block.chunks.join('') }
+      return { ...structuredClone(block.base), thinking: joinStreamChunks(block.chunks) }
     case 'toolCall':
     case 'static':
       return structuredClone(block.base)
@@ -641,6 +674,8 @@ export class ExtensionHost {
         return JSON.stringify(await this.#invoke(operation.invocation, nativeContext) ?? null)
       case 'invokeHookBatch':
         return JSON.stringify(await this.#invokeHookBatch(operation.invocation, nativeContext))
+      case 'invokeContextHookBatch':
+        return JSON.stringify(await this.#invokeContextHookBatch(operation.invocation, nativeContext))
       case 'invokeStreamHookBatch':
         return JSON.stringify(await this.#invokeStreamHookBatch(operation.invocation, nativeContext))
       case 'releaseStream':
@@ -663,6 +698,7 @@ export class ExtensionHost {
     const state: GenerationState = {
       ui: new ExtensionUI({
         agentDir: request.agentDir,
+        cwd: request.cwd,
         outputPad: request.outputPad,
         showImages: request.showImages,
       }),
@@ -825,10 +861,7 @@ export class ExtensionHost {
         const callbackId = `${pluginId}:hook:${event}:${target.length}`
         this.#registerCallback(state, callbackId, async (invocation, signal, nativeContext) => {
           const payload = parseExternal(hookInvocationPayloadSchema, invocation.payload, `JavaScript hook ${event} invocation payload`)
-          // Zod validates the payload, but handlers must receive the exact
-          // generation event object so mutations remain visible to the next
-          // callback in registration order, as in Pi's extension runner.
-          const eventValue = isRecord(invocation.payload.event) ? invocation.payload.event : payload.event
+          const eventValue = payload.event
           const chainedSystemPrompt = event === 'before_agent_start' && typeof eventValue.systemPrompt === 'string'
             ? eventValue.systemPrompt
             : undefined
@@ -1147,6 +1180,60 @@ export class ExtensionHost {
     }
   }
 
+  async #invokeContextHookBatch(
+    invocation: ContextHookBatchInvocation,
+    nativeContext: NativeExtensionContext | undefined,
+  ): Promise<{ processed: number; errors: { callbackId: string; message: string }[]; replacement?: { messages: unknown } }> {
+    const state = this.#requireGeneration(invocation.generationId)
+    const controller = new AbortController()
+    state.active.set(invocation.invocationId, controller)
+    const errors: { callbackId: string; message: string }[] = []
+    let processed = 0
+    try {
+      for (const entry of invocation.callbacks) {
+        if (controller.signal.aborted) break
+        processed++
+        const callback = state.callbacks.get(entry.callbackId)
+        if (!callback) {
+          errors.push({ callbackId: entry.callbackId, message: `Unknown JavaScript callback: ${entry.callbackId}` })
+          continue
+        }
+        // Keep the existing per-hook mutable input and signal lifetimes. Only
+        // returned replacements advance the chain; retained inputs stay detached.
+        const callbackController = new AbortController()
+        const cancel = (): void => callbackController.abort()
+        controller.signal.addEventListener('abort', cancel, { once: true })
+        try {
+          // Another invocation may have rebound retained Pi APIs while the
+          // preceding hook awaited. Match individual callback dispatch.
+          state.runtime.bind(nativeContext)
+          const result = await callback({
+            invocationId: invocation.invocationId, generationId: invocation.generationId,
+            callbackId: entry.callbackId, kind: 'agentHook',
+            payload: { hook: 'context', context: entry.context, event: { type: 'context', messages: structuredClone(invocation.messages) } },
+          }, callbackController.signal, nativeContext)
+          // Individual dispatch ends the callback before encoding its result.
+          callbackController.abort()
+          // Preserve JSON result semantics, including unserializable hook errors.
+          // Rust remains the sole validator/normalizer of message replacements.
+          const wireResult: unknown = JSON.parse(JSON.stringify(result ?? null))
+          if (isRecord(wireResult) && wireResult.messages !== undefined) {
+            return { processed, errors, replacement: { messages: wireResult.messages } }
+          }
+        } catch (error) {
+          errors.push({ callbackId: entry.callbackId, message: callbackErrorMessage(error) })
+        } finally {
+          callbackController.abort()
+          controller.signal.removeEventListener('abort', cancel)
+        }
+      }
+      return { processed, errors }
+    } finally {
+      controller.abort()
+      state.active.delete(invocation.invocationId)
+    }
+  }
+
   async #invokeStreamHookBatch(
     invocation: StreamHookBatchInvocation,
     nativeContext: NativeExtensionContext | undefined,
@@ -1162,8 +1249,8 @@ export class ExtensionHost {
       if (!current) {
         throw new Error(`Assistant stream ${invocation.streamId} has no initial message`)
       }
-      stream = current
-      applyStreamUpdate(stream, invocation.update)
+      stream = applyStreamUpdate(current, invocation.update)
+      generation.streams.set(invocation.streamId, stream)
     }
     const event = createStreamHookEvent(invocation.streamId, stream, invocation.update)
     if (!event) return { errors: [] }

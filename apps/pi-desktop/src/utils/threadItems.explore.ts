@@ -9,7 +9,15 @@ import {
   truncateToolText,
 } from "./threadItems.shared";
 
-const READ_COMMANDS = new Set(["cat", "sed", "head", "tail", "less", "more", "nl"]);
+const READ_COMMANDS = new Set([
+  "cat",
+  "sed",
+  "head",
+  "tail",
+  "less",
+  "more",
+  "nl",
+]);
 const LIST_COMMANDS = new Set(["ls", "tree", "find", "fd"]);
 const SEARCH_COMMANDS = new Set(["rg", "grep", "ripgrep", "findstr"]);
 const PATH_HINT_REGEX = /[\\/]/;
@@ -32,53 +40,72 @@ const RG_FLAGS_WITH_VALUES = new Set([
   "--max-depth",
 ]);
 
+function mapChanged<T>(items: T[], transform: (item: T) => T): T[] {
+  let changed: T[] | undefined;
+  items.forEach((item, index) => {
+    const next = transform(item);
+    if (next !== item) {
+      changed ??= [...items];
+      changed[index] = next;
+    }
+  });
+  return changed ?? items;
+}
+
 export function normalizeItem(item: ConversationItem): ConversationItem {
   if (item.kind === "message") {
-    return { ...item, text: truncateText(item.text) };
+    const text = truncateText(item.text);
+    return text === item.text ? item : { ...item, text };
   }
   if (item.kind === "userInput") {
-    return {
-      ...item,
-      questions: item.questions.map((question) => ({
-        ...question,
-        header: truncateText(question.header, 300),
-        question: truncateText(question.question, 2000),
-        answers: question.answers.map((answer) => truncateText(answer, 2000)),
-      })),
-    };
-  }
-  if (item.kind === "explore") {
-    return item;
+    const questions = mapChanged(item.questions, (question) => {
+      const header = truncateText(question.header, 300);
+      const text = truncateText(question.question, 2000);
+      const answers = mapChanged(question.answers, (answer) =>
+        truncateText(answer, 2000),
+      );
+      return header === question.header &&
+        text === question.question &&
+        answers === question.answers
+        ? question
+        : { ...question, header, question: text, answers };
+    });
+    return questions === item.questions ? item : { ...item, questions };
   }
   if (item.kind === "reasoning") {
-    return {
-      ...item,
-      summary: truncateText(item.summary),
-      content: truncateText(item.content),
-    };
+    const summary = truncateText(item.summary);
+    const content = truncateText(item.content);
+    return summary === item.summary && content === item.content
+      ? item
+      : { ...item, summary, content };
   }
   if (item.kind === "diff") {
-    return { ...item, diff: truncateText(item.diff) };
+    const diff = truncateText(item.diff);
+    return diff === item.diff ? item : { ...item, diff };
   }
   if (item.kind === "tool") {
-    return {
-      ...item,
-      title: truncateText(item.title, 200),
-      detail: item.toolType === "customMessage"
+    const title = truncateText(item.title, 200);
+    const detail =
+      item.toolType === "customMessage"
         ? truncateText(item.detail)
-        : truncateText(item.detail, 2000),
-      output: item.output
-        ? truncateToolText(item.toolType, item.output)
-        : item.output,
-      changes: item.changes
-        ? item.changes.map((change) => ({
-            ...change,
-            diff: change.diff
-              ? truncateToolText(item.toolType, change.diff)
-              : change.diff,
-          }))
-        : item.changes,
-    };
+        : truncateText(item.detail, 2000);
+    const output = item.output
+      ? truncateToolText(item.toolType, item.output)
+      : item.output;
+    const changes =
+      item.changes &&
+      mapChanged(item.changes, (change) => {
+        const diff = change.diff
+          ? truncateToolText(item.toolType, change.diff)
+          : change.diff;
+        return diff === change.diff ? change : { ...change, diff };
+      });
+    return title === item.title &&
+      detail === item.detail &&
+      output === item.output &&
+      changes === item.changes
+      ? item
+      : { ...item, title, detail, output, changes };
   }
   return item;
 }
@@ -92,9 +119,7 @@ function cleanCommandText(commandText: string) {
     /^(?:\/\S+\/)?(?:bash|zsh|sh|fish)(?:\.exe)?\s+-lc\s+(?:(['"])([\s\S]+)\1|([\s\S]+))$/,
   );
   const inner = shellMatch ? (shellMatch[2] ?? shellMatch[3] ?? "") : trimmed;
-  const cdMatch = inner.match(
-    /^\s*cd\s+[^&;]+(?:\s*&&\s*|\s*;\s*)([\s\S]+)$/i,
-  );
+  const cdMatch = inner.match(/^\s*cd\s+[^&;]+(?:\s*&&\s*|\s*;\s*)([\s\S]+)$/i);
   const stripped = cdMatch ? cdMatch[1] : inner;
   return stripped.trim();
 }
@@ -218,7 +243,11 @@ function parseSearch(tokens: string[]): ExploreEntry | null {
   const query = positional[0];
   const rawPath = positional.length > 1 ? positional[1] : "";
   const path =
-    commandName === "rg" ? rawPath : rawPath && isPathLike(rawPath) ? rawPath : "";
+    commandName === "rg"
+      ? rawPath
+      : rawPath && isPathLike(rawPath)
+        ? rawPath
+        : "";
   const label = path
     ? i18n.t("explore.searchIn", {
         ns: "messages",
@@ -312,8 +341,10 @@ function mergeExploreEntries(base: ExploreEntry[], next: ExploreEntry[]) {
   return deduped;
 }
 
-function summarizeCommandExecution(item: Extract<ConversationItem, { kind: "tool" }>) {
-  if (isFailedStatus(item.status)) {
+function summarizeCommandExecution(
+  item: Extract<ConversationItem, { kind: "tool" }>,
+) {
+  if (item.images?.length || isFailedStatus(item.status)) {
     return null;
   }
   const rawCommand = item.title.replace(/^Command:\s*/i, "").trim();
@@ -412,10 +443,10 @@ export function prepareThreadItems(
     }
     const output = item.output ? truncateText(item.output) : item.output;
     const changes = item.changes
-      ? item.changes.map((change) => ({
-          ...change,
-          diff: change.diff ? truncateText(change.diff) : change.diff,
-        }))
+      ? mapChanged(item.changes, (change) => {
+          const diff = change.diff ? truncateText(change.diff) : change.diff;
+          return diff === change.diff ? change : { ...change, diff };
+        })
       : item.changes;
     if (output === item.output && changes === item.changes) {
       return item;

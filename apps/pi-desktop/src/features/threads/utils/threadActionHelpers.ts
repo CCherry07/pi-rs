@@ -2,7 +2,6 @@ import type {
   ConversationItem,
   ThreadListSortKey,
   ThreadSummary,
-  WorkspaceInfo,
 } from "@/types";
 import {
   buildItemsFromThread,
@@ -11,28 +10,14 @@ import {
   mergeThreadItems,
   previewThreadName,
 } from "@utils/threadItems";
-import { asString, normalizeRootPath } from "./threadNormalize";
+import { asString } from "./threadNormalize";
 import { getResumedTurnState } from "./threadRpc";
 
-function isWithinWorkspaceRoot(path: string, workspaceRoot: string) {
-  if (!path || !workspaceRoot) {
-    return false;
-  }
-  return (
-    path === workspaceRoot ||
-    (path.length > workspaceRoot.length &&
-      path.startsWith(workspaceRoot) &&
-      path.charCodeAt(workspaceRoot.length) === 47)
-  );
-}
-
-export type WorkspacePathLookup = {
-  workspaceIdsByPath: Record<string, string[]>;
-  workspacePathsSorted: string[];
-};
-
 type ThreadRecord = Record<string, unknown>;
-type ThreadStatusLookup = Record<string, { isProcessing?: boolean } | undefined>;
+type ThreadStatusLookup = Record<
+  string,
+  { isProcessing?: boolean } | undefined
+>;
 
 export type ResumeHydrationPlan = {
   keepLocalProcessing: boolean;
@@ -59,61 +44,6 @@ export type WorkspaceThreadListState = {
   summaries: ThreadSummary[];
   uniqueThreads: ThreadRecord[];
 };
-
-export function buildWorkspacePathLookup(
-  workspaces: WorkspaceInfo[],
-): WorkspacePathLookup {
-  const workspaceIdsByPath: Record<string, string[]> = {};
-  const workspacePathsSorted: string[] = [];
-  workspaces.forEach((workspace) => {
-    const workspacePath = normalizeRootPath(workspace.path);
-    if (!workspacePath) {
-      return;
-    }
-    if (!workspaceIdsByPath[workspacePath]) {
-      workspaceIdsByPath[workspacePath] = [];
-      workspacePathsSorted.push(workspacePath);
-    }
-    workspaceIdsByPath[workspacePath].push(workspace.id);
-  });
-  workspacePathsSorted.sort((a, b) => b.length - a.length);
-  return { workspaceIdsByPath, workspacePathsSorted };
-}
-
-export function resolveWorkspaceIdForThreadPath(
-  path: string,
-  lookup: WorkspacePathLookup,
-  allowedWorkspaceIds?: Set<string>,
-) {
-  const normalizedPath = normalizeRootPath(path);
-  if (!normalizedPath) {
-    return null;
-  }
-  const matchedWorkspacePath = lookup.workspacePathsSorted.find((workspacePath) =>
-    isWithinWorkspaceRoot(normalizedPath, workspacePath),
-  );
-  if (!matchedWorkspacePath) {
-    return null;
-  }
-  const workspaceIds = lookup.workspaceIdsByPath[matchedWorkspacePath] ?? [];
-  if (!allowedWorkspaceIds) {
-    return workspaceIds[0] ?? null;
-  }
-  return (
-    workspaceIds.find((workspaceId) => allowedWorkspaceIds.has(workspaceId)) ??
-    null
-  );
-}
-
-export function getThreadListNextCursor(result: Record<string, unknown>) {
-  if (typeof result.nextCursor === "string") {
-    return result.nextCursor;
-  }
-  if (typeof result.next_cursor === "string") {
-    return result.next_cursor;
-  }
-  return null;
-}
 
 export function buildResumeHydrationPlan({
   getCustomName,
@@ -157,8 +87,10 @@ export function buildResumeHydrationPlan({
   const resumedActiveTurnId = keepLocalProcessing
     ? localActiveTurnId
     : resumedTurnState.activeTurnId;
-  const shouldMarkProcessing = keepLocalProcessing || Boolean(resumedActiveTurnId);
-  const processingTimestamp = resumedTurnState.activeTurnStartedAtMs ?? Date.now();
+  const shouldMarkProcessing =
+    keepLocalProcessing || Boolean(resumedActiveTurnId);
+  const processingTimestamp =
+    resumedTurnState.activeTurnStartedAtMs ?? Date.now();
   const hasOverlap =
     items.length > 0 &&
     localItems.length > 0 &&
@@ -176,9 +108,9 @@ export function buildResumeHydrationPlan({
     !customName && preview ? previewThreadName(preview, "New Agent") : null;
   const lastAgentMessage = [...mergedItems]
     .reverse()
-    .find(
-      (item) => item.kind === "message" && item.role === "assistant",
-    ) as ConversationItem | undefined;
+    .find((item) => item.kind === "message" && item.role === "assistant") as
+    | ConversationItem
+    | undefined;
   const lastMessageText =
     lastAgentMessage && lastAgentMessage.kind === "message"
       ? lastAgentMessage.text

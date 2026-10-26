@@ -19,7 +19,7 @@ use time::format_description::well_known::Rfc3339;
 use pi_session::{
     AgentMessage, BranchSummaryEntry, CompactionEntry, CustomEntry, CustomMessageEntry, HeaderKind,
     MAIN_LANE, MessageEntry, ModelChangeEntry, SESSION_SCHEMA_VERSION, SessionEntry, SessionError,
-    SessionFact, SessionHeader, SessionLog, SessionMutation, SessionRecord, ThinkingLevelEntry,
+    SessionFact, SessionHeader, SessionMutation, SessionRecord, SessionStore, ThinkingLevelEntry,
 };
 
 const LEGACY_HEADER_TYPE: &str = "session";
@@ -98,11 +98,11 @@ pub fn import_session_file(
     let entry_count = match format {
         SessionFileFormat::V4 => {
             std::fs::copy(source, destination)?;
-            match SessionLog::open(destination) {
+            match SessionStore::open(destination) {
                 Ok((_, document)) => document.entries.len(),
                 Err(error) => {
                     let _ = std::fs::remove_file(destination);
-                    return Err(error);
+                    return Err(error.into());
                 }
             }
         }
@@ -178,7 +178,7 @@ fn migrate_legacy(source: &Path, destination: &Path, version: u32) -> Result<usi
     }
 
     write_v4(destination, &header, &mutations)?;
-    SessionLog::open(destination)?;
+    SessionStore::open(destination)?;
     Ok(raw_entries.len())
 }
 
@@ -283,11 +283,6 @@ fn migrate_hook_message_roles(values: &mut [Value]) {
 }
 
 fn convert_header(value: &Value, version: u32) -> Result<SessionHeader, SessionError> {
-    let parent = value
-        .get("parentSession")
-        .or_else(|| value.get("branchedFrom"))
-        .and_then(Value::as_str)
-        .map(PathBuf::from);
     let mut metadata = Map::new();
     metadata.insert(
         IMPORT_METADATA_KEY.to_string(),
@@ -303,7 +298,6 @@ fn convert_header(value: &Value, version: u32) -> Result<SessionHeader, SessionE
         created_at: legacy_timestamp(value, "timestamp")?,
         cwd: PathBuf::from(require_string(value, "cwd")?),
         parent_session_id: None,
-        legacy_parent_session_path: parent,
         metadata: Some(metadata),
     })
 }
@@ -690,7 +684,7 @@ mod tests {
         let original = fs::read(&source).unwrap();
 
         let report = import_session_file(&source, &destination).unwrap();
-        let (_, document) = SessionLog::open(&destination).unwrap();
+        let (_, document) = SessionStore::open(&destination).unwrap();
         let context = build_session_context(
             &document
                 .branch()
@@ -733,15 +727,18 @@ mod tests {
         );
 
         import_session_file(&source, &destination).unwrap();
-        let (_, document) = SessionLog::open(&destination).unwrap();
+        let (_, document) = SessionStore::open(&destination).unwrap();
 
         assert_eq!(document.entries.len(), 4);
         assert_eq!(document.entries[3].parent_id.as_deref(), Some("c"));
         assert_eq!(document.labels.get("a").map(String::as_str), Some("start"));
         assert_eq!(document.name.as_deref(), Some("Imported"));
-        assert_eq!(
-            document.header.legacy_parent_session_path.as_deref(),
-            Some(Path::new("/tmp/parent.jsonl"))
+        assert_eq!(document.header.parent_session_id, None);
+        assert!(
+            serde_json::to_value(&document.header)
+                .unwrap()
+                .get("legacyParentSessionPath")
+                .is_none()
         );
         assert_eq!(
             serde_json::to_value(document.messages().remove(0)).unwrap()["extensionField"],
@@ -774,7 +771,7 @@ mod tests {
         )
         .unwrap();
         let current = directory.path().join("current.jsonl");
-        SessionLog::create(&current, SessionHeader::new("current", directory.path())).unwrap();
+        SessionStore::create(&current, SessionHeader::new("current", directory.path())).unwrap();
 
         assert!(validate_session_import(&legacy).is_ok());
         assert!(validate_session_import(&current).is_ok());
@@ -801,7 +798,7 @@ mod tests {
         }
         write_legacy(&source, &values);
         import_session_file(&source, &destination).unwrap();
-        let (log, _) = SessionLog::open(&destination).unwrap();
+        let (log, _) = SessionStore::open(&destination).unwrap();
         let messages = log.context().unwrap().messages;
         assert_eq!(messages.len(), 2);
         assert_eq!(
@@ -817,7 +814,7 @@ mod tests {
         let empty_destination = directory.path().join("none.jsonl");
         import_session_file(&source, &empty_destination).unwrap();
         assert_eq!(
-            SessionLog::open(empty_destination)
+            SessionStore::open(empty_destination)
                 .unwrap()
                 .0
                 .context()

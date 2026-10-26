@@ -269,7 +269,7 @@ impl Drop for HistoryFixture {
 
 fn stored_entries(session: &AgentSession) -> BTreeMap<String, Value> {
     session
-        .log()
+        .history()
         .load()
         .unwrap()
         .branch()
@@ -291,34 +291,40 @@ fn assert_stored_history(session: &PiSession, original: &BTreeMap<String, Value>
     }
 }
 
-fn add_unknown_history(session: &PiSession) {
+fn add_unknown_history(log: &pi_session::SessionStore) {
     let mut user =
         serde_json::to_value(Message::User(UserMessage::text("historical annotation", 2))).unwrap();
     user["extensionMetadata"] = json!({"nested": ["preserve", 7]});
-    session
-        .current()
-        .log()
-        .append_message(AgentMessage::custom(user).unwrap())
+    log.append_message(AgentMessage::custom(user).unwrap())
         .unwrap();
-    session
-        .current()
-        .log()
-        .append_message(
-            AgentMessage::custom(json!({
-                "role": "history-fixture.opaque", "payload": "opaque-private-state", "timestamp": 3
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+    log.append_message(
+        AgentMessage::custom(json!({
+            "role": "history-fixture.opaque", "payload": "opaque-private-state", "timestamp": 3
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 }
 
 async fn check_history_after_plugin_change(version: PluginVersion, reload_first: bool) {
     let fixture = HistoryFixture::new().await;
     let host = fixture.host();
     let path = fixture.root.path().join("history.jsonl");
+    let log = pi_session::SessionStore::create(
+        &path,
+        pi_session::SessionHeader::new("history-fixture", fixture.root.path()),
+    )
+    .unwrap();
+    add_unknown_history(&log);
+    drop(log);
     let session = host
         .sessions()
-        .create_session_with_overlay(fixture.root.path(), &path, fixture.overlay())
+        .open_session(
+            &path,
+            pi_session::OpenSessionOptions {
+                generation_overlay: fixture.overlay(),
+            },
+        )
         .await
         .unwrap();
     session
@@ -328,7 +334,6 @@ async fn check_history_after_plugin_change(version: PluginVersion, reload_first:
     session.current().prompt("use the plugin").await.unwrap();
     assert!(path.exists());
     fixture.assert_provider_history();
-    add_unknown_history(&session);
     let original = stored_entries(&session.current());
     assert!(
         original
@@ -359,16 +364,25 @@ async fn check_history_after_plugin_change(version: PluginVersion, reload_first:
 
     let reopened_host = fixture.host();
     let reopened = if version.tool_name.is_none() {
-        reopened_host.sessions().open_session(&path).await.unwrap()
+        reopened_host
+            .sessions()
+            .open_session(&path, Default::default())
+            .await
+            .unwrap()
     } else {
         reopened_host
             .sessions()
-            .open_session_with_overlay(&path, fixture.overlay())
+            .open_session(
+                &path,
+                pi_session::OpenSessionOptions {
+                    generation_overlay: fixture.overlay(),
+                },
+            )
             .await
             .unwrap()
     };
     assert_stored_history(&reopened, &original);
-    let tools = reopened.current().runtime().tool_specs();
+    let tools = reopened.current().catalog().tool_specs();
     match version.tool_name {
         Some(name) => {
             assert!(tools.iter().any(|tool| tool.name == name
@@ -381,8 +395,9 @@ async fn check_history_after_plugin_change(version: PluginVersion, reload_first:
             assert!(
                 reopened
                     .current()
-                    .runtime()
-                    .active_tools()
+                    .snapshot()
+                    .agent
+                    .active_tools
                     .iter()
                     .any(|tool| tool == name)
             );

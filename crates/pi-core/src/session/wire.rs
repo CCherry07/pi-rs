@@ -15,6 +15,15 @@ pub enum SessionWireError {
     InvalidPayload(String),
 }
 
+/// Position of a fork relative to its selected history entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ForkPosition {
+    #[default]
+    Before,
+    At,
+}
+
 /// Pi's extensible agent-level message. Standard provider messages retain
 /// their typed representation; extension-defined roles are preserved as JSON.
 #[derive(Debug, Clone)]
@@ -193,6 +202,30 @@ impl AgentMessage {
             ) => Arc::ptr_eq(left_source, right_source),
             _ => false,
         }
+    }
+
+    /// Detaches this message from a larger replay buffer without decoding its
+    /// wire data again. Forked histories can then release unselected source data.
+    #[doc(hidden)]
+    pub fn compact_replay_source(&self) -> Self {
+        let AgentMessageKind::Standard {
+            message,
+            original: Some(OriginalMessage::SharedRaw { source, range }),
+            ..
+        } = self.0.as_ref()
+        else {
+            return self.clone();
+        };
+        let bytes = source[range.clone()].to_vec();
+        let range = 0..bytes.len();
+        Self(Arc::new(AgentMessageKind::Standard {
+            message: message.clone(),
+            original: Some(OriginalMessage::SharedRaw {
+                source: Arc::new(bytes),
+                range,
+            }),
+            display_text_cache: OnceLock::new(),
+        }))
     }
 
     pub fn with_display_text(

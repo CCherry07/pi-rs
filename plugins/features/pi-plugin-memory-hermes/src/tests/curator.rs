@@ -45,7 +45,7 @@ async fn curator_is_private_bounded_and_rolls_back_receipt_backed_changes() {
     let root = tempfile::tempdir().unwrap();
     let (plugin, curator, skill) = setup(root.path());
     let before = fs::read(&skill.path).unwrap();
-    let (session, provider) = session(root.path(), plugin.clone(), vec![
+    let (_manager, session, provider) = session(root.path(), plugin.clone(), vec![
         ScriptedTurn::Text("private parent response".into()),
         call("skill_manage", json!({"action":"patch","name":skill.name,"old_string":"cargo check","new_string":"no fresh read"})),
         call("skill_view", json!({"name":skill.name})),
@@ -58,9 +58,9 @@ async fn curator_is_private_bounded_and_rolls_back_receipt_backed_changes() {
         .prompt("Parent-only sensitive conversation marker")
         .await
         .unwrap();
-    let parent = session.runtime().agent().state().messages;
-    session.submit("/curator run --consolidate").await.unwrap();
-    assert_eq!(session.runtime().agent().state().messages, parent);
+    let parent = session.snapshot().agent.messages;
+    session.prompt("/curator run --consolidate").await.unwrap();
+    assert_eq!(session.snapshot().agent.messages, parent);
     let requests = provider.requests();
     assert_eq!(requests.len(), 7);
     let private = format!(
@@ -96,7 +96,7 @@ async fn curator_is_private_bounded_and_rolls_back_receipt_backed_changes() {
     );
     let meta = Metadata::read(skill.path.parent().unwrap()).unwrap();
     assert_eq!(meta.patch_count, 1);
-    let entries = session.log().load().unwrap().records.into_iter().filter(|record| {
+    let entries = session.history().load().unwrap().records.into_iter().filter(|record| {
         let pi_session::LaneRecordEntry::Usage(usage) = &record.record else { return false; };
         matches!(&usage.attribution, pi_session::UsageAttribution::Adjustment { details: Some(details), .. }
             if details.get("task") == Some(&json!("curator")))
@@ -114,7 +114,7 @@ async fn curator_is_private_bounded_and_rolls_back_receipt_backed_changes() {
 async fn model_preview_cannot_write_provenance_packages_reports_or_scheduler_state() {
     let root = tempfile::tempdir().unwrap();
     let (plugin, curator, skill) = setup(root.path());
-    let (session, provider) = session(
+    let (_manager, session, provider) = session(
         root.path(),
         plugin,
         vec![
@@ -129,7 +129,7 @@ async fn model_preview_cannot_write_provenance_packages_reports_or_scheduler_sta
     .await;
     let before = tree(&curator.root);
     session
-        .submit("/curator run --dry-run --consolidate")
+        .prompt("/curator run --dry-run --consolidate")
         .await
         .unwrap();
     assert_eq!(tree(&curator.root), before);
@@ -137,7 +137,7 @@ async fn model_preview_cannot_write_provenance_packages_reports_or_scheduler_sta
     assert!(requests[2].messages.iter().any(
         |m| matches!(m, Message::ToolResult(r) if r.tool_name == "skill_manage" && r.is_error)
     ));
-    assert!(session.runtime().agent().state().messages.is_empty());
+    assert!(session.snapshot().agent.messages.is_empty());
     assert!(!root.path().join("session.jsonl").exists());
     session.shutdown().await;
 }
@@ -182,14 +182,14 @@ async fn curator_rejects_project_access_and_preserves_uncopied_supporting_files(
         })
         .unwrap();
     curator.adopt(&target.name).unwrap();
-    let (session, provider) = session(root.path(), plugin, vec![
+    let (_manager, session, provider) = session(root.path(), plugin, vec![
         call("skill_view", json!({"skill_id":project.id})),
         call("skill_manage", json!({"action":"create","scope":"project","name":"forbidden","description":"Forbidden project creation","content":"Do not create"})),
         call("skill_view", json!({"name":skill.name})),
         call("skill_manage", json!({"action":"delete","name":skill.name,"absorbed_into":target.name})),
         ScriptedTurn::Text("No unsafe changes.".into()),
     ]).await;
-    session.submit("/curator run --consolidate").await.unwrap();
+    session.prompt("/curator run --consolidate").await.unwrap();
     let requests = provider.requests();
     let results = &requests.last().unwrap().messages;
     assert_eq!(
@@ -237,7 +237,7 @@ async fn project_curator_reads_writes_and_rolls_back_only_its_bound_scope() {
     project.adopt(&project_skill.name).unwrap();
     let global_before = tree(&global.root);
     let original = fs::read(&project_skill.path).unwrap();
-    let (session, provider) = session(root.path(), plugin, vec![
+    let (_manager, session, provider) = session(root.path(), plugin, vec![
         call("skill_view", json!({"name":project_skill.name})),
         ScriptedTurn::Text("Preview project improvements.".into()),
         call("skills_list", json!({})),
@@ -254,13 +254,13 @@ async fn project_curator_reads_writes_and_rolls_back_only_its_bound_scope() {
     let global_before_run = tree(&global.root);
     let project_before_preview = tree(&project.root);
     session
-        .submit("/curator run --scope project --dry-run --consolidate")
+        .prompt("/curator run --scope project --dry-run --consolidate")
         .await
         .unwrap();
     assert_eq!(tree(&project.root), project_before_preview);
     assert_eq!(tree(&global.root), global_before_run);
     session
-        .submit("/curator run --scope project --consolidate")
+        .prompt("/curator run --scope project --consolidate")
         .await
         .unwrap();
     assert_eq!(tree(&global.root), global_before_run);
@@ -292,7 +292,7 @@ async fn project_curator_reads_writes_and_rolls_back_only_its_bound_scope() {
     assert!(Metadata::read(&created).unwrap().curator_managed);
     assert!(!global.root.join("project-umbrella").exists());
     session
-        .submit("/curator rollback --scope project")
+        .prompt("/curator rollback --scope project")
         .await
         .unwrap();
     assert_eq!(fs::read(&project_skill.path).unwrap(), original);
@@ -331,7 +331,7 @@ async fn project_consolidation_resolves_the_destination_in_its_own_scope() {
         fs::write(document.path.with_file_name("asset.bin"), [0, 128, 255]).unwrap();
         project.adopt(&document.name).unwrap();
     }
-    let (session, _) = session(
+    let (_manager, session, _) = session(
         root.path(),
         plugin,
         vec![
@@ -346,7 +346,7 @@ async fn project_consolidation_resolves_the_destination_in_its_own_scope() {
     .await;
     let global_before = tree(&global.root);
     session
-        .submit("/curator run --scope project --consolidate")
+        .prompt("/curator run --scope project --consolidate")
         .await
         .unwrap();
     assert!(!source.path.exists());
@@ -354,7 +354,7 @@ async fn project_consolidation_resolves_the_destination_in_its_own_scope() {
     assert_eq!(project.archives().unwrap().len(), 1);
     assert_eq!(tree(&global.root), global_before);
     session
-        .submit("/curator rollback --scope project")
+        .prompt("/curator rollback --scope project")
         .await
         .unwrap();
     assert_eq!(
@@ -401,7 +401,7 @@ async fn automatic_worker_maintains_project_when_global_is_paused() {
         .unwrap();
     let global = Curator::new(plugin.store.global_skill_root(), Config::default());
     global.update_state(|state| state.paused = true).unwrap();
-    let (session, provider) = session(root.path(), plugin, vec![]).await;
+    let (_manager, session, provider) = session(root.path(), plugin, vec![]).await;
     tokio::time::timeout(std::time::Duration::from_secs(45), async {
         while project.state().unwrap().run_count == 0 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -424,7 +424,7 @@ async fn normal_read_activity_is_observed_without_transferring_ownership() {
     let mut meta = Metadata::read(directory).unwrap();
     meta.curator_managed = false;
     meta.save(directory).unwrap();
-    let (session, _) = session(
+    let (_manager, session, _) = session(
         root.path(),
         plugin,
         vec![
@@ -447,11 +447,11 @@ async fn curator_stops_at_the_iteration_budget() {
     let turns = (0..12)
         .map(|_| call("skill_view", json!({"name":skill.name})))
         .collect();
-    let (session, provider) = session(root.path(), plugin, turns).await;
-    session.submit("/curator run --consolidate").await.unwrap();
+    let (_manager, session, provider) = session(root.path(), plugin, turns).await;
+    session.prompt("/curator run --consolidate").await.unwrap();
     assert_eq!(provider.requests().len(), 8);
     assert_eq!(curator.state().unwrap().run_count, 1);
-    assert!(session.runtime().agent().state().messages.is_empty());
+    assert!(session.snapshot().agent.messages.is_empty());
     session.shutdown().await;
 }
 
@@ -460,8 +460,8 @@ async fn empty_library_never_invokes_the_provider() {
     let root = tempfile::tempdir().unwrap();
     let (plugin, curator, skill) = setup(root.path());
     curator.archive(&skill.name).unwrap();
-    let (session, provider) = session(root.path(), plugin, vec![]).await;
-    session.submit("/curator run --consolidate").await.unwrap();
+    let (_manager, session, provider) = session(root.path(), plugin, vec![]).await;
+    session.prompt("/curator run --consolidate").await.unwrap();
     assert!(provider.requests().is_empty());
     assert_eq!(curator.state().unwrap().run_count, 1);
     session.shutdown().await;

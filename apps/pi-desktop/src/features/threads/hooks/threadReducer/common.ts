@@ -110,19 +110,6 @@ export function mergeStreamingText(existing: string, delta: string) {
   return `${existing}${delta}`;
 }
 
-export function addSummaryBoundary(existing: string) {
-  if (!existing) {
-    return existing;
-  }
-  if (existing.endsWith("\n\n")) {
-    return existing;
-  }
-  if (existing.endsWith("\n")) {
-    return `${existing}\n`;
-  }
-  return `${existing}\n\n`;
-}
-
 export function prefersUpdatedSort(state: ThreadState, workspaceId: string) {
   return (state.threadSortKeyByWorkspace[workspaceId] ?? "updated_at") === "updated_at";
 }

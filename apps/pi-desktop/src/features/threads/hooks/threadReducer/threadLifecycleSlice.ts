@@ -30,21 +30,24 @@ export function reduceThreadLifecycle(
               ...state.threadStatusById,
               [action.threadId]: {
                 isProcessing:
-                  state.threadStatusById[action.threadId]?.isProcessing ?? false,
+                  state.threadStatusById[action.threadId]?.isProcessing ??
+                  false,
                 hasUnread: false,
                 processingStartedAt:
-                  state.threadStatusById[action.threadId]?.processingStartedAt ??
-                  null,
+                  state.threadStatusById[action.threadId]
+                    ?.processingStartedAt ?? null,
                 lastDurationMs:
-                  state.threadStatusById[action.threadId]?.lastDurationMs ?? null,
+                  state.threadStatusById[action.threadId]?.lastDurationMs ??
+                  null,
               },
             }
           : state.threadStatusById,
       };
     case "ensureThread": {
       const hidden =
-        state.hiddenThreadIdsByWorkspace[action.workspaceId]?.[action.threadId] ??
-        false;
+        state.hiddenThreadIdsByWorkspace[action.workspaceId]?.[
+          action.threadId
+        ] ?? false;
       if (hidden) {
         return state;
       }
@@ -75,7 +78,8 @@ export function reduceThreadLifecycle(
         activeThreadIdByWorkspace: {
           ...state.activeThreadIdByWorkspace,
           [action.workspaceId]:
-            state.activeThreadIdByWorkspace[action.workspaceId] ?? action.threadId,
+            state.activeThreadIdByWorkspace[action.workspaceId] ??
+            action.threadId,
         },
       };
     }
@@ -95,8 +99,8 @@ export function reduceThreadLifecycle(
       const filtered = list.filter((thread) => thread.id !== action.threadId);
       const nextActive =
         state.activeThreadIdByWorkspace[action.workspaceId] === action.threadId
-          ? filtered[0]?.id ?? null
-          : state.activeThreadIdByWorkspace[action.workspaceId] ?? null;
+          ? (filtered[0]?.id ?? null)
+          : (state.activeThreadIdByWorkspace[action.workspaceId] ?? null);
 
       return {
         ...state,
@@ -119,16 +123,18 @@ export function reduceThreadLifecycle(
       const filtered = list.filter((thread) => thread.id !== action.threadId);
       const nextActive =
         state.activeThreadIdByWorkspace[action.workspaceId] === action.threadId
-          ? filtered[0]?.id ?? null
-          : state.activeThreadIdByWorkspace[action.workspaceId] ?? null;
+          ? (filtered[0]?.id ?? null)
+          : (state.activeThreadIdByWorkspace[action.workspaceId] ?? null);
       const { [action.threadId]: _, ...restItems } = state.itemsByThread;
-      const { [action.threadId]: _commands, ...restCommands } = state.commandsByThread;
-      const { [action.threadId]: _inheritance, ...restInheritance } = state.contextInheritanceByThread;
+      const { [action.threadId]: _commands, ...restCommands } =
+        state.commandsByThread;
+      const { [action.threadId]: _inheritance, ...restInheritance } =
+        state.contextInheritanceByThread;
       const { [action.threadId]: __, ...restStatus } = state.threadStatusById;
-      const { [action.threadId]: ___, ...restTurns } = state.activeTurnIdByThread;
-      const { [action.threadId]: ____, ...restDiffs } = state.turnDiffByThread;
-      const { [action.threadId]: _____, ...restPlans } = state.planByThread;
-      const { [action.threadId]: ______, ...restParents } = state.threadParentById;
+      const { [action.threadId]: ___, ...restTurns } =
+        state.activeTurnIdByThread;
+      const { [action.threadId]: ______, ...restParents } =
+        state.threadParentById;
       return {
         ...state,
         threadsByWorkspace: {
@@ -140,8 +146,6 @@ export function reduceThreadLifecycle(
         commandsByThread: restCommands,
         threadStatusById: restStatus,
         activeTurnIdByThread: restTurns,
-        turnDiffByThread: restDiffs,
-        planByThread: restPlans,
         threadParentById: restParents,
         activeThreadIdByWorkspace: {
           ...state.activeThreadIdByWorkspace,
@@ -193,7 +197,7 @@ export function reduceThreadLifecycle(
       const nextDuration =
         wasProcessing && startedAt
           ? Math.max(0, action.timestamp - startedAt)
-          : lastDurationMs ?? null;
+          : (lastDurationMs ?? null);
       const nextStatus: ThreadStatus = {
         isProcessing: false,
         hasUnread,
@@ -274,7 +278,12 @@ export function reduceThreadLifecycle(
         }
         const patchEntries = Object.entries(action.patch).filter(
           ([, value]) => value !== undefined,
-        ) as Array<[keyof typeof action.patch, NonNullable<(typeof action.patch)[keyof typeof action.patch]>]>;
+        ) as Array<
+          [
+            keyof typeof action.patch,
+            NonNullable<(typeof action.patch)[keyof typeof action.patch]>,
+          ]
+        >;
         if (!patchEntries.length) {
           return thread;
         }
@@ -336,9 +345,29 @@ export function reduceThreadLifecycle(
         },
       };
     }
+    case "appendThreads": {
+      const existing = state.threadsByWorkspace[action.workspaceId] ?? [];
+      const hidden = state.hiddenThreadIdsByWorkspace[action.workspaceId] ?? {};
+      const ids = new Set(existing.map((thread) => thread.id));
+      const additions = action.threads.filter((thread) => {
+        if (hidden[thread.id] || ids.has(thread.id)) return false;
+        ids.add(thread.id);
+        return true;
+      });
+      if (!additions.length) return state;
+      return {
+        ...state,
+        threadsByWorkspace: {
+          ...state.threadsByWorkspace,
+          [action.workspaceId]: [...existing, ...additions],
+        },
+      };
+    }
     case "setThreads": {
       const hidden = state.hiddenThreadIdsByWorkspace[action.workspaceId] ?? {};
-      const visibleThreads = action.threads.filter((thread) => !hidden[thread.id]);
+      const visibleThreads = action.threads.filter(
+        (thread) => !hidden[thread.id],
+      );
       const preserveAnchors = action.preserveAnchors === true;
       if (!preserveAnchors) {
         const currentActiveThreadId =
@@ -364,7 +393,8 @@ export function reduceThreadLifecycle(
           },
         };
       }
-      const existingThreads = state.threadsByWorkspace[action.workspaceId] ?? [];
+      const existingThreads =
+        state.threadsByWorkspace[action.workspaceId] ?? [];
       const existingById = new Map(
         existingThreads.map((thread) => [thread.id, thread] as const),
       );
@@ -400,7 +430,8 @@ export function reduceThreadLifecycle(
         includedIds.add(threadId);
       };
 
-      const activeThreadId = state.activeThreadIdByWorkspace[action.workspaceId];
+      const activeThreadId =
+        state.activeThreadIdByWorkspace[action.workspaceId];
       appendExistingAnchor(activeThreadId);
       existingThreads.forEach((thread) => {
         if (state.threadStatusById[thread.id]?.isProcessing) {

@@ -48,13 +48,11 @@ impl WeakSubagentRuntime {
 }
 
 struct RuntimeInner {
-    runtime_id: String,
     limits: RuntimeLimits,
     checkpointing: bool,
     state: Mutex<RuntimeState>,
     changed: watch::Sender<u64>,
     monitors: Mutex<HashMap<String, (String, Arc<MonitorTask>)>>,
-    desktop: Mutex<crate::desktop::DesktopState>,
 }
 
 struct MonitorTask {
@@ -360,13 +358,11 @@ impl SubagentRuntime {
     fn with_limits_and_checkpointing(limits: RuntimeLimits, checkpointing: bool) -> Self {
         Self {
             inner: Arc::new(RuntimeInner {
-                runtime_id: Uuid::now_v7().to_string(),
                 limits,
                 checkpointing,
                 state: Mutex::new(RuntimeState::default()),
                 changed: watch::channel(0).0,
                 monitors: Mutex::new(HashMap::new()),
-                desktop: Mutex::new(crate::desktop::DesktopState::default()),
             }),
         }
     }
@@ -391,7 +387,6 @@ impl SubagentRuntime {
     }
 
     fn wake(&self) {
-        self.publish_desktop();
         self.inner
             .changed
             .send_modify(|revision| *revision = revision.wrapping_add(1));
@@ -588,7 +583,7 @@ impl SubagentRuntime {
                 .and_then(|registered| registered.pi_session.as_ref())
                 .and_then(pi_session::WeakPiSession::upgrade);
             let result = match parent {
-                Some(parent) => match pi_session::SessionLog::open(&child_path) {
+                Some(parent) => match pi_session::SessionStore::open(&child_path) {
                     Ok((_, document)) if document.header.id == child_session_id => {
                         parent.restore_isolated_session(&child_path).await
                     }
@@ -598,7 +593,7 @@ impl SubagentRuntime {
                             document.header.id, child_session_id
                         )),
                     ),
-                    Err(error) => Err(error.into()),
+                    Err(error) => Err(pi_session::SessionError::from(error).into()),
                 },
                 None => Err(
                     pi_session::MultiSessionManagerError::InvalidIsolatedRequest(format!(
@@ -697,31 +692,6 @@ impl SubagentRuntime {
     }
 
     pub(crate) fn bind_session(&self, id: String, session: SessionContext) {
-        let needs_history = self
-            .inner
-            .desktop
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .needs_restore(&id);
-        let history = if needs_history {
-            session
-                .snapshot()
-                .map(|snapshot| {
-                    snapshot
-                        .branch()
-                        .iter()
-                        .map(|entry| entry.raw().clone())
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        self.inner
-            .desktop
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .restore(&id, history);
         let mut state = self.lock();
         let pi_session = state
             .sessions
@@ -743,7 +713,12 @@ impl SubagentRuntime {
     /// rebinds the same frontend handle to the newly published generation.
     pub fn session_registered(&self, session: pi_session::PiSession) {
         let session_id = session.id();
-        let context = session.current().runtime().context_parts().session;
+        let context = pi_plugin::ContextParts::new(
+            session
+                .current()
+                .plugin_context(pi_plugin::PluginContextScope::Base),
+        )
+        .session;
         self.bind_session(session_id.clone(), context);
         if let Some(registered) = self.lock().sessions.get_mut(&session_id) {
             registered.pi_session = Some(session.downgrade());
@@ -763,15 +738,6 @@ impl SubagentRuntime {
         }
     }
 
-    pub(crate) fn suspend_desktop(&self, id: &str) {
-        // Serializes with publication so shutdown cannot race a captured old context.
-        self.inner
-            .desktop
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .suspend(id);
-    }
-
     pub(crate) fn set_task(&self, id: &str, task: &str) -> Result<(), LaunchError> {
         if let Some(agent) = self.lock().agents.get_mut(id) {
             agent.task = Some(task.to_string());
@@ -782,33 +748,6 @@ impl SubagentRuntime {
             .map_err(LaunchError::Persistence)?;
         self.wake();
         Ok(())
-    }
-
-    fn publish_desktop(&self) {
-        let mut desktop = self
-            .inner
-            .desktop
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let owners = {
-            let state = self.lock();
-            state.sessions.iter().map(|(owner, registered)| {
-                let agents = state.agents.values().filter(|agent| agent.parent_session_id == *owner)
-                    .map(|agent| (agent.id.clone(), json!({
-                        "agentId":agent.id,"agent":agent.profile.name,"task":agent.task,
-                        "state":agent.state,"updatedAt":agent.updated_at,
-                        "session":{"sessionId":agent.child_session_id,
-                            "isolatedSessionId":agent.handle.as_ref().map(|handle| handle.id().as_str()),
-                            "ownerSessionId":owner},
-                        "totalTokens":agent.usage.total_tokens
-                    }))).collect();
-                (owner.clone(), registered.session.clone(), agents)
-            }).collect::<Vec<_>>()
-        };
-        // append_entry can acquire the session journal lock; never keep the runtime lock here.
-        for (owner, session, agents) in owners {
-            desktop.publish(&self.inner.runtime_id, &owner, &session, agents);
-        }
     }
 
     pub(crate) fn begin_launch(
@@ -1751,11 +1690,6 @@ impl SubagentRuntime {
             state.roots.remove(session_id);
         }
         drop(state);
-        self.inner
-            .desktop
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .forget(session_id);
         self.wake();
     }
 

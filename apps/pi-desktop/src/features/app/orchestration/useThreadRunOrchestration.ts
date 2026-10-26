@@ -1,9 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
-import type { ServiceTier } from "@/types";
 import { useThreadRunParams } from "@threads/hooks/useThreadRunParams";
 import {
-  type PendingNewThreadSeed,
   NO_THREAD_SCOPE_SUFFIX,
 } from "@threads/utils/threadRunParamsSeed";
 
@@ -12,8 +10,6 @@ type ThreadRunOrchestration = {
   setPreferredModelId: Dispatch<SetStateAction<string | null>>;
   preferredEffort: string | null;
   setPreferredEffort: Dispatch<SetStateAction<string | null>>;
-  preferredServiceTier: ServiceTier | null | undefined;
-  setPreferredServiceTier: Dispatch<SetStateAction<ServiceTier | null | undefined>>;
   threadRunSelectionKey: string | null;
   setThreadRunSelectionKey: Dispatch<SetStateAction<string | null>>;
   threadRunParamsVersion: number;
@@ -22,10 +18,8 @@ type ThreadRunOrchestration = {
   persistThreadRunParams: (patch: {
     modelId?: string | null;
     effort?: string | null;
-    serviceTier?: ServiceTier | null | undefined;
   }) => void;
   activeThreadIdRef: MutableRefObject<string | null>;
-  pendingNewThreadSeedRef: MutableRefObject<PendingNewThreadSeed | null>;
 };
 
 type UseThreadRunOrchestrationParams = {
@@ -42,20 +36,15 @@ export function useThreadRunOrchestration({
   } = useThreadRunParams();
   const [preferredModelId, setPreferredModelId] = useState<string | null>(null);
   const [preferredEffort, setPreferredEffort] = useState<string | null>(null);
-  const [preferredServiceTier, setPreferredServiceTier] = useState<
-    ServiceTier | null | undefined
-  >(undefined);
   const [threadRunSelectionKey, setThreadRunSelectionKey] = useState<string | null>(
     null,
   );
   const activeThreadIdRef = useRef<string | null>(null);
-  const pendingNewThreadSeedRef = useRef<PendingNewThreadSeed | null>(null);
 
   const persistThreadRunParams = useCallback(
     (patch: {
       modelId?: string | null;
       effort?: string | null;
-      serviceTier?: ServiceTier | null | undefined;
     }) => {
       const workspaceId = activeWorkspaceIdForParamsRef.current;
       const threadId = activeThreadIdRef.current ?? NO_THREAD_SCOPE_SUFFIX;
@@ -63,14 +52,6 @@ export function useThreadRunOrchestration({
         return;
       }
       patchThreadRunParams(workspaceId, threadId, patch);
-      if (
-        activeThreadIdRef.current &&
-        Object.prototype.hasOwnProperty.call(patch, "serviceTier")
-      ) {
-        patchThreadRunParams(workspaceId, NO_THREAD_SCOPE_SUFFIX, {
-          serviceTier: patch.serviceTier,
-        });
-      }
     },
     [activeWorkspaceIdForParamsRef, patchThreadRunParams],
   );
@@ -81,8 +62,6 @@ export function useThreadRunOrchestration({
       setPreferredModelId,
       preferredEffort,
       setPreferredEffort,
-      preferredServiceTier,
-      setPreferredServiceTier,
       threadRunSelectionKey,
       setThreadRunSelectionKey,
       threadRunParamsVersion,
@@ -90,12 +69,10 @@ export function useThreadRunOrchestration({
       patchThreadRunParams,
       persistThreadRunParams,
       activeThreadIdRef,
-      pendingNewThreadSeedRef,
     }),
     [
       preferredEffort,
       preferredModelId,
-      preferredServiceTier,
       threadRunSelectionKey,
       threadRunParamsVersion,
       getThreadRunParams,

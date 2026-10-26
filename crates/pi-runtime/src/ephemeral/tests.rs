@@ -513,7 +513,7 @@ async fn detached_compaction_preserves_first_replay_and_only_rewrites_private_co
     );
     assert!(requests[2].messages.len() < requests[0].messages.len());
     assert_balanced(&requests[2].messages);
-    assert_eq!(runtime.agent().state().messages, history);
+    assert_eq!(runtime.agent().state().messages.as_ref(), &history);
     assert_eq!(events.load(Ordering::SeqCst), 0);
     assert!(!outcome.messages.iter().any(|message| matches!(message, Message::User(m) if m.content.iter().any(|b| matches!(b, ContentBlock::Text(t) if t.text.contains("Private context summary"))))));
 }
@@ -573,7 +573,7 @@ async fn incomplete_or_failed_compaction_never_commits_a_partial_summary() {
         );
         assert_eq!(provider.requests().len(), 2);
         assert_balanced(&outcome.messages);
-        assert_eq!(runtime.agent().state().messages, history);
+        assert_eq!(runtime.agent().state().messages.as_ref(), &history);
     }
 }
 
@@ -709,7 +709,7 @@ async fn cancellation_and_reload_during_summary_keep_parent_generation_and_histo
         }
         assert!(provider.signals.lock().unwrap()[1].is_aborted());
         assert_eq!(provider.inner.requests().len(), 2);
-        assert_eq!(runtime.agent().state().messages, history);
+        assert_eq!(runtime.agent().state().messages.as_ref(), &history);
         assert!(matches!(
             old_context.access_for_adapter(),
             Err(pi_plugin::PluginContextError::Retired)
@@ -835,7 +835,7 @@ async fn inherited_history_uses_the_parents_message_converter() {
             Message::User(UserMessage::text("maintain", 0)),
         ]
     );
-    assert_eq!(runtime.agent().state().messages, [custom]);
+    assert_eq!(runtime.agent().state().messages.as_slice(), &[custom]);
 }
 
 #[tokio::test]

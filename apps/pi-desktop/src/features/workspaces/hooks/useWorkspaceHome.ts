@@ -3,7 +3,6 @@ import { useTranslation } from "react-i18next";
 import type {
   ModelOption,
   SendMessageResult,
-  ServiceTier,
   WorkspaceInfo,
 } from "../../../types";
 import { generateRunMetadata } from "../../../services/tauri";
@@ -38,14 +37,12 @@ type UseWorkspaceHomeOptions = {
   models: ModelOption[];
   selectedModelId: string | null;
   effort?: string | null;
-  serviceTier?: ServiceTier | null | undefined;
   seedThreadRunParams?: (
     workspaceId: string,
     threadId: string,
     patch: {
       modelId: string | null;
       effort: string | null;
-      serviceTier: ServiceTier | null | undefined;
     },
   ) => void;
   requestWorktree: (
@@ -64,7 +61,6 @@ type UseWorkspaceHomeOptions = {
     options?: {
       model?: string | null;
       effort?: string | null;
-      serviceTier?: ServiceTier | null | undefined;
     },
   ) => Promise<void | SendMessageResult>;
   reloadWorkspace?: () => Promise<void>;
@@ -188,7 +184,6 @@ export function useWorkspaceHome({
   models,
   selectedModelId,
   effort = null,
-  serviceTier = undefined,
   seedThreadRunParams,
   requestWorktree,
   startThreadForWorkspace,
@@ -506,12 +501,10 @@ export function useWorkspaceHome({
           seedThreadRunParams?.(activeWorkspace.id, threadId, {
             modelId: selectedModelId,
             effort,
-            serviceTier,
           });
           await sendUserMessageToThread(activeWorkspace, threadId, prompt, images, {
             model: selectedModelId,
             effort,
-            serviceTier,
           });
           const model =
             selectedModelId ? modelLookup.get(selectedModelId) ?? null : null;
@@ -561,7 +554,6 @@ export function useWorkspaceHome({
               seedThreadRunParams?.(worktreeWorkspace.id, threadId, {
                 modelId: selection.modelId,
                 effort,
-                serviceTier,
               });
               await sendUserMessageToThread(
                 worktreeWorkspace,
@@ -571,7 +563,6 @@ export function useWorkspaceHome({
                 {
                   model: selection.modelId,
                   effort,
-                  serviceTier,
                 },
               );
               instances.push({
@@ -645,7 +636,6 @@ export function useWorkspaceHome({
     runMode,
     seedThreadRunParams,
     selectedModelId,
-    serviceTier,
     sendUserMessageToThread,
     reloadWorkspace,
     setDraft,

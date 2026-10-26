@@ -56,10 +56,7 @@
     "exportMarkdown": "导出 .md",
     "exportDialogTitle": "将计划导出为 Markdown",
     "exportFailed": "计划导出失败",
-    "exportUnavailable": "无法导出计划。",
-    "title": "计划",
-    "waiting": "正在等待计划...",
-    "empty": "当前没有计划。"
+    "exportUnavailable": "无法导出计划。"
   },
   "explore": {
     "exploring": "正在探索",
@@ -174,10 +171,8 @@
       "stop": "停止听写",
       "start": "开始听写"
     },
-    "plan": "计划",
     "model": "模型",
     "noModels": "没有可用模型",
-    "fastModeToggle": "切换快速模式",
     "thinkingMode": "思考模式",
     "default": "默认",
     "tokenUsageUnknown": "Token 用量未知",

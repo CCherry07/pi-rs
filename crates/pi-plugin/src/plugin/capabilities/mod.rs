@@ -12,9 +12,11 @@ mod surface;
 mod types;
 mod ui;
 pub use surface::{
-    UiAppAction, UiCommand, UiCompletion, UiHostOperation, UiHostRequest, UiInteraction,
+    UiAppAction, UiCommand, UiCompletion, UiFocusTarget, UiHostOperation, UiHostRequest,
+    UiInteraction, UiMouseButton, UiMouseEvent, UiMouseEventKind, UiMouseResult,
     UiMultiSelectAction, UiMultiSelectOption, UiMultiSelectRequest, UiMultiSelectResponse, UiNode,
-    UiNodeKind, UiOverlayOptions, UiProductCommand, UiRegion, UiRegionPlacement, UiShortcut,
+    UiNodeKind, UiOverlayAnchor, UiOverlayMargin, UiOverlayOptions, UiOverlayPosition,
+    UiProductCommand, UiRegion, UiRegionBounds, UiRegionPlacement, UiRegionSnapshot, UiShortcut,
     UiSurfaceArea, UiSurfaceCommand, UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot, UiTone,
     UiTranscriptItem, UiTranscriptRender,
 };

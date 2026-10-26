@@ -1,29 +1,42 @@
 //! Generation-owned descriptions, semantic events, and Rust component state.
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, HashSet, VecDeque},
 };
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use pi_plugin::{
-    UiInteraction, UiRegion, UiRegionPlacement, UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot,
+    UiFocusTarget, UiInteraction, UiRegion, UiRegionBounds, UiRegionPlacement, UiRegionSnapshot,
+    UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot,
 };
-use ratatui::{layout::Rect, widgets::Clear};
+use ratatui::{
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    widgets::Clear,
+};
 use tokio::sync::oneshot;
 
 use super::super::super::UiPalette;
 use super::super::graphics::Graphics;
 use super::runtime::{self, TreeRuntime};
+#[path = "mouse.rs"]
+mod mouse;
 
 struct RegionRuntime {
     id: String,
     tree: RefCell<TreeRuntime>,
+    bounds: Cell<Option<Rect>>,
+    order: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct FocusTarget {
+    owner: String,
+    region: String,
 }
 struct Owner {
     frame: UiSurfaceFrame,
     admitted: bool,
     regions: Vec<RegionRuntime>,
-    focused_region: Option<String>,
     requested_focus: Option<(String, String)>,
     pending: Option<oneshot::Sender<UiSurfaceEvent>>,
     events: VecDeque<UiSurfaceEvent>,
@@ -33,6 +46,12 @@ struct Owner {
 pub(super) struct SurfaceOwners {
     owners: Vec<Owner>,
     retired: HashSet<String>,
+    focused: Option<FocusTarget>,
+    focus_revision: u64,
+    focus_history: Vec<FocusTarget>,
+    released: HashSet<FocusTarget>,
+    order: u64,
+    mouse: mouse::MouseState,
 }
 
 fn exclusive(placement: UiRegionPlacement) -> bool {
@@ -57,7 +76,6 @@ impl SurfaceOwners {
                 },
                 admitted: false,
                 regions: Vec::new(),
-                focused_region: None,
                 requested_focus: None,
                 pending: None,
                 events: VecDeque::new(),
@@ -75,12 +93,144 @@ impl SurfaceOwners {
                     .any(|region| region.placement == placement)
             })
     }
+    fn region_visible(&self, index: usize, region: &UiRegion) -> bool {
+        self.visible(index, region.placement)
+            && !region
+                .overlay
+                .as_ref()
+                .is_some_and(|options| options.hidden)
+    }
+    fn target(&self, index: usize, region: &str) -> FocusTarget {
+        FocusTarget {
+            owner: self.owners[index].frame.owner.clone(),
+            region: region.into(),
+        }
+    }
+    fn locate(&self, target: &FocusTarget) -> Option<(usize, usize)> {
+        let index = self.position(&target.owner)?;
+        let region = self.owners[index]
+            .frame
+            .regions
+            .iter()
+            .position(|region| region.id == target.region)?;
+        self.region_visible(index, &self.owners[index].frame.regions[region])
+            .then_some((index, region))
+    }
+    fn activate(&mut self, target: FocusTarget) {
+        let Some((index, region_index)) = self.locate(&target) else {
+            return;
+        };
+        if self.focused.as_ref() != Some(&target) {
+            self.focus_revision = self.focus_revision.wrapping_add(1);
+            if let Some(previous) = self.focused.replace(target.clone()) {
+                self.focus_history.retain(|entry| entry != &previous);
+                self.focus_history.push(previous);
+            }
+        }
+        self.released.remove(&target);
+        if self.owners[index].frame.regions[region_index].placement == UiRegionPlacement::Overlay {
+            self.order = self.order.wrapping_add(1);
+            if let Some(region) = self.owners[index]
+                .regions
+                .iter_mut()
+                .find(|region| region.id == target.region)
+            {
+                region.order = self.order;
+            }
+        }
+    }
+    fn restore_focus(&mut self) {
+        if self.focused.is_some() {
+            self.focus_revision = self.focus_revision.wrapping_add(1);
+        }
+        self.focused = None;
+        while let Some(previous) = self.focus_history.pop() {
+            if self.locate(&previous).is_some() && !self.released.contains(&previous) {
+                self.activate(previous);
+                return;
+            }
+        }
+        for (index, region_index) in self.overlay_order().into_iter().rev() {
+            let region = &self.owners[index].frame.regions[region_index];
+            let target = self.target(index, &region.id);
+            if !region
+                .overlay
+                .as_ref()
+                .is_some_and(|options| options.non_capturing)
+                && !self.released.contains(&target)
+            {
+                self.activate(target);
+                return;
+            }
+        }
+    }
+    fn overlay_order(&self) -> Vec<(usize, usize)> {
+        let mut regions = Vec::new();
+        for (index, owner) in self.owners.iter().enumerate() {
+            for (region_index, region) in owner.frame.regions.iter().enumerate() {
+                if region.placement == UiRegionPlacement::Overlay
+                    && self.region_visible(index, region)
+                {
+                    let order = owner
+                        .regions
+                        .iter()
+                        .find(|state| state.id == region.id)
+                        .map_or(0, |state| state.order);
+                    regions.push((order, index, region_index));
+                }
+            }
+        }
+        regions.sort_by_key(|(order, ..)| *order);
+        regions
+            .into_iter()
+            .map(|(_, index, region)| (index, region))
+            .collect()
+    }
+    pub(super) fn begin_frame(&self) {
+        for owner in &self.owners {
+            for region in &owner.regions {
+                region.bounds.set(None);
+            }
+        }
+    }
+    pub(super) fn snapshots(&self) -> Vec<UiRegionSnapshot> {
+        self.owners
+            .iter()
+            .enumerate()
+            .flat_map(|(index, owner)| {
+                owner.frame.regions.iter().map(move |region| {
+                    let visible = self.region_visible(index, region);
+                    let bounds = visible
+                        .then(|| {
+                            owner
+                                .regions
+                                .iter()
+                                .find(|state| state.id == region.id)
+                                .and_then(|state| state.bounds.get())
+                        })
+                        .flatten();
+                    UiRegionSnapshot {
+                        owner: owner.frame.owner.clone(),
+                        region_id: region.id.clone(),
+                        focused: visible
+                            && self.focused.as_ref() == Some(&self.target(index, &region.id)),
+                        bounds: bounds.map(|area| UiRegionBounds {
+                            row: area.y,
+                            col: area.x,
+                            width: area.width,
+                            height: area.height,
+                        }),
+                    }
+                })
+            })
+            .collect()
+    }
     pub(super) fn compose(&self) -> UiSurfaceFrame {
         let mut frame = UiSurfaceFrame::default();
         let mut transcript = BTreeMap::new();
         for (index, owner) in self.owners.iter().enumerate() {
             for region in &owner.frame.regions {
-                if self.visible(index, region.placement) {
+                if self.region_visible(index, region) {
                     frame.regions.push(region.clone());
                 }
             }
@@ -115,17 +265,18 @@ impl SurfaceOwners {
             return;
         }
         let entry = &mut self.owners[index];
-        let previous_overlays = entry
+        let previous_visible: HashSet<_> = entry
             .frame
             .regions
             .iter()
-            .filter(|region| region.placement == UiRegionPlacement::Overlay)
-            .count();
-        let overlays = frame
-            .regions
-            .iter()
-            .filter(|region| region.placement == UiRegionPlacement::Overlay)
-            .count();
+            .filter(|region| {
+                !region
+                    .overlay
+                    .as_ref()
+                    .is_some_and(|options| options.hidden)
+            })
+            .map(|region| region.id.clone())
+            .collect();
         entry
             .regions
             .retain(|state| frame.regions.iter().any(|region| region.id == state.id));
@@ -137,10 +288,23 @@ impl SurfaceOwners {
                     entry.regions.push(RegionRuntime {
                         id: region.id.clone(),
                         tree: RefCell::new(TreeRuntime::default()),
+                        bounds: Cell::new(None),
+                        order: 0,
                     });
                     entry.regions.last_mut().expect("region inserted")
                 };
             state.tree.get_mut().reconcile(&region.root);
+            if !previous_visible.contains(&region.id) {
+                self.order = self.order.wrapping_add(1);
+                state.order = self.order;
+            }
+            if region
+                .overlay
+                .as_ref()
+                .is_some_and(|options| options.hidden)
+            {
+                state.bounds.set(None);
+            }
         }
         entry.events.retain_mut(|event| {
             let UiSurfaceEvent::Interaction { region_id, node_id, revision, event, .. } = event else { return true; };
@@ -148,7 +312,7 @@ impl SurfaceOwners {
                 if !frame.shortcuts.iter().any(|shortcut| &shortcut.key == key) { return false; }
             } else {
                 let old = entry.frame.regions.iter().find(|region| region.id == *region_id).and_then(|region| runtime::find_node(&region.root, node_id));
-                let next = frame.regions.iter().find(|region| region.id == *region_id).and_then(|region| runtime::find_node(&region.root, node_id));
+                let next = frame.regions.iter().find(|region| region.id == *region_id && !region.overlay.as_ref().is_some_and(|options| options.hidden)).and_then(|region| runtime::find_node(&region.root, node_id));
                 if !matches!((old, next), (Some(old), Some(next)) if std::mem::discriminant(&old.kind) == std::mem::discriminant(&next.kind)) { return false; }
             }
             *revision = frame.revision;
@@ -156,36 +320,56 @@ impl SurfaceOwners {
         });
         entry.admitted = true;
         entry.frame = frame;
-        if overlays > previous_overlays
-            || entry
-                .focused_region
-                .as_ref()
-                .is_none_or(|id| !entry.regions.iter().any(|region| &region.id == id))
-        {
-            entry.focused_region = entry
-                .regions
-                .iter()
-                .rev()
-                .find(|state| state.tree.borrow().interactive())
-                .map(|state| state.id.clone());
-        }
-        if let Some((region_id, node_id)) = entry.requested_focus.clone()
-            && let Some(state) = entry.regions.iter_mut().find(|state| state.id == region_id)
-            && state.tree.get_mut().focus(&node_id)
-        {
-            entry.focused_region = Some(region_id);
-            entry.requested_focus = None;
-        }
+        let survives = |target: &FocusTarget| {
+            target.owner != entry.frame.owner
+                || entry
+                    .frame
+                    .regions
+                    .iter()
+                    .any(|region| region.id == target.region)
+        };
+        self.focus_history.retain(survives);
+        self.released.retain(survives);
+        let requested_focus = entry.requested_focus.take();
         if let Some(old) = entry.pending.replace(response) {
             let _ = old.send(UiSurfaceEvent::Closed);
         }
-        let index = if overlays > previous_overlays {
-            let entry = self.owners.remove(index);
-            self.owners.push(entry);
-            self.owners.len() - 1
-        } else {
-            index
-        };
+        if self
+            .focused
+            .as_ref()
+            .is_some_and(|target| self.locate(target).is_none())
+        {
+            self.restore_focus();
+        }
+        let new_focus = self.owners[index]
+            .frame
+            .regions
+            .iter()
+            .rev()
+            .find(|region| {
+                !previous_visible.contains(&region.id)
+                    && self.region_visible(index, region)
+                    && if region.placement == UiRegionPlacement::Overlay {
+                        !region
+                            .overlay
+                            .as_ref()
+                            .is_some_and(|options| options.non_capturing)
+                    } else {
+                        self.focused.is_none()
+                            && self.owners[index].regions.iter().any(|state| {
+                                state.id == region.id && state.tree.borrow().interactive()
+                            })
+                    }
+            })
+            .map(|region| self.target(index, &region.id));
+        if let Some(target) = new_focus {
+            self.activate(target);
+        }
+        if let Some((region_id, node_id)) = requested_focus {
+            let owner = self.owners[index].frame.owner.clone();
+            self.focus(&owner, &region_id, &node_id);
+        }
+        self.validate_mouse();
         self.flush(index);
     }
     pub(super) fn refresh(&mut self, snapshot: &UiSurfaceSnapshot) {
@@ -302,43 +486,45 @@ impl SurfaceOwners {
                 }
             }
         }
-        for index in (0..self.owners.len()).rev() {
-            for region_index in (0..self.owners[index].frame.regions.len()).rev() {
-                let region = &self.owners[index].frame.regions[region_index];
-                if !self.visible(index, region.placement) {
-                    continue;
-                }
-                let modal = region.placement == UiRegionPlacement::Overlay
-                    && region.overlay.as_ref().is_none_or(|options| options.modal);
-                let entry = &self.owners[index];
-                let tree = entry
-                    .regions
-                    .iter()
-                    .find(|state| state.id == region.id)
-                    .expect("mounted region");
-                if !modal
-                    && entry
-                        .focused_region
-                        .as_ref()
-                        .is_some_and(|focused| focused != &region.id)
-                    && !matches!(event, Event::Mouse(_))
-                {
-                    continue;
-                }
-                if !modal && !tree.tree.borrow().interactive() {
-                    continue;
-                }
-                let (handled, interaction) = tree.tree.borrow_mut().input(&region.root, event);
-                let region_id = region.id.clone();
-                if handled && matches!(event, Event::Mouse(_)) {
-                    self.owners[index].focused_region = Some(region_id.clone());
-                }
-                if let Some((node_id, interaction)) = interaction {
-                    self.emit(index, region_id, node_id, interaction, snapshot);
-                }
-                if handled || modal {
-                    return true;
-                }
+        let targets = if matches!(event, Event::Mouse(_)) {
+            let mut targets: Vec<_> = self.overlay_order().into_iter().rev().collect();
+            for (index, owner) in self.owners.iter().enumerate().rev() {
+                targets.extend(owner.frame.regions.iter().enumerate().rev().filter_map(
+                    |(region_index, region)| {
+                        (region.placement != UiRegionPlacement::Overlay
+                            && self.region_visible(index, region))
+                        .then_some((index, region_index))
+                    },
+                ));
+            }
+            targets
+        } else {
+            self.focused
+                .as_ref()
+                .and_then(|target| self.locate(target))
+                .into_iter()
+                .collect()
+        };
+        for (index, region_index) in targets {
+            let region = &self.owners[index].frame.regions[region_index];
+            let target = self.target(index, &region.id);
+            let modal = self.focused.as_ref() == Some(&target)
+                && region.placement == UiRegionPlacement::Overlay
+                && region.overlay.as_ref().is_none_or(|options| options.modal);
+            let tree = self.owners[index]
+                .regions
+                .iter()
+                .find(|state| state.id == region.id)
+                .expect("mounted region");
+            let (handled, interaction) = tree.tree.borrow_mut().input(&region.root, event);
+            if handled && matches!(event, Event::Mouse(_)) {
+                self.activate(target.clone());
+            }
+            if let Some((node_id, interaction)) = interaction {
+                self.emit(index, target.region, node_id, interaction, snapshot);
+            }
+            if handled || modal {
+                return true;
             }
         }
         false
@@ -348,16 +534,62 @@ impl SurfaceOwners {
             return false;
         }
         let index = self.ensure_owner(owner);
+        let target = self.target(index, region_id);
+        if self.owners[index]
+            .frame
+            .regions
+            .iter()
+            .any(|region| region.id == region_id)
+            && self.locate(&target).is_none()
+        {
+            return false;
+        }
         let entry = &mut self.owners[index];
         entry.requested_focus = Some((region_id.into(), node_id.into()));
         if let Some(state) = entry.regions.iter_mut().find(|state| state.id == region_id)
             && state.tree.get_mut().focus(node_id)
         {
-            entry.focused_region = Some(region_id.into());
             entry.requested_focus = None;
+            self.activate(target);
             true
         } else {
             false
+        }
+    }
+
+    pub(super) fn unfocus(
+        &mut self,
+        owner: &str,
+        region_id: &str,
+        destination: Option<&UiFocusTarget>,
+    ) {
+        let target = FocusTarget {
+            owner: owner.into(),
+            region: region_id.into(),
+        };
+        if self.focused.as_ref() != Some(&target) {
+            return;
+        }
+        let next = if let Some(UiFocusTarget::Region { region_id }) = destination {
+            let next = FocusTarget {
+                owner: owner.into(),
+                region: region_id.clone(),
+            };
+            if next == target || self.locate(&next).is_none() {
+                return;
+            }
+            Some(next)
+        } else {
+            None
+        };
+        self.released.insert(target.clone());
+        self.focus_history.retain(|previous| previous != &target);
+        self.focus_revision = self.focus_revision.wrapping_add(1);
+        self.focused = None;
+        if let Some(next) = next {
+            self.activate(next);
+        } else if destination.is_none() {
+            self.restore_focus();
         }
     }
 
@@ -371,14 +603,28 @@ impl SurfaceOwners {
         {
             let _ = sender.send(UiSurfaceEvent::Closed);
         }
+        self.focus_history.retain(|target| target.owner != owner);
+        self.released.retain(|target| target.owner != owner);
+        if self
+            .focused
+            .as_ref()
+            .is_some_and(|target| target.owner == owner)
+        {
+            self.restore_focus();
+        }
+        self.validate_mouse();
     }
     pub(super) fn close(&mut self) {
+        self.cancel_mouse();
         for owner in self.owners.drain(..) {
             self.retired.insert(owner.frame.owner);
             if let Some(sender) = owner.pending {
                 let _ = sender.send(UiSurfaceEvent::Closed);
             }
         }
+        self.focused = None;
+        self.focus_history.clear();
+        self.released.clear();
     }
     pub(super) fn draw_regions(
         &self,
@@ -392,12 +638,9 @@ impl SurfaceOwners {
             if !self.visible(index, placement) {
                 continue;
             }
-            for region in owner
-                .frame
-                .regions
-                .iter()
-                .filter(|region| region.placement == placement)
-            {
+            for region in owner.frame.regions.iter().filter(|region| {
+                region.placement == placement && self.region_visible(index, region)
+            }) {
                 let height = runtime::measure(&region.root, area.width, palette).min(area.height);
                 self.draw_region(
                     index,
@@ -419,36 +662,28 @@ impl SurfaceOwners {
         graphics: &mut Graphics,
     ) {
         let root = frame.area();
-        for (index, owner) in self.owners.iter().enumerate() {
-            for region in owner
-                .frame
-                .regions
-                .iter()
-                .filter(|region| region.placement == UiRegionPlacement::Overlay)
+        for (index, region_index) in self.overlay_order() {
+            let region = &self.owners[index].frame.regions[region_index];
+            if self.focused.as_ref() == Some(&self.target(index, &region.id))
+                && region.overlay.as_ref().is_none_or(|options| options.modal)
             {
-                let width = region
-                    .overlay
-                    .as_ref()
-                    .and_then(|options| options.width)
-                    .unwrap_or(root.width.saturating_sub(4).max(1))
-                    .min(root.width);
-                let height = runtime::measure(&region.root, width, palette)
-                    .min(
-                        region
-                            .overlay
-                            .as_ref()
-                            .and_then(|options| options.max_height)
-                            .unwrap_or(root.height),
-                    )
-                    .min(root.height);
-                let area = Rect::new(
-                    root.x + (root.width - width) / 2,
-                    root.y + (root.height - height) / 2,
-                    width,
-                    height,
-                );
-                self.draw_region(index, region, frame, area, palette, graphics);
+                let backdrop = Style::default()
+                    .fg(Color::DarkGray)
+                    .bg(Color::Reset)
+                    .remove_modifier(Modifier::all())
+                    .add_modifier(Modifier::DIM);
+                for cell in &mut frame.buffer_mut().content {
+                    cell.set_style(backdrop);
+                }
+                graphics.occlude(root);
             }
+            let area = super::overlay::bounds(
+                root,
+                &region.root,
+                &region.overlay.clone().unwrap_or_default(),
+                palette,
+            );
+            self.draw_region(index, region, frame, area, palette, graphics);
         }
     }
     fn draw_region(
@@ -465,14 +700,8 @@ impl SurfaceOwners {
             .iter()
             .find(|state| state.id == region.id)
             .expect("mounted region");
-        let active = self.owners[index].focused_region.as_deref() == Some(region.id.as_str())
-            && !self.owners[index + 1..].iter().any(|owner| {
-                owner
-                    .frame
-                    .regions
-                    .iter()
-                    .any(|region| region.placement == UiRegionPlacement::Overlay)
-            });
+        let active = self.focused.as_ref() == Some(&self.target(index, &region.id));
+        runtime.bounds.set(Some(area));
         graphics.occlude(area);
         frame.render_widget(Clear, area);
         let mut tree = runtime.tree.borrow_mut();

@@ -2,14 +2,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use pi_core::{AgentEvent, ContentBlock, Message, StreamEvent, ToolResult};
-use pi_session::{AgentSessionEvent, RevisionedAgentSessionEvent, SessionEntry};
+use pi_session::{
+    AgentSessionEvent, RevisionedAgentSessionEvent, SessionEntry, SessionResetReason, SessionUpdate,
+};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 
 use crate::backend::events::PiEvent;
 
-use super::session_store::{content_text, LiveSession, SessionStore};
+use super::session_store::{content_text, LiveSession};
 
 pub(crate) type ForwarderRegistry = Arc<Mutex<HashSet<String>>>;
 
@@ -123,7 +125,7 @@ impl ProjectionState {
         };
         // Covered ToolExecutionStart events are not replayed. Retain pending
         // arguments so their later update/end still projects the original call.
-        for message in &snapshot.agent.messages {
+        for message in snapshot.agent.messages.iter() {
             match message {
                 Message::Assistant(message) => {
                     for call in message.tool_calls() {
@@ -180,8 +182,8 @@ impl ContextRefresh {
             self.after_context_change = true;
             return false;
         }
-        // CompactionEnd does not publish the new Agent state. The next Agent
-        // event is the first reliable snapshot boundary for immediate activation.
+        // Use the next Agent event as the refresh boundary for both immediate
+        // and deferred compaction activation.
         if self.after_context_change
             && matches!(
                 event,
@@ -234,11 +236,10 @@ pub(crate) fn spawn_session_forwarder(
     thread_id: String,
     key: String,
     live: LiveSession,
-    store: SessionStore,
     forwarders: ForwarderRegistry,
 ) {
     tauri::async_runtime::spawn(async move {
-        forward_session_events(app, workspace_id, thread_id, key, live, store, forwarders).await;
+        forward_session_events(app, workspace_id, thread_id, key, live, forwarders).await;
     });
 }
 
@@ -248,52 +249,34 @@ async fn forward_session_events(
     thread_id: String,
     key: String,
     mut live: LiveSession,
-    store: SessionStore,
     forwarders: ForwarderRegistry,
 ) {
-    let mut state = ProjectionState::from_snapshot(&live.presentation_snapshot(), &thread_id);
+    let mut state = ProjectionState::from_snapshot(&live.snapshot, &thread_id);
     let mut thread_id = thread_id;
-    let mut changes = live.changes.take();
     let mut context_refresh = ContextRefresh::default();
-    let mut initial_revision = live.subscription.snapshot.revision;
-    loop {
-        let event = tokio::select! {
-            biased;
-            changed = async {
-                match &mut changes {
-                    Some(receiver) => receiver.changed().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                if changed.is_err() { break; }
-                let current = Arc::clone(&changes.as_mut().unwrap().borrow_and_update());
+    while let Some(update) = live.recv().await {
+        match update {
+            SessionUpdate::Reset { reason, .. } => {
                 let previous_id = thread_id;
-                thread_id = current.log().header().id;
-                // The watch may coalesce replacements. Rehydrate the latest session
-                // at its new subscription boundary instead of replaying old streams.
-                live.replace(current);
-                initial_revision = live.subscription.snapshot.revision;
+                thread_id = live.session().history().header().id;
                 context_refresh = ContextRefresh::default();
-                state = ProjectionState::from_snapshot(&live.presentation_snapshot(), &thread_id);
-                emit(&app, &workspace_id, "thread/replaced", json!({
-                    "previousThreadId": previous_id,
-                    "generationChanged": true,
-                    "thread": super::thread_from_subscription(&live),
-                }));
-                continue;
+                state = ProjectionState::from_snapshot(&live.snapshot, &thread_id);
+                emit(
+                    &app,
+                    &workspace_id,
+                    "thread/replaced",
+                    json!({
+                        "previousThreadId": previous_id,
+                        "generationChanged": reason == SessionResetReason::Replacement,
+                        "thread": super::thread_from_subscription(&live),
+                    }),
+                );
             }
-            event = live.subscription.events.recv() => event,
-        };
-        match event {
-            Ok(event) if event.revision <= initial_revision => continue,
-            Ok(event)
-                if event.revision <= live.subscription.snapshot.revision
-                    && snapshot_covers_event(&event.event) =>
-            {
-                continue;
-            }
-            Ok(event) => {
-                let should_refresh = context_refresh.before_event(&event.event);
+            SessionUpdate::Event { version, event } => {
+                if version.revision <= live.snapshot.revision && snapshot_covers_event(&event) {
+                    continue;
+                }
+                let should_refresh = context_refresh.before_event(&event);
                 project_event(
                     EventProjectionContext {
                         app: &app,
@@ -302,43 +285,23 @@ async fn forward_session_events(
                         live: &live,
                     },
                     &mut state,
-                    event,
+                    RevisionedAgentSessionEvent {
+                        revision: version.revision,
+                        event,
+                    },
                 )
                 .await;
                 if should_refresh {
-                    if let Some(thread) =
-                        refresh_thread_snapshot(&mut live, &store, &thread_id).await
-                    {
-                        state = ProjectionState::from_snapshot(
-                            &live.presentation_snapshot(),
-                            &thread_id,
-                        );
-                        emit(
-                            &app,
-                            &workspace_id,
-                            "thread/replaced",
-                            json!({
-                                "previousThreadId": thread_id, "thread": thread,
-                            }),
-                        );
-                    }
-                }
-            }
-            Err(broadcast::error::RecvError::Lagged(_)) => {
-                if let Some(thread) = refresh_thread_snapshot(&mut live, &store, &thread_id).await {
-                    state =
-                        ProjectionState::from_snapshot(&live.presentation_snapshot(), &thread_id);
+                    let thread = refresh_thread_snapshot(&mut live);
+                    state = ProjectionState::from_snapshot(&live.snapshot, &thread_id);
                     emit(
                         &app,
                         &workspace_id,
                         "thread/replaced",
-                        json!({
-                            "previousThreadId": thread_id, "thread": thread,
-                        }),
+                        json!({ "previousThreadId": thread_id, "thread": thread }),
                     );
                 }
             }
-            Err(broadcast::error::RecvError::Closed) => break,
         }
     }
     forwarders.lock().await.remove(&key);
@@ -520,17 +483,6 @@ async fn project_event(
             }),
         ),
         AgentSessionEvent::EntryAppended { entry } => {
-            if let Some((key, value)) = super::desktop_views::widget_update(&entry) {
-                emit(
-                    app,
-                    workspace_id,
-                    "thread/widgetUpdated",
-                    json!({
-                        "threadId": thread_id, "key": key, "value": value,
-                        "version": entry.seq,
-                    }),
-                );
-            }
             for item in state.messages.entry(&entry) {
                 emit(
                     app,
@@ -665,6 +617,7 @@ fn tool_result_item(
         cwd,
     );
     item["details"] = json!(result.details);
+    item["images"] = json!(super::content_image_urls(&result.content));
     item
 }
 
@@ -676,24 +629,9 @@ fn notice_params(thread_id: &str, message: &str, level: pi_plugin::NoticeLevel) 
     json!({ "threadId": thread_id, "message": message, "level": level })
 }
 
-async fn refresh_thread_snapshot(
-    live: &mut LiveSession,
-    store: &SessionStore,
-    thread_id: &str,
-) -> Option<Value> {
-    live.refresh_subscription();
-    Some(if live.primary().is_some() {
-        super::thread_from_subscription(live)
-    } else {
-        let observed = store.observed_isolated(thread_id)?;
-        super::thread_from_isolated_snapshot(
-            &live.subscription.snapshot,
-            &observed.observation,
-            &observed.parent_thread_id,
-            &observed.agent,
-            observed.nickname.as_deref(),
-        )
-    })
+fn refresh_thread_snapshot(live: &mut LiveSession) -> Value {
+    live.refresh_snapshot();
+    super::thread_from_subscription(live)
 }
 
 fn emit_status(app: &AppHandle, workspace_id: &str, thread_id: &str, status: &str) {
@@ -747,7 +685,7 @@ mod tests {
                 model_id: pi_core::ModelId::new("test"),
                 thinking_level: pi_core::ThinkingLevel::Off,
                 active_tools: Vec::new(),
-                messages,
+                messages: Arc::new(messages),
                 is_running: false,
                 streaming_message: None,
                 pending_tool_calls: Default::default(),
@@ -1007,13 +945,16 @@ mod tests {
             )]))
             .build()
             .unwrap();
-        let session =
-            pi_session::AgentSession::create(runtime, directory.path().join("session.jsonl"))
-                .await
-                .unwrap();
+        let session = pi_session::AgentSession::create(
+            runtime,
+            directory.path().join("session.jsonl"),
+            Default::default(),
+        )
+        .await
+        .unwrap();
         let mut subscription = session.subscribe();
         let mut projection = MessageProjection::from_snapshot(&subscription.snapshot);
-        session.submit("task").await.unwrap();
+        session.prompt("task").await.unwrap();
         let mut emitted = HashMap::new();
         let mut deltas = Vec::new();
         while let Ok(event) = subscription.events.try_recv() {
@@ -1122,13 +1063,17 @@ mod tests {
             ]))
             .build()
             .unwrap();
-        let session =
-            pi_session::AgentSession::create(runtime, directory.path().join("session.jsonl"))
-                .await
-                .unwrap();
+        let agent = runtime.agent().clone();
+        let session = pi_session::AgentSession::create(
+            runtime,
+            directory.path().join("session.jsonl"),
+            Default::default(),
+        )
+        .await
+        .unwrap();
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        session.runtime().agent().subscribe(Arc::new({
+        agent.subscribe(Arc::new({
             let reached = reached.clone();
             let release = release.clone();
             move |event: AgentEvent, _: pi_core::AbortSignal| {
@@ -1146,7 +1091,7 @@ mod tests {
         }));
         let run = tokio::spawn({
             let session = session.clone();
-            async move { session.submit("task").await }
+            async move { session.prompt("task").await }
         });
         tokio::time::timeout(std::time::Duration::from_secs(2), reached.notified())
             .await
@@ -1208,7 +1153,7 @@ mod tests {
         for item in final_items {
             assert_eq!(by_id[item["id"].as_str().unwrap()], item);
         }
-        session.submit("followup").await.unwrap();
+        session.prompt("followup").await.unwrap();
         while let Ok(event) = subscription.events.try_recv() {
             if let AgentSessionEvent::Agent(event) = event.event {
                 if let AgentEvent::MessageEnd { message } = *event {
@@ -1236,11 +1181,14 @@ mod tests {
             ]))
             .build()
             .unwrap();
-        let session =
-            pi_session::AgentSession::create(runtime, directory.path().join("session.jsonl"))
-                .await
-                .unwrap();
-        session.submit("old task").await.unwrap();
+        let session = pi_session::AgentSession::create(
+            runtime,
+            directory.path().join("session.jsonl"),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        session.prompt("old task").await.unwrap();
         let mut subscription = session.subscribe();
         let mut items = snapshot_items(&subscription.snapshot);
         let mut projection = MessageProjection::from_snapshot(&subscription.snapshot);
@@ -1249,6 +1197,7 @@ mod tests {
             .append_compaction(pi_session::CompactionEntry {
                 summary: "compact context".into(),
                 retained_tail: Vec::new(),
+                retained_entry_ids: Vec::new(),
                 tokens_before: 100,
                 details: None,
                 usage: None,
@@ -1256,11 +1205,11 @@ mod tests {
             .await
             .unwrap();
         while let Ok(event) = subscription.events.try_recv() {
-            // CompactionEnd has not refreshed the hub's Agent context yet.
+            // The projection defers its refresh until the next Agent event.
             assert!(!refresh.before_event(&event.event));
         }
         assert!(refresh.after_context_change);
-        session.submit("new task").await.unwrap();
+        session.prompt("new task").await.unwrap();
         let mut replaced = false;
         while let Ok(event) = subscription.events.try_recv() {
             if refresh.before_event(&event.event) {
@@ -1276,7 +1225,7 @@ mod tests {
         assert!(replaced);
         assert!(!json!(items).to_string().contains("old response"));
         assert!(json!(items).to_string().contains("new response"));
-        session.submit("third task").await.unwrap();
+        session.prompt("third task").await.unwrap();
         while let Ok(event) = subscription.events.try_recv() {
             if let AgentSessionEvent::Agent(event) = event.event {
                 if let AgentEvent::MessageEnd { message } = *event {
@@ -1306,7 +1255,7 @@ mod tests {
                 ]))
                 .build()
                 .unwrap();
-            let session = pi_session::AgentSession::create_with_options(
+            let session = pi_session::AgentSession::create(
                 runtime,
                 directory.path().join("session.jsonl"),
                 pi_session::AgentSessionOptions::default().shell_executor(std::sync::Arc::new(
@@ -1315,7 +1264,7 @@ mod tests {
             )
             .await
             .unwrap();
-            session.submit("first task").await.unwrap();
+            session.prompt("first task").await.unwrap();
             let mut subscription = session.subscribe();
             let before_count = subscription.snapshot.agent.messages.len();
             session
@@ -1340,10 +1289,17 @@ mod tests {
                 }
                 assert!(refresh.after_context_change);
             }
-            // The event hub still has the pre-write Agent vector; counting only
-            // MessageEnd here would put the next user in the custom message slot.
-            assert_eq!(subscription.snapshot.agent.messages.len(), before_count);
-            session.submit("second task").await.unwrap();
+            // A new subscription includes both context writes immediately;
+            // retaining the original subscription preserves its old history.
+            assert_eq!(
+                subscription.snapshot.agent.messages.len(),
+                if subscribe_after_write {
+                    before_count + 2
+                } else {
+                    before_count
+                }
+            );
+            session.prompt("second task").await.unwrap();
             let event = subscription.events.recv().await.unwrap();
             assert!(refresh.before_event(&event.event));
             subscription = session.subscribe();
@@ -1406,13 +1362,16 @@ mod tests {
             )]))
             .build()
             .unwrap();
-        let session =
-            pi_session::AgentSession::create(runtime, directory.path().join("session.jsonl"))
-                .await
-                .unwrap();
+        let session = pi_session::AgentSession::create(
+            runtime,
+            directory.path().join("session.jsonl"),
+            Default::default(),
+        )
+        .await
+        .unwrap();
         let mut subscription = session.subscribe();
         let initial_revision = subscription.snapshot.revision;
-        session.submit("fail quickly").await.unwrap();
+        session.prompt("fail quickly").await.unwrap();
         // Refresh the data boundary without dropping queued semantic events.
         subscription.snapshot = session.subscribe().snapshot;
         let mut notifications = Vec::new();
@@ -1564,6 +1523,65 @@ mod tests {
         assert_eq!(projected[0]["text"], "/skill:review");
         assert_eq!(projected[1]["type"], "image");
         assert!(!json!(projected).to_string().contains("expanded skill body"));
+    }
+
+    #[test]
+    fn live_tool_result_images_survive_projection() {
+        for name in ["read", "bash"] {
+            for status in ["inProgress", "completed", "failed"] {
+                let mut result = ToolResult::text("Read image file [image/png]");
+                result
+                    .content
+                    .push(ContentBlock::Image(pi_core::ImageContent {
+                        data: "aW1hZ2U=".into(),
+                        mime_type: "image/png".into(),
+                    }));
+                let item = tool_result_item(
+                    "image-call",
+                    name,
+                    json!({ "path": "/tmp/image.png" }),
+                    status,
+                    &result,
+                    "/project",
+                );
+                assert_eq!(item["images"], json!(["data:image/png;base64,aW1hZ2U="]));
+            }
+        }
+    }
+
+    #[test]
+    fn restored_tool_result_images_survive_projection() {
+        for name in ["read", "bash"] {
+            let result = Message::tool_result(pi_core::ToolResultMessage {
+                tool_call_id: pi_core::ToolCallId::new("image-call"),
+                tool_name: name.into(),
+                content: vec![
+                    block_text("Read image file [image/png]"),
+                    ContentBlock::Image(pi_core::ImageContent {
+                        data: "aW1hZ2U=".into(),
+                        mime_type: "image/png".into(),
+                    }),
+                ],
+                details: None,
+                usage: None,
+                added_tool_names: None,
+                is_error: false,
+                timestamp_ms: 1,
+            });
+            let thread = super::super::thread_from_snapshot(
+                &snapshot(vec![result]),
+                "parent",
+                std::path::Path::new("/project"),
+                Default::default(),
+                json!("pi-rs"),
+                None,
+                Default::default(),
+            );
+            assert_eq!(
+                thread["turns"][0]["items"][0]["images"],
+                json!(["data:image/png;base64,aW1hZ2U="])
+            );
+        }
     }
 
     #[test]

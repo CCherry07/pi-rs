@@ -8,7 +8,7 @@ use pi_core::{ContentBlock, Message, PluginId, StopReason, Usage};
 use pi_plugin::{
     AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, Plugin, PluginError,
 };
-use pi_session::{MultiSessionManager, SessionGenerationOverlay, SubmitOutcome};
+use pi_session::{MultiSessionManager, PromptOutcome, SessionGenerationOverlay};
 use pi_utils::time::unix_timestamp_ms as now_ms;
 
 use crate::model::EVAL_RUN_SCHEMA_VERSION;
@@ -156,7 +156,10 @@ impl EvalRunner {
             });
             let session = target
                 .manager
-                .create_session_with_overlay(&workspace, &session_path, overlay)
+                .create_session(pi_session::CreateSessionOptions {
+                    generation_overlay: overlay,
+                    ..pi_session::CreateSessionOptions::new(&workspace, &session_path)
+                })
                 .await
                 .map_err(|error| EvalError::Runtime(error.to_string()))?;
 
@@ -232,9 +235,9 @@ impl EvalRunner {
             }
 
             let current = session.current();
-            let state = current.runtime().agent().state();
+            let state = current.snapshot().agent;
             let model_has_pricing = current
-                .runtime()
+                .catalog()
                 .model(&state.provider_id, &state.model_id)
                 .is_some_and(|model| {
                     model.cost.input > 0.0
@@ -402,7 +405,7 @@ async fn run_submission(
     let current = session.current();
     run_future_submission(
         session,
-        async move { current.submit(prompt).await },
+        async move { current.prompt(prompt).await },
         timeout,
         operation,
     )
@@ -416,11 +419,11 @@ async fn run_future_submission<F>(
     operation: &OperationSlot,
 ) -> Result<(), StepError>
 where
-    F: Future<Output = Result<SubmitOutcome, pi_session::SessionError>> + Send + 'static,
+    F: Future<Output = Result<PromptOutcome, pi_session::SessionError>> + Send + 'static,
 {
     match run_operation(session, future, step_timeout, operation).await? {
-        SubmitOutcome::Agent(_) | SubmitOutcome::Handled => Ok(()),
-        SubmitOutcome::Queued { .. } => Err(StepError::Failed(
+        PromptOutcome::Agent(_) | PromptOutcome::Handled => Ok(()),
+        PromptOutcome::Queued { .. } => Err(StepError::Failed(
             "input was queued while the sequential eval runner was idle".to_string(),
         )),
         _ => Err(StepError::Failed(
@@ -678,7 +681,10 @@ mod tests {
             .build();
         let session = harness
             .sessions()
-            .create_session(directory.path(), directory.path().join("session.jsonl"))
+            .create_session(pi_session::CreateSessionOptions::new(
+                directory.path(),
+                directory.path().join("session.jsonl"),
+            ))
             .await
             .unwrap();
         let cleaned = Arc::new(AtomicBool::new(false));

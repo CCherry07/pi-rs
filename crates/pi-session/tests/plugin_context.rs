@@ -7,8 +7,8 @@ use pi_plugin::{
 };
 use pi_runtime::PiRuntime;
 use pi_session::{
-    AgentSession, AgentSessionOptions, PiPluginContext, PluginContextBinding, PluginUiBridge,
-    SessionStartEvent, SessionStartReason,
+    AgentSessionOptions, MultiSessionManager, PiPluginContext, PluginContextBinding,
+    PluginUiBridge, PreparedSessionGeneration, SessionGenerationRequest,
 };
 use pi_test_support::ScriptedProviderPlugin;
 
@@ -39,15 +39,15 @@ impl PluginUiBridge for RecordingUiBridge {
         &self,
         frame: pi_plugin::UiSurfaceFrame,
     ) -> Result<pi_plugin::UiSurfaceEvent, String> {
-        let pi_plugin::UiNodeKind::Column { children, .. } = &frame.regions[0].root.kind else {
-            panic!("expected dialog column");
+        let pi_plugin::UiNodeKind::Panel { title, child } = &frame.regions[0].root.kind else {
+            panic!("expected dialog panel");
         };
-        let pi_plugin::UiNodeKind::Text { text, .. } = &children[0].kind else {
-            panic!("expected dialog title");
+        let pi_plugin::UiNodeKind::Column { children, .. } = &child.kind else {
+            panic!("expected dialog content");
         };
-        let (title, message) = text
-            .split_once('\n')
-            .expect("confirmation title and message");
+        let pi_plugin::UiNodeKind::Text { text: message, .. } = &children[0].kind else {
+            panic!("expected confirmation description");
+        };
         self.confirmations
             .lock()
             .unwrap()
@@ -127,22 +127,30 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
         .plugin_context(context_access)
         .build()
         .unwrap();
-    let prepared = AgentSession::prepare_create_with_options(
-        runtime,
-        directory.path().join("native-context.jsonl"),
-        AgentSessionOptions::default(),
-    )
-    .await
-    .unwrap();
-    access.bind_generation_session(prepared.session());
-    let session = prepared
-        .activate(SessionStartEvent {
-            reason: SessionStartReason::Startup,
-            previous_session_file: None,
-        })
-        .await;
+    let manager = MultiSessionManager::new({
+        let runtime = runtime.clone();
+        let access = access.clone();
+        move |_: SessionGenerationRequest| {
+            let runtime = runtime.clone();
+            let access = access.clone();
+            async move {
+                Ok(
+                    PreparedSessionGeneration::new(runtime, AgentSessionOptions::default())
+                        .bind_session(move |session| access.bind_generation_session(session)),
+                )
+            }
+        }
+    });
+    let session = manager
+        .create_session(pi_session::CreateSessionOptions::new(
+            runtime.cwd(),
+            directory.path().join("native-context.jsonl"),
+        ))
+        .await
+        .unwrap()
+        .current();
 
-    session.runtime().process_input("hello").await.unwrap();
+    runtime.process_input("hello").await.unwrap();
 
     assert_eq!(
         *observed.lock().unwrap(),
@@ -150,15 +158,12 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
             mode: PresentationMode::Tui,
             has_ui: true,
             trusted: true,
-            session_id: session.log().header().id.clone(),
+            session_id: session.history().header().id.clone(),
         })
     );
 
-    let replacement_context = CommandContextParts::new(
-        session
-            .runtime()
-            .plugin_context_handle(PluginContextScope::Command),
-    );
+    let replacement_context =
+        CommandContextParts::new(session.plugin_context(PluginContextScope::Command));
     assert_eq!(
         replacement_context.ui.mode().unwrap(),
         PresentationMode::Tui
@@ -175,24 +180,25 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
         .await
         .unwrap();
 
-    let (provider_id, model_id) = session.runtime().agent().model_selection();
+    let state = session.snapshot().agent;
+    let (provider_id, model_id) = (state.provider_id, state.model_id);
     assert_eq!(
         replacement_context.models.current().unwrap(),
-        session.runtime().model(&provider_id, &model_id)
+        session.catalog().model(&provider_id, &model_id)
     );
     assert_eq!(
         replacement_context.models.thinking_level().unwrap(),
-        Some(session.runtime().agent().thinking_level())
+        Some(session.snapshot().agent.thinking_level)
     );
     assert!(replacement_context.session.is_idle().unwrap());
     assert!(!replacement_context.session.has_pending_messages().unwrap());
     assert_eq!(
         replacement_context.session.system_prompt().unwrap(),
-        session.runtime().agent().runtime().system_prompt()
+        session.snapshot().agent.system_prompt
     );
     assert_eq!(
         replacement_context.session.id().unwrap(),
-        session.log().id()
+        session.history().id()
     );
     assert_eq!(
         replacement_context.session.name().unwrap().as_deref(),
@@ -220,19 +226,19 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
     );
     assert_eq!(
         replacement_context.session.header().unwrap()["id"],
-        session.log().id()
+        session.history().id()
     );
     assert_eq!(
         replacement_context.session.active_tools().unwrap(),
-        session.runtime().active_tools()
+        session.snapshot().agent.active_tools
     );
     assert_eq!(
         replacement_context.session.tools().unwrap(),
-        session.runtime().tool_specs()
+        session.catalog().tool_specs()
     );
     assert_eq!(
         replacement_context.session.commands().unwrap(),
-        session.runtime().command_specs()
+        session.catalog().command_specs()
     );
     assert!(
         replacement_context
@@ -250,8 +256,8 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
     );
 
     let snapshot = replacement_context.session.snapshot().unwrap();
-    assert_eq!(snapshot.id(), session.log().header().id);
-    assert_eq!(snapshot.cwd(), session.log().header().cwd);
+    assert_eq!(snapshot.id(), session.history().header().id);
+    assert_eq!(snapshot.cwd(), session.history().header().cwd);
     assert_eq!(snapshot.name(), Some("Snapshot DX"));
     assert_eq!(snapshot.leaf_id(), Some(entry_id.as_str()));
     assert_eq!(snapshot.label(&entry_id), Some("checkpoint"));
@@ -280,7 +286,7 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
             Some(serde_json::json!({"task": "background_review"})),
         )
         .unwrap();
-    let document = session.log().load().unwrap();
+    let document = session.history().load().unwrap();
     let usage = document
         .records
         .iter()

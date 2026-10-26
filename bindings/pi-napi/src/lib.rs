@@ -11,10 +11,10 @@ use napi_derive::napi;
 use pi_core::ToolUpdate;
 use pi_js_plugin::{
     ExtensionContextNotification, ExtensionContextQuery, ExtensionContextRequest,
-    JsCallbackDispatcher, JsCallbackError, JsGenerationManifest, JsGenerationRequest,
-    JsHookBatchInvocation, JsHookBatchResult, JsHostOperation, JsInvocation, JsPluginHost,
-    JsStreamHookBatchInvocation, PluginContextHandle, execute_context_notification,
-    execute_context_query, execute_context_request,
+    JsCallbackDispatcher, JsCallbackError, JsContextHookBatchInvocation, JsContextHookBatchResult,
+    JsGenerationManifest, JsGenerationRequest, JsHookBatchInvocation, JsHookBatchResult,
+    JsHostOperation, JsInvocation, JsPluginHost, JsStreamHookBatchInvocation, PluginContextHandle,
+    execute_context_notification, execute_context_query, execute_context_request,
 };
 use pi_plugin::ToolUpdateSink;
 use serde_json::Value;
@@ -271,6 +271,25 @@ impl JsCallbackDispatcher for NativePiHost {
         serde_json::from_value(response).map_err(|error| {
             JsCallbackError::new(format!(
                 "JavaScript host returned an invalid hook batch result: {error}"
+            ))
+        })
+    }
+
+    async fn invoke_context_hook_batch(
+        &self,
+        invocation: JsContextHookBatchInvocation,
+        context: PluginContextHandle,
+    ) -> Result<JsContextHookBatchResult, JsCallbackError> {
+        let response = self
+            .request(
+                JsHostOperation::InvokeContextHookBatch { invocation },
+                Some(context),
+                None,
+            )
+            .await?;
+        serde_json::from_value(response).map_err(|error| {
+            JsCallbackError::new(format!(
+                "JavaScript host returned an invalid context hook batch result: {error}"
             ))
         })
     }

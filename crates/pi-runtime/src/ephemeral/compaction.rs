@@ -1,4 +1,4 @@
-//! Private context compaction: no SessionLog, session hooks, or rotation.
+//! Private context compaction: no SessionStore, session hooks, or rotation.
 //!
 //! The caller supplies retention policy. Only the existing generation-pinned
 //! provider completion and the normal Agent loop are used to execute it.

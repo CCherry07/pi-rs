@@ -45,7 +45,17 @@ function parseUserInputs(inputs: Array<Record<string, unknown>>) {
 export function buildConversationItem(item: Record<string, unknown>): ConversationItem | null {
   const result = convertConversationItem(item);
   if (result?.kind !== "tool") return result;
-  return { ...result, toolName: typeof item.toolName === "string" ? item.toolName : undefined, data: item };
+  const images = Array.isArray(item.images)
+    ? item.images.filter(
+        (image): image is string => typeof image === "string" && image.length > 0,
+      )
+    : [];
+  return {
+    ...result,
+    ...(Array.isArray(item.images) ? { images } : {}),
+    toolName: typeof item.toolName === "string" ? item.toolName : undefined,
+    data: item,
+  };
 }
 
 function convertConversationItem(

@@ -1,5 +1,3 @@
-import type { ServiceTier } from "@/types";
-
 const STORAGE_KEY_THREAD_ACTIVITY = "pi-monitor.threadLastUserActivity";
 export const STORAGE_KEY_PINNED_THREADS = "pi-monitor.pinnedThreads";
 export const STORAGE_KEY_CUSTOM_NAMES = "pi-monitor.threadCustomNames";
@@ -15,16 +13,15 @@ export type CustomNamesMap = Record<string, string>;
 export type ThreadRunParams = {
   modelId: string | null;
   effort: string | null;
-  // string => explicit per-thread tier override
-  // null => explicit "Default/off" override
-  // undefined => legacy/unset thread value that should inherit no-thread scope
-  serviceTier: ServiceTier | null | undefined;
   updatedAt: number;
 };
 
 export type ThreadRunParamsMap = Record<string, ThreadRunParams>;
 
-export function makeThreadRunParamsKey(workspaceId: string, threadId: string): string {
+export function makeThreadRunParamsKey(
+  workspaceId: string,
+  threadId: string,
+): string {
   return `${workspaceId}:${threadId}`;
 }
 
@@ -94,7 +91,10 @@ export function saveThreadActivity(activity: ThreadActivityMap) {
   }
 }
 
-export function makeCustomNameKey(workspaceId: string, threadId: string): string {
+export function makeCustomNameKey(
+  workspaceId: string,
+  threadId: string,
+): string {
   return `${workspaceId}:${threadId}`;
 }
 
@@ -117,7 +117,11 @@ export function loadCustomNames(): CustomNamesMap {
   }
 }
 
-export function saveCustomName(workspaceId: string, threadId: string, name: string): void {
+export function saveCustomName(
+  workspaceId: string,
+  threadId: string,
+  name: string,
+): void {
   if (typeof window === "undefined") {
     return;
   }

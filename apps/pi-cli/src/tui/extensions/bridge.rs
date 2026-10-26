@@ -68,6 +68,19 @@ impl PluginUiBridge for PluginUiService {
 }
 
 impl SurfaceReceiver {
+    /// Publish geometry after painting, even when no further terminal event arrives.
+    pub(in crate::tui) fn publish_regions(&self, surface: &mut super::surface::ExtensionSurface) {
+        let regions = surface.region_snapshots();
+        let mut snapshot = self
+            .snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if snapshot.regions != regions {
+            snapshot.regions = regions;
+            surface.refresh(&snapshot);
+        }
+    }
+
     pub(in crate::tui) fn take_startup(&mut self) -> Option<super::startup::StartupUi> {
         self.startup.take()
     }

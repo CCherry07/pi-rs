@@ -23,10 +23,8 @@ Currently wired:
 
 - workspace persistence;
 - list, create, resume, fork, rename, archive, and compact Pi sessions;
-- text and image submission, steering, interruption (including observed subagent runs), and live
-  streaming;
-- collapsible child-agent chat panels embedded in the parent conversation, with lazy history
-  loading, live messages/reasoning/tools, independent scrolling and retryable read errors;
+- text and image submission, steering, interruption, and live streaming;
+- subagent results in ordinary tool and custom-message rows;
 - independent child timelines: `fork` parent history stays in a collapsed, read-only creation
   snapshot rather than appearing as child messages; `fresh` explicitly reports no inherited
   history. The source session and available snapshot boundary are shown above the child chat,
@@ -55,14 +53,12 @@ response. Background generation uses separate sessions. Failed reloads leave the
 catalog and event subscription intact. Successful native session navigation changes the selected
 thread identity; the old saved thread is not silently rebound to the new session.
 
-Desktop actions `/compact`, `/fast`, `/fork`, `/new`, `/resume`, and `/status` retain priority
-(case-insensitive exact command names) in both completion and dispatch. `/prompts:*` remains
-the Desktop custom-prompt namespace. Conflicting runtime names are hidden, not advertised with
-an execution path that runs another command. In particular `/resume` refreshes the Desktop
-thread, and `/fast` retains the imported UI setting; the native adapter does not forward a
-service-tier setting to providers. These are Desktop presentation choices, not Pi TUI parity.
+Desktop actions `/compact` and `/reload` retain priority (case-insensitive exact command
+names) in both completion and dispatch. `/prompts:*` remains the Desktop custom-prompt
+namespace. Conflicting runtime names are hidden and the composer shows a collision warning.
+The imported Fast toggle and its unused service-tier state have been removed.
 
-Other slash commands go through `AgentSession.submit` exactly once; a handled command need not
+Other slash commands go through `AgentSession.prompt` exactly once; a handled command need not
 start an agent turn or create a session file. Tauri waits for the real submit receipt while Pi
 product events stream independently. The local follow-up queue retains Desktop queue/steer
 intent; steering uses native preprocessing and handled commands do not stall queue draining.
@@ -75,11 +71,33 @@ notices) are not replayed. The composer visibly warns when Desktop action names 
 
 Only commands registered by the Rust runtime (including built-in feature plugins and loaded
 native plugins) are exposed. The Desktop does not host legacy Pi JavaScript runtime extensions,
-TUI widgets, argument-completion callbacks, or interactive extension dialogs. The separate React
-presentation extension interface is described below. CLI-only
-frontend commands such as `/reload` are not implicitly registered here; a native command may
-use the runtime reload/navigation capabilities. Project native plugins still use shared Pi
-project trust; desktop presentation packages consume that same decision.
+TUI widgets, argument-completion callbacks, or interactive extension dialogs. CLI-only
+frontend commands are not implicitly registered here. Desktop's `/reload` invokes managed
+session replacement; native commands may also use the runtime reload/navigation capabilities. Project native plugins use shared Pi project trust.
+
+## Session lists and rendering
+
+Session listing batches all requested Projects in one native scan. The native index reuses JSONL
+summaries when the path, modification time and size are unchanged, and refreshes changed or moved
+files. Lists follow the stored Project identity, so editing a Project's directories does not hide
+its existing conversations. Legacy sessions use the shared unambiguous-directory fallback.
+
+Both active and archived lists support cursors. Creation sorting uses the session header timestamp;
+activity sorting uses the file modification time, with the session ID breaking ties. A cursor is
+scoped to its Project, archive state and sort order. Older pages append to current UI state, and
+superseded list requests cannot overwrite a newer refresh or sort selection.
+
+Streaming text updates preserve unchanged row references. The selected conversation receives its
+own inherited-context snapshot directly; background conversation updates do not replace its message
+array. Same-ID replacements invalidate pending resume responses. The unused Plan panel and handlers
+for events with no native producer have been removed; native tools and plugin messages continue to
+render through the shared transcript components.
+
+Body Markdown images use Desktop's asset protocol for absolute file paths and `file://` URLs;
+relative image paths resolve against the current workspace. Image data URLs are supported only
+in image elements, independently of ordinary-link filtering. Images scale down to fit the message.
+Native tool-result image blocks are preserved in both live events and restored history. Their
+thumbnails stay visible outside collapsed tool groups and open through the shared image preview.
 
 ## Adding a workspace
 
@@ -185,6 +203,14 @@ cd src-tauri
 cargo check
 ```
 
+### Appearance preview
+
+Run `npm run dev -- --host 127.0.0.1` and open
+<http://127.0.0.1:1421/examples/design-preview.html?theme=light> to explore the
+light/dark desktop styling with real frontend components and fixture data.
+The preview does not invoke a provider or change a project. See
+[the appearance guide](docs/appearance.md) for palette, typography, and component rules.
+
 ## Attribution
 
 - UI foundation: CodexMonitor, MIT license.
@@ -203,57 +229,11 @@ to refresh their generation. Project writes require the existing project trust d
 Symlink paths remain read-only; imports reject links/special files. Failed Trash operations
 never fall back to permanent deletion. Viewing skills does not count as Agent usage.
 
+## Plugin presentation
 
-## React plugin views
-
-Plugins can write React, Hooks and CSS and optionally compose the shared `ToolCard`, `StatusBadge`,
-`Markdown`, `SessionView` and `InlineCommandForm` modules from `@pi-rs/desktop-sdk`. Typed
-`defineWidgetChannel` / `useWidget` and `usePluginCommand` adapters keep decoding and command names
-inside the plugin. The host passes raw tool arguments,
-result `details`, partial results and custom-message data. Domain-specific interpretation belongs to
-the plugin. The subagent UI is the bundled example, including task state and stop/follow-up controls:
-[`plugins/features/pi-plugin-subagents/desktop`](../../plugins/features/pi-plugin-subagents/desktop).
-
-Build a local extension from the desktop directory:
-
-```sh
-npm run build:extension -- ../../plugins/features/pi-plugin-subagents/desktop
-```
-
-A source package contains `src/index.tsx`, CSS and `pi-desktop.json`:
-
-```json
-{"schemaVersion":1,"id":"example.checks","name":"Checks","entry":"dist/index.js","styles":["dist/style.css"]}
-```
-
-Install the **contents** of its built `dist` directory under
-`~/.pi/agent/desktop-extensions/<package>/` or `<workspace>/.pi/desktop-extensions/<package>/`.
-Project packages require the existing project trust decision. Click **Reload desktop extensions**
-in the conversation after rebuilding/installing. A matching installed ID replaces the bundled
-extension without rebuilding the desktop. Native package installation remains separate.
-
-For a provider-free preview of the dynamically loaded subagent bundle, build it as above, run
-`npm run dev`, and open `/examples/preview.html`. The preview supplies simulated tasks and commands;
-it verifies actual bundle loading and React interactions without launching model work.
-
-The SDK guide in [`packages/pi-desktop-sdk`](../../packages/pi-desktop-sdk/README.md) documents exact
-interfaces and lifetime rules. Extensions execute as trusted webview code using the host React
-instance. Missing/crashing renderers have normal transcript fallbacks. UI-only reload does not stop
-background agents; native session reload retains its existing child-shutdown behavior.
-
-Backend plugins publish later status changes with the native author helper:
-
-```rust
-use pi_plugin::desktop::WidgetPublisher;
-
-let mut progress = WidgetPublisher::new("example.progress")?;
-progress.publish(&context.session, &serde_json::json!({
-    "completed": 3, "total": 5
-}))?;
-```
-
-The host retains the latest value on the current branch and forwards updates using durable record
-sequence numbers. Use null to remove a key, keep values below 256 KiB, and coalesce unchanged
-snapshots. `WidgetPublisher` hides the entry envelope, size validation, tombstones and duplicate
-suppression. These records are hidden from the model. Plugins own their payload validation,
-historical state and command implementations. No general plugin RPC server is required.
+Desktop renders native tool results and displayed custom plugin messages with its built-in
+components. The React desktop SDK, extension packages, custom panels and widget/command bridges
+have been removed. Native plugins and the `subagents:interrupt` / `subagents:followup` slash commands
+continue to use the normal runtime path. Child sessions open as saved history snapshots.
+Existing session files remain readable; old widget records stay opaque and hidden.
+The light/dark appearance preview remains available above.

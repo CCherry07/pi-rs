@@ -11,7 +11,6 @@ import { GitDiffViewer } from "../../../git/components/GitDiffViewer";
 import { Home } from "../../../home/components/Home";
 import { Messages } from "../../../messages/components/Messages";
 import { ErrorToasts } from "../../../notifications/components/ErrorToasts";
-import { PlanPanel } from "../../../plan/components/PlanPanel";
 import { PromptPanel } from "../../../prompts/components/PromptPanel";
 import { TerminalDock } from "../../../terminal/components/TerminalDock";
 import type { TerminalSessionState } from "../../../terminal/hooks/useTerminalSession";
@@ -67,7 +66,6 @@ export type LayoutGitSurface = {
 };
 
 export type LayoutSecondarySurface = {
-  planPanelProps: ComponentProps<typeof PlanPanel>;
   terminalDockProps: Omit<ComponentProps<typeof TerminalDock>, "terminalNode">;
   terminalState: TerminalSessionState | null;
   debugPanelProps: ComponentProps<typeof DebugPanel>;
@@ -100,7 +98,6 @@ export type LayoutNodesResult = {
   tabBarNode: ReactNode;
   gitDiffPanelNode: ReactNode;
   gitDiffViewerNode: ReactNode;
-  planPanelNode: ReactNode;
   debugPanelNode: ReactNode;
   debugPanelFullNode: ReactNode;
   terminalDockNode: ReactNode;

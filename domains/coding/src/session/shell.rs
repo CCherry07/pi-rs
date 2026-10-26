@@ -70,7 +70,7 @@ mod tests {
             shell_command_prefix: Some("configured_value=from-settings".to_string()),
             ..pi_settings::SettingsValues::default()
         };
-        let session = AgentSession::create_with_options(
+        let session = AgentSession::create(
             runtime(directory.path(), [ScriptedTurn::Text("done".to_string())]),
             &path,
             crate::configuration::session_options(&settings, InitialModelRequest::default()),
@@ -99,7 +99,7 @@ mod tests {
             "shell-only use must not create a resume entry"
         );
         let message = session
-            .log()
+            .history()
             .load()
             .unwrap()
             .messages()
@@ -111,7 +111,7 @@ mod tests {
         session.prompt("hello").await.unwrap();
         session.shutdown().await;
         drop(session);
-        let reopened = AgentSession::open(runtime(directory.path(), []), &path)
+        let reopened = AgentSession::open(runtime(directory.path(), []), &path, Default::default())
             .await
             .unwrap();
         assert_eq!(
@@ -120,7 +120,7 @@ mod tests {
         );
         assert!(
             reopened
-                .log()
+                .history()
                 .load()
                 .unwrap()
                 .messages()

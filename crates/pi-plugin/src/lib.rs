@@ -32,7 +32,7 @@ pub use plugin::{
     BeforeAgentStartEvent, BeforeAgentStartPatch, BeforeProviderHeadersEvent,
     BeforeProviderRequestEvent, BoundaryCompaction, BoundaryContextPreview, BoundaryResult,
     BoundaryState, CommandContextParts, CommandModelsContext, CommandSessionContext,
-    CompactOptions, ContextEvent, ContextParts, ContextPatch, ContextUsage,
+    CompactOptions, ContextEvent, ContextHookBatch, ContextParts, ContextPatch, ContextUsage,
     DirectCompletionRequest, EphemeralCompactionOptions, EphemeralSessionOutcome,
     EphemeralSessionRequest, EphemeralSessionStatus, ForkOptions, ForkPosition, InputContext,
     InputEvent, InputPatch, InputSource, InputStreamingBehavior, IsolatedContextMode,
@@ -58,9 +58,11 @@ pub use plugin::{
     SessionTreeSummary, ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolExecutionEndEvent,
     ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch,
     TreePreparation, TurnEndEvent, TurnStartEvent, UiAppAction, UiCommand, UiCompletion, UiContext,
-    UiContextAccess, UiHostOperation, UiHostRequest, UiInteraction, UiMultiSelectAction,
-    UiMultiSelectOption, UiMultiSelectRequest, UiMultiSelectResponse, UiNode, UiNodeKind,
-    UiOverlayOptions, UiProductCommand, UiRegion, UiRegionPlacement, UiShortcut, UiSurfaceArea,
+    UiContextAccess, UiFocusTarget, UiHostOperation, UiHostRequest, UiInteraction, UiMouseButton,
+    UiMouseEvent, UiMouseEventKind, UiMouseResult, UiMultiSelectAction, UiMultiSelectOption,
+    UiMultiSelectRequest, UiMultiSelectResponse, UiNode, UiNodeKind, UiOverlayAnchor,
+    UiOverlayMargin, UiOverlayOptions, UiOverlayPosition, UiProductCommand, UiRegion,
+    UiRegionBounds, UiRegionPlacement, UiRegionSnapshot, UiShortcut, UiSurfaceArea,
     UiSurfaceCommand, UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot, UiTone, UiTranscriptItem,
     UiTranscriptRender, UnavailablePluginContext,
 };
@@ -74,7 +76,6 @@ pub use tool::{Tool, ToolContext, ToolError, ToolUpdateSink};
 
 pub use prepare::{PrepareContext, PrepareError, PrepareResult};
 
-pub mod desktop;
 pub mod ui;
 pub use ui::{UiComponent, UiComponentUpdate, UiComponentWaker};
 /// Native export contracts; enable only when building or loading a native plugin.

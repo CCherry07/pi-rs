@@ -1,8 +1,5 @@
 import type {
   ThreadTokenUsage,
-  TurnPlan,
-  TurnPlanStep,
-  TurnPlanStepStatus,
 } from "@/types";
 
 export function asString(value: unknown) {
@@ -100,69 +97,6 @@ export function normalizeTokenUsage(
       }
       return null;
     })(),
-  };
-}
-
-function normalizePlanStepStatus(value: unknown): TurnPlanStepStatus {
-  const raw = typeof value === "string" ? value : "";
-  const normalized = raw.replace(/[_\s-]/g, "").toLowerCase();
-  if (normalized === "inprogress") {
-    return "inProgress";
-  }
-  if (normalized === "completed") {
-    return "completed";
-  }
-  return "pending";
-}
-
-export function normalizePlanUpdate(
-  turnId: string,
-  explanation: unknown,
-  plan: unknown,
-): TurnPlan | null {
-  const planRecord =
-    plan && typeof plan === "object" && !Array.isArray(plan)
-      ? (plan as Record<string, unknown>)
-      : null;
-  const rawSteps = (() => {
-    if (Array.isArray(plan)) {
-      return plan;
-    }
-    if (planRecord) {
-      const candidate =
-        planRecord.steps ??
-        planRecord.plan ??
-        planRecord.items ??
-        planRecord.entries ??
-        null;
-      return Array.isArray(candidate) ? candidate : [];
-    }
-    return [];
-  })();
-  const steps = rawSteps
-    .map((entry) => {
-      if (!entry || typeof entry !== "object") {
-        return null;
-      }
-      const record = entry as Record<string, unknown>;
-      const step = asString(record.step ?? record.text ?? record.title ?? "");
-      if (!step) {
-        return null;
-      }
-      return {
-        step,
-        status: normalizePlanStepStatus(record.status),
-      } satisfies TurnPlanStep;
-    })
-    .filter((entry): entry is TurnPlanStep => Boolean(entry));
-  const note = asString(explanation ?? planRecord?.explanation ?? planRecord?.note).trim();
-  if (!steps.length && !note) {
-    return null;
-  }
-  return {
-    turnId,
-    explanation: note ? note : null,
-    steps,
   };
 }
 

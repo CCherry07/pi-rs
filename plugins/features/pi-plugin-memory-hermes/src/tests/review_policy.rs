@@ -32,7 +32,7 @@ async fn automatic_review_prompt(memory: bool, skills: bool) -> String {
             ..HermesMemoryConfig::default()
         },
     );
-    let (session, provider) = session(
+    let (_manager, session, provider) = session(
         root.path(),
         plugin.clone(),
         vec![
@@ -68,7 +68,7 @@ async fn lifecycle_flush_sends_the_complete_combined_learning_policy() {
             ..HermesMemoryConfig::default()
         },
     );
-    let (session, provider) = session(
+    let (_manager, session, provider) = session(
         root.path(),
         plugin,
         vec![
@@ -107,7 +107,7 @@ async fn lifecycle_flush_sends_the_complete_combined_learning_policy() {
     ] {
         assert!(prompt.contains(clause), "flush omitted policy: {clause}");
     }
-    let document = session.log().load().unwrap();
+    let document = session.history().load().unwrap();
     let (review_usage, details) = document
         .records
         .iter()
@@ -153,7 +153,7 @@ async fn unavailable_review_model_falls_back_to_the_live_session_model() {
             ..HermesMemoryConfig::default()
         },
     );
-    let (session, provider) = session(
+    let (_manager, session, provider) = session(
         root.path(),
         plugin.clone(),
         vec![

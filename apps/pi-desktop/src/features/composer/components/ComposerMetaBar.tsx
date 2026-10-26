@@ -1,7 +1,7 @@
 import type { CSSProperties } from "react";
-import { BrainCog, Zap } from "lucide-react";
+import { BrainCog } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { ServiceTier, ThreadTokenUsage } from "../../../types";
+import type { ThreadTokenUsage } from "../../../types";
 import { formatTokens, formatTokenUsageLabel } from "../../../utils/tokenUsage";
 
 export { formatTokens, formatTokenUsageLabel } from "../../../utils/tokenUsage";
@@ -14,8 +14,6 @@ type ComposerMetaBarProps = {
   reasoningOptions: string[];
   selectedEffort: string | null;
   onSelectEffort: (effort: string) => void;
-  selectedServiceTier: ServiceTier | null;
-  onSelectServiceTier: (tier: ServiceTier | null) => void;
   reasoningSupported: boolean;
   tokenUsage?: ThreadTokenUsage | null;
 };
@@ -28,8 +26,6 @@ export function ComposerMetaBar({
   reasoningOptions,
   selectedEffort,
   onSelectEffort,
-  selectedServiceTier,
-  onSelectServiceTier,
   reasoningSupported,
   tokenUsage = null,
 }: ComposerMetaBarProps) {
@@ -37,7 +33,9 @@ export function ComposerMetaBar({
   const selectedModel =
     models.find((model) => model.id === selectedModelId) ?? null;
   const selectedModelLabel =
-    selectedModel?.displayName || selectedModel?.model || t("composer.noModels");
+    selectedModel?.displayName ||
+    selectedModel?.model ||
+    t("composer.noModels");
   const modelSelectStyle = {
     "--composer-model-select-width": `${Math.max(selectedModelLabel.length + 2, 8)}ch`,
   } as CSSProperties;
@@ -65,7 +63,9 @@ export function ComposerMetaBar({
       ? t("composer.tokenUsageUnknown")
       : t("composer.tokenUsage", { tokens: tokenUsageLabel });
   const contextTooltip =
-    boundedUsedTokens !== null && remainingTokens !== null && contextFreePercent !== null
+    boundedUsedTokens !== null &&
+    remainingTokens !== null &&
+    contextFreePercent !== null
       ? t("composer.contextUsage", {
           used: formatTokens(boundedUsedTokens),
           remaining: formatTokens(remainingTokens),
@@ -114,26 +114,15 @@ export function ComposerMetaBar({
             disabled={disabled}
             style={modelSelectStyle}
           >
-            {models.length === 0 && <option value="">{t("composer.noModels")}</option>}
+            {models.length === 0 && (
+              <option value="">{t("composer.noModels")}</option>
+            )}
             {models.map((model) => (
               <option key={model.id} value={model.id}>
                 {model.displayName || model.model}
               </option>
             ))}
           </select>
-          <button
-            type="button"
-            className={`composer-fast-indicator${selectedServiceTier === "fast" ? " composer-fast-indicator--active" : ""}`}
-            aria-label={t("composer.fastModeToggle")}
-            aria-pressed={selectedServiceTier === "fast"}
-            title={t("composer.fastModeToggle")}
-            disabled={disabled}
-            onClick={() =>
-              onSelectServiceTier(selectedServiceTier === "fast" ? null : "fast")
-            }
-          >
-            <Zap size={12} strokeWidth={1.8} />
-          </button>
         </div>
         <div className="composer-select-wrap composer-select-wrap--effort">
           <span className="composer-icon composer-icon--effort" aria-hidden>

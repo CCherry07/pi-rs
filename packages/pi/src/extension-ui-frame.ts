@@ -16,6 +16,7 @@ export interface UiMultiSelectResponse {
 }
 export type UiNode = { id: string } & (
   | { type: "text"; text: string; tone?: UiTone }
+  | { type: "custom"; lines: string[]; interactive?: boolean; mouse?: boolean; instanceId?: string; keyRelease?: boolean; cursor?: [number, number] | null }
   | { type: "markdown"; text: string }
   | { type: "link"; text: string; url: string }
   | { type: "column" | "row"; children: UiNode[]; gap?: number }
@@ -70,6 +71,7 @@ export const uiMultiSelectResponseSchema: z.ZodType<UiMultiSelectResponse> = z.s
 });
 const node: z.ZodType<UiNode> = z.lazy(() => z.discriminatedUnion("type", [
   z.strictObject({ id, type: z.literal("text"), text: z.string(), tone: z.enum(["default", "accent", "muted", "success", "warning", "error"]).default("default") }),
+  z.strictObject({ id, type: z.literal("custom"), lines: z.array(z.string()), interactive: z.boolean().default(false), mouse: z.boolean().default(false), instanceId: z.string().default(""), keyRelease: z.boolean().default(false), cursor: z.tuple([cells, cells]).nullish() }),
   z.strictObject({ id, type: z.literal("markdown"), text: z.string() }),
   z.strictObject({ id, type: z.literal("link"), text: z.string(), url: z.string() }),
   z.strictObject({ id, type: z.literal("column"), children: z.array(node), gap: cells.default(0) }),
@@ -96,21 +98,47 @@ export const uiNodeSchema = node.superRefine((root, context) => {
   visit(root);
 });
 export type Placement = "header" | "aboveEditor" | "belowEditor" | "footer" | "editor" | "overlay";
-export interface UiRegion { id: string; placement: Placement; root: UiNode; overlay?: { width?: number; maxHeight?: number; modal?: boolean } }
+export type UiOverlayPosition = { type: "cells" | "percent"; value: number };
+export type UiOverlayAnchor = "top-left" | "top-center" | "top-right" | "left-center" | "center" | "right-center" | "bottom-left" | "bottom-center" | "bottom-right";
+export interface UiOverlayOptions {
+  width?: number; maxHeight?: number; modal?: boolean; anchor?: UiOverlayAnchor;
+  offsetX?: number; offsetY?: number; row?: UiOverlayPosition; col?: UiOverlayPosition;
+  margin?: { top: number; right: number; bottom: number; left: number };
+  hidden?: boolean; nonCapturing?: boolean;
+}
+export interface UiRegion { id: string; placement: Placement; root: UiNode; overlay?: UiOverlayOptions }
 export const uiSnapshotSchema = z.object({
   columns: z.number(), rows: z.number(), editorText: z.string(), toolsExpanded: z.boolean(),
   isRunning: z.boolean().default(false),
   transcript: z.array(z.object({ index: z.number().int().nonnegative(), fingerprint: z.string(), payload: z.record(z.string(), z.unknown()) })).default([]),
   transcriptWidth: z.number().default(0),
   areas: z.array(z.object({ placement: z.enum(["header", "aboveEditor", "belowEditor", "footer", "editor", "overlay"]), row: z.number(), column: z.number(), width: z.number(), height: z.number() })).default([]),
+  regions: z.array(z.object({ owner: z.string(), regionId: z.string(), focused: z.boolean(), bounds: z.object({ row: cells, col: cells, width: cells, height: cells }).nullable() })).default([]),
 });
 export type UiSnapshot = z.infer<typeof uiSnapshotSchema>;
+export const uiMouseEventSchema = z.strictObject({
+  type: z.enum(["press", "release", "move", "drag", "click", "wheel"]),
+  button: z.enum(["left", "middle", "right", "none"]),
+  x: z.number().int().min(-2147483648).max(2147483647), y: z.number().int().min(-2147483648).max(2147483647),
+  screenX: cells, screenY: cells, width: cells, height: cells,
+  shift: z.boolean(), alt: z.boolean(), ctrl: z.boolean(),
+  wheelDelta: z.number().int().min(-2147483648).max(2147483647).nullish(),
+  clickCount: z.number().int().min(0).max(255).nullish(),
+});
+export type UiMouseEvent = z.infer<typeof uiMouseEventSchema>;
+export const uiMouseResultSchema = z.strictObject({
+  handled: z.boolean().default(false), capture: z.boolean().default(false), focus: z.boolean().default(false),
+  render: z.boolean().nullish(), target: z.number().int().nonnegative().nullish(), cancelled: z.boolean().default(false),
+});
+export type UiMouseResult = z.infer<typeof uiMouseResultSchema>;
 export const uiInteractionSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("change"), value: z.unknown() }),
   z.strictObject({ type: z.literal("submit"), value: z.unknown() }),
   z.strictObject({ type: z.literal("activate") }),
   z.strictObject({ type: z.literal("cancel") }),
   z.strictObject({ type: z.literal("shortcut"), key: z.string() }),
+  z.strictObject({ type: z.literal("customInput"), data: z.string() }),
+  z.strictObject({ type: z.literal("customMouse"), id: z.number().int().nonnegative(), instanceId: z.string(), target: z.number().int().nonnegative().nullish(), event: uiMouseEventSchema }),
 ]);
 export type UiInteraction = z.infer<typeof uiInteractionSchema>;
 export const uiEventSchema = z.discriminatedUnion("type", [
@@ -126,6 +154,11 @@ const uiSurfaceCommandSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("wake") }),
   z.strictObject({ type: z.literal("close") }),
   z.strictObject({ type: z.literal("focus"), regionId: z.string(), nodeId: z.string() }),
+  z.strictObject({ type: z.literal("unfocus"), regionId: z.string(), target: z.discriminatedUnion("type", [
+    z.strictObject({ type: z.literal("app") }),
+    z.strictObject({ type: z.literal("region"), regionId: z.string() }),
+  ]).nullish() }),
+  z.strictObject({ type: z.literal("mouseResult"), id: z.number().int().nonnegative(), result: uiMouseResultSchema }),
 ]);
 const uiProductCommandSchema = z.discriminatedUnion("type", [
   z.strictObject({ type: z.literal("appAction"), action: z.enum(["clear", "interrupt", "exit", "paste", "copy", "followUp", "dequeue", "newSession", "tree", "fork", "resume"]) }),

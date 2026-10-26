@@ -6,7 +6,6 @@ import type {
   CollabAgentRef,
   CustomPromptOption,
   DebugEntry,
-  ServiceTier,
   ThreadListSortKey,
   WorkspaceInfo,
 } from "@/types";
@@ -21,8 +20,6 @@ import { useThreadActions } from "./useThreadActions";
 import { useThreadMessaging } from "./useThreadMessaging";
 import { useThreadSelectors } from "./useThreadSelectors";
 import { useThreadStatus } from "./useThreadStatus";
-import { useThreadConversationLoader } from "./useThreadConversationLoader";
-import type { ThreadConversationsSource } from "../contexts/ThreadConversations";
 import { useWorkspaceDraft } from "./useWorkspaceDraft";
 import { useThreadTitleAutogeneration } from "./useThreadTitleAutogeneration";
 import {
@@ -49,7 +46,6 @@ type UseThreadsOptions = {
   onDebug?: (entry: DebugEntry) => void;
   model?: string | null;
   effort?: string | null;
-  serviceTier?: ServiceTier | null | undefined;
   steerEnabled?: boolean;
   threadTitleAutogenerationEnabled?: boolean;
   chatHistoryScrollbackItems?: number | null;
@@ -75,7 +71,6 @@ export function useThreads({
   onDebug,
   model,
   effort,
-  serviceTier,
   steerEnabled = false,
   threadTitleAutogenerationEnabled = false,
   chatHistoryScrollbackItems,
@@ -104,7 +99,6 @@ export function useThreads({
   const loadedThreadsRef = useRef<Record<string, boolean>>({});
   const replaceOnResumeRef = useRef<Record<string, boolean>>({});
   const pendingInterruptsRef = useRef<Set<string>>(new Set());
-  const planByThreadRef = useRef(state.planByThread);
   const itemsByThreadRef = useRef(state.itemsByThread);
   const threadsByWorkspaceRef = useRef(state.threadsByWorkspace);
   const activeTurnIdByThreadRef = useRef(state.activeTurnIdByThread);
@@ -112,7 +106,6 @@ export function useThreads({
   const threadParentByIdRef = useRef(state.threadParentById);
   const cascadeArchiveSkipRef = useRef<Record<string, number>>({});
   const subagentHydrationInFlightRef = useRef<Record<string, true>>({});
-  planByThreadRef.current = state.planByThread;
   itemsByThreadRef.current = state.itemsByThread;
   threadsByWorkspaceRef.current = state.threadsByWorkspace;
   activeTurnIdByThreadRef.current = state.activeTurnIdByThread;
@@ -143,14 +136,17 @@ export function useThreads({
     dispatch,
   });
 
-  const { loadThread, invalidateThread: invalidateConversation, getReplacementRevision } = useThreadConversationLoader({ state, dispatch, getStatusRevision });
-  const conversationSource = useMemo<ThreadConversationsSource>(() => ({
-    itemsByThread: state.itemsByThread,
-    contextInheritanceByThread: state.contextInheritanceByThread,
-    threadStatusById: state.threadStatusById,
-    tokenUsageByThread: state.tokenUsageByThread,
-    loadThread,
-  }), [state.itemsByThread, state.contextInheritanceByThread, state.threadStatusById, state.tokenUsageByThread, loadThread]);
+  const replacementRevisions = useRef(new Map<string, number>());
+  const getReplacementRevision = useCallback(
+    (threadId: string) => replacementRevisions.current.get(threadId) ?? 0,
+    [],
+  );
+  const invalidateConversation = useCallback((threadId: string) => {
+    replacementRevisions.current.set(
+      threadId,
+      (replacementRevisions.current.get(threadId) ?? 0) + 1,
+    );
+  }, []);
 
   const pushThreadErrorMessage = useCallback(
     (threadId: string, message: string) => {
@@ -406,8 +402,6 @@ export function useThreads({
   const threadHandlers = useThreadEventHandlers({
     activeThreadId,
     dispatch,
-    getItemsForThread: (threadId) => itemsByThreadRef.current[threadId] ?? [],
-    planByThreadRef,
     getCustomName,
     isThreadHidden,
     setThreadLoaded,
@@ -431,7 +425,11 @@ export function useThreads({
       if (!threadId) {
         return;
       }
-      dispatch({ type: "setThreadContextInheritance", threadId, contextInheritance: contextInheritanceFromThread(thread) });
+      dispatch({
+        type: "setThreadContextInheritance",
+        threadId,
+        contextInheritance: contextInheritanceFromThread(thread),
+      });
       const parentThreadId = getParentThreadIdFromThread(thread);
       if (!parentThreadId) {
         return;
@@ -659,7 +657,6 @@ export function useThreads({
     activeThreadId,
     model,
     effort,
-    serviceTier,
     steerEnabled,
     customPrompts,
     threadStatusById: state.threadStatusById,
@@ -760,7 +757,9 @@ export function useThreads({
     setActiveThreadId,
     hasLocalThreadSnapshot,
     activeItems,
-    conversationSource,
+    activeContextInheritance: activeThreadId
+      ? state.contextInheritanceByThread[activeThreadId] ?? null
+      : null,
     runtimeCommands: activeThreadId ? state.commandsByThread[activeThreadId] ?? [] : draftCommands,
     threadsByWorkspace: state.threadsByWorkspace,
     threadParentById: state.threadParentById,
@@ -771,9 +770,7 @@ export function useThreads({
     threadListPagingByWorkspace: state.threadListPagingByWorkspace,
     threadListCursorByWorkspace: state.threadListCursorByWorkspace,
     activeTurnIdByThread: state.activeTurnIdByThread,
-    turnDiffByThread: state.turnDiffByThread,
     tokenUsageByThread: state.tokenUsageByThread,
-    planByThread: state.planByThread,
     lastAgentMessageByThread: state.lastAgentMessageByThread,
     pinnedThreadsVersion,
     interruptTurn,

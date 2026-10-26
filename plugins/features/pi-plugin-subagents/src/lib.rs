@@ -2,8 +2,8 @@
 
 mod catalog;
 mod collaboration;
+mod commands;
 mod config;
-mod desktop;
 mod fork_context;
 mod launch_context;
 mod launch_plan;
@@ -95,7 +95,7 @@ impl Plugin for SubagentsPlugin {
                 kind,
             )))?;
         }
-        desktop::register_commands(context, &self.runtime)?;
+        commands::register_commands(context, &self.runtime)?;
         Ok(())
     }
 
@@ -152,10 +152,11 @@ impl Plugin for SubagentsPlugin {
         event: pi_plugin::ContextEvent,
     ) -> Result<pi_plugin::ContextPatch, PluginError> {
         let session_id = context.session.id()?;
+        let messages = Arc::unwrap_or_clone(event.messages);
         let messages = if let Some((run_id, _)) = self.runtime.assignment_for_session(&session_id) {
-            fork_context::project_inherited_messages(event.messages, &run_id)
+            fork_context::project_inherited_messages(messages, &run_id)
         } else {
-            event.messages
+            messages
         };
         Ok(pi_plugin::ContextPatch {
             messages: Some(
@@ -180,7 +181,6 @@ impl Plugin for SubagentsPlugin {
         context: &SessionPluginContext,
         _event: &SessionShutdownEvent,
     ) -> Result<(), PluginError> {
-        self.runtime.suspend_desktop(&context.identity().id);
         self.runtime.close_owner(&context.identity().id);
         self.runtime.drain_monitors(&context.identity().id).await;
         self.runtime.forget_session(&context.identity().id);

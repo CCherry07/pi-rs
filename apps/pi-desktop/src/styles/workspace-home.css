@@ -5,12 +5,12 @@
   grid-row: 1 / -1;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 28px;
   justify-content: flex-start;
   max-width: 860px;
   margin: 0 auto;
   text-align: left;
-  padding: 36px 32px 24px;
+  padding: clamp(40px, 8vh, 76px) 36px 28px;
   overflow-y: auto;
 }
 
@@ -27,13 +27,13 @@
   border: 1px solid var(--border-subtle);
   background: var(--surface-card);
   object-fit: cover;
-  box-shadow: 0 10px 20px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--shadow-card);
 }
 
 .workspace-home-title {
-  font-size: 34px;
+  font-size: 32px;
   font-weight: 600;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.035em;
 }
 
 .workspace-home-path {
@@ -82,10 +82,14 @@
   gap: 0;
   padding: 14px 18px 18px;
   border-top: none;
-  border-radius: 22px;
-  border: 1px solid var(--cm-border-default);
-  background: var(--cm-surface-panel);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  border-radius: 16px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-card);
+}
+
+.workspace-home .composer:focus-within {
+  border-color: var(--border-accent);
 }
 
 .workspace-home .composer-input {
@@ -357,7 +361,7 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-card);
 }
 
 .workspace-home-run-header {

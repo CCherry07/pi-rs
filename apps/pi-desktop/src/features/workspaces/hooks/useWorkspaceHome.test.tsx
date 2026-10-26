@@ -114,7 +114,6 @@ describe("useWorkspaceHome", () => {
     expect(seedThreadRunParams).toHaveBeenCalledWith("wt-1", "thread-1", {
       modelId: "openai/gpt-5.1-max",
       effort: null,
-      serviceTier: undefined,
     });
   });
 
@@ -155,7 +154,6 @@ describe("useWorkspaceHome", () => {
     expect(seedThreadRunParams).toHaveBeenCalledWith("ws-1", "thread-1", {
       modelId: "openai/gpt-5.1-max",
       effort: null,
-      serviceTier: undefined,
     });
   });
 

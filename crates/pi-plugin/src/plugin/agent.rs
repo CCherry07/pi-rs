@@ -287,12 +287,25 @@ pub struct ToolExecutionEndEvent {
 
 #[derive(Debug, Clone)]
 pub struct ContextEvent {
-    pub messages: Vec<Message>,
+    /// Shared read view. Return an owned replacement to change the next hook's input.
+    pub messages: Arc<Vec<Message>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ContextPatch {
     pub messages: Option<Vec<Message>>,
+}
+
+/// An adapter may execute adjacent context hooks in one transport operation.
+/// Each context retains its plugin identity and registration order. Implementations
+/// must validate replacements and isolate hook failures before continuing the chain.
+#[async_trait]
+pub trait ContextHookBatch: Send + Sync {
+    async fn context(
+        &self,
+        contexts: Vec<AgentPluginContext>,
+        event: ContextEvent,
+    ) -> std::result::Result<ContextPatch, PluginError>;
 }
 
 #[derive(Debug, Clone)]
@@ -593,6 +606,12 @@ pub trait Plugin: Send + Sync {
         Ok(())
     }
 
+    /// Return the same batch object for hooks sharing a transport. Its identity
+    /// must remain stable for this plugin generation. Unrelated hooks split a batch.
+    fn context_hook_batch(&self) -> Option<&dyn ContextHookBatch> {
+        None
+    }
+
     async fn context(
         &self,
         _context: AgentPluginContext,
@@ -737,6 +756,7 @@ fn same_message_role(left: &Message, right: &Message) -> bool {
 pub struct PluginDriver {
     pub(super) plugins: Vec<RegisteredPlugin>,
     routes: AgentHookRoutes,
+    context_batches: Vec<Vec<usize>>,
     session_routes: [Vec<usize>; 10],
     pub(super) diagnostics: PluginDiagnosticSink,
     context_epoch: PluginContextEpoch,
@@ -808,10 +828,35 @@ impl PluginDriver {
             }
             registered.push(RegisteredPlugin { id, plugin });
         }
+        let mut context_batches: Vec<Vec<usize>> = Vec::new();
+        for &index in routes.get(AgentHook::Context) {
+            let previous = context_batches
+                .last()
+                .and_then(|batch| batch.last())
+                .copied();
+            let same_batch = previous.is_some_and(|previous| {
+                match (
+                    registered[previous].plugin.context_hook_batch(),
+                    registered[index].plugin.context_hook_batch(),
+                ) {
+                    (Some(left), Some(right)) => std::ptr::eq(left, right),
+                    _ => false,
+                }
+            });
+            if same_batch {
+                context_batches
+                    .last_mut()
+                    .expect("previous batch")
+                    .push(index);
+            } else {
+                context_batches.push(vec![index]);
+            }
+        }
         let diagnostics = PluginDiagnosticSink::default();
         Ok(Self {
             plugins: registered,
             routes,
+            context_batches,
             session_routes,
             diagnostics,
             context_epoch,
@@ -1023,30 +1068,56 @@ impl PluginDriver {
         run_id: &RunId,
         cwd: &std::path::Path,
         signal: &AbortSignal,
-        mut messages: Vec<Message>,
+        messages: Vec<Message>,
     ) -> std::result::Result<Vec<Message>, PluginError> {
-        for registered in self.interested_plugins(AgentHook::Context) {
-            let patch = match registered
-                .plugin
-                .context(
-                    self.agent_plugin_context(registered, run_id, cwd, signal),
-                    ContextEvent {
-                        messages: messages.clone(),
-                    },
-                )
-                .await
-            {
+        if self.context_batches.is_empty() {
+            return Ok(messages);
+        }
+        let mut messages = Arc::new(messages);
+        for batch in &self.context_batches {
+            let registered = &self.plugins[batch[0]];
+            let event = ContextEvent {
+                messages: Arc::clone(&messages),
+            };
+            let result = match registered.plugin.context_hook_batch() {
+                Some(handler) => {
+                    let contexts = batch
+                        .iter()
+                        .map(|&index| {
+                            self.agent_plugin_context(&self.plugins[index], run_id, cwd, signal)
+                        })
+                        .collect();
+                    handler.context(contexts, event).await
+                }
+                None => {
+                    registered
+                        .plugin
+                        .context(
+                            self.agent_plugin_context(registered, run_id, cwd, signal),
+                            event,
+                        )
+                        .await
+                }
+            };
+            let patch = match result {
                 Ok(patch) => patch,
                 Err(error) => {
-                    self.record_error(registered, AgentHook::Context, error);
+                    for &index in batch {
+                        self.diagnostics.record(
+                            self.plugins[index].id.clone(),
+                            AgentHook::Context,
+                            None,
+                            error.to_string(),
+                        );
+                    }
                     continue;
                 }
             };
             if let Some(replacement) = patch.messages {
-                messages = replacement;
+                messages = Arc::new(replacement);
             }
         }
-        Ok(messages)
+        Ok(Arc::unwrap_or_clone(messages))
     }
 
     pub async fn tool_call(

@@ -11,10 +11,6 @@ pub(crate) fn sanitize_clone_dir_name(name: &str) -> String {
     worktree_core::sanitize_clone_dir_name(name)
 }
 
-pub(crate) fn unique_worktree_path(base_dir: &Path, name: &str) -> PathBuf {
-    worktree_core::unique_worktree_path_best_effort(base_dir, name)
-}
-
 pub(crate) fn unique_worktree_path_for_rename(
     base_dir: &Path,
     name: &str,

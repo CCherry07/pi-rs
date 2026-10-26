@@ -598,7 +598,7 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 | `crates/pi-media`                                | Shared image validation, resizing, and format conversion                               |
 | `crates/pi-agent`                                | Agent façade, agent loop, stream assembly, and tool scheduling                           |
 | `crates/pi-runtime`                              | Generation construction, prompt assembly, and atomic reload                              |
-| `crates/pi-session`                              | Pi v4 JSONL, tree/branch state, compaction, recovery reducer, and session runtime        |
+| `crates/pi-session`                              | Session history, runtime, managed generations and observation, and plugin capability adapters |
 | `crates/pi-rpc`                                  | Pi JSON projection and stdin/stdout RPC                                                   |
 | `crates/pi-acp`                                | ACP stable-v1 session adapter                                                          |
 | `plugins/features/pi-plugin-mcp`               | MCP client/tools, local configuration management and `/mcp` commands                    |

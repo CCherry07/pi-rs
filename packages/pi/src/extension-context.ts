@@ -363,9 +363,6 @@ function normalizeSessionHeader(value: unknown): unknown | null {
       ? new Date(value.createdAt).toISOString()
       : value.createdAt,
     cwd: value.cwd,
-    ...(typeof value.legacyParentSessionPath === 'string'
-      ? { parentSession: value.legacyParentSessionPath }
-      : {}),
   }
 }
 

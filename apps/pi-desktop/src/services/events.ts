@@ -114,8 +114,6 @@ const menuNextWorkspaceHub = createEventHub<void>("menu-next-workspace");
 const menuPrevWorkspaceHub = createEventHub<void>("menu-prev-workspace");
 const menuCycleModelHub = createEventHub<void>("menu-composer-cycle-model");
 const menuCycleReasoningHub = createEventHub<void>("menu-composer-cycle-reasoning");
-const menuComposerCycleModelHub = createEventHub<void>("menu-composer-cycle-model");
-const menuComposerCycleReasoningHub = createEventHub<void>("menu-composer-cycle-reasoning");
 
 export function subscribePiEvents(
   onEvent: (event: PiEvent) => void,
@@ -310,24 +308,6 @@ export function subscribeMenuCycleReasoning(
   options?: SubscriptionOptions,
 ): Unsubscribe {
   return menuCycleReasoningHub.subscribe(() => {
-    onEvent();
-  }, options);
-}
-
-export function subscribeMenuComposerCycleModel(
-  onEvent: () => void,
-  options?: SubscriptionOptions,
-): Unsubscribe {
-  return menuComposerCycleModelHub.subscribe(() => {
-    onEvent();
-  }, options);
-}
-
-export function subscribeMenuComposerCycleReasoning(
-  onEvent: () => void,
-  options?: SubscriptionOptions,
-): Unsubscribe {
-  return menuComposerCycleReasoningHub.subscribe(() => {
     onEvent();
   }, options);
 }

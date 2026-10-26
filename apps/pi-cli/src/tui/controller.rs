@@ -537,10 +537,10 @@ pub(super) fn submit_editor(
         return;
     }
     if input == "/trust" {
-        match project_trust.manual_options(session.runtime().cwd()) {
+        match project_trust.manual_options(session.catalog().cwd()) {
             Ok(options) => {
                 app.trust_prompt = Some(TrustPromptState {
-                    cwd: session.runtime().cwd().to_path_buf(),
+                    cwd: session.catalog().cwd().to_path_buf(),
                     options,
                     selected: 0,
                     response: None,
@@ -555,13 +555,10 @@ pub(super) fn submit_editor(
     }
     app.input.clear();
     app.command_palette.get_mut().reset();
-    app.awaiting_assistant = true;
-    app.working_started_at = Some(Instant::now());
-    app.status = "Working...".to_string();
     spawn_effect(
+        app,
         Arc::clone(session),
         session_handle.clone(),
-        app.epoch,
         input,
         mode,
         sender.clone(),
@@ -982,14 +979,22 @@ pub(super) fn incomplete_command_status(
 }
 
 pub(super) fn spawn_effect(
+    app: &mut App,
     session: Arc<AgentSession>,
     session_handle: PiSession,
-    epoch: u64,
     input: impl Into<SessionInput>,
     mode: EffectMode,
     sender: tokio::sync::mpsc::UnboundedSender<EffectDone>,
 ) {
     let input = input.into();
+    // Commands may only open UI or update settings. Their actual agent work, if
+    // any, starts the indicator through runtime events instead of submission.
+    if !input.text().trim_start().starts_with('/') || !input.images().is_empty() {
+        app.awaiting_assistant = true;
+        app.working_started_at = Some(Instant::now());
+        app.status = "Working...".to_string();
+    }
+    let epoch = app.epoch;
     tokio::spawn(async move {
         let refresh_transcript = input.images().is_empty() && input.text().starts_with("/tree ");
         let status = run_effect(&session_handle, &session, input, mode).await;
@@ -1016,7 +1021,7 @@ pub(super) async fn run_effect(
     let input = submission.text();
     if input == "/clone" {
         let leaf = session
-            .log()
+            .history()
             .leaf_id()
             .ok_or_else(|| "Nothing to clone yet".to_string())?;
         session_handle
@@ -1062,7 +1067,7 @@ pub(super) async fn run_effect(
         let requested = arguments.trim();
         if requested.is_empty() {
             return session
-                .log()
+                .history()
                 .name()
                 .map(|name| format!("Session name: {name}"))
                 .ok_or_else(|| "usage: /name <name>".to_string());
@@ -1075,14 +1080,17 @@ pub(super) async fn run_effect(
     }
     if input == "/session" {
         let metadata = session
-            .log()
+            .history()
             .metadata()
             .map_err(|error| error.to_string())?;
-        let stats = session.log().stats();
-        let document = session.log().load().map_err(|error| error.to_string())?;
+        let stats = session.history().stats();
+        let document = session
+            .history()
+            .load()
+            .map_err(|error| error.to_string())?;
         let usage = aggregate_document_usage(&document);
         let name = session
-            .log()
+            .history()
             .name()
             .map(|name| format!("Name: {name}\n"))
             .unwrap_or_default();
@@ -1098,7 +1106,7 @@ pub(super) async fn run_effect(
         ));
     }
     if input == "/help" {
-        return Ok(builtin_help_text(&session.runtime().command_specs()));
+        return Ok(builtin_help_text(&session.catalog().command_specs()));
     }
     if let Some(arguments) = input.strip_prefix("/new")
         && (arguments.is_empty() || arguments.starts_with(char::is_whitespace))
@@ -1106,7 +1114,7 @@ pub(super) async fn run_effect(
         let requested = arguments.trim();
         let path = if requested.is_empty() {
             session
-                .log()
+                .history()
                 .path()
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."))
@@ -1115,7 +1123,7 @@ pub(super) async fn run_effect(
             std::path::PathBuf::from(requested)
         };
         session_handle
-            .new_session(session.runtime().cwd(), &path)
+            .new_session(session.catalog().cwd(), &path)
             .await
             .map_err(|error| error.to_string())?;
         return Ok(format!("Created {}", path.display()));
@@ -1134,8 +1142,8 @@ pub(super) async fn run_effect(
         return Ok(format!("Resumed {path}"));
     }
     if input == "/model" {
-        let state = session.runtime().agent().state();
-        let models = session.runtime().available_models();
+        let state = session.snapshot().agent;
+        let models = session.catalog().available_models();
         if models.is_empty() {
             return Ok(format!(
                 "Current model: {}/{} · no catalog models loaded",
@@ -1162,8 +1170,8 @@ pub(super) async fn run_effect(
         if model.is_empty() {
             return Err("usage: /model <provider/model|model-id>".to_string());
         }
-        let current_provider = session.runtime().agent().state().provider_id;
-        let runtime = session.runtime();
+        let current_provider = session.snapshot().agent.provider_id;
+        let runtime = session.catalog();
         let registered = runtime.resolve_model_reference(&current_provider, model);
         if let Some(registered) = &registered
             && !runtime.provider_is_available(&registered.provider)
@@ -1178,7 +1186,7 @@ pub(super) async fn run_effect(
             (model.provider, model.id)
         } else if let Some((provider, model_id)) = model.split_once('/') {
             let provider = ProviderId::new(provider);
-            if session.runtime().provider_is_available(&provider) {
+            if session.catalog().provider_is_available(&provider) {
                 (provider, ModelId::new(model_id))
             } else {
                 (current_provider, ModelId::new(model))
@@ -1227,20 +1235,20 @@ async fn submit_session_input(
     mode: EffectMode,
 ) -> Result<String, String> {
     let outcome = match mode {
-        EffectMode::Submit => session.submit(input).await,
+        EffectMode::Submit => session.prompt(input).await,
         EffectMode::FollowUp => session.follow_up(input).await,
     }
     .map_err(|error| error.to_string())?;
     Ok(match outcome {
-        SubmitOutcome::Agent(outcome) => match outcome.stop {
+        PromptOutcome::Agent(outcome) => match outcome.stop {
             AgentLoopStop::Completed => "Ready".to_string(),
             AgentLoopStop::Aborted => "Stopped".to_string(),
             AgentLoopStop::ProviderError => "Provider error".to_string(),
             AgentLoopStop::MaxToolIterations => "Tool limit reached".to_string(),
             AgentLoopStop::TerminatedByTools => "Stopped by tool".to_string(),
         },
-        SubmitOutcome::Handled => "Ready".to_string(),
-        SubmitOutcome::Queued { kind, .. } => format!("Queued {kind:?}"),
+        PromptOutcome::Handled => "Ready".to_string(),
+        PromptOutcome::Queued { kind, .. } => format!("Queued {kind:?}"),
         _ => "Ready".to_string(),
     })
 }

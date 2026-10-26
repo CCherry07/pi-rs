@@ -59,13 +59,7 @@ pub struct NewSessionOptions {
     pub parent_session: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ForkPosition {
-    #[default]
-    Before,
-    At,
-}
+pub use pi_core::session::ForkPosition;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkOptions {

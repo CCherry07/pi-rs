@@ -1,8 +1,52 @@
 // @vitest-environment jsdom
-import { cleanup, createEvent, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { expectOpenedFileTarget } from "../test/fileLinkAssertions";
 import { Markdown } from "./Markdown";
+
+describe("Markdown code block copying", () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+
+  beforeEach(() => {
+    writeText.mockClear();
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it.each(["ts", ""])("copies code without fences for language '%s'", async (language) => {
+    const code = 'function greet() {\n  console.log("hello");\n\n  return 42;\n}';
+    render(
+      <Markdown
+        value={`\`\`\`${language}\n${code}\n\`\`\``}
+        codeBlockStyle="message"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy code block" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(code));
+    expect(await screen.findByText("Copied")).toBeTruthy();
+  });
+
+  it("includes fences only with Alt when modifier copying is enabled", async () => {
+    const code = "const answer = 42;\nconsole.log(answer);";
+    const markdown = `\`\`\`ts\n${code}\n\`\`\``;
+    render(
+      <Markdown value={markdown} codeBlockStyle="message" codeBlockCopyUseModifier />,
+    );
+
+    const copyButton = screen.getByRole("button", { name: "Copy code block" });
+    fireEvent.click(copyButton);
+    await waitFor(() => expect(writeText).toHaveBeenNthCalledWith(1, code));
+
+    fireEvent.click(copyButton, { altKey: true });
+    await waitFor(() => expect(writeText).toHaveBeenNthCalledWith(2, markdown));
+  });
+});
 
 describe("Markdown file-like href behavior", () => {
   afterEach(() => {

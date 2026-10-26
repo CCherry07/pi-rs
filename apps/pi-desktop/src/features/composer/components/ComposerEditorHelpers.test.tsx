@@ -36,8 +36,6 @@ function ComposerHarness({ initialText = "", editorSettings }: HarnessProps) {
       reasoningOptions={[]}
       selectedEffort={null}
       onSelectEffort={() => {}}
-      selectedServiceTier={null}
-      onSelectServiceTier={() => {}}
       reasoningSupported={false}
       skills={[]}
       prompts={[]}

@@ -10,7 +10,7 @@ mod tool_scheduler;
 
 pub use agent::{
     Agent, AgentConfigurationPatch, AgentOptions, AgentRestoreState, AgentRuntime,
-    AgentStateSnapshot, PromptInput, SubscriptionId, WeakAgent,
+    AgentStateSnapshot, PreparedAgentConfiguration, PromptInput, SubscriptionId, WeakAgent,
 };
 pub use agent_loop::{
     AgentLoopConfig, AgentLoopError, AgentLoopOutcome, AgentLoopServices, AgentLoopStop,
@@ -27,3 +27,6 @@ pub use tool_scheduler::{ExecutedToolBatch, ToolScheduler};
 
 #[cfg(test)]
 mod conformance_tests;
+
+#[cfg(test)]
+mod shared_snapshot_tests;

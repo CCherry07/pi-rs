@@ -21,25 +21,28 @@ async fn invalid_reload_keeps_previous_generation_and_acp_mode_skips_files() {
     let pi = pi_coding::Pi::builder(config.clone()).build().unwrap();
     let session = pi
         .sessions()
-        .create_session(&project, agent.join("test.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            &project,
+            agent.join("test.jsonl"),
+        ))
         .await
         .unwrap();
     assert!(
         session
             .current()
-            .runtime()
+            .catalog()
             .command_specs()
             .iter()
             .any(|spec| spec.name == "mcp")
     );
     let before = session.current();
-    before.submit("/mcp paths").await.unwrap();
+    before.prompt("/mcp paths").await.unwrap();
     fs::write(agent.join("mcp.json"), "invalid").unwrap();
     assert!(session.reload().await.is_err());
     assert!(Arc::ptr_eq(&before, &session.current()));
     assert!(!agent.join("test.jsonl").exists());
     fs::write(agent.join("mcp.json"), EMPTY).unwrap();
-    session.current().submit("/mcp reload").await.unwrap();
+    session.current().prompt("/mcp reload").await.unwrap();
     assert!(!Arc::ptr_eq(&before, &session.current()));
     assert!(!agent.join("test.jsonl").exists());
     fs::write(agent.join("mcp.json"), "invalid").unwrap();
@@ -47,12 +50,15 @@ async fn invalid_reload_keeps_previous_generation_and_acp_mode_skips_files() {
     let isolated = pi_coding::Pi::builder(config).build().unwrap();
     let acp = isolated
         .sessions()
-        .create_session(&project, agent.join("acp.jsonl"))
+        .create_session(pi_session::CreateSessionOptions::new(
+            &project,
+            agent.join("acp.jsonl"),
+        ))
         .await
         .unwrap();
     assert!(
         !acp.current()
-            .runtime()
+            .catalog()
             .command_specs()
             .iter()
             .any(|spec| spec.name == "mcp")

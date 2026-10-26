@@ -1,28 +1,9 @@
 @import './themes.css';
 
+/* Reading surfaces are opaque; only the sidebar follows native window vibrancy. */
 .app.reduced-transparency {
-  --surface-sidebar: rgba(18, 18, 18, 0.92);
-  --surface-sidebar-opaque: rgb(18, 18, 18);
-  --surface-topbar: rgba(10, 14, 20, 0.94);
-  --surface-right-panel: rgba(9, 12, 20, 0.92);
-  --surface-composer: rgba(10, 14, 20, 0.94);
-  --surface-messages: rgba(8, 10, 16, 0.94);
-  --surface-card: rgba(30, 32, 40, 0.94);
-  --surface-card-strong: rgba(38, 40, 48, 0.96);
-  --surface-card-muted: rgba(24, 26, 34, 0.9);
-  --surface-item: rgba(28, 30, 38, 0.88);
-  --surface-control: rgba(40, 44, 55, 0.7);
-  --surface-control-hover: rgba(54, 60, 72, 0.8);
-  --surface-control-disabled: rgba(40, 44, 55, 0.5);
-  --surface-hover: rgba(46, 50, 62, 0.7);
-  --surface-active: rgba(100, 200, 255, 0.18);
-  --surface-debug: rgba(12, 16, 26, 0.92);
-  --surface-command: rgba(12, 14, 20, 0.95);
-  --surface-diff-card: rgba(14, 18, 28, 0.9);
-  --surface-bubble: rgba(42, 46, 58, 0.9);
-  --surface-bubble-user: rgba(77, 153, 255, 0.55);
-  --surface-context-core: rgba(16, 20, 30, 0.96);
-  --surface-popover: rgba(16, 20, 30, 0.995);
+  --surface-sidebar: var(--surface-sidebar-opaque);
+  --surface-topbar: var(--surface-messages);
 }
 
 * {
@@ -54,7 +35,7 @@ body {
   border-radius: 0;
   overflow: hidden;
   position: relative;
-  --main-topbar-height: 44px;
+  --main-topbar-height: 52px;
   /* Shared Pi chrome language */
   --cm-surface-row: color-mix(in srgb, var(--surface-card) 44%, transparent);
   --cm-surface-panel-soft: color-mix(in srgb, var(--surface-card) 56%, transparent);
@@ -81,6 +62,7 @@ body {
   --cm-border-accent-strong: color-mix(in srgb, var(--border-accent) 46%, transparent);
   transition: grid-template-columns 220ms ease;
   font-family: var(--ui-font-family);
+  -webkit-font-smoothing: antialiased;
 }
 
 .app.is-resizing,
@@ -270,11 +252,9 @@ button.window-caption-control:focus-visible,
   .commit-button-spinner,
   .sidebar-refresh-icon.spinning,
   .worktree-deleting-spinner,
-  .sidebar-account-spinner,
   .settings-agents-generate-loader,
   .composer-action-spinner,
-  .compact-chat-refresh-icon.spinning,
-  .home-usage-refresh-icon.spinning {
+  .compact-chat-refresh-icon.spinning {
     animation-duration: var(--ds-spinner-dur) !important;
     animation-iteration-count: infinite !important;
   }

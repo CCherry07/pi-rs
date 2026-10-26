@@ -1,75 +1,55 @@
 #![forbid(unsafe_code)]
 
-//! Pi v4 session tree, mutation journal, JSONL storage, and runtime adapter.
+//! Product session runtime, managed generations and plugin capability adapters.
 //!
-//! The durable core mirrors `legacy/pi/packages/agent/src/harness/session`:
-//! entries, lane records, lane pointers, and global facts share one sequence;
-//! context is projected from a selected branch; and a JSONL tail is repaired
-//! only when the final append is syntactically torn.
+//! Durable values and storage live in the internal `history` module and are re-exported
+//! here. `AgentSession` owns one generation's activity; `PiSession` follows managed
+//! replacements and exposes an ordered observation stream across those generations.
 
 extern crate self as pi_session;
 
 #[doc(hidden)]
 pub use async_trait::async_trait as __plugin_async_trait;
 
-mod agent_session;
-mod agent_session_runtime;
-mod compaction;
-mod context;
-mod event;
-mod isolated_context;
-mod isolated_session;
-mod journal;
-mod multi_session_manager;
+mod error;
+mod history;
+mod management;
+mod runtime;
+pub use error::SessionError;
+pub use history::*;
 pub mod plugin;
-mod plugin_context;
-mod session_options;
-mod shell;
-mod types;
 
-pub use agent_session::{
-    AgentSession, PreparedAgentSession, SessionInput, ShellExecutionOptions, SubmitOutcome,
+pub use runtime::{SessionCatalog, SessionHistory};
+
+pub use management::{
+    AgentSessionReplacement, PreparedSessionGeneration, SessionGenerationActivation,
+    SessionGenerationFactory, SessionGenerationOverlay, SessionGenerationRequest,
 };
-pub use agent_session_runtime::{
-    AgentSessionInitialModelSource, AgentSessionInitialState, AgentSessionReplacement,
-    PreparedSessionGeneration, RestoredSessionConfiguration, RestoredToolSelection,
-    SessionGenerationActivation, SessionGenerationFactory, SessionGenerationOverlay,
-    SessionGenerationRequest,
-};
-pub(crate) use compaction::{
-    CompactionError, compact, estimate_session_context_tokens, estimate_tokens, prepare_compaction,
-    should_compact,
-};
-pub use compaction::{
+pub(crate) use runtime::PreparedAgentSession;
+pub use runtime::compaction::{
     ContextUsageEstimate, GenericCompactionPolicy, SUMMARIZATION_SYSTEM_PROMPT,
     SessionCompactionPolicy, calculate_context_tokens, current_session_context_tokens,
     estimate_context_tokens,
 };
-pub use context::{
-    ContextEntryTransform, CustomEntryContextMessageProjector, SessionContext,
-    SessionContextBuildOptions, SessionModel, agent_message_to_provider_message,
-    agent_message_to_runtime_message, annotate_compaction, build_context_entries,
-    build_session_context, default_context_entry_transform, project_session_entries,
-    session_entry_to_context_messages,
-};
-pub use event::{
+pub(crate) use runtime::compaction::{compact, estimate_session_context_tokens, estimate_tokens};
+pub use runtime::{AgentSession, PromptOutcome, SessionInput, ShellExecutionOptions};
+
+pub use management::{IsolatedSessionObservation, IsolatedSessionUsageSnapshot};
+pub use management::{SessionObservation, SessionResetReason, SessionUpdate, SessionVersion};
+pub use runtime::events::{
     AgentSessionEvent, AgentSessionSnapshot, AgentSessionSubscription, AutoRetrySnapshot,
     BashExecutionSnapshot, CompactionSnapshot, QueueSnapshot, RevisionedAgentSessionEvent,
 };
-pub use isolated_context::InheritedSessionContext;
-pub use isolated_session::{IsolatedSessionObservation, IsolatedSessionUsageSnapshot};
-pub use journal::{
-    EffectiveLaneConfiguration, ExactSessionIdResolution, JsonlSessionRepo, LaneOperationState,
-    LaneReductionInput, LaneReductionResult, LaneState, LaneStepState, NewestOwnEntryState,
-    OperationTargetState, RecordLogCorruption, RecordLogCorruptionReason, RecordLogSlice,
-    SessionLog, TerminalFailureSource, TerminalFailureState, ToolBatchCallState, ToolBatchState,
-    aggregate_document_usage, aggregate_session_usage, reduce_lane_state, session_entry_usage,
-    validate_record_log,
-};
-pub use multi_session_manager::{
-    MultiSessionManager, MultiSessionManagerError, PiSession, WeakPiSession,
+
+pub use management::{
+    CreateSessionOptions, MultiSessionManager, MultiSessionManagerError, OpenSessionOptions,
+    PiSession, SessionSource, WeakPiSession,
 };
 pub use pi_plugin::{ForkPosition, NoticeLevel};
+pub use plugin::{
+    PiPluginContext, PluginContextBinding, PluginProviderMutation, PluginProviderMutationAccess,
+    PluginUiBridge,
+};
 pub use plugin::{
     PluginError, SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent,
     SessionBeforeForkResult, SessionBeforeSwitchEvent, SessionBeforeSwitchResult,
@@ -79,17 +59,13 @@ pub use plugin::{
     SessionStartEvent, SessionStartReason, SessionSwitchReason, SessionTreeEvent,
     SessionTreeSummary, TreePreparation,
 };
-pub use plugin_context::{
-    PiPluginContext, PluginContextBinding, PluginProviderMutation, PluginProviderMutationAccess,
-    PluginUiBridge,
+pub use runtime::SessionShellExecutor;
+pub use runtime::{
+    AgentSessionInitialModelSource, AgentSessionInitialState, AgentSessionOptions,
+    AutoRetrySettings, InitialModelRequest, InitialModelResolveError, InitialModelSelection,
+    RestoredSessionConfiguration, RestoredToolSelection, SessionRuntimeInventory,
+    resolve_model_scope, validate_initial_model_scope,
 };
-pub use session_options::{
-    AgentSessionOptions, AutoRetrySettings, InitialModelRequest, InitialModelResolveError,
-    InitialModelSelection, SessionRuntimeInventory, resolve_model_scope,
-    validate_initial_model_scope,
-};
-pub use shell::SessionShellExecutor;
-pub use types::*;
 
 pub(crate) use pi_utils::time::unix_timestamp_ms as now_ms;
 

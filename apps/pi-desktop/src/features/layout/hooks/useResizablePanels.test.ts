@@ -75,13 +75,16 @@ describe("useResizablePanels", () => {
   it("reads stored sizes and clamps to bounds", () => {
     window.localStorage.setItem("pi-monitor.sidebarWidth", "999");
     window.localStorage.setItem("pi-monitor.rightPanelWidth", "100");
-    window.localStorage.setItem("pi-monitor.planPanelHeight", "not-a-number");
+    window.localStorage.setItem(
+      "pi-monitor.terminalPanelHeight",
+      "not-a-number",
+    );
 
     const hook = renderResizablePanels();
 
     expect(hook.result.sidebarWidth).toBe(420);
     expect(hook.result.rightPanelWidth).toBe(270);
-    expect(hook.result.planPanelHeight).toBe(220);
+    expect(hook.result.terminalPanelHeight).toBe(220);
 
     hook.unmount();
   });
@@ -111,9 +114,7 @@ describe("useResizablePanels", () => {
     });
 
     expect(hook.result.sidebarWidth).toBe(420);
-    expect(window.localStorage.getItem("pi-monitor.sidebarWidth")).toBe(
-      "420",
-    );
+    expect(window.localStorage.getItem("pi-monitor.sidebarWidth")).toBe("420");
 
     hook.unmount();
     appEl.remove();

@@ -158,15 +158,43 @@ pub fn measure<E>(
 where
     E: Display,
 {
-    for _ in 0..config.warmup_iterations {
-        black_box(operation()).map_err(|error| format!("benchmark warmup failed: {error}"))?;
-    }
+    measure_with_setup(
+        name,
+        config,
+        fixture_hash,
+        parameters,
+        || Ok(()),
+        |_| operation(),
+        |_, _| Ok(()),
+    )
+}
 
+/// Prepares and verifies each sample outside timing, with only one fixture alive.
+/// The operation's return value and fixture are also dropped after timing stops.
+pub fn measure_with_setup<S, T, E>(
+    name: impl Into<String>,
+    config: BenchConfig,
+    fixture_hash: impl Into<String>,
+    parameters: BTreeMap<String, String>,
+    mut setup: impl FnMut() -> Result<S, E>,
+    mut operation: impl FnMut(&mut S) -> Result<T, E>,
+    mut verify: impl FnMut(&S, &T) -> Result<(), E>,
+) -> BenchResult<BenchmarkCase>
+where
+    E: Display,
+{
     let mut samples = Vec::with_capacity(config.sample_iterations);
-    for _ in 0..config.sample_iterations {
+    for index in 0..config.warmup_iterations + config.sample_iterations {
+        let mut fixture = setup().map_err(|error| format!("benchmark setup failed: {error}"))?;
         let started = Instant::now();
-        black_box(operation()).map_err(|error| format!("benchmark sample failed: {error}"))?;
-        samples.push(duration_ns(started.elapsed().as_nanos()));
+        let output = black_box(operation(&mut fixture));
+        let elapsed = duration_ns(started.elapsed().as_nanos());
+        let output = output.map_err(|error| format!("benchmark operation failed: {error}"))?;
+        verify(&fixture, &output)
+            .map_err(|error| format!("benchmark verification failed: {error}"))?;
+        if index >= config.warmup_iterations {
+            samples.push(elapsed);
+        }
     }
 
     Ok(BenchmarkCase {

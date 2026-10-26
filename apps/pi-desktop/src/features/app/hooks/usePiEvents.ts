@@ -22,13 +22,6 @@ type AgentCompleted = {
   text: string;
 };
 
-type HookEvent = {
-  workspaceId: string;
-  threadId: string;
-  turnId: string | null;
-  run: Record<string, unknown>;
-};
-
 type PiEventHandlers = {
   onThreadNotice?: (workspaceId: string, threadId: string, message: string, level: string) => void;
   onThreadReplaced?: (workspaceId: string, previousThreadId: string, thread: Record<string, unknown>) => void;
@@ -42,7 +35,6 @@ type PiEventHandlers = {
     threadId: string,
     status: Record<string, unknown>,
   ) => void;
-  onThreadClosed?: (workspaceId: string, threadId: string) => void;
   onThreadArchived?: (workspaceId: string, threadId: string) => void;
   onThreadUnarchived?: (
     workspaceId: string,
@@ -60,29 +52,9 @@ type PiEventHandlers = {
     turnId: string,
     payload: { message: string; willRetry: boolean },
   ) => void;
-  onTurnPlanUpdated?: (
-    workspaceId: string,
-    threadId: string,
-    turnId: string,
-    payload: { explanation: unknown; plan: unknown },
-  ) => void;
-  onHookStarted?: (event: HookEvent) => void;
-  onHookCompleted?: (event: HookEvent) => void;
   onItemStarted?: (workspaceId: string, threadId: string, item: Record<string, unknown>) => void;
   onItemCompleted?: (workspaceId: string, threadId: string, item: Record<string, unknown>) => void;
-  onReasoningSummaryDelta?: (workspaceId: string, threadId: string, itemId: string, delta: string) => void;
-  onReasoningSummaryBoundary?: (workspaceId: string, threadId: string, itemId: string) => void;
   onReasoningTextDelta?: (workspaceId: string, threadId: string, itemId: string, delta: string) => void;
-  onPlanDelta?: (workspaceId: string, threadId: string, itemId: string, delta: string) => void;
-  onCommandOutputDelta?: (workspaceId: string, threadId: string, itemId: string, delta: string) => void;
-  onTerminalInteraction?: (
-    workspaceId: string,
-    threadId: string,
-    itemId: string,
-    stdin: string,
-  ) => void;
-  onFileChangeOutputDelta?: (workspaceId: string, threadId: string, itemId: string, delta: string) => void;
-  onTurnDiffUpdated?: (workspaceId: string, threadId: string, diff: string) => void;
   onThreadTokenUsageUpdated?: (
     workspaceId: string,
     threadId: string,
@@ -92,20 +64,11 @@ type PiEventHandlers = {
 
 export const METHODS_ROUTED_IN_USE_PI_EVENTS = [
   "error",
-  "hook/completed",
-  "hook/started",
   "item/agentMessage/delta",
-  "item/commandExecution/outputDelta",
-  "item/commandExecution/terminalInteraction",
   "item/completed",
-  "item/fileChange/outputDelta",
-  "item/plan/delta",
-  "item/reasoning/summaryPartAdded",
-  "item/reasoning/summaryTextDelta",
   "item/reasoning/textDelta",
   "item/started",
   "thread/archived",
-  "thread/closed",
   "thread/deleted",
   "thread/name/updated",
   "thread/notice",
@@ -115,35 +78,8 @@ export const METHODS_ROUTED_IN_USE_PI_EVENTS = [
   "thread/tokenUsage/updated",
   "thread/unarchived",
   "turn/completed",
-  "turn/diff/updated",
-  "turn/plan/updated",
   "turn/started",
 ] as const satisfies readonly SupportedPiEventMethod[];
-
-function parseHookEvent(
-  workspaceId: string,
-  params: Record<string, unknown>,
-): HookEvent | null {
-  const threadId = String(params.threadId ?? params.thread_id ?? "").trim();
-  if (!threadId) {
-    return null;
-  }
-  const run = params.run;
-  if (!run || typeof run !== "object" || Array.isArray(run)) {
-    return null;
-  }
-  const turnIdRaw = params.turnId ?? params.turn_id ?? null;
-  const turnId =
-    typeof turnIdRaw === "string" && turnIdRaw.trim().length > 0
-      ? turnIdRaw.trim()
-      : null;
-  return {
-    workspaceId,
-    threadId,
-    turnId,
-    run: run as Record<string, unknown>,
-  };
-}
 
 export function usePiEvents(handlers: PiEventHandlers) {
   // Use ref to keep handlers current without triggering re-subscription
@@ -193,22 +129,6 @@ export function usePiEvents(handlers: PiEventHandlers) {
         const turnId = String(turn?.id ?? params.turnId ?? params.turn_id ?? "");
         if (threadId) {
           currentHandlers.onTurnStarted?.(workspace_id, threadId, turnId);
-        }
-        return;
-      }
-
-      if (method === "hook/started") {
-        const event = parseHookEvent(workspace_id, params);
-        if (event) {
-          currentHandlers.onHookStarted?.(event);
-        }
-        return;
-      }
-
-      if (method === "hook/completed") {
-        const event = parseHookEvent(workspace_id, params);
-        if (event) {
-          currentHandlers.onHookCompleted?.(event);
         }
         return;
       }
@@ -274,14 +194,6 @@ export function usePiEvents(handlers: PiEventHandlers) {
         return;
       }
 
-      if (method === "thread/closed") {
-        const threadId = String(params.threadId ?? params.thread_id ?? "").trim();
-        if (threadId) {
-          currentHandlers.onThreadClosed?.(workspace_id, threadId);
-        }
-        return;
-      }
-
       if (method === "thread/archived" || method === "thread/deleted") {
         const threadId = String(params.threadId ?? params.thread_id ?? "").trim();
         if (threadId) {
@@ -329,27 +241,6 @@ export function usePiEvents(handlers: PiEventHandlers) {
         return;
       }
 
-      if (method === "turn/plan/updated") {
-        const threadId = String(params.threadId ?? params.thread_id ?? "");
-        const turnId = String(params.turnId ?? params.turn_id ?? "");
-        if (threadId) {
-          currentHandlers.onTurnPlanUpdated?.(workspace_id, threadId, turnId, {
-            explanation: params.explanation,
-            plan: params.plan,
-          });
-        }
-        return;
-      }
-
-      if (method === "turn/diff/updated") {
-        const threadId = String(params.threadId ?? params.thread_id ?? "");
-        const diff = String(params.diff ?? "");
-        if (threadId && diff) {
-          currentHandlers.onTurnDiffUpdated?.(workspace_id, threadId, diff);
-        }
-        return;
-      }
-
       if (method === "thread/tokenUsage/updated") {
         const threadId = String(params.threadId ?? params.thread_id ?? "");
         const tokenUsage =
@@ -391,71 +282,12 @@ export function usePiEvents(handlers: PiEventHandlers) {
         return;
       }
 
-      if (method === "item/reasoning/summaryTextDelta") {
-        const threadId = String(params.threadId ?? params.thread_id ?? "");
-        const itemId = String(params.itemId ?? params.item_id ?? "");
-        const delta = String(params.delta ?? "");
-        if (threadId && itemId && delta) {
-          currentHandlers.onReasoningSummaryDelta?.(workspace_id, threadId, itemId, delta);
-        }
-        return;
-      }
-
-      if (method === "item/reasoning/summaryPartAdded") {
-        const threadId = String(params.threadId ?? params.thread_id ?? "");
-        const itemId = String(params.itemId ?? params.item_id ?? "");
-        if (threadId && itemId) {
-          currentHandlers.onReasoningSummaryBoundary?.(workspace_id, threadId, itemId);
-        }
-        return;
-      }
-
       if (method === "item/reasoning/textDelta") {
         const threadId = String(params.threadId ?? params.thread_id ?? "");
         const itemId = String(params.itemId ?? params.item_id ?? "");
         const delta = String(params.delta ?? "");
         if (threadId && itemId && delta) {
           currentHandlers.onReasoningTextDelta?.(workspace_id, threadId, itemId, delta);
-        }
-        return;
-      }
-
-      if (method === "item/plan/delta") {
-        const threadId = String(params.threadId ?? params.thread_id ?? "");
-        const itemId = String(params.itemId ?? params.item_id ?? "");
-        const delta = String(params.delta ?? "");
-        if (threadId && itemId && delta) {
-          currentHandlers.onPlanDelta?.(workspace_id, threadId, itemId, delta);
-        }
-        return;
-      }
-
-      if (method === "item/commandExecution/outputDelta") {
-        const threadId = String(params.threadId ?? params.thread_id ?? "");
-        const itemId = String(params.itemId ?? params.item_id ?? "");
-        const delta = String(params.delta ?? "");
-        if (threadId && itemId && delta) {
-          currentHandlers.onCommandOutputDelta?.(workspace_id, threadId, itemId, delta);
-        }
-        return;
-      }
-
-      if (method === "item/commandExecution/terminalInteraction") {
-        const threadId = String(params.threadId ?? params.thread_id ?? "");
-        const itemId = String(params.itemId ?? params.item_id ?? "");
-        const stdin = String(params.stdin ?? "");
-        if (threadId && itemId) {
-          currentHandlers.onTerminalInteraction?.(workspace_id, threadId, itemId, stdin);
-        }
-        return;
-      }
-
-      if (method === "item/fileChange/outputDelta") {
-        const threadId = String(params.threadId ?? params.thread_id ?? "");
-        const itemId = String(params.itemId ?? params.item_id ?? "");
-        const delta = String(params.delta ?? "");
-        if (threadId && itemId && delta) {
-          currentHandlers.onFileChangeOutputDelta?.(workspace_id, threadId, itemId, delta);
         }
         return;
       }

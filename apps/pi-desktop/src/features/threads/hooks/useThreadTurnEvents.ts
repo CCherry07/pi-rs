@@ -2,12 +2,10 @@ import { commandsFromThread } from "@utils/desktopCommands";
 import { useCallback, useRef } from "react";
 import type { Dispatch, MutableRefObject } from "react";
 import i18n from "@/i18n";
-import type { TurnPlan } from "@/types";
 import { interruptTurn as interruptTurnService } from "@services/tauri";
 import { getThreadTimestamp } from "@utils/threadItems";
 import {
   asString,
-  normalizePlanUpdate,
   normalizeTokenUsage,
 } from "@threads/utils/threadNormalize";
 import {
@@ -20,14 +18,12 @@ import {
   getThreadStartAction,
   normalizeThreadStatusType,
   resetThreadTurnState,
-  shouldClearCompletedPlanForThread,
   shouldIgnoreOrphanSubagentThread,
 } from "./threadTurnEventHelpers";
 import type { ThreadAction } from "./useThreadsReducer";
 
 type UseThreadTurnEventsOptions = {
   dispatch: Dispatch<ThreadAction>;
-  planByThreadRef: MutableRefObject<Record<string, TurnPlan | null>>;
   getCustomName: (workspaceId: string, threadId: string) => string | undefined;
   isThreadHidden: (workspaceId: string, threadId: string) => boolean;
   setThreadLoaded: (threadId: string, isLoaded: boolean) => void;
@@ -42,7 +38,6 @@ type UseThreadTurnEventsOptions = {
 
 export function useThreadTurnEvents({
   dispatch,
-  planByThreadRef,
   getCustomName,
   isThreadHidden,
   setThreadLoaded,
@@ -95,12 +90,6 @@ export function useThreadTurnEvents({
       return reducerTurnId;
     },
     [getActiveTurnId],
-  );
-
-  const shouldClearCompletedPlan = useCallback(
-    (threadId: string, turnId: string) =>
-      shouldClearCompletedPlanForThread(planByThreadRef, threadId, turnId),
-    [planByThreadRef],
   );
 
   const onThreadStarted = useCallback(
@@ -313,17 +302,12 @@ export function useThreadTurnEvents({
         threadId,
       );
       setActiveTurnId(threadId, null);
-      if (shouldClearCompletedPlan(threadId, turnId)) {
-        dispatch({ type: "clearThreadPlan", threadId });
-      }
     },
     [
-      dispatch,
       getLatestKnownActiveTurnId,
       markProcessing,
       pendingInterruptsRef,
       setActiveTurnId,
-      shouldClearCompletedPlan,
     ],
   );
 
@@ -363,54 +347,6 @@ export function useThreadTurnEvents({
       setActiveTurnId,
       setThreadLoaded,
     ],
-  );
-
-  const onThreadClosed = useCallback(
-    (_workspaceId: string, threadId: string) => {
-      setThreadLoaded(threadId, false);
-      markProcessing(threadId, false);
-      resetThreadTurnState(
-        {
-          hasOptimisticActiveTurnByThreadRef,
-          immediateActiveTurnIdByThreadRef,
-          pendingInterruptsRef,
-        },
-        threadId,
-      );
-      setActiveTurnId(threadId, null);
-    },
-    [
-      markProcessing,
-      pendingInterruptsRef,
-      setActiveTurnId,
-      setThreadLoaded,
-    ],
-  );
-
-  const onTurnPlanUpdated = useCallback(
-    (
-      workspaceId: string,
-      threadId: string,
-      turnId: string,
-      payload: { explanation: unknown; plan: unknown },
-    ) => {
-      dispatch({ type: "ensureThread", workspaceId, threadId });
-      const normalized = normalizePlanUpdate(
-        turnId,
-        payload.explanation,
-        payload.plan,
-      );
-      dispatch({ type: "setThreadPlan", threadId, plan: normalized });
-    },
-    [dispatch],
-  );
-
-  const onTurnDiffUpdated = useCallback(
-    (workspaceId: string, threadId: string, diff: string) => {
-      dispatch({ type: "ensureThread", workspaceId, threadId });
-      dispatch({ type: "setThreadTurnDiff", threadId, diff });
-    },
-    [dispatch],
   );
 
   const onThreadTokenUsageUpdated = useCallback(
@@ -482,9 +418,6 @@ export function useThreadTurnEvents({
     onTurnStarted,
     onTurnCompleted,
     onThreadStatusChanged,
-    onThreadClosed,
-    onTurnPlanUpdated,
-    onTurnDiffUpdated,
     onThreadTokenUsageUpdated,
     onTurnError,
   };

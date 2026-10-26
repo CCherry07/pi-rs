@@ -667,6 +667,44 @@ export const UserInputRow = memo(function UserInputRow({
   );
 });
 
+function ToolImageAttachments({
+  sources,
+  hasText,
+}: {
+  sources: string[];
+  hasText: boolean;
+}) {
+  const { t } = useTranslation("messages");
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const images = useMemo(
+    () =>
+      sources.flatMap((image, index) => {
+        const src = normalizeMessageImageSrc(image);
+        return src
+          ? [{ src, label: t("images.imageNumber", { number: index + 1 }) }]
+          : [];
+      }),
+    [sources, t],
+  );
+  if (!images.length) return null;
+  return (
+    <>
+      <MessageImageGrid
+        images={images}
+        onOpen={setLightboxIndex}
+        hasText={hasText}
+      />
+      {lightboxIndex !== null && (
+        <ImageLightbox
+          images={images}
+          activeIndex={lightboxIndex}
+          onClose={() => setLightboxIndex(null)}
+        />
+      )}
+    </>
+  );
+}
+
 function CustomMessageRow({
   item,
   showMessageFilePath,
@@ -675,18 +713,15 @@ function CustomMessageRow({
   onOpenFileLinkMenu,
   onOpenThreadLink,
 }: Pick<ToolRowProps, "item"> & MarkdownFileLinkProps) {
-  const { t } = useTranslation("messages");
-  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
-  const images = (item.images ?? []).flatMap((image, index) => {
-    const src = normalizeMessageImageSrc(image);
-    return src ? [{ src, label: t("images.imageNumber", { number: index + 1 }) }] : [];
-  });
   return (
     <div className="tool-inline tool-inline-row" role="status">
       <div className="tool-inline-content">
         <span className="tool-inline-label">{item.title}</span>
-        {images.length > 0 && (
-          <MessageImageGrid images={images} onOpen={setLightboxIndex} hasText={Boolean(item.detail)} />
+        {item.images && item.images.length > 0 && (
+          <ToolImageAttachments
+            sources={item.images}
+            hasText={Boolean(item.detail)}
+          />
         )}
         {item.detail && (
           <Markdown
@@ -698,9 +733,6 @@ function CustomMessageRow({
             onOpenFileLinkMenu={onOpenFileLinkMenu}
             onOpenThreadLink={onOpenThreadLink}
           />
-        )}
-        {lightboxIndex !== null && images.length > 0 && (
-          <ImageLightbox images={images} activeIndex={lightboxIndex} onClose={() => setLightboxIndex(null)} />
         )}
       </div>
     </div>
@@ -871,6 +903,12 @@ export const ToolRow = memo(function ToolRow({
             <span className="tool-inline-status">{inlineStatus}</span>
           )}
         </button>
+        {item.images && item.images.length > 0 && (
+          <ToolImageAttachments
+            sources={item.images}
+            hasText={Boolean(summary.output)}
+          />
+        )}
         {isExpanded && summary.detail && !isFileChange && (
           <div className="tool-inline-detail">{summary.detail}</div>
         )}

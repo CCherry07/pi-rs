@@ -8,7 +8,7 @@ use pi_core::{
 };
 use pi_session::{
     EntryOrder, LaneRecordEntry, MAIN_LANE, NewLaneRecord, OperationIntent, OperationOutcome,
-    RecordQuery, SessionEntry, SessionHeader, SessionLog, SessionMutation,
+    RecordQuery, SessionEntry, SessionHeader, SessionMutation, SessionStore,
 };
 use tempfile::TempDir;
 
@@ -80,7 +80,7 @@ impl SessionFixture {
     fn create(name: &str, turns: usize, payload_bytes: usize) -> BenchResult<Self> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join(format!("{name}.jsonl"));
-        let log = SessionLog::create(
+        let log = SessionStore::create(
             &path,
             SessionHeader::new(format!("bench-{name}"), directory.path()),
         )?;
@@ -148,7 +148,7 @@ impl SessionFixture {
     fn create_mixed(name: &str, turns: usize, payload_bytes: usize) -> BenchResult<Self> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join(format!("{name}.jsonl"));
-        let log = SessionLog::create_deferred(
+        let log = SessionStore::create_deferred(
             &path,
             SessionHeader::new(format!("bench-{name}"), directory.path()),
         )?;
@@ -235,7 +235,7 @@ impl SessionFixture {
     }
 
     fn verify(&self) -> Result<(), String> {
-        let (_, document) = SessionLog::open(&self.path).map_err(|error| error.to_string())?;
+        let (_, document) = SessionStore::open(&self.path).map_err(|error| error.to_string())?;
         let branch = document.branch().map_err(|error| error.to_string())?;
         if branch.len() != self.expected_entries {
             return Err(format!(
@@ -285,7 +285,8 @@ impl SessionFixture {
             fixture_identity.clone(),
             parameters.clone(),
             || {
-                let log = SessionLog::open_handle(&self.path).map_err(|error| error.to_string())?;
+                let log =
+                    SessionStore::open_handle(&self.path).map_err(|error| error.to_string())?;
                 black_box(log);
                 Ok::<(), String>(())
             },
@@ -309,7 +310,7 @@ impl SessionFixture {
             },
         )?);
 
-        let log = SessionLog::open_handle(&self.path).map_err(|error| error.to_string())?;
+        let log = SessionStore::open_handle(&self.path).map_err(|error| error.to_string())?;
         self.measure_settled_recovery_scan(
             report,
             config,
@@ -414,7 +415,7 @@ impl SessionFixture {
             "session-recovery:v1:{}:{}:{}",
             self.expected_entries, self.expected_records, self.file_bytes
         ));
-        let log = SessionLog::open_handle(&self.path).map_err(|error| error.to_string())?;
+        let log = SessionStore::open_handle(&self.path).map_err(|error| error.to_string())?;
         report.push(measure(
             name,
             config,

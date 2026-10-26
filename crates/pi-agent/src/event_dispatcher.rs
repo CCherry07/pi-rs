@@ -82,7 +82,7 @@ impl AgentEventDispatcher {
             }
             AgentEvent::MessageEnd { message } => {
                 state.snapshot.streaming_message = None;
-                state.snapshot.messages.push(message.clone());
+                Arc::make_mut(&mut state.snapshot.messages).push(message.clone());
             }
             AgentEvent::ToolExecutionStart { tool_call_id, .. } => {
                 state
@@ -312,7 +312,7 @@ impl AgentEventSink for AgentEventDispatcher {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let AgentEvent::MessageEnd { message } = &event
-                && let Some(last) = state.snapshot.messages.last_mut()
+                && let Some(last) = Arc::make_mut(&mut state.snapshot.messages).last_mut()
             {
                 *last = message.clone();
             }

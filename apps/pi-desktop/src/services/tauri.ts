@@ -1,48 +1,5 @@
 import { gitRequestArgs, type GitRequest, type GitInventory, type GitTarget } from "@/features/git/gitContext";
 import { invoke } from "@tauri-apps/api/core";
-import type { DesktopSessionRef } from "@pi-rs/desktop-sdk";
-import type { DesktopExtensionCatalog } from "../features/extensions/types";
-
-export async function getDesktopExtensions(workspaceId: string): Promise<DesktopExtensionCatalog> {
-  const catalog = await invoke<Omit<DesktopExtensionCatalog, "extensions"> & {
-    extensions: (DesktopExtensionCatalog["extensions"][number] & { project?: boolean })[];
-  }>("pi_desktop_extensions", { workspaceId });
-  return {
-    ...catalog,
-    extensions: catalog.extensions.map(source => ({
-      ...source,
-      scope: source.project ? "project" : "global",
-    })),
-  };
-}
-
-export type DesktopWidgetSnapshot = {
-  widgets: Record<string, unknown>;
-  versions: Record<string, number>;
-  scopeToken?: string | null;
-};
-
-export function getDesktopWidgets(workspaceId: string, threadId: string): Promise<DesktopWidgetSnapshot> {
-  return invoke("pi_get_desktop_widgets", { workspaceId, threadId });
-}
-
-export function observeDesktopSession(
-  workspaceId: string,
-  threadId: string,
-  reference: DesktopSessionRef,
-): Promise<{ thread: { id: string } }> {
-  return invoke("pi_observe_desktop_session", { workspaceId, threadId, reference });
-}
-
-export async function runDesktopCommand(
-  workspaceId: string,
-  threadId: string,
-  name: string,
-  args: string,
-  scopeToken: string,
-): Promise<void> {
-  await invoke("pi_desktop_command", { workspaceId, threadId, name, args, scopeToken });
-}
 
 export type McpScope = "global" | "project";
 export type McpDocument = {
@@ -175,7 +132,6 @@ export type TextFileResponse = {
   truncated: boolean;
 };
 
-export type GlobalAgentsResponse = TextFileResponse;
 export type AgentMdResponse = TextFileResponse;
 type FileScope = "workspace" | "global";
 type FileKind = "agents";
@@ -199,14 +155,6 @@ async function fileWrite(
 
 export async function readImageAsDataUrl(path: string): Promise<string> {
   return invoke<string>("read_image_as_data_url", { path });
-}
-
-export async function readGlobalAgentsMd(): Promise<GlobalAgentsResponse> {
-  return fileRead("global", "agents");
-}
-
-export async function writeGlobalAgentsMd(content: string): Promise<void> {
-  return fileWrite("global", "agents", content);
 }
 
 export async function addWorkspace(path: string): Promise<WorkspaceInfo> {
@@ -573,7 +521,6 @@ export async function sendUserMessage(
   options?: {
     model?: string | null;
     effort?: string | null;
-    serviceTier?: "fast" | "flex" | null | undefined;
     images?: string[];
   },
 ) {
@@ -586,9 +533,6 @@ export async function sendUserMessage(
     effort: options?.effort ?? null,
     images,
   };
-  if (options?.serviceTier !== undefined) {
-    payload.serviceTier = options.serviceTier;
-  }
   return invoke("pi_send_user_message", payload);
 }
 
@@ -801,10 +745,6 @@ export async function generateRunMetadata(workspaceId: string, prompt: string) {
     workspaceId,
     prompt,
   });
-}
-
-export async function getSkillsList(workspaceId: string, threadId?: string) {
-  return invoke<any>("pi_skills_list", { workspaceId, threadId });
 }
 
 export async function getPromptsList(workspaceId: string) {
@@ -1033,22 +973,22 @@ export async function closeTerminalSession(
   return invoke("terminal_close", { workspaceId, terminalId });
 }
 
-export async function listThreads(
-  workspaceId: string,
-  cursor?: string | null,
-  limit?: number | null,
-  sortKey?: "created_at" | "updated_at" | null,
-) {
-  return invoke<any>("pi_list_threads", { workspaceId, cursor, limit, sortKey });
-}
+export type ThreadListRequest = { workspaceId: string; cursor?: string | null };
+export type ThreadListPage = {
+  workspaceId: string;
+  data: Record<string, unknown>[];
+  nextCursor: string | null;
+};
 
-export async function listArchivedThreads(
-  workspaceId: string,
-  cursor?: string | null,
-  limit?: number | null,
-  sortKey?: "created_at" | "updated_at" | null,
-) {
-  return invoke<any>("pi_list_archived_threads", { workspaceId, cursor, limit, sortKey });
+export function listThreads(
+  requests: ThreadListRequest[],
+  options: {
+    limit?: number;
+    sortKey?: "created_at" | "updated_at";
+    archived?: boolean;
+  } = {},
+): Promise<ThreadListPage[]> {
+  return invoke("pi_list_threads", { requests, ...options });
 }
 
 export async function resumeThread(workspaceId: string, threadId: string) {
@@ -1057,14 +997,6 @@ export async function resumeThread(workspaceId: string, threadId: string) {
 
 export async function readThread(workspaceId: string, threadId: string) {
   return invoke<any>("pi_read_thread", { workspaceId, threadId });
-}
-
-export async function threadLiveSubscribe(workspaceId: string, threadId: string) {
-  return invoke<any>("pi_thread_live_subscribe", { workspaceId, threadId });
-}
-
-export async function threadLiveUnsubscribe(workspaceId: string, threadId: string) {
-  return invoke<any>("pi_thread_live_unsubscribe", { workspaceId, threadId });
 }
 
 export async function archiveThread(workspaceId: string, threadId: string) {

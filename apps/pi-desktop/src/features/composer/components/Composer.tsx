@@ -15,7 +15,6 @@ import type {
   DictationTranscript,
   FollowUpMessageBehavior,
   QueuedMessage,
-  ServiceTier,
   ThreadTokenUsage,
 } from "../../../types";
 import {
@@ -54,8 +53,6 @@ type ComposerProps = {
   reasoningOptions: string[];
   selectedEffort: string | null;
   onSelectEffort: (effort: string) => void;
-  selectedServiceTier: ServiceTier | null;
-  onSelectServiceTier: (tier: ServiceTier | null) => void;
   reasoningSupported: boolean;
   skills: { name: string; description?: string }[];
   runtimeCommands?: import("../../../utils/desktopCommands").RuntimeCommand[];
@@ -63,7 +60,6 @@ type ComposerProps = {
   files: FileMention[];
   tokenUsage?: ThreadTokenUsage | null;
   queuedMessages?: QueuedMessage[];
-  queuePausedReason?: string | null;
   onSteerQueued?: (item: QueuedMessage) => void;
   onEditQueued?: (item: QueuedMessage) => void;
   onDeleteQueued?: (id: string) => void;
@@ -123,8 +119,6 @@ export const Composer = memo(function Composer({
   reasoningOptions,
   selectedEffort,
   onSelectEffort,
-  selectedServiceTier,
-  onSelectServiceTier,
   reasoningSupported,
   skills,
   runtimeCommands,
@@ -132,7 +126,6 @@ export const Composer = memo(function Composer({
   files,
   tokenUsage = null,
   queuedMessages = [],
-  queuePausedReason = null,
   onSteerQueued,
   onEditQueued,
   onDeleteQueued,
@@ -443,7 +436,6 @@ export const Composer = memo(function Composer({
     tryExpandFence,
   });
 
-
   const commandCollisions = (runtimeCommands ?? []).filter((command) => isDesktopCommandName(command.name));
 
   return (
@@ -455,7 +447,6 @@ export const Composer = memo(function Composer({
       )}
       <ComposerQueue
         queuedMessages={queuedMessages}
-        pausedReason={queuePausedReason}
         steerAvailable={steerAvailable}
         onSteerQueued={onSteerQueued}
         onEditQueued={onEditQueued}
@@ -506,8 +497,6 @@ export const Composer = memo(function Composer({
         reasoningOptions={reasoningOptions}
         selectedEffort={selectedEffort}
         onSelectEffort={onSelectEffort}
-        selectedServiceTier={selectedServiceTier}
-        onSelectServiceTier={onSelectServiceTier}
         reasoningSupported={reasoningSupported}
         tokenUsage={tokenUsage}
       />

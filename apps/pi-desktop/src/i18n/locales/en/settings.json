@@ -275,8 +275,8 @@
         "subtitle": "Wraps selected text when creating a fence."
       },
       "copyWithout": {
-        "title": "Copy blocks without fences",
-        "subtitle": "When enabled, Copy is plain text. Hold {{key}} to include ``` fences."
+        "title": "Copy code fences with a modifier key",
+        "subtitle": "Copy includes only the code by default. Enable this to hold {{key}} while copying to include ``` fences."
       }
     },
     "pasting": {

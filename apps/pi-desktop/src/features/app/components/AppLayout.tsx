@@ -13,7 +13,6 @@ type AppLayoutProps = {
   centerMode: "chat" | "diff";
   preloadGitDiffs: boolean;
   splitChatDiffView: boolean;
-  hasActivePlan: boolean;
   activeWorkspace: boolean;
   sidebarNode: ReactNode;
   messagesNode: ReactNode;
@@ -28,7 +27,6 @@ type AppLayoutProps = {
   tabBarNode: ReactNode;
   gitDiffPanelNode: ReactNode;
   gitDiffViewerNode: ReactNode;
-  planPanelNode: ReactNode;
   debugPanelNode: ReactNode;
   debugPanelFullNode: ReactNode;
   terminalDockNode: ReactNode;
@@ -38,7 +36,6 @@ type AppLayoutProps = {
   onSidebarResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
   onChatDiffSplitPositionResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
   onRightPanelResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
-  onPlanPanelResizeStart: (event: MouseEvent<HTMLDivElement>) => void;
 };
 
 export const AppLayout = memo(function AppLayout({
@@ -51,7 +48,6 @@ export const AppLayout = memo(function AppLayout({
   centerMode,
   preloadGitDiffs,
   splitChatDiffView,
-  hasActivePlan,
   activeWorkspace,
   sidebarNode,
   messagesNode,
@@ -66,7 +62,6 @@ export const AppLayout = memo(function AppLayout({
   tabBarNode,
   gitDiffPanelNode,
   gitDiffViewerNode,
-  planPanelNode,
   debugPanelNode,
   debugPanelFullNode,
   terminalDockNode,
@@ -76,7 +71,6 @@ export const AppLayout = memo(function AppLayout({
   onSidebarResizeStart,
   onChatDiffSplitPositionResizeStart,
   onRightPanelResizeStart,
-  onPlanPanelResizeStart,
 }: AppLayoutProps) {
   if (isPhone) {
     return (
@@ -142,15 +136,12 @@ export const AppLayout = memo(function AppLayout({
       messagesNode={messagesNode}
       gitDiffViewerNode={gitDiffViewerNode}
       gitDiffPanelNode={gitDiffPanelNode}
-      planPanelNode={planPanelNode}
       composerNode={composerNode}
       terminalDockNode={terminalDockNode}
       debugPanelNode={debugPanelNode}
-      hasActivePlan={hasActivePlan}
       onSidebarResizeStart={onSidebarResizeStart}
       onChatDiffSplitPositionResizeStart={onChatDiffSplitPositionResizeStart}
       onRightPanelResizeStart={onRightPanelResizeStart}
-      onPlanPanelResizeStart={onPlanPanelResizeStart}
     />
   );
 });

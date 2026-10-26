@@ -10,7 +10,7 @@ use pi_plugin::{Plugin, PluginId, RegisterContext, Tool, ToolContext, ToolError,
 use pi_runtime::PiRuntime;
 use pi_session::{
     AgentSessionOptions, MultiSessionManager, PreparedSessionGeneration, SessionError,
-    SessionGenerationRequest, SessionHeader, SessionLog,
+    SessionGenerationRequest, SessionHeader, SessionStore,
 };
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::{Value, json};
@@ -135,7 +135,9 @@ async fn multi_root_workspace_survives_execution_reload_resume_and_fork() {
             if failure.load(Ordering::SeqCst) {
                 return Err(SessionError::Runtime("failed candidate".into()));
             }
-            let runtime = PiRuntime::builder()
+            let runtime = request
+                .generation_overlay
+                .apply_to(PiRuntime::builder())
                 .workspace(request.workspace)
                 .agent_options(AgentOptions {
                     cwd: request.cwd,
@@ -171,16 +173,39 @@ async fn multi_root_workspace_survives_execution_reload_resume_and_fork() {
     let path = root.path().join("a.jsonl");
     let metadata = serde_json::Map::from_iter([("unrelated".into(), json!({"preserve":true}))]);
     let first = manager
-        .create_session_with_workspace(first_spec.clone(), &path, None, Some(metadata))
+        .create_session(pi_session::CreateSessionOptions {
+            workspace: first_spec.clone(),
+            path: path.clone(),
+            session_id: Some("workspace-session".into()),
+            metadata: Some(metadata),
+            generation_overlay: pi_session::SessionGenerationOverlay::new()
+                .with_execution_origin(pi_plugin::SessionExecutionOrigin::Subagent),
+        })
         .await
         .unwrap();
     let second = manager
-        .create_session_with_workspace(second_spec.clone(), root.path().join("b.jsonl"), None, None)
+        .create_session(pi_session::CreateSessionOptions {
+            workspace: second_spec.clone(),
+            path: root.path().join("b.jsonl"),
+            session_id: None,
+            metadata: None,
+            generation_overlay: Default::default(),
+        })
         .await
         .unwrap();
     assert!(!path.exists());
+    assert_eq!(first.id(), "workspace-session");
+    assert_eq!(
+        first.current().catalog().execution_origin(),
+        pi_plugin::SessionExecutionOrigin::Subagent
+    );
     first.reload().await.unwrap();
     assert!(!path.exists());
+    assert_eq!(first.id(), "workspace-session");
+    assert_eq!(
+        first.current().catalog().execution_origin(),
+        pi_plugin::SessionExecutionOrigin::Subagent
+    );
     let first_current = first.current();
     let second_current = second.current();
     let (a, b) = tokio::join!(first_current.prompt("a"), second_current.prompt("b"));
@@ -188,12 +213,16 @@ async fn multi_root_workspace_survives_execution_reload_resume_and_fork() {
     b.unwrap();
     assert!(path.exists());
     assert_eq!(
-        SessionLog::read(&path).unwrap().header.workspace().unwrap(),
+        SessionStore::read(&path)
+            .unwrap()
+            .header
+            .workspace()
+            .unwrap(),
         first_spec
     );
     fail.store(true, Ordering::SeqCst);
     assert!(first.reload().await.is_err());
-    assert_eq!(first.current().runtime().workspace().spec(), &first_spec);
+    assert_eq!(first.current().catalog().workspace().spec(), &first_spec);
     fail.store(false, Ordering::SeqCst);
     for stage in ["factory", "hook", "prepare", "execute", "session"] {
         let observed = recorded.lock().unwrap();
@@ -208,24 +237,24 @@ async fn multi_root_workspace_survives_execution_reload_resume_and_fork() {
                 .any(|(kind, spec)| *kind == stage && spec == &second_spec)
         );
     }
-    let fork_point = first
-        .current()
-        .log()
-        .append_message(pi_core::Message::User(pi_core::UserMessage::text(
-            "fork", 1,
-        )))
-        .unwrap();
+    let fork_point = first.current().history().leaf_id().unwrap();
     first
         .fork_session(fork_point, pi_session::ForkPosition::At)
         .await
         .unwrap();
-    assert_eq!(first.current().runtime().workspace().spec(), &first_spec);
+    assert_eq!(first.current().catalog().workspace().spec(), &first_spec);
     assert_eq!(
-        first.current().log().header().metadata.as_ref().unwrap()["unrelated"],
+        first
+            .current()
+            .history()
+            .header()
+            .metadata
+            .as_ref()
+            .unwrap()["unrelated"],
         json!({"preserve":true})
     );
     first.resume_session(&path).await.unwrap();
-    assert_eq!(first.current().runtime().workspace().spec(), &first_spec);
+    assert_eq!(first.current().catalog().workspace().spec(), &first_spec);
     manager.shutdown().await.unwrap();
 }
 
@@ -257,5 +286,5 @@ fn workspace_metadata_is_strict_and_preserves_other_extensions() {
     header.cwd = "/elsewhere".into();
     assert!(header.workspace().is_err());
     let root = tempfile::tempdir().unwrap();
-    assert!(SessionLog::create_deferred(root.path().join("bad.jsonl"), header).is_err());
+    assert!(SessionStore::create_deferred(root.path().join("bad.jsonl"), header).is_err());
 }

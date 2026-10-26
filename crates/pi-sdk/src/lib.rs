@@ -16,5 +16,7 @@ pub use pi_runtime::{
     SystemPromptRenderer,
 };
 pub use pi_session::{
-    AgentSessionOptions, MultiSessionManager, MultiSessionManagerError, PiSession, SessionInput,
+    AgentSessionOptions, CreateSessionOptions, MultiSessionManager, MultiSessionManagerError,
+    OpenSessionOptions, PiSession, PromptOutcome, SessionInput, SessionObservation,
+    SessionResetReason, SessionSource, SessionUpdate, SessionVersion,
 };
