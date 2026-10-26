@@ -319,6 +319,16 @@ test("context edits and both continuation boundaries cross Node/NAPI into provid
       let continued = false;
       let verified = false;
       pi.on("before_agent_start", () => { continued = false; verified = false; });
+      pi.on("context", event => { event.messages.push({ role:"user",content:"unreturned context mutation",timestamp:1 }); });
+      pi.on("context", () => ({ messages: 42 }));
+      pi.on("context", event => {
+        if (JSON.stringify(event.messages).includes("unreturned context mutation")) throw new Error("context input leaked");
+        return { messages: [...event.messages, { role:"user",content:"validated context chain",timestamp:1 }] };
+      });
+      pi.on("context", event => {
+        if (!JSON.stringify(event.messages).includes("validated context chain")) throw new Error("stale context chain");
+        process.stdout.write("context-chain-verified\\n");
+      });
       pi.on("turn_end", event => {
         if (continued) return;
         continued = true;
@@ -362,6 +372,11 @@ test("context edits and both continuation boundaries cross Node/NAPI into provid
     "--base-url", `http://127.0.0.1:${address.port}/v1`, "--print", "start boundary check",
   ], root);
   assert.equal(requests.length, 3);
+  for (const request of requests) {
+    assert.match(JSON.stringify(request), /validated context chain/);
+    assert.doesNotMatch(JSON.stringify(request), /unreturned context mutation/);
+  }
+  assert.equal(stdout.match(/context-chain-verified/g)?.length, 3);
   assert.match(JSON.stringify(requests[1]), /edited first response/);
   assert.doesNotMatch(JSON.stringify(requests[1]), /original first response/);
   assert.match(JSON.stringify(requests[1]), /boundary continuation/);

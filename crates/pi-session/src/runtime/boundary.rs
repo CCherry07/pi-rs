@@ -8,10 +8,21 @@ use pi_plugin::{
 use super::AgentSession;
 use super::context::ContextActivation;
 use crate::{
-    CompactionEntry, ContextEditEntry, ContextEditReplacement, SessionEntry, SessionError,
-    SessionRecord, estimate_session_context_tokens, next_unique_id, now_ms,
-    project_session_entries,
+    AgentMessage, CompactionEntry, ContextEditEntry, ContextEditReplacement, ProjectedSessionEntry,
+    SessionEntry, SessionError, SessionRecord, estimate_session_context_tokens, next_unique_id,
+    now_ms, project_session_entries,
 };
+
+#[derive(Clone)]
+struct BoundaryProjection {
+    entries: Arc<Vec<ProjectedSessionEntry>>,
+    messages: Arc<Vec<AgentMessage>>,
+    llm_messages: Arc<Vec<Message>>,
+}
+
+// Entries are immutable and a leaf identifies the entire selected parent chain.
+// Keep this cache within one dispatch; drafts and custom projectors bypass it.
+type BoundaryPreviewCache = Option<(Option<String>, BoundaryProjection)>;
 
 impl AgentSession {
     /// Append a branch-local content edit without changing the stored original message.
@@ -115,7 +126,14 @@ impl AgentSession {
         &self,
         drafts: &[SessionBoundaryDraft],
         hook: AgentHook,
+        cache: &mut BoundaryPreviewCache,
     ) -> Result<BoundaryContextPreview, String> {
+        let options = self.context_updates.options();
+        if options.entry_transforms.is_empty() && options.entry_projectors.is_empty() {
+            return self.default_boundary_preview(drafts, hook, cache);
+        }
+        // Arbitrary extension projection callbacks need not be pure. Preserve
+        // both their invocation count and ordering relative to queue reads.
         let (path, _) = self
             .prepare_boundary(drafts)
             .map_err(|error| error.to_string())?;
@@ -128,9 +146,65 @@ impl AgentSession {
                 && self.runtime.agent().has_queued_messages());
         let context_entries = project_session_entries(&path, self.context_updates.options());
         Ok(BoundaryContextPreview {
-            context_entries,
-            context_messages: context.messages,
-            llm_messages,
+            context_entries: Arc::new(context_entries),
+            context_messages: Arc::new(context.messages),
+            llm_messages: Arc::new(llm_messages),
+            pending_messages,
+            can_continue,
+        })
+    }
+
+    fn default_boundary_preview(
+        &self,
+        drafts: &[SessionBoundaryDraft],
+        hook: AgentHook,
+        cache: &mut BoundaryPreviewCache,
+    ) -> Result<BoundaryContextPreview, String> {
+        let cached = if drafts.is_empty() {
+            let leaf = self
+                .store
+                .leaf_id_for_lane(crate::MAIN_LANE)
+                .map_err(|error| error.to_string())?;
+            cache
+                .as_ref()
+                .filter(|(cached_leaf, _)| *cached_leaf == leaf)
+                .map(|(_, projection)| projection.clone())
+        } else {
+            None
+        };
+        let projection = match cached {
+            Some(projection) => projection,
+            None => {
+                let (path, _) = self
+                    .prepare_boundary(drafts)
+                    .map_err(|error| error.to_string())?;
+                let (context, entries) = crate::history::build_session_context_and_entries(
+                    &path,
+                    self.context_updates.options(),
+                );
+                let projection = BoundaryProjection {
+                    llm_messages: Arc::new(context.provider_messages()),
+                    messages: Arc::new(context.messages),
+                    entries: Arc::new(entries),
+                };
+                if drafts.is_empty() {
+                    *cache = Some((
+                        path.last().map(|entry| entry.id.clone()),
+                        projection.clone(),
+                    ));
+                }
+                projection
+            }
+        };
+        let pending_messages = self.runtime.agent().peek_queued_messages();
+        let final_assistant = matches!(projection.llm_messages.last(), Some(Message::Assistant(_)));
+        let can_continue = (!projection.llm_messages.is_empty() && !final_assistant)
+            || ((hook == AgentHook::TurnEnd || final_assistant)
+                && self.runtime.agent().has_queued_messages());
+        Ok(BoundaryContextPreview {
+            context_entries: projection.entries,
+            context_messages: projection.messages,
+            llm_messages: projection.llm_messages,
             pending_messages,
             can_continue,
         })
@@ -187,6 +261,7 @@ impl AgentSession {
                 })
                 .collect();
         }
+        let mut preview_cache = None;
         let result = self
             .plugin_driver
             .dispatch_boundary(
@@ -195,7 +270,7 @@ impl AgentSession {
                 signal,
                 turn,
                 outcome,
-                |drafts| self.boundary_preview(drafts, hook),
+                |drafts| self.boundary_preview(drafts, hook, &mut preview_cache),
             )
             .await;
         let drafts = result.entries.unwrap_or_default();
@@ -211,7 +286,7 @@ impl AgentSession {
         let requested = result.continue_run.unwrap_or(false)
             || (hook == AgentHook::AgentBeforeSettle && self.runtime.agent().has_queued_messages());
         let runnable = self
-            .boundary_preview(&[], hook)
+            .boundary_preview(&[], hook, &mut preview_cache)
             .map_err(SessionError::Runtime)?
             .can_continue;
         if requested && !runnable {

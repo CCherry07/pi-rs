@@ -301,7 +301,15 @@ unchanged content reuses one pinned handle, while a rebuilt artifact gets a new 
 The SDK also pins the `serde_json::Value` map representation used by constructor options, so feature
 unification in a host workspace cannot silently change that Rust-ABI type's layout.
 
-The current contract is native ABI **30**. ABI 30 separates surface lifecycle, product presentation and host-operation commands behind one typed UI transport envelope. ABI 29 replaces plugin-supplied terminal lines and raw input with declarative `UiNode` trees and semantic events. Rust owns node layout, focus, editor state and rendering for both native and JavaScript plugins. ABI 28 added host operations and transcript presentation; ABI 27 added frontend geometry. ABI 26 added extension UI surface capabilities and generation retirement cleanup. ABI 25 adds actionable session boundaries, context edits,
+The current contract is native ABI **34**. Context events and boundary-preview entry/message vectors
+use shared `Arc<Vec<_>>` snapshots. Read through the shared view; use `Arc::unwrap_or_clone` or
+`Arc::make_mut` when preparing an owned context replacement. `Plugin::context_hook_batch` optionally
+exposes one stable borrowed `ContextHookBatch` for adjacent hooks sharing a transport; ordinary
+native plugins keep the default individual dispatch. Existing constructor symbols and process-long
+library pinning remain unchanged; rebuild native artifacts against the new SDK.
+
+ABI 33 adds correlated custom mouse events and retained component identities; ABI 32 adds overlay
+placement and region snapshots; ABI 31 adds plugin-drawn content. ABI 30 separates surface lifecycle, product presentation and host-operation commands behind one typed UI transport envelope. ABI 29 replaces plugin-supplied terminal lines and raw input with declarative `UiNode` trees and semantic events. Rust owns node layout, focus, editor state and rendering for both native and JavaScript plugins. ABI 28 added host operations and transcript presentation; ABI 27 added frontend geometry. ABI 26 added extension UI surface capabilities and generation retirement cleanup. ABI 25 adds actionable session boundaries, context edits,
 and retained-entry provenance. ABI 24 moves native contracts into `pi-plugin` and
 consolidates host services in `pi-plugin-manager`. ABI 23 unifies callback errors as `PluginError` and
 uses typed `PluginHook` diagnostics with optional generation metadata. ABI 22 unifies Agent and Session callbacks under one Plugin, moves preparation

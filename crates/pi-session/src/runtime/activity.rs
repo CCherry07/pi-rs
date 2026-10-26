@@ -150,9 +150,9 @@ impl SessionActivity {
         generation: u64,
         display: &str,
         text: &str,
-        images: &[ImageContent],
+        user_message: UserMessage,
     ) -> Result<String, SessionError> {
-        let message = Message::User(input_user_message(text, images, now_ms()));
+        let message = Message::User(user_message);
         let wire = if display == text {
             AgentMessage::from(message.clone())
         } else {
@@ -413,28 +413,25 @@ impl SessionActivity {
     pub(super) fn clear_queue(&self, agent: &Agent) -> Result<QueueSnapshot, SessionError> {
         let mut activity = self.lock();
         let cleared = activity.queue_snapshot();
-        let cancel = |item: &PendingSessionMessage| -> Result<(), SessionError> {
-            if item.kind.is_none() {
-                return Ok(());
-            }
-            self.store.append_record(NewLaneRecord {
+        let cancellations = activity
+            .recovered_queue
+            .iter()
+            .chain(
+                activity
+                    .active_run
+                    .iter()
+                    .flat_map(|run| run.pending.iter()),
+            )
+            .filter(|item| item.kind.is_some())
+            .map(|item| NewLaneRecord {
                 id: next_unique_id("queue-cancel"),
                 lane: MAIN_LANE.to_string(),
                 record: LaneRecordEntry::QueueCancelled {
                     run_id: item.run_id.clone(),
                     entry_id: item.target.id.clone(),
                 },
-            })?;
-            Ok(())
-        };
-        for item in &activity.recovered_queue {
-            cancel(item)?;
-        }
-        if let Some(run) = &activity.active_run {
-            for item in &run.pending {
-                cancel(item)?;
-            }
-        }
+            });
+        self.store.append_records_batch(cancellations)?;
         activity.recovered_queue.clear();
         if let Some(run) = &mut activity.active_run {
             run.pending.retain(|item| item.kind.is_none());

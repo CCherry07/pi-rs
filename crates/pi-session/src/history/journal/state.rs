@@ -22,6 +22,7 @@ pub(crate) struct SessionState {
     stats: SessionStats,
     name: Option<String>,
     labels: HashMap<String, String>,
+    // May lag behind `log`; only shared_document refreshes this read view.
     document_cache: Option<Arc<SessionDocument>>,
 }
 
@@ -389,7 +390,6 @@ impl SessionState {
     }
 
     fn apply_entry(&mut self, seq: u64, lane: Option<String>, record: SessionRecord) {
-        self.document_cache = None;
         self.sequence = seq;
         if matches!(record.entry, SessionEntry::Message(_)) {
             self.stats.message_count = self.stats.message_count.saturating_add(1);
@@ -409,7 +409,6 @@ impl SessionState {
     }
 
     fn apply_record(&mut self, seq: u64, record: LaneRecord) {
-        self.document_cache = None;
         self.sequence = seq;
         self.record_ids.insert(record.id.clone());
         if let LaneRecordEntry::Usage(usage) = &record.record {
@@ -453,7 +452,6 @@ impl SessionState {
     }
 
     fn apply_lane(&mut self, seq: u64, lane: String, leaf_id: Option<String>) {
-        self.document_cache = None;
         self.sequence = seq;
         if let Some(pointer) = self.lanes.iter_mut().find(|pointer| pointer.lane == lane) {
             pointer.leaf_id.clone_from(&leaf_id);
@@ -467,7 +465,6 @@ impl SessionState {
     }
 
     fn apply_fact(&mut self, seq: u64, fact: SessionFact) {
-        self.document_cache = None;
         self.sequence = seq;
         match &fact {
             SessionFact::Name { name } => self.name.clone_from(name),
@@ -527,11 +524,11 @@ impl SessionState {
         let Some(start) = start else {
             return Ok(Vec::new());
         };
-        let mut path = self.walk_to_root(&start)?;
         let mut results = Vec::new();
         match query.entries.order {
             EntryOrder::NewestFirst => {
-                for entry in path {
+                for entry in self.ancestors(&start)? {
+                    let entry = entry?;
                     let reached_bound = query.stop_at_id.as_deref() == Some(entry.id.as_str())
                         || query.stop_at_type == Some(entry.entry.entry_type());
                     if matches_entry_query(entry, &query.entries) {
@@ -543,6 +540,7 @@ impl SessionState {
                 }
             }
             EntryOrder::OldestFirst => {
+                let mut path = self.walk_to_root(&start)?;
                 path.reverse();
                 for entry in path {
                     let reached_bound = query.stop_at_id.as_deref() == Some(entry.id.as_str())
@@ -680,15 +678,50 @@ impl SessionState {
     }
 
     /// Returns the immutable document for the current mutation revision.
-    /// Repeated readers share the same materialization until the next
-    /// successfully applied mutation invalidates it.
+    /// Refreshes an unretained view from the new journal suffix. Retained
+    /// views stay immutable and require a fresh materialization instead.
     pub(crate) fn shared_document(&mut self, header: SessionHeader) -> Arc<SessionDocument> {
-        if let Some(document) = &self.document_cache {
+        if let Some(document) = &self.document_cache
+            && document.log.len() == self.log.len()
+        {
             return Arc::clone(document);
         }
-        let document = Arc::new(self.document(header));
+        let document = if let Some(mut cached) = self.document_cache.take()
+            && let Some(document) = Arc::get_mut(&mut cached)
+        {
+            self.refresh_document(document);
+            cached
+        } else {
+            Arc::new(self.document(header))
+        };
         self.document_cache = Some(Arc::clone(&document));
         document
+    }
+
+    fn refresh_document(&self, document: &mut SessionDocument) {
+        document
+            .entries
+            .extend_from_slice(&self.entries[document.entries.len()..]);
+        document
+            .records
+            .extend_from_slice(&self.records[document.records.len()..]);
+        for item in &self.log[document.log.len()..] {
+            if let StoredLogItem::Fact {
+                fact: SessionFact::Label { target_id, .. },
+                ..
+            } = item
+            {
+                if let Some(label) = self.labels.get(target_id) {
+                    document.labels.insert(target_id.clone(), label.clone());
+                } else {
+                    document.labels.remove(target_id);
+                }
+            }
+            document.log.push(item.materialize(self));
+        }
+        document.lanes.clone_from(&self.lanes);
+        document.name.clone_from(&self.name);
+        document.stats.clone_from(&self.stats);
     }
 
     #[cfg(test)]
@@ -835,27 +868,46 @@ impl SessionState {
     }
 
     fn walk_to_root<'a>(&'a self, start: &str) -> Result<Vec<&'a SessionRecord>, HistoryError> {
-        let mut path = Vec::new();
-        let mut visited = HashSet::new();
-        let mut current = self
+        self.ancestors(start)?.collect()
+    }
+
+    fn ancestors(&self, start: &str) -> Result<Ancestors<'_>, HistoryError> {
+        let first = self
             .entry_by_id(start)
             .ok_or_else(|| HistoryError::NotFound(start.to_string()))?;
-        loop {
-            if !visited.insert(current.id.as_str()) {
-                return Err(HistoryError::InvalidEntry(format!(
-                    "session branch contains a cycle at {}",
-                    current.id
-                )));
-            }
-            path.push(current);
-            let Some(parent_id) = &current.parent_id else {
-                break;
-            };
-            current = self.entry_by_id(parent_id).ok_or_else(|| {
-                HistoryError::InvalidEntry(format!("entry not found: {parent_id}"))
-            })?;
+        Ok(Ancestors {
+            state: self,
+            next: Some(&first.id),
+            visited: HashSet::new(),
+        })
+    }
+}
+
+struct Ancestors<'a> {
+    state: &'a SessionState,
+    next: Option<&'a str>,
+    visited: HashSet<&'a str>,
+}
+
+impl<'a> Iterator for Ancestors<'a> {
+    type Item = Result<&'a SessionRecord, HistoryError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let id = self.next.take()?;
+        if !self.visited.insert(id) {
+            return Some(Err(HistoryError::InvalidEntry(format!(
+                "session branch contains a cycle at {id}"
+            ))));
         }
-        Ok(path)
+        match self.state.entry_by_id(id) {
+            Some(entry) => {
+                self.next = entry.parent_id.as_deref();
+                Some(Ok(entry))
+            }
+            None => Some(Err(HistoryError::InvalidEntry(format!(
+                "entry not found: {id}"
+            )))),
+        }
     }
 }
 
@@ -969,6 +1021,72 @@ mod tests {
             1,
             "the canonical entry payload should be retained only once"
         );
+    }
+
+    #[test]
+    fn shared_document_refresh_reuses_previous_entry_payloads() {
+        let mut state = SessionState::default();
+        let header = SessionHeader::new("snapshot", "/project");
+        state
+            .apply_mutation(SessionMutation::Entry {
+                lane: Some(MAIN_LANE.to_string()),
+                record: SessionRecord {
+                    id: "first".to_string(),
+                    seq: 1,
+                    parent_id: None,
+                    timestamp_ms: 1,
+                    entry: SessionEntry::Custom(CustomEntry {
+                        custom_type: "payload".to_string(),
+                        data: Some(json!({ "payload": "x".repeat(4_096) })),
+                    }),
+                },
+            })
+            .unwrap();
+        let (entry_payload, log_payload) = {
+            let document = state.shared_document(header.clone());
+            let LogItem::Entry { entry, .. } = &document.log[0] else {
+                panic!("expected entry log item");
+            };
+            (
+                payload_pointer(&document.entries[0]),
+                payload_pointer(entry),
+            )
+        };
+
+        state
+            .apply_mutation(SessionMutation::Entry {
+                lane: Some(MAIN_LANE.to_string()),
+                record: SessionRecord {
+                    id: "second".to_string(),
+                    seq: 2,
+                    parent_id: Some("first".to_string()),
+                    timestamp_ms: 2,
+                    entry: SessionEntry::Custom(CustomEntry {
+                        custom_type: "payload".to_string(),
+                        data: None,
+                    }),
+                },
+            })
+            .unwrap();
+
+        assert!(
+            state.has_cached_document(),
+            "an unretained snapshot should survive append for incremental refresh"
+        );
+        assert_eq!(
+            state.document_cache.as_ref().unwrap().entries.len(),
+            1,
+            "append must leave snapshot refresh to the next reader"
+        );
+        let document = state.shared_document(header);
+        assert_eq!(document.entries.len(), 2);
+        assert_eq!(document.log.len(), 2);
+        assert_eq!(payload_pointer(&document.entries[0]), entry_payload);
+        let LogItem::Entry { entry, .. } = &document.log[0] else {
+            panic!("expected entry log item");
+        };
+        assert_eq!(payload_pointer(entry), log_payload);
+        assert_eq!(document.leaf_id(MAIN_LANE).unwrap(), Some("second"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -10,6 +10,7 @@ use super::state::SessionState;
 use super::validation::{
     validate_mutation_payload, validate_new_lane_record, validate_provisioned_entry,
 };
+use super::writer::JournalWriter;
 use crate::history::{
     AgentMessage, BranchQuery, EntryQuery, ForkOptions, HistoryError, JsonlSessionMetadata,
     LanePointer, LaneRecord, LaneRecordEntry, LogItem, MAIN_LANE, MessageEntry, NewLaneRecord,
@@ -51,7 +52,7 @@ struct SessionStoreInner {
 }
 
 enum SessionPersistence {
-    Materialized,
+    Materialized(JournalWriter),
     Deferred { encoded_mutations: Vec<u8> },
 }
 
@@ -64,7 +65,7 @@ impl SessionStore {
         }
         let mut file = OpenOptions::new()
             .create_new(true)
-            .write(true)
+            .append(true)
             .open(&path)?;
         write_json_line(&mut file, &header, 1)?;
         file.sync_all()?;
@@ -74,7 +75,7 @@ impl SessionStore {
             header,
             SessionState::default(),
             modified_at,
-            SessionPersistence::Materialized,
+            SessionPersistence::Materialized(JournalWriter::created(file)?),
         ))
     }
 
@@ -124,12 +125,13 @@ impl SessionStore {
             }
             TailRepair::TruncateTo(valid_len) => repair_torn_tail(&path, valid_len)?,
         }
+        let persistence = SessionPersistence::Materialized(JournalWriter::unopened(&path)?);
         Ok(Self::from_parts(
             path,
             header,
             state,
             modified_at,
-            SessionPersistence::Materialized,
+            persistence,
         ))
     }
 
@@ -199,7 +201,7 @@ impl SessionStore {
                 .persistence
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-            SessionPersistence::Materialized
+            SessionPersistence::Materialized(_)
         )
     }
 
@@ -222,22 +224,26 @@ impl SessionStore {
         let result = (|| {
             let mut file = OpenOptions::new()
                 .create_new(true)
-                .write(true)
+                .append(true)
                 .open(&self.inner.path)?;
             created = true;
             write_json_line(&mut file, &self.inner.header, 1)?;
             file.write_all(encoded_mutations)?;
             file.sync_all()?;
-            Ok::<(), HistoryError>(())
+            Ok::<_, HistoryError>(JournalWriter::created(file)?)
         })();
-        if let Err(error) = result {
-            if created {
-                let _ = std::fs::remove_file(&self.inner.path);
+        match result {
+            Ok(writer) => {
+                *persistence = SessionPersistence::Materialized(writer);
+                Ok(true)
             }
-            return Err(error);
+            Err(error) => {
+                if created {
+                    let _ = std::fs::remove_file(&self.inner.path);
+                }
+                Err(error)
+            }
         }
-        *persistence = SessionPersistence::Materialized;
-        Ok(true)
     }
 
     pub fn load(&self) -> Result<SessionDocument, HistoryError> {
@@ -245,8 +251,9 @@ impl SessionStore {
     }
 
     /// Returns a revision-stable immutable document shared by all readers.
-    /// The first read after a mutation materializes the document; subsequent
-    /// reads at the same revision clone only the [`Arc`].
+    /// The first read after a mutation refreshes an unretained cached document
+    /// incrementally, or materializes a new document if readers still hold the
+    /// previous view. Reads at the same revision clone only the [`Arc`].
     pub fn shared_document(&self) -> Result<Arc<SessionDocument>, HistoryError> {
         Ok(self.state().shared_document(self.inner.header.clone()))
     }
@@ -416,32 +423,74 @@ impl SessionStore {
     }
 
     pub fn append_record(&self, new_record: NewLaneRecord) -> Result<LaneRecord, HistoryError> {
-        validate_new_lane_record(&new_record)?;
+        let mut records = self.append_records_batch([new_record])?;
+        Ok(records.pop().expect("one requested lane record"))
+    }
+
+    /// Commits one runtime operation's records before publishing its live state.
+    pub(crate) fn append_records_batch(
+        &self,
+        new_records: impl IntoIterator<Item = NewLaneRecord>,
+    ) -> Result<Vec<LaneRecord>, HistoryError> {
         let mut state = self.state();
-        state.require_lane(&new_record.lane)?;
-        state.validate_unused_id(&new_record.id)?;
-        if matches!(new_record.record, LaneRecordEntry::OperationStarted { .. })
-            && let Some(open) = state
-                .find_open_operations(&new_record.lane, Some(1))?
-                .first()
-        {
-            return Err(HistoryError::Storage(format!(
-                "lane {} already has an open operation {}",
-                new_record.lane, open.id
-            )));
+        let mut open_operations = std::collections::HashMap::<String, Vec<String>>::new();
+        let mut record_ids = std::collections::HashSet::new();
+        let mut records = Vec::new();
+        let mut mutations = Vec::new();
+        let mut next_sequence = state.next_sequence();
+        for new_record in new_records {
+            validate_new_lane_record(&new_record)?;
+            state.require_lane(&new_record.lane)?;
+            state.validate_unused_id(&new_record.id)?;
+            if !record_ids.insert(new_record.id.clone()) {
+                return Err(HistoryError::AlreadyExists(new_record.id));
+            }
+            if matches!(
+                new_record.record,
+                LaneRecordEntry::OperationStarted { .. }
+                    | LaneRecordEntry::OperationFinished { .. }
+            ) {
+                let open = match open_operations.entry(new_record.lane.clone()) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
+                        state
+                            .find_open_operations(&new_record.lane, None)?
+                            .into_iter()
+                            .map(|record| record.id)
+                            .collect(),
+                    ),
+                };
+                match &new_record.record {
+                    LaneRecordEntry::OperationStarted { .. } => {
+                        if let Some(id) = open.first() {
+                            return Err(HistoryError::Storage(format!(
+                                "lane {} already has an open operation {}",
+                                new_record.lane, id
+                            )));
+                        }
+                        open.push(new_record.id.clone());
+                    }
+                    LaneRecordEntry::OperationFinished { run_id, .. } => {
+                        open.retain(|id| id != run_id);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let record = LaneRecord {
+                id: new_record.id,
+                seq: next_sequence,
+                lane: new_record.lane,
+                timestamp_ms: now_ms(),
+                record: new_record.record,
+            };
+            next_sequence = next_sequence.saturating_add(1);
+            mutations.push(SessionMutation::Record {
+                record: record.clone(),
+            });
+            records.push(record);
         }
-        let record = LaneRecord {
-            id: new_record.id,
-            seq: state.next_sequence(),
-            lane: new_record.lane,
-            timestamp_ms: now_ms(),
-            record: new_record.record,
-        };
-        let mutation = SessionMutation::Record {
-            record: record.clone(),
-        };
-        self.commit(&mut state, mutation)?;
-        Ok(record)
+        self.commit_mutations(&mut state, mutations)?;
+        Ok(records)
     }
 
     pub fn find_entries(&self, query: &EntryQuery) -> Result<Vec<SessionRecord>, HistoryError> {
@@ -576,23 +625,33 @@ impl SessionStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mutations = self.state().create_fork_mutations(options)?;
+        let mut mutations = self.state().create_fork_mutations(options)?;
+        for mutation in &mut mutations {
+            if let SessionMutation::Entry { record, .. } = mutation
+                && let SessionEntry::Message(entry) = &mut record.entry
+            {
+                entry.message = entry.message.compact_replay_source();
+            }
+        }
         let mut validation_state = SessionState::default();
         for mutation in &mutations {
             validation_state.apply_mutation(mutation.clone())?;
         }
         let temporary = sibling_temporary_path(&path);
         let result = (|| {
-            let mut file = OpenOptions::new()
+            let file = OpenOptions::new()
                 .create(true)
                 .truncate(true)
                 .write(true)
                 .open(&temporary)?;
+            let mut file = BufWriter::with_capacity(64 * 1024, file);
             write_json_line(&mut file, &header, 1)?;
             for (index, mutation) in mutations.iter().enumerate() {
                 write_json_line(&mut file, mutation, index + 2)?;
             }
-            file.sync_all()?;
+            file.flush()?;
+            file.get_ref().sync_all()?;
+            drop(file);
             std::fs::rename(&temporary, &path)?;
             Ok::<(), HistoryError>(())
         })();
@@ -600,8 +659,15 @@ impl SessionStore {
             let _ = std::fs::remove_file(&temporary);
         }
         result?;
-        let (log, _) = Self::open(path)?;
-        Ok(log)
+        let modified_at = file_modified_at(&path)?;
+        let persistence = SessionPersistence::Materialized(JournalWriter::unopened(&path)?);
+        Ok(Self::from_parts(
+            path,
+            header,
+            validation_state,
+            modified_at,
+            persistence,
+        ))
     }
 
     fn state(&self) -> MutexGuard<'_, SessionState> {
@@ -654,10 +720,8 @@ impl SessionStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match &mut *persistence {
-            SessionPersistence::Materialized => {
-                let mut file = OpenOptions::new().append(true).open(&self.inner.path)?;
-                file.write_all(&encoded)?;
-                file.sync_data()?;
+            SessionPersistence::Materialized(writer) => {
+                writer.append(&self.inner.path, &encoded)?;
             }
             SessionPersistence::Deferred { encoded_mutations } => {
                 encoded_mutations.extend_from_slice(&encoded);
@@ -1140,6 +1204,355 @@ mod tests {
         }
     }
 
+    fn writer_state(store: &SessionStore) -> (bool, usize) {
+        let persistence = store.inner.persistence.lock().unwrap();
+        match &*persistence {
+            SessionPersistence::Materialized(writer) => (writer.has_handle(), writer.append_opens),
+            SessionPersistence::Deferred { .. } => (false, 0),
+        }
+    }
+
+    #[test]
+    fn record_batches_validate_ids_and_open_operations_before_persisting() {
+        use crate::history::{OperationIntent, OperationOutcome};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let store = SessionStore::create(&path, header()).unwrap();
+        let started = |id: &str| NewLaneRecord {
+            id: id.into(),
+            lane: MAIN_LANE.into(),
+            record: LaneRecordEntry::OperationStarted {
+                source_leaf_id: None,
+                intent: OperationIntent::Run {
+                    original_prompt: Vec::new(),
+                    initial_messages: Vec::new(),
+                    system_prompt_override: None,
+                    resume_data: None,
+                },
+            },
+        };
+        let before = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            store.append_records_batch([started("same"), started("same")]),
+            Err(HistoryError::AlreadyExists(_))
+        ));
+        assert!(matches!(
+            store.append_records_batch([started("first"), started("second")]),
+            Err(HistoryError::Storage(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(store.load().unwrap().records.is_empty());
+        let records = store
+            .append_records_batch([
+                started("first"),
+                NewLaneRecord {
+                    id: "finished".into(),
+                    lane: MAIN_LANE.into(),
+                    record: LaneRecordEntry::OperationFinished {
+                        run_id: "first".into(),
+                        outcome: OperationOutcome::Completed,
+                        error: None,
+                    },
+                },
+                started("second"),
+            ])
+            .unwrap();
+        assert_eq!(
+            records.iter().map(|record| record.seq).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            store.find_open_operations(MAIN_LANE, None).unwrap(),
+            vec![records[2].clone()]
+        );
+        assert_eq!(SessionStore::read(&path).unwrap().records, records);
+    }
+
+    #[test]
+    fn bounded_branch_queries_preserve_direction_filters_and_stop_conditions() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::create_deferred(directory.path().join("session.jsonl"), header())
+            .unwrap();
+        let ids = store
+            .append_batch((0..4096).map(|i| {
+                SessionEntry::message(Message::User(UserMessage::text(format!("message-{i}"), i)))
+            }))
+            .unwrap();
+        store.create_lane("worker", Some(&ids[63])).unwrap();
+        let query = BranchQuery {
+            entries: EntryQuery {
+                limit: Some(3),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let get_ids = |records: Vec<SessionRecord>| {
+            records
+                .into_iter()
+                .map(|record| record.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            get_ids(store.find_entries_on_branch(&query).unwrap()),
+            ids[4093..].iter().rev().cloned().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            get_ids(store.find_entries_on_lane_branch("worker", &query).unwrap()),
+            ids[61..64].iter().rev().cloned().collect::<Vec<_>>()
+        );
+        let oldest = BranchQuery {
+            entries: EntryQuery {
+                order: EntryOrder::OldestFirst,
+                ..query.entries.clone()
+            },
+            ..query.clone()
+        };
+        assert_eq!(
+            get_ids(store.find_entries_on_branch(&oldest).unwrap()),
+            ids[..3]
+        );
+        let stop = BranchQuery {
+            stop_at_id: Some(ids[4094].clone()),
+            ..query.clone()
+        };
+        assert_eq!(
+            get_ids(store.find_entries_on_branch(&stop).unwrap()),
+            [ids[4095].clone(), ids[4094].clone()]
+        );
+        let after = BranchQuery {
+            entries: EntryQuery {
+                after_seq: Some(4094),
+                ..query.entries.clone()
+            },
+            ..query
+        };
+        assert_eq!(
+            get_ids(store.find_entries_on_branch(&after).unwrap()),
+            ids[4090..4093].iter().rev().cloned().collect::<Vec<_>>()
+        );
+        let after_oldest = BranchQuery {
+            entries: EntryQuery {
+                order: EntryOrder::OldestFirst,
+                ..after.entries.clone()
+            },
+            ..after
+        };
+        assert_eq!(
+            get_ids(store.find_entries_on_branch(&after_oldest).unwrap()),
+            ids[4094..]
+        );
+        store.append_custom_entry("boundary", None).unwrap();
+        let last = store
+            .append_message(Message::User(UserMessage::text("after custom", 4097)))
+            .unwrap();
+        let filtered = BranchQuery {
+            entries: EntryQuery {
+                entry_type: Some(SessionEntryType::Message),
+                limit: Some(50),
+                ..Default::default()
+            },
+            stop_at_type: Some(SessionEntryType::Custom),
+            ..Default::default()
+        };
+        assert_eq!(
+            get_ids(store.find_entries_on_branch(&filtered).unwrap()),
+            [last]
+        );
+    }
+
+    #[test]
+    fn opened_store_acquires_write_access_lazily_and_clones_share_the_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let created = SessionStore::create(&path, header()).unwrap();
+        created
+            .append_message(Message::User(UserMessage::text("one", 1)))
+            .unwrap();
+        #[cfg(unix)]
+        assert_eq!(writer_state(&created), (true, 0));
+        drop(created);
+
+        let opened = SessionStore::open_handle(&path).unwrap();
+        assert_eq!(writer_state(&opened), (false, 0));
+        let shared = opened.clone();
+        opened
+            .append_message(Message::User(UserMessage::text("two", 2)))
+            .unwrap();
+        shared
+            .append_message(Message::User(UserMessage::text("three", 3)))
+            .unwrap();
+        #[cfg(unix)]
+        assert_eq!(writer_state(&opened), (true, 1));
+        assert_eq!(
+            opened.load().unwrap().entries,
+            SessionStore::read(&path).unwrap().entries
+        );
+        assert_eq!(shared.stats().message_count, 3);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn readonly_store_opens_without_a_writer_and_permission_changes_invalidate_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let store = SessionStore::create(&path, header()).unwrap();
+        store
+            .append_message(Message::User(UserMessage::text("one", 1)))
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let read_only = SessionStore::open_handle(&path).unwrap();
+        assert_eq!(writer_state(&read_only), (false, 0));
+        assert_eq!(read_only.stats().message_count, 1);
+        assert!(
+            store
+                .append_message(Message::User(UserMessage::text("two", 2)))
+                .is_err()
+        );
+        assert!(!writer_state(&store).0);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    fn replaced_or_truncated_file_is_not_appended_through_a_cached_writer() {
+        for replace in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("session.jsonl");
+            let store = SessionStore::create(&path, header()).unwrap();
+            store
+                .append_message(Message::User(UserMessage::text("one", 1)))
+                .unwrap();
+            let entries = store.load().unwrap().entries;
+            let previous = directory.path().join("previous.jsonl");
+            if replace {
+                std::fs::rename(&path, &previous).unwrap();
+                drop(SessionStore::create(&path, header()).unwrap());
+            } else {
+                OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_len(0)
+                    .unwrap();
+            }
+            let before = std::fs::read(&path).unwrap();
+            assert!(
+                store
+                    .append_message(Message::User(UserMessage::text("two", 2)))
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(store.load().unwrap().entries, entries);
+            assert!(!writer_state(&store).0);
+            if replace {
+                assert_eq!(SessionStore::read(&previous).unwrap().entries, entries);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_sync_keeps_live_state_unchanged_and_requires_replaying_written_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let store = SessionStore::create(&path, header()).unwrap();
+        store
+            .append_message(Message::User(UserMessage::text("one", 1)))
+            .unwrap();
+        {
+            let mut persistence = store.inner.persistence.lock().unwrap();
+            let SessionPersistence::Materialized(writer) = &mut *persistence else {
+                panic!()
+            };
+            writer.fail_sync = true;
+        }
+        assert!(
+            store
+                .append_message(Message::User(UserMessage::text("two", 2)))
+                .is_err()
+        );
+        assert_eq!(store.stats().message_count, 1);
+        assert!(!writer_state(&store).0);
+        assert!(
+            store
+                .append_message(Message::User(UserMessage::text("retry", 3)))
+                .is_err()
+        );
+
+        let recovered = SessionStore::open_handle(&path).unwrap();
+        assert_eq!(recovered.stats().message_count, 2);
+        recovered
+            .append_message(Message::User(UserMessage::text("after recovery", 3)))
+            .unwrap();
+        assert_eq!(SessionStore::read(path).unwrap().messages().len(), 3);
+    }
+
+    #[test]
+    fn fork_reuses_validated_state_without_retaining_the_source_replay_buffer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.jsonl");
+        let created = SessionStore::create(&path, header()).unwrap();
+        let first = created
+            .append_message(
+                AgentMessage::custom(serde_json::json!({
+                    "role": "user", "content": [{"type":"text","text":"first"}],
+                    "timestamp": 1, "extension": {"keep": [1, 2, 3]}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        created
+            .append_message(Message::User(UserMessage::text("last", 2)))
+            .unwrap();
+        created.set_name(Some("forked name".into())).unwrap();
+        created
+            .set_label(&first, Some("first label".into()))
+            .unwrap();
+        created.create_lane("worker", Some(&first)).unwrap();
+        drop(created);
+        let source = SessionStore::open_handle(&path).unwrap();
+        for (index, options) in [
+            ForkOptions::Tree,
+            ForkOptions::Branch {
+                entry_id: Some(first.clone()),
+                position: Some(crate::history::ForkPosition::At),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let destination = directory.path().join(format!("fork-{index}.jsonl"));
+            let fork = source.fork(&destination, header(), &options).unwrap();
+            let actual = fork.load().unwrap();
+            let persisted = SessionStore::read(&destination).unwrap();
+            assert_eq!(actual.entries, persisted.entries);
+            assert_eq!(actual.log, persisted.log);
+            assert_eq!(actual.labels, persisted.labels);
+            assert_eq!(actual.lanes, persisted.lanes);
+            assert_eq!(actual.name, persisted.name);
+            let SessionEntry::Message(original) = source.get_entry(&first).unwrap().entry else {
+                panic!()
+            };
+            let SessionEntry::Message(copied) = &actual.entries[0].entry else {
+                panic!()
+            };
+            assert!(!copied.message.shares_replay_source_with(&original.message));
+            assert_eq!(
+                serde_json::to_value(&copied.message).unwrap(),
+                serde_json::to_value(&original.message).unwrap()
+            );
+            fork.append_message(Message::User(UserMessage::text("continued", 3)))
+                .unwrap();
+            assert_eq!(
+                SessionStore::read(&destination).unwrap().entries.len(),
+                actual.entries.len() + 1
+            );
+        }
+    }
+
     #[test]
     fn reads_old_parent_paths_as_unknown_header_fields() {
         let directory = tempfile::tempdir().unwrap();
@@ -1226,6 +1639,123 @@ mod tests {
         assert_eq!(first.messages().len(), 1);
         assert_eq!(next_revision.messages().len(), 2);
         assert!(Arc::ptr_eq(&next_revision, &log.shared_document().unwrap()));
+    }
+
+    #[test]
+    fn shared_document_matches_owned_document_across_mutations() {
+        use crate::history::{SessionUsage, UsageAttribution, UsageRecord};
+
+        fn assert_same(actual: &SessionDocument, expected: &SessionDocument) {
+            assert_eq!(actual.header, expected.header);
+            assert_eq!(actual.entries, expected.entries);
+            assert_eq!(actual.records, expected.records);
+            assert_eq!(actual.lanes, expected.lanes);
+            assert_eq!(actual.log, expected.log);
+            assert_eq!(actual.name, expected.name);
+            assert_eq!(actual.labels, expected.labels);
+            assert_eq!(actual.stats, expected.stats);
+        }
+
+        for retain_snapshots in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("session.jsonl");
+            let log = SessionStore::create_deferred(&path, header()).unwrap();
+            let mut retained = Vec::new();
+            let mut check = || {
+                let actual = log.shared_document().unwrap();
+                let expected = log.load().unwrap();
+                assert_same(&actual, &expected);
+                if retain_snapshots {
+                    retained.push((actual, expected));
+                }
+            };
+
+            check();
+            let root = log
+                .append_message(Message::User(UserMessage::text("root", 1)))
+                .unwrap();
+            check();
+            log.append_batch([
+                SessionEntry::message(Message::User(UserMessage::text("second", 2))),
+                SessionEntry::message(Message::User(UserMessage::text("third", 3))),
+            ])
+            .unwrap();
+            log.append_custom_entry("checkpoint", Some(serde_json::json!({"version": 1})))
+                .unwrap();
+            check();
+            log.create_lane("worker", Some(&root)).unwrap();
+            check();
+            log.append_to_lane(
+                SessionEntry::message(Message::User(UserMessage::text("worker", 4))),
+                "worker",
+            )
+            .unwrap();
+            check();
+            log.branch(Some(&root)).unwrap();
+            check();
+            log.set_name(Some("first name".to_string())).unwrap();
+            check();
+            log.set_label(&root, Some("first label".to_string()))
+                .unwrap();
+            check();
+            log.append_record(NewLaneRecord {
+                id: "usage".to_string(),
+                lane: MAIN_LANE.to_string(),
+                record: LaneRecordEntry::Usage(UsageRecord {
+                    usage: SessionUsage {
+                        input: 10,
+                        output: 5,
+                        cache_read: 2,
+                        cache_write: 3,
+                        total_tokens: 20,
+                        cost: pi_core::UsageCost {
+                            total: 0.5,
+                            ..pi_core::UsageCost::default()
+                        },
+                        ..SessionUsage::default()
+                    },
+                    attribution: UsageAttribution::Adjustment {
+                        run_id: None,
+                        entry_id: None,
+                        details: None,
+                    },
+                }),
+            })
+            .unwrap();
+            check();
+            log.set_name(Some("renamed".to_string())).unwrap();
+            log.set_label(&root, Some("relabeled".to_string())).unwrap();
+            check();
+            log.set_name(None).unwrap();
+            log.set_label(&root, None).unwrap();
+            log.move_lane("worker", None).unwrap();
+            check();
+
+            for (snapshot, expected) in retained {
+                assert_same(&snapshot, &expected);
+            }
+            let current = log.shared_document().unwrap();
+            assert!(log.branch(Some("missing")).is_err());
+            assert!(Arc::ptr_eq(&current, &log.shared_document().unwrap()));
+            log.materialize().unwrap();
+            let (_, reopened) = SessionStore::open(&path).unwrap();
+            assert_same(&current, &reopened);
+        }
+    }
+
+    #[test]
+    fn shared_document_refresh_does_not_modify_weakly_retained_snapshots() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = SessionStore::create_deferred(directory.path().join("session.jsonl"), header())
+            .unwrap();
+        let previous = Arc::downgrade(&log.shared_document().unwrap());
+
+        log.append_message(Message::User(UserMessage::text("next", 1)))
+            .unwrap();
+        let current = log.shared_document().unwrap();
+
+        assert_eq!(current.messages().len(), 1);
+        assert!(previous.upgrade().is_none());
     }
 
     #[test]

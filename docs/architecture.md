@@ -839,7 +839,7 @@ configuration files or plugin ID conventions.
 5. `tool_call` runs in order after prepared provider arguments are validated, chains argument patches without revalidation (matching Pi), and lets the first block decision win. It is the intentional fail-closed exception: a hook error fails that tool call. Every typed `Plugin` callback receives the same `Arc<AgentContext>` snapshot for the batch, including the current system prompt, transcript with the requesting assistant message, and active-tool names. The JavaScript extension Adapter projects Pi's narrower extension event and does not serialize this native context into Node.
 6. `input` receives text, images, source, and optional streaming behavior. Text/image replacements chain in registration order, `Handled` stops the submission, and a hook error is recorded as a generation-local plugin diagnostic before later hooks continue.
 7. `before_agent_start` runs once per prompt/continue invocation in registration order; prompt replacements chain and injected messages are accumulated for that run only. Hook errors are diagnosed and skipped without discarding earlier replacements.
-8. `context` runs before every provider request and chains message replacements without mutating the persisted transcript. Hook errors are diagnosed and later hooks still run.
+8. `context` runs before every provider request and chains message replacements without mutating the persisted transcript. `ContextEvent.messages` is an `Arc<Vec<Message>>` read snapshot; only an explicit owned replacement changes the next hook's input. Hook errors are diagnosed and later hooks still run. Generation construction groups adjacent context routes sharing the same `ContextHookBatch` object; an unrelated route splits the group. Native callbacks retain their ordinary per-plugin dispatch by default.
 9. `tool_result` receives that same batch context and chains content, details, usage, `added_tool_names`, and error patches. Hook errors are diagnosed and skipped; they do not rewrite a successfully executed tool result into a failure. `added_tool_names` then survives the tool-result message and session/provider projection. Legacy before/after tool hooks remain compatible.
 10. Lifecycle events are delivered through independent plugin methods (`agent_start/end/settled`, `turn_start/end`, `message_start/update/end`, and `tool_execution_start/update/end`) in registration order. `agent_start`/`agent_end` belong to each low-level run, while session orchestration emits `agent_settled` once no automatic retry, compaction, or queued continuation remains and before publishing the product settled event. Turns use a zero-based per-run index and `turn_start` also carries its millisecond timestamp. `message_end` may replace a message while preserving its role; each valid replacement becomes the next hook's input and the final message is used by Agent state, listeners, provider context, tool scheduling, and persistence. A validated plugin context may append extension state while the owning prompt operation still holds its outer gate, including during `agent_settled`; direct idle-time callers retain the ordinary busy exclusion. Observer errors and invalid cross-role replacements are diagnosed and skipped without failing the run.
 11. A native plugin is trusted in-process code; the loader and trait interfaces are not a sandbox.
@@ -906,7 +906,7 @@ not skip generation validation or justify reusing mutable session state. Prepara
 activate background work or mutate live registries; activation remains session_start and cleanup
 remains session_shutdown/Drop. Failed candidates are dropped without touching the live generation.
 
-Native ABI 30 exports only `Plugin` (kind 1) or `ProviderPlugin` (kind 2), retaining the
+Native ABI 34 exports only `Plugin` (kind 1) or `ProviderPlugin` (kind 2), retaining the
 `pi_plugin_create_v26` / `pi_provider_plugin_create_v26` constructor symbols. Manifest kinds are
 `plugin` / `provider`.
 The descriptor rejects older ABI versions before resolving constructors; those libraries must be rebuilt.
@@ -1276,8 +1276,8 @@ extension registrations/results, and native binding exports.
 TypeScript protocol types are inferred from those schemas so runtime checks and static interfaces
 cannot drift independently.
 
-The callback boundary uses seven generation-scoped operations encoded as JSON: `prepareGeneration`,
-`invoke`, `invokeHookBatch`, `invokeStreamHookBatch`, `releaseStream`, `cancel`, and
+The callback boundary uses eight generation-scoped operations encoded as JSON: `prepareGeneration`,
+`invoke`, `invokeHookBatch`, `invokeContextHookBatch`, `invokeStreamHookBatch`, `releaseStream`, `cancel`, and
 `retireGeneration`. Every invocation also receives a NAPI class instance named
 `NativeExtensionContext`; it is a direct native capability rather than another process-global
 callback broker. Its deliberately small JavaScript Interface has three methods: `query` for
@@ -1307,13 +1307,23 @@ adapters retain their plugin identities and continue to own tools, commands, and
 hooks. One batch carries the shared event once plus a small callback/context list. Node validates and
 projects the event once, then awaits callbacks in registration order against the same event object;
 a rejected callback becomes a callback-scoped diagnostic and does not suppress later observers.
+`context` uses `invokeContextHookBatch` for each contiguous group of adapters sharing one JS
+generation. The input history is encoded once for consecutive callbacks that return no replacement.
+Node preserves detached mutable inputs and per-callback abort-signal lifetime. A returned replacement
+yields to Rust for typed validation and normalization before the remaining callbacks run; invalid
+results retain the previous messages and produce a diagnostic for their originating plugin.
+This keeps message validation in Rust, preserves native/JS registration order, and avoids a full
+history equality scan for callbacks returning no patch. Node still clones each callback's mutable
+input so unreturned mutations and retained events cannot affect later callbacks.
 High-frequency `message_update` uses the separate typed `invokeStreamHookBatch` wire. Rust sends an
 initial message once and thereafter serializes only `streamId` plus the current `StreamEvent`; no
 `serde_json::Value` message tree is built per delta. Node retains text, thinking, and tool-argument
-chunks, applies metadata patches in place, and exposes lazy `message` plus
+chunks as shared immutable prefixes, retains the event's stream version, and exposes lazy `message` plus
 `assistantMessageEvent.partial`/`message`/`error` getters. Empty hooks never join the cumulative text;
 the first snapshot read materializes once for the whole callback batch, and that detached snapshot
-keeps plugin mutation out of canonical stream state. `releaseStream`, terminal `done`, and generation
+keeps plugin mutation out of canonical stream state. Internal event validation checks object shape
+without enumerating getters; an unread retained event still projects its own historical version
+when read after later deltas. `releaseStream`, terminal `done`, and generation
 retirement bound the accumulator lifetime.
 Rust aborts send `cancel`, which aborts the callback's `AbortController`; retirement aborts all
 remaining work and drops every callback for that generation. The native context is guarded by the
@@ -1731,8 +1741,16 @@ converts edits and compactions once in journal order, including retain-none chec
 The session supplies preview validation and one atomic journal commit. Each native or JavaScript
 handler sees prior proposals and the last valid preview; a later handler can repair invalid drafts.
 A final invalid batch is rejected without partial writes. JavaScript handlers cross the adapter
-individually at actionable boundaries so previews are rebuilt even between callbacks in one source.
+individually at actionable boundaries so previews are refreshed even between callbacks in one source.
 Pi wire conversion stays in the JavaScript adapter; native previews retain strongly typed entries.
+The preview's entry/message vectors are shared immutable snapshots. Session owns a dispatch-local
+cache for the default projection with no pending drafts, keyed by the selected leaf of the immutable
+parent chain. One projection supplies entries and messages; journal appends or branch movement
+invalidate reuse, while queues and continuation eligibility are read again after every handler,
+including failed handlers. Draft previews and custom transforms/projectors retain their existing
+rebuild behavior and callback ordering. Final draft validation still occurs against the current
+journal before committing. Native ABI 34 adds these shared vectors and context batching; Pi v4 and
+the JavaScript boundary-event wire fields are unchanged.
 
 The session's composed turn controller dispatches `turn_end` after assistant/tool-result persistence,
 then the previous controller's stop decision wins over extension continuation. Context replacements
@@ -1948,12 +1966,19 @@ session tree rather than only the selected branch, so resume and navigation do n
 was already billed. The signed v4 usage ledger remains the storage-level statistics contract for
 operation-attributed usage and adjustments.
 
-`SessionStore` is the concrete durable storage Adapter. It owns atomic mutation persistence,
+`SessionStore` is the concrete durable storage Adapter. It owns validated, durable mutation batches,
 branch/tree fork semantics, and shares `SessionState` projection and payload/query validation inside
 the private `journal` Module. A branch fork copies only the selected message path and applicable
 facts; a tree fork copies all entries, lanes, and applicable facts. Neither copies operation
 records. There is deliberately no public generic `SessionStorage` / `SessionView` seam: no product
 caller varies by backend.
+
+Fork publication builds and validates its destination state once, encodes the same v4 mutations
+through a 64 KiB `BufWriter`, explicitly flushes and `sync_all`s the temporary file, closes it and
+renames it before returning a store backed by that validated state. It does not reread or replay the
+new file. Selected replay-backed messages retain only their own raw message bytes, so a short fork
+does not keep the parent's complete JSONL buffer alive; unknown wire extensions remain intact.
+Failures before publication remove the temporary file and leave the parent usable.
 
 Persisted mutations decode directly from each JSONL byte slice into the strongly typed v4 mutation
 union, then pass through the same sequence, timestamp, payload, and state validation. Fields where
@@ -1984,10 +2009,38 @@ recovery queries scale with currently open operations rather than rescanning the
 history. These are internal JSONL implementation details and do not change the existing v4 wire
 shape.
 
+The private journal persistence owner shares one lazy append writer through the existing store
+mutex. On Unix, `create` and first materialization retain their append descriptor; read-only open
+does not acquire write access, and the first later commit opens it once. Store clones and generation
+reloads reuse that owner, and the last owner drops the descriptor. Non-Unix builds keep reopening
+on each append until an equivalent inexpensive file-identity check is available there.
+Each commit still writes the encoded batch and calls `sync_data` before applying live mutations.
+Path metadata is checked before the write and against descriptor metadata after synchronization:
+identity, length, modification time, permissions and Unix ownership must remain consistent. These
+checks reject replaced, truncated or ordinarily edited files; they are not a cross-process lock.
+Unix ctime is excluded because restoring an unchanged file to its original path can change ctime.
+Any write/sync/check failure discards the writer without retrying a possibly partial batch or
+advancing live state. Changed contents require reopening and replay; restoring an unchanged original
+file after a path/access failure permits the next operation to reacquire the writer.
+
+`clear_queue` is one runtime persistence cut point: it collects ordered cancellation records for
+recovered and active queued input, then commits them through History's internal lane-record batch
+Interface. Payloads, lanes, shared IDs, sequence and operation admission rules are checked before
+the single write/sync. Runtime and Agent queues clear and one product update is published only after
+success. The wire format remains multiple ordinary v4 records; a failed or interrupted write can
+leave a valid prefix, which recovery applies individually. This is not a filesystem transaction.
+Run start, message ends, tool/results and run finish keep their existing separate durable cut points.
+
 Materialized session documents are revision-scoped immutable read views. The first document read
-after a successful mutation projects the journal state; all later readers of the same revision
-share that `Arc<SessionDocument>`. Applying the next validated mutation invalidates the cached view,
-while existing readers retain a coherent snapshot. The owning `SessionStore::load` API remains as a
+after a successful mutation projects the current journal state; all later readers of the same
+revision share that `Arc<SessionDocument>`. The store keeps one cached view, which can lag behind
+the append-only journal until another document read. If no strong or weak readers retain that
+view, the next read extends its entries, records, and log from the new suffix and refreshes current
+metadata. Otherwise it materializes a new document, leaving every retained snapshot unchanged.
+Writers neither copy nor refresh the document. The cached view lives until replacement or store
+drop, so a read followed by writes can retain one previous revision's document in memory.
+This is an internal Rust read-cache optimization; v4 persistence, mutation validation, and Pi's
+append-only tree behavior are unchanged. The owning `SessionStore::load` API remains as a
 compatibility adapter for callers that require an independently owned document; runtime and plugin
 read paths should use the shared view so repeated context, usage, and branch queries do not clone
 the full session.
@@ -2002,6 +2055,9 @@ that genuinely consume multiple read-model collections. Startup recovery first q
 open-operation index and the record ledger. A settled session restores queue state and closes no
 operations without projecting a document; only an actually interrupted operation materializes the
 full tree/record view required by the reducer.
+Newest-first branch queries traverse ancestors lazily and stop at the requested limit or bound.
+Cycle/missing-node checks still cover every visited ancestor. Filters may require a longer scan;
+oldest-first queries and complete context projection still traverse the full selected path.
 
 `JsonlSessionRepo::resolve_exact_id` owns the CLI's project-scoped session identity lookup and Pi
 directory/filename layout. Resolution is read-only: an existing ID yields its metadata, while a
@@ -2010,6 +2066,13 @@ then enters `MultiSessionManager::create_session` through `CreateSessionOptions:
 its internal runtime target injects the ID into the new session header after generation preparation.
 The product factory never sees the
 storage target, keeping the adapter thin and deferred persistence intact.
+`allocate_new(cwd)` separately generates a fresh UUID v7 and a `NewSessionTarget { id, cwd, path }`
+without enumerating history or writing files. `Pi::create_project_session` uses that allocation
+Interface, while explicit user IDs retain full header-based lookup, including renamed files and
+duplicate-ID selection by newest modification time. Lookup keeps only matching candidates and reads
+their modification metadata. Directories with at least 128 JSONL candidates use up to four available
+CPU workers for header reads; results merge in directory order to preserve stable timestamp ties.
+Small directories remain serial, and no persistent index or cache-invalidation policy is introduced.
 
 `SessionDocument::context()` derives model, thinking level, and active tools from the entire selected
 path. Its default transform starts at the latest compaction; that compaction contributes its summary
@@ -2063,7 +2126,8 @@ that handle to `MultiSessionManager`; generation construction does not replay th
 second time. Settled sessions keep recovery query-first: the header is read directly, queue and
 operation state come from indexed entries plus the record ledger, and runtime context walks only
 the active branch. Interrupted-operation reduction may materialize a revision-scoped document, but
-subsequent repairs invalidate that view and context restoration still reads current indexed state.
+subsequent repairs advance the journal revision and context restoration still reads current indexed
+state.
 
 Command and input-hook transformations preserve two text views. The effective text remains the
 standard user-message content used by Agent, provider projection, replay, and recovery. When it
@@ -2073,6 +2137,12 @@ snapshots. Pi v4 readers that ignore unknown fields continue to see the effectiv
 pi-rs resume and queue recovery do not expose private expanded prompts. Frontends do not parse or
 reverse plugin-specific prompt formats; messages written before this metadata existed display their
 persisted content as-is.
+
+A prepared text submission fixes its user-message timestamp after input preprocessing. Session
+admission persists `PreparedRuntimePrompt::user_message()` and the Agent receives that same prepared
+value, even when durable run-start I/O delays execution. This removes independent Session/Agent
+clock reads that could make otherwise identical live and recovered messages differ by a millisecond.
+Text and image inputs retain the same rule without adding a journal mutation.
 
 `before_agent_start` custom messages remain agent-level messages through lifecycle dispatch and
 runtime state. For a normal prompt the submitted user message is emitted first, followed by custom

@@ -91,6 +91,97 @@ test("accepts the resolved agent directory and rejects malformed host operations
   );
 });
 
+test('keeps unread stream events lazy and stable across later updates', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-lazy-stream-'))
+  const extension = join(root, 'retained.ts')
+  await writeFile(extension, `
+    export default function (pi: any) {
+      const events: any[] = [];
+      pi.on("message_update", (event: any) => { events.push(event); });
+      for (let i = 0; i < 3; i++) pi.on("message_update", () => {});
+      pi.registerCommand("read-events", {
+        handler: () => ({ action: "transform", text: JSON.stringify(events.map(event => {
+          const message = event.message;
+          const partial = event.assistantMessageEvent.partial ?? event.assistantMessageEvent.message;
+          return { message, shared: message.content === partial.content, stable: message === event.message };
+        })) })
+      });
+    }
+  `)
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: { projectTrusted: true, extensionPaths: [extension], mode: 'print' },
+  })))
+  const plugin = manifest.agentPlugins[0]
+  assert.ok(plugin)
+  const callbacks = plugin.hooks.map(hook => ({ callbackId: hook.callbackId, context: { cwd: root } }))
+  const clone = structuredClone
+  let snapshots = 0
+  t.mock.method(globalThis, 'structuredClone', (value: unknown) => {
+    if (isRecord(value) && value.role === 'assistant') snapshots++
+    return clone(value)
+  })
+  const update = async (value: object, initialMessage?: object): Promise<void> => {
+    assert.deepEqual(parseJson(await host.dispatch(JSON.stringify({
+      type: 'invokeStreamHookBatch',
+      invocation: {
+        invocationId: 'stream-update', generationId: manifest.generationId,
+        callbacks, streamId: 'retained', update: value, initialMessage,
+      },
+    }))), { errors: [] })
+  }
+  const metadata = { responseModel: null, responseId: null, diagnostics: null, deferred: null, rawStopReason: null, endTurn: null }
+  await update({ type: 'metadata', patch: metadata }, {
+    role: 'assistant', responseId: 'original', stopReason: 'pending',
+    content: [{ type: 'text', text: 'start' }],
+  })
+  for (let i = 0; i < 8; i++) await update({ type: 'textDelta', contentIndex: 0, delta: String(i) })
+  await update({ type: 'metadata', patch: { ...metadata, responseId: 'new' } })
+  await update({ type: 'textEnd', contentIndex: 0, textSignature: 'signed' })
+  await update({ type: 'toolCallStart', contentIndex: 1, id: 'call', name: 'read' })
+  await update({ type: 'toolCallDelta', contentIndex: 1, argumentsDelta: '{"id":1}' })
+  await update({ type: 'toolCallEnd', contentIndex: 1, thoughtSignature: null })
+  await update({ type: 'done', reason: 'toolUse', usage: { totalTokens: 2 } })
+  assert.equal(snapshots, 0, 'callbacks which retain events without reading messages must stay lazy')
+
+  const command = plugin.commands[0]
+  assert.ok(command)
+  const read = async (): Promise<{ message: Record<string, unknown>; shared: boolean; stable: boolean }[]> => {
+    const result = parseJson(await host.dispatch(JSON.stringify({
+      type: 'invoke',
+      invocation: {
+        invocationId: 'read-events', generationId: manifest.generationId,
+        callbackId: command.callbackId, kind: 'command', payload: { context: {}, arguments: '' },
+      },
+    }))) as { text: string }
+    return JSON.parse(result.text)
+  }
+  const events = await read()
+  assert.equal(events.length, 13)
+  assert.ok(events.every(event => event.shared && event.stable))
+  for (let i = 0; i < 8; i++) {
+    assert.deepEqual(events[i]?.message, {
+      role: 'assistant', responseId: 'original', stopReason: 'pending',
+      content: [{ type: 'text', text: `start${'01234567'.slice(0, i + 1)}` }],
+    })
+  }
+  assert.deepEqual(events[9]?.message.content, [
+    { type: 'text', text: 'start01234567', textSignature: 'signed' },
+    { type: 'toolCall', id: 'call', name: 'read', arguments: null },
+  ])
+  assert.deepEqual(events[12]?.message, {
+    role: 'assistant', responseId: 'new', stopReason: 'toolUse', usage: { totalTokens: 2 },
+    content: [
+      { type: 'text', text: 'start01234567', textSignature: 'signed' },
+      { type: 'toolCall', id: 'call', name: 'read', arguments: { id: 1 } },
+    ],
+  })
+  assert.equal(snapshots, events.length, 'first reads materialize each batch exactly once')
+  assert.deepEqual(await read(), events)
+  assert.equal(snapshots, events.length, 'repeated reads reuse the materialized snapshot')
+})
+
 test('batches stream hooks over chunked state and shares one lazy message snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-hook-batch-'))
   const first = join(root, 'first.ts')

@@ -8,9 +8,21 @@ use crate::history::{
 
 use super::jsonl::{validate_header, validate_header_json_shape};
 
+const PARALLEL_LOOKUP_MIN_FILES: usize = 128;
+const MAX_LOOKUP_WORKERS: usize = 4;
+
 #[derive(Clone)]
 pub struct JsonlSessionRepo {
     sessions_root: PathBuf,
+}
+
+/// A fresh UUID and its Pi-compatible location; allocation performs no writes
+/// or history enumeration. The session still materializes its file lazily.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSessionTarget {
+    pub id: String,
+    pub cwd: PathBuf,
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +42,13 @@ impl JsonlSessionRepo {
         }
     }
 
+    pub fn allocate_new(&self, cwd: impl AsRef<Path>) -> Result<NewSessionTarget, HistoryError> {
+        self.new_target(
+            absolute_path(cwd.as_ref())?,
+            uuid::Uuid::now_v7().to_string(),
+        )
+    }
+
     /// Resolves Pi's project-scoped `--session-id` contract without writing
     /// a directory or session file for a missing ID.
     pub fn resolve_exact_id(
@@ -39,74 +58,94 @@ impl JsonlSessionRepo {
     ) -> Result<ExactSessionIdResolution, HistoryError> {
         validate_session_id(id)?;
         let cwd = absolute_path(cwd.as_ref())?;
-        if let Some(metadata) = list_jsonl_session_metadata(&self.sessions_root, Some(&cwd))?
-            .into_iter()
-            .find(|metadata| metadata.id == id)
-        {
+        let directory = self.session_directory(&cwd)?;
+        if let Some(metadata) = find_exact_metadata(&directory, id)? {
             return Ok(ExactSessionIdResolution::Existing(metadata));
         }
-
-        let directory = self.session_directory(&cwd)?;
-        let path = directory.join(format!("{}_{}.jsonl", session_timestamp(now_ms()), id));
-        Ok(ExactSessionIdResolution::New {
-            id: id.to_string(),
-            cwd,
-            path,
-        })
+        let NewSessionTarget { id, cwd, path } = self.new_target(cwd, id.to_string())?;
+        Ok(ExactSessionIdResolution::New { id, cwd, path })
     }
 
     fn session_directory(&self, cwd: &Path) -> Result<PathBuf, HistoryError> {
         Ok(absolute_path(&self.sessions_root)?.join(jsonl_session_directory_name(cwd)))
     }
+
+    fn new_target(&self, cwd: PathBuf, id: String) -> Result<NewSessionTarget, HistoryError> {
+        let directory = self.session_directory(&cwd)?;
+        let path = directory.join(format!("{}_{}.jsonl", session_timestamp(now_ms()), id));
+        Ok(NewSessionTarget { id, cwd, path })
+    }
 }
 
-fn list_jsonl_session_metadata(
-    sessions_root: &Path,
-    cwd: Option<&Path>,
-) -> Result<Vec<JsonlSessionMetadata>, HistoryError> {
-    let root = absolute_path(sessions_root)?;
-    let directories = match cwd {
-        Some(cwd) => {
-            let cwd = absolute_path(cwd)?;
-            let directory = root.join(jsonl_session_directory_name(&cwd));
-            if directory.exists() {
-                vec![directory]
-            } else {
-                Vec::new()
-            }
-        }
-        None if !root.exists() => Vec::new(),
-        None => std::fs::read_dir(&root)?
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                entry
-                    .file_type()
-                    .ok()
-                    .filter(|kind| kind.is_dir() || kind.is_symlink())
-                    .map(|_| entry.path())
-            })
-            .collect(),
+fn find_exact_metadata(
+    directory: &Path,
+    id: &str,
+) -> Result<Option<JsonlSessionMetadata>, HistoryError> {
+    if !directory.exists() {
+        return Ok(None);
+    }
+    let entries = std::fs::read_dir(directory)?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension() == Some(OsStr::new("jsonl")))
+        .collect::<Vec<_>>();
+    let workers = if entries.len() < PARALLEL_LOOKUP_MIN_FILES {
+        1
+    } else {
+        std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(MAX_LOOKUP_WORKERS)
     };
+    latest_matching_entry(&entries, id, workers)
+}
 
-    let mut metadata = Vec::new();
-    for directory in directories {
-        for entry in std::fs::read_dir(directory)?.filter_map(Result::ok) {
-            let path = entry.path();
-            let is_jsonl = path.extension() == Some(OsStr::new("jsonl"));
-            let is_file = entry.file_type().is_ok_and(|kind| !kind.is_dir());
-            if !is_jsonl || !is_file {
-                continue;
-            }
-            let Some(header) = read_header_for_listing(&path) else {
-                continue;
-            };
-            let modified_at = entry
-                .metadata()
-                .ok()
-                .and_then(|metadata| metadata.modified().ok())
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0.0, |duration| duration.as_secs_f64() * 1_000.0);
-            metadata.push(JsonlSessionMetadata {
+fn latest_matching_entry(
+    entries: &[std::fs::DirEntry],
+    id: &str,
+    workers: usize,
+) -> Result<Option<JsonlSessionMetadata>, HistoryError> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    if workers <= 1 {
+        return Ok(latest_in_chunk(entries, id));
+    }
+    std::thread::scope(|scope| {
+        let mut chunks = entries.chunks(entries.len().div_ceil(workers));
+        let first = chunks.next().expect("nonempty directory entries");
+        let pending = chunks
+            .map(|chunk| scope.spawn(move || latest_in_chunk(chunk, id)))
+            .collect::<Vec<_>>();
+        let mut latest = latest_in_chunk(first, id);
+        // Join in directory order, not completion order, to preserve stable ties.
+        for worker in pending {
+            let candidate = worker.join().map_err(|_| {
+                HistoryError::Storage("session header lookup worker panicked".into())
+            })?;
+            select_newer(&mut latest, candidate);
+        }
+        Ok(latest)
+    })
+}
+
+fn latest_in_chunk(entries: &[std::fs::DirEntry], id: &str) -> Option<JsonlSessionMetadata> {
+    let mut latest = None;
+    for entry in entries {
+        if !entry.file_type().is_ok_and(|kind| !kind.is_dir()) {
+            continue;
+        }
+        let path = entry.path();
+        let Some(header) = read_header_for_listing(&path).filter(|header| header.id == id) else {
+            continue;
+        };
+        let modified_at = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0.0, |duration| duration.as_secs_f64() * 1_000.0);
+        select_newer(
+            &mut latest,
+            Some(JsonlSessionMetadata {
                 id: header.id,
                 created_at: header.created_at,
                 cwd: header.cwd,
@@ -115,11 +154,23 @@ fn list_jsonl_session_metadata(
                 source_format: SESSION_SCHEMA_VERSION,
                 parent_session_id: header.parent_session_id,
                 metadata: header.metadata,
-            });
-        }
+            }),
+        );
     }
-    metadata.sort_by(|left, right| right.modified_at.total_cmp(&left.modified_at));
-    Ok(metadata)
+    latest
+}
+
+fn select_newer(
+    latest: &mut Option<JsonlSessionMetadata>,
+    candidate: Option<JsonlSessionMetadata>,
+) {
+    if let Some(candidate) = candidate
+        && latest
+            .as_ref()
+            .is_none_or(|previous| candidate.modified_at > previous.modified_at)
+    {
+        *latest = Some(candidate);
+    }
 }
 
 fn read_header_for_listing(path: &Path) -> Option<SessionHeader> {
@@ -205,6 +256,127 @@ fn civil_date_from_unix_days(days: i64) -> (i64, i64, i64) {
 mod tests {
     use super::*;
     use crate::history::SessionStore;
+
+    #[test]
+    fn allocating_new_id_is_pure_and_uses_the_existing_project_layout() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("sessions");
+        let repo = JsonlSessionRepo::new(&root);
+        let cwd = directory.path().join("workspace");
+        let first = repo.allocate_new(&cwd).unwrap();
+        let second = repo.allocate_new(&cwd).unwrap();
+        assert_ne!(first.id, second.id);
+        assert_eq!(
+            uuid::Uuid::parse_str(&first.id).unwrap().get_version_num(),
+            7
+        );
+        assert_eq!(first.cwd, std::path::absolute(cwd).unwrap());
+        assert_eq!(first.path.parent(), second.path.parent());
+        assert!(
+            first
+                .path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(&format!("_{}.jsonl", first.id))
+        );
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn serial_and_parallel_lookup_preserve_header_matching_and_stable_ties() {
+        use std::fs::{File, FileTimes};
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let directory = tempfile::tempdir().unwrap();
+        let repo = JsonlSessionRepo::new(directory.path().join("sessions"));
+        let cwd = directory.path().join("workspace");
+        let root = repo.session_directory(&cwd).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let mut matching = Vec::new();
+        for index in 0..132 {
+            let path = root.join(format!("renamed-{index}.jsonl"));
+            let id = if index == 5 || index == 130 {
+                "wanted"
+            } else {
+                "other"
+            };
+            drop(SessionStore::create(&path, SessionHeader::new(id, &cwd)).unwrap());
+            File::open(&path)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(100)))
+                .unwrap();
+            if id == "wanted" {
+                matching.push(path);
+            }
+        }
+        std::fs::write(root.join("broken.jsonl"), "not JSON\n").unwrap();
+        std::fs::create_dir(root.join("folder.jsonl")).unwrap();
+        let entries = std::fs::read_dir(&root)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        let first = entries
+            .iter()
+            .find(|entry| matching.contains(&entry.path()))
+            .unwrap()
+            .path();
+        for workers in [1, 4] {
+            assert_eq!(
+                latest_matching_entry(&entries, "wanted", workers)
+                    .unwrap()
+                    .unwrap()
+                    .path,
+                first
+            );
+            assert!(
+                latest_matching_entry(&entries, "missing", workers)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        File::open(&matching[1])
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(200)))
+            .unwrap();
+        assert!(matches!(repo.resolve_exact_id(&cwd, "wanted").unwrap(),
+            ExactSessionIdResolution::Existing(metadata) if metadata.path == matching[1]));
+        std::fs::remove_file(&matching[1]).unwrap();
+        for workers in [1, 4] {
+            assert_eq!(
+                latest_matching_entry(&entries, "wanted", workers)
+                    .unwrap()
+                    .unwrap()
+                    .path,
+                matching[0]
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn lookup_and_allocation_work_in_a_readonly_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let repo = JsonlSessionRepo::new(directory.path().join("sessions"));
+        let target = repo.allocate_new(directory.path()).unwrap();
+        drop(
+            SessionStore::create(&target.path, SessionHeader::new(&target.id, &target.cwd))
+                .unwrap(),
+        );
+        let parent = target.path.parent().unwrap();
+        std::fs::set_permissions(&target.path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(
+            matches!(repo.resolve_exact_id(&target.cwd, &target.id).unwrap(),
+            ExactSessionIdResolution::Existing(metadata) if metadata.path == target.path)
+        );
+        let fresh = repo.allocate_new(&target.cwd).unwrap();
+        assert!(!fresh.path.exists());
+        assert_eq!(std::fs::read_dir(parent).unwrap().count(), 1);
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     #[test]
     fn exact_id_resolution_is_project_scoped_and_does_not_materialize_new_sessions() {

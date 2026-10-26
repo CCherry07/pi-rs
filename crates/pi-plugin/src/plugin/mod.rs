@@ -31,11 +31,12 @@ mod provider;
 
 pub use agent::{
     AgentEndEvent, AgentHook, AgentHookInterests, AgentPluginContext, AgentSettledEvent,
-    AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch, ContextEvent, ContextPatch,
-    InputContext, InputEvent, InputPatch, InputSource, InputStreamingBehavior, MessageEndEvent,
-    MessageEndPatch, MessageStartEvent, MessageUpdateEvent, Plugin, PluginDriver, RegisterContext,
-    ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolExecutionEndEvent, ToolExecutionStartEvent,
-    ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch, TurnEndEvent, TurnStartEvent,
+    AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch, ContextEvent, ContextHookBatch,
+    ContextPatch, InputContext, InputEvent, InputPatch, InputSource, InputStreamingBehavior,
+    MessageEndEvent, MessageEndPatch, MessageStartEvent, MessageUpdateEvent, Plugin, PluginDriver,
+    RegisterContext, ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolExecutionEndEvent,
+    ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch,
+    TurnEndEvent, TurnStartEvent,
 };
 pub use capabilities::{
     CommandContextParts, CommandModelsContext, CommandSessionContext, CompactOptions, ContextParts,

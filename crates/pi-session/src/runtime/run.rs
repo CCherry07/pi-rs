@@ -118,7 +118,7 @@ impl AgentSession {
                     prepared.generation(),
                     prepared.display_text(),
                     prepared.text(),
-                    prepared.images(),
+                    prepared.user_message(),
                 )?;
                 (PreparedSessionPrompt::Text(prepared), run_id)
             }

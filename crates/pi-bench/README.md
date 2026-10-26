@@ -19,6 +19,26 @@ includes the same prompt, persistence and settlement overhead. Compare the extra
 each history size to detect per-chunk history copying. The isolated `stream_assembly` workload
 does not exercise this bridge.
 
+`session_io` covers durable 1/4/16-entry batches with first and retained writers, long and short
+forks, newest-50 branch queries, 4/16-item queue clears, fresh session allocation and explicit ID
+lookup. It also separates a restored session's first prompt, its next turn, and open plus first
+prompt with four native `turn_end` hooks. Configuration is already persisted in those fixtures, so
+the first prompt includes acquiring write access. File creation, seeding and verification happen
+outside the timer, and only one fixture remains alive at a time. Verification reopens persisted
+results; queue checks restore a fresh runtime. Outer record timestamps are fixed while timed writes
+use the real clock. Every successful durable batch retains its `sync_data` guarantee.
+Run with `cargo bench -p pi-bench --bench session_io`; avoid concurrent builds during measurements.
+New allocations are pure path/ID construction, and explicit lookup still reads headers. Their
+performance results must be interpreted separately.
+
+`plugin_context` runs 0, 1, 4 and 16 native or JavaScript context hooks over 64 and 4,096
+mixed user/assistant messages with 512-byte bodies. Its JS dispatcher measures the real Rust
+adapter and outbound JSON encoding, then returns an empty batch result; Node execution, input
+cloning, parsing and NAPI crossing are excluded. Reports include encoded bytes and host calls per
+operation. The initial owned input clone is included equally in every case. Run with
+`cargo bench -p pi-bench --bench plugin_context`; correctness and ordering are separately covered
+by the context-hook, boundary and Node/NAPI regressions.
+
 The large session-resume case also reports its replay, settled-session recovery scan, indexed
 branch/context reads, document snapshot, document-based branch/context construction, and
 provider-projection phases separately. A mixed large case interleaves message entries with
@@ -71,3 +91,67 @@ The large-history/high-delta case exposes the removed per-chunk copying; the low
 does not show an improvement at every size. The Agent and Session shared-snapshot regressions
 independently verify history pointer sharing across chunks and immutable retained history after
 message-end hooks and context changes. No fixed speedup ratio is an acceptance requirement.
+
+## Incremental document refresh comparison
+
+Local measurement on 2026-10-26 compared commit `6f2b170` with incremental shared-document
+refresh on an Apple M3 Pro, aarch64 macOS, Rust 1.98.0, release. Both binaries ran twice in
+baseline/current/current/baseline order. Each `session_commit` case used 5 warmups and 50 samples;
+fixture hashes, parameters and sampling settings matched. The table shows the range of the two
+p50 measurements in microseconds for one deferred append followed by a shared-document read.
+
+| Existing entries | Before (µs) | After (µs) |
+| ---: | ---: | ---: |
+| 64 | 13.959 | 2.625–2.708 |
+| 1,024 | 119.250–120.625 | 2.500–2.625 |
+| 4,096 | 457.291–459.833 | 2.625 |
+| 16,384 | 3,313.458–3,396.375 | 2.750 |
+
+The previous view is released before mutation in this workload. The store can therefore retain
+its historical payloads and copy only the new suffix when the next reader requests a document.
+Retained strong or weak snapshots require a fresh document; independently owned snapshots and
+initial materialization still scale with history. The cache can retain one older document until
+its next read or the store is dropped. Deferred appends do not measure filesystem sync latency.
+
+The same alternating comparison ran `session_stream` with 3 warmups and 24 samples. At 4,096
+messages and 256 deltas, whole-turn p50s were 31.02/31.42 ms before and 31.84/27.92 ms after.
+This does not establish a whole-turn speedup: that workload includes journal synchronization and
+does not repeatedly request full documents. The improvement above is specific to document refresh.
+
+## Session I/O comparison
+
+An expanded Session audit on 2026-10-26 compared the implementation-start Session snapshot with
+the I/O changes on an Apple M3 Pro, macOS, Rust 1.98.0, release, with warm files and scripted
+providers. Both versions used the same surrounding Agent/Plugin code and current Runtime,
+including its prepared-input timestamp fix. Two uninstrumented runs per version were bracketed
+around a separate instrumented run; measurements ran without concurrent compilation. The values
+below are the range of the two p50s in milliseconds, with 3 warmups and 20 samples per case.
+
+| Operation | Before (ms) | After (ms) |
+| --- | ---: | ---: |
+| Restored 4096-message session, first prompt, 4 native hooks | 26.983–27.222 | 14.902–15.088 |
+| Same session, next prompt | 31.567–32.484 | 14.119–14.785 |
+| Open session and run first prompt | 30.040–33.119 | 17.231–18.149 |
+| Fork a 16384-message branch | 184.712–201.448 | 25.344–27.238 |
+| Clear 4 queued inputs | 22.948–25.674 | 1.455–2.888 |
+| Resolve an existing ID among 1000 session files | 356.525–583.139 | 80.049–90.906 |
+| Read the newest 50 branch entries from 16384 messages | 1.492–1.529 | 0.0062–0.0063 |
+
+The first-prompt fixture already contains configuration, so acquiring the first append handle is
+included. The next prompt starts with 4098 messages. Ordinary prompts still perform four writes
+and four `sync_data` calls; the instrumented first prompt spent 10.919 ms of its 14.852 ms mean in
+those syncs. The 64 KiB fork buffer reduced underlying File writes from 16386 to 101 and reused
+validated state without rereading the output. Queue cancellation keeps four ordinary v4 records
+while committing them with one write and one sync. Writer reuse applies to Unix.
+
+An additional `Pi::create_project_session` comparison, with optional features disabled and the same
+generation assembly, measured 257.917–263.973 ms for the old scan-before-create path versus
+0.499–0.501 ms for direct allocation with 1000 historical files. Its fixture verifies the canonical
+project directory, seeded ID lookup and resulting session parent; project path normalization must
+not silently turn a populated-directory benchmark into an empty-directory benchmark.
+
+The expanded audit covered 274 cases plus focused checks, retaining 29740 accepted primary raw
+samples. A single rename regression candidate did not recur in a separate 50-sample alternating
+comparison. Filesystem timings varied between runs; the operation counts and durability regressions
+provide independent evidence. The permanent `session_io` suite retains 23 representative workloads
+with setup and verification outside timing for future comparisons.

@@ -4,6 +4,7 @@ use crate::{AbortSignal, AgentPluginContext, Message, RunId};
 use pi_core::session::{ContextEditEntry, CustomEntry, CustomMessageEntry};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionBoundaryDraft {
@@ -78,9 +79,9 @@ pub enum AgentActivityOutcome {
 #[serde(rename_all = "camelCase")]
 pub struct BoundaryContextPreview {
     /// Provenance-preserving entries before provider conversion.
-    pub context_entries: Vec<pi_core::session::ProjectedSessionEntry>,
-    pub context_messages: Vec<pi_core::session::AgentMessage>,
-    pub llm_messages: Vec<Message>,
+    pub context_entries: Arc<Vec<pi_core::session::ProjectedSessionEntry>>,
+    pub context_messages: Arc<Vec<pi_core::session::AgentMessage>>,
+    pub llm_messages: Arc<Vec<Message>>,
     pub pending_messages: Vec<Message>,
     pub can_continue: bool,
 }
@@ -135,9 +136,8 @@ impl PluginDriver {
         signal: &AbortSignal,
         turn: Option<TurnEndEvent>,
         outcome: AgentActivityOutcome,
-        preview: impl Fn(&[SessionBoundaryDraft]) -> Result<BoundaryContextPreview, String>
-        + Send
-        + Sync,
+        mut preview: impl FnMut(&[SessionBoundaryDraft]) -> Result<BoundaryContextPreview, String>
+        + Send,
     ) -> BoundaryResult {
         let hook = if turn.is_some() {
             AgentHook::TurnEnd

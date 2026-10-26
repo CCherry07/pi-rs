@@ -8,12 +8,13 @@ mod provenance;
 mod types;
 pub use journal::{
     EffectiveLaneConfiguration, ExactSessionIdResolution, JsonlSessionRepo, LaneOperationState,
-    LaneReductionInput, LaneReductionResult, LaneState, LaneStepState, NewestOwnEntryState,
-    OperationTargetState, RecordLogCorruption, RecordLogCorruptionReason, RecordLogSlice,
-    SessionStore, TerminalFailureSource, TerminalFailureState, ToolBatchCallState, ToolBatchState,
-    aggregate_document_usage, aggregate_session_usage, reduce_lane_state, session_entry_usage,
-    validate_record_log,
+    LaneReductionInput, LaneReductionResult, LaneState, LaneStepState, NewSessionTarget,
+    NewestOwnEntryState, OperationTargetState, RecordLogCorruption, RecordLogCorruptionReason,
+    RecordLogSlice, SessionStore, TerminalFailureSource, TerminalFailureState, ToolBatchCallState,
+    ToolBatchState, aggregate_document_usage, aggregate_session_usage, reduce_lane_state,
+    session_entry_usage, validate_record_log,
 };
+pub(crate) use projection::build_session_context_and_entries;
 pub use projection::{
     ContextEntryTransform, CustomEntryContextMessageProjector, SessionContext,
     SessionContextBuildOptions, SessionModel, agent_message_to_provider_message,

@@ -37,6 +37,13 @@ const hookBatchInvocationSchema = z.strictObject({
   event: jsonObjectSchema,
 })
 
+const contextHookBatchInvocationSchema = z.strictObject({
+  invocationId: z.string(),
+  generationId: z.string(),
+  callbacks: z.array(z.strictObject({ callbackId: z.string(), context: jsonObjectSchema })),
+  messages: z.array(jsonObjectSchema),
+})
+
 const responseMetadataPatchSchema = z.strictObject({
   responseModel: z.string().nullable(),
   responseId: z.string().nullable(),
@@ -120,6 +127,7 @@ const hostOperationSchema = z.discriminatedUnion('type', [
   z.strictObject({ type: z.literal('prepareGeneration'), request: generationRequestSchema }),
   z.strictObject({ type: z.literal('invoke'), invocation: invocationSchema }),
   z.strictObject({ type: z.literal('invokeHookBatch'), invocation: hookBatchInvocationSchema }),
+  z.strictObject({ type: z.literal('invokeContextHookBatch'), invocation: contextHookBatchInvocationSchema }),
   z.strictObject({ type: z.literal('invokeStreamHookBatch'), invocation: streamHookBatchInvocationSchema }),
   z.strictObject({ type: z.literal('releaseStream'), generationId: z.string(), streamId: z.string() }),
   z.strictObject({ type: z.literal('cancel'), invocationId: z.string() }),
@@ -197,6 +205,7 @@ export type ToolExecutionMode = z.infer<typeof toolExecutionModeSchema>
 export type GenerationRequest = z.infer<typeof generationRequestSchema>
 export type Invocation = z.infer<typeof invocationSchema>
 export type HookBatchInvocation = z.infer<typeof hookBatchInvocationSchema>
+export type ContextHookBatchInvocation = z.infer<typeof contextHookBatchInvocationSchema>
 export type StreamUpdate = z.infer<typeof streamUpdateSchema>
 export type StreamHookBatchInvocation = z.infer<typeof streamHookBatchInvocationSchema>
 export type HostOperation = z.infer<typeof hostOperationSchema>

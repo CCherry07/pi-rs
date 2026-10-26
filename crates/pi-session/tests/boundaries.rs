@@ -12,7 +12,7 @@ use pi_session::{
 use pi_test_support::{ScriptedProviderPlugin, ScriptedTurn};
 use serde_json::json;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 type Turn = dyn Fn(TurnEndEvent) -> BoundaryResult + Send + Sync;
 type Settle = dyn Fn(AgentBeforeSettleEvent) -> BoundaryResult + Send + Sync;
@@ -128,6 +128,221 @@ fn options() -> AgentSessionOptions {
 }
 fn text(messages: &[Message]) -> String {
     serde_json::to_string(messages).unwrap()
+}
+
+#[tokio::test]
+async fn unchanged_boundary_hooks_share_retained_context_snapshots() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshots = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let plugins = ["one", "two", "three", "four"]
+        .into_iter()
+        .map(|id| {
+            let snapshots = snapshots.clone();
+            BoundaryPlugin::turn(id, move |event| {
+                snapshots
+                    .lock()
+                    .unwrap()
+                    .push(event.boundary.unwrap().context);
+                BoundaryResult::default()
+            })
+        })
+        .collect();
+    let provider = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("answer".into())]);
+    let session = AgentSession::create(
+        runtime(provider, plugins, false),
+        dir.path().join("s.jsonl"),
+        options(),
+    )
+    .await
+    .unwrap();
+    session.prompt("start").await.unwrap();
+    let snapshots = snapshots.lock().unwrap();
+    assert_eq!(snapshots.len(), 4);
+    let first = &snapshots[0];
+    assert!(!first.context_entries.is_empty());
+    for snapshot in &snapshots[1..] {
+        assert_eq!(snapshot, first);
+        assert_eq!(
+            snapshot.context_entries.as_ptr(),
+            first.context_entries.as_ptr()
+        );
+        assert_eq!(
+            snapshot.context_messages.as_ptr(),
+            first.context_messages.as_ptr()
+        );
+        assert_eq!(snapshot.llm_messages.as_ptr(), first.llm_messages.as_ptr());
+    }
+}
+
+#[tokio::test]
+async fn custom_boundary_projectors_still_run_between_every_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let snapshots = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let plugins = ["first", "second"]
+        .into_iter()
+        .map(|id| {
+            let calls = calls.clone();
+            let snapshots = snapshots.clone();
+            BoundaryPlugin::turn(id, move |event| {
+                snapshots.lock().unwrap().push((
+                    calls.load(Ordering::SeqCst),
+                    event.boundary.unwrap().context,
+                ));
+                BoundaryResult::default()
+            })
+        })
+        .collect();
+    let mut options = options();
+    options
+        .context
+        .entry_transforms
+        .push(Arc::new(move |entries| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            entries.to_vec()
+        }));
+    let provider = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("answer".into())]);
+    let session = AgentSession::create(
+        runtime(provider, plugins, false),
+        dir.path().join("s.jsonl"),
+        options,
+    )
+    .await
+    .unwrap();
+    session.prompt("start").await.unwrap();
+    let snapshots = snapshots.lock().unwrap();
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[1].0, snapshots[0].0 + 2);
+    assert!(!Arc::ptr_eq(
+        &snapshots[0].1.context_entries,
+        &snapshots[1].1.context_entries
+    ));
+}
+
+struct SideEffectBoundary {
+    index: usize,
+    seen: AtomicBool,
+    snapshots: Arc<std::sync::Mutex<Vec<pi_plugin::BoundaryContextPreview>>>,
+    session: Arc<std::sync::Mutex<Option<std::sync::Weak<AgentSession>>>>,
+}
+
+#[pi_plugin::plugin]
+impl Plugin for SideEffectBoundary {
+    fn id(&self) -> PluginId {
+        PluginId::new(format!("side-effect-{}", self.index))
+    }
+
+    async fn turn_end(
+        &self,
+        context: AgentPluginContext,
+        event: TurnEndEvent,
+    ) -> Result<BoundaryResult, PluginError> {
+        if self.seen.swap(true, Ordering::SeqCst) {
+            return Ok(BoundaryResult::default());
+        }
+        self.snapshots
+            .lock()
+            .unwrap()
+            .push(event.boundary.unwrap().context);
+        if self.index == 0 {
+            context
+                .session
+                .append_entry("side-effect", Some(json!({"value": 1})))?;
+            return Err(PluginError::Hook {
+                plugin_id: self.id(),
+                hook: "turn_end",
+                message: "after append".into(),
+            });
+        }
+        if self.index == 1 {
+            let session = self
+                .session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .upgrade()
+                .unwrap();
+            session
+                .enqueue_message(
+                    Message::User(pi_core::UserMessage::text("queued by hook", 2)),
+                    pi_session::QueueKind::Steer,
+                )
+                .unwrap();
+        }
+        Ok(BoundaryResult::default())
+    }
+}
+
+#[tokio::test]
+async fn boundary_cache_refreshes_journal_changes_on_error_and_reads_queues_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshots = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let slot = Arc::new(std::sync::Mutex::new(None));
+    let access = Arc::new(pi_session::PiPluginContext::new(
+        pi_plugin::PresentationMode::Print,
+        true,
+        pi_session::PluginContextBinding::new(),
+    ));
+    let provider = ScriptedProviderPlugin::scripted([
+        ScriptedTurn::Text("answer".into()),
+        ScriptedTurn::Text("follow up".into()),
+    ]);
+    let mut builder = PiRuntime::builder()
+        .plugin_context(access.clone())
+        .provider_plugin(provider)
+        .agent_options(AgentOptions {
+            provider_id: ProviderId::new("scripted"),
+            model_id: ModelId::new("test"),
+            ..Default::default()
+        })
+        .system_prompt(SystemPrompt::Final("test".into()));
+    for index in 0..3 {
+        builder = builder.plugin(SideEffectBoundary {
+            index,
+            seen: AtomicBool::new(false),
+            snapshots: snapshots.clone(),
+            session: slot.clone(),
+        });
+    }
+    let session = AgentSession::create(
+        builder.build().unwrap(),
+        dir.path().join("s.jsonl"),
+        options(),
+    )
+    .await
+    .unwrap();
+    *slot.lock().unwrap() = Some(Arc::downgrade(&session));
+    access.bind_generation_session(session.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(10), session.prompt("start"))
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshots = snapshots.lock().unwrap();
+    assert_eq!(snapshots.len(), 3);
+    assert_eq!(
+        snapshots[1].context_entries.len(),
+        snapshots[0].context_entries.len() + 1
+    );
+    assert!(!Arc::ptr_eq(
+        &snapshots[0].context_entries,
+        &snapshots[1].context_entries
+    ));
+    assert!(Arc::ptr_eq(
+        &snapshots[1].context_entries,
+        &snapshots[2].context_entries
+    ));
+    assert!(snapshots[0].pending_messages.is_empty());
+    assert!(snapshots[1].pending_messages.is_empty());
+    assert!(text(&snapshots[2].pending_messages).contains("queued by hook"));
+    assert!(snapshots[2].can_continue);
+    assert!(
+        session
+            .catalog()
+            .plugin_diagnostics()
+            .iter()
+            .any(|error| error.message.contains("after append"))
+    );
 }
 
 #[tokio::test]

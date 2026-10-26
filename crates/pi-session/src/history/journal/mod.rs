@@ -11,6 +11,7 @@ mod repo;
 mod state;
 mod usage;
 mod validation;
+mod writer;
 
 pub use jsonl::SessionStore;
 pub use reducer::{
@@ -19,7 +20,7 @@ pub use reducer::{
     RecordLogCorruptionReason, RecordLogSlice, TerminalFailureSource, TerminalFailureState,
     ToolBatchCallState, ToolBatchState, reduce_lane_state, validate_record_log,
 };
-pub use repo::{ExactSessionIdResolution, JsonlSessionRepo};
+pub use repo::{ExactSessionIdResolution, JsonlSessionRepo, NewSessionTarget};
 pub use usage::{aggregate_document_usage, aggregate_session_usage, session_entry_usage};
 
 pub use reducer::reduce_lane_operation;

@@ -58,19 +58,14 @@ impl Pi {
     ) -> Result<pi_session::PiSession, String> {
         let project = self.projects().get(project_id)?;
         let workspace = project.resolve()?;
-        let id = uuid::Uuid::now_v7().to_string();
-        let path = match pi_session::JsonlSessionRepo::new(self.agent_dir.join("sessions"))
-            .resolve_exact_id(workspace.cwd(), &id)
-            .map_err(|error| error.to_string())?
-        {
-            pi_session::ExactSessionIdResolution::New { path, .. } => path,
-            _ => return Err("new session identity already exists".into()),
-        };
+        let target = pi_session::JsonlSessionRepo::new(self.agent_dir.join("sessions"))
+            .allocate_new(workspace.cwd())
+            .map_err(|error| error.to_string())?;
         self.sessions
             .create_session(pi_session::CreateSessionOptions {
                 workspace,
-                path,
-                session_id: Some(id),
+                path: target.path,
+                session_id: Some(target.id),
                 metadata: Some(project.session_metadata()),
                 generation_overlay: Default::default(),
             })

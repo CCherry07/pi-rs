@@ -32,7 +32,7 @@ pub use plugin::{
     BeforeAgentStartEvent, BeforeAgentStartPatch, BeforeProviderHeadersEvent,
     BeforeProviderRequestEvent, BoundaryCompaction, BoundaryContextPreview, BoundaryResult,
     BoundaryState, CommandContextParts, CommandModelsContext, CommandSessionContext,
-    CompactOptions, ContextEvent, ContextParts, ContextPatch, ContextUsage,
+    CompactOptions, ContextEvent, ContextHookBatch, ContextParts, ContextPatch, ContextUsage,
     DirectCompletionRequest, EphemeralCompactionOptions, EphemeralSessionOutcome,
     EphemeralSessionRequest, EphemeralSessionStatus, ForkOptions, ForkPosition, InputContext,
     InputEvent, InputPatch, InputSource, InputStreamingBehavior, IsolatedContextMode,

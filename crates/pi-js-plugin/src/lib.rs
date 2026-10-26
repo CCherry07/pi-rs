@@ -17,12 +17,12 @@ use pi_plugin::{
     AfterProviderResponseEvent, AgentEndEvent, AgentHook, AgentHookInterests, AgentPluginContext,
     AgentSettledEvent, AgentStartEvent, BeforeAgentStartEvent, BeforeAgentStartPatch,
     BeforeProviderHeadersEvent, BeforeProviderRequestEvent, Command, CommandContext, CommandError,
-    CommandOutcome, CommandSpec, ContextEvent, ContextPatch, InputContext, InputEvent, InputPatch,
-    InputSource, InputStreamingBehavior, MessageEndEvent, MessageEndPatch, MessageStartEvent,
-    MessageUpdateEvent, Plugin, PluginError, ProviderPlugin, ProviderPluginContext,
-    RegisterContext, Tool, ToolCallEvent, ToolCallPatch, ToolContext, ToolError,
-    ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent,
-    ToolResultPatch, ToolUpdateSink, TurnEndEvent, TurnStartEvent,
+    CommandOutcome, CommandSpec, ContextEvent, ContextHookBatch, ContextPatch, InputContext,
+    InputEvent, InputPatch, InputSource, InputStreamingBehavior, MessageEndEvent, MessageEndPatch,
+    MessageStartEvent, MessageUpdateEvent, Plugin, PluginError, ProviderPlugin,
+    ProviderPluginContext, RegisterContext, Tool, ToolCallEvent, ToolCallPatch, ToolContext,
+    ToolError, ToolExecutionEndEvent, ToolExecutionStartEvent, ToolExecutionUpdateEvent,
+    ToolResultEvent, ToolResultPatch, ToolUpdateSink, TurnEndEvent, TurnStartEvent,
 };
 use pi_plugin::{
     SessionBeforeCompactEvent, SessionBeforeCompactResult, SessionBeforeForkEvent,
@@ -121,6 +121,9 @@ pub enum JsHostOperation {
     },
     InvokeHookBatch {
         invocation: JsHookBatchInvocation,
+    },
+    InvokeContextHookBatch {
+        invocation: JsContextHookBatchInvocation,
     },
     InvokeStreamHookBatch {
         invocation: JsStreamHookBatchInvocation,
@@ -339,6 +342,32 @@ pub struct JsHookBatchInvocation {
     pub event: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsContextHookBatchInvocation {
+    pub invocation_id: String,
+    pub generation_id: String,
+    pub callbacks: Vec<JsHookBatchCallback>,
+    pub messages: Arc<Vec<Message>>,
+}
+
+/// A batch yields at the first replacement so Rust validates/normalizes it
+/// before the next callback. Null is an invalid replacement, not an absent one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsContextHookBatchResult {
+    pub processed: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<JsContextReplacement>,
+    #[serde(default)]
+    pub errors: Vec<JsHookBatchError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JsContextReplacement {
+    pub messages: Value,
+}
+
 /// Compact wire payload for high-frequency assistant stream hooks.
 ///
 /// The cumulative message is sent only when a stream is first observed. Each
@@ -418,6 +447,49 @@ pub trait JsCallbackDispatcher: Send + Sync {
         _updates: ToolUpdateSink,
     ) -> Result<Value, JsCallbackError> {
         self.invoke(invocation, context).await
+    }
+
+    async fn invoke_context_hook_batch(
+        &self,
+        invocation: JsContextHookBatchInvocation,
+        context: PluginContextHandle,
+    ) -> Result<JsContextHookBatchResult, JsCallbackError> {
+        let mut result = JsContextHookBatchResult {
+            processed: 0,
+            replacement: None,
+            errors: Vec::new(),
+        };
+        for callback in invocation.callbacks {
+            let response = self
+                .invoke(
+                    JsInvocation {
+                        invocation_id: invocation.invocation_id.clone(),
+                        generation_id: invocation.generation_id.clone(),
+                        callback_id: callback.callback_id.clone(),
+                        kind: JsInvocationKind::AgentHook,
+                        payload: json!({ "hook": "context", "context": callback.context,
+                    "event": { "type": "context", "messages": invocation.messages } }),
+                    },
+                    context.clone(),
+                )
+                .await;
+            result.processed += 1;
+            match response {
+                Ok(response) => {
+                    if let Some(messages) = response.get("messages") {
+                        result.replacement = Some(JsContextReplacement {
+                            messages: messages.clone(),
+                        });
+                        break;
+                    }
+                }
+                Err(error) => result.errors.push(JsHookBatchError {
+                    callback_id: callback.callback_id,
+                    message: error.message,
+                }),
+            }
+        }
+        Ok(result)
     }
 
     /// Executes observer hooks in registration order. Dispatchers that cross
@@ -540,6 +612,26 @@ impl JsPluginGeneration {
             &provider_registrations,
             &session_plugins,
         )?;
+        let context_batch = Arc::new(JsContextHooks {
+            lease: Arc::clone(&lease),
+            hooks: agent_plugins
+                .iter()
+                .map(|plugin| {
+                    let plugin_id = PluginId::new(plugin.id.clone());
+                    let hooks = plugin
+                        .hooks
+                        .iter()
+                        .filter(|hook| hook.name == "context")
+                        .map(|hook| JsAgentHook {
+                            plugin_id: plugin_id.clone(),
+                            name: hook.name.clone(),
+                            callback_id: hook.callback_id.clone(),
+                        })
+                        .collect();
+                    (plugin_id, hooks)
+                })
+                .collect(),
+        });
         // JavaScript extensions are one contiguous generation contribution.
         // Route only observer hooks through the first adapter so callbacks can
         // share one encoded event and one host crossing. Chained/mutating hooks
@@ -629,6 +721,7 @@ impl JsPluginGeneration {
                     tools,
                     commands,
                     hooks,
+                    context_batch: Arc::clone(&context_batch),
                     lease: Arc::clone(&lease),
                     active_streams: Mutex::new(HashMap::new()),
                 }) as Arc<dyn Plugin>
@@ -701,6 +794,16 @@ impl JsCallbackDispatcher for HostCallbackDispatcher {
         context: PluginContextHandle,
     ) -> Result<JsHookBatchResult, JsCallbackError> {
         self.host.invoke_hook_batch(invocation, context).await
+    }
+
+    async fn invoke_context_hook_batch(
+        &self,
+        invocation: JsContextHookBatchInvocation,
+        context: PluginContextHandle,
+    ) -> Result<JsContextHookBatchResult, JsCallbackError> {
+        self.host
+            .invoke_context_hook_batch(invocation, context)
+            .await
     }
 
     async fn invoke_stream_hook_batch(
@@ -1068,6 +1171,32 @@ impl JsGenerationLease {
         }
     }
 
+    async fn invoke_context_hook_batch(
+        &self,
+        callbacks: Vec<JsHookBatchCallback>,
+        messages: Arc<Vec<Message>>,
+        context: PluginContextHandle,
+        signal: &AbortSignal,
+    ) -> Result<JsContextHookBatchResult, JsInvokeError> {
+        let invocation_id = format!(
+            "js-invocation-{}",
+            NEXT_JS_INVOCATION_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let invocation = JsContextHookBatchInvocation {
+            invocation_id: invocation_id.clone(),
+            generation_id: self.generation_id.clone(),
+            callbacks,
+            messages,
+        };
+        tokio::select! {
+            result = self.dispatcher.invoke_context_hook_batch(invocation, context) => result.map_err(JsInvokeError::Callback),
+            () = signal.wait() => {
+                self.dispatcher.cancel(&invocation_id);
+                Err(JsInvokeError::Aborted)
+            }
+        }
+    }
+
     fn release_stream(&self, stream_id: &AssistantStreamId) {
         self.dispatcher
             .release_stream(&self.generation_id, stream_id.as_str());
@@ -1130,6 +1259,7 @@ struct JsPlugin {
     tools: Vec<Arc<dyn Tool>>,
     commands: Vec<Arc<dyn Command>>,
     hooks: Vec<JsAgentHook>,
+    context_batch: Arc<JsContextHooks>,
     session_hooks: Vec<JsHookManifest>,
     lease: Arc<JsGenerationLease>,
     active_streams: Mutex<HashMap<RunId, ActiveJsStream>>,
@@ -1145,6 +1275,99 @@ struct JsAgentHook {
     plugin_id: PluginId,
     name: String,
     callback_id: String,
+}
+
+struct JsContextHooks {
+    lease: Arc<JsGenerationLease>,
+    hooks: HashMap<PluginId, Vec<JsAgentHook>>,
+}
+
+#[async_trait]
+impl ContextHookBatch for JsContextHooks {
+    async fn context(
+        &self,
+        contexts: Vec<AgentPluginContext>,
+        event: ContextEvent,
+    ) -> Result<ContextPatch, PluginError> {
+        let mut hooks = Vec::new();
+        for context in &contexts {
+            if let Some(callbacks) = self.hooks.get(context.plugin_id()) {
+                hooks.extend(callbacks.iter().map(|hook| (context, hook)));
+            }
+        }
+        let mut messages = event.messages;
+        let mut changed = false;
+        let mut remaining = hooks.as_slice();
+        while let Some(&(context, _)) = remaining.first() {
+            if context.signal().is_aborted() {
+                break;
+            }
+            let callbacks = remaining
+                .iter()
+                .map(|(context, hook)| JsHookBatchCallback {
+                    callback_id: hook.callback_id.clone(),
+                    context: agent_plugin_context_value(context),
+                })
+                .collect();
+            let response = self
+                .lease
+                .invoke_context_hook_batch(
+                    callbacks,
+                    Arc::clone(&messages),
+                    context.plugin_context_handle(),
+                    context.signal(),
+                )
+                .await;
+            let response = match response {
+                Ok(response) if response.processed > 0 && response.processed <= remaining.len() => {
+                    response
+                }
+                response => {
+                    let message = match response {
+                        Ok(_) => "JavaScript context batch returned an invalid processed count"
+                            .to_string(),
+                        Err(JsInvokeError::Aborted) => {
+                            "JavaScript context hook batch was aborted".to_string()
+                        }
+                        Err(JsInvokeError::Callback(error)) => error.to_string(),
+                    };
+                    for &(context, hook) in remaining {
+                        report_agent_hook_error(context, "context", hook, message.clone());
+                    }
+                    break;
+                }
+            };
+            for error in response.errors {
+                if let Some(&(context, hook)) = remaining[..response.processed]
+                    .iter()
+                    .find(|(_, hook)| hook.callback_id == error.callback_id)
+                {
+                    report_agent_hook_error(context, "context", hook, error.message);
+                }
+            }
+            if let Some(replacement) = response.replacement {
+                match serde_json::from_value::<Vec<Message>>(replacement.messages) {
+                    Ok(replacement) => {
+                        messages = Arc::new(replacement);
+                        changed = true;
+                    }
+                    Err(error) => {
+                        let (context, hook) = remaining[response.processed - 1];
+                        report_agent_hook_error(
+                            context,
+                            "context",
+                            hook,
+                            format!("invalid messages result: {error}"),
+                        );
+                    }
+                }
+            }
+            remaining = &remaining[response.processed..];
+        }
+        Ok(ContextPatch {
+            messages: changed.then(|| Arc::unwrap_or_clone(messages)),
+        })
+    }
 }
 
 impl JsPlugin {
@@ -1964,43 +2187,16 @@ impl Plugin for JsPlugin {
         .await
     }
 
+    fn context_hook_batch(&self) -> Option<&dyn ContextHookBatch> {
+        Some(self.context_batch.as_ref())
+    }
+
     async fn context(
         &self,
         context: AgentPluginContext,
         event: ContextEvent,
     ) -> Result<ContextPatch, PluginError> {
-        let original = event.messages;
-        let mut messages = original.clone();
-        for hook in self.hook_callbacks("context") {
-            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
-            let result = match self
-                .invoke_hook(
-                    "context",
-                    hook,
-                    callback_context.plugin_context_handle(),
-                    agent_plugin_context_value(&callback_context),
-                    json!({ "type": "context", "messages": messages }),
-                    callback_context.signal(),
-                )
-                .await
-            {
-                Ok(result) => result,
-                Err(error) => {
-                    callback_context.report_hook_error("context", error.to_string());
-                    continue;
-                }
-            };
-            if let Some(replacement) = result.get("messages") {
-                match serde_json::from_value::<Vec<Message>>(replacement.clone()) {
-                    Ok(replacement) => messages = replacement,
-                    Err(error) => callback_context
-                        .report_hook_error("context", format!("invalid messages result: {error}")),
-                }
-            }
-        }
-        Ok(ContextPatch {
-            messages: (messages != original).then_some(messages),
-        })
+        self.context_batch.context(vec![context], event).await
     }
 
     async fn tool_call(

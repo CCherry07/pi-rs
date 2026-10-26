@@ -1663,6 +1663,100 @@ async fn durable_queue_revisions_survive_abort_and_process_recovery() {
 }
 
 #[tokio::test]
+async fn clearing_multiple_queue_items_is_durable_and_failed_clears_publish_no_update() {
+    for fail in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("queue.jsonl");
+        let session = AgentSession::create(
+            scripted_runtime([ScriptedTurn::Text("saved".into())]),
+            &path,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        session.prompt("start").await.unwrap();
+        for index in 0..4 {
+            session
+                .enqueue_message(
+                    Message::User(UserMessage::text(format!("queued-{index}"), index)),
+                    QueueKind::NextRun,
+                )
+                .unwrap();
+        }
+        let before = session.snapshot().queue.clone();
+        let before_clear = std::fs::read(&path).unwrap();
+        let mut updates = session.subscribe();
+        let recovery_path = if fail {
+            let moved = directory.path().join("original.jsonl");
+            std::fs::rename(&path, &moved).unwrap();
+            std::fs::write(&path, "replacement\n").unwrap();
+            moved
+        } else {
+            path.clone()
+        };
+        let result = session.clear_queue();
+        let queue_updates = std::iter::from_fn(|| updates.events.try_recv().ok())
+            .filter(|update| matches!(update.event, crate::AgentSessionEvent::QueueUpdate { .. }))
+            .count();
+        if fail {
+            assert!(result.is_err());
+            assert_eq!(session.snapshot().queue.follow_up, before.follow_up);
+            assert_eq!(queue_updates, 0);
+        } else {
+            assert_eq!(result.unwrap().follow_up, before.follow_up);
+            assert!(session.snapshot().queue.follow_up.is_empty());
+            assert_eq!(queue_updates, 1);
+            let cancellations = session
+                .store()
+                .load()
+                .unwrap()
+                .records
+                .into_iter()
+                .filter(|record| matches!(record.record, LaneRecordEntry::QueueCancelled { .. }))
+                .collect::<Vec<_>>();
+            assert_eq!(cancellations.len(), 4);
+            assert!(
+                cancellations
+                    .windows(2)
+                    .all(|pair| pair[0].seq + 1 == pair[1].seq)
+            );
+            // One write is not a filesystem transaction. Recovery must accept
+            // only the complete records preceding a torn batch suffix.
+            let committed = std::fs::read(&path).unwrap();
+            let mut prefix = before_clear;
+            prefix.extend(
+                committed[prefix.len()..]
+                    .split_inclusive(|byte| *byte == b'\n')
+                    .take(2)
+                    .flatten(),
+            );
+            prefix.extend_from_slice(b"{\"kind\":\"record\",\"seq\":");
+            let partial_path = directory.path().join("partial-clear.jsonl");
+            std::fs::write(&partial_path, prefix).unwrap();
+            let partial =
+                AgentSession::open(scripted_runtime([]), &partial_path, Default::default())
+                    .await
+                    .unwrap();
+            assert_eq!(partial.snapshot().queue.follow_up, before.follow_up[2..]);
+            assert_eq!(
+                partial.clear_queue().unwrap().follow_up,
+                before.follow_up[2..]
+            );
+            partial.shutdown().await;
+        }
+        let restored = AgentSession::open(scripted_runtime([]), &recovery_path, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            restored.snapshot().queue.follow_up.len(),
+            if fail { 4 } else { 0 }
+        );
+        restored.shutdown().await;
+        session.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn open_reconciles_interrupted_run_from_reducer_without_replaying_side_effects() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("interrupted-session.jsonl");

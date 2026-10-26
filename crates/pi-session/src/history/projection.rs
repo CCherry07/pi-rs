@@ -216,6 +216,31 @@ pub fn build_session_context(
     path_entries: &[SessionRecord],
     options: &SessionContextBuildOptions,
 ) -> SessionContext {
+    let messages = project_session_entries(path_entries, options)
+        .into_iter()
+        .flat_map(|entry| entry.messages)
+        .collect();
+    context_from_messages(path_entries, messages)
+}
+
+/// Reads provenance and context from the same projection. Callers using custom,
+/// potentially stateful projectors must preserve their existing invocation order.
+pub(crate) fn build_session_context_and_entries(
+    path: &[SessionRecord],
+    options: &SessionContextBuildOptions,
+) -> (SessionContext, Vec<ProjectedSessionEntry>) {
+    let entries = project_session_entries(path, options);
+    let messages = entries
+        .iter()
+        .flat_map(|entry| entry.messages.iter().cloned())
+        .collect();
+    (context_from_messages(path, messages), entries)
+}
+
+fn context_from_messages(
+    path_entries: &[SessionRecord],
+    messages: Vec<AgentMessage>,
+) -> SessionContext {
     // Configuration derives from the full path, not the post-compaction
     // projection. This is the subtle but intentional v4 behavior.
     let mut thinking_level = "off".to_string();
@@ -254,10 +279,6 @@ pub fn build_session_context(
         }
     }
 
-    let messages = project_session_entries(path_entries, options)
-        .into_iter()
-        .flat_map(|entry| entry.messages)
-        .collect();
     SessionContext {
         messages,
         thinking_level,

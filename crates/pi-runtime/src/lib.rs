@@ -149,6 +149,7 @@ pub struct PreparedRuntimePrompt {
     display_text: String,
     text: String,
     images: Vec<ImageContent>,
+    timestamp_ms: i64,
 }
 
 /// A structured prompt prepared under one generation lease.
@@ -179,18 +180,18 @@ impl PreparedRuntimePrompt {
         &self.images
     }
 
+    /// The exact prepared input, including the timestamp reused by the Agent.
+    /// Session hosts can persist this value before starting the run.
+    pub fn user_message(&self) -> UserMessage {
+        input_user_message(self.text.clone(), self.images.clone(), self.timestamp_ms)
+    }
+
     pub async fn run(self) -> Result<AgentLoopOutcome, RuntimeError> {
-        if self.images.is_empty() {
-            self.runtime
-                .prompt_locked(PromptInput::Text(self.text))
-                .await
-        } else {
-            self.runtime
-                .prompt_locked(PromptInput::Messages(vec![Message::User(
-                    input_user_message(self.text, self.images, now_ms()),
-                )]))
-                .await
-        }
+        self.runtime
+            .prompt_locked(PromptInput::Messages(vec![Message::User(
+                input_user_message(self.text, self.images, self.timestamp_ms),
+            )]))
+            .await
     }
 }
 
@@ -1328,6 +1329,7 @@ impl PiRuntime {
             display_text,
             text,
             images,
+            timestamp_ms: now_ms(),
         }))
     }
 
@@ -2101,6 +2103,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepared_input_keeps_its_timestamp_across_delayed_run_admission() {
+        for images in [
+            None,
+            Some(vec![ImageContent {
+                data: "aW1hZ2U=".into(),
+                mime_type: "image/png".into(),
+            }]),
+        ] {
+            let scripted = ScriptedProviderPlugin::scripted([ScriptedTurn::Text("done".into())]);
+            let provider = scripted.provider();
+            let runtime = PiRuntime::builder()
+                .provider_plugin(scripted)
+                .build()
+                .unwrap();
+            let PreparedTextSubmission::Agent(prepared) = runtime
+                .prepare_submission_after_command("input".into(), "input".into(), images)
+                .await
+                .unwrap()
+            else {
+                panic!("expected prepared text")
+            };
+            let expected = prepared.user_message();
+            tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+            assert!(now_ms() > expected.timestamp_ms);
+            prepared.run().await.unwrap();
+            assert_eq!(provider.requests()[0].messages[0], Message::User(expected));
+        }
+    }
+
+    #[tokio::test]
     async fn input_hook_images_reach_the_provider_and_streaming_metadata_reaches_hooks() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let submitted_image = ImageContent {
@@ -2811,11 +2843,10 @@ mod tests {
             _context: AgentPluginContext,
             mut event: ContextEvent,
         ) -> Result<ContextPatch, PluginError> {
-            event
-                .messages
+            Arc::make_mut(&mut event.messages)
                 .insert(0, Message::User(UserMessage::text("context-only", 1)));
             Ok(ContextPatch {
-                messages: Some(event.messages),
+                messages: Some(Arc::unwrap_or_clone(event.messages)),
             })
         }
 
