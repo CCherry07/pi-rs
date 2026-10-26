@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.0](https://github.com/CCherry07/pi-rs/compare/v0.8.6...v0.9.0) (2026-10-26)
+
+
+### Features
+
+* Add comprehensive tests and enhancements for UI command handling and session transfer ([f12552b](https://github.com/CCherry07/pi-rs/commit/f12552b88164554171b72fa597d5c3f5ab3c5a9e))
+* Implement Codex authentication with token rotation and update OAuth handling ([4e08084](https://github.com/CCherry07/pi-rs/commit/4e08084bba404b47e80836ec6de6c8d64d4cbcfc))
+* js plugin ([#21](https://github.com/CCherry07/pi-rs/issues/21)) ([8df724b](https://github.com/CCherry07/pi-rs/commit/8df724bff3271cc2141eeb6b583b9cb1862926a2))
+* Refactor AgentHarnessBuilder to own configuration and implement SessionGenerationFactory ([4fc85f7](https://github.com/CCherry07/pi-rs/commit/4fc85f7b6db35b6562aebcbe69ea6c84757da9e6))
+
 ## [0.8.6](https://github.com/CCherry07/pi-rs/compare/v0.8.5...v0.8.6) (2026-10-01)
 
 
