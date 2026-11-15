@@ -768,7 +768,9 @@ fn message_display_text(message: &Message) -> String {
             pi_core::CustomMessageContent::Text(text) => return text.clone(),
             pi_core::CustomMessageContent::Blocks(blocks) => blocks.as_slice(),
         },
-        Message::Assistant(_) | Message::ToolResult(_) => return String::new(),
+        Message::System(_) | Message::Assistant(_) | Message::ToolResult(_) => {
+            return String::new();
+        }
     };
     blocks
         .iter()

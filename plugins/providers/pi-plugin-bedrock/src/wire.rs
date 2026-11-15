@@ -25,8 +25,9 @@ pub fn request_body(request: &ProviderRequest) -> Value {
         "messages".to_string(),
         Value::Array(project_messages(request)),
     );
-    if !request.system_prompt.is_empty() {
-        let mut system = vec![json!({"text": request.system_prompt})];
+    let system_prompt = pi_core::SystemMessage::fold(&request.system_prompt, &request.messages);
+    if !system_prompt.is_empty() {
+        let mut system = vec![json!({"text": system_prompt})];
         if model.is_some_and(supports_prompt_caching) {
             system.push(json!({"cachePoint": {"type": "default"}}));
         }
@@ -107,6 +108,7 @@ fn project_messages(request: &ProviderRequest) -> Vec<Value> {
             );
         }
         match message {
+            Message::System(_) => continue,
             Message::User(message) => {
                 let mut content = project_user_content(&message.content);
                 if content.is_empty() {

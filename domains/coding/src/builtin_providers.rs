@@ -17,12 +17,14 @@ use pi_runtime::{PiRuntimeBuilder, RuntimeError};
 
 use crate::Config;
 use crate::configuration::{codex_transport_options, provider_transport_config};
-use crate::credentials::{StoredCredential, read_stored_credential};
+use crate::credentials::{StoredCredential, StoredCredentialSource, read_stored_credential};
 
 pub(crate) struct BuiltinProviderSet {
     transport: Arc<dyn HttpTransport>,
     codex_transport_options: CodexTransportOptions,
-    effective_api_key: Option<String>,
+    stored_credentials: std::collections::BTreeMap<String, StoredCredential>,
+    openrouter_catalog: Vec<pi_core::ModelSpec>,
+    models_snapshot: Option<pi_plugin_models::ModelsPlugin>,
     provider_config: OpenAiCompatibleConfig,
     stored_anthropic: Option<StoredCredential>,
     stored_google: Option<StoredCredential>,
@@ -39,6 +41,83 @@ pub(crate) struct BuiltinProviderSet {
 impl BuiltinProviderSet {
     pub(crate) fn prepare(config: &Config) -> Result<Self, RuntimeError> {
         Self::load(config, None, configured_transport(config)?)
+    }
+
+    pub(crate) async fn prepare_with_catalog(
+        config: &mut Config,
+        dynamic: Option<&crate::dynamic_providers::DynamicProviderCandidate>,
+    ) -> Result<Self, RuntimeError> {
+        let mut providers = Self::prepare(config)?;
+        let mut options = pi_plugin_models::ModelsPluginOptions::for_agent_dir(&config.agent_dir);
+        if let Some(key) = &config.api_key {
+            options = options.runtime_api_key(config.provider.clone(), key.clone());
+        }
+        if let Some(dynamic) = dynamic {
+            for (id, value) in dynamic.provider_configs() {
+                options = options.extension_provider_config(id, value);
+            }
+        }
+        providers.models_snapshot = Some(
+            pi_plugin_models::ModelsPlugin::load_with_transport(
+                options,
+                providers.transport.clone(),
+            )
+            .map_err(|error| RuntimeError::Build(error.to_string()))?,
+        );
+        let result = providers.refresh_openrouter(config).await;
+        if let Err(message) = result {
+            config
+                .settings_diagnostics
+                .push(pi_runtime::ResourceDiagnostic {
+                    kind: pi_runtime::DiagnosticKind::Warning,
+                    message,
+                    path: config.agent_dir.join("models.json"),
+                });
+        }
+        Ok(providers)
+    }
+
+    async fn refresh_openrouter(&mut self, config: &Config) -> Result<(), String> {
+        use pi_provider::CredentialSource;
+        let (_, signal) = pi_core::AbortHandle::new();
+        let models = self
+            .models_snapshot
+            .as_ref()
+            .expect("catalog refresh follows model snapshot preparation");
+        let route = models
+            .catalog_request_config(&"openrouter".into(), &signal)
+            .await?;
+        let key = match route.api_key {
+            Some(key) => Some(key),
+            None => StoredCredentialSource::new(
+                &config.agent_dir,
+                "openrouter",
+                selected_api_key(config, "openrouter"),
+                vec![(
+                    "OPENROUTER_API_KEY".into(),
+                    pi_provider::CredentialKind::ApiKey,
+                )],
+            )
+            .resolve(&signal)
+            .await
+            .map_err(|error| error.to_string())?
+            .map(|value| value.secret),
+        };
+        let Some(key) = key else {
+            return Ok(());
+        };
+        self.openrouter_catalog = pi_plugin_openrouter::refresh_account_catalog(
+            route
+                .base_url
+                .as_deref()
+                .unwrap_or(pi_plugin_openrouter::OPENROUTER_BASE_URL),
+            &key,
+            &route.headers,
+            config.runtime_settings.http_proxy.as_deref(),
+            self.openrouter_catalog.clone(),
+        )
+        .await?;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -68,7 +147,7 @@ impl BuiltinProviderSet {
         let stored_google_vertex = load("google-vertex")?;
         let stored_xai = load("xai")?;
         let stored_mistral = load("mistral")?;
-        let stored_azure = load("azure-openai-responses")?;
+        let stored_azure = load("azure")?.or(load("azure-openai-responses")?);
         let stored_openrouter = load("openrouter")?;
         let stored_copilot = load("github-copilot")?.and_then(|credential| {
             let token = credential.secret()?.to_owned();
@@ -105,7 +184,12 @@ impl BuiltinProviderSet {
         Ok(Self {
             transport,
             codex_transport_options,
-            effective_api_key,
+            openrouter_catalog: pi_plugin_openrouter::openrouter_models(),
+            models_snapshot: None,
+            stored_credentials: crate::credentials::read_credentials(
+                &config.agent_dir.join("auth.json"),
+            )
+            .map_err(RuntimeError::Build)?,
             provider_config,
             stored_anthropic,
             stored_google,
@@ -120,12 +204,12 @@ impl BuiltinProviderSet {
         })
     }
 
-    pub(crate) fn transport(&self) -> Arc<dyn HttpTransport> {
-        Arc::clone(&self.transport)
+    pub(crate) fn models_snapshot(&self) -> Option<pi_plugin_models::ModelsPlugin> {
+        self.models_snapshot.clone()
     }
 
-    pub(crate) fn effective_api_key(&self) -> Option<&str> {
-        self.effective_api_key.as_deref()
+    pub(crate) fn transport(&self) -> Arc<dyn HttpTransport> {
+        Arc::clone(&self.transport)
     }
 
     pub(crate) fn register(self, builder: PiRuntimeBuilder, config: &Config) -> PiRuntimeBuilder {
@@ -143,10 +227,33 @@ impl BuiltinProviderSet {
             stored_copilot,
             stored_bedrock,
             codex_credentials,
+            stored_credentials,
+            openrouter_catalog,
             ..
         } = self;
+        let codex_source = StoredCredentialSource::builtin(
+            &config.agent_dir,
+            "openai-codex",
+            selected_api_key(config, "openai-codex"),
+        );
+        let xai_source = StoredCredentialSource::builtin(
+            &config.agent_dir,
+            "xai",
+            selected_api_key(config, "xai"),
+        );
+        let anthropic_source = StoredCredentialSource::builtin(
+            &config.agent_dir,
+            "anthropic",
+            selected_api_key(config, "anthropic"),
+        );
+        let copilot_source = StoredCredentialSource::builtin(
+            &config.agent_dir,
+            "github-copilot",
+            selected_api_key(config, "github-copilot"),
+        );
         let builder = if config.provider == "openai-codex" {
             let credentials = codex_credentials.clone();
+            let codex_source = Arc::clone(&codex_source);
             let transport = Arc::clone(&transport);
             let transport_options = codex_transport_options.clone();
             builder.provider_plugin_factory(move || {
@@ -155,22 +262,31 @@ impl BuiltinProviderSet {
                     Arc::clone(&transport),
                     transport_options.clone(),
                 )
+                .with_credential_source(
+                    Arc::clone(&codex_source),
+                    Arc::clone(&transport),
+                    transport_options.clone(),
+                )
             })
         } else if config.provider == "xai" {
             let api_key = config.api_key.clone();
             let selected_xai = stored_xai.clone();
+            let xai_source = Arc::clone(&xai_source);
             let transport = Arc::clone(&transport);
-            builder.provider_plugin_factory(move || match &api_key {
-                Some(api_key) => {
-                    XAiPlugin::new_with_transport(Some(api_key.clone()), Arc::clone(&transport))
-                }
-                None => XAiPlugin::from_stored_with_transport(
-                    selected_xai
-                        .as_ref()
-                        .and_then(StoredCredential::secret)
-                        .map(str::to_string),
-                    Arc::clone(&transport),
-                ),
+            builder.provider_plugin_factory(move || {
+                (match &api_key {
+                    Some(api_key) => {
+                        XAiPlugin::new_with_transport(Some(api_key.clone()), Arc::clone(&transport))
+                    }
+                    None => XAiPlugin::from_stored_with_transport(
+                        selected_xai
+                            .as_ref()
+                            .and_then(StoredCredential::secret)
+                            .map(str::to_string),
+                        Arc::clone(&transport),
+                    ),
+                })
+                .with_credential_source(Arc::clone(&xai_source), Arc::clone(&transport))
             })
         } else if matches!(
             config.provider.as_str(),
@@ -182,7 +298,12 @@ impl BuiltinProviderSet {
                 | "mistral"
                 | "azure-openai-responses"
                 | "openrouter"
-        ) {
+                | "openai"
+                | "azure"
+        ) || pi_plugin_gateways::gateway_definitions()
+            .iter()
+            .any(|definition| definition.id == config.provider)
+        {
             builder
         } else {
             builder.try_provider_plugin_factory({
@@ -196,22 +317,48 @@ impl BuiltinProviderSet {
                 }
             })
         };
+        let openai_key = selected_api_key(config, "openai")
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .or_else(|| {
+                stored_credentials
+                    .get("openai")
+                    .and_then(StoredCredential::secret)
+                    .map(str::to_owned)
+            });
+        let openai_source = StoredCredentialSource::builtin(
+            &config.agent_dir,
+            "openai",
+            selected_api_key(config, "openai"),
+        );
+        let builder = builder.try_provider_plugin_factory({
+            let transport = Arc::clone(&transport);
+            move || {
+                pi_plugin_openai::OpenAiPlugin::from_stored_with_transport(
+                    openai_key.clone(),
+                    Arc::clone(&openai_source),
+                    Arc::clone(&transport),
+                )
+            }
+        });
         let explicit_api_key = selected_api_key(config, "anthropic");
         let builder = builder.provider_plugin_factory({
             let transport = Arc::clone(&transport);
-            move || match &explicit_api_key {
-                Some(api_key) => AnthropicPlugin::with_api_key_and_transport(
-                    api_key.clone(),
-                    Arc::clone(&transport),
-                ),
-                None => AnthropicPlugin::from_stored_with_transport(
-                    stored_anthropic.as_ref().and_then(|credential| {
-                        credential
-                            .secret()
-                            .map(|secret| (secret, credential.is_oauth()))
-                    }),
-                    Arc::clone(&transport),
-                ),
+            move || {
+                (match &explicit_api_key {
+                    Some(api_key) => AnthropicPlugin::with_api_key_and_transport(
+                        api_key.clone(),
+                        Arc::clone(&transport),
+                    ),
+                    None => AnthropicPlugin::from_stored_with_transport(
+                        stored_anthropic.as_ref().and_then(|credential| {
+                            credential
+                                .secret()
+                                .map(|secret| (secret, credential.is_oauth()))
+                        }),
+                        Arc::clone(&transport),
+                    ),
+                })
+                .with_credential_source(Arc::clone(&anthropic_source), Arc::clone(&transport))
             }
         });
         let builder = if config.provider == "openai-codex" {
@@ -222,6 +369,11 @@ impl BuiltinProviderSet {
             builder.provider_plugin_factory(move || {
                 OpenAiCodexPlugin::with_transport_options(
                     codex_credentials.clone(),
+                    Arc::clone(&transport),
+                    transport_options.clone(),
+                )
+                .with_credential_source(
+                    Arc::clone(&codex_source),
                     Arc::clone(&transport),
                     transport_options.clone(),
                 )
@@ -240,6 +392,7 @@ impl BuiltinProviderSet {
                         .map(str::to_string),
                     Arc::clone(&transport),
                 )
+                .with_credential_source(Arc::clone(&xai_source), Arc::clone(&transport))
             })
         };
         let explicit_api_key = selected_api_key(config, "google");
@@ -296,7 +449,8 @@ impl BuiltinProviderSet {
                 ),
             }
         });
-        let explicit_api_key = selected_api_key(config, "azure-openai-responses");
+        let explicit_api_key = selected_api_key(config, "azure")
+            .or_else(|| selected_api_key(config, "azure-openai-responses"));
         let builder = builder.try_provider_plugin_factory({
             let transport = Arc::clone(&transport);
             move || match &explicit_api_key {
@@ -316,37 +470,89 @@ impl BuiltinProviderSet {
         let explicit_api_key = selected_api_key(config, "openrouter");
         let builder = builder.try_provider_plugin_factory({
             let transport = Arc::clone(&transport);
-            move || match &explicit_api_key {
-                Some(api_key) => OpenRouterPlugin::new_with_transport(
-                    Some(api_key.clone()),
-                    Arc::clone(&transport),
-                ),
-                None => OpenRouterPlugin::from_stored_with_transport(
-                    stored_openrouter
-                        .as_ref()
-                        .and_then(StoredCredential::secret)
-                        .map(str::to_owned),
-                    Arc::clone(&transport),
-                ),
+            move || {
+                (match &explicit_api_key {
+                    Some(api_key) => OpenRouterPlugin::new_with_transport(
+                        Some(api_key.clone()),
+                        Arc::clone(&transport),
+                    ),
+                    None => OpenRouterPlugin::from_stored_with_transport(
+                        stored_openrouter
+                            .as_ref()
+                            .and_then(StoredCredential::secret)
+                            .map(str::to_owned),
+                        Arc::clone(&transport),
+                    ),
+                })
+                .map(|plugin| plugin.with_catalog(openrouter_catalog.clone()))
             }
         });
         let explicit_token = selected_api_key(config, "github-copilot");
         let builder = builder.try_provider_plugin_factory({
             let transport = Arc::clone(&transport);
-            move || match &explicit_token {
-                Some(token) => GitHubCopilotPlugin::new_with_transport(
-                    Some(token.clone()),
-                    None,
-                    Arc::clone(&transport),
-                ),
-                None => GitHubCopilotPlugin::from_stored_catalog_with_transport(
-                    stored_copilot
-                        .as_ref()
-                        .map(|(token, metadata)| metadata.credential(token)),
-                    Arc::clone(&transport),
-                ),
+            move || {
+                (match &explicit_token {
+                    Some(token) => GitHubCopilotPlugin::new_with_transport(
+                        Some(token.clone()),
+                        None,
+                        Arc::clone(&transport),
+                    ),
+                    None => GitHubCopilotPlugin::from_stored_catalog_with_transport(
+                        stored_copilot
+                            .as_ref()
+                            .map(|(token, metadata)| metadata.credential(token)),
+                        Arc::clone(&transport),
+                    ),
+                })
+                .map(|plugin| {
+                    plugin
+                        .with_credential_source(Arc::clone(&copilot_source), Arc::clone(&transport))
+                })
             }
         });
+        let mut builder = builder;
+        for definition in pi_plugin_gateways::gateway_definitions() {
+            let stored = stored_credentials.get(&definition.id);
+            let explicit = selected_api_key(config, &definition.id);
+            let mut available = explicit.is_some()
+                || stored.and_then(StoredCredential::secret).is_some()
+                || definition
+                    .environment
+                    .iter()
+                    .any(|key| std::env::var(key).is_ok_and(|value| !value.trim().is_empty()));
+            if definition.id.starts_with("cloudflare-") {
+                for key in ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_GATEWAY_ID"] {
+                    if key == "CLOUDFLARE_GATEWAY_ID" && definition.id != "cloudflare-ai-gateway" {
+                        continue;
+                    }
+                    available &= stored
+                        .and_then(StoredCredential::environment)
+                        .and_then(|env| env.get(key))
+                        .is_some()
+                        || std::env::var(key).is_ok_and(|value| !value.trim().is_empty());
+                }
+            }
+            let source: Arc<dyn pi_provider::CredentialSource> =
+                Arc::new(StoredCredentialSource::new(
+                    &config.agent_dir,
+                    &definition.id,
+                    explicit,
+                    definition
+                        .environment
+                        .iter()
+                        .map(|key| (key.clone(), pi_provider::CredentialKind::ApiKey))
+                        .collect(),
+                ));
+            let transport = Arc::clone(&transport);
+            builder = builder.provider_plugin_factory(move || {
+                pi_plugin_gateways::GatewayPlugin::new(
+                    definition,
+                    Arc::clone(&source),
+                    available,
+                    Arc::clone(&transport),
+                )
+            });
+        }
         let explicit_token = selected_api_key(config, "amazon-bedrock");
         builder.try_provider_plugin_factory(move || {
             let token = explicit_token.clone().or_else(|| {
@@ -506,8 +712,8 @@ mod tests {
         credentials.insert(
             "github-copilot",
             json!({
-                "type":"oauth", "access":"stored-key", "refresh":"refresh", "expires":0,
-                "enterpriseUrl":"github.example.com", "availableModelIds":["gpt-4.1"],
+                "type":"oauth", "access":"stored-key", "refresh":"refresh", "expires":9_007_199_254_740_991_u64,
+                "enterpriseUrl":"github.example.com", "availableModelIds":["gemini-3.8-flash"],
             }),
         );
         std::fs::write(
@@ -545,6 +751,7 @@ mod tests {
                     .build()
                     .unwrap();
                 let mut expected = vec![
+                    "openai-provider",
                     "anthropic-provider",
                     "openai-codex-provider",
                     "xai-provider",
@@ -569,6 +776,14 @@ mod tests {
                     }
                     _ => {}
                 }
+                let mut expected: Vec<String> = expected.into_iter().map(str::to_owned).collect();
+                expected.pop(); // Bedrock follows independently registered gateways.
+                expected.extend(
+                    pi_plugin_gateways::gateway_definitions()
+                        .iter()
+                        .map(|definition| format!("{}-provider", definition.id)),
+                );
+                expected.push("amazon-bedrock-provider".into());
                 for reload in [false, true] {
                     if reload {
                         runtime.reload().await.unwrap();

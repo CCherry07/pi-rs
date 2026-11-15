@@ -24,7 +24,7 @@ pub enum AnthropicMode {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+#[serde(rename_all = "camelCase", default)]
 pub struct AnthropicMessagesCompat {
     pub supports_eager_tool_input_streaming: Option<bool>,
     pub supports_long_cache_retention: Option<bool>,
@@ -34,8 +34,26 @@ pub struct AnthropicMessagesCompat {
     pub force_adaptive_thinking: Option<bool>,
     pub allow_empty_signature: Option<bool>,
     pub supports_strict_tools: Option<bool>,
-    pub allowed_fallback_models: Option<Vec<String>>,
+    pub allowed_fallback_models: Option<Vec<AnthropicFallbackModel>>,
     pub supports_tool_references: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum AnthropicFallbackModel {
+    Legacy(String),
+    Model {
+        provider: String,
+        model: String,
+        cost: pi_core::ModelCost,
+    },
+}
+impl AnthropicFallbackModel {
+    fn model(&self) -> &str {
+        match self {
+            Self::Legacy(model) | Self::Model { model, .. } => model,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +66,7 @@ pub(crate) struct ResolvedAnthropicMessagesCompat {
     pub force_adaptive_thinking: bool,
     pub allow_empty_signature: bool,
     pub supports_tool_references: bool,
+    pub allowed_fallback_models: Vec<AnthropicFallbackModel>,
 }
 
 pub(crate) fn compatibility(request: &ProviderRequest) -> ResolvedAnthropicMessagesCompat {
@@ -77,6 +96,7 @@ pub(crate) fn compatibility(request: &ProviderRequest) -> ResolvedAnthropicMessa
         supports_tool_references: configured
             .supports_tool_references
             .unwrap_or(default_tool_references),
+        allowed_fallback_models: configured.allowed_fallback_models.unwrap_or_default(),
     }
 }
 
@@ -146,8 +166,9 @@ pub fn request_body(request: &ProviderRequest, mode: AnthropicMode) -> Value {
             "text": "You are Claude Code, Anthropic's official CLI for Claude."
         }));
     }
-    if !request.system_prompt.is_empty() {
-        system.push(json!({"type": "text", "text": request.system_prompt}));
+    let system_prompt = pi_core::SystemMessage::fold(&request.system_prompt, &request.messages);
+    if !system_prompt.is_empty() {
+        system.push(json!({"type": "text", "text": system_prompt}));
     }
     let mut body = json!({
         "model": request.model.as_str(),
@@ -155,6 +176,15 @@ pub fn request_body(request: &ProviderRequest, mode: AnthropicMode) -> Value {
         "max_tokens": request.max_output_tokens.unwrap_or(16_384),
         "stream": true
     });
+    if !compat.allowed_fallback_models.is_empty() {
+        body["fallbacks"] = json!(
+            compat
+                .allowed_fallback_models
+                .iter()
+                .map(|fallback| json!({"model":fallback.model()}))
+                .collect::<Vec<_>>()
+        );
+    }
     if !system.is_empty() {
         body["system"] = Value::Array(system.clone());
     }
@@ -357,6 +387,7 @@ fn project_message(
     loaded_tools: &mut HashSet<String>,
 ) -> Vec<Value> {
     match message {
+        Message::System(_) => Vec::new(),
         Message::User(message) => vec![json!({
             "role": "user",
             "content": message.content.iter().filter_map(project_user_block).collect::<Vec<_>>()

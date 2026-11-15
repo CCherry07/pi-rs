@@ -87,8 +87,9 @@ impl GenerationComponents<'_> {
         let features = config.features();
         let memory_enabled = self.memory.is_some();
         let mut skill_activity_observer = None;
+        let models_snapshot = builtin_providers.models_snapshot();
         let transport = builtin_providers.transport();
-        let effective_api_key = builtin_providers.effective_api_key().map(str::to_string);
+        let effective_api_key = config.api_key.clone();
         let skill_options =
             crate::skills::runtime_skill_options(config, project_trusted, memory_enabled);
         if features.skills && memory_enabled {
@@ -137,11 +138,17 @@ impl GenerationComponents<'_> {
         let skill_prompt_projector = features
             .subagents
             .then(|| Arc::new(SubagentSkillPromptProjector::new(self.subagents.clone())));
-        let mut builder = builder.try_provider_plugin_factory({
-            let model_options = model_options.clone();
-            let transport = Arc::clone(&transport);
-            move || ModelsPlugin::load_with_transport(model_options.clone(), Arc::clone(&transport))
-        });
+        let mut builder = if let Some(snapshot) = models_snapshot {
+            builder.provider_plugin_factory(move || snapshot.clone())
+        } else {
+            builder.try_provider_plugin_factory({
+                let model_options = model_options.clone();
+                let transport = Arc::clone(&transport);
+                move || {
+                    ModelsPlugin::load_with_transport(model_options.clone(), Arc::clone(&transport))
+                }
+            })
+        };
         if features.prompt_templates {
             builder = builder.plugin_factory({
                 let prompt_template_options = prompt_template_options.clone();
@@ -858,7 +865,10 @@ mod tests {
 
         assert!(
             runtime
-                .model(&ProviderId::new("openai-codex"), &ModelId::new("gpt-5.5"))
+                .model(
+                    &ProviderId::new("openai-codex"),
+                    &ModelId::new("gpt-5.6-sol")
+                )
                 .is_some()
         );
         assert!(runtime.available_models().is_empty());
@@ -975,7 +985,7 @@ mod tests {
                     "access": "copilot-token",
                     "refresh": "github-token",
                     "expires": 4_102_444_800_000_f64,
-                    "availableModelIds": ["gpt-4.1"]
+                    "availableModelIds": ["gemini-3.8-flash"]
                 }
             })
             .to_string(),
@@ -998,7 +1008,7 @@ mod tests {
             ("google-vertex", "gemini-2.5-flash"),
             ("mistral", "mistral-small-latest"),
             ("openrouter", "openai/gpt-5.4"),
-            ("github-copilot", "gpt-4.1"),
+            ("github-copilot", "gemini-3.8-flash"),
         ] {
             assert!(
                 runtime
@@ -1071,7 +1081,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let mut config = app_config(directory.path(), Some("gpt-5.5"));
+        let mut config = app_config(directory.path(), Some("gpt-5.6-sol"));
         config.provider = "openai-codex".to_string();
         config.requested_provider = Some("openai-codex".to_string());
 
@@ -1087,14 +1097,15 @@ mod tests {
 
         assert_eq!(runtime.agent().state().provider_id.as_str(), "openai-codex");
         assert!(runtime.available_models().iter().any(|model| {
-            model.provider == ProviderId::new("openai-codex") && model.id == ModelId::new("gpt-5.5")
+            model.provider == ProviderId::new("openai-codex")
+                && model.id == ModelId::new("gpt-5.6-sol")
         }));
     }
 
     #[test]
     fn openai_codex_provider_loads_its_builtin_model_catalog() {
         let directory = tempfile::tempdir().unwrap();
-        let mut config = app_config(directory.path(), Some("gpt-5.5"));
+        let mut config = app_config(directory.path(), Some("gpt-5.6-sol"));
         config.provider = "openai-codex".to_string();
         config.requested_provider = Some("openai-codex".to_string());
         config.base_url = "https://chatgpt.com/backend-api".to_string();
@@ -1110,10 +1121,13 @@ mod tests {
         .unwrap();
 
         let model = runtime
-            .model(&ProviderId::new("openai-codex"), &ModelId::new("gpt-5.5"))
+            .model(
+                &ProviderId::new("openai-codex"),
+                &ModelId::new("gpt-5.6-sol"),
+            )
             .unwrap();
         assert_eq!(model.context_window, 272_000);
-        assert_eq!(runtime.agent().state().model_id.as_str(), "gpt-5.5");
+        assert_eq!(runtime.agent().state().model_id.as_str(), "gpt-5.6-sol");
     }
 
     #[test]

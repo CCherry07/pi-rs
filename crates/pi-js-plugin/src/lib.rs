@@ -1830,7 +1830,10 @@ fn parse_input_images(value: &Value) -> Result<Vec<ImageContent>, String> {
 fn pi_prompt_input(messages: &[Message]) -> (String, Vec<ContentBlock>) {
     let Some(user) = messages.iter().rev().find_map(|message| match message {
         Message::User(user) => Some(user),
-        Message::Assistant(_) | Message::ToolResult(_) | Message::Custom(_) => None,
+        Message::System(_)
+        | Message::Assistant(_)
+        | Message::ToolResult(_)
+        | Message::Custom(_) => None,
     }) else {
         return (String::new(), Vec::new());
     };
@@ -1912,7 +1915,8 @@ fn message_end_replacement(value: &Value) -> Result<Message, String> {
 fn same_message_role(left: &Message, right: &Message) -> bool {
     matches!(
         (left, right),
-        (Message::User(_), Message::User(_))
+        (Message::System(_), Message::System(_))
+            | (Message::User(_), Message::User(_))
             | (Message::Assistant(_), Message::Assistant(_))
             | (Message::ToolResult(_), Message::ToolResult(_))
             | (Message::Custom(_), Message::Custom(_))

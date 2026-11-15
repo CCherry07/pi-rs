@@ -31,6 +31,7 @@ pi-plugin-manager.workspace = true
 pi-plugin-memory-hermes.workspace = true
 pi-plugin-mistral.workspace = true
 pi-plugin-models.workspace = true
+pi-plugin-gateways.workspace = true
 pi-plugin-openai.workspace = true
 pi-plugin-openrouter.workspace = true
 pi-plugin-prompts.workspace = true

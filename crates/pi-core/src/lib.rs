@@ -18,7 +18,7 @@ pub use events::AgentEvent;
 pub use ids::{ModelId, PluginId, ProviderId, RunId, ToolCallId};
 pub use message::{
     AssistantMessage, ContentBlock, CustomMessage, CustomMessageContent, CustomMessageInput,
-    DeferredHandle, ImageContent, Message, TextContent, ThinkingContent, ToolCall,
+    DeferredHandle, ImageContent, Message, SystemMessage, TextContent, ThinkingContent, ToolCall,
     ToolResultMessage, UserMessage,
 };
 pub use model::{

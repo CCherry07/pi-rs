@@ -281,6 +281,10 @@ struct OpenAiResponsesCompatSchema {
     supports_additional_tools: Option<bool>,
     supports_tool_search: Option<bool>,
     supports_explicit_prompt_cache_mode: Option<bool>,
+    supports_mid_convo_effort: Option<bool>,
+    supports_mid_convo_system_messages: Option<bool>,
+    supports_max_output_tokens: Option<bool>,
+    prompt_cache_key_mode: Option<PromptCacheKeyModeSchema>,
 }
 
 #[allow(dead_code)]
@@ -295,8 +299,20 @@ struct AnthropicMessagesCompatSchema {
     force_adaptive_thinking: Option<bool>,
     allow_empty_signature: Option<bool>,
     supports_strict_tools: Option<bool>,
-    allowed_fallback_models: Option<Vec<String>>,
+    allowed_fallback_models: Option<Vec<AnthropicFallbackModelSchema>>,
     supports_tool_references: Option<bool>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum AnthropicFallbackModelSchema {
+    Legacy(String),
+    Model {
+        provider: String,
+        model: String,
+        cost: ModelCostConfig,
+    },
 }
 
 #[allow(dead_code)]
@@ -322,6 +338,15 @@ enum ThinkingFormatSchema {
     QwenChatTemplate,
     StringThinking,
     AntLing,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum PromptCacheKeyModeSchema {
+    Auto,
+    Enabled,
+    Disabled,
 }
 
 #[allow(dead_code)]
@@ -1173,6 +1198,8 @@ mod tests {
         assert!(encoded.contains("supportsFinishReason"));
         assert!(encoded.contains("thinkingTokenBudgetField"));
         assert!(encoded.contains("supportsExplicitPromptCacheMode"));
+        assert!(encoded.contains("supportsMaxOutputTokens"));
+        assert!(encoded.contains("promptCacheKeyMode"));
         assert!(encoded.contains("allowedFallbackModels"));
         assert!(encoded.contains("preferred_min_throughput"));
         assert!(encoded.contains("thinking.budget"));

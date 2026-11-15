@@ -456,7 +456,7 @@ function applyStreamUpdate(state: AssistantStreamState, update: StreamUpdate): A
     case 'start': {
       const metadata = update.metadata
       const header = { ...state.header, api: metadata.api, provider: metadata.provider, model: metadata.model, timestamp: metadata.timestamp }
-      for (const key of ['responseModel', 'responseId', 'diagnostics', 'deferred', 'rawStopReason', 'endTurn']) {
+      for (const key of ['providerThinkingLevel', 'responseModel', 'responseId', 'diagnostics', 'deferred', 'rawStopReason', 'endTurn']) {
         setOptional(header, key, metadata[key])
       }
       return { ...state, header }

@@ -5,3 +5,4 @@ mod mcp_configuration;
 mod mcp_reload;
 mod plugin_history_reload;
 mod reload_state;
+mod responses_history;

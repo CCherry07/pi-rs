@@ -103,7 +103,10 @@ impl AgentMessage {
                 )
             })?
             .to_string();
-        if matches!(role.as_str(), "user" | "assistant" | "toolResult") {
+        if matches!(
+            role.as_str(),
+            "system" | "user" | "assistant" | "toolResult"
+        ) {
             // Deserialize through a borrowed Value so the original wire object
             // can preserve unknown extensions without first cloning the whole
             // nested message tree.
@@ -128,13 +131,16 @@ impl AgentMessage {
             SessionWireError::InvalidPayload("agent message source range is invalid".to_string())
         })?;
         match serde_json::from_str::<Message>(raw) {
-            Ok(message @ (Message::User(_) | Message::Assistant(_) | Message::ToolResult(_))) => {
-                Ok(Self(Arc::new(AgentMessageKind::Standard {
-                    message,
-                    original: Some(OriginalMessage::SharedRaw { source, range }),
-                    display_text_cache: OnceLock::new(),
-                })))
-            }
+            Ok(
+                message @ (Message::System(_)
+                | Message::User(_)
+                | Message::Assistant(_)
+                | Message::ToolResult(_)),
+            ) => Ok(Self(Arc::new(AgentMessageKind::Standard {
+                message,
+                original: Some(OriginalMessage::SharedRaw { source, range }),
+                display_text_cache: OnceLock::new(),
+            }))),
             Ok(Message::Custom(_)) | Err(_) => {
                 let value = serde_json::from_str(raw)
                     .map_err(|error| SessionWireError::InvalidPayload(error.to_string()))?;
@@ -145,6 +151,10 @@ impl AgentMessage {
 
     pub fn role(&self) -> &str {
         match self.0.as_ref() {
+            AgentMessageKind::Standard {
+                message: Message::System(_),
+                ..
+            } => "system",
             AgentMessageKind::Standard {
                 message: Message::User(_),
                 ..

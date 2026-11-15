@@ -9,8 +9,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
 use pi_core::{
-    AbortSignal, ContentBlock, ContentMetadata, Message, ProviderId, ResponseMetadata,
-    ResponseMetadataPatch, StopReason, StreamEvent, ToolCallId, ToolSpec, Usage,
+    AbortSignal, Message, ProviderId, ResponseMetadata, StreamEvent, ToolSpec, Usage,
 };
 use pi_plugin::{
     Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderRequest,
@@ -27,10 +26,22 @@ use serde_json::{Value, json};
 use crate::config::{OpenAiCompatibleConfig, validate_config};
 use crate::request::SessionAffinityFormat;
 
+mod replay;
+mod state;
+
 pub const OPENAI_RESPONSES_API: &str = "openai-responses";
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptCacheKeyMode {
+    #[default]
+    Auto,
+    Enabled,
+    Disabled,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+#[serde(rename_all = "camelCase", default)]
 pub struct OpenAiResponsesCompat {
     pub supports_developer_role: Option<bool>,
     pub session_affinity_format: Option<SessionAffinityFormat>,
@@ -41,6 +52,10 @@ pub struct OpenAiResponsesCompat {
     pub supports_additional_tools: Option<bool>,
     pub supports_tool_search: Option<bool>,
     pub supports_explicit_prompt_cache_mode: Option<bool>,
+    pub supports_mid_convo_effort: Option<bool>,
+    pub supports_mid_convo_system_messages: Option<bool>,
+    pub supports_max_output_tokens: Option<bool>,
+    pub prompt_cache_key_mode: Option<PromptCacheKeyMode>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +67,10 @@ struct ResolvedOpenAiResponsesCompat {
     supports_additional_tools: bool,
     supports_tool_search: bool,
     supports_explicit_prompt_cache_mode: bool,
+    supports_mid_convo_effort: bool,
+    supports_mid_convo_system_messages: bool,
+    supports_max_output_tokens: bool,
+    prompt_cache_key_mode: PromptCacheKeyMode,
 }
 
 impl ResolvedOpenAiResponsesCompat {
@@ -83,6 +102,12 @@ impl ResolvedOpenAiResponsesCompat {
             supports_explicit_prompt_cache_mode: configured
                 .supports_explicit_prompt_cache_mode
                 .unwrap_or(false),
+            supports_mid_convo_effort: configured.supports_mid_convo_effort.unwrap_or(false),
+            supports_mid_convo_system_messages: configured
+                .supports_mid_convo_system_messages
+                .unwrap_or(false),
+            supports_max_output_tokens: configured.supports_max_output_tokens.unwrap_or(true),
+            prompt_cache_key_mode: configured.prompt_cache_key_mode.unwrap_or_default(),
         }
     }
 }
@@ -110,14 +135,18 @@ impl OpenAiResponsesCompatibleProvider {
         responses_endpoint(&self.config.base_url)
     }
 
-    fn headers(&self, request: &ProviderRequest) -> BTreeMap<String, String> {
+    fn headers(
+        &self,
+        request: &ProviderRequest,
+        cache_retention: CacheRetention,
+    ) -> BTreeMap<String, String> {
         let mut headers = self.config.headers.clone();
         insert_header(&mut headers, "Accept", "text/event-stream");
         insert_header(&mut headers, "Content-Type", "application/json");
         if let Some(key) = &self.config.api_key {
             insert_header(&mut headers, "Authorization", format!("Bearer {key}"));
         }
-        for (name, value) in response_affinity_headers(request) {
+        for (name, value) in response_affinity_headers(request, cache_retention) {
             insert_header(&mut headers, name, value);
         }
         for (name, value) in &request.headers {
@@ -147,15 +176,34 @@ impl Provider for OpenAiResponsesCompatibleProvider {
         context: ProviderCallContext,
         signal: AbortSignal,
     ) -> Result<ProviderStream, ProviderError> {
-        let headers = self.headers(&request);
+        let cache_retention = cache_retention();
+        let headers = self.headers(&request, cache_retention);
         let endpoint = request
             .model_spec
             .as_ref()
             .and_then(|model| model.base_url.as_deref())
             .map(responses_endpoint)
             .unwrap_or_else(|| self.endpoint());
+        // Match Pi's direct ChatGPT grant detection, not arbitrary bearer-auth
+        // gateways. Keep credential inspection inside the provider, never in
+        // public model metadata or the semantic request.
+        let base_url = request
+            .model_spec
+            .as_ref()
+            .and_then(|model| model.base_url.as_deref())
+            .unwrap_or(&self.config.base_url);
+        let chatgpt_sign_in = self.config.provider_id.as_str() == "openai"
+            && base_url == "https://api.openai.com/v1"
+            && self
+                .config
+                .api_key
+                .as_deref()
+                .is_some_and(|key| !key.starts_with("sk-"));
         let payload = context
-            .before_provider_request(&signal, request_body(&request))
+            .before_provider_request(
+                &signal,
+                request_body_with_options(&request, cache_retention, chatgpt_sign_in),
+            )
             .await?;
         let response = post_json_with_provider_hooks(
             self.transport.as_ref(),
@@ -184,12 +232,23 @@ impl Provider for OpenAiResponsesCompatibleProvider {
             )));
         }
 
-        Ok(stream(
-            self.config.provider_id.clone(),
-            request.model,
-            OPENAI_RESPONSES_API,
-            response.body,
-            signal,
+        let effort = configuration_effort(&request, chatgpt_sign_in);
+        Ok(Box::pin(
+            stream(
+                self.config.provider_id.clone(),
+                request.model,
+                OPENAI_RESPONSES_API,
+                response.body,
+                signal,
+            )
+            .map(move |event| {
+                event.map(|mut event| {
+                    if let StreamEvent::Start { metadata } = &mut event {
+                        metadata.provider_thinking_level.clone_from(&effort);
+                    }
+                    event
+                })
+            }),
         ))
     }
 }
@@ -210,9 +269,19 @@ fn responses_endpoint(base: &str) -> String {
     }
 }
 
-/// Projects semantic messages into OpenAI Responses input items.
+/// Projects semantic messages without a target model. Model-bound signatures
+/// are omitted; normal provider requests use the model-aware replay path.
 pub fn input_items(messages: &[Message]) -> Vec<Value> {
-    messages.iter().flat_map(message_input_items).collect()
+    replay::balanced(messages, None).iter().enumerate()
+        .flat_map(|(position, message)| replay::project(message, None, position)).collect()
+}
+
+/// Model-aware replay for sibling Responses transports. Their system prompt
+/// remains in the transport-owned instructions field; explicit updates stay in input.
+pub(crate) fn replay_input(request: &ProviderRequest) -> Vec<Value> {
+    let mut compat = ResolvedOpenAiResponsesCompat::for_request(request);
+    compat.supports_mid_convo_system_messages = true;
+    input_items_with_deferred_tools(request, &compat, None)
 }
 
 /// Projects semantic tools into OpenAI Responses function definitions.
@@ -247,16 +316,22 @@ fn tools_with_compat(
 
 /// Projects a semantic request into an OpenAI Responses payload.
 pub fn request_body(request: &ProviderRequest) -> Value {
-    request_body_with_cache_retention(request, cache_retention())
+    request_body_with_options(request, cache_retention(), false)
 }
 
-fn request_body_with_cache_retention(
+fn request_body_with_options(
     request: &ProviderRequest,
     cache_retention: CacheRetention,
+    chatgpt_sign_in: bool,
 ) -> Value {
     let compat = ResolvedOpenAiResponsesCompat::for_request(request);
     let mut input = Vec::new();
-    if !request.system_prompt.is_empty() {
+    let system_prompt = if compat.supports_mid_convo_system_messages {
+        request.system_prompt.clone()
+    } else {
+        pi_core::SystemMessage::fold(&request.system_prompt, &request.messages)
+    };
+    if !system_prompt.is_empty() {
         let role = if request
             .model_spec
             .as_ref()
@@ -267,9 +342,17 @@ fn request_body_with_cache_retention(
         } else {
             "system"
         };
-        input.push(json!({"role": role, "content": request.system_prompt}));
+        input.push(json!({"role": role, "content": system_prompt}));
     }
-    input.extend(input_items_with_deferred_tools(request, &compat));
+    let configuration_effort = configuration_effort(request, chatgpt_sign_in);
+    input.extend(input_items_with_deferred_tools(
+        request,
+        &compat,
+        configuration_effort.as_deref(),
+    ));
+    if let Some(effort) = &configuration_effort {
+        input.push(json!({"type":"configuration_update","reasoning":{"effort":effort}}));
+    }
     let deferred_names = deferred_tool_names(request, &compat);
     let immediate_tools = request
         .tools
@@ -303,7 +386,7 @@ fn request_body_with_cache_retention(
             );
         if let Some(effort) = effort {
             payload["reasoning"] = json!({
-                    "effort": effort,
+                "effort": if configuration_effort.is_some() { "medium" } else { &effort },
                 "summary": "auto"
             });
             payload["include"] = json!(["reasoning.encrypted_content"]);
@@ -319,26 +402,32 @@ fn request_body_with_cache_retention(
                 .unwrap_or_else(|| "none".to_string())
         });
     }
-    if let Some(max_tokens) = request.max_output_tokens {
+    if let Some(max_tokens) = request.max_output_tokens
+        && compat.supports_max_output_tokens
+        && !chatgpt_sign_in
+    {
         payload["max_output_tokens"] = json!(max_tokens.max(16));
     }
-    match cache_retention {
-        CacheRetention::None if compat.supports_explicit_prompt_cache_mode => {
-            payload["prompt_cache_options"] = json!({"mode": "explicit"});
-        }
-        CacheRetention::None => {}
-        CacheRetention::Short => {
-            if let Some(session_id) = &request.session_id {
-                payload["prompt_cache_key"] = Value::String(session_id.clone());
+    if cache_retention != CacheRetention::None
+        && compat.prompt_cache_key_mode != PromptCacheKeyMode::Disabled
+        && let Some(session_id) = &request.session_id
+    {
+        // Pi counts Unicode code points, not UTF-8 bytes, for the 64-character limit.
+        payload["prompt_cache_key"] = Value::String(session_id.chars().take(64).collect());
+    }
+    if !chatgpt_sign_in {
+        match cache_retention {
+            CacheRetention::None if compat.supports_explicit_prompt_cache_mode => {
+                payload["prompt_cache_options"] = json!({"mode": "explicit"});
             }
-        }
-        CacheRetention::Long => {
-            if let Some(session_id) = &request.session_id {
-                payload["prompt_cache_key"] = Value::String(session_id.clone());
+            CacheRetention::Long if compat.supports_long_cache_retention => {
+                if compat.supports_explicit_prompt_cache_mode {
+                    payload["prompt_cache_options"] = json!({"ttl": "30m"});
+                } else {
+                    payload["prompt_cache_retention"] = json!("24h");
+                }
             }
-            if compat.supports_long_cache_retention {
-                payload["prompt_cache_retention"] = Value::String("24h".to_string());
-            }
+            _ => {}
         }
     }
     // models.json samplingParams are applied last so user keys win.
@@ -346,6 +435,26 @@ fn request_body_with_cache_retention(
         payload.extend(request.sampling_params.clone());
     }
     payload
+}
+
+fn configuration_effort(request: &ProviderRequest, chatgpt_sign_in: bool) -> Option<String> {
+    if chatgpt_sign_in
+        || request.thinking_level == pi_core::ThinkingLevel::Off
+        || !ResolvedOpenAiResponsesCompat::for_request(request).supports_mid_convo_effort
+    {
+        return None;
+    }
+    let model = request.model_spec.as_ref()?;
+    if !model.reasoning || model.api != OPENAI_RESPONSES_API {
+        return None;
+    }
+    Some(
+        model
+            .thinking_level_map
+            .get(request.thinking_level.as_str())
+            .and_then(Clone::clone)
+            .unwrap_or_else(|| request.thinking_level.as_str().into()),
+    )
 }
 
 fn deferred_tool_names(
@@ -370,6 +479,7 @@ fn deferred_tool_names(
 fn input_items_with_deferred_tools(
     request: &ProviderRequest,
     compat: &ResolvedOpenAiResponsesCompat,
+    configuration_effort: Option<&str>,
 ) -> Vec<Value> {
     let mut items = Vec::new();
     let mut loaded = std::collections::HashSet::new();
@@ -378,8 +488,57 @@ fn input_items_with_deferred_tools(
         .iter()
         .map(|tool| (tool.name.as_str(), tool))
         .collect::<HashMap<_, _>>();
-    for message in &request.messages {
-        items.extend(message_input_items(message));
+    let balanced = replay::balanced(&request.messages, request.model_spec.as_ref());
+    for (position, message) in balanced.iter().enumerate() {
+        if let Message::System(system) = message {
+            if compat.supports_mid_convo_system_messages {
+                let text = if position == 0 && request.system_prompt.is_empty() {
+                    system.render()
+                } else {
+                    let mut parts = vec![system.instruction_text()];
+                    parts.extend(system.sections.iter().map(|(name, value)| match value {
+                        Some(text) => {
+                            format!("Updated system prompt section \"{name}\":\n\n{text}")
+                        }
+                        None => format!("Removed system prompt section \"{name}\"."),
+                    }));
+                    parts
+                        .into_iter()
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
+                };
+                if !text.is_empty() {
+                    let role = if compat.supports_developer_role
+                        && request
+                            .model_spec
+                            .as_ref()
+                            .is_some_and(|model| model.reasoning)
+                    {
+                        "developer"
+                    } else {
+                        "system"
+                    };
+                    items.push(json!({"role":role,"content":text}));
+                }
+            }
+            continue;
+        }
+        let leading_system = matches!(balanced.first(), Some(Message::System(_)));
+        let projected = replay::project(message, request.model_spec.as_ref(), position.saturating_sub(usize::from(leading_system)));
+        if !projected.is_empty()
+            && configuration_effort.is_some()
+            && let Message::Assistant(assistant) = message
+            && request.model_spec.as_ref().is_some_and(|model| {
+                assistant.provider == model.provider
+                    && assistant.api == model.api
+                    && assistant.model == model.id
+            })
+            && let Some(effort) = &assistant.provider_thinking_level
+        {
+            items.push(json!({"type":"configuration_update","reasoning":{"effort":effort}}));
+        }
+        items.extend(projected);
         let Message::ToolResult(result) = message else {
             continue;
         };
@@ -453,6 +612,7 @@ pub fn stream(
                     for event in events {
                         if event.data == "[DONE]" {
                             for event in state.finish() { yield Ok(event); }
+                            if let Some(error) = state.take_pending_error() { yield Err(error); }
                             return;
                         }
                         match state.consume(&event.data) {
@@ -482,6 +642,7 @@ pub fn stream(
                         Err(error) => { yield Err(map_transport_error(error)); return; }
                     }
                     for event in state.finish() { yield Ok(event); }
+                    if let Some(error) = state.take_pending_error() { yield Err(error); }
                     return;
                 }
             }
@@ -489,346 +650,8 @@ pub fn stream(
     })
 }
 
-fn message_input_items(message: &Message) -> Vec<Value> {
-    match message {
-        Message::User(message) => vec![json!({
-            "type": "message",
-            "role": "user",
-            "content": message.content.iter().filter_map(input_content).collect::<Vec<_>>()
-        })],
-        Message::Custom(message) => vec![json!({
-            "type": "message",
-            "role": "user",
-            "content": message
-                .content
-                .to_blocks()
-                .iter()
-                .filter_map(input_content)
-                .collect::<Vec<_>>()
-        })],
-        Message::Assistant(message) => {
-            let mut items = Vec::new();
-            let text = message
-                .content
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !text.is_empty() {
-                items.push(json!({
-                    "type": "message", "role": "assistant",
-                    "content": [{"type": "output_text", "text": text}]
-                }));
-            }
-            items.extend(message.content.iter().filter_map(|block| match block {
-                ContentBlock::ToolCall(call) => Some(json!({
-                    "type": "function_call",
-                    "call_id": call.id.as_str(),
-                    "name": call.name,
-                    "arguments": call.arguments.to_string()
-                })),
-                _ => None,
-            }));
-            items
-        }
-        Message::ToolResult(message) => vec![json!({
-            "type": "function_call_output",
-            "call_id": message.tool_call_id.as_str(),
-            "output": message.content.iter().filter_map(|block| match block {
-                ContentBlock::Text(text) => Some(text.text.as_str()),
-                ContentBlock::Thinking(text) => Some(text.thinking.as_str()),
-                _ => None,
-            }).collect::<Vec<_>>().join("\n")
-        })],
-    }
-}
 
-fn input_content(block: &ContentBlock) -> Option<Value> {
-    match block {
-        ContentBlock::Text(text) => Some(json!({"type": "input_text", "text": text.text})),
-        ContentBlock::Image(image) => Some(json!({
-            "type": "input_image",
-            "image_url": format!("data:{};base64,{}", image.mime_type, image.data)
-        })),
-        ContentBlock::Thinking(_) | ContentBlock::ToolCall(_) => None,
-    }
-}
-
-struct StreamState {
-    text_index: Option<usize>,
-    thinking_index: Option<usize>,
-    tools: HashMap<String, usize>,
-    had_tool_call: bool,
-    next_index: usize,
-    closed: bool,
-    requested_model: Option<String>,
-    pending_error: Option<ProviderError>,
-}
-
-impl StreamState {
-    fn new(model: &pi_core::ModelId) -> Self {
-        Self {
-            text_index: None,
-            thinking_index: None,
-            tools: HashMap::new(),
-            had_tool_call: false,
-            next_index: 0,
-            closed: false,
-            requested_model: Some(model.as_str().to_string()),
-            pending_error: None,
-        }
-    }
-
-    fn take_pending_error(&mut self) -> Option<ProviderError> {
-        self.pending_error.take()
-    }
-
-    fn consume(&mut self, data: &str) -> Result<Vec<StreamEvent>, ProviderError> {
-        let value: Value = serde_json::from_str(data).map_err(|error| {
-            ProviderError::Protocol(format!("invalid OpenAI Responses SSE JSON: {error}"))
-        })?;
-        let kind = value
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let mut events = Vec::new();
-        if matches!(
-            kind,
-            "response.created"
-                | "response.completed"
-                | "response.done"
-                | "response.incomplete"
-                | "response.failed"
-        ) {
-            let response = value.get("response").unwrap_or(&Value::Null);
-            let status = response.get("status").and_then(Value::as_str);
-            let incomplete_reason = response
-                .pointer("/incomplete_details/reason")
-                .and_then(Value::as_str);
-            let terminal = kind != "response.created";
-            let patch = ResponseMetadataPatch {
-                response_model: response
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .filter(|model| self.requested_model.as_deref() != Some(*model))
-                    .map(str::to_string),
-                response_id: response
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                raw_stop_reason: terminal
-                    .then(|| match (status, incomplete_reason) {
-                        (Some(status), Some(reason)) => Some(format!("{status}.{reason}")),
-                        (Some(status), None) => Some(status.to_string()),
-                        (None, Some(reason)) => Some(reason.to_string()),
-                        (None, None) => None,
-                    })
-                    .flatten(),
-                end_turn: response.get("end_turn").and_then(Value::as_bool),
-                ..ResponseMetadataPatch::default()
-            };
-            if patch.response_model.is_some()
-                || patch.response_id.is_some()
-                || patch.raw_stop_reason.is_some()
-                || patch.end_turn.is_some()
-            {
-                events.push(StreamEvent::Metadata { patch });
-            }
-        }
-        match kind {
-            "response.output_text.delta" => {
-                let delta = value
-                    .get("delta")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if !delta.is_empty() {
-                    let index = *self.text_index.get_or_insert_with(|| {
-                        let index = self.next_index;
-                        self.next_index += 1;
-                        events.push(StreamEvent::TextStart {
-                            content_index: index,
-                        });
-                        index
-                    });
-                    events.push(StreamEvent::TextDelta {
-                        content_index: index,
-                        delta: delta.to_string(),
-                    });
-                }
-            }
-            "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
-                let delta = value
-                    .get("delta")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if !delta.is_empty() {
-                    let index = *self.thinking_index.get_or_insert_with(|| {
-                        let index = self.next_index;
-                        self.next_index += 1;
-                        events.push(StreamEvent::ThinkingStart {
-                            content_index: index,
-                        });
-                        index
-                    });
-                    events.push(StreamEvent::ThinkingDelta {
-                        content_index: index,
-                        delta: delta.to_string(),
-                    });
-                }
-            }
-            "response.output_item.added" => {
-                if value.pointer("/item/type").and_then(Value::as_str) == Some("function_call") {
-                    let item_id = value
-                        .pointer("/item/id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    let call_id = value
-                        .pointer("/item/call_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or(item_id);
-                    let name = value
-                        .pointer("/item/name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    let index = self.next_index;
-                    self.next_index += 1;
-                    self.had_tool_call = true;
-                    self.tools.insert(item_id.to_string(), index);
-                    events.push(StreamEvent::ToolCallStart {
-                        content_index: index,
-                        id: ToolCallId::new(call_id),
-                        name: name.to_string(),
-                    });
-                    if let Some(namespace) =
-                        value.pointer("/item/namespace").and_then(Value::as_str)
-                    {
-                        events.push(StreamEvent::ContentMetadata {
-                            content_index: index,
-                            metadata: ContentMetadata::ToolCall {
-                                namespace: Some(namespace.to_string()),
-                            },
-                        });
-                    }
-                    if let Some(arguments) = value
-                        .pointer("/item/arguments")
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.is_empty())
-                    {
-                        events.push(StreamEvent::ToolCallDelta {
-                            content_index: index,
-                            arguments_delta: arguments.to_string(),
-                        });
-                    }
-                }
-            }
-            "response.function_call_arguments.delta" => {
-                let item_id = value
-                    .get("item_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if let Some(index) = self.tools.get(item_id).copied() {
-                    let delta = value
-                        .get("delta")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    if !delta.is_empty() {
-                        events.push(StreamEvent::ToolCallDelta {
-                            content_index: index,
-                            arguments_delta: delta.to_string(),
-                        });
-                    }
-                }
-            }
-            "response.output_item.done" => {
-                if value.pointer("/item/type").and_then(Value::as_str) == Some("function_call") {
-                    let item_id = value
-                        .pointer("/item/id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    if let Some(index) = self.tools.remove(item_id) {
-                        if let Some(namespace) =
-                            value.pointer("/item/namespace").and_then(Value::as_str)
-                        {
-                            events.push(StreamEvent::ContentMetadata {
-                                content_index: index,
-                                metadata: ContentMetadata::ToolCall {
-                                    namespace: Some(namespace.to_string()),
-                                },
-                            });
-                        }
-                        events.push(StreamEvent::ToolCallEnd {
-                            content_index: index,
-                            thought_signature: None,
-                        });
-                    }
-                }
-            }
-            "response.completed" | "response.done" | "response.incomplete" => {
-                let reason = if kind == "response.incomplete" {
-                    StopReason::Length
-                } else if self.had_tool_call {
-                    StopReason::ToolUse
-                } else {
-                    StopReason::Stop
-                };
-                let usage = response_usage(value.get("response").unwrap_or(&Value::Null));
-                events.extend(self.close());
-                events.push(StreamEvent::Done { reason, usage });
-            }
-            "response.failed" | "error" => {
-                let message = value
-                    .pointer("/response/error/message")
-                    .or_else(|| value.get("message"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("OpenAI Responses request failed");
-                self.pending_error = Some(ProviderError::Failure(message.to_string()));
-            }
-            _ => {}
-        }
-        Ok(events)
-    }
-
-    fn close(&mut self) -> Vec<StreamEvent> {
-        if self.closed {
-            return Vec::new();
-        }
-        self.closed = true;
-        let mut events = Vec::new();
-        if let Some(index) = self.thinking_index {
-            events.push(StreamEvent::ThinkingEnd {
-                content_index: index,
-                thinking_signature: None,
-            });
-        }
-        if let Some(index) = self.text_index {
-            events.push(StreamEvent::TextEnd {
-                content_index: index,
-                text_signature: None,
-            });
-        }
-        for (_, index) in self.tools.drain() {
-            events.push(StreamEvent::ToolCallEnd {
-                content_index: index,
-                thought_signature: None,
-            });
-        }
-        events
-    }
-
-    fn finish(&mut self) -> Vec<StreamEvent> {
-        let mut events = self.close();
-        if !events.is_empty() {
-            events.push(StreamEvent::Done {
-                reason: StopReason::Stop,
-                usage: Usage::default(),
-            });
-        }
-        events
-    }
-}
+use state::StreamState;
 
 fn response_usage(response: &Value) -> Usage {
     let usage = response.get("usage").unwrap_or(&Value::Null);
@@ -876,7 +699,13 @@ fn cache_retention() -> CacheRetention {
     }
 }
 
-fn response_affinity_headers(request: &ProviderRequest) -> BTreeMap<String, String> {
+fn response_affinity_headers(
+    request: &ProviderRequest,
+    cache_retention: CacheRetention,
+) -> BTreeMap<String, String> {
+    if cache_retention == CacheRetention::None {
+        return BTreeMap::new();
+    }
     let Some(session_id) = &request.session_id else {
         return BTreeMap::new();
     };
@@ -885,7 +714,7 @@ fn response_affinity_headers(request: &ProviderRequest) -> BTreeMap<String, Stri
             BTreeMap::from([("x-session-id".to_string(), session_id.clone())])
         }
         SessionAffinityFormat::Openai => BTreeMap::from([
-            ("session_id".to_string(), session_id.clone()),
+            ("session-id".to_string(), session_id.clone()),
             ("x-client-request-id".to_string(), session_id.clone()),
         ]),
         SessionAffinityFormat::OpenaiNosession => {
@@ -902,7 +731,7 @@ fn map_transport_error(error: TransportError) -> ProviderError {
 mod tests {
     use super::*;
     use futures::stream;
-    use pi_core::{AbortHandle, ModelId, ModelSpec, ThinkingLevel, UserMessage};
+    use pi_core::{AbortHandle, ContentMetadata, ModelId, ModelSpec, ThinkingLevel, UserMessage};
     use pi_plugin::ProviderRequest;
 
     #[test]
@@ -950,11 +779,11 @@ mod tests {
             session_id: Some("session-1".to_string()),
         };
 
-        let body = request_body_with_cache_retention(&request, CacheRetention::None);
+        let body = request_body_with_options(&request, CacheRetention::None, false);
         assert_eq!(body["prompt_cache_options"]["mode"], "explicit");
         assert!(body.get("prompt_cache_key").is_none());
         assert_eq!(
-            response_affinity_headers(&request)["x-session-id"],
+            response_affinity_headers(&request, CacheRetention::Short)["x-session-id"],
             "session-1"
         );
     }

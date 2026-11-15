@@ -1481,7 +1481,7 @@ fn indexed_message(id: String, timestamp: String, message: &Message) -> Option<I
     let (role, blocks) = match message {
         Message::User(message) => ("user", message.content.as_slice()),
         Message::Assistant(message) => ("assistant", message.content.as_slice()),
-        Message::ToolResult(_) | Message::Custom(_) => return None,
+        Message::System(_) | Message::ToolResult(_) | Message::Custom(_) => return None,
     };
     let content = blocks
         .iter()

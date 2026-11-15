@@ -308,29 +308,33 @@ impl SessionGenerationFactory for ProductSessionFactory {
             memory: memory.as_ref(),
             subagents: &self.subagents,
         };
-        let built_runtime = match BuiltinProviderSet::prepare(&config)
-            .and_then(|providers| {
-                components.build_runtime(
-                    &config,
-                    project_trusted,
-                    context_access,
-                    &generation_overlay,
-                    dynamic_provider_candidate.as_ref(),
-                    providers,
-                )
-            })
-            .map_err(SessionError::from)
-            .and_then(|built| {
-                if let Some(initial_state) = &initial_state {
-                    validate_initial_model_scope(
-                        &initial_state.model,
-                        initial_state.model_source,
-                        config.runtime_settings.enabled_models.as_deref(),
-                        &built.runtime.available_models(),
-                    )?;
-                }
-                Ok(built)
-            }) {
+        let built_runtime = match BuiltinProviderSet::prepare_with_catalog(
+            &mut config,
+            dynamic_provider_candidate.as_ref(),
+        )
+        .await
+        .and_then(|providers| {
+            components.build_runtime(
+                &config,
+                project_trusted,
+                context_access,
+                &generation_overlay,
+                dynamic_provider_candidate.as_ref(),
+                providers,
+            )
+        })
+        .map_err(SessionError::from)
+        .and_then(|built| {
+            if let Some(initial_state) = &initial_state {
+                validate_initial_model_scope(
+                    &initial_state.model,
+                    initial_state.model_source,
+                    config.runtime_settings.enabled_models.as_deref(),
+                    &built.runtime.available_models(),
+                )?;
+            }
+            Ok(built)
+        }) {
             Ok(built) => built,
             Err(error) => {
                 if let Some(candidate) = &dynamic_provider_candidate {

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use pi_core::{ModelCost, ModelCostTier, ModelInput, ModelSpec, PluginId};
+use pi_core::{ModelSpec, PluginId};
 use pi_plugin::{Provider, ProviderError, ProviderPlugin, ProviderRegisterContext};
 use pi_provider::HttpTransport;
 
@@ -10,10 +10,33 @@ use crate::provider::{OpenAiCompatibleProvider, OpenAiProvider};
 
 /// OpenAI Codex transport and model catalog loaded as one provider contribution.
 pub struct OpenAiCodexPlugin {
-    provider: Arc<OpenAiCodexProvider>,
+    provider: Arc<dyn Provider>,
 }
 
 impl OpenAiCodexPlugin {
+    pub fn with_credential_source(
+        mut self,
+        source: Arc<dyn pi_provider::CredentialSource>,
+        transport: Arc<dyn HttpTransport>,
+        options: CodexTransportOptions,
+    ) -> Self {
+        self.provider = Arc::new(pi_provider::CredentialProvider::new(
+            self.provider,
+            source,
+            move |value| {
+                let credentials = value
+                    .map(|value| crate::CodexCredentials::from_access_token(&value.secret))
+                    .unwrap_or_else(crate::CodexCredentials::discover);
+                Ok(Arc::new(OpenAiCodexProvider::with_transport_options(
+                    credentials,
+                    Arc::clone(&transport),
+                    options.clone(),
+                )))
+            },
+        ));
+        self
+    }
+
     pub fn discover() -> Self {
         Self::new(crate::CodexCredentials::discover())
     }
@@ -66,13 +89,6 @@ impl ProviderPlugin for OpenAiCodexPlugin {
 /// Built-in metadata for the models exposed by OpenAI's Codex backend.
 pub struct OpenAiCodexCatalogPlugin;
 
-const CODEX_PROVIDER: &str = "openai-codex";
-const CODEX_API: &str = "openai-codex-responses";
-const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
-const CODEX_CONTEXT_WINDOW: u64 = 272_000;
-const CODEX_SPARK_CONTEXT_WINDOW: u64 = 128_000;
-const CODEX_MAX_TOKENS: u64 = 128_000;
-
 #[pi_plugin::provider_plugin]
 impl ProviderPlugin for OpenAiCodexCatalogPlugin {
     fn id(&self) -> PluginId {
@@ -89,137 +105,7 @@ impl ProviderPlugin for OpenAiCodexCatalogPlugin {
 
 /// Returns the current Pi-compatible OpenAI Codex model catalog.
 pub fn openai_codex_models() -> Vec<ModelSpec> {
-    let mut astra = codex_model(
-        "gpt-6-astra",
-        "GPT-6 Astra",
-        CODEX_CONTEXT_WINDOW,
-        true,
-        true,
-        long_context_cost(10.0, 50.0, 1.0, 12.5),
-    );
-    astra.thinking_level_map.insert("off".to_string(), None);
-    astra.thinking_level_map.insert("minimal".to_string(), None);
-
-    vec![
-        astra,
-        codex_model(
-            "gpt-5.3-codex-spark",
-            "GPT-5.3 Codex Spark",
-            CODEX_SPARK_CONTEXT_WINDOW,
-            false,
-            false,
-            ModelCost {
-                input: 1.75,
-                output: 14.0,
-                cache_read: 0.175,
-                cache_write: 0.0,
-                tiers: Vec::new(),
-            },
-        ),
-        codex_model(
-            "gpt-5.4",
-            "GPT-5.4",
-            CODEX_CONTEXT_WINDOW,
-            true,
-            false,
-            long_context_cost(2.5, 15.0, 0.25, 0.0),
-        ),
-        codex_model(
-            "gpt-5.4-mini",
-            "GPT-5.4 mini",
-            CODEX_CONTEXT_WINDOW,
-            true,
-            false,
-            ModelCost {
-                input: 0.75,
-                output: 4.5,
-                cache_read: 0.075,
-                cache_write: 0.0,
-                tiers: Vec::new(),
-            },
-        ),
-        codex_model(
-            "gpt-5.5",
-            "GPT-5.5",
-            CODEX_CONTEXT_WINDOW,
-            true,
-            false,
-            long_context_cost(5.0, 30.0, 0.5, 0.0),
-        ),
-        codex_model(
-            "gpt-5.6-luna",
-            "GPT-5.6 Luna",
-            CODEX_CONTEXT_WINDOW,
-            true,
-            true,
-            long_context_cost(0.2, 1.2, 0.02, 0.25),
-        ),
-        codex_model(
-            "gpt-5.6-sol",
-            "GPT-5.6 Sol",
-            CODEX_CONTEXT_WINDOW,
-            true,
-            true,
-            long_context_cost(5.0, 30.0, 0.5, 6.25),
-        ),
-        codex_model(
-            "gpt-5.6-terra",
-            "GPT-5.6 Terra",
-            CODEX_CONTEXT_WINDOW,
-            true,
-            true,
-            long_context_cost(2.0, 12.0, 0.2, 2.5),
-        ),
-    ]
-}
-
-fn codex_model(
-    id: &str,
-    name: &str,
-    context_window: u64,
-    image_input: bool,
-    supports_max: bool,
-    cost: ModelCost,
-) -> ModelSpec {
-    let mut model = ModelSpec::new(CODEX_PROVIDER, id, name, CODEX_API);
-    model.base_url = Some(CODEX_BASE_URL.to_string());
-    model.reasoning = true;
-    model.input = if image_input {
-        vec![ModelInput::Text, ModelInput::Image]
-    } else {
-        vec![ModelInput::Text]
-    };
-    model.cost = cost;
-    model.context_window = context_window;
-    model.max_tokens = CODEX_MAX_TOKENS;
-    model
-        .thinking_level_map
-        .insert("minimal".to_string(), Some("low".to_string()));
-    model
-        .thinking_level_map
-        .insert("xhigh".to_string(), Some("xhigh".to_string()));
-    if supports_max {
-        model
-            .thinking_level_map
-            .insert("max".to_string(), Some("max".to_string()));
-    }
-    model
-}
-
-fn long_context_cost(input: f64, output: f64, cache_read: f64, cache_write: f64) -> ModelCost {
-    ModelCost {
-        input,
-        output,
-        cache_read,
-        cache_write,
-        tiers: vec![ModelCostTier {
-            input_tokens_above: CODEX_CONTEXT_WINDOW,
-            input: input * 2.0,
-            output: output * 1.5,
-            cache_read: cache_read * 2.0,
-            cache_write: cache_write * 2.0,
-        }],
-    }
+    serde_json::from_str(include_str!("data/openai-codex.json")).expect("checked-in Codex catalog")
 }
 
 pub struct OpenAiCompatiblePlugin {
@@ -259,17 +145,59 @@ impl ProviderPlugin for OpenAiCompatiblePlugin {
 }
 
 pub struct OpenAiPlugin {
-    provider: Arc<OpenAiProvider>,
+    provider: Arc<dyn Provider>,
 }
 
 impl OpenAiPlugin {
+    pub fn from_stored_with_transport(
+        key: Option<String>,
+        source: Arc<dyn pi_provider::CredentialSource>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Result<Self, ProviderError> {
+        let make = |key: Option<String>| {
+            let config = key
+                .map_or_else(
+                    || OpenAiCompatibleConfig::without_api_key("https://api.openai.com/v1"),
+                    |key| OpenAiCompatibleConfig::new("https://api.openai.com/v1", key),
+                )
+                .provider_id("openai");
+            crate::OpenAiResponsesCompatibleProvider::with_transport(config, Arc::clone(&transport))
+        };
+        let initial = Arc::new(make(key)?);
+        Ok(Self {
+            provider: Arc::new(pi_provider::CredentialProvider::new(
+                initial,
+                source,
+                move |value| {
+                    let config = value
+                        .map_or_else(
+                            || OpenAiCompatibleConfig::without_api_key("https://api.openai.com/v1"),
+                            |value| {
+                                OpenAiCompatibleConfig::new(
+                                    "https://api.openai.com/v1",
+                                    &value.secret,
+                                )
+                            },
+                        )
+                        .provider_id("openai");
+                    Ok(Arc::new(
+                        crate::OpenAiResponsesCompatibleProvider::with_transport(
+                            config,
+                            Arc::clone(&transport),
+                        )?,
+                    ))
+                },
+            )),
+        })
+    }
+
     pub fn new(config: OpenAiConfig) -> Result<Self, ProviderError> {
         Ok(Self {
             provider: Arc::new(OpenAiProvider::new(config)?),
         })
     }
 
-    pub fn provider(&self) -> Arc<OpenAiProvider> {
+    pub fn provider(&self) -> Arc<dyn Provider> {
         Arc::clone(&self.provider)
     }
 
@@ -290,8 +218,16 @@ impl ProviderPlugin for OpenAiPlugin {
     }
 
     fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
-        context.register_provider(self.provider.clone())
+        context.register_provider(self.provider.clone())?;
+        for model in openai_models() {
+            context.register_model(model)?;
+        }
+        Ok(())
     }
+}
+
+pub fn openai_models() -> Vec<ModelSpec> {
+    serde_json::from_str(include_str!("data/openai.json")).expect("checked-in OpenAI catalog")
 }
 
 #[cfg(test)]
@@ -315,7 +251,7 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(runtime.models().len(), 8);
+        assert_eq!(runtime.models().len(), 7);
         assert!(runtime.available_models().is_empty());
         assert_eq!(
             runtime.provider_statuses()[0].availability,
@@ -337,9 +273,12 @@ mod tests {
             .build()
             .unwrap();
 
-        assert_eq!(runtime.models().len(), 8);
+        assert_eq!(runtime.models().len(), 7);
         let model = runtime
-            .model(&ProviderId::new("openai-codex"), &ModelId::new("gpt-5.5"))
+            .model(
+                &ProviderId::new("openai-codex"),
+                &ModelId::new("gpt-5.6-sol"),
+            )
             .unwrap();
         assert_eq!(model.context_window, 272_000);
         assert_eq!(model.max_tokens, 128_000);
@@ -353,7 +292,10 @@ mod tests {
             model.thinking_level_map.get("xhigh"),
             Some(&Some("xhigh".to_string()))
         );
-        assert!(!model.thinking_level_map.contains_key("max"));
+        assert_eq!(
+            model.thinking_level_map.get("max"),
+            Some(&Some("max".into()))
+        );
 
         let latest = runtime
             .model(
@@ -382,7 +324,10 @@ mod tests {
         assert_eq!(astra.cost.tiers.len(), 1);
         assert_eq!(astra.cost.tiers[0].input_tokens_above, 272_000);
         assert_eq!(astra.thinking_level_map.get("off"), Some(&None));
-        assert_eq!(astra.thinking_level_map.get("minimal"), Some(&None));
+        assert_eq!(
+            astra.thinking_level_map.get("minimal"),
+            Some(&Some("low".into()))
+        );
         assert_eq!(
             astra.thinking_level_map.get("xhigh"),
             Some(&Some("xhigh".to_string()))
@@ -394,6 +339,7 @@ mod tests {
         assert_eq!(
             astra.supported_thinking_levels(),
             vec![
+                pi_core::ThinkingLevel::Minimal,
                 pi_core::ThinkingLevel::Low,
                 pi_core::ThinkingLevel::Medium,
                 pi_core::ThinkingLevel::High,
@@ -403,15 +349,15 @@ mod tests {
         );
         assert_eq!(
             astra.clamp_thinking_level(pi_core::ThinkingLevel::Off),
-            pi_core::ThinkingLevel::Low
+            pi_core::ThinkingLevel::Minimal
         );
 
         let spark = runtime
             .model(
                 &ProviderId::new("openai-codex"),
-                &ModelId::new("gpt-5.3-codex-spark"),
+                &ModelId::new("gpt-6.1-sol"),
             )
             .unwrap();
-        assert_eq!(spark.context_window, 128_000);
+        assert_eq!(spark.context_window, 500_000);
     }
 }

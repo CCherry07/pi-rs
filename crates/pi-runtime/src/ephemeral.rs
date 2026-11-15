@@ -382,7 +382,7 @@ fn outcome_usage(messages: &[Message], summary_usage: &std::sync::Mutex<Usage>) 
                     add_usage(&mut total, usage);
                 }
             }
-            Message::User(_) | Message::Custom(_) => {}
+            Message::System(_) | Message::User(_) | Message::Custom(_) => {}
         }
     }
     total.total_tokens = total

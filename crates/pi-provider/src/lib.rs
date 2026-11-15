@@ -2,10 +2,12 @@
 
 //! Vendor-neutral HTTP transport and Server-Sent Events primitives.
 
+mod credentials;
 mod headers;
 mod sse;
 mod transport;
 
+pub use credentials::{CredentialKind, CredentialProvider, CredentialSource, ProviderCredential};
 pub use headers::{insert_header, remove_header};
 pub use sse::{SseDecoder, SseEvent};
 pub use transport::{

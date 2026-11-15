@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use messages::{AnthropicMode, compatibility, request_body, stream as messages_stream};
-use pi_core::{AbortSignal, ModelCost, ModelInput, ModelSpec, PluginId, ProviderId};
+use pi_core::{AbortSignal, ModelSpec, PluginId, ProviderId};
 use pi_plugin::{
     Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderPlugin,
     ProviderRegisterContext, ProviderRequest, ProviderStream,
@@ -19,9 +19,8 @@ use pi_provider::{
     HttpTransport, ReqwestTransport, TransportError, insert_header, post_json_with_provider_hooks,
     read_error_response,
 };
-use serde_json::json;
 
-pub use messages::AnthropicMessagesCompat;
+pub use messages::{AnthropicFallbackModel, AnthropicMessagesCompat};
 
 const PROVIDER_ID: &str = "anthropic";
 pub const ANTHROPIC_MESSAGES_API: &str = "anthropic-messages";
@@ -74,10 +73,39 @@ impl AnthropicCompatibleConfig {
 
 /// Independent Anthropic provider plugin with Claude Code OAuth-token request shaping.
 pub struct AnthropicPlugin {
-    provider: Arc<AnthropicProvider>,
+    provider: Arc<dyn Provider>,
 }
 
 impl AnthropicPlugin {
+    pub fn with_credential_source(
+        mut self,
+        source: Arc<dyn pi_provider::CredentialSource>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
+        self.provider = Arc::new(pi_provider::CredentialProvider::new(
+            self.provider,
+            source,
+            move |value| {
+                let credential = value.map(|value| match value.kind {
+                    pi_provider::CredentialKind::OAuth => {
+                        AnthropicCredential::ClaudeCodeOAuth(value.secret.clone())
+                    }
+                    pi_provider::CredentialKind::Bearer => {
+                        AnthropicCredential::Bearer(value.secret.clone())
+                    }
+                    pi_provider::CredentialKind::ApiKey => {
+                        AnthropicCredential::ApiKey(value.secret.clone())
+                    }
+                });
+                Ok(Arc::new(AnthropicProvider::with_transport(
+                    credential,
+                    Arc::clone(&transport),
+                )))
+            },
+        ));
+        self
+    }
+
     pub fn discover() -> Self {
         Self::from_stored(None)
     }
@@ -331,10 +359,16 @@ impl Provider for AnthropicCompatibleProvider {
         signal: AbortSignal,
     ) -> Result<ProviderStream, ProviderError> {
         let headers = self.headers(&request);
+        let endpoint = request
+            .model_spec
+            .as_ref()
+            .and_then(|model| model.base_url.as_deref())
+            .map(messages_endpoint)
+            .unwrap_or_else(|| self.endpoint());
         stream_messages(
             &self.transport,
             self.config.provider_id.clone(),
-            &self.endpoint(),
+            &endpoint,
             headers,
             request.model.clone(),
             request,
@@ -347,165 +381,7 @@ impl Provider for AnthropicCompatibleProvider {
 }
 
 pub fn anthropic_models() -> Vec<ModelSpec> {
-    vec![
-        model(
-            "claude-haiku-4-5",
-            "Claude Haiku 4.5",
-            200_000,
-            64_000,
-            1.0,
-            5.0,
-            0.1,
-            1.25,
-        ),
-        model(
-            "claude-sonnet-4-6",
-            "Claude Sonnet 4.6",
-            1_000_000,
-            128_000,
-            3.0,
-            15.0,
-            0.3,
-            3.75,
-        ),
-        model(
-            "claude-opus-4-6",
-            "Claude Opus 4.6",
-            1_000_000,
-            128_000,
-            5.0,
-            25.0,
-            0.5,
-            6.25,
-        ),
-        model(
-            "claude-opus-4-7",
-            "Claude Opus 4.7",
-            1_000_000,
-            128_000,
-            5.0,
-            25.0,
-            0.5,
-            6.25,
-        ),
-        model(
-            "claude-opus-4-8",
-            "Claude Opus 4.8",
-            1_000_000,
-            128_000,
-            5.0,
-            25.0,
-            0.5,
-            6.25,
-        ),
-        model(
-            "claude-sonnet-5",
-            "Claude Sonnet 5",
-            1_000_000,
-            128_000,
-            2.0,
-            10.0,
-            0.2,
-            2.5,
-        ),
-        model(
-            "claude-opus-5",
-            "Claude Opus 5",
-            1_000_000,
-            128_000,
-            5.0,
-            25.0,
-            0.5,
-            6.25,
-        ),
-        model(
-            "claude-fable-5",
-            "Claude Fable 5",
-            1_000_000,
-            128_000,
-            10.0,
-            50.0,
-            1.0,
-            12.5,
-        ),
-    ]
-}
-
-#[allow(clippy::too_many_arguments)]
-fn model(
-    id: &str,
-    name: &str,
-    context: u64,
-    output: u64,
-    input_cost: f64,
-    output_cost: f64,
-    cache_read: f64,
-    cache_write: f64,
-) -> ModelSpec {
-    let mut model = ModelSpec::new(PROVIDER_ID, id, name, ANTHROPIC_MESSAGES_API);
-    model.base_url = Some("https://api.anthropic.com".to_string());
-    model.reasoning = true;
-    model.input = vec![ModelInput::Text, ModelInput::Image];
-    model.cost = ModelCost {
-        input: input_cost,
-        output: output_cost,
-        cache_read,
-        cache_write,
-        tiers: Vec::new(),
-    };
-    model.context_window = context;
-    model.max_tokens = output;
-    let mut compat = json!({
-        "supportsEagerToolInputStreaming": true,
-        "supportsStrictTools": true,
-        "supportsToolReferences": !id.contains("haiku")
-    });
-    if matches!(
-        id,
-        "claude-sonnet-4-6"
-            | "claude-opus-4-6"
-            | "claude-opus-4-7"
-            | "claude-opus-4-8"
-            | "claude-sonnet-5"
-            | "claude-opus-5"
-            | "claude-fable-5"
-    ) {
-        compat["forceAdaptiveThinking"] = json!(true);
-    }
-    if matches!(id, "claude-opus-4-7" | "claude-opus-4-8" | "claude-opus-5") {
-        compat["supportsTemperature"] = json!(false);
-    }
-    match id {
-        "claude-opus-4-6" | "claude-sonnet-4-6" => {
-            model
-                .thinking_level_map
-                .insert("max".to_string(), Some("max".to_string()));
-        }
-        "claude-opus-4-7" | "claude-opus-4-8" | "claude-opus-5" | "claude-sonnet-5" => {
-            model
-                .thinking_level_map
-                .insert("xhigh".to_string(), Some("xhigh".to_string()));
-            model
-                .thinking_level_map
-                .insert("max".to_string(), Some("max".to_string()));
-        }
-        "claude-fable-5" => {
-            model.thinking_level_map.insert("off".to_string(), None);
-            model
-                .thinking_level_map
-                .insert("xhigh".to_string(), Some("xhigh".to_string()));
-            model
-                .thinking_level_map
-                .insert("max".to_string(), Some("max".to_string()));
-            compat["allowedFallbackModels"] = json!(["claude-opus-4-8", "claude-opus-5"]);
-        }
-        _ => {}
-    }
-    if id == "claude-opus-5" {
-        compat["allowedFallbackModels"] = json!(["claude-opus-4-8"]);
-    }
-    model.compat = Some(compat);
-    model
+    serde_json::from_str(include_str!("data/anthropic.json")).expect("checked-in anthropic catalog")
 }
 
 fn env(name: &str) -> Option<String> {
@@ -612,6 +488,7 @@ fn map_transport_error(error: TransportError) -> ProviderError {
 
 #[cfg(test)]
 mod tests {
+    use pi_core::ModelInput;
     use std::sync::Mutex;
 
     use super::*;
@@ -679,7 +556,7 @@ mod tests {
             ("claude-fable-5", 1_000_000, 128_000, 10.0, 50.0, 1.0, 12.5),
         ];
 
-        assert_eq!(models.len(), expected.len());
+        assert_eq!(models.len(), 17);
         for (id, context_window, max_tokens, input_cost, output_cost, cache_read, cache_write) in
             expected
         {
@@ -753,12 +630,12 @@ mod tests {
         }
         assert_eq!(
             find("claude-opus-5").compat.as_ref().unwrap()["allowedFallbackModels"],
-            json!(["claude-opus-4-8"])
+            Value::Null
         );
         assert_eq!(find("claude-fable-5").thinking_level_map["off"], None);
         assert_eq!(
-            find("claude-fable-5").compat.as_ref().unwrap()["allowedFallbackModels"],
-            json!(["claude-opus-4-8", "claude-opus-5"])
+            find("claude-fable-5").compat.as_ref().unwrap()["allowedFallbackModels"][0]["model"],
+            "claude-opus-4-8"
         );
     }
 

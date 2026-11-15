@@ -84,11 +84,33 @@ impl GitHubCopilotStoredMetadata {
 }
 
 pub struct GitHubCopilotPlugin {
-    provider: Arc<GitHubCopilotProvider>,
+    provider: Arc<dyn Provider>,
     available_model_ids: Option<BTreeSet<String>>,
 }
 
 impl GitHubCopilotPlugin {
+    pub fn with_credential_source(
+        mut self,
+        source: Arc<dyn pi_provider::CredentialSource>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
+        self.provider = Arc::new(pi_provider::CredentialProvider::new(
+            self.provider,
+            source,
+            move |value| {
+                Ok(Arc::new(GitHubCopilotProvider::with_transport(
+                    value.map(|value| value.secret.clone()),
+                    value
+                        .and_then(|value| value.metadata.get("enterpriseUrl"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    Arc::clone(&transport),
+                )?))
+            },
+        ));
+        self
+    }
+
     pub fn discover() -> Result<Self, ProviderError> {
         Self::from_stored(None)
     }
@@ -320,8 +342,13 @@ impl Provider for GitHubCopilotProvider {
 }
 
 fn apply_copilot_headers(request: &mut ProviderRequest, token: &str) {
-    let initiator = match request.messages.last() {
-        Some(Message::User(_) | Message::Custom(_)) | None => "user",
+    let initiator = match request
+        .messages
+        .iter()
+        .rev()
+        .find(|message| !matches!(message, Message::System(_)))
+    {
+        Some(Message::System(_) | Message::User(_) | Message::Custom(_)) | None => "user",
         Some(Message::Assistant(_) | Message::ToolResult(_)) => "agent",
     };
     let has_images = request.messages.iter().any(|message| match message {
@@ -338,7 +365,7 @@ fn apply_copilot_headers(request: &mut ProviderRequest, token: &str) {
             .to_blocks()
             .iter()
             .any(|block| matches!(block, ContentBlock::Image(_))),
-        Message::Assistant(_) => false,
+        Message::System(_) | Message::Assistant(_) => false,
     });
     for (name, value) in [
         ("Authorization", format!("Bearer {token}")),
@@ -406,13 +433,13 @@ mod tests {
         let plugin = GitHubCopilotPlugin::new_with_catalog_and_transport(
             Some("token".to_string()),
             None,
-            Some(BTreeSet::from(["gpt-4.1".to_string()])),
+            Some(BTreeSet::from(["gemini-3.8-flash".to_string()])),
             Arc::new(ReqwestTransport::new()),
         )
         .unwrap();
         let models = plugin.models();
         assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id.as_str(), "gpt-4.1");
+        assert_eq!(models[0].id.as_str(), "gemini-3.8-flash");
     }
 
     #[test]
@@ -421,12 +448,12 @@ mod tests {
             (serde_json::json!({}), true, None),
             (serde_json::json!({"availableModelIds": null}), true, None),
             (
-                serde_json::json!({"availableModelIds": "gpt-4.1"}),
+                serde_json::json!({"availableModelIds": "gemini-3.8-flash"}),
                 true,
                 None,
             ),
             (
-                serde_json::json!({"availableModelIds": ["gpt-4.1", 1]}),
+                serde_json::json!({"availableModelIds": ["gemini-3.8-flash", 1]}),
                 true,
                 None,
             ),
@@ -436,9 +463,9 @@ mod tests {
                 Some(vec![]),
             ),
             (
-                serde_json::json!({"availableModelIds": ["gpt-4.1"]}),
+                serde_json::json!({"availableModelIds": ["gemini-3.8-flash"]}),
                 true,
-                Some(vec!["gpt-4.1".to_string()]),
+                Some(vec!["gemini-3.8-flash".to_string()]),
             ),
             (serde_json::json!({"availableModelIds": []}), false, None),
         ] {
@@ -522,10 +549,10 @@ mod tests {
         .unwrap();
         let model = github_copilot_models()
             .into_iter()
-            .find(|model| model.id.as_str() == "gpt-4.1")
+            .find(|model| model.id.as_str() == "gemini-3.8-flash")
             .unwrap();
         let request = ProviderRequest {
-            model: ModelId::new("gpt-4.1"),
+            model: ModelId::new("gemini-3.8-flash"),
             model_spec: Some(model),
             system_prompt: "system".to_string(),
             messages: Vec::new(),
@@ -544,7 +571,7 @@ mod tests {
                 ProviderCallContext::without_plugins(
                     ".",
                     ProviderId::new(GITHUB_COPILOT_PROVIDER_ID),
-                    ModelId::new("gpt-4.1"),
+                    ModelId::new("gemini-3.8-flash"),
                 ),
                 signal,
             )
@@ -558,6 +585,6 @@ mod tests {
         assert_eq!(capture.headers["X-Initiator"], "user");
         assert_eq!(capture.headers["Openai-Intent"], "conversation-edits");
         assert!(capture.headers["Authorization"].starts_with("Bearer tid=1"));
-        assert_eq!(capture.body["model"], "gpt-4.1");
+        assert_eq!(capture.body["model"], "gemini-3.8-flash");
     }
 }

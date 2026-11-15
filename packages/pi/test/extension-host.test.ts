@@ -450,6 +450,40 @@ test("accepts the resolved agent directory and rejects malformed host operations
   );
 });
 
+test('preserves provider thinking levels through lazy stream snapshots', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-provider-thinking-'))
+  const extension = join(root, 'thinking.ts')
+  await writeFile(extension, `export default (pi: any) => {
+    const events: any[] = [];
+    pi.on('message_update', (event: any) => { events.push(event); });
+    pi.registerCommand('levels', { handler: () => ({ action: 'transform', text: JSON.stringify(events.map(event => event.message.providerThinkingLevel)) }) });
+  }`)
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration', request: { projectTrusted: true, extensionPaths: [extension], mode: 'print' },
+  })))
+  const plugin = manifest.agentPlugins[0]
+  assert.ok(plugin?.hooks[0] && plugin.commands[0])
+  const update = (value: object, initialMessage?: object) => host.dispatch(JSON.stringify({
+    type: 'invokeStreamHookBatch', invocation: {
+      invocationId: 'thinking-update', generationId: manifest.generationId, streamId: 'thinking',
+      callbacks: [{ callbackId: plugin.hooks[0]!.callbackId, context: {} }], update: value, initialMessage,
+    },
+  }))
+  await update({ type: 'textStart', contentIndex: 0 }, {
+    role: 'assistant', providerThinkingLevel: 'high', content: [{ type: 'text', text: '' }],
+  })
+  await update({ type: 'textDelta', contentIndex: 0, delta: 'first' })
+  await update({ type: 'start', metadata: { provider: 'openai', model: 'model', api: 'openai-responses', timestamp: 1, providerThinkingLevel: 'low' } })
+  await update({ type: 'textDelta', contentIndex: 0, delta: 'second' })
+  const result = parseJson(await host.dispatch(JSON.stringify({ type: 'invoke', invocation: {
+    invocationId: 'read-levels', generationId: manifest.generationId, callbackId: plugin.commands[0].callbackId,
+    kind: 'command', payload: { context: {}, arguments: '' },
+  } }))) as { text: string }
+  assert.deepEqual(JSON.parse(result.text), ['high', 'high', 'low'])
+  await host.dispatch(JSON.stringify({ type: 'retireGeneration', generationId: manifest.generationId }))
+})
+
 test('keeps unread stream events lazy and stable across later updates', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-lazy-stream-'))
   const extension = join(root, 'retained.ts')

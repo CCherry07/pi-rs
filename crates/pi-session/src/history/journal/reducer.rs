@@ -1145,6 +1145,7 @@ mod tests {
             api: "openai-responses".to_string(),
             provider: ProviderId::new("openai"),
             model: ModelId::new("test-model"),
+            provider_thinking_level: None,
             response_model: None,
             response_id: None,
             diagnostics: None,

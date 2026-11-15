@@ -191,9 +191,6 @@ async fn run(
     if let Some(CliCommand::Plugin { command }) = &cli.command {
         return plugin_commands::run(&cli, &config, command, &settings).await;
     }
-    if !matches!(cli.command, Some(CliCommand::Auth { .. })) {
-        auth::refresh_oauth_if_needed(&config.agent_dir).await?;
-    }
     if let Some(CliCommand::Auth { command }) = &cli.command {
         return auth::run(&config.agent_dir, command).await;
     }

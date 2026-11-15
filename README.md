@@ -165,6 +165,8 @@ pi auth login
 # Browser/subscription OAuth for built-in providers
 pi auth login anthropic --oauth
 pi auth login openai-codex --oauth
+pi auth login openai --oauth
+pi auth login kimi-coding --oauth
 pi auth login github-copilot --oauth
 pi auth login openrouter --oauth
 pi auth login xai --oauth
@@ -172,6 +174,8 @@ pi auth login xai --oauth
 # Provider-specific credential-chain setup
 pi auth login amazon-bedrock
 pi auth login google-vertex
+pi auth login cloudflare-workers-ai
+pi auth login cloudflare-ai-gateway
 
 # Prompt for an API key without echo
 pi auth login anthropic --api-key
@@ -212,10 +216,24 @@ Credentials may also be persisted in Pi's `<agent-dir>/auth.json` format:
 }
 ```
 
-Stored OAuth credentials for Anthropic, OpenAI Codex, GitHub Copilot, and xAI are refreshed
-automatically shortly before expiry. OpenRouter's browser flow returns a persistent API key rather
+Stored OAuth credentials for Anthropic, OpenAI, OpenAI Codex, GitHub Copilot, Kimi Coding, and xAI
+are refreshed before requests when near expiry, including during long-running sessions. Concurrent
+processes share a lock across token refresh and atomic persistence; unrelated expired accounts do
+not block startup. OpenRouter's browser flow returns a persistent API key rather
 than a refresh token. After changing credentials from another process while the TUI is running,
 use `/reload` to rebuild the provider generation.
+
+The ordinary `openai` provider uses the Responses API and supports direct Sign in with ChatGPT.
+Its OAuth credential includes an issued `clientId`; use `pi auth login openai --oauth` to create it.
+`openai-codex` retains its separate Codex device login and WebSocket/SSE transport.
+
+Built-in chat catalogs are synchronized from the checked-in Pi source with
+`python3 scripts/sync-provider-catalogs.py`. The catalog includes DeepSeek, Groq, Moonshot,
+MiniMax, Qwen Token Plan, ZAI, Cloudflare, OpenCode and other standard-protocol gateways.
+API-key names and model-specific protocols follow that source. Azure accepts both `azure` and
+`azure-openai-responses`; OpenRouter supports Anthropic Messages and Chat Completions and refreshes
+account-specific model availability, limits and pricing during product generation preparation.
+A catalog refresh failure appears as a diagnostic and retains the baseline catalog.
 
 The built-in xAI provider uses `https://api.x.ai/v1/responses` and exposes the current Grok 4.5
 and Grok 4.6 catalog. Without `XAI_API_KEY`, these models remain registered for diagnostics but are

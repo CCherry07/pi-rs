@@ -941,7 +941,7 @@ fn session_stats_json(session: &AgentSession) -> Result<Value, String> {
                 Some(Message::ToolResult(_)) => {
                     tool_results += 1;
                 }
-                Some(Message::Custom(_)) | None => {}
+                Some(Message::System(_) | Message::Custom(_)) | None => {}
             }
         }
     }

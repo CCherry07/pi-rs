@@ -881,7 +881,7 @@ fn filter_blocked_images(mut message: Message, block_images: bool) -> Message {
     let content = match &mut message {
         Message::User(message) => &mut message.content,
         Message::ToolResult(message) => &mut Arc::make_mut(message).content,
-        Message::Assistant(_) | Message::Custom(_) => return message,
+        Message::System(_) | Message::Assistant(_) | Message::Custom(_) => return message,
     };
     if !content
         .iter()
@@ -1001,6 +1001,7 @@ fn provider_failure_message(
         api: "unknown".to_string(),
         provider: config.provider_id.clone(),
         model: config.model_id.clone(),
+        provider_thinking_level: None,
         response_model: None,
         response_id: None,
         diagnostics: None,

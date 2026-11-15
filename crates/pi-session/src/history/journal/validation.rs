@@ -144,7 +144,7 @@ fn validate_agent_message(message: &AgentMessage) -> Result<(), HistoryError> {
             }
             Ok(())
         }
-        Some(Message::User(_) | Message::Custom(_)) | None => Ok(()),
+        Some(Message::System(_) | Message::User(_) | Message::Custom(_)) | None => Ok(()),
     }
 }
 
@@ -366,6 +366,7 @@ mod tests {
             api: "test".to_string(),
             provider: ProviderId::new("provider"),
             model: ModelId::new("model"),
+            provider_thinking_level: None,
             response_model: None,
             response_id: None,
             diagnostics: None,

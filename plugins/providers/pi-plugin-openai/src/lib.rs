@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod chatgpt_oauth;
 mod codex;
 mod codex_auth;
 mod config;
@@ -19,7 +20,7 @@ pub use oauth::{
 };
 pub use plugin::{
     OpenAiCodexCatalogPlugin, OpenAiCodexPlugin, OpenAiCompatiblePlugin, OpenAiPlugin,
-    openai_codex_models,
+    openai_codex_models, openai_models,
 };
 pub use provider::{OpenAiCompatibleProvider, OpenAiProvider};
 pub use request::OpenAiCompletionsCompat;

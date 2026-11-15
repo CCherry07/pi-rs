@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_core::{AbortSignal, ModelCost, ModelInput, ModelSpec, PluginId, ProviderId};
+use pi_core::{AbortSignal, ModelSpec, PluginId, ProviderId};
 use pi_plugin::{
     Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderPlugin,
     ProviderRegisterContext, ProviderRequest, ProviderStream,
@@ -29,10 +29,28 @@ const BASE_URL: &str = "https://api.x.ai/v1";
 
 /// Built-in xAI Responses provider and current Pi-compatible Grok catalog.
 pub struct XAiPlugin {
-    provider: Arc<XAiProvider>,
+    provider: Arc<dyn Provider>,
 }
 
 impl XAiPlugin {
+    pub fn with_credential_source(
+        mut self,
+        source: Arc<dyn pi_provider::CredentialSource>,
+        transport: Arc<dyn HttpTransport>,
+    ) -> Self {
+        self.provider = Arc::new(pi_provider::CredentialProvider::new(
+            self.provider,
+            source,
+            move |value| {
+                Ok(Arc::new(XAiProvider::with_transport(
+                    value.map(|value| value.secret.clone()),
+                    Arc::clone(&transport),
+                )))
+            },
+        ));
+        self
+    }
+
     pub fn discover() -> Self {
         Self::from_stored(None)
     }
@@ -203,50 +221,7 @@ fn responses_endpoint(base: &str) -> String {
 }
 
 pub fn xai_models() -> Vec<ModelSpec> {
-    vec![
-        xai_model(
-            "grok-4.5", "Grok 4.5", 500_000, 500_000, 2.0, 6.0, 0.3, false,
-        ),
-        xai_model(
-            "grok-4.6", "Grok 4.6", 500_000, 500_000, 2.0, 6.0, 0.5, true,
-        ),
-    ]
-}
-
-#[allow(clippy::too_many_arguments)]
-fn xai_model(
-    id: &str,
-    name: &str,
-    context_window: u64,
-    max_tokens: u64,
-    input_cost: f64,
-    output_cost: f64,
-    cache_read_cost: f64,
-    xhigh: bool,
-) -> ModelSpec {
-    let mut model = ModelSpec::new(PROVIDER_ID, id, name, API_NAME);
-    model.base_url = Some(BASE_URL.to_string());
-    model.reasoning = true;
-    model.input = vec![ModelInput::Text, ModelInput::Image];
-    model.cost = ModelCost {
-        input: input_cost,
-        output: output_cost,
-        cache_read: cache_read_cost,
-        cache_write: 0.0,
-        tiers: Vec::new(),
-    };
-    model.context_window = context_window;
-    model.max_tokens = max_tokens;
-    model.thinking_level_map = BTreeMap::from([
-        ("off".to_string(), None),
-        ("minimal".to_string(), None),
-        ("low".to_string(), Some("low".to_string())),
-        ("medium".to_string(), Some("medium".to_string())),
-        ("high".to_string(), Some("high".to_string())),
-        ("xhigh".to_string(), xhigh.then(|| "xhigh".to_string())),
-        ("max".to_string(), None),
-    ]);
-    model
+    serde_json::from_str(include_str!("data/xai.json")).expect("checked-in xai catalog")
 }
 
 fn env(name: &str) -> Option<String> {

@@ -379,6 +379,8 @@ impl std::str::FromStr for ThinkingLevel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResponseMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_thinking_level: Option<String>,
     pub provider: ProviderId,
     pub model: ModelId,
     pub api: String,
@@ -400,6 +402,7 @@ impl ResponseMetadata {
         timestamp_ms: i64,
     ) -> Self {
         Self {
+            provider_thinking_level: None,
             provider,
             model,
             api: api.into(),

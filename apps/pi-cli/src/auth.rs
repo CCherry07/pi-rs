@@ -1,12 +1,10 @@
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 
-use fs2::FileExt;
 #[cfg(test)]
 use pi_coding::read_stored_credential;
-use pi_coding::{StoredCredential, read_credentials};
+use pi_coding::{StoredCredential, modify_credentials, read_credentials};
 
 use crate::config::AuthCommand;
 
@@ -40,78 +38,6 @@ pub(crate) fn logout_provider_catalog(agent_dir: &Path) -> Result<Vec<AuthProvid
         .collect())
 }
 
-pub(crate) async fn refresh_oauth_if_needed(agent_dir: &Path) -> Result<(), String> {
-    for provider in ["xai", "anthropic", "openai-codex", "github-copilot"] {
-        refresh_provider_if_needed(agent_dir, provider).await?;
-    }
-    Ok(())
-}
-
-async fn refresh_provider_if_needed(agent_dir: &Path, provider: &str) -> Result<(), String> {
-    let path = agent_dir.join("auth.json");
-    let Some(StoredCredential::Oauth {
-        refresh,
-        expires,
-        extra,
-        ..
-    }) = read_credentials(&path)?.get(provider).cloned()
-    else {
-        return Ok(());
-    };
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0.0, |duration| duration.as_millis() as f64);
-    if expires > now_ms + 5.0 * 60.0 * 1_000.0 {
-        return Ok(());
-    }
-    if refresh.trim().is_empty() {
-        return Err(format!(
-            "stored {provider} OAuth token is expired and has no refresh token; run `pi auth login {provider} --oauth` again"
-        ));
-    }
-    let mut extra = extra;
-    let (access, refresh, expires) = match provider {
-        "xai" => {
-            let credential = pi_plugin_xai::refresh(&refresh).await?;
-            (credential.access, credential.refresh, credential.expires)
-        }
-        "anthropic" => {
-            let credential = pi_plugin_anthropic::refresh(&refresh).await?;
-            (credential.access, credential.refresh, credential.expires)
-        }
-        "openai-codex" => {
-            let credential = pi_plugin_openai::refresh_openai_oauth(&refresh).await?;
-            (credential.access, credential.refresh, credential.expires)
-        }
-        "github-copilot" => {
-            let enterprise_domain = extra
-                .get("enterpriseUrl")
-                .and_then(serde_json::Value::as_str);
-            let credential =
-                pi_plugin_copilot::refresh_github_copilot_oauth(&refresh, enterprise_domain)
-                    .await?;
-            extra.insert(
-                "availableModelIds".to_string(),
-                serde_json::json!(credential.available_model_ids),
-            );
-            (credential.access, credential.refresh, credential.expires)
-        }
-        _ => return Ok(()),
-    };
-    modify_credentials(agent_dir, |credentials| {
-        credentials.insert(
-            provider.to_string(),
-            StoredCredential::Oauth {
-                access,
-                refresh,
-                expires: expires as f64,
-                extra,
-            },
-        );
-    })?;
-    Ok(())
-}
-
 pub(crate) async fn run(agent_dir: &Path, command: &AuthCommand) -> Result<(), String> {
     match command {
         AuthCommand::Login {
@@ -129,6 +55,8 @@ pub(crate) async fn run(agent_dir: &Path, command: &AuthCommand) -> Result<(), S
                     "xai" => run_xai_oauth().await?,
                     "anthropic" => run_anthropic_oauth().await?,
                     "openai-codex" => run_openai_oauth().await?,
+                    "openai" => run_chatgpt_oauth(agent_dir).await?,
+                    "kimi-coding" => run_kimi_oauth().await?,
                     "github-copilot" => run_github_copilot_oauth().await?,
                     "openrouter" => run_openrouter_oauth().await?,
                     _ => {
@@ -143,20 +71,21 @@ pub(crate) async fn run(agent_dir: &Path, command: &AuthCommand) -> Result<(), S
                 println!("OAuth login successful for {provider}.");
                 return Ok(());
             }
-            if *oauth_token
-                && !matches!(
-                    provider.as_str(),
-                    "anthropic" | "xai" | "openai-codex" | "github-copilot" | "openrouter"
-                )
-            {
+            if *oauth_token && !oauth_supported(&provider) {
                 return Err(format!(
                     "provider {provider:?} does not support stored OAuth tokens"
                 ));
+            }
+            if *oauth_token && provider == "openai" {
+                return Err("OpenAI ChatGPT OAuth requires its issued client ID; use `pi auth login openai --oauth`".into());
             }
             if !*api_key && !*oauth_token && token.is_none() {
                 let credential = match provider.as_str() {
                     "amazon-bedrock" => Some(run_amazon_bedrock_auth()?),
                     "google-vertex" => Some(run_google_vertex_auth()?),
+                    "cloudflare-workers-ai" | "cloudflare-ai-gateway" => {
+                        Some(run_cloudflare_auth(&provider)?)
+                    }
                     _ => None,
                 };
                 if let Some(credential) = credential {
@@ -177,6 +106,8 @@ pub(crate) async fn run(agent_dir: &Path, command: &AuthCommand) -> Result<(), S
                     "xai" => run_xai_oauth().await?,
                     "anthropic" => run_anthropic_oauth().await?,
                     "openai-codex" => run_openai_oauth().await?,
+                    "openai" => run_chatgpt_oauth(agent_dir).await?,
+                    "kimi-coding" => run_kimi_oauth().await?,
                     "github-copilot" => run_github_copilot_oauth().await?,
                     "openrouter" => run_openrouter_oauth().await?,
                     _ => unreachable!("OAuth support checked by select_auth_type"),
@@ -541,6 +472,8 @@ fn provider_catalog(agent_dir: &Path) -> Result<Vec<String>, String> {
         "google-vertex",
         "mistral",
         "openai-codex",
+        "openai",
+        "azure",
         "openai-compatible",
         "openrouter",
         "xai",
@@ -548,6 +481,11 @@ fn provider_catalog(agent_dir: &Path) -> Result<Vec<String>, String> {
     .into_iter()
     .map(str::to_string)
     .collect::<Vec<_>>();
+    providers.extend(
+        pi_coding::gateway_definitions()
+            .iter()
+            .map(|definition| definition.id.clone()),
+    );
     let models_path = agent_dir.join("models.json");
     let configured = pi_plugin_models::ModelsPlugin::load(
         pi_plugin_models::ModelsPluginOptions::new(&models_path),
@@ -582,7 +520,13 @@ fn select_auth_type(provider: &str) -> Result<bool, String> {
 fn oauth_supported(provider: &str) -> bool {
     matches!(
         provider,
-        "anthropic" | "github-copilot" | "openai-codex" | "openrouter" | "xai"
+        "anthropic"
+            | "github-copilot"
+            | "openai-codex"
+            | "openrouter"
+            | "xai"
+            | "openai"
+            | "kimi-coding"
     )
 }
 
@@ -610,55 +554,68 @@ fn validate_provider_id(provider: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn modify_credentials<T>(
-    agent_dir: &Path,
-    update: impl FnOnce(&mut BTreeMap<String, StoredCredential>) -> T,
-) -> Result<T, String> {
-    std::fs::create_dir_all(agent_dir)
-        .map_err(|error| format!("failed to create {}: {error}", agent_dir.display()))?;
-    let path = agent_dir.join("auth.json");
-    let lock_path = agent_dir.join("auth.json.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|error| format!("failed to open {}: {error}", lock_path.display()))?;
-    lock.lock_exclusive()
-        .map_err(|error| format!("failed to lock {}: {error}", lock_path.display()))?;
-    let result = (|| {
-        let mut credentials = read_credentials(&path)?;
-        let result = update(&mut credentials);
-        let encoded = serde_json::to_vec_pretty(&credentials)
-            .map_err(|error| format!("failed to encode {}: {error}", path.display()))?;
-        let temporary = agent_dir.join(format!(".auth.json.{}.tmp", std::process::id()));
-        let mut file = create_secret_file(&temporary)?;
-        file.write_all(&encoded)
-            .and_then(|_| file.write_all(b"\n"))
-            .and_then(|_| file.sync_all())
-            .map_err(|error| format!("failed to write {}: {error}", temporary.display()))?;
-        std::fs::rename(&temporary, &path).map_err(|error| {
-            let _ = std::fs::remove_file(&temporary);
-            format!("failed to replace {}: {error}", path.display())
-        })?;
-        Ok(result)
-    })();
-    let _ = FileExt::unlock(&lock);
-    result
+async fn run_chatgpt_oauth(agent_dir: &Path) -> Result<StoredCredential, String> {
+    std::fs::create_dir_all(agent_dir).map_err(|error| error.to_string())?;
+    let path = agent_dir.join("device-id");
+    let device = match std::fs::read_to_string(&path) {
+        Ok(value) => value.trim().to_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let value = uuid::Uuid::now_v7().to_string();
+            std::fs::write(&path, &value).map_err(|error| error.to_string())?;
+            value
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let login = pi_plugin_openai::chatgpt_oauth::start(&device).await?;
+    println!("Open this URL to sign in with ChatGPT:\n{}", login.url);
+    if let Err(error) = open_browser(&login.url) {
+        eprintln!("Could not open browser: {error}");
+    }
+    let value = login.wait().await?;
+    Ok(StoredCredential::Oauth {
+        access: value.access,
+        refresh: value.refresh,
+        expires: value.expires as f64,
+        extra: value.metadata,
+    })
 }
 
-fn create_secret_file(path: &Path) -> Result<File, String> {
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+async fn run_kimi_oauth() -> Result<StoredCredential, String> {
+    let device = pi_coding::kimi_oauth::start().await?;
+    println!(
+        "Open this URL to sign in with Kimi Code:\n{}\nVerification code: {}",
+        device.verification_uri_complete, device.user_code
+    );
+    if let Err(error) = open_browser(&device.verification_uri_complete) {
+        eprintln!("Could not open browser: {error}");
     }
-    options
-        .open(path)
-        .map_err(|error| format!("failed to create {}: {error}", path.display()))
+    let value = pi_coding::kimi_oauth::poll(&device).await?;
+    Ok(StoredCredential::Oauth {
+        access: value.access,
+        refresh: value.refresh,
+        expires: value.expires as f64,
+        extra: BTreeMap::new(),
+    })
+}
+
+fn run_cloudflare_auth(provider: &str) -> Result<StoredCredential, String> {
+    require_interactive_auth("Cloudflare")?;
+    let key =
+        rpassword::prompt_password("Cloudflare API key: ").map_err(|error| error.to_string())?;
+    validate_environment_value("Cloudflare API key", &key)?;
+    let account = prompt_line("Cloudflare account ID: ")?;
+    validate_environment_value("Cloudflare account ID", &account)?;
+    let mut env = BTreeMap::from([("CLOUDFLARE_ACCOUNT_ID".into(), account)]);
+    if provider == "cloudflare-ai-gateway" {
+        let gateway = prompt_line("Cloudflare AI Gateway ID: ")?;
+        validate_environment_value("Cloudflare AI Gateway ID", &gateway)?;
+        env.insert("CLOUDFLARE_GATEWAY_ID".into(), gateway);
+    }
+    Ok(StoredCredential::ApiKey {
+        key: Some(key),
+        env,
+        extra: BTreeMap::new(),
+    })
 }
 
 #[cfg(test)]

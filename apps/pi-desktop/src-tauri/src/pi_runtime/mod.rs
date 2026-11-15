@@ -1020,6 +1020,7 @@ fn thread_from_snapshot(
         }
         updated_at = updated_at.max(timestamp);
         match message {
+            Message::System(_) => {},
             Message::User(message) => {
                 flush(&mut turns, &mut items, turn_started_at, turn_index, false);
                 turn_index += 1;
@@ -1213,6 +1214,7 @@ fn user_content(blocks: &[ContentBlock]) -> Vec<Value> {
 
 fn message_timestamp(message: &Message) -> i64 {
     match message {
+        Message::System(message) => message.timestamp_ms,
         Message::User(message) => message.timestamp_ms,
         Message::Assistant(message) => message.timestamp_ms,
         Message::ToolResult(message) => message.timestamp_ms,

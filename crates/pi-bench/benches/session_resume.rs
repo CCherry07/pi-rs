@@ -95,6 +95,7 @@ impl SessionFixture {
             ))));
             entries.push(SessionEntry::message(Message::assistant(
                 AssistantMessage {
+                    provider_thinking_level: None,
                     content: vec![ContentBlock::ToolCall(ToolCall {
                         id: call_id.clone(),
                         name: "read".to_string(),
@@ -178,6 +179,7 @@ impl SessionFixture {
                     timestamp,
                 ))),
                 SessionEntry::message(Message::assistant(AssistantMessage {
+                    provider_thinking_level: None,
                     content: vec![ContentBlock::ToolCall(ToolCall {
                         id: call_id.clone(),
                         name: "read".to_string(),

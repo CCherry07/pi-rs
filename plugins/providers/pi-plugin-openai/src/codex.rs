@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::responses::{input_items, stream as responses_stream, tools as response_tools};
+use crate::responses::{replay_input, stream as responses_stream, tools as response_tools};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use pi_core::{AbortSignal, ProviderId};
@@ -646,7 +646,7 @@ fn normalized_response_output(response: &Value) -> Vec<Value> {
         .into_iter()
         .flatten()
         .filter_map(|item| match item.get("type").and_then(Value::as_str) {
-            Some("message") => {
+            Some("message") if item.get("role").and_then(Value::as_str) == Some("assistant") => {
                 let content = item
                     .get("content")
                     .and_then(Value::as_array)
@@ -662,15 +662,23 @@ fn normalized_response_output(response: &Value) -> Vec<Value> {
                         })
                     })
                     .collect::<Vec<_>>();
-                (!content.is_empty())
-                    .then(|| json!({"type": "message", "role": "assistant", "content": content}))
+                (!content.is_empty()).then(|| {
+                    let mut value = json!({"type": "message", "role": "assistant", "content": content});
+                    if let Some(phase) = item.get("phase") { value["phase"] = phase.clone(); }
+                    value
+                })
             }
-            Some("function_call") => Some(json!({
-                "type": "function_call",
-                "call_id": item.get("call_id").and_then(Value::as_str).unwrap_or_default(),
-                "name": item.get("name").and_then(Value::as_str).unwrap_or_default(),
-                "arguments": item.get("arguments").and_then(Value::as_str).unwrap_or_default()
-            })),
+            Some("function_call") => {
+                let mut value = json!({
+                    "type": "function_call",
+                    "call_id": item.get("call_id").and_then(Value::as_str).unwrap_or_default(),
+                    "name": item.get("name").and_then(Value::as_str).unwrap_or_default(),
+                    "arguments": item.get("arguments").and_then(Value::as_str).unwrap_or_default()
+                });
+                if let Some(namespace) = item.get("namespace") { value["namespace"] = namespace.clone(); }
+                Some(value)
+            }
+            Some(_) => Some(item.clone()),
             _ => None,
         })
         .collect()
@@ -690,7 +698,13 @@ fn cached_websocket_request_body(body: &Value, continuation: &WebSocketContinuat
         .cloned()
         .unwrap_or_default();
     baseline.extend(continuation.last_response_items.clone());
-    if current_input.len() < baseline.len() || current_input[..baseline.len()] != baseline {
+    // Compare the same replay projection on both sides. Text item IDs/status and
+    // annotations are transport metadata; reasoning, phase, namespace and content
+    // remain significant so an edited history never takes a cached continuation.
+    if current_input.len() < baseline.len()
+        || normalized_response_output(&json!({"output": &current_input[..baseline.len()]}))
+            != normalized_response_output(&json!({"output": baseline}))
+    {
         return body.clone();
     }
 
@@ -791,7 +805,7 @@ fn next_websocket_request_id() -> String {
 }
 
 pub(crate) fn responses_request_body(request: &ProviderRequest) -> Value {
-    let input = input_items(&request.messages);
+    let input = replay_input(request);
     let tools = response_tools(&request.tools);
     let mut body = json!({
         "model": request.model.as_str(),
@@ -938,7 +952,7 @@ mod tests {
         };
 
         let body = responses_request_body(&request);
-        assert!(body.get("reasoning").is_none());
+        assert_eq!(body["reasoning"]["effort"], "low");
 
         request.thinking_level = pi_core::ThinkingLevel::Low;
         let body = responses_request_body(&request);
@@ -1082,6 +1096,25 @@ mod tests {
         assert_eq!(requests[1]["input"].as_array().unwrap().len(), 1);
         assert_eq!(requests[1]["input"][0]["role"], "user");
         assert_eq!(requests[1]["input"][0]["content"][0]["text"], "next");
+    }
+
+    #[test]
+    fn cached_continuation_never_ignores_edited_user_or_reasoning_history() {
+        let prompt = json!({"model":"model","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"original"}]}]});
+        let continuation = WebSocketContinuation {
+            last_request_body: prompt.clone(),
+            last_response_id: "response".into(),
+            last_response_items: vec![json!({"type":"reasoning","id":"rs_1","encrypted_content":"opaque"})],
+        };
+        let mut next = prompt;
+        next["input"].as_array_mut().unwrap().extend(continuation.last_response_items.clone());
+        next["input"].as_array_mut().unwrap().push(json!({"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}));
+        assert_eq!(cached_websocket_request_body(&next, &continuation)["previous_response_id"], "response");
+        let mut edited = next.clone();
+        edited["input"][0]["content"][0]["text"] = json!("edited");
+        assert!(cached_websocket_request_body(&edited, &continuation).get("previous_response_id").is_none());
+        next["input"][1]["encrypted_content"] = json!("different");
+        assert!(cached_websocket_request_body(&next, &continuation).get("previous_response_id").is_none());
     }
 
     struct SseFallbackTransport {
@@ -1393,6 +1426,7 @@ mod tests {
             api: API_NAME.to_string(),
             provider: ProviderId::new(PROVIDER_ID),
             model: pi_core::ModelId::new("gpt-5.5"),
+            provider_thinking_level: None,
             response_model: None,
             response_id: Some(response_id.to_string()),
             diagnostics: None,

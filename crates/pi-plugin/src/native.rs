@@ -9,6 +9,7 @@ pub use serde_json::Value as PluginOptionsValue;
 
 /// Version of the trusted Rust-ABI plugin contract.
 ///
+/// ABI 35 adds typed system history and provider-native thinking-level metadata.
 /// ABI 34 shares context/boundary snapshots and supports ordered context hook batches.
 /// ABI 33 adds correlated custom mouse events/results and retained component identities.
 /// ABI 32 adds overlay placement, visibility, focus release and region layout snapshots.
@@ -45,7 +46,7 @@ pub use serde_json::Value as PluginOptionsValue;
 /// tool argument preparation.
 /// Hosts must reject older artifacts before resolving their Rust-ABI
 /// constructors.
-pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 34;
+pub const NATIVE_PLUGIN_ABI_VERSION: u32 = 35;
 pub const BUILD_FINGERPRINT: &str = env!("PI_PLUGIN_BUILD_FINGERPRINT");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

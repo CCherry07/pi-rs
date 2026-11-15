@@ -477,6 +477,7 @@ mod tests {
                 api: "test".into(),
                 provider: pi_core::ProviderId::new("test"),
                 model: pi_core::ModelId::new("test"),
+                provider_thinking_level: None,
                 response_model: None,
                 response_id: None,
                 diagnostics: None,

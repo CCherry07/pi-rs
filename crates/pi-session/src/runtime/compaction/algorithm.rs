@@ -401,6 +401,7 @@ pub fn should_compact(
 
 pub fn estimate_tokens(message: &AgentMessage) -> u64 {
     let chars = match message.as_standard() {
+        Some(Message::System(message)) => message.render().len(),
         Some(Message::User(message)) => content_chars(&message.content),
         Some(Message::Assistant(message)) => message
             .content
@@ -621,6 +622,7 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
             continue;
         };
         match message {
+            Message::System(message) => parts.push(format!("[System]: {}", message.render())),
             Message::User(message) => {
                 let content = content_text(&message.content);
                 if !content.is_empty() {
@@ -913,6 +915,7 @@ fn assistant_usage(message: &AgentMessage) -> Option<&Usage> {
 
 fn message_timestamp(message: &AgentMessage) -> Option<i64> {
     match message.as_standard() {
+        Some(Message::System(message)) => Some(message.timestamp_ms),
         Some(Message::User(message)) => Some(message.timestamp_ms),
         Some(Message::Assistant(message)) => Some(message.timestamp_ms),
         Some(Message::ToolResult(message)) => Some(message.timestamp_ms),
@@ -1064,6 +1067,7 @@ mod tests {
             api: "scripted".to_string(),
             provider: ProviderId::new("scripted"),
             model: ModelId::new("test"),
+            provider_thinking_level: None,
             response_model: None,
             response_id: None,
             diagnostics: None,

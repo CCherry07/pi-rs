@@ -854,7 +854,7 @@ fn replay_transcript(
                     }
                 }
             }
-            Message::ToolResult(_) | Message::Custom(_) => {}
+            Message::System(_) | Message::ToolResult(_) | Message::Custom(_) => {}
         }
     }
     Ok(())

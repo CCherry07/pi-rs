@@ -1542,26 +1542,80 @@ Radius is intentionally not projected through this static routing path. `oauth: 
 one provider-owned OAuth, persisted remote-catalog, and `pi-messages` lifecycle; until that deep
 module exists, generation construction rejects Radius configuration explicitly.
 
-The independent `pi-plugin-anthropic` provider owns Anthropic Messages projection/SSE parsing, credential precedence, standard configurable routing, Claude Code request mode, browser PKCE authorization-code exchange/refresh, and its Claude catalog as one deep vendor Module. `ModelsPlugin` reuses its standard route for Anthropic-compatible custom providers without importing built-in Anthropic credential or OAuth policy. Claude Code mode preserves thinking signatures and applies OAuth identity headers, the required system identity, and bidirectional canonical tool-name mapping. `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, and Pi-compatible `<agent-dir>/auth.json` credentials are supported; explicit CLI credentials win, followed by environment credentials and stored credentials. The CLI owns secure credential persistence through `pi auth login/logout/status`: writes use a sibling lock, atomic replacement, and Unix mode `0600`, while status never emits secrets.
+The independent `pi-plugin-anthropic` provider owns Anthropic Messages projection/SSE parsing, credential precedence, standard configurable routing, Claude Code request mode, browser PKCE authorization-code exchange/refresh, and its Claude catalog as one deep vendor Module. `ModelsPlugin` reuses its standard route for Anthropic-compatible custom providers without importing built-in Anthropic credential or OAuth policy. Claude Code mode preserves thinking signatures and applies OAuth identity headers, the required system identity, and bidirectional canonical tool-name mapping. `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, and Pi-compatible `<agent-dir>/auth.json` credentials are supported; explicit CLI credentials win, followed by environment credentials and stored credentials. Coding owns the shared credential store used by `pi auth login/logout/status` and provider requests: writes use a sibling lock, atomic replacement, and Unix mode `0600`, while status never emits secrets.
 
-The built-in `openai-codex` plugin is installed in every product generation rather than only when Codex is initially selected. It owns the explicit Pi-compatible model catalog, Codex Device OAuth/refresh, and a Codex Responses Adapter. Reusable OpenAI Responses message/tool projection and SSE adaptation live directly in `pi-plugin-openai::responses`; the separate `pi-plugin-xai` provider depends on that plugin crate while retaining its own lifecycle, credentials, headers, payload policy, OAuth device flow, refresh, and Grok catalog. xAI exposes the current Grok 4.5/4.6 Responses models, resolves `XAI_API_KEY` or Pi-compatible stored credentials when rebuilding a generation, supports explicit xAI Device OAuth through `pi auth login xai --oauth`, and proactively refreshes stored xAI OAuth credentials before application startup. The built-in `pi-plugin-google` provider owns the Google Generative AI projection and current Gemini catalog, resolves `GEMINI_API_KEY` before Pi-compatible stored credentials, and exposes API-key login as `pi auth login google`; Google OAuth identities are not part of this provider. Anthropic and OpenAI Codex stored OAuth credentials use the same startup refresh transaction. `pi auth login` without a provider builds its selector from built-ins, validated JSONC `models.json` provider IDs, and existing stored credentials; unknown third-party providers receive API-key auth unless a future provider-owned OAuth capability declares otherwise. Device authorization validates xAI HTTPS verification URLs before invoking the platform browser Adapter; token polling and refresh remain provider-owned while locked atomic `auth.json` persistence remains CLI-owned. At generation construction the Codex plugin credential-blindly probes Codex CLI credentials from `~/.codex/auth.json` and `~/.config/codex/auth.json`; a valid access-token JWT with `chatgpt_account_id` makes the provider selectable. Requests use the ChatGPT Codex Responses endpoint and its required bearer, account, beta, originator, and user-agent headers. Its generation-local transport policy supports SSE, WebSocket, cached WebSocket continuation, and Pi's automatic preference: a WebSocket is reused by session/account, `previous_response_id` sends only a verified context suffix, and a transport failure before the first provider event activates SSE fallback for that session. Connect and per-frame idle waits remain abortable. An explicit HTTP proxy forces the proxied SSE path because the Rust WebSocket client has no proxy-tunnelling Adapter and must not bypass product proxy policy. This reuse does not write or refresh Codex CLI credentials and is not Pi's `/login` flow. The catalog supplies context windows, output limits, input modalities, reasoning support, and costs; it is not remote discovery. `ModelRuntime` keeps the complete registered catalog distinct from its credential-blind available view and exposes provider availability diagnostics. Providers report whether the current immutable generation has enough configuration to be selectable without resolving secret values. Initial selection and `/model` consume the available view, while restore and diagnostics can still inspect registered models. `AgentSession` derives compaction limits from the active generation's current `ModelSpec`, so model switches immediately change threshold and overflow decisions. An explicit session context-window option remains an embedding override.
+The built-in `openai-codex` plugin is installed in every product generation rather than only when Codex is initially selected. It owns the explicit Pi-compatible model catalog, Codex Device OAuth/refresh, and a Codex Responses Adapter. Reusable OpenAI Responses message/tool projection and SSE adaptation live directly in `pi-plugin-openai::responses`; the separate `pi-plugin-xai` provider depends on that plugin crate while retaining its own lifecycle, credentials, headers, payload policy, OAuth device flow, refresh, and Grok catalog. xAI exposes the current Grok 4.5/4.6 Responses models, resolves `XAI_API_KEY` or Pi-compatible stored credentials when rebuilding a generation, supports explicit xAI Device OAuth through `pi auth login xai --oauth`, and resolves stored xAI OAuth credentials immediately before requests. The built-in `pi-plugin-google` provider owns the Google Generative AI projection and current Gemini catalog, resolves `GEMINI_API_KEY` before Pi-compatible stored credentials, and exposes API-key login as `pi auth login google`; Google OAuth identities are not part of this provider. Anthropic, OpenAI, OpenAI Codex, GitHub Copilot, Kimi Coding, and xAI stored OAuth credentials use the shared request-time refresh transaction. `pi auth login` without a provider builds its selector from built-ins, validated JSONC `models.json` provider IDs, and existing stored credentials; unknown third-party providers receive API-key auth unless a future provider-owned OAuth capability declares otherwise. Device authorization validates xAI HTTPS verification URLs before invoking the platform browser Adapter; token polling and refresh remain provider-owned while locked atomic `auth.json` persistence remains Coding-owned. At generation construction the Codex plugin credential-blindly probes Codex CLI credentials from `~/.codex/auth.json` and `~/.config/codex/auth.json`; a valid access-token JWT with `chatgpt_account_id` makes the provider selectable. Requests use the ChatGPT Codex Responses endpoint and its required bearer, account, beta, originator, and user-agent headers. Its generation-local transport policy supports SSE, WebSocket, cached WebSocket continuation, and Pi's automatic preference: a WebSocket is reused by session/account, `previous_response_id` sends only a verified context suffix, and a transport failure before the first provider event activates SSE fallback for that session. Connect and per-frame idle waits remain abortable. An explicit HTTP proxy forces the proxied SSE path because the Rust WebSocket client has no proxy-tunnelling Adapter and must not bypass product proxy policy. This reuse does not write or refresh Codex CLI credentials and is not Pi's `/login` flow. The catalog supplies context windows, output limits, input modalities, reasoning support, and costs; it is not remote discovery. `ModelRuntime` keeps the complete registered catalog distinct from its credential-blind available view and exposes provider availability diagnostics. Providers report whether the current immutable generation has enough configuration to be selectable without resolving secret values. Initial selection and `/model` consume the available view, while restore and diagnostics can still inspect registered models. `AgentSession` derives compaction limits from the active generation's current `ModelSpec`, so model switches immediately change threshold and overflow decisions. An explicit session context-window option remains an embedding override.
 
 The built-in Codex catalog includes Pi-derived thinking maps. Every current Codex model exposes
 `xhigh`; GPT-5.6 maps semantic `minimal` to provider effort `low` and additionally exposes `max`.
-GPT-6 Astra supports only `low` through `max`; unsupported `off` and `minimal` requests clamp to
-`low` before provider dispatch.
+GPT-6 Astra maps semantic `minimal` to provider effort `low`; unsupported `off` requests clamp
+up to `minimal` before dispatch. GPT-6.1 Sol carries its current 500,000-token context window.
+Removed upstream catalog entries use the existing session model-fallback diagnostics on resume.
 
 Dedicated provider crates keep vendor behavior behind the same immutable generation boundary.
 Mistral owns its native chat projection and stream parser; Azure OpenAI Responses owns deployment
 and `api-version` endpoint construction; Google Vertex owns express API-key and
 project/location-based application-default credential routing; Amazon Bedrock owns Converse Stream,
 AWS EventStream decoding, bearer authentication, and SigV4 credential resolution. OpenRouter owns
-its curated catalog and browser PKCE key exchange. GitHub Copilot owns device authorization,
+its catalog and browser PKCE key exchange. GitHub Copilot owns device authorization,
 short-lived Copilot token mint/refresh, account `/models` filtering, enterprise-domain routing, and
 dispatch across Anthropic, OpenAI Completions, and OpenAI Responses projections. These product
 plugins are registered in every generation even when unavailable, so diagnostics retain their
-catalogs while `/model` exposes only providers with usable credential configuration. Their curated
-catalogs are explicit generation data rather than a claim of complete remote Pi catalog parity.
+catalogs while `/model` exposes only providers with usable credential configuration. Their chat catalogs are checked-in snapshots generated from the current local Pi catalog by
+`scripts/sync-provider-catalogs.py`. Image-generation and classifier catalogs remain outside this
+Coding provider surface. Catalog regeneration is explicit and requires no network during builds.
+
+`pi-provider::CredentialSource` supplies secret-bearing request data independently of vendor wire
+projection. `CredentialProvider` preserves a generation's provider connection state while the
+credential remains unchanged, and rebuilds only its internal adapter after rotation. Provider
+registries, model metadata and plugin hooks remain immutable. Coding's `StoredCredentialSource`
+resolves explicit/environment credentials or reads `auth.json`; stored OAuth refresh holds the same
+cross-process file lock as login/logout across re-read, refresh and atomic persistence. It rechecks
+expiry under the lock. Cancelling a caller stops waiting immediately; an already-started bounded
+refresh still saves any rotated credential. An expired credential for an unrelated provider cannot
+block application startup. Explicit credentials win; environment then stored credentials retain the
+existing Rust product order. Cloudflare follows Pi's per-field stored-before-environment merge.
+
+The ordinary `openai` provider now owns its full Responses chat catalog. Its direct ChatGPT login
+uses dynamic client registration, PKCE, a validated callback on port 1455, the issued `clientId`, and
+`chatgpt.tokens.use.direct`; it is independent of `openai-codex` device login. `pi-plugin-gateways`
+registers independent catalog-backed provider instances for DeepSeek, Groq, Moonshot, MiniMax,
+Qwen Token Plan, ZAI, Cloudflare, OpenCode and the other standard-protocol gateways. Vendor headers, including NVIDIA model polling headers,
+Cloudflare account/gateway endpoint substitution and Kimi device OAuth live in that plugin crate;
+Coding only supplies credentials and generation factories. Each model chooses its own protocol.
+
+The Responses request adapter matches current Pi's direct ChatGPT grant policy: an `openai`
+request to the exact `https://api.openai.com/v1` base using a non-`sk-` credential omits generated
+`max_output_tokens`, `prompt_cache_retention`, and `prompt_cache_options`. API keys and other
+provider/endpoints retain ordinary payload behavior. Credential classification remains private to
+the provider, after request-time resolution and before payload hooks; it is not stored in model
+metadata or session history. Rust has no separate named temperature option at this seam:
+`samplingParams`, including an explicit temperature or output budget, and provider payload hooks
+still override generated fields last, as in Pi.
+Responses compat honors `supportsMaxOutputTokens` and `promptCacheKeyMode` (`auto`, `enabled`,
+`disabled`), with typed models.json validation before generation publication. Active cache keys
+are capped at 64 Unicode code points. Long retention uses `prompt_cache_options.ttl: "30m"` for
+explicit-cache models and `prompt_cache_retention: "24h"` otherwise. Cache-disabled requests omit
+automatic affinity headers; ordinary Responses affinity uses `session-id`, not the Completions
+API's `session_id`, and explicit headers retain precedence. These are provider-request conformance
+fixes, not changes to generation lifetime or credential precedence. Mid-conversation system/effort
+projection, service-tier pricing and complete upstream Responses replay remain separate work.
+
+Responses reasoning summaries defer synthetic paragraph separators until the next non-empty
+reasoning delta. Completed items join summary parts without a trailing separator, matching Pi's
+final text. This is a deliberate transient-display difference from Pi, which appends separators
+immediately and later replaces its mutable partial text; Rust's semantic deltas remain append-only.
+Provider-supplied whitespace is preserved, and contradictory final content still fails validation.
+
+Azure exposes canonical `azure` alongside the existing `azure-openai-responses` identity, preserving
+old sessions/configuration. Both route chat-completions models with Azure deployment names and
+API-version headers/URLs, while keeping catalog model identity in stream metadata. OpenRouter
+routes Anthropic models through Messages and other chat models through Completions. Product
+preparation refreshes its account allowlist, token limits and prices through `/models/user`, using
+validated provider routing and the configured HTTP proxy before publishing the generation.
+Rejected/missing catalog endpoints keep the shipped catalog; other refresh failures are visible
+resource diagnostics and leave the baseline usable. This is a generation-scoped snapshot rather
+than Pi's mutable live catalog. It does not persist an account catalog across processes.
 
 Initial selection is part of the `AgentSessionOptions` interface in `pi-session`.
 `InitialModelRequest` resolves an explicit request, a restorable session model, the configured
@@ -2231,7 +2285,9 @@ constrained by the active generation's `ModelSpec`: non-reasoning models force t
 configured summary budget is clamped to the model's maximum output tokens.
 
 Normal assistant turns classify provider failures with the same current Pi transient/terminal
-rules. An enabled retry persists the failed assistant for audit, removes only that terminal failure
+rules. Numeric statuses and socket codes retain identifier boundaries, and subscription/plan quota
+failures take precedence over HTTP 429. Connection-closed and current upstream stream failures are
+transient. An enabled retry persists the failed assistant for audit, removes only that terminal failure
 from the next live provider context, publishes retry start/end product events, and waits with an
 abortable exponential backoff. Context overflow takes the one compaction-recovery path before
 ordinary retries, so it cannot consume both policies or create a compaction loop. Standalone

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use gcp_auth::TokenProvider;
-use pi_core::{AbortSignal, ModelCost, ModelInput, ModelSpec, PluginId, ProviderId};
+use pi_core::{AbortSignal, ModelSpec, PluginId, ProviderId};
 use pi_plugin::{
     Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderPlugin,
     ProviderRegisterContext, ProviderRequest, ProviderStream,
@@ -442,64 +442,8 @@ enum VertexCredentials {
 }
 
 pub fn google_vertex_models() -> Vec<ModelSpec> {
-    vec![
-        model("gemini-2.5-flash", "Gemini 2.5 Flash", 0.3, 2.5, 0.03),
-        model(
-            "gemini-2.5-flash-lite",
-            "Gemini 2.5 Flash-Lite",
-            0.1,
-            0.4,
-            0.01,
-        ),
-        model("gemini-2.5-pro", "Gemini 2.5 Pro", 1.25, 10.0, 0.125),
-        model(
-            "gemini-3-flash-preview",
-            "Gemini 3 Flash Preview",
-            0.5,
-            3.0,
-            0.05,
-        ),
-        pro_model("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
-        pro_model(
-            "gemini-3.1-pro-preview-customtools",
-            "Gemini 3.1 Pro Preview Custom Tools",
-        ),
-        model("gemini-3.5-flash", "Gemini 3.5 Flash", 1.5, 9.0, 0.15),
-        model("gemini-flash-latest", "Gemini Flash Latest", 1.5, 9.0, 0.15),
-    ]
-}
-
-fn model(id: &str, name: &str, input: f64, output: f64, cache_read: f64) -> ModelSpec {
-    let mut model = ModelSpec::new(GOOGLE_VERTEX_PROVIDER_ID, id, name, GOOGLE_VERTEX_API);
-    model.base_url = Some("https://{location}-aiplatform.googleapis.com".to_string());
-    model.reasoning = true;
-    model.input = vec![ModelInput::Text, ModelInput::Image];
-    model.cost = ModelCost {
-        input,
-        output,
-        cache_read,
-        cache_write: 0.0,
-        tiers: Vec::new(),
-    };
-    model.context_window = 1_048_576;
-    model.max_tokens = 65_536;
-    if id.starts_with("gemini-3") || id.starts_with("gemini-flash") {
-        model.thinking_level_map.insert("off".to_string(), None);
-    }
-    model
-}
-
-fn pro_model(id: &str, name: &str) -> ModelSpec {
-    let mut model = model(id, name, 2.0, 12.0, 0.2);
-    model.thinking_level_map.insert("minimal".to_string(), None);
-    model
-        .thinking_level_map
-        .insert("low".to_string(), Some("LOW".to_string()));
-    model.thinking_level_map.insert("medium".to_string(), None);
-    model
-        .thinking_level_map
-        .insert("high".to_string(), Some("HIGH".to_string()));
-    model
+    serde_json::from_str(include_str!("data/google-vertex.json"))
+        .expect("checked-in Vertex catalog")
 }
 
 fn vertex_express_endpoint(base: &str, model: &str) -> Result<String, ProviderError> {

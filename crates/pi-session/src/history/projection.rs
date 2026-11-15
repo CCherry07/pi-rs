@@ -476,9 +476,15 @@ fn repair_dangling_tool_calls(messages: Vec<Message>) -> Vec<Message> {
     let mut repaired = Vec::with_capacity(messages.len());
     let mut pending = Vec::<(ToolCallId, String, i64)>::new();
 
+    let mut held_system = Vec::new();
     for message in messages {
+        if matches!(message, Message::System(_)) && !pending.is_empty() {
+            held_system.push(message);
+            continue;
+        }
         if !matches!(message, Message::ToolResult(_)) {
             append_missing_tool_results(&mut repaired, &mut pending);
+            repaired.append(&mut held_system);
         }
         match &message {
             Message::Assistant(assistant) => {
@@ -497,11 +503,12 @@ fn repair_dangling_tool_calls(messages: Vec<Message>) -> Vec<Message> {
                     pending.remove(index);
                 }
             }
-            Message::User(_) | Message::Custom(_) => {}
+            Message::System(_) | Message::User(_) | Message::Custom(_) => {}
         }
         repaired.push(message);
     }
     append_missing_tool_results(&mut repaired, &mut pending);
+    repaired.append(&mut held_system);
     repaired
 }
 
@@ -740,6 +747,7 @@ mod tests {
     fn assistant(text: &str, stop_reason: StopReason) -> AgentMessage {
         Message::assistant(AssistantMessage {
             content: vec![ContentBlock::Text(TextContent::new(text))],
+            provider_thinking_level: None,
             api: "anthropic-messages".to_string(),
             provider: ProviderId::new("anthropic"),
             model: ModelId::new("claude"),
@@ -760,6 +768,7 @@ mod tests {
     fn assistant_tool_call(id: &str, name: &str) -> AgentMessage {
         Message::assistant(AssistantMessage {
             content: vec![ContentBlock::ToolCall(ToolCall::new(id, name, json!({})))],
+            provider_thinking_level: None,
             api: "openai-completions".to_string(),
             provider: ProviderId::new("openai"),
             model: ModelId::new("gpt"),

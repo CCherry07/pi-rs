@@ -126,6 +126,7 @@ fn assistant_message(content: Vec<ContentBlock>, stop_reason: StopReason) -> Ass
         api: "scripted".to_string(),
         provider: ProviderId::new("scripted"),
         model: ModelId::new("test"),
+        provider_thinking_level: None,
         response_model: None,
         response_id: None,
         diagnostics: None,
@@ -213,6 +214,7 @@ fn message_role(message: &Message) -> &'static str {
         Message::Assistant(_) => "assistant",
         Message::ToolResult(_) => "toolResult",
         Message::Custom(_) => "custom",
+        Message::System(_) => "system",
     }
 }
 

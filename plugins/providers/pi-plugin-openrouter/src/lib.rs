@@ -2,8 +2,10 @@
 
 //! OpenRouter provider and high-value built-in model catalog.
 
+mod account_catalog;
 mod catalog;
 mod oauth;
+pub use account_catalog::{personalize_catalog, refresh_account_catalog};
 
 pub use catalog::openrouter_models;
 pub use oauth::{
@@ -27,9 +29,15 @@ pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 pub struct OpenRouterPlugin {
     provider: Arc<OpenRouterProvider>,
+    models: Vec<pi_core::ModelSpec>,
 }
 
 impl OpenRouterPlugin {
+    pub fn with_catalog(mut self, models: Vec<pi_core::ModelSpec>) -> Self {
+        self.models = models;
+        self
+    }
+
     pub fn discover() -> Result<Self, ProviderError> {
         Self::from_stored(None)
     }
@@ -57,6 +65,7 @@ impl OpenRouterPlugin {
     ) -> Result<Self, ProviderError> {
         Ok(Self {
             provider: Arc::new(OpenRouterProvider::with_transport(api_key, transport)?),
+            models: openrouter_models(),
         })
     }
 }
@@ -69,8 +78,8 @@ impl ProviderPlugin for OpenRouterPlugin {
 
     fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_provider(self.provider.clone())?;
-        for model in openrouter_models() {
-            context.register_model(model)?;
+        for model in &self.models {
+            context.register_model(model.clone())?;
         }
         Ok(())
     }
@@ -78,6 +87,7 @@ impl ProviderPlugin for OpenRouterPlugin {
 
 pub struct OpenRouterProvider {
     inner: OpenAiCompatibleProvider,
+    anthropic: pi_plugin_anthropic::AnthropicCompatibleProvider,
 }
 
 impl OpenRouterProvider {
@@ -93,7 +103,19 @@ impl OpenRouterProvider {
         config
             .headers
             .insert("User-Agent".to_string(), "pi-rs".to_string());
+        let mut anthropic_config =
+            pi_plugin_anthropic::AnthropicCompatibleConfig::without_api_key(OPENROUTER_BASE_URL);
+        anthropic_config.provider_id = OPENROUTER_PROVIDER_ID.into();
+        if let Some(key) = &config.api_key {
+            anthropic_config
+                .headers
+                .insert("Authorization".into(), format!("Bearer {key}"));
+        }
         Ok(Self {
+            anthropic: pi_plugin_anthropic::AnthropicCompatibleProvider::with_transport(
+                anthropic_config,
+                transport.clone(),
+            )?,
             inner: OpenAiCompatibleProvider::with_transport(config, transport)?,
         })
     }
@@ -119,13 +141,115 @@ impl Provider for OpenRouterProvider {
         context: ProviderCallContext,
         signal: AbortSignal,
     ) -> Result<ProviderStream, ProviderError> {
-        self.inner.stream(request, context, signal).await
+        if request
+            .model_spec
+            .as_ref()
+            .is_some_and(|model| model.api == "anthropic-messages")
+        {
+            self.anthropic.stream(request, context, signal).await
+        } else {
+            self.inner.stream(request, context, signal).await
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    type CapturedRequest = (String, BTreeMap<String, String>);
+    #[derive(Default)]
+    struct Capture(Mutex<Option<CapturedRequest>>);
+    #[async_trait]
+    impl HttpTransport for Capture {
+        async fn post_json(
+            &self,
+            url: &str,
+            headers: &BTreeMap<String, String>,
+            _: &serde_json::Value,
+            _: AbortSignal,
+        ) -> Result<pi_provider::HttpResponse, pi_provider::TransportError> {
+            *self.0.lock().unwrap() = Some((url.into(), headers.clone()));
+            Err(pi_provider::TransportError::Request("captured".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn routes_messages_and_completions_with_openrouter_bearer_auth() {
+        for (api, base, endpoint) in [
+            (
+                "anthropic-messages",
+                None,
+                "https://openrouter.ai/api/v1/messages",
+            ),
+            (
+                "openai-completions",
+                None,
+                "https://openrouter.ai/api/v1/chat/completions",
+            ),
+            (
+                "anthropic-messages",
+                Some("https://us.openrouter.ai/api/v1"),
+                "https://us.openrouter.ai/api/v1/messages",
+            ),
+            (
+                "openai-completions",
+                Some("https://us.openrouter.ai/api/v1"),
+                "https://us.openrouter.ai/api/v1/chat/completions",
+            ),
+        ] {
+            let mut model = openrouter_models()
+                .into_iter()
+                .find(|model| model.api == api)
+                .unwrap();
+            if let Some(base) = base {
+                model.base_url = Some(base.into());
+            }
+            let capture = Arc::new(Capture::default());
+            let provider =
+                OpenRouterProvider::with_transport(Some("fixture".into()), capture.clone())
+                    .unwrap();
+            let context =
+                ProviderCallContext::without_plugins("/", model.provider.clone(), model.id.clone());
+            let request = ProviderRequest {
+                model: model.id.clone(),
+                model_spec: Some(model),
+                system_prompt: String::new(),
+                messages: vec![],
+                tools: vec![],
+                thinking_level: pi_core::ThinkingLevel::Off,
+                thinking_budgets: None,
+                max_output_tokens: None,
+                headers: BTreeMap::new(),
+                sampling_params: BTreeMap::new(),
+                session_id: None,
+            };
+            let (_, signal) = pi_core::AbortHandle::new();
+            assert!(provider.stream(request, context, signal).await.is_err());
+            let (url, headers) = capture
+                .0
+                .lock()
+                .unwrap()
+                .take()
+                .expect("request reached transport");
+            assert_eq!(url, endpoint);
+            assert_eq!(
+                headers
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case("authorization"))
+                    .unwrap()
+                    .1,
+                "Bearer fixture"
+            );
+            assert!(
+                !headers
+                    .keys()
+                    .any(|key| key.eq_ignore_ascii_case("x-api-key"))
+            );
+        }
+    }
 
     #[test]
     fn catalog_models_keep_openrouter_compat_and_aliases() {
@@ -133,13 +257,19 @@ mod tests {
         assert!(
             models
                 .iter()
-                .any(|model| model.id.as_str() == "~openai/gpt-latest")
+                .any(|model| model.id.as_str() == "~openai/gpt-sol-latest")
         );
         assert!(models.iter().all(|model| {
             model.provider == ProviderId::new(OPENROUTER_PROVIDER_ID)
-                && model.api == "openai-completions"
-                && model.base_url.as_deref() == Some(OPENROUTER_BASE_URL)
-                && model.compat.is_some()
+                && matches!(
+                    model.api.as_str(),
+                    "openai-completions" | "anthropic-messages"
+                )
+                && model
+                    .base_url
+                    .as_deref()
+                    .is_some_and(|url| url.starts_with("https://openrouter.ai/api"))
+                && (model.api == "anthropic-messages" || model.compat.is_some())
         }));
     }
 }

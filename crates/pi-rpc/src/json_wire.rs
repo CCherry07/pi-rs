@@ -539,6 +539,7 @@ mod tests {
             api: "test".to_string(),
             provider: "test".into(),
             model: "model".into(),
+            provider_thinking_level: None,
             response_model: None,
             response_id: None,
             diagnostics: None,

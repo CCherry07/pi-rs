@@ -35,6 +35,7 @@ members = [
     "plugins/features/pi-plugin-subagents",
     "plugins/features/pi-plugin-schedule",
     "plugins/providers/pi-plugin-models",
+    "plugins/providers/pi-plugin-gateways",
     "plugins/providers/pi-plugin-anthropic",
     "plugins/providers/pi-plugin-openai",
     "plugins/providers/pi-plugin-xai",
@@ -107,6 +108,7 @@ pi-plugin-session-transfer = { path = "plugins/features/pi-plugin-session-transf
 pi-plugin-memory-hermes = { path = "plugins/features/pi-plugin-memory-hermes" }
 pi-plugin-subagents = { path = "plugins/features/pi-plugin-subagents" }
 pi-plugin-schedule = { path = "plugins/features/pi-plugin-schedule" }
+pi-plugin-gateways = { path = "plugins/providers/pi-plugin-gateways" }
 pi-plugin-models = { path = "plugins/providers/pi-plugin-models" }
 pi-plugin-anthropic = { path = "plugins/providers/pi-plugin-anthropic" }
 pi-plugin-openai = { path = "plugins/providers/pi-plugin-openai" }

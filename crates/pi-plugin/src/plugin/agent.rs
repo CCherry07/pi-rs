@@ -767,7 +767,8 @@ impl AgentHookRoutes {
 fn same_message_role(left: &Message, right: &Message) -> bool {
     matches!(
         (left, right),
-        (Message::User(_), Message::User(_))
+        (Message::System(_), Message::System(_))
+            | (Message::User(_), Message::User(_))
             | (Message::Assistant(_), Message::Assistant(_))
             | (Message::ToolResult(_), Message::ToolResult(_))
             | (Message::Custom(_), Message::Custom(_))
@@ -1375,6 +1376,7 @@ mod tests {
             api: "test".to_string(),
             provider: ProviderId::new("scripted"),
             model: ModelId::new("test"),
+            provider_thinking_level: None,
             response_model: None,
             response_id: None,
             diagnostics: None,

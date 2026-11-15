@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+#[serde(rename_all = "camelCase", default)]
 pub struct OpenAiCompletionsCompat {
     pub supports_store: Option<bool>,
     pub supports_developer_role: Option<bool>,
@@ -354,7 +354,8 @@ fn messages(request: &ProviderRequest, compat: &ResolvedOpenAiCompletionsCompat)
     let mut messages = Vec::new();
     let mut pending_tool_images = Vec::new();
     let mut last_was_tool_result = false;
-    if !request.system_prompt.is_empty() {
+    let system_prompt = pi_core::SystemMessage::fold(&request.system_prompt, &request.messages);
+    if !system_prompt.is_empty() {
         let role = if request
             .model_spec
             .as_ref()
@@ -365,7 +366,7 @@ fn messages(request: &ProviderRequest, compat: &ResolvedOpenAiCompletionsCompat)
         } else {
             "system"
         };
-        messages.push(json!({"role": role, "content": request.system_prompt}));
+        messages.push(json!({"role": role, "content": system_prompt}));
     }
     for message in &request.messages {
         if !matches!(message, Message::ToolResult(_)) {
@@ -380,6 +381,7 @@ fn messages(request: &ProviderRequest, compat: &ResolvedOpenAiCompletionsCompat)
             }
         }
         match message {
+            Message::System(_) => continue,
             Message::User(message) => {
                 if last_was_tool_result && compat.requires_assistant_after_tool_result {
                     messages.push(assistant_tool_bridge());
@@ -808,7 +810,7 @@ fn has_tool_history(messages: &[Message]) -> bool {
             .iter()
             .any(|block| matches!(block, ContentBlock::ToolCall(_))),
         Message::ToolResult(_) => true,
-        Message::User(_) | Message::Custom(_) => false,
+        Message::System(_) | Message::User(_) | Message::Custom(_) => false,
     })
 }
 

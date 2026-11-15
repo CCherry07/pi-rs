@@ -238,6 +238,11 @@ fn render_entry(output: &mut String, entry: &SessionEntry) {
 fn render_agent_message(output: &mut String, agent_message: &AgentMessage) {
     if let Some(message) = agent_message.as_standard() {
         match message {
+            Message::System(message) => render_collapsible_notice(
+                output,
+                "System instructions",
+                &markdown_html(&message.render()),
+            ),
             Message::User(user) => {
                 let text = agent_message
                     .display_text()
@@ -662,6 +667,7 @@ mod tests {
             api: "test".to_string(),
             provider: "test".into(),
             model: "test".into(),
+            provider_thinking_level: None,
             response_model: None,
             response_id: None,
             diagnostics: None,

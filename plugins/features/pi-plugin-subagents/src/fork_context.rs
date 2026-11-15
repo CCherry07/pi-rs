@@ -125,6 +125,7 @@ mod tests {
             api: "test".into(),
             provider: "test".into(),
             model: "test".into(),
+            provider_thinking_level: None,
             response_model: None,
             response_id: None,
             diagnostics: None,

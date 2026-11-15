@@ -252,8 +252,9 @@ pub fn request_body(request: &ProviderRequest) -> Value {
         .is_some_and(|model| model.input.contains(&ModelInput::Image));
     let mut normalizer = ToolCallIdNormalizer::default();
     let mut messages = Vec::new();
-    if !request.system_prompt.is_empty() {
-        messages.push(json!({"role": "system", "content": request.system_prompt}));
+    let system_prompt = pi_core::SystemMessage::fold(&request.system_prompt, &request.messages);
+    if !system_prompt.is_empty() {
+        messages.push(json!({"role": "system", "content": system_prompt}));
     }
     for message in &request.messages {
         if let Some(message) = project_message(message, supports_images, &mut normalizer) {
@@ -324,6 +325,7 @@ fn project_message(
     normalizer: &mut ToolCallIdNormalizer,
 ) -> Option<Value> {
     match message {
+        Message::System(_) => None,
         Message::User(message) => project_user_blocks(&message.content, supports_images),
         Message::Custom(message) => {
             project_user_blocks(&message.content.to_blocks(), supports_images)

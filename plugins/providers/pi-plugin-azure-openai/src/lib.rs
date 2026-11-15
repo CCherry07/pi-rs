@@ -72,7 +72,16 @@ impl ProviderPlugin for AzureOpenAiPlugin {
 
     fn register(&self, context: &mut ProviderRegisterContext<'_>) -> pi_plugin::Result<()> {
         context.register_provider(self.provider.clone())?;
+        let mut config = self.provider.config.clone();
+        config.provider_id = "azure".into();
+        context.register_provider(Arc::new(AzureOpenAiResponsesProvider {
+            config,
+            transport: self.provider.transport.clone(),
+        }))?;
         for model in azure_openai_models() {
+            let mut canonical = model.clone();
+            canonical.provider = "azure".into();
+            context.register_model(canonical)?;
             context.register_model(model)?;
         }
         Ok(())
@@ -266,6 +275,41 @@ impl Provider for AzureOpenAiResponsesProvider {
     ) -> Result<ProviderStream, ProviderError> {
         let endpoint = self.endpoint(&request)?;
         let headers = self.headers(&request);
+        if request
+            .model_spec
+            .as_ref()
+            .is_some_and(|model| model.api == "openai-completions")
+        {
+            let mut config = pi_plugin_openai::OpenAiCompatibleConfig::without_api_key(
+                endpoint.replace("/responses", "/chat/completions"),
+            );
+            config.provider_id = self.config.provider_id.clone();
+            config.headers = headers;
+            let original_model = request.model.clone();
+            let mut request = request;
+            if let Some(deployment) = self.config.deployment_names.get(request.model.as_str()) {
+                request.model = deployment.clone().into();
+            }
+            // The route owns the resolved Azure deployment endpoint.
+            if let Some(model) = &mut request.model_spec {
+                model.base_url = Some(config.base_url.clone());
+            }
+            use futures::StreamExt;
+            let stream = pi_plugin_openai::OpenAiCompatibleProvider::with_transport(
+                config,
+                self.transport.clone(),
+            )?
+            .stream(request, context, signal)
+            .await?;
+            return Ok(Box::pin(stream.map(move |event| {
+                event.map(|mut event| {
+                    if let pi_core::StreamEvent::Start { metadata } = &mut event {
+                        metadata.model = original_model.clone();
+                    }
+                    event
+                })
+            })));
+        }
         let original_model = request.model.clone();
         let mut wire_request = request;
         if let Some(deployment) = self.config.deployment_names.get(original_model.as_str()) {
@@ -535,5 +579,53 @@ mod tests {
         assert!(!capture.headers.contains_key("Authorization"));
         assert_eq!(capture.body["model"], "production-gpt-5");
         assert_eq!(capture.body["max_output_tokens"], 16);
+    }
+    #[tokio::test]
+    async fn chat_route_uses_deployment_but_preserves_catalog_identity() {
+        let capture = Arc::new(Mutex::new(Capture::default()));
+        let provider = AzureOpenAiResponsesProvider::with_transport(
+            AzureOpenAiResponsesConfig::new("https://demo.openai.azure.com", "fixture")
+                .deployment_name("catalog-model", "deployment"),
+            Arc::new(CapturingTransport(capture.clone())),
+        )
+        .unwrap();
+        let request = ProviderRequest {
+            model: "catalog-model".into(),
+            model_spec: Some(ModelSpec::new(
+                "azure",
+                "catalog-model",
+                "Model",
+                "openai-completions",
+            )),
+            system_prompt: String::new(),
+            messages: vec![],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            thinking_budgets: None,
+            max_output_tokens: None,
+            headers: BTreeMap::new(),
+            sampling_params: BTreeMap::new(),
+            session_id: None,
+        };
+        let (_, signal) = AbortHandle::new();
+        let mut stream = provider
+            .stream(
+                request,
+                ProviderCallContext::without_plugins("/", "azure".into(), "catalog-model".into()),
+                signal,
+            )
+            .await
+            .unwrap();
+        let first = stream.next().await.unwrap().unwrap();
+        assert!(
+            matches!(first, StreamEvent::Start { metadata } if metadata.model.as_str() == "catalog-model")
+        );
+        let capture = capture.lock().unwrap();
+        assert_eq!(
+            capture.url,
+            "https://demo.openai.azure.com/openai/v1/chat/completions?api-version=v1"
+        );
+        assert_eq!(capture.body["model"], "deployment");
+        assert_eq!(capture.headers["api-key"], "fixture");
     }
 }

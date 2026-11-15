@@ -207,13 +207,15 @@ fn completions_endpoint(base: &str) -> String {
 }
 
 pub struct OpenAiProvider {
-    inner: OpenAiCompatibleProvider,
+    inner: crate::responses::OpenAiResponsesCompatibleProvider,
 }
 
 impl OpenAiProvider {
     pub fn new(config: OpenAiConfig) -> Result<Self, ProviderError> {
         Ok(Self {
-            inner: OpenAiCompatibleProvider::new(config.compatible_config())?,
+            inner: crate::responses::OpenAiResponsesCompatibleProvider::new(
+                config.compatible_config(),
+            )?,
         })
     }
 
@@ -222,7 +224,10 @@ impl OpenAiProvider {
         transport: Arc<dyn HttpTransport>,
     ) -> Result<Self, ProviderError> {
         Ok(Self {
-            inner: OpenAiCompatibleProvider::with_transport(config.compatible_config(), transport)?,
+            inner: crate::responses::OpenAiResponsesCompatibleProvider::with_transport(
+                config.compatible_config(),
+                transport,
+            )?,
         })
     }
 }
@@ -231,6 +236,10 @@ impl OpenAiProvider {
 impl Provider for OpenAiProvider {
     fn id(&self) -> ProviderId {
         ProviderId::new("openai")
+    }
+
+    fn availability(&self) -> ProviderAvailability {
+        self.inner.availability()
     }
 
     async fn stream(

@@ -228,32 +228,67 @@ pub fn is_retryable_provider_error_message(error: &str) -> bool {
         "outofbudget",
         "quotaexceeded",
         "billing",
+        "subscriptionsharingusagelimitexceeded",
+        "subscriptionsharingworkplaceindividualusagelimitexceeded",
     ];
     if non_retryable
         .iter()
         .any(|pattern| compact.contains(pattern))
+        || has_json_error_code(error, "1308")
     {
         return false;
     }
+    // Keep numeric boundaries: request IDs and byte counts are not HTTP statuses.
+    if error
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| matches!(token, "429" | "500" | "502" | "503" | "504" | "520" | "524"))
+    {
+        return true;
+    }
+    let lower = error.to_ascii_lowercase();
+    if lower
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|token| {
+            matches!(
+                token,
+                "econnreset" | "econnaborted" | "econnrefused" | "etimedout" | "epipe"
+            )
+        })
+        || lower.split("request to ").skip(1).any(|tail| {
+            tail.split_once(" failed, reason:")
+                .is_some_and(|(url, _)| !url.is_empty() && !url.chars().any(char::is_whitespace))
+        })
+    {
+        return true;
+    }
     [
         "overloaded",
+        "serverbusy",
+        "serversarecurrentlybusy",
+        "currentlyexperiencinghighdemand",
+        "modelisatcapacity",
         "ratelimit",
         "toomanyrequests",
-        "429",
-        "500",
-        "502",
-        "503",
-        "504",
-        "524",
         "serviceunavailable",
+        "serviceisunavailable",
+        "servicetemporarilyunavailable",
+        "serviceistemporarilyunavailable",
         "servererror",
         "internalerror",
         "providerreturnederror",
+        "providerreturnedanerror",
         "exceededrequestbufferlimitwhileretryingupstream",
+        "unabletoforwardupstream",
+        "upstreamrequestfailed",
+        "upstreamstreamreaderror",
+        "streamwasinterrupted",
+        "http2streamfailed",
         "networkerror",
         "connectionerror",
         "connectionrefused",
         "connectionlost",
+        "connectionclosed",
+        "connectionresetbypeer",
         "othersideclosed",
         "fetchfailed",
         "getaddrinfo",
@@ -272,14 +307,38 @@ pub fn is_retryable_provider_error_message(error: &str) -> bool {
         "streamendedbeforemessagestop",
         "streamendedbeforeaterminalresponseevent",
         "http2requestdidnotgetaresponse",
+        "streamdisconnectedbeforecompletion",
+        "cutshortafterthereplyhadbegun",
+        "pendingstreamhasbeencanceled",
         "retrydelay",
         "youcanretryyourrequest",
         "tryyourrequestagain",
         "pleaseretryyourrequest",
         "resourceexhausted",
+        "subscriptionsharingusageunavailable",
+        "subscriptionsharinguserunavailable",
     ]
     .iter()
     .any(|pattern| compact.contains(pattern))
+}
+
+// Pi's ZAI plan-limit rule matches the JSON error code, not arbitrary numbers
+// elsewhere in the provider message. Both numeric and string codes are valid.
+fn has_json_error_code(message: &str, code: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .split("\"code\"")
+        .skip(1)
+        .any(|tail| {
+            let Some(value) = tail.trim_start().strip_prefix(':') else {
+                return false;
+            };
+            let value = value.trim_start();
+            let value = value.strip_prefix('"').unwrap_or(value);
+            value
+                .strip_prefix(code)
+                .is_some_and(|tail| !tail.starts_with(|character: char| character.is_ascii_digit()))
+        })
 }
 
 #[cfg(test)]
@@ -297,5 +356,70 @@ mod retry_tests {
         assert!(!is_retryable_provider_error_message(
             "429 insufficient_quota: check billing"
         ));
+    }
+
+    #[test]
+    fn retry_classifier_does_not_read_status_codes_inside_identifiers() {
+        for message in [
+            "HTTP 401 Unauthorized\n{\"error\":\"invalid_api_key\",\"request_id\":\"req500abc\"}",
+            "400 Bad Request: maximum size is 524288 bytes",
+            "invalid request abc429 def502 ghi503 jkl504 mno520 pqr524",
+        ] {
+            assert!(!is_retryable_provider_error_message(message), "{message}");
+        }
+        for message in ["HTTP 500 Internal Server Error", "upstream returned (429)"] {
+            assert!(is_retryable_provider_error_message(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn retry_classifier_treats_subscription_and_plan_quotas_as_terminal() {
+        for message in [
+            "HTTP 429 Too Many Requests\n{\"error\":{\"code\":\"subscription_sharing_usage_limit_exceeded\"}}",
+            "429 subscription_sharing_workplace_individual_usage_limit_exceeded",
+            "HTTP 429 Too Many Requests\n{\"error\":{\"code\":\"1308\",\"message\":\"limit reached\"}}",
+            "429 {\"error\":{\"code\" : 1308}}",
+        ] {
+            assert!(!is_retryable_provider_error_message(message), "{message}");
+        }
+        for message in ["429 {\"code\":13080}", "429 {\"request_id\":\"1308\"}"] {
+            assert!(is_retryable_provider_error_message(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn retry_classifier_handles_current_pi_transient_errors() {
+        for message in [
+            "{\"type\":\"api_error\",\"message\":\"Connection closed.\"}",
+            "read ECONNRESET",
+            "write EPIPE",
+            "connect ETIMEDOUT",
+            "ECONNABORTED",
+            "ECONNREFUSED",
+            "HTTP 520 proxy failure",
+            "server_busy",
+            "servers are currently busy",
+            "currently experiencing high demand",
+            "model is at capacity",
+            "The service is temporarily unavailable",
+            "The upstream provider returned an error",
+            "unable to forward upstream",
+            "upstream_request_failed",
+            "upstream_stream_read_error",
+            "stream was interrupted",
+            "HTTP/2 stream failed",
+            "connection reset by peer",
+            "request to https://example.test failed, reason:",
+            "stream disconnected before completion",
+            "cut short after the reply had begun",
+            "pending stream has been canceled",
+            "subscription_sharing_usage_unavailable",
+            "subscription_sharing_user_unavailable",
+        ] {
+            assert!(is_retryable_provider_error_message(message), "{message}");
+        }
+        for message in ["bad field MY_EPIPE_FIELD", "invalid ID abcECONNRESET123"] {
+            assert!(!is_retryable_provider_error_message(message), "{message}");
+        }
     }
 }

@@ -8,6 +8,7 @@ use crate::{ModelId, ProviderId, StopReason, ToolCallId, Usage};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
 pub enum Message {
+    System(SystemMessage),
     User(UserMessage),
     Assistant(Arc<AssistantMessage>),
     ToolResult(Arc<ToolResultMessage>),
@@ -42,6 +43,127 @@ impl Message {
             }),
             message => message,
         }
+    }
+}
+
+/// Instructions at a point in the transcript. Sections retain insertion order;
+/// `None` removes a previously declared section. This is not user content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemMessage {
+    #[serde(deserialize_with = "deserialize_user_content")]
+    pub content: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "sections")]
+    pub sections: Vec<(String, Option<String>)>,
+    #[serde(rename = "timestamp")]
+    pub timestamp_ms: i64,
+}
+
+impl SystemMessage {
+    pub fn text(text: impl Into<String>, timestamp_ms: i64) -> Self {
+        Self {
+            content: vec![ContentBlock::Text(TextContent::new(text))],
+            sections: Vec::new(),
+            timestamp_ms,
+        }
+    }
+
+    pub fn render(&self) -> String {
+        std::iter::once(self.instruction_text())
+            .chain(self.sections.iter().filter_map(|(_, text)| text.clone()))
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// Resolve append-only instruction text and ordered section replacements.
+    pub fn fold(base: &str, messages: &[Message]) -> String {
+        let mut content = vec![base.to_owned()];
+        let mut sections: Vec<(String, String)> = Vec::new();
+        for message in messages {
+            let Message::System(message) = message else {
+                continue;
+            };
+            content.push(message.instruction_text());
+            for (name, value) in &message.sections {
+                if let Some(index) = sections.iter().position(|(key, _)| key == name) {
+                    if let Some(value) = value {
+                        sections[index].1.clone_from(value);
+                    } else {
+                        sections.remove(index);
+                    }
+                } else if let Some(value) = value {
+                    sections.push((name.clone(), value.clone()));
+                }
+            }
+        }
+        content.extend(sections.into_iter().map(|(_, value)| value));
+        content
+            .into_iter()
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    pub fn instruction_text(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+mod sections {
+    use serde::{Deserialize, Deserializer, Serializer, ser::SerializeMap};
+    pub fn serialize<S: Serializer>(
+        values: &[(String, Option<String>)],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(values.len()))?;
+        for (key, value) in values {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<(String, Option<String>)>, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Vec<(String, Option<String>)>;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("ordered system sections")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut values: Self::Value = Vec::new();
+                while let Some((key, value)) = map.next_entry::<String, Option<String>>()? {
+                    if let Some((_, previous)) = values.iter_mut().find(|(name, _)| *name == key) {
+                        *previous = value;
+                    } else {
+                        values.push((key, value));
+                    }
+                }
+                Ok(values)
+            }
+        }
+        // Missing sections use the field default; explicit null is also harmless.
+        #[derive(Deserialize)]
+        struct Ordered(#[serde(deserialize_with = "read")] Vec<(String, Option<String>)>);
+        fn read<'de, D: Deserializer<'de>>(
+            d: D,
+        ) -> Result<Vec<(String, Option<String>)>, D::Error> {
+            d.deserialize_map(Visitor)
+        }
+        Ok(Option::<Ordered>::deserialize(deserializer)?
+            .map(|v| v.0)
+            .unwrap_or_default())
     }
 }
 
@@ -127,6 +249,8 @@ pub struct CustomMessage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_thinking_level: Option<String>,
     pub content: Vec<ContentBlock>,
     pub api: String,
     pub provider: ProviderId,

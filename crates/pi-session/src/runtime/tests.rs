@@ -2439,7 +2439,7 @@ async fn overflow_compaction_drops_the_failed_assistant_and_retries_once() {
 async fn transient_provider_failure_retries_without_reprojecting_failed_assistant() {
     let directory = tempfile::tempdir().unwrap();
     let provider_plugin = ScriptedProviderPlugin::scripted([
-        ScriptedTurn::Error("503 service unavailable".to_string()),
+        ScriptedTurn::Error("Connection closed.".to_string()),
         ScriptedTurn::Text("recovered".to_string()),
     ]);
     let provider = provider_plugin.provider();
@@ -2523,10 +2523,27 @@ async fn transient_provider_failure_retries_without_reprojecting_failed_assistan
 
 #[tokio::test]
 async fn quota_failure_is_not_retried() {
+    for message in [
+        "429 insufficient_quota: check billing",
+        "HTTP 429 Too Many Requests\n{\"error\":{\"code\":\"subscription_sharing_usage_limit_exceeded\"}}",
+        "HTTP 429 Too Many Requests\n{\"error\":{\"code\":\"1308\"}}",
+    ] {
+        assert_failure_is_not_retried(message).await;
+    }
+}
+
+#[tokio::test]
+async fn invalid_key_with_status_digits_in_request_id_is_not_retried() {
+    assert_failure_is_not_retried(
+        "HTTP 401 Unauthorized\n{\"error\":\"invalid_api_key\",\"request_id\":\"req500abc\"}",
+    )
+    .await;
+}
+
+async fn assert_failure_is_not_retried(message: &str) {
     let directory = tempfile::tempdir().unwrap();
-    let provider_plugin = ScriptedProviderPlugin::scripted([ScriptedTurn::Error(
-        "429 insufficient_quota: check billing".to_string(),
-    )]);
+    let provider_plugin =
+        ScriptedProviderPlugin::scripted([ScriptedTurn::Error(message.to_string())]);
     let provider = provider_plugin.provider();
     let runtime = PiRuntime::builder()
         .provider_plugin(provider_plugin)
@@ -2550,8 +2567,10 @@ async fn quota_failure_is_not_retried() {
     .unwrap();
     let mut subscription = session.subscribe();
 
-    let pi_session::PromptOutcome::Agent(outcome) =
-        session.prompt("do not retry quota").await.unwrap()
+    let pi_session::PromptOutcome::Agent(outcome) = session
+        .prompt("do not retry terminal failure")
+        .await
+        .unwrap()
     else {
         panic!("expected an agent run");
     };

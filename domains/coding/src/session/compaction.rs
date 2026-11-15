@@ -242,6 +242,7 @@ mod tests {
             api: "scripted".to_string(),
             provider: ProviderId::new("scripted"),
             model: ModelId::new("test"),
+            provider_thinking_level: None,
             response_model: None,
             response_id: None,
             diagnostics: None,

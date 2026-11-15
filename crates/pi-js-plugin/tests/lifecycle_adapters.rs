@@ -553,6 +553,7 @@ fn assistant(text: &str) -> AssistantMessage {
         api: "test".to_string(),
         provider: ProviderId::new("provider"),
         model: ModelId::new("model"),
+        provider_thinking_level: None,
         response_model: None,
         response_id: None,
         diagnostics: None,

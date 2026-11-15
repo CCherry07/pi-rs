@@ -1116,6 +1116,7 @@ impl App {
                 self.status = "Agent running… Esc stops".to_string();
             }
             AgentEvent::MessageStart { message } => match message {
+                Message::System(_) => {}
                 Message::User(user) => {
                     self.transcript
                         .push(TranscriptItem::User(user_text(&user.content)));
@@ -2036,6 +2037,7 @@ fn session_entry_choices(
 
 fn message_choice_text(message: &Message) -> String {
     match message {
+        Message::System(_) => "System instructions".into(),
         Message::User(message) => user_text(&message.content),
         Message::Assistant(_) => {
             assistant_text(message).unwrap_or_else(|| "Assistant message".to_string())
@@ -2121,6 +2123,7 @@ fn push_history_record(transcript: &mut Vec<TranscriptItem>, record: &pi_session
 fn push_history_message(transcript: &mut Vec<TranscriptItem>, message: &pi_session::AgentMessage) {
     if let Some(standard) = message.as_standard() {
         match standard {
+            Message::System(_) => {}
             Message::User(user) => {
                 let display = message
                     .display_text()
@@ -3548,6 +3551,7 @@ mod tests {
         let mut app = demo_app();
         app.transcript.clear();
         let failure = pi_core::AssistantMessage {
+            provider_thinking_level: None,
             content: Vec::new(),
             api: "openai-completions".to_string(),
             provider: ProviderId::new("openai-compatible"),
@@ -5049,6 +5053,7 @@ mod tests {
         let log = SessionStore::create(&path, SessionHeader::new("usage-resume", directory.path()))
             .unwrap();
         let assistant = Message::assistant(pi_core::AssistantMessage {
+            provider_thinking_level: None,
             content: vec![ContentBlock::Text(pi_core::TextContent::new("answer"))],
             api: "openai-completions".to_string(),
             provider: ProviderId::new("openai-compatible"),

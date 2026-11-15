@@ -239,8 +239,9 @@ impl Provider for GoogleCompatibleProvider {
 
 pub fn request_body(request: &ProviderRequest) -> Value {
     let mut body = json!({"contents": project_messages(request)});
-    if !request.system_prompt.is_empty() {
-        body["systemInstruction"] = json!({"parts": [{"text": request.system_prompt}]});
+    let system_prompt = pi_core::SystemMessage::fold(&request.system_prompt, &request.messages);
+    if !system_prompt.is_empty() {
+        body["systemInstruction"] = json!({"parts": [{"text": system_prompt}]});
     }
     if !request.tools.is_empty() {
         body["tools"] = json!([{
@@ -282,6 +283,7 @@ fn project_messages(request: &ProviderRequest) -> Vec<Value> {
         .is_some_and(|model| model.input.contains(&pi_core::ModelInput::Image));
     for message in &request.messages {
         match message {
+            Message::System(_) => {}
             Message::User(message) => {
                 let parts = message
                     .content
@@ -998,7 +1000,7 @@ mod tests {
     #[test]
     fn builtin_catalog_contains_current_gemini_models() {
         let models = google_models();
-        assert_eq!(models.len(), 22);
+        assert_eq!(models.len(), 24);
         let pro = models
             .iter()
             .find(|model| model.id == ModelId::new("gemini-3.1-pro-preview"))
@@ -1012,7 +1014,7 @@ mod tests {
         assert_eq!(pro.cost.input, 2.0);
         assert_eq!(pro.cost.output, 12.0);
         assert_eq!(pro.cost.cache_read, 0.2);
-        assert_eq!(pro.thinking_level_map["high"].as_deref(), Some("HIGH"));
+        assert_eq!(pro.thinking_level_map["high"].as_deref(), Some("high"));
         assert!(
             models
                 .iter()

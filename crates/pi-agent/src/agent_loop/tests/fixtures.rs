@@ -45,6 +45,7 @@ pub fn text_response(text: &str) -> AssistantMessage {
         api: "scripted".to_string(),
         provider: ProviderId::new("scripted"),
         model: ModelId::new("test"),
+        provider_thinking_level: None,
         response_model: None,
         response_id: None,
         diagnostics: None,
@@ -66,6 +67,7 @@ pub fn roles(messages: &[Message]) -> Vec<&'static str> {
             Message::Assistant(_) => "assistant",
             Message::ToolResult(_) => "toolResult",
             Message::Custom(_) => "custom",
+            Message::System(_) => "system",
         })
         .collect()
 }

@@ -301,7 +301,11 @@ unchanged content reuses one pinned handle, while a rebuilt artifact gets a new 
 The SDK also pins the `serde_json::Value` map representation used by constructor options, so feature
 unification in a host workspace cannot silently change that Rust-ABI type's layout.
 
-The current contract is native ABI **34**. Context events and boundary-preview entry/message vectors
+The current contract is native ABI **35**. Messages now include a typed `System` variant,
+and assistant/response metadata carry optional `providerThinkingLevel`. Rebuild native plugins
+against this SDK; older descriptors are rejected before constructors are resolved.
+
+ABI 34 introduced shared context snapshots. Context events and boundary-preview entry/message vectors
 use shared `Arc<Vec<_>>` snapshots. Read through the shared view; use `Arc::unwrap_or_clone` or
 `Arc::make_mut` when preparing an owned context replacement. `Plugin::context_hook_batch` optionally
 exposes one stable borrowed `ContextHookBatch` for adjacent hooks sharing a transport; ordinary

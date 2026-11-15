@@ -544,6 +544,10 @@ fn observe(
     let mut final_response = String::new();
     for message in messages {
         match message {
+            Message::System(message) => transcript.push(EvalTranscriptEvent::Message {
+                role: "system".into(),
+                content: message.render(),
+            }),
             Message::User(message) => transcript.push(EvalTranscriptEvent::Message {
                 role: "user".to_string(),
                 content: content_text(&message.content),

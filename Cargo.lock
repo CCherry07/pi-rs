@@ -3080,6 +3080,7 @@ dependencies = [
  "pi-plugin-copilot",
  "pi-plugin-edit",
  "pi-plugin-find",
+ "pi-plugin-gateways",
  "pi-plugin-google",
  "pi-plugin-grep",
  "pi-plugin-hashline-edit",
@@ -3400,6 +3401,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pi-plugin-gateways"
+version = "0.8.6"
+dependencies = [
+ "async-trait",
+ "pi-core",
+ "pi-plugin",
+ "pi-plugin-anthropic",
+ "pi-plugin-google",
+ "pi-plugin-openai",
+ "pi-provider",
+ "pi-utils",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "pi-plugin-google"
 version = "0.1.0"
 dependencies = [
@@ -3601,13 +3620,16 @@ dependencies = [
  "pi-provider",
  "pi-runtime",
  "pi-utils",
+ "rand 0.8.7",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "time",
  "tokio",
  "tokio-tungstenite",
+ "uuid",
 ]
 
 [[package]]
@@ -3618,6 +3640,7 @@ dependencies = [
  "base64 0.22.1",
  "pi-core",
  "pi-plugin",
+ "pi-plugin-anthropic",
  "pi-plugin-openai",
  "pi-provider",
  "rand 0.8.7",

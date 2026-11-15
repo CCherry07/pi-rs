@@ -298,6 +298,7 @@ fn estimate_text(text: &str) -> u64 {
 
 fn estimate_message(message: &Message) -> u64 {
     let blocks = match message {
+        Message::System(m) => return estimate_text(&m.render()).saturating_add(16),
         Message::User(m) => &m.content,
         Message::Assistant(m) => &m.content,
         Message::ToolResult(m) => &m.content,
@@ -336,6 +337,7 @@ fn text_content(blocks: &[ContentBlock]) -> String {
 
 fn serialize_message(message: &Message) -> String {
     let (role, blocks) = match message {
+        Message::System(m) => return format!("SYSTEM: {}", bound_text(&m.render(), 6_000)),
         Message::User(m) => ("USER".to_string(), &m.content),
         Message::Assistant(m) => ("ASSISTANT".to_string(), &m.content),
         Message::ToolResult(m) => (

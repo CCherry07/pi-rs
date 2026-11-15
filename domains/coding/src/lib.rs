@@ -17,7 +17,9 @@ pub mod skills;
 #[cfg(test)]
 mod test_support;
 
-pub use credentials::{StoredCredential, read_credentials, read_stored_credential};
+pub use credentials::{
+    StoredCredential, modify_credentials, read_credentials, read_stored_credential,
+};
 pub use features::Features;
 pub use generation::ProductSessionFactory;
 pub use pi::{Pi, PiBuilder};
@@ -36,3 +38,5 @@ mod workspace_prompt;
 
 mod session;
 pub use session::{CodingCompactionPolicy, CodingShellExecutor};
+
+pub use pi_plugin_gateways::{gateway_definitions, kimi_oauth};

@@ -522,6 +522,93 @@ mod tests {
         }
     }
 
+    struct FixtureCredential;
+
+    #[async_trait]
+    impl pi_provider::CredentialSource for FixtureCredential {
+        async fn resolve(
+            &self,
+            _: &AbortSignal,
+        ) -> Result<Option<pi_provider::ProviderCredential>, ProviderError> {
+            Ok(Some(pi_provider::ProviderCredential {
+                secret: "chatgpt-access-token".into(),
+                kind: pi_provider::CredentialKind::OAuth,
+                metadata: BTreeMap::new(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_models_json_overlays_reach_direct_and_oauth_fallback_requests() {
+        for (key, budget) in [(Some("sk-fixture"), Some(2_048)), (None, None)] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("models.json");
+            std::fs::write(&path, json!({"providers": {"openai": {
+                "apiKey": key,
+                "baseUrl": "https://api.openai.com/v1",
+                "api": "openai-responses",
+                "compat": {"supportsMaxOutputTokens": false, "promptCacheKeyMode": "disabled"},
+                "models": [{"id": "custom-model", "maxTokens": 2_048}],
+                "modelOverrides": {"custom-model": {"compat": {"supportsMaxOutputTokens": true}}}
+            }}}).to_string()).unwrap();
+            let transport = Arc::new(CapturingTransport::default());
+            let builtin = pi_plugin_openai::OpenAiPlugin::from_stored_with_transport(
+                Some("chatgpt-access-token".into()),
+                Arc::new(FixtureCredential),
+                transport.clone(),
+            )
+            .unwrap();
+            let models = crate::ModelsPlugin::load_with_transport(
+                crate::ModelsPluginOptions::new(&path),
+                transport.clone(),
+            )
+            .unwrap();
+            let (_, _, registries) = pi_plugin::RegistriesBuilder::new()
+                .register_plugin_sets(Vec::new(), vec![Arc::new(builtin), Arc::new(models)])
+                .unwrap();
+            let provider = registries.provider(&ProviderId::new("openai")).unwrap();
+            let (_, signal) = AbortHandle::new();
+            let _stream = provider
+                .stream(
+                    ProviderRequest {
+                        model: ModelId::new("custom-model"),
+                        model_spec: None,
+                        system_prompt: String::new(),
+                        messages: Vec::new(),
+                        tools: Vec::new(),
+                        thinking_level: ThinkingLevel::Off,
+                        thinking_budgets: None,
+                        max_output_tokens: None,
+                        headers: BTreeMap::new(),
+                        sampling_params: BTreeMap::new(),
+                        session_id: Some("session".into()),
+                    },
+                    ProviderCallContext::without_plugins(
+                        "/",
+                        "openai".into(),
+                        "custom-model".into(),
+                    ),
+                    signal,
+                )
+                .await
+                .unwrap();
+            let captured = transport.request.lock().unwrap();
+            assert_eq!(captured.url, "https://api.openai.com/v1/responses");
+            assert_eq!(
+                captured.headers["Authorization"],
+                format!("Bearer {}", key.unwrap_or("chatgpt-access-token"))
+            );
+            let body = captured.body.as_ref().unwrap();
+            assert_eq!(
+                body.get("max_output_tokens")
+                    .and_then(serde_json::Value::as_u64),
+                budget
+            );
+            assert!(body.get("prompt_cache_key").is_none());
+            assert!(body.get("prompt_cache_retention").is_none() || key.is_some());
+        }
+    }
+
     #[tokio::test]
     async fn routing_applies_runtime_auth_headers_and_model_defaults() {
         let mut spec = ModelSpec::new("custom", "model", "Model", "openai-completions");

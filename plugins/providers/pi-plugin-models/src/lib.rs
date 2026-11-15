@@ -90,12 +90,14 @@ pub enum ModelsPluginError {
     },
 }
 
+#[derive(Clone)]
 pub struct ModelsPlugin {
     providers: Vec<PreparedProviderLayers>,
     resolver: Arc<ConfigValueResolver>,
     transport: Arc<dyn HttpTransport>,
 }
 
+#[derive(Clone)]
 struct PreparedProviderLayers {
     file: Option<PreparedProvider>,
     extension: Option<PreparedProvider>,
@@ -136,6 +138,50 @@ impl ModelsPlugin {
             resolver: Arc::new(ConfigValueResolver::default()),
             transport,
         })
+    }
+
+    /// Resolve a configured provider's catalog endpoint and credentials using
+    /// the same validated generation snapshot as inference routing.
+    pub async fn catalog_request_config(
+        &self,
+        id: &ProviderId,
+        signal: &pi_core::AbortSignal,
+    ) -> std::result::Result<ProviderCatalogRequest, String> {
+        let mut result = ProviderCatalogRequest::default();
+        for layers in &self.providers {
+            let provider = match (&layers.file, &layers.extension) {
+                (Some(file), Some(extension)) => extension.overlay_on(file),
+                (Some(provider), None) | (None, Some(provider)) => provider.clone(),
+                (None, None) => continue,
+            };
+            if &provider.id != id {
+                continue;
+            }
+            result.base_url = provider.base_url;
+            result.api_key = match provider.runtime_api_key {
+                Some(key) => Some(key),
+                None => match provider.api_key {
+                    Some(key) => Some(
+                        self.resolver
+                            .resolve(&key, "catalog API key", signal)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    ),
+                    None => None,
+                },
+            };
+            for (name, value) in &provider.headers {
+                pi_provider::insert_header(
+                    &mut result.headers,
+                    name,
+                    self.resolver
+                        .resolve(value, "catalog header", signal)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+        }
+        Ok(result)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -235,6 +281,14 @@ impl PreparedProviderLayers {
     }
 }
 
+/// Secret-bearing request configuration, excluded from Debug and catalog metadata.
+#[derive(Default)]
+pub struct ProviderCatalogRequest {
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub headers: BTreeMap<String, String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +297,43 @@ mod tests {
     use pi_plugin::RegistriesBuilder;
     use pi_plugin_anthropic::AnthropicPlugin;
     use pi_runtime::{PiRuntime, SystemPrompt};
+
+    #[tokio::test]
+    async fn catalog_request_uses_the_frozen_effective_routing_layer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("models.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({"providers":{"openrouter":{
+                "baseUrl":"https://file.example/v1", "apiKey":"!exit 1",
+                "headers":{"X-File":"saved", "X-Shared":"file"}
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        let plugin = ModelsPlugin::load(ModelsPluginOptions::new(&path).extension_provider_config(
+            "openrouter",
+            serde_json::json!({
+                "baseUrl":"https://extension.example/v1", "apiKey":"extension-key",
+                "headers":{"X-Shared":"extension"}
+            }),
+        ))
+        .unwrap();
+        std::fs::write(&path, "invalid replacement").unwrap();
+        let (_, signal) = pi_core::AbortHandle::new();
+        let route = plugin
+            .clone()
+            .catalog_request_config(&"openrouter".into(), &signal)
+            .await
+            .unwrap();
+        assert_eq!(
+            route.base_url.as_deref(),
+            Some("https://extension.example/v1")
+        );
+        assert_eq!(route.api_key.as_deref(), Some("extension-key"));
+        assert_eq!(route.headers["X-File"], "saved");
+        assert_eq!(route.headers["X-Shared"], "extension");
+    }
 
     fn config(name: &str) -> String {
         format!(
@@ -271,6 +362,38 @@ mod tests {
               }}
             }}"#
         )
+    }
+
+    #[test]
+    fn responses_compat_rejects_invalid_budget_and_cache_policy_before_registration() {
+        for compat in [
+            serde_json::json!({"supportsMaxOutputTokens": "false"}),
+            serde_json::json!({"supportsMidConvoEffort": "true"}),
+            serde_json::json!({"supportsMidConvoSystemMessages": "true"}),
+            serde_json::json!({"promptCacheKeyMode": "sometimes"}),
+            serde_json::json!({"promptCacheKeyMode": false}),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("models.json");
+            std::fs::write(
+                &path,
+                serde_json::json!({"providers": {"custom": {
+                    "baseUrl": "https://gateway.example/v1",
+                    "api": "openai-responses",
+                    "compat": compat,
+                    "models": [{"id": "model"}]
+                }}})
+                .to_string(),
+            )
+            .unwrap();
+            let plugin = ModelsPlugin::load(ModelsPluginOptions::new(&path)).unwrap();
+            assert!(
+                RegistriesBuilder::new()
+                    .register_plugin_sets(Vec::new(), vec![Arc::new(plugin)])
+                    .is_err(),
+                "invalid compat was accepted: {compat}"
+            );
+        }
     }
 
     #[test]
@@ -451,7 +574,10 @@ mod tests {
             .model(&provider, &ModelId::new("custom-claude"))
             .unwrap();
 
-        assert_eq!(registries.model_specs().len(), 9);
+        assert_eq!(
+            registries.model_specs().len(),
+            pi_plugin_anthropic::anthropic_models().len() + 1
+        );
         assert_eq!(sonnet.name, "Proxy Sonnet");
         assert!(!sonnet.reasoning);
         assert_eq!(sonnet.input, vec![ModelInput::Text]);
@@ -577,7 +703,7 @@ mod tests {
             .filter(|model| model.provider == ProviderId::new("anthropic"))
             .collect::<Vec<_>>();
 
-        assert_eq!(models.len(), 8);
+        assert_eq!(models.len(), pi_plugin_anthropic::anthropic_models().len());
         assert!(
             models
                 .iter()
@@ -609,7 +735,7 @@ mod tests {
                 .into_iter()
                 .filter(|model| model.provider == ProviderId::new("anthropic"))
                 .count(),
-            8
+            pi_plugin_anthropic::anthropic_models().len()
         );
     }
 

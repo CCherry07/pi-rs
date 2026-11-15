@@ -8,11 +8,11 @@ pub use pi_core::{
     AssistantStream, AssistantStreamId, AssistantStreamView, ContentBlock, ContentMetadata,
     CustomMessage, CustomMessageContent, CustomMessageInput, DeferredHandle, ImageContent, Message,
     ModelCost, ModelCostTier, ModelId, ModelInput, ModelSelection, ModelSpec, PluginId, ProviderId,
-    ResponseMetadata, ResponseMetadataPatch, RunId, StopReason, StreamEvent, TextContent,
-    ThinkingBudgets, ThinkingContent, ThinkingLevel, ToolCall, ToolCallId, ToolExecutionMode,
-    ToolResult, ToolResultMessage, ToolSpec, ToolUpdate, Usage, UsageCost, UserMessage,
-    WorkspaceError, WorkspaceRoot, WorkspaceRootId, WorkspaceRootOwnership, WorkspaceSnapshot,
-    WorkspaceSpec, session,
+    ResponseMetadata, ResponseMetadataPatch, RunId, StopReason, StreamEvent, SystemMessage,
+    TextContent, ThinkingBudgets, ThinkingContent, ThinkingLevel, ToolCall, ToolCallId,
+    ToolExecutionMode, ToolResult, ToolResultMessage, ToolSpec, ToolUpdate, Usage, UsageCost,
+    UserMessage, WorkspaceError, WorkspaceRoot, WorkspaceRootId, WorkspaceRootOwnership,
+    WorkspaceSnapshot, WorkspaceSpec, session,
 };
 mod command;
 mod error;

@@ -403,6 +403,7 @@ impl StreamAssemblerState {
             ResponseMetadata::new("unknown".into(), "unknown".into(), "unknown", 0)
         });
         AssistantMessage {
+            provider_thinking_level: metadata.provider_thinking_level,
             content: vec![ContentBlock::Text(TextContent::new(""))],
             api: metadata.api,
             provider: metadata.provider,
@@ -531,6 +532,7 @@ impl StreamAssemblerState {
         }
 
         Ok(AssistantMessage {
+            provider_thinking_level: metadata.provider_thinking_level,
             content,
             api: metadata.api,
             provider: metadata.provider,
