@@ -513,6 +513,13 @@ Missed intervals coalesce rather than replaying a backlog, and uncertain interru
 not automatically retried. See [the scheduling guide](plugins/features/pi-plugin-schedule/README.md)
 for time zones, limits, storage, and recovery behavior.
 
+## Computer Use
+
+Connect the official `cua-driver mcp` server in `mcp.json` to let Pi's conversation model
+observe and operate desktop apps and browsers. Use `/mcp status`, `/mcp test cua-driver`
+and `/mcp reload` to manage the connection. See the
+[Cua Driver setup guide](plugins/features/pi-plugin-mcp/README.md#cua-driver).
+
 ## Native plugin packages
 
 ```bash

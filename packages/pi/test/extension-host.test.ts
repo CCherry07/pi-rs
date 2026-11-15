@@ -25,6 +25,365 @@ test('keeps session-only extensions in unified plugin registration order', async
   assert.equal(manifest.agentPlugins[1]?.hooks[0]?.name, 'agent_start')
 })
 
+test('keeps the first tool when extensions register the same name', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-duplicate-tools-'))
+  const first = join(root, 'first.ts')
+  const second = join(root, 'second.ts')
+  const extension = (description: string) => `
+    export default function (pi: any) {
+      pi.registerTool({
+        name: "shared",
+        description: ${JSON.stringify(description)},
+        parameters: { type: "object" },
+        execute: async () => ({ content: [{ type: "text", text: ${JSON.stringify(description)} }] })
+      });
+    }
+  `
+  await writeFile(first, extension('first'))
+  await writeFile(second, extension('second'))
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: { projectTrusted: true, extensionPaths: [first, second], mode: 'print' },
+  })))
+  const tools = manifest.agentPlugins.flatMap(plugin => plugin.tools)
+  assert.deepEqual(tools.map(tool => [tool.name, tool.description]), [['shared', 'first']])
+
+  const tool = tools[0]
+  assert.ok(tool)
+  const result = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'duplicate-tool',
+      generationId: manifest.generationId,
+      callbackId: tool.callbackId,
+      kind: 'tool',
+      payload: { input: {}, context: { toolCallId: 'call-1' } },
+    },
+  })))
+  assert.deepEqual(result, {
+    content: [{ type: 'text', text: 'first' }],
+    isError: false,
+    terminate: false,
+  })
+})
+
+test('suffixes duplicate command invocation names in extension order', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-duplicate-commands-'))
+  const first = join(root, 'first.ts')
+  const second = join(root, 'second.ts')
+  const extension = (description: string) => `
+    export default function (pi: any) {
+      pi.registerCommand("shared", {
+        description: ${JSON.stringify(description)},
+        handler: () => ({ action: "transform", text: ${JSON.stringify(description)} })
+      });
+    }
+  `
+  await writeFile(first, extension('first'))
+  await writeFile(second, extension('second'))
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: { projectTrusted: true, extensionPaths: [first, second], mode: 'print' },
+  })))
+  const commands = manifest.agentPlugins.flatMap(plugin => plugin.commands)
+  assert.deepEqual(
+    commands.map(command => [command.name, command.invocationName, command.description]),
+    [
+      ['shared', 'shared:1', 'first'],
+      ['shared', 'shared:2', 'second'],
+    ],
+  )
+
+  for (const command of commands) {
+    const result = parseJson(await host.dispatch(JSON.stringify({
+      type: 'invoke',
+      invocation: {
+        invocationId: command.invocationName,
+        generationId: manifest.generationId,
+        callbackId: command.callbackId,
+        kind: 'command',
+        payload: { arguments: '', context: {} },
+      },
+    }))) as { text: string }
+    assert.equal(result.text, command.description)
+  }
+})
+
+test('uses the last same-extension tool and command registrations', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-reregister-tool-'))
+  const extension = join(root, 'extension.ts')
+  await writeFile(extension, `
+    export default function (pi: any) {
+      for (const description of ["first", "second"]) {
+        pi.registerTool({
+          name: "shared",
+          description,
+          parameters: { type: "object" },
+          execute: async () => ({ content: [{ type: "text", text: description }] })
+        });
+        pi.registerCommand("shared-command", {
+          description,
+          handler: () => ({ action: "transform", text: description })
+        });
+      }
+    }
+  `)
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: { projectTrusted: true, extensionPaths: [extension], mode: 'print' },
+  })))
+  assert.deepEqual(
+    manifest.agentPlugins[0]?.tools.map(tool => [tool.name, tool.description]),
+    [['shared', 'second']],
+  )
+  assert.deepEqual(
+    manifest.agentPlugins[0]?.commands.map(command => [command.name, command.invocationName, command.description]),
+    [['shared-command', 'shared-command', 'second']],
+  )
+})
+
+test('pi.on self-removal applies after the current hook snapshot', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-hook-unsubscribe-'))
+  const extension = join(root, 'extension.ts')
+  await writeFile(extension, `
+    export default function (pi: any) {
+      const calls: string[] = [];
+      const stopA = pi.on("agent_end", () => {
+        calls.push("A");
+        stopA();
+      });
+      pi.on("agent_end", () => { calls.push("B"); });
+      pi.registerCommand("read", {
+        handler: () => ({ action: "transform", text: JSON.stringify(calls) })
+      });
+    }
+  `)
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: { projectTrusted: true, extensionPaths: [extension], mode: 'print' },
+  })))
+  const emit = async (invocationId: string) => {
+    const snapshot = parseJson(await host.dispatch(JSON.stringify({
+      type: 'snapshotHooks',
+      generationId: manifest.generationId,
+      hook: 'agent_end',
+    }))) as { callbacks: { pluginId: string; callbackId: string }[] }
+    return parseJson(await host.dispatch(JSON.stringify({
+      type: 'invokeHookBatch',
+      invocation: {
+        invocationId,
+        generationId: manifest.generationId,
+        hook: 'agent_end',
+        callbacks: snapshot.callbacks.map(callback => ({
+          callbackId: callback.callbackId,
+          context: { pluginId: callback.pluginId },
+        })),
+        event: { type: 'agent_end', messages: [] },
+      },
+    })))
+  }
+
+  assert.deepEqual(await emit('first'), { errors: [] })
+  assert.deepEqual(await emit('second'), { errors: [] })
+
+  const command = manifest.agentPlugins[0]?.commands[0]
+  assert.ok(command)
+  const result = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'read', generationId: manifest.generationId,
+      callbackId: command.callbackId, kind: 'command', payload: { arguments: '', context: {} },
+    },
+  }))) as { text: string }
+  assert.deepEqual(JSON.parse(result.text), ['A', 'B', 'B'])
+})
+
+test('pi.on removes duplicate handler registrations independently', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-hook-duplicates-'))
+  const extension = join(root, 'extension.ts')
+  await writeFile(extension, `
+    export default function (pi: any) {
+      const calls: string[] = [];
+      const shared = () => { calls.push("shared"); };
+      const stops = [
+        pi.on("agent_end", shared),
+        pi.on("agent_end", () => { calls.push("B"); }),
+        pi.on("agent_end", shared),
+      ];
+      pi.registerCommand("stop", { handler: (index: string) => { stops[Number(index)](); } });
+      pi.registerCommand("read", {
+        handler: () => ({ action: "transform", text: JSON.stringify(calls) })
+      });
+    }
+  `)
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: { projectTrusted: true, extensionPaths: [extension], mode: 'print' },
+  })))
+  const commands = Object.fromEntries(
+    manifest.agentPlugins[0]?.commands.map(command => [command.name, command]) ?? [],
+  )
+  const invokeCommand = async (name: string, arguments_: string) => {
+    const command = commands[name]
+    assert.ok(command)
+    return parseJson(await host.dispatch(JSON.stringify({
+      type: 'invoke',
+      invocation: {
+        invocationId: `${name}-${arguments_}`, generationId: manifest.generationId,
+        callbackId: command.callbackId, kind: 'command', payload: { arguments: arguments_, context: {} },
+      },
+    }))) as { text?: string }
+  }
+  const emit = async (invocationId: string) => {
+    const snapshot = parseJson(await host.dispatch(JSON.stringify({
+      type: 'snapshotHooks', generationId: manifest.generationId, hook: 'agent_end',
+    }))) as { callbacks: { pluginId: string; callbackId: string }[] }
+    await host.dispatch(JSON.stringify({
+      type: 'invokeHookBatch',
+      invocation: {
+        invocationId, generationId: manifest.generationId, hook: 'agent_end',
+        callbacks: snapshot.callbacks.map(callback => ({ callbackId: callback.callbackId, context: { pluginId: callback.pluginId } })),
+        event: { type: 'agent_end', messages: [] },
+      },
+    }))
+    return snapshot.callbacks.length
+  }
+
+  await invokeCommand('stop', '2')
+  await invokeCommand('stop', '2')
+  assert.equal(await emit('first'), 2)
+  await invokeCommand('stop', '0')
+  assert.equal(await emit('second'), 1)
+  await invokeCommand('stop', '1')
+  assert.equal(await emit('third'), 0)
+  const result = await invokeCommand('read', '')
+  assert.deepEqual(JSON.parse(result.text ?? 'null'), ['shared', 'B', 'B'])
+})
+
+test('pi.on defers removals and additions until the next hook snapshot', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-hook-snapshot-'))
+  const extension = join(root, 'extension.ts')
+  await writeFile(extension, `
+    export default function (pi: any) {
+      const calls: string[] = [];
+      let added = false;
+      pi.on("agent_end", () => {
+        calls.push("A");
+        stopB();
+        if (!added) {
+          added = true;
+          pi.on("agent_end", () => { calls.push("C"); });
+        }
+      });
+      const stopB = pi.on("agent_end", () => { calls.push("B"); });
+      pi.registerCommand("read", {
+        handler: () => ({ action: "transform", text: JSON.stringify(calls) })
+      });
+    }
+  `)
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: { projectTrusted: true, extensionPaths: [extension], mode: 'print' },
+  })))
+  const emit = async (invocationId: string) => {
+    const snapshot = parseJson(await host.dispatch(JSON.stringify({
+      type: 'snapshotHooks', generationId: manifest.generationId, hook: 'agent_end',
+    }))) as { callbacks: { pluginId: string; callbackId: string }[] }
+    await host.dispatch(JSON.stringify({
+      type: 'invokeHookBatch',
+      invocation: {
+        invocationId, generationId: manifest.generationId, hook: 'agent_end',
+        callbacks: snapshot.callbacks.map(callback => ({ callbackId: callback.callbackId, context: { pluginId: callback.pluginId } })),
+        event: { type: 'agent_end', messages: [] },
+      },
+    }))
+  }
+
+  await emit('first')
+  await emit('second')
+  const command = manifest.agentPlugins[0]?.commands[0]
+  assert.ok(command)
+  const result = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'read', generationId: manifest.generationId,
+      callbackId: command.callbackId, kind: 'command', payload: { arguments: '', context: {} },
+    },
+  }))) as { text: string }
+  assert.deepEqual(JSON.parse(result.text), ['A', 'B', 'A', 'C'])
+})
+
+test('pi.on uses a fresh hook snapshot for nested dispatch', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-hook-nested-'))
+  const extension = join(root, 'extension.ts')
+  const emitKey = '__piRsNestedHookEmit'
+  delete (globalThis as Record<string, unknown>)[emitKey]
+  t.after(() => { delete (globalThis as Record<string, unknown>)[emitKey] })
+  await writeFile(extension, `
+    export default function (pi: any) {
+      const calls: string[] = [];
+      const stopA = pi.on("agent_end", async () => {
+        calls.push("A");
+        stopA();
+        stopB();
+        pi.on("agent_end", () => { calls.push("C"); });
+        await globalThis.${emitKey}();
+      });
+      const stopB = pi.on("agent_end", () => { calls.push("B"); });
+      pi.registerCommand("read", {
+        handler: () => ({ action: "transform", text: JSON.stringify(calls) })
+      });
+    }
+  `)
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: { projectTrusted: true, extensionPaths: [extension], mode: 'print' },
+  })))
+  let nextInvocation = 0
+  const emit = async () => {
+    const snapshot = parseJson(await host.dispatch(JSON.stringify({
+      type: 'snapshotHooks', generationId: manifest.generationId, hook: 'agent_end',
+    }))) as { callbacks: { pluginId: string; callbackId: string }[] }
+    await host.dispatch(JSON.stringify({
+      type: 'invokeHookBatch',
+      invocation: {
+        invocationId: `nested-${nextInvocation++}`,
+        generationId: manifest.generationId,
+        hook: 'agent_end',
+        callbacks: snapshot.callbacks.map(callback => ({ callbackId: callback.callbackId, context: { pluginId: callback.pluginId } })),
+        event: { type: 'agent_end', messages: [] },
+      },
+    }))
+  }
+  ;(globalThis as Record<string, unknown>)[emitKey] = emit
+
+  await emit()
+  const command = manifest.agentPlugins[0]?.commands[0]
+  assert.ok(command)
+  const result = parseJson(await host.dispatch(JSON.stringify({
+    type: 'invoke',
+    invocation: {
+      invocationId: 'read', generationId: manifest.generationId,
+      callbackId: command.callbackId, kind: 'command', payload: { arguments: '', context: {} },
+    },
+  }))) as { text: string }
+  assert.deepEqual(JSON.parse(result.text), ['A', 'C', 'B'])
+})
+
 test('exposes the resolved generation agent directory during extension loading and callbacks', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pi-rs-agent-dir-'))
   const agentDir = join(root, 'agent')
@@ -1263,6 +1622,43 @@ test('keeps noninteractive UI registrations non-fatal while agent_settled stays 
     },
   })))
   assert.deepEqual(result, { action: 'handled' })
+})
+
+// Adapted from legacy/pi regression #7193. Each pi-rs generation owns one
+// event bus, so retiring the generation must remove extension listeners while
+// leaving a captured emitter harmless.
+test('retires extension event-bus listeners with their generation', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'pi-rs-js-event-bus-retirement-'))
+  const extension = join(root, 'event-bus.ts')
+  const probeKey = '__piRsExtensionEventBusRetirementProbe'
+  delete (globalThis as Record<string, unknown>)[probeKey]
+  t.after(() => { delete (globalThis as Record<string, unknown>)[probeKey] })
+  await writeFile(extension, `
+    export default function (pi: any) {
+      const probe = globalThis.${probeKey} = { api: pi, calls: 0 };
+      pi.events.on("reload:test", () => { probe.calls++; });
+    }
+  `)
+
+  const host = new ExtensionHost()
+  const manifest = parseGenerationManifest(await host.dispatch(JSON.stringify({
+    type: 'prepareGeneration',
+    request: { projectTrusted: true, extensionPaths: [extension], mode: 'print' },
+  })))
+  const probe = (globalThis as Record<string, unknown>)[probeKey] as {
+    api: { events: { emit(channel: string, data: unknown): void }; getCommands(): unknown[] }
+    calls: number
+  }
+
+  probe.api.events.emit('reload:test', undefined)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(probe.calls, 1)
+
+  await host.dispatch(JSON.stringify({ type: 'retireGeneration', generationId: manifest.generationId }))
+  probe.api.events.emit('reload:test', undefined)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(probe.calls, 1)
+  assert.throws(() => probe.api.getCommands(), /generation is retired/)
 })
 
 test('keeps ordinary missing extension dependencies fatal', async () => {

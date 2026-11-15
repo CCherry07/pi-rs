@@ -125,6 +125,7 @@ const streamHookBatchInvocationSchema = z.strictObject({
 
 const hostOperationSchema = z.discriminatedUnion('type', [
   z.strictObject({ type: z.literal('prepareGeneration'), request: generationRequestSchema }),
+  z.strictObject({ type: z.literal('snapshotHooks'), generationId: z.string(), hook: z.string() }),
   z.strictObject({ type: z.literal('invoke'), invocation: invocationSchema }),
   z.strictObject({ type: z.literal('invokeHookBatch'), invocation: hookBatchInvocationSchema }),
   z.strictObject({ type: z.literal('invokeContextHookBatch'), invocation: contextHookBatchInvocationSchema }),
@@ -154,6 +155,7 @@ const toolManifestSchema = z.strictObject({
 const commandManifestSchema = z.strictObject({
   callbackId: z.string(),
   name: z.string(),
+  invocationName: z.string(),
   description: z.string(),
   argumentHint: z.string().optional(),
 })
@@ -167,6 +169,7 @@ const providerRegistrationManifestSchema = z.strictObject({
 
 const generationManifestSchema = z.strictObject({
   generationId: z.string(),
+  dynamicHooks: z.boolean().default(false),
   agentPlugins: z.array(
     z.strictObject({
       id: z.string(),

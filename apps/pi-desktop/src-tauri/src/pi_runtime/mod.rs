@@ -1,3 +1,6 @@
+mod confirm_bridge;
+#[cfg(debug_assertions)]
+pub(crate) use confirm_bridge::spawn_selftest as confirm_selftest;
 mod isolated_projection;
 pub(crate) mod mcp;
 pub(crate) mod plugins;
@@ -38,7 +41,7 @@ pub(crate) struct PiRuntimeState {
     skill_mutation_gate: skills::SkillMutationGate,
 }
 
-pub(crate) fn create_state() -> Result<PiRuntimeState, String> {
+pub(crate) fn create_state<R: tauri::Runtime>(app: AppHandle<R>) -> Result<PiRuntimeState, String> {
     dotenvy::dotenv().ok();
     let agent_dir = crate::agent_paths::agent_dir()?;
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
@@ -46,6 +49,7 @@ pub(crate) fn create_state() -> Result<PiRuntimeState, String> {
     config.discover_extensions = false;
     let sdk = Pi::builder(config)
         .presentation_mode(PresentationMode::Rpc)
+        .plugin_ui_bridge(Arc::new(confirm_bridge::DesktopConfirmBridge::new(app)))
         .build()?;
     Ok(PiRuntimeState {
         project_trust: sdk.project_trust().clone(),
@@ -112,14 +116,26 @@ pub(crate) async fn pi_read_thread(
     workspace_id: String,
     thread_id: String,
     pi: State<'_, PiRuntimeState>,
-    app: AppHandle,
 ) -> Result<Value, String> {
-    if let Ok(stored) = pi.store.read_isolated(&thread_id) {
-        return Ok(json!({ "thread": thread_from_stored_isolated(&stored)? }));
+    let _ = workspace_id;
+    let store = pi.store.clone();
+    tokio::task::spawn_blocking(move || {
+        read_thread_snapshot(&store, &thread_id).map(|thread| json!({ "thread": thread }))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+// History inspection must not construct a generation, connect MCP servers, or
+// wait for another session's open gate. Resume installs the live subscription.
+fn read_thread_snapshot(store: &SessionStore, id: &str) -> Result<Value, String> {
+    if let Some((_, handle)) = store.handle(id) {
+        return Ok(thread_from_session(&handle.current()));
     }
-    let session = pi.store.open(&thread_id).await?;
-    ensure_forwarder(&app, &pi, &workspace_id, thread_id.clone()).await?;
-    Ok(json!({ "thread": thread_from_session(&session) }))
+    if let Ok(stored) = store.read_isolated(id) {
+        return thread_from_stored_isolated(&stored);
+    }
+    Ok(thread_from_transcript(store.transcript(id)?))
 }
 
 #[tauri::command]
@@ -694,40 +710,24 @@ fn thread_from_session(session: &AgentSession) -> Value {
     thread
 }
 
-fn thread_from_stored_isolated(stored: &StoredIsolatedSession) -> Result<Value, String> {
-    let branch = stored
-        .document
-        .branch()
-        .map_err(|error| error.to_string())?;
-    let message_entry_ids = collect_message_entry_ids(branch.iter().copied());
-    let messages = stored
-        .document
-        .context()
-        .map_err(|error| error.to_string())?
-        .runtime_messages();
-    let model_selection = branch.iter().rev().find_map(|record| match &record.entry {
-        SessionEntry::ModelChange(change) => {
-            Some((change.provider.clone(), change.model_id.clone()))
-        }
-        SessionEntry::Message(entry) => match entry.message.as_standard() {
-            Some(Message::Assistant(message)) => {
-                Some((message.provider.clone(), message.model.clone()))
-            }
-            _ => None,
-        },
-        _ => None,
-    });
-    let thinking_level = branch
-        .iter()
-        .rev()
-        .find_map(|record| match &record.entry {
-            SessionEntry::ThinkingLevelChange(change) => change.thinking_level.parse().ok(),
-            _ => None,
-        })
-        .unwrap_or(ThinkingLevel::Off);
-    let (provider_id, model_id) =
-        model_selection.unwrap_or_else(|| (ProviderId::new("unknown"), ModelId::new("unknown")));
-    let snapshot = AgentSessionSnapshot {
+fn snapshot_from_document(
+    document: &pi_session::SessionDocument,
+) -> Result<AgentSessionSnapshot, String> {
+    let context = document.context().map_err(|error| error.to_string())?;
+    Ok(snapshot_from_context(context, document.name.clone()))
+}
+
+fn snapshot_from_context(
+    context: pi_session::SessionContext,
+    name: Option<String>,
+) -> AgentSessionSnapshot {
+    let messages = context.runtime_messages();
+    let thinking_level = context.thinking_level.parse().unwrap_or(ThinkingLevel::Off);
+    let (provider_id, model_id) = context.model.map_or_else(
+        || (ProviderId::new("unknown"), ModelId::new("unknown")),
+        |model| (model.provider, model.model_id),
+    );
+    AgentSessionSnapshot {
         revision: 0,
         agent: AgentStateSnapshot {
             system_prompt: String::new(),
@@ -745,8 +745,54 @@ fn thread_from_stored_isolated(stored: &StoredIsolatedSession) -> Result<Value, 
         compaction: None,
         auto_retry: None,
         bash: None,
-        name: stored.document.name.clone(),
+        name,
+    }
+}
+
+fn thread_from_transcript(transcript: pi_session::SessionTranscript) -> Value {
+    let usage = SessionTokenUsage {
+        total_tokens: Some(transcript.usage.total_tokens),
+        context_tokens: pi_session::current_session_context_tokens(
+            &transcript.branch,
+            &transcript.context.messages,
+        )
+        .map(|usage| usage.tokens),
+        model_context_window: None,
     };
+    let snapshot = snapshot_from_context(transcript.context, transcript.name);
+    thread_from_snapshot(
+        &snapshot,
+        &transcript.header.id,
+        &transcript.header.cwd,
+        usage,
+        json!("pi-rs"),
+        None,
+        collect_message_entry_ids(transcript.branch.iter()),
+    )
+}
+
+#[cfg(test)]
+fn thread_from_document(document: &pi_session::SessionDocument) -> Result<Value, String> {
+    let snapshot = snapshot_from_document(document)?;
+    let branch = document.branch().map_err(|error| error.to_string())?;
+    Ok(thread_from_snapshot(
+        &snapshot,
+        &document.header.id,
+        &document.header.cwd,
+        document_token_usage(document, None),
+        json!("pi-rs"),
+        None,
+        collect_message_entry_ids(branch.iter().copied()),
+    ))
+}
+
+fn thread_from_stored_isolated(stored: &StoredIsolatedSession) -> Result<Value, String> {
+    let snapshot = snapshot_from_document(&stored.document)?;
+    let branch = stored
+        .document
+        .branch()
+        .map_err(|error| error.to_string())?;
+    let message_entry_ids = collect_message_entry_ids(branch.iter().copied());
     let own_snapshot = isolated_projection::separate_inherited_context(&snapshot, &stored.document);
     let mut thread = thread_from_snapshot(
         &own_snapshot,
@@ -2598,6 +2644,84 @@ mod tests {
         let summaries = store.list(directory.path()).unwrap();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].title, "hello desktop");
+    }
+
+    #[tokio::test]
+    async fn saved_history_snapshot_does_not_prepare_a_runtime_or_modify_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent_dir = directory.path().join("agent");
+        let store = scripted_store(agent_dir.clone());
+        let session = store.create(directory.path()).await.unwrap();
+        let mut subscription = session.subscribe();
+        session.prompt("/native transform").await.unwrap();
+        wait_for_standard_message_entries(&mut subscription, 2).await;
+        session
+            .append_custom_entry(
+                "extension.state",
+                Some(json!({ "state": "x".repeat(1_000_000) })),
+            )
+            .unwrap();
+        let expected = thread_from_session(&session);
+        let id = session.history().header().id;
+        let before = std::fs::read(session.history().path()).unwrap();
+
+        let fixture = Arc::new(CommandFixture::default());
+        fixture
+            .fail_reload
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let cold = scripted_store_with_fixture(agent_dir, fixture.clone());
+        let snapshot = read_thread_snapshot(&cold, &id).unwrap();
+        assert_eq!(snapshot["turns"], expected["turns"]);
+        // The scripted response records its own model in the durable context.
+        assert_eq!(snapshot["model"], "test");
+        assert_eq!(snapshot["effort"], expected["effort"]);
+        assert_eq!(
+            snapshot["tokenUsage"]["totalTokens"],
+            expected["tokenUsage"]["totalTokens"]
+        );
+        assert!(snapshot.get("commands").is_none());
+        assert!(cold.handle(&id).is_none());
+        assert_eq!(fixture.builds.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(session.history().path()).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn live_history_snapshot_preserves_an_unsaved_session_and_its_commands() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = scripted_store(directory.path().join("agent"));
+        let session = store.create(directory.path()).await.unwrap();
+        let id = session.history().header().id;
+        let snapshot = read_thread_snapshot(&store, &id).unwrap();
+        assert_eq!(snapshot["id"], id);
+        assert_eq!(snapshot["commands"], command_catalog_json(&session));
+        assert!(!session.history().path().exists());
+    }
+
+    #[test]
+    #[ignore = "read-only local timing; set PI_DESKTOP_BENCH_AGENT_DIR and PI_DESKTOP_BENCH_SESSION_ID"]
+    fn saved_history_snapshot_timing() {
+        let agent_dir = std::env::var_os("PI_DESKTOP_BENCH_AGENT_DIR").unwrap();
+        let id = std::env::var("PI_DESKTOP_BENCH_SESSION_ID").unwrap();
+        let store = scripted_store(PathBuf::from(agent_dir));
+        for _ in 0..3 {
+            let start = std::time::Instant::now();
+            let full = thread_from_document(&store.document(&id).unwrap()).unwrap();
+            let full_elapsed = start.elapsed();
+            let start = std::time::Instant::now();
+            let snapshot = read_thread_snapshot(&store, &id).unwrap();
+            let elapsed = start.elapsed();
+            assert_eq!(snapshot["id"], id);
+            assert!(
+                snapshot == full,
+                "transcript projection differs from complete history"
+            );
+            assert!(store.handle(&id).is_none());
+            println!(
+                "saved history snapshot: full={} ms, transcript={} ms",
+                full_elapsed.as_millis(),
+                elapsed.as_millis()
+            );
+        }
     }
 
     #[tokio::test]

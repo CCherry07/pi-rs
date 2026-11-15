@@ -3,8 +3,8 @@ use crate::{McpLibrary, McpScope, McpServerRow, McpToolSet};
 use async_trait::async_trait;
 use pi_core::PluginId;
 use pi_plugin::{
-    Command, CommandContext, CommandError, CommandOutcome, CommandSpec, NoticeLevel, Plugin,
-    RegisterContext,
+    AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, Command, CommandContext,
+    CommandError, CommandOutcome, CommandSpec, NoticeLevel, Plugin, PluginError, RegisterContext,
 };
 use std::sync::Arc;
 
@@ -25,6 +25,14 @@ impl Plugin for McpProductPlugin {
             rows: self.rows.clone(),
             pool: self.pool.clone(),
         }))
+    }
+
+    async fn before_agent_start(
+        &self,
+        _context: AgentPluginContext,
+        event: BeforeAgentStartEvent,
+    ) -> Result<BeforeAgentStartPatch, PluginError> {
+        Ok(self.pool.prompt_patch(event))
     }
 }
 struct McpCommand {

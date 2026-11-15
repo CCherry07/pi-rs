@@ -91,7 +91,11 @@ pub fn run() {
             }
             let state = state::AppState::load(app.handle()).map_err(std::io::Error::other)?;
             app.manage(state);
-            app.manage(pi_runtime::create_state().map_err(std::io::Error::other)?);
+            app.manage(
+                pi_runtime::create_state(app.handle().clone()).map_err(std::io::Error::other)?,
+            );
+            #[cfg(debug_assertions)]
+            pi_runtime::confirm_selftest(app.handle().clone());
             #[cfg(target_os = "macos")]
             {
                 let tray_state = app.state::<tray::TrayState>();

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -542,11 +543,11 @@ impl SessionStore {
         let document = pi_session::SessionStore::read(&path).map_err(|error| error.to_string())?;
         let owner_path = isolated_owner_path(&path)
             .ok_or_else(|| format!("invalid isolated session path: {}", path.display()))?;
-        let owner = pi_session::SessionStore::read(&owner_path).ok();
+        let owner = read_session_header(&owner_path);
         let parent_thread_id = document
             .isolated_parent_session_id()
             .map_err(|error| error.to_string())?
-            .or_else(|| owner.as_ref().map(|owner| owner.header.id.clone()))
+            .or_else(|| owner.map(|header| header.id))
             .ok_or_else(|| {
                 format!(
                     "cannot resolve isolated session owner {}",
@@ -574,6 +575,11 @@ impl SessionStore {
             return Ok(stored.document);
         }
         pi_session::SessionStore::read(self.find_path(id)?).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn transcript(&self, id: &str) -> Result<pi_session::SessionTranscript, String> {
+        pi_session::SessionStore::read_transcript(self.find_path(id)?)
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn list_pages(
@@ -778,7 +784,15 @@ fn session_companion_directory(path: &Path) -> PathBuf {
 }
 
 fn session_id_matches(path: &Path, id: &str) -> bool {
-    pi_session::SessionStore::read(path).is_ok_and(|document| document.header.id == id)
+    read_session_header(path).is_some_and(|header| header.id == id)
+}
+
+fn read_session_header(path: &Path) -> Option<pi_session::SessionHeader> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut line = String::new();
+    BufReader::new(file).read_line(&mut line).ok()?;
+    let header: pi_session::SessionHeader = serde_json::from_str(&line).ok()?;
+    (header.version == pi_session::SESSION_SCHEMA_VERSION).then_some(header)
 }
 
 fn session_files(root: &Path) -> Result<Vec<PathBuf>, String> {
@@ -851,4 +865,25 @@ pub(crate) fn content_text(content: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    #[test]
+    fn session_identity_lookup_does_not_replay_the_body() {
+        let dir = tempfile::tempdir().unwrap();
+        // Filenames are not authoritative. Discovery needs only the header;
+        // the selected session is still fully validated when read or opened.
+        let path = dir.path().join("different-filename.jsonl");
+        let header = serde_json::json!({
+            "kind": "header", "version": 4, "id": "saved-session",
+            "createdAt": 1, "cwd": dir.path(),
+        });
+        std::fs::write(&path, format!("{header}\ninvalid body\n{{}}\n")).unwrap();
+        assert!(session_id_matches(&path, "saved-session"));
+        assert!(!session_id_matches(&path, "different-filename"));
+        assert!(pi_session::SessionStore::read(&path).is_err());
+    }
 }

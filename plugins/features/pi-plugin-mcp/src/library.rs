@@ -1,5 +1,5 @@
 //! Product-owned MCP configuration. Disk views never initialize a session or connect.
-//! This is a deliberate Rust product extension; upstream Pi has no built-in MCP.
+//! Direct tool exposure and generation-owned connections are deliberate Rust product choices.
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};

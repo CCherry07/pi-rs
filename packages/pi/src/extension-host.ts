@@ -8,13 +8,17 @@ import * as piTui from '@earendil-works/pi-tui'
 import * as compatibilityApi from './compat-api.js'
 import { CompatibilityResolver } from './compatibility-resolver.js'
 import { ExtensionUI } from './extension-ui.js'
+import { GenerationHookRegistry } from './generation-hook-registry.js'
 import { createExtensionContext } from './extension-context.js'
 import { ExtensionRuntime, type ExecOptions } from './extension-runtime.js'
+import {
+  RegistrationPlanner,
+  type UnplannedAgentPluginManifest,
+  type UnplannedCommandManifest,
+} from './extension-registration.js'
 import type { PiExtensionCommandContext, PiExtensionContext } from './extension-api.js'
 import type { NativeExtensionContext } from './native-binding.js'
 import {
-  type AgentPluginManifest,
-  type CommandManifest,
   type GenerationManifest,
   type GenerationRequest,
   type HookBatchInvocation,
@@ -261,7 +265,7 @@ type ExtensionCallback = (
 
 interface Contribution {
   tools: ToolManifest[]
-  commands: CommandManifest[]
+  commands: UnplannedCommandManifest[]
   agentHooks: HookManifest[]
   providerHooks: HookManifest[]
   sessionHooks: HookManifest[]
@@ -289,6 +293,9 @@ interface GenerationState {
   initializing: boolean
   providerRegistrations: ProviderRegistrationManifest[]
   streams: Map<string, AssistantStreamState>
+  nextCallbackId: number
+  hooks: GenerationHookRegistry
+  registrations: RegistrationPlanner
 }
 
 interface AssistantStreamChunk {
@@ -315,7 +322,7 @@ interface ExtensionEventBus {
 
 interface ExtensionApi {
   registerTool(definition: unknown): void
-  on(event: string, handler: unknown): void
+  on(event: string, handler: unknown): () => void
   registerCommand(name: string, options: unknown): void
   registerShortcut(key: string, options: unknown): void
   registerFlag(name: string, options: unknown): void
@@ -658,6 +665,12 @@ function extensionId(index: number, path: string): string {
   return `js:${index}:${basename(path).replace(/[^a-zA-Z0-9._-]/g, '-')}`
 }
 
+function replaceNamed<T extends { name: string }>(registrations: T[], registration: T): void {
+  const existing = registrations.findIndex(candidate => candidate.name === registration.name)
+  if (existing === -1) registrations.push(registration)
+  else registrations[existing] = registration
+}
+
 export class ExtensionHost {
   #generation = 0
   readonly #generations = new Map<string, GenerationState>()
@@ -670,6 +683,10 @@ export class ExtensionHost {
     switch (operation.type) {
       case 'prepareGeneration':
         return JSON.stringify(await this.#prepareGeneration(operation.request))
+      case 'snapshotHooks':
+        return JSON.stringify({
+          callbacks: this.#requireGeneration(operation.generationId).hooks.snapshot(operation.hook),
+        })
       case 'invoke':
         return JSON.stringify(await this.#invoke(operation.invocation, nativeContext) ?? null)
       case 'invokeHookBatch':
@@ -692,6 +709,7 @@ export class ExtensionHost {
 
   async #prepareGeneration(request: GenerationRequest): Promise<GenerationManifest> {
     const generationId = `js-${++this.#generation}`
+    const extensions = request.extensionPaths.map((path, index) => ({ id: extensionId(index, path), path }))
     const runtime = new ExtensionRuntime(request.cwd, () => {
       this.#requireGeneration(generationId)
     })
@@ -714,17 +732,18 @@ export class ExtensionHost {
       initializing: true,
       providerRegistrations: [],
       streams: new Map(),
+      nextCallbackId: 0,
+      hooks: new GenerationHookRegistry(extensions.map(extension => extension.id)),
+      registrations: new RegistrationPlanner(),
     }
     this.#generations.set(generationId, state)
     try {
-      const paths = request.extensionPaths
-      const agentPlugins: AgentPluginManifest[] = []
+      const agentPlugins: UnplannedAgentPluginManifest[] = []
       const providerPlugins: ProviderPluginManifest[] = []
       const sessionPlugins: SessionPluginManifest[] = []
       const diagnostics: ExtensionDiagnostic[] = []
 
-      for (const [index, path] of paths.entries()) {
-        const id = extensionId(index, path)
+      for (const { id, path } of extensions) {
         const contribution: Contribution = {
           tools: [],
           commands: [],
@@ -742,17 +761,13 @@ export class ExtensionHost {
         const imported = await state.ui.run(() => jiti.import<unknown>(path, { default: true }))
         const factory = parseExternal(callableSchema, imported, `Extension default export (${path})`)
         await state.ui.run(() => callDynamic(factory, undefined, [api]))
-        if (contribution.tools.length || contribution.commands.length || contribution.agentHooks.length || contribution.sessionHooks.length) {
-          agentPlugins.push({
-            id,
-            tools: contribution.tools,
-            commands: contribution.commands,
-            hooks: contribution.agentHooks,
-          })
-        }
-        if (contribution.providerHooks.length) {
-          providerPlugins.push({ id, hooks: contribution.providerHooks })
-        }
+        agentPlugins.push({
+          id,
+          tools: contribution.tools,
+          commands: contribution.commands,
+          hooks: contribution.agentHooks,
+        })
+        providerPlugins.push({ id, hooks: contribution.providerHooks })
         if (contribution.sessionHooks.length) {
           sessionPlugins.push({ id, hooks: contribution.sessionHooks })
         }
@@ -767,7 +782,8 @@ export class ExtensionHost {
 
       return {
         generationId,
-        agentPlugins,
+        dynamicHooks: true,
+        agentPlugins: state.registrations.plan(agentPlugins),
         providerPlugins,
         providerRegistrations: state.providerRegistrations,
         sessionPlugins,
@@ -809,11 +825,15 @@ export class ExtensionHost {
     return {
       registerTool: value => {
         const definition = parseToolDefinition(value, path)
-        if (state.mode === 'tui') { state.ui.transcript.registerTool(definition.name, definition); enableUi() }
-        const callbackId = `${pluginId}:tool:${definition.name}`
+        const activeRegistration = state.registrations.acceptsTool(pluginId, definition.name)
+        if (state.mode === 'tui' && activeRegistration) {
+          state.ui.transcript.registerTool(definition.name, definition)
+          enableUi()
+        }
+        const callbackId = this.#nextCallbackId(state, pluginId, 'tool')
         const prepareCallbackId = definition.prepareArguments === undefined
           ? undefined
-          : `${pluginId}:tool:${definition.name}:prepareArguments`
+          : this.#nextCallbackId(state, pluginId, 'tool-prepare')
         if (prepareCallbackId !== undefined) {
           this.#registerCallback(state, prepareCallbackId, async (invocation, signal, nativeContext) => {
             const payload = parseExternal(
@@ -835,7 +855,7 @@ export class ExtensionHost {
           const result = await definition.execute(payload.context.toolCallId, payload.input, signal, update, this.#extensionContext(payload.context, generationId, signal, nativeContext, false))
           return normalizeToolResult(result, definition.name)
         })
-        contribution.tools.push({
+        replaceNamed(contribution.tools, {
           callbackId,
           prepareCallbackId,
           name: definition.name,
@@ -848,17 +868,18 @@ export class ExtensionHost {
         })
       },
       on: (event, value) => {
+        this.#requireGeneration(generationId)
         const registeredHandler = parseExternal(callableSchema, value, `pi.on(\"${event}\") handler (${path})`)
         const handler: HookHandler = (eventValue, context) => callDynamic(registeredHandler, undefined, [eventValue, context])
         const target = AGENT_HOOKS.has(event) ? contribution.agentHooks : PROVIDER_HOOKS.has(event) ? contribution.providerHooks : SESSION_HOOKS.has(event) ? contribution.sessionHooks : undefined
         if (!target) {
           if (KNOWN_HOOKS.has(event)) {
             inactive(`pi.on(\"${event}\")`)
-            return
+            return () => undefined
           }
           throw new Error(`pi.on(\"${event}\") is not a recognized Pi hook (${path})`)
         }
-        const callbackId = `${pluginId}:hook:${event}:${target.length}`
+        const callbackId = this.#nextCallbackId(state, pluginId, `hook-${event}`)
         this.#registerCallback(state, callbackId, async (invocation, signal, nativeContext) => {
           const payload = parseExternal(hookInvocationPayloadSchema, invocation.payload, `JavaScript hook ${event} invocation payload`)
           const eventValue = payload.event
@@ -912,11 +933,12 @@ export class ExtensionHost {
           return result ?? null
         })
         target.push({ name: event, callbackId })
+        return state.hooks.subscribe(pluginId, event, callbackId)
       },
       registerCommand: (name, value) => {
         if (!name) throw new Error(`registerCommand requires a name and handler (${path})`)
         const options = parseCommandOptions(value, path)
-        const callbackId = `${pluginId}:command:${name}`
+        const callbackId = this.#nextCallbackId(state, pluginId, 'command')
         this.#registerCallback(state, callbackId, async (invocation, signal, nativeContext) => {
           const payload = parseExternal(commandInvocationPayloadSchema, invocation.payload, `JavaScript command ${name} invocation payload`)
           const context = this.#extensionContext(payload.context, generationId, signal, nativeContext, true) as ExtensionCommandContext
@@ -924,7 +946,7 @@ export class ExtensionHost {
           if (typeof result === 'string') return { action: 'transform', text: result }
           return isRecord(result) && result.action ? result : { action: 'handled' }
         })
-        contribution.commands.push({
+        replaceNamed(contribution.commands, {
           callbackId,
           name,
           description: options.description ?? '',
@@ -1078,6 +1100,10 @@ export class ExtensionHost {
       throw new Error(`duplicate JavaScript callback id: ${callbackId}`)
     }
     state.callbacks.set(callbackId, (invocation, signal, native) => state.ui.run(() => callback(invocation, signal, native)))
+  }
+
+  #nextCallbackId(state: GenerationState, pluginId: string, kind: string): string {
+    return `${pluginId}:${kind}:${state.nextCallbackId++}`
   }
 
   #requireGeneration(generationId: string): GenerationState {
@@ -1315,6 +1341,7 @@ export class ExtensionHost {
     state.active.clear()
     state.callbacks.clear()
     state.streams.clear()
+    state.hooks.clear()
     state.events.clear()
     state.ui.retire()
     state.runtime.retire()

@@ -43,6 +43,8 @@ static NEXT_JS_INVOCATION_ID: AtomicU64 = AtomicU64::new(1);
 pub struct JsGenerationManifest {
     pub generation_id: String,
     #[serde(default)]
+    pub dynamic_hooks: bool,
+    #[serde(default)]
     pub agent_plugins: Vec<JsAgentPluginManifest>,
     #[serde(default)]
     pub provider_plugins: Vec<JsProviderPluginManifest>,
@@ -116,6 +118,10 @@ pub enum JsHostOperation {
     PrepareGeneration {
         request: JsGenerationRequest,
     },
+    SnapshotHooks {
+        generation_id: String,
+        hook: String,
+    },
     Invoke {
         invocation: JsInvocation,
     },
@@ -178,6 +184,15 @@ mod wire_tests {
         .unwrap();
         assert_eq!(retire["generationId"], "generation-1");
         assert!(retire.get("generation_id").is_none());
+
+        let snapshot = serde_json::to_value(JsHostOperation::SnapshotHooks {
+            generation_id: "generation-1".to_string(),
+            hook: "agent_end".to_string(),
+        })
+        .unwrap();
+        assert_eq!(snapshot["type"], "snapshotHooks");
+        assert_eq!(snapshot["generationId"], "generation-1");
+        assert_eq!(snapshot["hook"], "agent_end");
 
         let batch = serde_json::to_value(JsHostOperation::InvokeHookBatch {
             invocation: JsHookBatchInvocation {
@@ -294,11 +309,19 @@ pub struct JsHookManifest {
     pub callback_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsHookSnapshot {
+    pub plugin_id: String,
+    pub callback_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JsCommandManifest {
     pub callback_id: String,
     pub name: String,
+    pub invocation_name: String,
     pub description: String,
     #[serde(default)]
     pub argument_hint: Option<String>,
@@ -434,6 +457,14 @@ impl JsCallbackError {
 
 #[async_trait]
 pub trait JsCallbackDispatcher: Send + Sync {
+    async fn snapshot_hooks(
+        &self,
+        _generation_id: &str,
+        _hook: &str,
+    ) -> Result<Option<Vec<JsHookSnapshot>>, JsCallbackError> {
+        Ok(None)
+    }
+
     async fn invoke(
         &self,
         invocation: JsInvocation,
@@ -595,6 +626,7 @@ impl JsPluginGeneration {
     ) -> Result<Self, JsPluginError> {
         let JsGenerationManifest {
             generation_id,
+            dynamic_hooks,
             agent_plugins,
             provider_plugins,
             provider_registrations,
@@ -614,6 +646,7 @@ impl JsPluginGeneration {
         )?;
         let context_batch = Arc::new(JsContextHooks {
             lease: Arc::clone(&lease),
+            dynamic_hooks,
             hooks: agent_plugins
                 .iter()
                 .map(|plugin| {
@@ -653,6 +686,19 @@ impl JsPluginGeneration {
                 })
                 .collect::<Vec<_>>(),
         );
+        let mut generation_dynamic_hooks = dynamic_hooks.then(|| {
+            agent_plugins
+                .iter()
+                .flat_map(|plugin| {
+                    let plugin_id = PluginId::new(plugin.id.clone());
+                    plugin.hooks.iter().map(move |hook| JsAgentHook {
+                        plugin_id: plugin_id.clone(),
+                        name: hook.name.clone(),
+                        callback_id: hook.callback_id.clone(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
         let mut agent_plugins = agent_plugins;
         let mut session_hooks = std::collections::HashMap::new();
         let mut session_position = 0;
@@ -679,8 +725,26 @@ impl JsPluginGeneration {
                 );
                 session_position += 1;
             }
-            session_hooks.insert(session.id, session.hooks);
+            let plugin_id = PluginId::new(session.id.clone());
+            session_hooks.insert(
+                session.id,
+                session
+                    .hooks
+                    .into_iter()
+                    .map(|hook| JsAgentHook {
+                        plugin_id: plugin_id.clone(),
+                        name: hook.name,
+                        callback_id: hook.callback_id,
+                    })
+                    .collect::<Vec<_>>(),
+            );
         }
+        let mut generation_session_hooks = dynamic_hooks.then(|| {
+            agent_plugins
+                .iter()
+                .flat_map(|plugin| session_hooks.get(&plugin.id).cloned().unwrap_or_default())
+                .collect::<Vec<_>>()
+        });
         let agent_plugins = agent_plugins
             .into_iter()
             .enumerate()
@@ -691,7 +755,7 @@ impl JsPluginGeneration {
                     commands,
                     hooks,
                 } = plugin;
-                let session_hooks = session_hooks.remove(&id).unwrap_or_default();
+                let mut session_hooks = session_hooks.remove(&id).unwrap_or_default();
                 let plugin_id = PluginId::new(id);
                 let tools = tools
                     .into_iter()
@@ -703,16 +767,30 @@ impl JsPluginGeneration {
                         Arc::new(JsCommand::new(command, Arc::clone(&lease))) as Arc<dyn Command>
                     })
                     .collect();
-                let mut hooks = hooks
-                    .into_iter()
-                    .filter(|hook| !is_batched_agent_observer(&hook.name))
-                    .map(|hook| JsAgentHook {
-                        plugin_id: plugin_id.clone(),
-                        name: hook.name,
-                        callback_id: hook.callback_id,
-                    })
-                    .collect::<Vec<_>>();
-                if index == 0 {
+                let mut hooks = if dynamic_hooks {
+                    if index == 0 {
+                        generation_dynamic_hooks.take().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    hooks
+                        .into_iter()
+                        .filter(|hook| !is_batched_agent_observer(&hook.name))
+                        .map(|hook| JsAgentHook {
+                            plugin_id: plugin_id.clone(),
+                            name: hook.name,
+                            callback_id: hook.callback_id,
+                        })
+                        .collect::<Vec<_>>()
+                };
+                if dynamic_hooks {
+                    session_hooks = if index == 0 {
+                        generation_session_hooks.take().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                } else if index == 0 {
                     hooks.extend(generation_observer_hooks.take().unwrap_or_default());
                 }
                 Arc::new(JsPlugin {
@@ -721,22 +799,60 @@ impl JsPluginGeneration {
                     tools,
                     commands,
                     hooks,
+                    dynamic_hooks: dynamic_hooks && index == 0,
                     context_batch: Arc::clone(&context_batch),
                     lease: Arc::clone(&lease),
                     active_streams: Mutex::new(HashMap::new()),
+                    boundary_snapshots: Mutex::new(HashMap::new()),
                 }) as Arc<dyn Plugin>
             })
             .collect();
-        let provider_plugins = provider_plugins
-            .into_iter()
-            .map(|plugin| {
-                Arc::new(JsProviderPlugin {
-                    id: PluginId::new(plugin.id),
-                    hooks: plugin.hooks,
-                    lease: Arc::clone(&lease),
-                }) as Arc<dyn ProviderPlugin>
-            })
-            .collect();
+        let provider_plugins = if dynamic_hooks {
+            provider_plugins
+                .first()
+                .map(|first| {
+                    let hooks = provider_plugins
+                        .iter()
+                        .flat_map(|plugin| {
+                            let plugin_id = PluginId::new(plugin.id.clone());
+                            plugin.hooks.iter().map(move |hook| JsAgentHook {
+                                plugin_id: plugin_id.clone(),
+                                name: hook.name.clone(),
+                                callback_id: hook.callback_id.clone(),
+                            })
+                        })
+                        .collect();
+                    vec![Arc::new(JsProviderPlugin {
+                        id: PluginId::new(first.id.clone()),
+                        hooks,
+                        dynamic_hooks: true,
+                        lease: Arc::clone(&lease),
+                    }) as Arc<dyn ProviderPlugin>]
+                })
+                .unwrap_or_default()
+        } else {
+            provider_plugins
+                .into_iter()
+                .map(|plugin| {
+                    let plugin_id = PluginId::new(plugin.id);
+                    let hooks = plugin
+                        .hooks
+                        .into_iter()
+                        .map(|hook| JsAgentHook {
+                            plugin_id: plugin_id.clone(),
+                            name: hook.name,
+                            callback_id: hook.callback_id,
+                        })
+                        .collect();
+                    Arc::new(JsProviderPlugin {
+                        id: plugin_id,
+                        hooks,
+                        dynamic_hooks: false,
+                        lease: Arc::clone(&lease),
+                    }) as Arc<dyn ProviderPlugin>
+                })
+                .collect()
+        };
 
         Ok(Self {
             plugins: agent_plugins,
@@ -769,6 +885,14 @@ struct HostCallbackDispatcher {
 
 #[async_trait]
 impl JsCallbackDispatcher for HostCallbackDispatcher {
+    async fn snapshot_hooks(
+        &self,
+        generation_id: &str,
+        hook: &str,
+    ) -> Result<Option<Vec<JsHookSnapshot>>, JsCallbackError> {
+        self.host.snapshot_hooks(generation_id, hook).await
+    }
+
     async fn invoke(
         &self,
         invocation: JsInvocation,
@@ -1005,7 +1129,10 @@ fn validate_agent_plugin(
         }
     }
     for command in &plugin.commands {
-        if command.callback_id.trim().is_empty() || command.name.trim().is_empty() {
+        if command.callback_id.trim().is_empty()
+            || command.name.trim().is_empty()
+            || command.invocation_name.trim().is_empty()
+        {
             return Err(JsPluginError::InvalidManifest(format!(
                 "agent plugin {} has an invalid command",
                 plugin.id
@@ -1078,6 +1205,15 @@ enum JsInvokeError {
 }
 
 impl JsGenerationLease {
+    async fn snapshot_hooks(
+        &self,
+        hook: &str,
+    ) -> Result<Option<Vec<JsHookSnapshot>>, JsCallbackError> {
+        self.dispatcher
+            .snapshot_hooks(&self.generation_id, hook)
+            .await
+    }
+
     async fn invoke(
         &self,
         callback_id: &str,
@@ -1259,15 +1395,16 @@ struct JsPlugin {
     tools: Vec<Arc<dyn Tool>>,
     commands: Vec<Arc<dyn Command>>,
     hooks: Vec<JsAgentHook>,
+    dynamic_hooks: bool,
     context_batch: Arc<JsContextHooks>,
-    session_hooks: Vec<JsHookManifest>,
+    session_hooks: Vec<JsAgentHook>,
     lease: Arc<JsGenerationLease>,
     active_streams: Mutex<HashMap<RunId, ActiveJsStream>>,
+    boundary_snapshots: Mutex<HashMap<u64, Vec<JsAgentHook>>>,
 }
 
 struct ActiveJsStream {
     id: AssistantStreamId,
-    callbacks: Arc<[JsHookBatchCallback]>,
 }
 
 #[derive(Clone)]
@@ -1279,6 +1416,7 @@ struct JsAgentHook {
 
 struct JsContextHooks {
     lease: Arc<JsGenerationLease>,
+    dynamic_hooks: bool,
     hooks: HashMap<PluginId, Vec<JsAgentHook>>,
 }
 
@@ -1289,16 +1427,48 @@ impl ContextHookBatch for JsContextHooks {
         contexts: Vec<AgentPluginContext>,
         event: ContextEvent,
     ) -> Result<ContextPatch, PluginError> {
-        let mut hooks = Vec::new();
-        for context in &contexts {
-            if let Some(callbacks) = self.hooks.get(context.plugin_id()) {
-                hooks.extend(callbacks.iter().map(|hook| (context, hook)));
+        let mut hooks: Vec<(AgentPluginContext, JsAgentHook)> = Vec::new();
+        if self.dynamic_hooks {
+            let Some(context) = contexts.first() else {
+                return Ok(ContextPatch::default());
+            };
+            let snapshot = self
+                .lease
+                .snapshot_hooks("context")
+                .await
+                .map_err(|error| {
+                    PluginError::Failure(format!(
+                        "cannot snapshot JavaScript context hooks: {error}"
+                    ))
+                })?
+                .unwrap_or_default();
+            hooks.extend(snapshot.into_iter().map(|hook| {
+                let plugin_id = PluginId::new(hook.plugin_id);
+                (
+                    context.for_adapter_plugin(plugin_id.clone()),
+                    JsAgentHook {
+                        plugin_id,
+                        name: "context".to_string(),
+                        callback_id: hook.callback_id,
+                    },
+                )
+            }));
+        } else {
+            for context in contexts {
+                if let Some(callbacks) = self.hooks.get(context.plugin_id()) {
+                    hooks.extend(
+                        callbacks
+                            .iter()
+                            .cloned()
+                            .map(|hook| (context.clone(), hook)),
+                    );
+                }
             }
         }
         let mut messages = event.messages;
         let mut changed = false;
         let mut remaining = hooks.as_slice();
-        while let Some(&(context, _)) = remaining.first() {
+        while let Some((context, _)) = remaining.first() {
             if context.signal().is_aborted() {
                 break;
             }
@@ -1331,14 +1501,14 @@ impl ContextHookBatch for JsContextHooks {
                         }
                         Err(JsInvokeError::Callback(error)) => error.to_string(),
                     };
-                    for &(context, hook) in remaining {
+                    for (context, hook) in remaining {
                         report_agent_hook_error(context, "context", hook, message.clone());
                     }
                     break;
                 }
             };
             for error in response.errors {
-                if let Some(&(context, hook)) = remaining[..response.processed]
+                if let Some((context, hook)) = remaining[..response.processed]
                     .iter()
                     .find(|(_, hook)| hook.callback_id == error.callback_id)
                 {
@@ -1352,7 +1522,7 @@ impl ContextHookBatch for JsContextHooks {
                         changed = true;
                     }
                     Err(error) => {
-                        let (context, hook) = remaining[response.processed - 1];
+                        let (context, hook) = &remaining[response.processed - 1];
                         report_agent_hook_error(
                             context,
                             "context",
@@ -1373,6 +1543,30 @@ impl ContextHookBatch for JsContextHooks {
 impl JsPlugin {
     fn hook_callbacks<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a JsAgentHook> {
         self.hooks.iter().filter(move |hook| hook.name == name)
+    }
+
+    async fn hook_snapshot(&self, name: &'static str) -> Result<Vec<JsAgentHook>, PluginError> {
+        if self.dynamic_hooks {
+            match self.lease.snapshot_hooks(name).await {
+                Ok(Some(snapshot)) => {
+                    return Ok(snapshot
+                        .into_iter()
+                        .map(|hook| JsAgentHook {
+                            plugin_id: PluginId::new(hook.plugin_id),
+                            name: name.to_string(),
+                            callback_id: hook.callback_id,
+                        })
+                        .collect());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(PluginError::Failure(format!(
+                        "cannot snapshot JavaScript {name} hooks: {error}"
+                    )));
+                }
+            }
+        }
+        Ok(self.hook_callbacks(name).cloned().collect())
     }
 
     async fn invoke_hook(
@@ -1409,7 +1603,7 @@ impl JsPlugin {
         context: &AgentPluginContext,
         event: Value,
     ) -> Result<(), PluginError> {
-        let hooks = self.hook_callbacks(name).cloned().collect::<Vec<_>>();
+        let hooks = self.hook_snapshot(name).await?;
         if hooks.is_empty() {
             return Ok(());
         }
@@ -1464,43 +1658,50 @@ impl JsPlugin {
         event: MessageUpdateEvent,
     ) -> Result<(), PluginError> {
         const HOOK: &str = "message_update";
-        let hooks = self.hook_callbacks(HOOK).collect::<Vec<_>>();
+        let hooks = self.hook_snapshot(HOOK).await?;
         if hooks.is_empty() {
+            if let Some(active_stream) = self
+                .active_streams
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(context.run_id())
+            {
+                self.lease.release_stream(&active_stream.id);
+            }
             return Ok(());
         }
         let stream_id = event.stream.id().clone();
-        let (initial_message, callbacks) = {
+        let initial_message = {
             let mut active = self
                 .active_streams
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(active_stream) = active
+            if active
                 .get(context.run_id())
-                .filter(|active_stream| active_stream.id == stream_id)
+                .is_some_and(|active_stream| active_stream.id == stream_id)
             {
-                (None, Arc::clone(&active_stream.callbacks))
+                None
             } else {
-                let callbacks = hooks
-                    .iter()
-                    .map(|hook| {
-                        let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
-                        JsHookBatchCallback {
-                            callback_id: hook.callback_id.clone(),
-                            context: agent_plugin_context_value(&callback_context),
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .into();
                 active.insert(
                     context.run_id().clone(),
                     ActiveJsStream {
                         id: stream_id.clone(),
-                        callbacks: Arc::clone(&callbacks),
                     },
                 );
-                (event.stream.snapshot(), callbacks)
+                event.stream.snapshot()
             }
         };
+        let callbacks = hooks
+            .iter()
+            .map(|hook| {
+                let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+                JsHookBatchCallback {
+                    callback_id: hook.callback_id.clone(),
+                    context: agent_plugin_context_value(&callback_context),
+                }
+            })
+            .collect::<Vec<_>>()
+            .into();
         let is_done = matches!(event.update.as_ref(), StreamEvent::Done { .. });
         let result = self
             .lease
@@ -1727,25 +1928,43 @@ impl Plugin for JsPlugin {
     }
 
     fn session_hook_interests(&self) -> pi_plugin::SessionHookInterests {
-        let hooks: Vec<_> = self
-            .session_hooks
-            .iter()
-            .map(|hook| {
-                pi_plugin::SessionHook::from_name(&hook.name).expect("validated session hook")
-            })
-            .collect();
+        let hooks: Vec<_> = if self.dynamic_hooks {
+            SESSION_HOOKS
+                .iter()
+                .map(|name| {
+                    pi_plugin::SessionHook::from_name(name)
+                        .expect("validated JavaScript session hook must have a core route")
+                })
+                .collect()
+        } else {
+            self.session_hooks
+                .iter()
+                .map(|hook| {
+                    pi_plugin::SessionHook::from_name(&hook.name).expect("validated session hook")
+                })
+                .collect()
+        };
         pi_plugin::SessionHookInterests::from_hooks(&hooks)
     }
 
     fn hook_interests(&self) -> AgentHookInterests {
-        let mut hooks: Vec<_> = self
-            .hooks
-            .iter()
-            .map(|hook| {
-                AgentHook::from_name(&hook.name)
-                    .expect("validated JavaScript agent hook must have a core route")
-            })
-            .collect();
+        let mut hooks: Vec<_> = if self.dynamic_hooks {
+            AGENT_HOOKS
+                .iter()
+                .map(|name| {
+                    AgentHook::from_name(name)
+                        .expect("validated JavaScript agent hook must have a core route")
+                })
+                .collect()
+        } else {
+            self.hooks
+                .iter()
+                .map(|hook| {
+                    AgentHook::from_name(&hook.name)
+                        .expect("validated JavaScript agent hook must have a core route")
+                })
+                .collect()
+        };
         if hooks.contains(&AgentHook::MessageUpdate) && !hooks.contains(&AgentHook::MessageEnd) {
             hooks.push(AgentHook::MessageEnd);
         }
@@ -1770,12 +1989,14 @@ impl Plugin for JsPlugin {
         let original = event.clone();
         let mut text = event.text;
         let mut images = event.images;
-        let context_value = json!({
-            "pluginId": context.plugin_id().as_str(),
-            "cwd": context.cwd().to_string_lossy(),
-            "workspace": context.workspace().spec(),
-        });
-        for hook in self.hook_callbacks("input") {
+        let hooks = self.hook_snapshot("input").await?;
+        for hook in &hooks {
+            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+            let context_value = json!({
+                "pluginId": callback_context.plugin_id().as_str(),
+                "cwd": callback_context.cwd().to_string_lossy(),
+                "workspace": callback_context.workspace().spec(),
+            });
             let mut event_value = json!({
                 "type": "input",
                 "text": text,
@@ -1800,16 +2021,16 @@ impl Plugin for JsPlugin {
                 .invoke_hook(
                     "input",
                     hook,
-                    context.plugin_context_handle(),
-                    context_value.clone(),
+                    callback_context.plugin_context_handle(),
+                    context_value,
                     event_value,
-                    context.signal(),
+                    callback_context.signal(),
                 )
                 .await
             {
                 Ok(result) => result,
                 Err(error) => {
-                    context.report_hook_error("input", error.to_string());
+                    callback_context.report_hook_error("input", error.to_string());
                     continue;
                 }
             };
@@ -1818,14 +2039,15 @@ impl Plugin for JsPlugin {
                 Some("handled") => return Ok(InputPatch::Handled),
                 Some("transform") => {
                     let Some(next_text) = result.get("text").and_then(Value::as_str) else {
-                        context.report_hook_error("input", "transform result is missing text");
+                        callback_context
+                            .report_hook_error("input", "transform result is missing text");
                         continue;
                     };
                     let next_images = match result.get("images") {
                         Some(value) if !value.is_null() => match parse_input_images(value) {
                             Ok(images) => Some(images),
                             Err(error) => {
-                                context.report_hook_error("input", error);
+                                callback_context.report_hook_error("input", error);
                                 continue;
                             }
                         },
@@ -1835,7 +2057,8 @@ impl Plugin for JsPlugin {
                     images = next_images;
                 }
                 Some(action) => {
-                    context.report_hook_error("input", format!("invalid input action: {action}"));
+                    callback_context
+                        .report_hook_error("input", format!("invalid input action: {action}"));
                 }
             }
         }
@@ -1860,7 +2083,8 @@ impl Plugin for JsPlugin {
             .access_for_adapter()
             .and_then(|access| access.system_prompt_options(PluginContextScope::Command))
             .unwrap_or_else(|_| json!({ "cwd": context.cwd() }));
-        for hook in self.hook_callbacks("before_agent_start") {
+        let hooks = self.hook_snapshot("before_agent_start").await?;
+        for hook in &hooks {
             let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
             let mut event_value = json!({
                 "type": "before_agent_start",
@@ -1975,21 +2199,40 @@ impl Plugin for JsPlugin {
         Ok(pi_plugin::BoundaryResult::default())
     }
 
-    fn boundary_hook_count(&self, hook: pi_plugin::AgentHook) -> usize {
-        self.hook_callbacks(hook.as_str()).count()
+    async fn boundary_hook_count(
+        &self,
+        _context: AgentPluginContext,
+        hook: pi_plugin::AgentHook,
+        dispatch_id: u64,
+    ) -> Result<usize, PluginError> {
+        let hooks = self.hook_snapshot(hook.as_str()).await?;
+        let count = hooks.len();
+        self.boundary_snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(dispatch_id, hooks);
+        Ok(count)
     }
 
     async fn boundary_hook(
         &self,
         context: AgentPluginContext,
         event: pi_plugin::SessionBoundaryEvent,
+        dispatch_id: u64,
         index: usize,
     ) -> Result<pi_plugin::BoundaryResult, PluginError> {
         let name = match &event {
             pi_plugin::SessionBoundaryEvent::TurnEnd(_) => "turn_end",
             pi_plugin::SessionBoundaryEvent::BeforeSettle(_) => "agent_before_settle",
         };
-        let Some(hook) = self.hook_callbacks(name).nth(index) else {
+        let hook = self
+            .boundary_snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&dispatch_id)
+            .and_then(|hooks| hooks.get(index))
+            .cloned();
+        let Some(hook) = hook else {
             return Ok(pi_plugin::BoundaryResult::default());
         };
         let mut payload = serde_json::to_value(event.state()).expect("boundary state serializes");
@@ -2024,7 +2267,7 @@ impl Plugin for JsPlugin {
         let result = self
             .invoke_hook(
                 name,
-                hook,
+                &hook,
                 context.plugin_context_handle(),
                 agent_plugin_context_value(&context),
                 payload,
@@ -2050,6 +2293,13 @@ impl Plugin for JsPlugin {
         }
         serde_json::from_value(result)
             .map_err(|error| PluginError::Failure(format!("invalid {name} result: {error}")))
+    }
+
+    fn boundary_hook_finished(&self, dispatch_id: u64) {
+        self.boundary_snapshots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&dispatch_id);
     }
 
     async fn message_start(
@@ -2088,7 +2338,8 @@ impl Plugin for JsPlugin {
         }
         let original = event.message;
         let mut message = original.clone();
-        for hook in self.hook_callbacks("message_end") {
+        let hooks = self.hook_snapshot("message_end").await?;
+        for hook in &hooks {
             let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
             let result = match self
                 .invoke_hook(
@@ -2206,7 +2457,8 @@ impl Plugin for JsPlugin {
     ) -> Result<ToolCallPatch, PluginError> {
         let original_arguments = event.validated_args;
         let mut arguments = original_arguments.clone();
-        for hook in self.hook_callbacks("tool_call") {
+        let hooks = self.hook_snapshot("tool_call").await?;
+        for hook in &hooks {
             let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
             let result = self
                 .invoke_hook(
@@ -2256,7 +2508,8 @@ impl Plugin for JsPlugin {
     ) -> Result<ToolResultPatch, PluginError> {
         let mut result = event.result;
         let mut aggregate = JsToolResultPatch::default();
-        for hook in self.hook_callbacks("tool_result") {
+        let hooks = self.hook_snapshot("tool_result").await?;
+        for hook in &hooks {
             let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
             let patch = match self
                 .invoke_hook(
@@ -2579,7 +2832,7 @@ impl JsCommand {
         Self {
             callback_id: manifest.callback_id,
             spec: CommandSpec {
-                name: manifest.name,
+                name: manifest.invocation_name,
                 description: manifest.description,
                 argument_hint: manifest.argument_hint,
             },
@@ -2634,8 +2887,40 @@ impl Command for JsCommand {
 
 struct JsProviderPlugin {
     id: PluginId,
-    hooks: Vec<JsHookManifest>,
+    hooks: Vec<JsAgentHook>,
+    dynamic_hooks: bool,
     lease: Arc<JsGenerationLease>,
+}
+
+impl JsProviderPlugin {
+    async fn hook_snapshot(&self, name: &'static str) -> Result<Vec<JsAgentHook>, PluginError> {
+        if self.dynamic_hooks {
+            match self.lease.snapshot_hooks(name).await {
+                Ok(Some(snapshot)) => {
+                    return Ok(snapshot
+                        .into_iter()
+                        .map(|hook| JsAgentHook {
+                            plugin_id: PluginId::new(hook.plugin_id),
+                            name: name.to_string(),
+                            callback_id: hook.callback_id,
+                        })
+                        .collect());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(PluginError::Failure(format!(
+                        "cannot snapshot JavaScript {name} hooks: {error}"
+                    )));
+                }
+            }
+        }
+        Ok(self
+            .hooks
+            .iter()
+            .filter(|hook| hook.name == name)
+            .cloned()
+            .collect())
+    }
 }
 
 #[pi_plugin::provider_plugin]
@@ -2651,11 +2936,9 @@ impl ProviderPlugin for JsProviderPlugin {
     ) -> Result<Option<Value>, PluginError> {
         let original = event.payload;
         let mut payload = original.clone();
-        for hook in self
-            .hooks
-            .iter()
-            .filter(|hook| hook.name == "before_provider_request")
-        {
+        let hooks = self.hook_snapshot("before_provider_request").await?;
+        for hook in &hooks {
+            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
             let result = match self
                 .lease
                 .invoke(
@@ -2664,20 +2947,20 @@ impl ProviderPlugin for JsProviderPlugin {
                     json!({
                         "hook": "before_provider_request",
                         "context": {
-                            "pluginId": context.plugin_id().as_str(),
-                            "generation": context.generation(),
-                            "providerId": context.provider_id().as_str(),
-                            "modelId": context.model_id().as_str(),
-                            "cwd": context.cwd().to_string_lossy(),
-                            "workspace": context.workspace().spec(),
+                            "pluginId": callback_context.plugin_id().as_str(),
+                            "generation": callback_context.generation(),
+                            "providerId": callback_context.provider_id().as_str(),
+                            "modelId": callback_context.model_id().as_str(),
+                            "cwd": callback_context.cwd().to_string_lossy(),
+                            "workspace": callback_context.workspace().spec(),
                         },
                         "event": {
                             "type": "before_provider_request",
                             "payload": payload,
                         },
                     }),
-                    context.plugin_context_handle(),
-                    Some(context.signal()),
+                    callback_context.plugin_context_handle(),
+                    Some(callback_context.signal()),
                 )
                 .await
             {
@@ -2687,7 +2970,7 @@ impl ProviderPlugin for JsProviderPlugin {
                         JsInvokeError::Aborted => "JavaScript hook was aborted".to_string(),
                         JsInvokeError::Callback(error) => error.to_string(),
                     };
-                    context.report_hook_error("before_provider_request", message);
+                    callback_context.report_hook_error("before_provider_request", message);
                     continue;
                 }
             };
@@ -2705,11 +2988,9 @@ impl ProviderPlugin for JsProviderPlugin {
     ) -> Result<Option<std::collections::BTreeMap<String, Option<String>>>, PluginError> {
         let original = event.headers;
         let mut headers = original.clone();
-        for hook in self
-            .hooks
-            .iter()
-            .filter(|hook| hook.name == "before_provider_headers")
-        {
+        let hooks = self.hook_snapshot("before_provider_headers").await?;
+        for hook in &hooks {
+            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
             let result = match self
                 .lease
                 .invoke(
@@ -2717,26 +2998,30 @@ impl ProviderPlugin for JsProviderPlugin {
                     JsInvocationKind::ProviderHook,
                     json!({
                         "hook": "before_provider_headers",
-                        "context": provider_hook_context(&context),
+                        "context": provider_hook_context(&callback_context),
                         "event": {
                             "type": "before_provider_headers",
                             "headers": headers,
                         },
                     }),
-                    context.plugin_context_handle(),
-                    Some(context.signal()),
+                    callback_context.plugin_context_handle(),
+                    Some(callback_context.signal()),
                 )
                 .await
             {
                 Ok(result) => result,
                 Err(error) => {
-                    report_provider_invoke_error(&context, "before_provider_headers", error);
+                    report_provider_invoke_error(
+                        &callback_context,
+                        "before_provider_headers",
+                        error,
+                    );
                     continue;
                 }
             };
             match serde_json::from_value(result) {
                 Ok(replacement) => headers = replacement,
-                Err(error) => context.report_hook_error(
+                Err(error) => callback_context.report_hook_error(
                     "before_provider_headers",
                     format!("invalid JavaScript header result: {error}"),
                 ),
@@ -2750,11 +3035,9 @@ impl ProviderPlugin for JsProviderPlugin {
         context: ProviderPluginContext,
         event: AfterProviderResponseEvent,
     ) -> Result<(), PluginError> {
-        for hook in self
-            .hooks
-            .iter()
-            .filter(|hook| hook.name == "after_provider_response")
-        {
+        let hooks = self.hook_snapshot("after_provider_response").await?;
+        for hook in &hooks {
+            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
             if let Err(error) = self
                 .lease
                 .invoke(
@@ -2762,19 +3045,19 @@ impl ProviderPlugin for JsProviderPlugin {
                     JsInvocationKind::ProviderHook,
                     json!({
                         "hook": "after_provider_response",
-                        "context": provider_hook_context(&context),
+                        "context": provider_hook_context(&callback_context),
                         "event": {
                             "type": "after_provider_response",
                             "status": event.status,
                             "headers": event.headers,
                         },
                     }),
-                    context.plugin_context_handle(),
-                    Some(context.signal()),
+                    callback_context.plugin_context_handle(),
+                    Some(callback_context.signal()),
                 )
                 .await
             {
-                report_provider_invoke_error(&context, "after_provider_response", error);
+                report_provider_invoke_error(&callback_context, "after_provider_response", error);
             }
         }
         Ok(())
@@ -2805,6 +3088,38 @@ fn report_provider_invoke_error(
 }
 
 impl JsPlugin {
+    async fn session_hook_snapshot(
+        &self,
+        name: &'static str,
+    ) -> Result<Vec<JsAgentHook>, PluginError> {
+        if self.dynamic_hooks {
+            match self.lease.snapshot_hooks(name).await {
+                Ok(Some(snapshot)) => {
+                    return Ok(snapshot
+                        .into_iter()
+                        .map(|hook| JsAgentHook {
+                            plugin_id: PluginId::new(hook.plugin_id),
+                            name: name.to_string(),
+                            callback_id: hook.callback_id,
+                        })
+                        .collect());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(PluginError::Failure(format!(
+                        "cannot snapshot JavaScript {name} hooks: {error}"
+                    )));
+                }
+            }
+        }
+        Ok(self
+            .session_hooks
+            .iter()
+            .filter(|hook| hook.name == name)
+            .cloned()
+            .collect())
+    }
+
     async fn session_invoke(
         &self,
         name: &'static str,
@@ -2813,27 +3128,38 @@ impl JsPlugin {
         signal: Option<&AbortSignal>,
     ) -> Result<Value, PluginError> {
         let mut last = Value::Null;
-        for hook in self.session_hooks.iter().filter(|hook| hook.name == name) {
-            let result = self
+        let hooks = self.session_hook_snapshot(name).await?;
+        for hook in &hooks {
+            let callback_context = context.for_adapter_plugin(hook.plugin_id.clone());
+            let result = match self
                 .lease
                 .invoke(
                     &hook.callback_id,
                     JsInvocationKind::SessionHook,
                     json!({
                         "hook": name,
-                        "context": session_context_value(context),
+                        "context": session_context_value(&callback_context),
                         "event": event,
                     }),
-                    context.plugin_context_handle(),
+                    callback_context.plugin_context_handle(),
                     signal,
                 )
                 .await
-                .map_err(|error| {
-                    PluginError::Failure(match error {
-                        JsInvokeError::Aborted => "JavaScript session hook was aborted".to_string(),
-                        JsInvokeError::Callback(error) => error.to_string(),
-                    })
-                })?;
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    callback_context.report_hook_error(
+                        name,
+                        match error {
+                            JsInvokeError::Aborted => {
+                                "JavaScript session hook was aborted".to_string()
+                            }
+                            JsInvokeError::Callback(error) => error.to_string(),
+                        },
+                    );
+                    continue;
+                }
+            };
             if !result.is_null() {
                 let cancelled = result.get("cancel").and_then(Value::as_bool) == Some(true);
                 last = result;

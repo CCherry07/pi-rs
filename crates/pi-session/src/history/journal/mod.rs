@@ -9,6 +9,7 @@ mod jsonl;
 mod reducer;
 mod repo;
 mod state;
+mod transcript;
 mod usage;
 mod validation;
 mod writer;

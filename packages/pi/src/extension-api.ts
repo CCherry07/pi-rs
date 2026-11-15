@@ -191,5 +191,5 @@ export interface PiExtensionApi {
       event: TEvent,
       context: PiExtensionContext,
     ) => TResult | Promise<TResult>,
-  ): void;
+  ): () => void;
 }

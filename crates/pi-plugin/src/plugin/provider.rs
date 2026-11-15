@@ -87,6 +87,14 @@ impl ProviderPluginContext {
             .record(self.plugin_id.clone(), hook, Some(self.generation), message);
     }
 
+    /// Rebinds adapter-owned metadata while retaining generation capabilities.
+    #[doc(hidden)]
+    pub fn for_adapter_plugin(&self, plugin_id: PluginId) -> Self {
+        let mut context = self.clone();
+        context.plugin_id = plugin_id;
+        context
+    }
+
     #[doc(hidden)]
     pub fn plugin_context_handle(&self) -> PluginContextHandle {
         self.session.handle_for_adapter()

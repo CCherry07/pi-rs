@@ -5,6 +5,9 @@ use pi_core::session::{ContextEditEntry, CustomEntry, CustomMessageEntry};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_BOUNDARY_DISPATCH_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionBoundaryDraft {
@@ -155,7 +158,21 @@ impl PluginDriver {
         };
         let mut valid = true;
         for registered in self.interested_plugins(hook) {
-            for index in 0..registered.plugin.boundary_hook_count(hook) {
+            let dispatch_id = NEXT_BOUNDARY_DISPATCH_ID.fetch_add(1, Ordering::Relaxed);
+            let count_context = self.agent_plugin_context(registered, run_id, cwd, signal);
+            let count = match registered
+                .plugin
+                .boundary_hook_count(count_context, hook, dispatch_id)
+                .await
+            {
+                Ok(count) => count,
+                Err(error) => {
+                    self.diagnostics
+                        .record(registered.id.clone(), hook, None, error.to_string());
+                    continue;
+                }
+            };
+            for index in 0..count {
                 let event = match &turn {
                     Some(turn) => {
                         let mut turn = turn.clone();
@@ -168,7 +185,11 @@ impl PluginDriver {
                 };
                 let context: AgentPluginContext =
                     self.agent_plugin_context(registered, run_id, cwd, signal);
-                match registered.plugin.boundary_hook(context, event, index).await {
+                match registered
+                    .plugin
+                    .boundary_hook(context, event, dispatch_id, index)
+                    .await
+                {
                     Ok(result) => {
                         if let Some(entries) = result.entries {
                             state.entries = entries;
@@ -200,6 +221,7 @@ impl PluginDriver {
                     }
                 }
             }
+            registered.plugin.boundary_hook_finished(dispatch_id);
         }
         if valid {
             BoundaryResult {

@@ -106,6 +106,7 @@ async fn manifest_tool_registers_and_dispatches_through_the_public_tool_interfac
     let generation = JsPluginGeneration::prepare_with_host(
         JsGenerationManifest {
             generation_id: "js-7".to_string(),
+            dynamic_hooks: false,
             agent_plugins: vec![JsAgentPluginManifest {
                 id: "example".to_string(),
                 tools: vec![JsToolManifest {
@@ -196,6 +197,7 @@ async fn provider_wire_hooks_chain_mutations_and_isolate_javascript_failures() {
     let generation = JsPluginGeneration::prepare(
         JsGenerationManifest {
             generation_id: "js-provider-hooks".to_string(),
+            dynamic_hooks: false,
             agent_plugins: Vec::new(),
             provider_plugins: vec![JsProviderPluginManifest {
                 id: "wire-hooks".to_string(),

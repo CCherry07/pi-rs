@@ -13,11 +13,17 @@ use pi_js_plugin::{
     ExtensionContextNotification, ExtensionContextQuery, ExtensionContextRequest,
     JsCallbackDispatcher, JsCallbackError, JsContextHookBatchInvocation, JsContextHookBatchResult,
     JsGenerationManifest, JsGenerationRequest, JsHookBatchInvocation, JsHookBatchResult,
-    JsHostOperation, JsInvocation, JsPluginHost, JsStreamHookBatchInvocation, PluginContextHandle,
-    execute_context_notification, execute_context_query, execute_context_request,
+    JsHookSnapshot, JsHostOperation, JsInvocation, JsPluginHost, JsStreamHookBatchInvocation,
+    PluginContextHandle, execute_context_notification, execute_context_query,
+    execute_context_request,
 };
 use pi_plugin::ToolUpdateSink;
 use serde_json::Value;
+
+#[derive(serde::Deserialize)]
+struct HookSnapshotResponse {
+    callbacks: Vec<JsHookSnapshot>,
+}
 
 // A weak TSFN lets Node exit after `runPi()` resolves. The pending `runPi`
 // promise itself keeps the process alive while Rust still needs callbacks.
@@ -233,6 +239,29 @@ fn napi_callback_error(error: napi::Error) -> JsCallbackError {
 
 #[async_trait]
 impl JsCallbackDispatcher for NativePiHost {
+    async fn snapshot_hooks(
+        &self,
+        generation_id: &str,
+        hook: &str,
+    ) -> Result<Option<Vec<JsHookSnapshot>>, JsCallbackError> {
+        let response = self
+            .request(
+                JsHostOperation::SnapshotHooks {
+                    generation_id: generation_id.to_string(),
+                    hook: hook.to_string(),
+                },
+                None,
+                None,
+            )
+            .await?;
+        let response: HookSnapshotResponse = serde_json::from_value(response).map_err(|error| {
+            JsCallbackError::new(format!(
+                "JavaScript host returned an invalid hook snapshot: {error}"
+            ))
+        })?;
+        Ok(Some(response.callbacks))
+    }
+
     async fn invoke(
         &self,
         invocation: JsInvocation,

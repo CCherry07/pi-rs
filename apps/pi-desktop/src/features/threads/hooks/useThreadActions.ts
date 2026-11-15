@@ -11,10 +11,11 @@ import {
   archiveThread as archiveThreadService,
   forkThread as forkThreadService,
   listThreads as listThreadsService,
+  readThread as readThreadService,
   resumeThread as resumeThreadService,
   startThread as startThreadService,
 } from "@services/tauri";
-import { getThreadTimestamp } from "@utils/threadItems";
+import { buildItemsFromThread, getThreadTimestamp } from "@utils/threadItems";
 import { extractThreadRunMetadata } from "@threads/utils/threadRunMetadata";
 import { contextInheritanceFromThread } from "@threads/utils/threadContextInheritance";
 import {
@@ -47,6 +48,7 @@ function nextForkThreadName(sourceName: string, threads: ThreadSummary[]) {
 type UseThreadActionsOptions = {
   dispatch: Dispatch<ThreadAction>;
   itemsByThread: ThreadState["itemsByThread"];
+  historyPreviewByThread: ThreadState["historyPreviewByThread"];
   threadsByWorkspace: ThreadState["threadsByWorkspace"];
   activeThreadIdByWorkspace: ThreadState["activeThreadIdByWorkspace"];
   activeTurnIdByThread: ThreadState["activeTurnIdByThread"];
@@ -78,6 +80,7 @@ type UseThreadActionsOptions = {
 export function useThreadActions({
   dispatch,
   itemsByThread,
+  historyPreviewByThread,
   threadsByWorkspace,
   activeThreadIdByWorkspace,
   activeTurnIdByThread,
@@ -99,6 +102,7 @@ export function useThreadActions({
 }: UseThreadActionsOptions) {
   const listingRevisions = useRef(new Map<string, number>());
   const resumeInFlightByThreadRef = useRef<Record<string, number>>({});
+  const resumeRequests = useRef(new Map<string, symbol>());
   const threadStatusByIdRef = useRef(threadStatusById);
   const activeTurnIdByThreadRef = useRef(activeTurnIdByThread);
   threadStatusByIdRef.current = threadStatusById;
@@ -244,13 +248,39 @@ export function useThreadActions({
         dispatch({ type: "setThreadResumeLoading", threadId, isLoading: true });
       }
       const replacementRevision = getReplacementRevision?.(threadId);
+      const request = Symbol();
+      resumeRequests.current.set(threadId, request);
+      const isCurrent = () =>
+        resumeRequests.current.get(threadId) === request &&
+        getReplacementRevision?.(threadId) === replacementRevision;
+      let resumeFinished = false;
+      // History is a read-only snapshot. It must not wait for plugin/MCP setup,
+      // and a late response must not undo a ready runtime or a replacement.
+      if (!itemsByThread[threadId]?.length) {
+        void (async () => {
+          try {
+            const response = await readThreadService(workspaceId, threadId);
+            if (resumeFinished || !isCurrent()) return;
+            const thread = extractThreadFromResponse(response);
+            if (!thread) return;
+            dispatch({
+              type: "hydrateThreadPreview",
+              threadId,
+              items: buildItemsFromThread(thread),
+              contextInheritance: contextInheritanceFromThread(thread),
+            });
+          } catch {
+            // Resume remains authoritative and reports failures below.
+          }
+        })();
+      }
       try {
         const response = (await resumeThreadService(
           workspaceId,
           threadId,
         )) as Record<string, unknown> | null;
-        if (getReplacementRevision?.(threadId) !== replacementRevision)
-          return threadId;
+        resumeFinished = true;
+        if (!isCurrent()) return threadId;
         onDebug?.({
           id: `${Date.now()}-server-thread-resume`,
           timestamp: Date.now(),
@@ -286,7 +316,9 @@ export function useThreadActions({
             notifySubagent: true,
           });
           applyCollabThreadLinksFromThread(workspaceId, threadId, thread);
-          const localItems = itemsByThread[threadId] ?? [];
+          const localItems = historyPreviewByThread[threadId]
+            ? []
+            : itemsByThread[threadId] ?? [];
           const shouldReplace =
             replaceLocal || replaceOnResumeRef.current[threadId] === true;
           if (shouldReplace) {
@@ -317,21 +349,14 @@ export function useThreadActions({
             });
           }
           dispatch({
-            type: "markProcessing",
-            threadId,
-            isProcessing: hydrationPlan.shouldMarkProcessing,
-            timestamp: hydrationPlan.processingTimestamp,
-          });
-          dispatch({
-            type: "setActiveTurnId",
-            threadId,
-            turnId: hydrationPlan.resumedActiveTurnId,
-          });
-          dispatch({
-            type: "setThreadItems",
+            type: "hydrateResumedThread",
             threadId,
             items: hydrationPlan.mergedItems,
             contextInheritance,
+            replaceLocal: shouldReplace,
+            isProcessing: hydrationPlan.shouldMarkProcessing,
+            timestamp: hydrationPlan.processingTimestamp,
+            turnId: hydrationPlan.resumedActiveTurnId,
           });
           if (hydrationPlan.threadName) {
             dispatch({
@@ -355,6 +380,14 @@ export function useThreadActions({
         loadedThreadsRef.current[threadId] = true;
         return threadId;
       } catch (error) {
+        if (!isCurrent()) return threadId;
+        dispatch({
+          type: "addNotice",
+          threadId,
+          itemId: `resume-error-${crypto.randomUUID()}`,
+          text: error instanceof Error ? error.message : String(error),
+          level: "error",
+        });
         onDebug?.({
           id: `${Date.now()}-client-thread-resume-error`,
           timestamp: Date.now(),
@@ -388,6 +421,7 @@ export function useThreadActions({
       getCustomName,
       getReplacementRevision,
       itemsByThread,
+      historyPreviewByThread,
       loadedThreadsRef,
       onDebug,
       replaceOnResumeRef,

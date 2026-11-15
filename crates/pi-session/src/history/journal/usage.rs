@@ -1,6 +1,8 @@
 use pi_core::{Message, Usage, UsageCost};
 
-use crate::history::{LaneRecordEntry, SessionDocument, SessionEntry, UsageAttribution};
+use crate::history::{
+    LaneRecord, LaneRecordEntry, SessionDocument, SessionEntry, SessionRecord, UsageAttribution,
+};
 
 /// Returns usage billed by one durable session entry.
 ///
@@ -78,7 +80,11 @@ pub fn aggregate_session_usage<'a>(entries: impl IntoIterator<Item = &'a Session
 /// work. Explicit adjustment records account for detached provider work such
 /// as a background review without adding that private work to the tree.
 pub fn aggregate_document_usage(document: &SessionDocument) -> Usage {
-    let base = aggregate_session_usage(document.entries.iter().map(|record| &record.entry));
+    aggregate_usage(&document.entries, &document.records)
+}
+
+pub(super) fn aggregate_usage(entries: &[SessionRecord], records: &[LaneRecord]) -> Usage {
+    let base = aggregate_session_usage(entries.iter().map(|record| &record.entry));
     let mut input = i128::from(base.input);
     let mut output = i128::from(base.output);
     let mut cache_read = i128::from(base.cache_read);
@@ -87,7 +93,7 @@ pub fn aggregate_document_usage(document: &SessionDocument) -> Usage {
     let mut reasoning = base.reasoning.map(i128::from);
     let mut cost = base.cost;
 
-    for adjustment in document.records.iter().filter_map(|record| {
+    for adjustment in records.iter().filter_map(|record| {
         let LaneRecordEntry::Usage(record) = &record.record else {
             return None;
         };

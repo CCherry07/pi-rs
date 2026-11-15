@@ -677,6 +677,22 @@ impl SessionState {
         }
     }
 
+    pub(crate) fn into_transcript(
+        self,
+        header: SessionHeader,
+    ) -> Result<crate::history::SessionTranscript, HistoryError> {
+        let context = self.default_context_for_lane(MAIN_LANE)?;
+        let branch = self.branch_entries_for_lane(MAIN_LANE)?;
+        let usage = super::usage::aggregate_usage(&self.entries, &self.records);
+        Ok(crate::history::SessionTranscript {
+            header,
+            name: self.name,
+            branch,
+            context,
+            usage,
+        })
+    }
+
     /// Returns the immutable document for the current mutation revision.
     /// Refreshes an unretained view from the new journal suffix. Retained
     /// views stay immutable and require a fresh materialization instead.

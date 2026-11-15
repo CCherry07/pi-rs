@@ -5,6 +5,23 @@ This matrix records the observable JavaScript extension surface implemented by t
 does not register or execute it. Inactive registration is non-fatal and appears in the generation's
 diagnostics. Unknown names still fail construction.
 
+## Registration and subscription semantics
+
+The Node registration planner applies Pi's JavaScript rules before Rust publishes an immutable
+generation. Within one extension, registering the same tool or command name again replaces that
+extension's earlier definition. Across extensions, the first tool name wins. Repeated command names
+retain their logical name and receive ordered invocation names such as `name:1` and `name:2`. Rust
+continues to reject ordinary registry duplicates; only the JavaScript adapter performs this
+compatibility normalization.
+
+`pi.on(...)` returns an idempotent unsubscribe function. Every hook dispatch starts from a
+generation-local callback snapshot in extension load order, then subscription order within each
+extension. An extension retains its position when it subscribes for the first time after loading
+or resubscribes after removing all its handlers. Removals do not skip handlers already pending in
+that dispatch, registrations made by a handler appear on the next dispatch, and nested dispatches take a fresh
+snapshot. Rust still validates and chains each transforming callback separately. Generation
+retirement drops the registry and every callback it references.
+
 ## Hooks
 
 | Lifecycle | Hook | Status |
@@ -25,7 +42,8 @@ diagnostics. Unknown names still fail construction.
 | Session | `session_start`, `session_info_changed`, `session_before_switch`, `session_before_fork`, `session_before_compact`, `session_compact`, `session_compact_failed`, `session_shutdown`, `session_before_tree`, `session_tree` | Active through the session plugin lifecycle. |
 | Product/UI | `project_trust`, `resources_discover`, `model_select`, `thinking_level_select`, `user_bash` | Recognized and inactive. |
 
-Supported callbacks run in registration order. A rejected callback, malformed patch, or invalid
+Supported callbacks run in extension load order, then subscription order within each extension.
+A rejected callback, malformed patch, or invalid
 cross-role `message_end` replacement is recorded in the generation's diagnostics and later
 callbacks continue from the last valid value. `tool_call` is the deliberate exception: it remains
 fail-closed for the affected tool call, matching Pi's runner.

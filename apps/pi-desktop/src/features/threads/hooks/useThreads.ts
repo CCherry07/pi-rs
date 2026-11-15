@@ -593,6 +593,7 @@ export function useThreads({
   } = useThreadActions({
     dispatch,
     itemsByThread: state.itemsByThread,
+    historyPreviewByThread: state.historyPreviewByThread,
     threadsByWorkspace: state.threadsByWorkspace,
     activeThreadIdByWorkspace: state.activeThreadIdByWorkspace,
     activeTurnIdByThread: state.activeTurnIdByThread,

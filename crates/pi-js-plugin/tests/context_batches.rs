@@ -68,6 +68,7 @@ fn generation(dispatcher: Arc<Dispatcher>, plugins: &[(&str, &[&str])]) -> JsPlu
     JsPluginGeneration::prepare(
         JsGenerationManifest {
             generation_id: "context-generation".into(),
+            dynamic_hooks: false,
             agent_plugins: plugins
                 .iter()
                 .map(|(id, callbacks)| JsAgentPluginManifest {

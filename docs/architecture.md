@@ -679,6 +679,26 @@ snapshot; presentation does not own live agent execution state.
 Desktop session creation delegates path construction to `JsonlSessionRepo`, so its project-scoped
 `<timestamp>_<session-id>.jsonl` filename, v4 header ID, and projected frontend thread ID share one
 identity just as they do in Pi.
+Desktop separates history inspection from runtime restoration. `pi_read_thread` returns the
+existing live snapshot or projects saved native history in a blocking task, without constructing a
+generation, invoking plugins, subscribing to events or repairing the journal. ID discovery and
+isolated-parent lookup read only JSONL headers. Ordinary saved conversations use native
+`SessionStore::read_transcript`: JSON syntax, headers, mutation envelopes, sequence and tree/lane
+references pass through the shared reader and validator, while opaque `custom.data` is scanned
+without materializing its JSON tree. Native isolated-context/origin data, displayed custom messages,
+message wire extensions, context edits and compaction data remain available to the built-in context
+projection. `SessionTranscript` carries the main branch, its already-built context, name/header and
+all-branch billed usage; it does not expose an operation log or promise complete extension state.
+The reader avoids constructing/cloning a full `SessionDocument`, and Desktop reuses the projected
+context and branch for token estimates and message identities. Isolated-child presentation retains
+the complete-document path for provenance matching. Runtime resume, recovery, plugin projectors and
+export still use complete history. This read projection is an additive Rust Interface, not a new
+wire format; original JSONL files and extension state remain unchanged.
+The frontend requests this preview alongside `pi_resume_thread`, which retains generation preparation
+and subscription ownership. Only an untouched preview is automatically replaced by the ready runtime;
+live updates, explicit replacements and newer requests invalidate stale hydration. Runtime failures
+leave saved history visible with a transient error. This is a deliberate Desktop presentation choice,
+not a change to Pi v4 persistence, runtime generation activation or MCP connection ownership.
 Archive and unarchive preserve that project-relative path and companion session tree. An unarchive
 event includes a freshly projected summary from the restored JSONL so the desktop rebuilds the
 title, model, message count, and timestamps instead of publishing an empty thread placeholder.
@@ -833,14 +853,14 @@ configuration files or plugin ID conventions.
 ## Plugin-first rules
 
 1. Tools and commands are registered through `Plugin`. `ProviderPlugin` contributes provider implementations, routing overlays, model catalog entries, and provider request hooks. Agent code has no provider/tool name switches.
-2. Agent plugin hooks, provider plugin registration, and provider request hooks each execute in builder order. There is no numeric priority. Statically linked Rust plugin impls use one lifecycle attribute—`#[pi_plugin::plugin]` or `#[pi_plugin::provider_plugin]`—which expands async callbacks without a companion `#[async_trait]`. The agent attribute also derives hook interests. Native plugins get the corresponding behavior from `#[pi_plugin::native_plugin]` / `#[pi_plugin::native_provider]`, while JavaScript agent adapters derive interests from the validated `pi.on(...)` manifest. `PluginDriver` snapshots an immutable per-hook route when a generation is built. Registration still visits every agent plugin; runtime hooks visit only their exact route, with no catch-all interest or `ALL` fallback.
-3. Duplicate IDs are rejected within each plugin system; duplicate tool, command, provider, or model IDs fail runtime construction.
+2. Agent plugin hooks, provider plugin registration, and provider request hooks each execute in builder order. There is no numeric priority. Statically linked Rust plugin impls use one lifecycle attribute—`#[pi_plugin::plugin]` or `#[pi_plugin::provider_plugin]`—which expands async callbacks without a companion `#[async_trait]`. The agent attribute also derives hook interests. Native plugins get the corresponding behavior from `#[pi_plugin::native_plugin]` / `#[pi_plugin::native_provider]`. `PluginDriver` snapshots an immutable per-hook route when a generation is built. The generation's JavaScript coordinator advertises the supported adapter routes and obtains the active generation-local callback snapshot at each dispatch, so `pi.on()` can add and remove handlers without mutating the Rust route table. Registration still visits every agent plugin; native runtime hooks visit only their exact route, with no catch-all interest or `ALL` fallback.
+3. Duplicate IDs are rejected within each plugin system; duplicate tool, command, provider, or model IDs fail runtime construction. Before that strict registration seam, the JavaScript adapter applies Pi's tool and command collision policy and publishes only unique tool and command invocation names.
 4. Registries are mutable only during registration and frozen before Agent construction.
 5. `tool_call` runs in order after prepared provider arguments are validated, chains argument patches without revalidation (matching Pi), and lets the first block decision win. It is the intentional fail-closed exception: a hook error fails that tool call. Every typed `Plugin` callback receives the same `Arc<AgentContext>` snapshot for the batch, including the current system prompt, transcript with the requesting assistant message, and active-tool names. The JavaScript extension Adapter projects Pi's narrower extension event and does not serialize this native context into Node.
 6. `input` receives text, images, source, and optional streaming behavior. Text/image replacements chain in registration order, `Handled` stops the submission, and a hook error is recorded as a generation-local plugin diagnostic before later hooks continue.
 7. `before_agent_start` runs once per prompt/continue invocation in registration order; prompt replacements chain and injected messages are accumulated for that run only. Hook errors are diagnosed and skipped without discarding earlier replacements.
 8. `context` runs before every provider request and chains message replacements without mutating the persisted transcript. `ContextEvent.messages` is an `Arc<Vec<Message>>` read snapshot; only an explicit owned replacement changes the next hook's input. Hook errors are diagnosed and later hooks still run. Generation construction groups adjacent context routes sharing the same `ContextHookBatch` object; an unrelated route splits the group. Native callbacks retain their ordinary per-plugin dispatch by default.
-9. `tool_result` receives that same batch context and chains content, details, usage, `added_tool_names`, and error patches. Hook errors are diagnosed and skipped; they do not rewrite a successfully executed tool result into a failure. `added_tool_names` then survives the tool-result message and session/provider projection. Legacy before/after tool hooks remain compatible.
+9. `tool_result` receives that same batch context and chains content, details, usage, `added_tool_names`, and error patches. Hook errors are diagnosed and skipped; they do not rewrite a successfully executed tool result into a failure. `added_tool_names` then survives the tool-result message and session/provider projection. `ToolResultEvent.interrupted` is set only when the run's abort signal settled an executing call before its tool returned; the result is then the scheduler's `Operation aborted` placeholder. Hooks that react to interruption read this marker, never the placeholder text, which a tool may also return. Calls aborted before execution produce an immediate result and skip `tool_result`, as before. Legacy before/after tool hooks remain compatible.
 10. Lifecycle events are delivered through independent plugin methods (`agent_start/end/settled`, `turn_start/end`, `message_start/update/end`, and `tool_execution_start/update/end`) in registration order. `agent_start`/`agent_end` belong to each low-level run, while session orchestration emits `agent_settled` once no automatic retry, compaction, or queued continuation remains and before publishing the product settled event. Turns use a zero-based per-run index and `turn_start` also carries its millisecond timestamp. `message_end` may replace a message while preserving its role; each valid replacement becomes the next hook's input and the final message is used by Agent state, listeners, provider context, tool scheduling, and persistence. A validated plugin context may append extension state while the owning prompt operation still holds its outer gate, including during `agent_settled`; direct idle-time callers retain the ordinary busy exclusion. Observer errors and invalid cross-role replacements are diagnosed and skipped without failing the run.
 11. A native plugin is trusted in-process code; the loader and trait interfaces are not a sandbox.
 12. Registered slash commands own both their `CommandSpec` and execution. A `TransformInput` result then passes through `input` hooks in registration order before the agent run; `Handled` stops the submission. Text preprocessing retains both the product-facing submitted text and the effective model text rather than requiring a frontend to reverse an expansion.
@@ -913,7 +933,11 @@ The descriptor rejects older ABI versions before resolving constructors; those l
 `pi-plugin` is the single author-facing crate. Its default API covers static plugins, and its
 `native` feature enables `pi_plugin::native` descriptors/options, schema support and native export
 macros (`#[pi_plugin::native_plugin]` / `#[pi_plugin::native_provider]`). The feature pins the JSON
-map representation crossing the ABI. Ordinary builds avoid schema dependencies and ABI source
+map representation crossing the ABI. `pi-plugin` also always enables tokio's `parking_lot`
+feature: hosts share tokio synchronization types (inside `AbortSignal`, for example) with native
+libraries, the feature changes their layout, and a host dependency can enable it indirectly through
+`tokio/full`. Pinning it keeps host and plugin layouts identical regardless of
+the host's other dependencies. Ordinary builds avoid schema dependencies and ABI source
 fingerprinting. Only the audited native module permits unsafe code; plugin contracts remain safe.
 `pi-plugin-macros` remains a separate proc-macro crate and is reexported by `pi-plugin`.
 
@@ -1276,9 +1300,9 @@ extension registrations/results, and native binding exports.
 TypeScript protocol types are inferred from those schemas so runtime checks and static interfaces
 cannot drift independently.
 
-The callback boundary uses eight generation-scoped operations encoded as JSON: `prepareGeneration`,
-`invoke`, `invokeHookBatch`, `invokeContextHookBatch`, `invokeStreamHookBatch`, `releaseStream`, `cancel`, and
-`retireGeneration`. Every invocation also receives a NAPI class instance named
+The callback boundary uses nine generation-scoped operations encoded as JSON: `prepareGeneration`,
+`snapshotHooks`, `invoke`, `invokeHookBatch`, `invokeContextHookBatch`, `invokeStreamHookBatch`,
+`releaseStream`, `cancel`, and `retireGeneration`. Every invocation also receives a NAPI class instance named
 `NativeExtensionContext`; it is a direct native capability rather than another process-global
 callback broker. Its deliberately small JavaScript Interface has three methods: `query` for
 synchronous reads, `notify` for non-blocking commands, and `request` for awaited commands. Those
@@ -1299,12 +1323,18 @@ filters, ignore files, canonical-path deduplication, managed npm/git installatio
 `npmCommand`, and `PI_OFFLINE` are hidden behind that Interface. The Node Adapter receives only the
 ordered `extensionPaths` load list and loads TS/JS with Jiti `moduleCache: false`; it has no settings,
 source, installation, filtering, or precedence policy. JavaScript functions stay in a Node-owned
-callback table; Rust stores only opaque generation and callback IDs. `invoke` crosses a weak NAPI
-threadsafe function and awaits the JavaScript Promise without blocking either the Node event loop or Tokio.
+callback table. `snapshotHooks` returns the active callback IDs and their extension owners for one
+hook in extension load order, then subscription order within each extension. The host reserves
+every extension's position during generation preparation, including extensions with no initial
+hooks. Removing or later adding subscriptions does not change that extension's position or
+invalidate a snapshot already in flight. Rust stores only opaque generation and callback IDs.
+`invoke` crosses a weak NAPI threadsafe function and awaits the JavaScript Promise without blocking
+either the Node event loop or Tokio.
 Agent observer hooks cross the same Seam through `invokeHookBatch`: the JavaScript
-generation Adapter routes all observer callbacks through its first agent adapter while the remaining
-adapters retain their plugin identities and continue to own tools, commands, and chained/mutating
-hooks. One batch carries the shared event once plus a small callback/context list. Node validates and
+generation Adapter routes dynamic hooks through its first agent adapter while the remaining
+adapters retain their plugin identities and continue to own tools and commands. One batch carries
+the shared event once plus a small callback/context list. Transforming hooks retain their individual
+Rust calls so validation and chaining occur between callbacks. Node validates and
 projects the event once, then awaits callbacks in registration order against the same event object;
 a rejected callback becomes a callback-scoped diagnostic and does not suppress later observers.
 `context` uses `invokeContextHookBatch` for each contiguous group of adapters sharing one JS
@@ -1431,9 +1461,12 @@ are durable package-manager side effects and are not rolled back if later extens
 runtime validation fails.
 
 One JavaScript source may contribute Agent, Session and Provider hooks. For wire compatibility
-the manifest retains its callback lists, but Agent and Session lists with the same identity become
-one Rust Plugin instance. The Node host includes session-only sources in the ordered plugin list.
-Provider adapters remain independent. No `PluginBundle` is introduced. Manifest
+the manifest retains its initial callback lists, but Agent and Session lists with the same identity
+become one Rust Plugin instance. The Node host includes every loaded source in the ordered agent and
+provider adapter lists so a later `pi.on()` registration already has a generation route. One
+generation coordinator dispatches the active callback snapshot and rebinds each callback to its
+originating extension identity. Provider adapters remain independent from Agent/Session lifecycle.
+No `PluginBundle` is introduced. Manifest
 validation rejects unknown hooks, duplicate lifecycle IDs, duplicate callback IDs, invalid tool
 schemas, and later ordinary registry collisions before a candidate is published. Tool prompt
 metadata and execution mode become ordinary `ToolSpec` fields; hook replacement and cancellation
@@ -1445,9 +1478,9 @@ streaming-behavior fields; `turn_start`/`turn_end` expose the per-run turn index
 and `message_end` replacements flow back into the live Agent and persisted session, subject to the
 same-role invariant. Callback rejection, malformed results, and invalid replacements become
 generation-local diagnostics and do not suppress later callbacks. `tool_call` remains intentionally
-fail-closed, matching Pi's tool runner. The validated manifest is also the JavaScript adapter's
-hook-interest source, so an extension is never invoked for an event it did not register. Provider
-payload callbacks use the same isolated chaining rule as the Rust `ProviderPluginDriver`.
+fail-closed, matching Pi's tool runner. The immutable Rust adapter route covers supported dynamic
+JavaScript hooks; the Node snapshot decides which registered callbacks, if any, run for one event.
+Provider payload callbacks use the same isolated chaining rule as the Rust `ProviderPluginDriver`.
 
 `ProductSessionFactory` asks the Node host for a fresh callback generation on initial construction,
 new/resumed sessions, and `/reload`, alongside native plugins, resources, models, and session
@@ -1652,8 +1685,11 @@ registers the plugin factory in each generation.
 
 ## MCP configuration and generation ownership
 
-MCP is a deliberate Rust product extension: `legacy/pi/packages/coding-agent/README.md`
-explicitly excludes built-in MCP. The complete implementation lives in
+Current `legacy/pi/packages/coding-agent/src/extensions/mcp` provides built-in MCP, with
+server instructions attached to tool namespaces and codemode/deferred/direct exposure.
+Rust deliberately retains direct tool registration and generation-based connection ownership;
+it does not claim compatibility with Pi's asynchronous exposure or interactive MCP manager.
+The complete Rust implementation lives in
 `plugins/features/pi-plugin-mcp`, with client, config, library and product-plugin modules rather
 than a separate `pi-mcp` crate or an SDK implementation. `pi-plugin-mcp::config` owns document
 parsing, static transport validation, environment-reference syntax and connection-time path
@@ -1687,6 +1723,12 @@ the candidate without swapping the current generation. Pool ownership is referen
 retiring the last generation owner cancels its transports and child processes. Each server has
 30-second connection and discovery bounds. Request cancellation uses the SDK's negotiated
 notification/stream-close semantics. Server-returned tool content retains normal tool semantics.
+Text and images are projected into normal Pi tool results; the full structured result remains
+in result details. Negotiated server instructions are captured with the connection and appended
+once per run, only for servers with active tools. Both explicit-client and local-library plugins
+use the same prompt hook; the base prompt is unchanged and reload replaces the instructions.
+MCP tools with `readOnlyHint: true` may run in parallel. All other tools are sequential so a
+mutation completes before subsequent calls; annotations affect scheduling, not authorization.
 
 The pinned official Rust SDK handles Streamable HTTP negotiation, JSON and SSE framing,
 legacy-initialize compatibility, session headers and reconnects. Standalone 2024 HTTP+SSE is
@@ -2891,6 +2933,37 @@ the prompt has started, dropping the launch aborts that unclaimed prompt while p
 cleanup path, including when a scheduler's generation is shutting down. This is generic child
 ownership, not knowledge of the scheduling plugin, and does not change native ABI or Pi v4 records.
 
+## Computer Use
+
+Computer Use connects the normal Pi agent loop to the official `cua-driver mcp` stdio
+server through `pi-plugin-mcp`. Cua owns desktop/browser observation, input, batching and
+its daemon/session protocol. Pi owns model selection, tool execution, cancellation and the
+ordinary transcript. There is no nested task agent, candidate compiler, separate decision
+model, or in-process Cua SDK dependency. See [Computer Use setup](../plugins/features/pi-plugin-mcp/README.md#cua-driver).
+
+The server is configured in the existing global or trusted-project `mcp.json`; its official
+tool schemas become `mcp__cua_driver__*` when the configured name is `cua-driver`. Its
+negotiated usage instructions reach the calling model through the MCP plugin's run-local
+prompt hook. The official `get_guide` tool provides detailed instructions on demand, without
+copying or translating Cua's workflow into Pi-owned actions. Mutating or unannotated MCP
+tools run sequentially; tools explicitly annotated read-only may run in parallel. These are
+generic MCP rules, not switches on Cua tool names.
+
+A persistent MCP transport lets Cua manage its implicit session. Retiring the transport
+cleans up that session; a replacement generation prepares a new connection through the
+existing MCP lifecycle. Pi does not create trusted embedded-host sessions on a public daemon
+connection. On macOS the installed Cua app retains OS grants and owns the desktop daemon.
+The model observes the actual result before reporting completion; a successful tool response
+alone does not prove the user's goal was achieved. Cancellation is best effort and does not
+undo a delivered desktop action.
+
+This deliberately replaces the former `gui_task`, `/computer`, `computerUse` settings and
+`Features::computer_use` ceiling. Old settings remain unknown JSON fields if left on disk;
+they neither enable desktop tools nor select a decision model. Existing session records are
+not rewritten. Cua now follows ordinary MCP configuration trust, tool selection and session
+inheritance, including the fact that `Features::none()` does not disable explicitly configured
+MCP servers. To disable it, disable or remove its MCP entry and reload the session.
+
 ## Event ordering
 
 ```text
@@ -2984,6 +3057,11 @@ described in [plugin UI](plugin-ui.md).
 Availability is a property of the complete presentation adapter, not the mode label alone:
 `hasUI` is true only for TUI mode with an installed `PluginUiBridge`. Print, JSON, RPC, ACP and the
 current Desktop adapter report it unavailable.
+
+Semantic yes/no confirmation is separate from declarative surfaces. A `PluginUiBridge` that reports
+`supports_confirm` answers `UiContext::confirm` directly, and `UiContext::can_confirm` reports that
+capability. Desktop installs such a bridge in RPC mode and answers with a native dialog; a dismissed
+or failed dialog is a refusal. Without a bridge, confirmations in non-TUI modes resolve to no.
 
 `apps/pi-cli::tui::extensions::surface` owns layout, focus, per-node editing/selection/scroll state,
 completion selection, terminal input and rendering for both Rust and JavaScript plugins. Input and

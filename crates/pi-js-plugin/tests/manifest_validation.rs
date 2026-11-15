@@ -18,6 +18,7 @@ struct RetiringDispatcher {
 fn legacy_callback_lists_merge_without_reordering_either_hook_family() {
     let manifest = |session_ids: &[&str]| JsGenerationManifest {
         generation_id: "ordered".into(),
+        dynamic_hooks: false,
         agent_plugins: ["shared", "agent-only"]
             .map(|id| JsAgentPluginManifest {
                 id: id.into(),
@@ -65,6 +66,7 @@ fn configured_provider_registrations_are_validated_and_retained() {
     let generation = JsPluginGeneration::prepare(
         JsGenerationManifest {
             generation_id: "js-provider-registration".to_string(),
+            dynamic_hooks: false,
             agent_plugins: Vec::new(),
             provider_plugins: Vec::new(),
             provider_registrations: vec![JsProviderRegistration {
@@ -89,6 +91,7 @@ fn malformed_provider_registration_retires_the_candidate_generation() {
     let result = JsPluginGeneration::prepare(
         JsGenerationManifest {
             generation_id: "js-invalid-provider-registration".to_string(),
+            dynamic_hooks: false,
             agent_plugins: Vec::new(),
             provider_plugins: Vec::new(),
             provider_registrations: vec![JsProviderRegistration {
@@ -144,6 +147,7 @@ fn agent_hook_interests_are_derived_from_the_validated_manifest() {
     let generation = JsPluginGeneration::prepare(
         JsGenerationManifest {
             generation_id: "js-interests".to_string(),
+            dynamic_hooks: false,
             agent_plugins: vec![empty_agent(vec![JsHookManifest {
                 name: "input".to_string(),
                 callback_id: "input-callback".to_string(),
@@ -169,6 +173,7 @@ fn observer_batching_keeps_mutating_hooks_on_their_owning_plugin() {
     let generation = JsPluginGeneration::prepare(
         JsGenerationManifest {
             generation_id: "js-observer-routes".to_string(),
+            dynamic_hooks: false,
             agent_plugins: vec![
                 JsAgentPluginManifest {
                     id: "first".to_string(),
@@ -224,6 +229,7 @@ fn unsupported_hooks_fail_the_candidate_and_retire_its_host_generation() {
     let result = JsPluginGeneration::prepare(
         JsGenerationManifest {
             generation_id: "js-invalid".to_string(),
+            dynamic_hooks: false,
             agent_plugins: vec![empty_agent(vec![JsHookManifest {
                 name: "model_select".to_string(),
                 callback_id: "model-select".to_string(),
@@ -250,6 +256,7 @@ fn callback_ids_are_unique_across_the_three_lifecycle_manifests() {
     let result = JsPluginGeneration::prepare(
         JsGenerationManifest {
             generation_id: "js-duplicate".to_string(),
+            dynamic_hooks: false,
             agent_plugins: vec![empty_agent(vec![JsHookManifest {
                 name: "input".to_string(),
                 callback_id: "same-callback".to_string(),

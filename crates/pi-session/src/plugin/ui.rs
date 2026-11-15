@@ -86,6 +86,27 @@ impl UiContextAccess for PiPluginContext {
         Ok(matches!(self.mode, PresentationMode::Tui) && self.ui_bridge.is_some())
     }
 
+    fn has_confirm(&self) -> Result<bool, PluginContextError> {
+        Ok(self
+            .ui_bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.supports_confirm()))
+    }
+
+    async fn ui_confirm(
+        &self,
+        title: String,
+        message: String,
+    ) -> Result<Option<bool>, PluginContextError> {
+        let Some(bridge) = &self.ui_bridge else {
+            return Ok(None);
+        };
+        if !bridge.supports_confirm() {
+            return Ok(None);
+        }
+        bridge.confirm(title, message).await.map_err(context_failed)
+    }
+
     fn ui_notify(&self, level: NoticeLevel, message: String) -> Result<(), PluginContextError> {
         self.session()?.notify_plugin(message, level);
         Ok(())
