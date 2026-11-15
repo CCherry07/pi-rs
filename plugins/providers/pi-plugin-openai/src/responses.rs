@@ -8,9 +8,7 @@ use std::sync::Arc;
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::StreamExt;
-use pi_core::{
-    AbortSignal, Message, ProviderId, ResponseMetadata, StreamEvent, ToolSpec, Usage,
-};
+use pi_core::{AbortSignal, Message, ProviderId, ResponseMetadata, StreamEvent, ToolSpec, Usage};
 use pi_plugin::{
     Provider, ProviderAvailability, ProviderCallContext, ProviderError, ProviderRequest,
     ProviderStream,
@@ -272,8 +270,11 @@ fn responses_endpoint(base: &str) -> String {
 /// Projects semantic messages without a target model. Model-bound signatures
 /// are omitted; normal provider requests use the model-aware replay path.
 pub fn input_items(messages: &[Message]) -> Vec<Value> {
-    replay::balanced(messages, None).iter().enumerate()
-        .flat_map(|(position, message)| replay::project(message, None, position)).collect()
+    replay::balanced(messages, None)
+        .iter()
+        .enumerate()
+        .flat_map(|(position, message)| replay::project(message, None, position))
+        .collect()
 }
 
 /// Model-aware replay for sibling Responses transports. Their system prompt
@@ -525,7 +526,11 @@ fn input_items_with_deferred_tools(
             continue;
         }
         let leading_system = matches!(balanced.first(), Some(Message::System(_)));
-        let projected = replay::project(message, request.model_spec.as_ref(), position.saturating_sub(usize::from(leading_system)));
+        let projected = replay::project(
+            message,
+            request.model_spec.as_ref(),
+            position.saturating_sub(usize::from(leading_system)),
+        );
         if !projected.is_empty()
             && configuration_effort.is_some()
             && let Message::Assistant(assistant) = message
@@ -649,7 +654,6 @@ pub fn stream(
         }
     })
 }
-
 
 use state::StreamState;
 

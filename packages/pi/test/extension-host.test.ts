@@ -480,7 +480,7 @@ test('preserves provider thinking levels through lazy stream snapshots', async (
     invocationId: 'read-levels', generationId: manifest.generationId, callbackId: plugin.commands[0].callbackId,
     kind: 'command', payload: { context: {}, arguments: '' },
   } }))) as { text: string }
-  assert.deepEqual(JSON.parse(result.text), ['high', 'high', 'low'])
+  assert.deepEqual(JSON.parse(result.text), ['high', 'high', 'low', 'low'])
   await host.dispatch(JSON.stringify({ type: 'retireGeneration', generationId: manifest.generationId }))
 })
 

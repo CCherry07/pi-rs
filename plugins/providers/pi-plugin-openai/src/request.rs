@@ -369,6 +369,10 @@ fn messages(request: &ProviderRequest, compat: &ResolvedOpenAiCompletionsCompat)
         messages.push(json!({"role": role, "content": system_prompt}));
     }
     for message in &request.messages {
+        // Instructions were folded above; they must not split a tool batch.
+        if matches!(message, Message::System(_)) {
+            continue;
+        }
         if !matches!(message, Message::ToolResult(_)) {
             let had_tool_images = !pending_tool_images.is_empty();
             flush_tool_images(
@@ -1058,6 +1062,7 @@ mod tests {
                     is_error: false,
                     timestamp_ms: 0,
                 })),
+                Message::System(pi_core::SystemMessage::text("", 0)),
                 Message::ToolResult(Arc::new(ToolResultMessage {
                     tool_call_id: ToolCallId::new("text"),
                     tool_name: "bash".to_string(),

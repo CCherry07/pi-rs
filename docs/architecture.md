@@ -926,7 +926,7 @@ not skip generation validation or justify reusing mutable session state. Prepara
 activate background work or mutate live registries; activation remains session_start and cleanup
 remains session_shutdown/Drop. Failed candidates are dropped without touching the live generation.
 
-Native ABI 34 exports only `Plugin` (kind 1) or `ProviderPlugin` (kind 2), retaining the
+Native ABI 35 exports only `Plugin` (kind 1) or `ProviderPlugin` (kind 2), retaining the
 `pi_plugin_create_v26` / `pi_provider_plugin_create_v26` constructor symbols. Manifest kinds are
 `plugin` / `provider`.
 The descriptor rejects older ABI versions before resolving constructors; those libraries must be rebuilt.
@@ -1598,8 +1598,45 @@ are capped at 64 Unicode code points. Long retention uses `prompt_cache_options.
 explicit-cache models and `prompt_cache_retention: "24h"` otherwise. Cache-disabled requests omit
 automatic affinity headers; ordinary Responses affinity uses `session-id`, not the Completions
 API's `session_id`, and explicit headers retain precedence. These are provider-request conformance
-fixes, not changes to generation lifetime or credential precedence. Mid-conversation system/effort
-projection, service-tier pricing and complete upstream Responses replay remain separate work.
+fixes, not changes to generation lifetime or credential precedence.
+
+The message contract now includes `SystemMessage` instruction text and ordered nullable sections,
+and assistant/start metadata include optional `providerThinkingLevel`. These are native ABI 35
+changes; old native libraries must be rebuilt. The existing v4 message envelope is unchanged:
+older assistant messages omit the effort field, and unknown wire extensions remain preserved.
+System messages survive explicit structured submission, context hooks, journal reload and import
+rather than being dropped as unknown roles or converted to user messages. Session tool repair
+holds system updates until the pending tool-result group finishes, including synthesized missing
+results; it does not execute any historical tool. TUI/ACP/Desktop do not render system instructions
+as user chat. Existing whole-prompt replacement through `before_agent_start.system_prompt` remains
+run-local: this change does not automatically record such replacements as system deltas or port
+Pi's transcript-based tool declaration/removal lifecycle.
+
+Responses honors `supportsMidConvoSystemMessages`: explicit updates are rendered in place (after
+complete tool groups), or instruction text and section replacements/removals are folded into the
+leading prompt. Other built-in wire adapters conservatively fold explicit system instructions;
+this is not a claim of their complete current-Pi system/tool-delta parity. For
+`supportsMidConvoEffort`, non-off ordinary Responses requests retain `reasoning.effort: "medium"`
+and append a `configuration_update` before each same-model stamped reply and for the new reply.
+The start event records the mapped native effort, preserved by assembly, storage and JS snapshots.
+ChatGPT direct grants, disabled compat and thinking-off requests keep ordinary effort behavior.
+Old/foreign-model messages are never assigned a guessed historical effort.
+
+Responses replay retains ordered text/reasoning/tool blocks, same-model encrypted reasoning,
+text item IDs/phases, compound call/item IDs and namespaces. Foreign-model reasoning and text
+signatures are omitted, tool IDs/results are normalized together, and missing results are repaired
+only in the request projection. Images in tool results stay inside their result; non-vision models
+receive explicit omission text. Failed/aborted assistant replies are excluded. Codex uses the same
+model-aware replay; cached WebSocket continuation compares significant history, including user
+content, reasoning, phases and namespaces, before sending only a suffix.
+
+The SSE adapter tracks separate output slots and persists reasoning items and text signatures.
+Reasoning closes at the terminal response so Azure's terminal-only encrypted content can be
+backfilled without mutating an already-ended semantic block. This is a deliberate timing difference
+from Pi's mutable partials. Premature EOF and unfinished tool calls are errors, not successful
+responses. Completed content that contradicts streamed deltas is rejected rather than silently
+rewritten. Service-tier pricing, grammar tool streams, automatic system/tool-delta production and
+complete provider conformance remain separate work.
 
 Responses reasoning summaries defer synthetic paragraph separators until the next non-empty
 reasoning delta. Completed items join summary parts without a trailing separator, matching Pi's

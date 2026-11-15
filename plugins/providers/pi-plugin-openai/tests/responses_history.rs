@@ -147,6 +147,29 @@ async fn system_inside_tool_batch_waits_for_results_and_failed_replies_are_not_r
 }
 
 #[tokio::test]
+async fn incomplete_responses_preserve_terminal_metadata_before_reporting_failure() {
+    let (_, signal) = AbortHandle::new();
+    let bytes = format!("data: {}\n\n", json!({
+        "type":"response.incomplete",
+        "response":{"id":"filtered","status":"incomplete","incomplete_details":{"reason":"content_filter"}}
+    })).into_bytes();
+    let events = pi_plugin_openai::responses::stream(
+        "openai".into(),
+        "model".into(),
+        "openai-responses",
+        Box::pin(futures::stream::iter([Ok(bytes)])),
+        signal,
+    )
+    .collect::<Vec<_>>()
+    .await;
+    assert!(
+        matches!(&events[1], Ok(pi_core::StreamEvent::Metadata { patch })
+        if patch.response_id.as_deref() == Some("filtered") && patch.raw_stop_reason.as_deref() == Some("incomplete.content_filter"))
+    );
+    assert!(events.last().unwrap().is_err());
+}
+
+#[tokio::test]
 async fn truncated_response_streams_do_not_become_successful_tool_calls() {
     let (_, signal) = AbortHandle::new();
     let bytes=b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\ndata: [DONE]\n\n".to_vec();

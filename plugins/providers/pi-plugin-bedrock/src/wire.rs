@@ -99,6 +99,10 @@ fn project_messages(request: &ProviderRequest) -> Vec<Value> {
     let mut messages = Vec::new();
     let mut pending_tool_results = Vec::new();
     for original in &request.messages {
+        // Folded instructions are transparent to result grouping.
+        if matches!(original, Message::System(_)) {
+            continue;
+        }
         let message = original.clone().into_provider_message();
         if !matches!(message, Message::ToolResult(_)) && !pending_tool_results.is_empty() {
             push_message(

@@ -54,7 +54,8 @@ pub(super) fn balanced(messages: &[Message], model: Option<&ModelSpec>) -> Vec<M
                     }
                 }
                 if assistant.tool_calls().iter().any(|call| {
-                    ids.get(call.id.as_str()).is_some_and(|id| id != call.id.as_str())
+                    ids.get(call.id.as_str())
+                        .is_some_and(|id| id != call.id.as_str())
                 }) {
                     for block in &mut std::sync::Arc::make_mut(assistant).content {
                         if let ContentBlock::ToolCall(call) = block

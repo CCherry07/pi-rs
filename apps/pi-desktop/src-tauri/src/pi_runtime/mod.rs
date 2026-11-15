@@ -1020,7 +1020,7 @@ fn thread_from_snapshot(
         }
         updated_at = updated_at.max(timestamp);
         match message {
-            Message::System(_) => {},
+            Message::System(_) => {}
             Message::User(message) => {
                 flush(&mut turns, &mut items, turn_started_at, turn_index, false);
                 turn_index += 1;

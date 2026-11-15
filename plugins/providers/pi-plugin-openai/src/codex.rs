@@ -663,8 +663,11 @@ fn normalized_response_output(response: &Value) -> Vec<Value> {
                     })
                     .collect::<Vec<_>>();
                 (!content.is_empty()).then(|| {
-                    let mut value = json!({"type": "message", "role": "assistant", "content": content});
-                    if let Some(phase) = item.get("phase") { value["phase"] = phase.clone(); }
+                    let mut value =
+                        json!({"type": "message", "role": "assistant", "content": content});
+                    if let Some(phase) = item.get("phase") {
+                        value["phase"] = phase.clone();
+                    }
                     value
                 })
             }
@@ -675,7 +678,9 @@ fn normalized_response_output(response: &Value) -> Vec<Value> {
                     "name": item.get("name").and_then(Value::as_str).unwrap_or_default(),
                     "arguments": item.get("arguments").and_then(Value::as_str).unwrap_or_default()
                 });
-                if let Some(namespace) = item.get("namespace") { value["namespace"] = namespace.clone(); }
+                if let Some(namespace) = item.get("namespace") {
+                    value["namespace"] = namespace.clone();
+                }
                 Some(value)
             }
             Some(_) => Some(item.clone()),
@@ -1104,17 +1109,35 @@ mod tests {
         let continuation = WebSocketContinuation {
             last_request_body: prompt.clone(),
             last_response_id: "response".into(),
-            last_response_items: vec![json!({"type":"reasoning","id":"rs_1","encrypted_content":"opaque"})],
+            last_response_items: vec![
+                json!({"type":"reasoning","id":"rs_1","encrypted_content":"opaque"}),
+            ],
         };
         let mut next = prompt;
-        next["input"].as_array_mut().unwrap().extend(continuation.last_response_items.clone());
-        next["input"].as_array_mut().unwrap().push(json!({"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}));
-        assert_eq!(cached_websocket_request_body(&next, &continuation)["previous_response_id"], "response");
+        next["input"]
+            .as_array_mut()
+            .unwrap()
+            .extend(continuation.last_response_items.clone());
+        next["input"].as_array_mut().unwrap().push(
+            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}),
+        );
+        assert_eq!(
+            cached_websocket_request_body(&next, &continuation)["previous_response_id"],
+            "response"
+        );
         let mut edited = next.clone();
         edited["input"][0]["content"][0]["text"] = json!("edited");
-        assert!(cached_websocket_request_body(&edited, &continuation).get("previous_response_id").is_none());
+        assert!(
+            cached_websocket_request_body(&edited, &continuation)
+                .get("previous_response_id")
+                .is_none()
+        );
         next["input"][1]["encrypted_content"] = json!("different");
-        assert!(cached_websocket_request_body(&next, &continuation).get("previous_response_id").is_none());
+        assert!(
+            cached_websocket_request_body(&next, &continuation)
+                .get("previous_response_id")
+                .is_none()
+        );
     }
 
     struct SseFallbackTransport {

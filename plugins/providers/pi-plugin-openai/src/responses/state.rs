@@ -41,7 +41,12 @@ impl StreamState {
     pub(super) fn take_pending_error(&mut self) -> Option<ProviderError> {
         self.pending_error.take()
     }
-    fn slot(&mut self, value: &Value, kind: Kind, events: &mut Vec<StreamEvent>) -> Result<usize, ProviderError> {
+    fn slot(
+        &mut self,
+        value: &Value,
+        kind: Kind,
+        events: &mut Vec<StreamEvent>,
+    ) -> Result<usize, ProviderError> {
         let item = value.get("item").unwrap_or(&Value::Null);
         let id = item["id"]
             .as_str()
@@ -58,15 +63,25 @@ impl StreamState {
             });
         if let Some(index) = found {
             if self.slots[index].kind != kind {
-                return Err(ProviderError::Protocol("Responses output index changed item type".into()));
+                return Err(ProviderError::Protocol(
+                    "Responses output index changed item type".into(),
+                ));
             }
-            if let Some(output) = output { self.outputs.insert(output, index); }
-            if !id.is_empty() { self.ids.insert(id.into(), index); }
+            if let Some(output) = output {
+                self.outputs.insert(output, index);
+            }
+            if !id.is_empty() {
+                self.ids.insert(id.into(), index);
+            }
             return Ok(index);
         }
-        if kind == Kind::Tool && (item["call_id"].as_str().is_none_or(str::is_empty)
-            || item["name"].as_str().is_none_or(str::is_empty)) {
-            return Err(ProviderError::Protocol("Responses tool item is missing call_id or name".into()));
+        if kind == Kind::Tool
+            && (item["call_id"].as_str().is_none_or(str::is_empty)
+                || item["name"].as_str().is_none_or(str::is_empty))
+        {
+            return Err(ProviderError::Protocol(
+                "Responses tool item is missing call_id or name".into(),
+            ));
         }
         let index = self.slots.len();
         if let Some(output) = output {
@@ -311,7 +326,9 @@ impl StreamState {
                     });
                 if let Some(index) = index {
                     if self.slots[index].kind != Kind::Tool {
-                        return Err(ProviderError::Protocol("Responses tool delta references a non-tool item".into()));
+                        return Err(ProviderError::Protocol(
+                            "Responses tool delta references a non-tool item".into(),
+                        ));
                     }
                     if kind.ends_with(".done") {
                         self.final_text(
@@ -346,9 +363,10 @@ impl StreamState {
                     .iter()
                     .any(|slot| slot.kind == Kind::Tool && !slot.done)
                 {
-                    return Err(ProviderError::Protocol(
+                    self.pending_error = Some(ProviderError::Protocol(
                         "Responses stream completed with an unfinished tool call".into(),
                     ));
+                    return Ok(events);
                 }
                 let mut reason = if self.slots.iter().any(|s| s.kind == Kind::Tool) {
                     StopReason::ToolUse
@@ -359,9 +377,10 @@ impl StreamState {
                     if value["response"]["incomplete_details"]["reason"] == "max_output_tokens" {
                         reason = StopReason::Length;
                     } else {
-                        return Err(ProviderError::Failure(
+                        self.pending_error = Some(ProviderError::Failure(
                             "Responses incomplete without max_output_tokens reason".into(),
                         ));
+                        return Ok(events);
                     }
                 }
                 for index in 0..self.slots.len() {

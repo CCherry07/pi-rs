@@ -663,6 +663,7 @@ mod tests {
             api: "scripted".into(),
             provider: pi_core::ProviderId::new("scripted"),
             model: pi_core::ModelId::new("test"),
+            provider_thinking_level: None,
             response_model: None,
             response_id: None,
             usage: Default::default(),
