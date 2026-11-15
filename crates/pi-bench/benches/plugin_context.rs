@@ -77,6 +77,7 @@ fn js_plugins(count: usize, dispatcher: Arc<EncodeOnlyDispatcher>) -> Vec<Arc<dy
     JsPluginGeneration::prepare(
         JsGenerationManifest {
             generation_id: "bench-context".into(),
+            dynamic_hooks: false,
             agent_plugins: (0..count)
                 .map(|index| JsAgentPluginManifest {
                     id: format!("context-{index}"),

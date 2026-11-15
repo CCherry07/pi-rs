@@ -19,7 +19,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 # Only channels are needed in production; the workspace preset also enables the runtime.
-tokio = { version = "1.47.1", features = ["sync"] }
+# Native plugins share tokio sync types with their host across the Rust ABI.
+# `parking_lot` changes those layouts, and hosts can enable it indirectly via
+# `tokio/full`, so every artifact pins it to keep them equal.
+tokio = { version = "1.47.1", features = ["sync", "parking_lot"] }
 uuid = { version = "1", features = ["v4"] }
 
 [[example]]

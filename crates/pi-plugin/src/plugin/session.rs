@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use super::diagnostics::PluginDiagnosticSink;
 use crate::{AbortSignal, PluginId};
 use pi_core::session::{
     BranchSummaryEntry, CompactionEntry, CompactionPreparation, CompactionReason, SessionRecord,
@@ -39,6 +40,7 @@ pub struct SessionPluginContext {
     pub session: PluginSessionContext,
     pub models: ModelsContext,
     pub ui: UiContext,
+    diagnostics: PluginDiagnosticSink,
 }
 
 impl std::fmt::Debug for SessionPluginContext {
@@ -78,6 +80,7 @@ impl SessionPluginContext {
             session: context.session,
             models: context.models,
             ui: context.ui,
+            diagnostics: PluginDiagnosticSink::default(),
         }
     }
 
@@ -101,11 +104,25 @@ impl SessionPluginContext {
         &self.identity
     }
 
+    pub fn report_hook_error(&self, hook: &'static str, message: impl Into<String>) {
+        self.diagnostics
+            .record(self.plugin_id.clone(), hook, Some(self.generation), message);
+    }
+
+    /// Rebinds adapter-owned metadata while retaining generation capabilities.
+    #[doc(hidden)]
+    pub fn for_adapter_plugin(&self, plugin_id: PluginId) -> Self {
+        let mut context = self.clone();
+        context.plugin_id = plugin_id;
+        context
+    }
+
     pub(crate) fn with_plugin_context(
         plugin_id: PluginId,
         generation: u64,
         identity: SessionIdentity,
         context: ContextParts,
+        diagnostics: PluginDiagnosticSink,
     ) -> Self {
         Self {
             plugin_id,
@@ -115,6 +132,7 @@ impl SessionPluginContext {
             session: context.session,
             models: context.models,
             ui: context.ui,
+            diagnostics,
         }
     }
 

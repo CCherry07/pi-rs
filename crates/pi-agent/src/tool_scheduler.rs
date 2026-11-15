@@ -424,12 +424,19 @@ impl ToolScheduler {
         signal: &AbortSignal,
         events: Arc<dyn AgentEventSink>,
     ) -> FinalizedToolCall {
-        let (source_index, call, args, mut result, run_after_hook) = match prepared {
+        let (source_index, call, args, mut result, run_after_hook, interrupted) = match prepared {
             PreparedToolCall::Immediate {
                 source_index,
                 call,
                 result,
-            } => (source_index, call, serde_json::json!({}), result, false),
+            } => (
+                source_index,
+                call,
+                serde_json::json!({}),
+                result,
+                false,
+                false,
+            ),
             PreparedToolCall::Ready {
                 source_index,
                 call,
@@ -441,11 +448,15 @@ impl ToolScheduler {
                 let execution = tool.execute(context, call.id.clone(), args.clone(), updates);
                 tokio::pin!(execution);
                 let mut updates_open = true;
+                let mut interrupted = false;
 
                 let result = loop {
                     tokio::select! {
                         biased;
-                        () = signal.wait() => break ToolResult::error("Operation aborted"),
+                        () = signal.wait() => {
+                            interrupted = true;
+                            break ToolResult::error("Operation aborted");
+                        }
                         update = update_receiver.recv(), if updates_open => {
                             if let Some(update) = update {
                                 Self::emit_update(&events, signal, &call, update).await;
@@ -466,7 +477,7 @@ impl ToolScheduler {
                 while let Ok(update) = update_receiver.try_recv() {
                     Self::emit_update(&events, signal, &call, update).await;
                 }
-                (source_index, call, args, result, true)
+                (source_index, call, args, result, true, interrupted)
             }
         };
 
@@ -483,6 +494,7 @@ impl ToolScheduler {
                         validated_args: args,
                         result,
                         context: Arc::clone(context),
+                        interrupted,
                     },
                 )
                 .await;
@@ -994,5 +1006,142 @@ mod tests {
                 "message_end:call-2",
             ]
         );
+    }
+
+    /// Records whether each `tool_result` hook saw an interrupted call.
+    struct InterruptProbe {
+        tool: Arc<dyn Tool>,
+        seen: Arc<Mutex<Vec<(String, bool)>>>,
+    }
+
+    #[pi_plugin::plugin]
+    impl Plugin for InterruptProbe {
+        fn id(&self) -> PluginId {
+            PluginId::new("interrupt-probe")
+        }
+
+        fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
+            context.register_tool(Arc::clone(&self.tool))
+        }
+
+        async fn tool_result(
+            &self,
+            _context: AgentPluginContext,
+            event: ToolResultEvent,
+        ) -> Result<ToolResultPatch, PluginError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((event.tool_call.id.to_string(), event.interrupted));
+            Ok(ToolResultPatch::default())
+        }
+    }
+
+    fn probe_scheduler(
+        tool: Arc<dyn Tool>,
+        seen: &Arc<Mutex<Vec<(String, bool)>>>,
+    ) -> ToolScheduler {
+        let plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(InterruptProbe {
+            tool,
+            seen: Arc::clone(seen),
+        })];
+        let (plugins, registries) = RegistriesBuilder::new().register_plugins(plugins).unwrap();
+        ToolScheduler::new(
+            Arc::new(registries),
+            Arc::new(plugins),
+            PathBuf::from("."),
+            8,
+        )
+    }
+
+    #[tokio::test]
+    async fn result_hooks_see_a_typed_interruption_marker() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = probe_scheduler(
+            Arc::new(DelayedTool {
+                name: "slow",
+                delay: Duration::from_secs(30),
+                log: Arc::new(Mutex::new(Vec::new())),
+            }),
+            &seen,
+        );
+        let (abort, signal) = AbortHandle::new();
+        let events: Arc<dyn AgentEventSink> = Arc::new(RecordingEvents {
+            log: Arc::new(Mutex::new(Vec::new())),
+            abort_after_result: None,
+        });
+        let run_id = RunId::new("run");
+        let assistant = assistant();
+        let batch = scheduler.execute_batch(
+            &run_id,
+            &assistant,
+            context(),
+            vec![ToolCall::new("call-1", "slow", serde_json::json!({}))],
+            ToolExecutionMode::Sequential,
+            signal,
+            events,
+            1,
+        );
+        tokio::pin!(batch);
+        tokio::select! {
+            _ = &mut batch => panic!("the slow tool finished before the abort"),
+            () = tokio::time::sleep(Duration::from_millis(20)) => abort.abort(),
+        }
+        batch.await.unwrap();
+
+        assert_eq!(*seen.lock().unwrap(), [("call-1".to_string(), true)]);
+    }
+
+    #[tokio::test]
+    async fn a_tool_whose_text_says_operation_aborted_is_not_interrupted() {
+        struct AbortTextTool;
+
+        #[async_trait]
+        impl Tool for AbortTextTool {
+            fn spec(&self) -> ToolSpec {
+                ToolSpec {
+                    name: "abort-text".to_string(),
+                    label: "abort-text".to_string(),
+                    description: "abort-text".to_string(),
+                    parameters: serde_json::json!({"type": "object"}),
+                    execution_mode: ToolExecutionMode::Sequential,
+                    prompt_snippet: None,
+                    prompt_guidelines: Vec::new(),
+                }
+            }
+
+            async fn execute(
+                &self,
+                _context: ToolContext,
+                _tool_call_id: pi_core::ToolCallId,
+                _input: serde_json::Value,
+                _updates: ToolUpdateSink,
+            ) -> Result<ToolResult, ToolError> {
+                Ok(ToolResult::error("Operation aborted"))
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let scheduler = probe_scheduler(Arc::new(AbortTextTool), &seen);
+        let (_abort, signal) = AbortHandle::new();
+        let events: Arc<dyn AgentEventSink> = Arc::new(RecordingEvents {
+            log: Arc::new(Mutex::new(Vec::new())),
+            abort_after_result: None,
+        });
+        scheduler
+            .execute_batch(
+                &RunId::new("run"),
+                &assistant(),
+                context(),
+                vec![ToolCall::new("call-1", "abort-text", serde_json::json!({}))],
+                ToolExecutionMode::Sequential,
+                signal,
+                events,
+                1,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(*seen.lock().unwrap(), [("call-1".to_string(), false)]);
     }
 }

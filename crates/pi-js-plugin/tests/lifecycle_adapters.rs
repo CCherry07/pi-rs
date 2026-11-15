@@ -9,9 +9,9 @@ use pi_core::{
 use pi_js_plugin::{
     ExtensionContextQuery, JsAgentPluginManifest, JsCallbackDispatcher, JsCallbackError,
     JsCommandManifest, JsGenerationManifest, JsHookBatchError, JsHookBatchInvocation,
-    JsHookBatchResult, JsHookManifest, JsInvocation, JsPluginGeneration, JsProviderPluginManifest,
-    JsSessionPluginManifest, JsStreamHookBatchInvocation, PluginContextScope,
-    execute_context_query,
+    JsHookBatchResult, JsHookManifest, JsHookSnapshot, JsInvocation, JsPluginGeneration,
+    JsProviderPluginManifest, JsSessionPluginManifest, JsStreamHookBatchInvocation,
+    PluginContextScope, execute_context_query,
 };
 use pi_plugin::{
     AgentSettledEvent, BeforeAgentStartEvent, BeforeProviderRequestEvent, CommandContext,
@@ -21,8 +21,8 @@ use pi_plugin::{
     SessionContextAccess, TurnEndEvent, TurnStartEvent, UiContextAccess,
 };
 use pi_plugin::{
-    SessionBeforeSwitchEvent, SessionIdentity, SessionPluginContext, SessionStartEvent,
-    SessionStartReason, SessionSwitchReason,
+    SessionBeforeSwitchEvent, SessionDispatchContext, SessionIdentity, SessionPluginContext,
+    SessionStartEvent, SessionStartReason, SessionSwitchReason,
 };
 use serde_json::{Value, json};
 
@@ -37,6 +37,70 @@ struct LifecycleDispatcher {
 struct HookBatchDispatcher {
     batches: Mutex<Vec<JsHookBatchInvocation>>,
     stream_batches: Mutex<Vec<JsStreamHookBatchInvocation>>,
+}
+
+struct DynamicHookDispatcher {
+    snapshots: Mutex<Vec<Vec<JsHookSnapshot>>>,
+    invocations: Mutex<Vec<String>>,
+}
+
+struct DynamicCrossLifecycleDispatcher {
+    snapshots: Mutex<Vec<(&'static str, Vec<JsHookSnapshot>)>>,
+    invocations: Mutex<Vec<JsInvocation>>,
+}
+
+#[async_trait]
+impl JsCallbackDispatcher for DynamicCrossLifecycleDispatcher {
+    async fn snapshot_hooks(
+        &self,
+        _generation_id: &str,
+        hook: &str,
+    ) -> Result<Option<Vec<JsHookSnapshot>>, JsCallbackError> {
+        let (expected, snapshot) = self.snapshots.lock().unwrap().remove(0);
+        assert_eq!(hook, expected);
+        Ok(Some(snapshot))
+    }
+
+    async fn invoke(
+        &self,
+        invocation: JsInvocation,
+        _context: PluginContextHandle,
+    ) -> Result<Value, JsCallbackError> {
+        self.invocations.lock().unwrap().push(invocation.clone());
+        let result = match invocation.callback_id.as_str() {
+            "dynamic-provider" => json!({"dynamic": true}),
+            "failing-session" => {
+                return Err(JsCallbackError::new("first session handler failed"));
+            }
+            "dynamic-session" => json!({"cancel": true}),
+            callback => panic!("unexpected dynamic callback: {callback}"),
+        };
+        Ok(result)
+    }
+}
+
+#[async_trait]
+impl JsCallbackDispatcher for DynamicHookDispatcher {
+    async fn snapshot_hooks(
+        &self,
+        _generation_id: &str,
+        hook: &str,
+    ) -> Result<Option<Vec<JsHookSnapshot>>, JsCallbackError> {
+        assert_eq!(hook, "agent_end");
+        Ok(Some(self.snapshots.lock().unwrap().remove(0)))
+    }
+
+    async fn invoke(
+        &self,
+        invocation: JsInvocation,
+        _context: PluginContextHandle,
+    ) -> Result<Value, JsCallbackError> {
+        self.invocations
+            .lock()
+            .unwrap()
+            .push(invocation.callback_id);
+        Ok(Value::Null)
+    }
 }
 
 #[async_trait]
@@ -171,12 +235,14 @@ fn generation(dispatcher: Arc<LifecycleDispatcher>) -> JsPluginGeneration {
     JsPluginGeneration::prepare(
         JsGenerationManifest {
             generation_id: "js-lifecycle".to_string(),
+            dynamic_hooks: false,
             agent_plugins: vec![JsAgentPluginManifest {
                 id: "extension".to_string(),
                 tools: Vec::new(),
                 commands: vec![JsCommandManifest {
                     callback_id: "command".to_string(),
                     name: "rewrite".to_string(),
+                    invocation_name: "rewrite".to_string(),
                     description: "Rewrite input".to_string(),
                     argument_hint: None,
                 }],
@@ -255,6 +321,230 @@ fn generation(dispatcher: Arc<LifecycleDispatcher>) -> JsPluginGeneration {
         dispatcher,
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn dynamic_hook_snapshots_replace_the_frozen_manifest_callbacks() {
+    let dispatcher = Arc::new(DynamicHookDispatcher {
+        snapshots: Mutex::new(vec![
+            vec![
+                JsHookSnapshot {
+                    plugin_id: "extension".to_string(),
+                    callback_id: "a".to_string(),
+                },
+                JsHookSnapshot {
+                    plugin_id: "extension".to_string(),
+                    callback_id: "b".to_string(),
+                },
+            ],
+            vec![
+                JsHookSnapshot {
+                    plugin_id: "extension".to_string(),
+                    callback_id: "b".to_string(),
+                },
+                JsHookSnapshot {
+                    plugin_id: "extension".to_string(),
+                    callback_id: "c".to_string(),
+                },
+            ],
+        ]),
+        invocations: Mutex::new(Vec::new()),
+    });
+    let generation = JsPluginGeneration::prepare(
+        JsGenerationManifest {
+            generation_id: "dynamic-hooks".to_string(),
+            dynamic_hooks: true,
+            agent_plugins: vec![JsAgentPluginManifest {
+                id: "extension".to_string(),
+                tools: Vec::new(),
+                commands: Vec::new(),
+                hooks: Vec::new(),
+            }],
+            provider_plugins: Vec::new(),
+            provider_registrations: Vec::new(),
+            session_plugins: Vec::new(),
+            diagnostics: Vec::new(),
+        },
+        dispatcher.clone(),
+    )
+    .unwrap();
+    let (driver, _) = RegistriesBuilder::new()
+        .register_plugins(generation.plugins())
+        .unwrap();
+    let (_, signal) = AbortHandle::new();
+
+    for run in ["first", "second"] {
+        driver
+            .agent_end(
+                &RunId::new(run),
+                std::path::Path::new("/workspace"),
+                &signal,
+                pi_plugin::AgentEndEvent {
+                    messages: Vec::new(),
+                },
+            )
+            .await;
+    }
+
+    assert_eq!(
+        *dispatcher.invocations.lock().unwrap(),
+        ["a", "b", "b", "c"]
+    );
+}
+
+#[test]
+fn duplicate_logical_commands_register_by_unique_invocation_name() {
+    let command = |plugin: &str, callback: &str, invocation: &str| JsAgentPluginManifest {
+        id: plugin.to_string(),
+        tools: Vec::new(),
+        commands: vec![JsCommandManifest {
+            callback_id: callback.to_string(),
+            name: "shared".to_string(),
+            invocation_name: invocation.to_string(),
+            description: invocation.to_string(),
+            argument_hint: None,
+        }],
+        hooks: Vec::new(),
+    };
+    let generation = JsPluginGeneration::prepare(
+        JsGenerationManifest {
+            generation_id: "duplicate-commands".to_string(),
+            dynamic_hooks: false,
+            agent_plugins: vec![
+                command("first", "first-command", "shared:1"),
+                command("second", "second-command", "shared:2"),
+            ],
+            provider_plugins: Vec::new(),
+            provider_registrations: Vec::new(),
+            session_plugins: Vec::new(),
+            diagnostics: Vec::new(),
+        },
+        Arc::new(HookBatchDispatcher::default()),
+    )
+    .unwrap();
+
+    let (_, registries) = RegistriesBuilder::new()
+        .register_plugins(generation.plugins())
+        .unwrap();
+    assert!(registries.command("shared").is_none());
+    assert!(registries.command("shared:1").is_some());
+    assert!(registries.command("shared:2").is_some());
+}
+
+#[tokio::test]
+async fn dynamic_provider_and_session_hooks_need_no_frozen_callback_manifest() {
+    let owner = "second";
+    let dispatcher = Arc::new(DynamicCrossLifecycleDispatcher {
+        snapshots: Mutex::new(vec![
+            (
+                "before_provider_request",
+                vec![JsHookSnapshot {
+                    plugin_id: owner.to_string(),
+                    callback_id: "dynamic-provider".to_string(),
+                }],
+            ),
+            (
+                "session_before_switch",
+                vec![
+                    JsHookSnapshot {
+                        plugin_id: "first".to_string(),
+                        callback_id: "failing-session".to_string(),
+                    },
+                    JsHookSnapshot {
+                        plugin_id: owner.to_string(),
+                        callback_id: "dynamic-session".to_string(),
+                    },
+                ],
+            ),
+        ]),
+        invocations: Mutex::new(Vec::new()),
+    });
+    let empty_agent = |id: &str| JsAgentPluginManifest {
+        id: id.to_string(),
+        tools: Vec::new(),
+        commands: Vec::new(),
+        hooks: Vec::new(),
+    };
+    let empty_provider = |id: &str| JsProviderPluginManifest {
+        id: id.to_string(),
+        hooks: Vec::new(),
+    };
+    let generation = JsPluginGeneration::prepare(
+        JsGenerationManifest {
+            generation_id: "dynamic-cross-lifecycle".to_string(),
+            dynamic_hooks: true,
+            agent_plugins: vec![empty_agent("first"), empty_agent(owner)],
+            provider_plugins: vec![empty_provider("first"), empty_provider(owner)],
+            provider_registrations: Vec::new(),
+            session_plugins: Vec::new(),
+            diagnostics: Vec::new(),
+        },
+        dispatcher.clone(),
+    )
+    .unwrap();
+    assert_eq!(generation.provider_plugins().len(), 1);
+    assert!(
+        generation.plugins()[0]
+            .session_hook_interests()
+            .contains(pi_plugin::SessionHook::BeforeSwitch)
+    );
+    let (_, signal) = AbortHandle::new();
+
+    let provider_result = generation.provider_plugins()[0]
+        .before_provider_request(
+            ProviderPluginContext::unavailable_for_testing(
+                PluginId::new("first"),
+                1,
+                ProviderId::new("provider"),
+                ModelId::new("model"),
+                "/workspace".into(),
+                signal,
+            ),
+            BeforeProviderRequestEvent {
+                payload: json!({"original": true}),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(provider_result, Some(json!({"dynamic": true})));
+
+    let (driver, _) = RegistriesBuilder::new()
+        .register_plugins(generation.plugins())
+        .unwrap();
+    let session_result = driver
+        .session_before_switch(
+            &SessionDispatchContext {
+                generation: 1,
+                identity: SessionIdentity {
+                    id: "session".to_string(),
+                    path: "/sessions/session.jsonl".into(),
+                    cwd: "/workspace".into(),
+                    parent_session_id: None,
+                },
+            },
+            &SessionBeforeSwitchEvent {
+                reason: SessionSwitchReason::Resume,
+                target_session_file: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(session_result.cancel);
+    let diagnostics = driver.diagnostics();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].plugin_id.as_str(), "first");
+    assert_eq!(diagnostics[0].hook.as_str(), "session_before_switch");
+    assert_eq!(diagnostics[0].generation, Some(1));
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("first session handler failed")
+    );
+
+    let invocations = dispatcher.invocations.lock().unwrap();
+    assert_eq!(invocations[0].payload["context"]["pluginId"], owner);
+    assert_eq!(invocations[1].payload["context"]["pluginId"], "first");
+    assert_eq!(invocations[2].payload["context"]["pluginId"], owner);
 }
 
 fn assistant(text: &str) -> AssistantMessage {
@@ -635,6 +925,7 @@ async fn observer_hooks_share_one_generation_batch_and_one_compact_stream_encodi
     let generation = JsPluginGeneration::prepare(
         JsGenerationManifest {
             generation_id: "js-observer-batch".to_string(),
+            dynamic_hooks: false,
             agent_plugins: vec![
                 JsAgentPluginManifest {
                     id: "extension-first".to_string(),
@@ -733,6 +1024,28 @@ async fn observer_hooks_share_one_generation_batch_and_one_compact_stream_encodi
 struct BoundaryDispatcher;
 #[async_trait]
 impl JsCallbackDispatcher for BoundaryDispatcher {
+    async fn snapshot_hooks(
+        &self,
+        _generation_id: &str,
+        hook: &str,
+    ) -> Result<Option<Vec<JsHookSnapshot>>, JsCallbackError> {
+        assert_eq!(hook, "agent_before_settle");
+        Ok(Some(vec![
+            JsHookSnapshot {
+                plugin_id: "one".into(),
+                callback_id: "boundary:first".into(),
+            },
+            JsHookSnapshot {
+                plugin_id: "one".into(),
+                callback_id: "boundary:repair".into(),
+            },
+            JsHookSnapshot {
+                plugin_id: "two".into(),
+                callback_id: "boundary:last".into(),
+            },
+        ]))
+    }
+
     async fn invoke(
         &self,
         invocation: JsInvocation,
@@ -765,6 +1078,7 @@ async fn boundary_callbacks_rebuild_previews_between_handlers_and_sources() {
     let generation = JsPluginGeneration::prepare(
         JsGenerationManifest {
             generation_id: "boundaries".into(),
+            dynamic_hooks: true,
             agent_plugins: vec![
                 JsAgentPluginManifest {
                     id: "one".into(),

@@ -614,6 +614,23 @@ pub struct SessionDocument {
     pub stats: SessionStats,
 }
 
+/// Read-only projection of the main branch using the built-in context rules.
+///
+/// Unlike a complete [`SessionDocument`], this view omits the operation log and
+/// opaque extension state. `branch` retains entry identities and context-bearing
+/// data, but ordinary custom entries have no `data`. Displayed custom messages
+/// and native isolated-context seeds remain intact. Use the complete document
+/// for extension projectors, recovery, export, or resuming a runtime.
+#[derive(Debug)]
+pub struct SessionTranscript {
+    pub header: SessionHeader,
+    pub name: Option<String>,
+    pub branch: Vec<SessionRecord>,
+    pub context: super::SessionContext,
+    /// Billed usage across all branches, including adjustment records.
+    pub usage: Usage,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct JsonlSessionMetadata {
     pub id: String,

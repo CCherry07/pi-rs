@@ -147,6 +147,7 @@ impl PluginDriver {
             context.generation,
             context.identity.clone(),
             self.context_parts(),
+            self.diagnostics.clone(),
         )
     }
 

@@ -125,6 +125,14 @@ impl InputContext {
             .record(self.plugin_id.clone(), hook, None, message);
     }
 
+    /// Rebinds adapter-owned metadata while retaining generation capabilities.
+    #[doc(hidden)]
+    pub fn for_adapter_plugin(&self, plugin_id: PluginId) -> Self {
+        let mut context = self.clone();
+        context.plugin_id = plugin_id;
+        context
+    }
+
     #[doc(hidden)]
     pub fn plugin_context_handle(&self) -> PluginContextHandle {
         self.session.handle_for_adapter()
@@ -335,6 +343,11 @@ pub struct ToolResultEvent {
     pub validated_args: Value,
     pub result: ToolResult,
     pub context: Arc<crate::AgentContext>,
+    /// The run's abort signal settled this call before its tool returned, so
+    /// `result` is the scheduler's placeholder rather than the tool's own.
+    /// The tool may still have had effects; it is the only reliable way to
+    /// tell an interruption from a tool that reported the same text.
+    pub interrupted: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -546,14 +559,20 @@ pub trait Plugin: Send + Sync {
     }
     /// Adapters may expose multiple handlers while retaining their single plugin identity.
     #[doc(hidden)]
-    fn boundary_hook_count(&self, _hook: AgentHook) -> usize {
-        1
+    async fn boundary_hook_count(
+        &self,
+        _context: AgentPluginContext,
+        _hook: AgentHook,
+        _dispatch_id: u64,
+    ) -> std::result::Result<usize, PluginError> {
+        Ok(1)
     }
     #[doc(hidden)]
     async fn boundary_hook(
         &self,
         context: AgentPluginContext,
         event: SessionBoundaryEvent,
+        _dispatch_id: u64,
         _index: usize,
     ) -> std::result::Result<BoundaryResult, PluginError> {
         match event {
@@ -563,6 +582,8 @@ pub trait Plugin: Send + Sync {
             }
         }
     }
+    #[doc(hidden)]
+    fn boundary_hook_finished(&self, _dispatch_id: u64) {}
     async fn message_start(
         &self,
         _context: AgentPluginContext,
@@ -1177,6 +1198,7 @@ impl PluginDriver {
                 validated_args: event.validated_args.clone(),
                 result: result.clone(),
                 context: Arc::clone(&event.context),
+                interrupted: event.interrupted,
             };
             match registered
                 .plugin

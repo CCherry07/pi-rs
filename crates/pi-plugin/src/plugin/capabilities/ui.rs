@@ -36,6 +36,25 @@ pub trait UiContextAccess: Send + Sync {
     fn ui_notify(&self, _level: NoticeLevel, _message: String) -> PluginContextResult<()> {
         unbound()
     }
+
+    /// Answers a binary question through a semantic frontend prompt.
+    ///
+    /// `Ok(None)` means this context has no semantic confirmation surface and
+    /// the request falls back to the declarative selector. Graphical
+    /// frontends that do not render plugin surfaces implement this instead.
+    async fn ui_confirm(
+        &self,
+        _title: String,
+        _message: String,
+    ) -> PluginContextResult<Option<bool>> {
+        Ok(None)
+    }
+
+    /// True when `ui_confirm` reaches a person even though the declarative
+    /// surface protocol is unavailable.
+    fn has_confirm(&self) -> PluginContextResult<bool> {
+        Ok(false)
+    }
 }
 
 /// Product presentation capabilities. Terminal ownership remains in the app.
@@ -55,6 +74,12 @@ impl UiContext {
 
     pub fn is_available(&self) -> PluginContextResult<bool> {
         self.handle.access()?.has_ui()
+    }
+
+    /// True when `confirm` can reach a person in this presentation mode.
+    pub fn can_confirm(&self) -> PluginContextResult<bool> {
+        let access = self.handle.access()?;
+        Ok(access.has_ui()? || access.has_confirm()?)
     }
 
     /// Runs a Rust component through the same declarative document/event protocol as JavaScript UI.
@@ -88,9 +113,17 @@ impl UiContext {
         title: impl Into<String>,
         message: impl Into<String>,
     ) -> PluginContextResult<bool> {
+        let title = title.into();
+        let message = message.into();
+        let access = self.handle.access()?;
+        if access.has_confirm()?
+            && let Some(answer) = access.ui_confirm(title.clone(), message.clone()).await?
+        {
+            return Ok(answer);
+        }
         Ok(self
             .select(
-                format!("{}\n{}", title.into(), message.into()),
+                format!("{title}\n{message}"),
                 vec!["Yes".into(), "No".into()],
             )
             .await?

@@ -12,15 +12,17 @@ import {
 } from "./useThreadsReducer";
 import { useThreadActions } from "./useThreadActions";
 
-const { forkThread, listThreads, resumeThread } = vi.hoisted(() => ({
+const { forkThread, listThreads, readThread, resumeThread } = vi.hoisted(() => ({
   forkThread: vi.fn(),
   listThreads: vi.fn(),
+  readThread: vi.fn(),
   resumeThread: vi.fn(),
 }));
 vi.mock("@services/tauri", () => ({
   archiveThread: vi.fn(),
   forkThread,
   listThreads,
+  readThread,
   resumeThread,
   startThread: vi.fn(),
 }));
@@ -46,10 +48,12 @@ function page(
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((complete) => {
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((complete, fail) => {
     resolve = complete;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 function setup(seed: Partial<ThreadState> = {}) {
   const dispatchSpy = vi.fn();
@@ -85,6 +89,7 @@ function setup(seed: Partial<ThreadState> = {}) {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  readThread.mockResolvedValue(null);
   listThreads.mockImplementation(async (requests: ThreadListRequest[]) =>
     requests.map(({ workspaceId }) => page(workspaceId, [])),
   );
@@ -95,6 +100,119 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("useThreadActions", () => {
+  it("shows saved messages while runtime preparation is still pending", async () => {
+    const ready = deferred<unknown>();
+    resumeThread.mockReturnValueOnce(ready.promise);
+    const thread = {
+      id: "saved",
+      turns: [{ items: [{ id: "answer", type: "agentMessage", text: "Saved answer" }] }],
+    };
+    readThread.mockResolvedValueOnce({ thread });
+    const { result } = setup();
+    let pending!: Promise<string | null>;
+    await act(async () => {
+      pending = result.current.resumeThreadForWorkspace("one", "saved");
+    });
+    expect(result.current.state.itemsByThread.saved).toEqual([
+      expect.objectContaining({ id: "answer", text: "Saved answer" }),
+    ]);
+    expect(result.current.state.threadResumeLoadingById.saved).toBe(true);
+    await act(async () => {
+      ready.resolve({ thread: { ...thread, commands: [{ name: "native", description: "Ready" }] } });
+      await pending;
+    });
+    expect(result.current.state.threadResumeLoadingById.saved).toBe(false);
+    expect(result.current.state.commandsByThread.saved[0].name).toBe("native");
+  });
+
+  it("ignores a history response that arrives after runtime resume", async () => {
+    const history = deferred<unknown>();
+    readThread.mockReturnValueOnce(history.promise);
+    resumeThread.mockResolvedValueOnce({ thread: {
+      id: "saved", turns: [{ items: [{ id: "new", type: "agentMessage", text: "Current" }] }],
+    } });
+    const { result } = setup();
+    await act(async () => {
+      await result.current.resumeThreadForWorkspace("one", "saved");
+      history.resolve({ thread: {
+        id: "saved", turns: [{ items: [{ id: "old", type: "agentMessage", text: "Stale" }] }],
+      } });
+    });
+    expect(result.current.state.itemsByThread.saved).toEqual([
+      expect.objectContaining({ id: "new", text: "Current" }),
+    ]);
+  });
+
+  it("keeps history visible and reports a failed runtime preparation", async () => {
+    const history = deferred<unknown>();
+    readThread.mockReturnValueOnce(history.promise);
+    resumeThread.mockRejectedValueOnce(new Error("MCP initialization failed"));
+    const { result } = setup();
+    await act(async () => {
+      await result.current.resumeThreadForWorkspace("one", "saved");
+      history.resolve({ thread: {
+        id: "saved", turns: [{ items: [{ id: "answer", type: "agentMessage", text: "Saved" }] }],
+      } });
+    });
+    expect(result.current.state.itemsByThread.saved).toEqual([
+      expect.objectContaining({ id: "answer", text: "Saved" }),
+      expect.objectContaining({ toolType: "notice", detail: "MCP initialization failed", status: "failed" }),
+    ]);
+    expect(result.current.state.threadResumeLoadingById.saved).toBe(false);
+    resumeThread.mockResolvedValueOnce({ thread: {
+      id: "saved", turns: [{ items: [{ id: "recovered", type: "agentMessage", text: "Recovered history" }] }],
+    } });
+    await act(async () => {
+      await result.current.resumeThreadForWorkspace("one", "saved");
+    });
+    expect(result.current.state.itemsByThread.saved[0]).toMatchObject({
+      id: "recovered", text: "Recovered history",
+    });
+    expect(result.current.state.historyPreviewByThread.saved).toBeUndefined();
+  });
+
+  it("preserves live updates delivered in the same batch as a resume response", async () => {
+    const ready = deferred<unknown>();
+    resumeThread.mockReturnValueOnce(ready.promise);
+    const thread = { id: "saved", turns: [{ items: [{ id: "answer", type: "agentMessage", text: "Saved" }] }] };
+    readThread.mockResolvedValueOnce({ thread });
+    const { result } = setup();
+    let pending!: Promise<string | null>;
+    await act(async () => {
+      pending = result.current.resumeThreadForWorkspace("one", "saved");
+    });
+    await act(async () => {
+      result.current.dispatch({ type: "ensureThread", workspaceId: "one", threadId: "saved" });
+      result.current.dispatch({ type: "appendAgentDelta", workspaceId: "one", threadId: "saved", itemId: "live", delta: "Live answer", hasCustomName: false });
+      result.current.dispatch({ type: "markProcessing", threadId: "saved", isProcessing: true, timestamp: 1 });
+      ready.resolve({ thread });
+      await pending;
+    });
+    expect(result.current.state.itemsByThread.saved.map((item) => item.id)).toEqual(["answer", "live"]);
+    expect(result.current.state.threadStatusById.saved.isProcessing).toBe(true);
+  });
+
+  it("keeps a newly started turn active before its first message arrives", async () => {
+    const ready = deferred<unknown>();
+    resumeThread.mockReturnValueOnce(ready.promise);
+    const thread = { id: "saved", turns: [{ items: [{ id: "answer", type: "agentMessage", text: "Saved" }] }] };
+    readThread.mockResolvedValueOnce({ thread });
+    const { result } = setup();
+    let pending!: Promise<string | null>;
+    await act(async () => {
+      pending = result.current.resumeThreadForWorkspace("one", "saved");
+    });
+    await act(async () => {
+      result.current.dispatch({ type: "ensureThread", workspaceId: "one", threadId: "saved" });
+      result.current.dispatch({ type: "markProcessing", threadId: "saved", isProcessing: true, timestamp: 1 });
+      result.current.dispatch({ type: "setActiveTurnId", threadId: "saved", turnId: "new-turn" });
+      ready.resolve({ thread });
+      await pending;
+    });
+    expect(result.current.state.threadStatusById.saved.isProcessing).toBe(true);
+    expect(result.current.state.activeTurnIdByThread.saved).toBe("new-turn");
+  });
+
   it("batches project-scoped listings and preserves sessions saved before a directory change", async () => {
     const first = workspace("one");
     const second = workspace("two", "/another/root");

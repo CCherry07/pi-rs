@@ -443,6 +443,7 @@ mod tests {
             let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
             Ok(pi_js_plugin::JsGenerationManifest {
                 generation_id: format!("js-{generation}"),
+                dynamic_hooks: false,
                 agent_plugins: vec![pi_js_plugin::JsAgentPluginManifest {
                     id: "reload-fixture".to_string(),
                     tools: Vec::new(),

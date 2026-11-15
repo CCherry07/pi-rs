@@ -146,6 +146,15 @@ impl SessionStore {
         Ok(state.document(header))
     }
 
+    /// Reads history for display without preparing a runtime or modifying the file.
+    /// See [`crate::SessionTranscript`] for the projection's scope.
+    pub fn read_transcript(
+        path: impl AsRef<Path>,
+    ) -> Result<crate::SessionTranscript, HistoryError> {
+        let (header, state, _repair) = load_file_for(path.as_ref(), ReadMode::Transcript)?;
+        state.into_transcript(header)
+    }
+
     fn from_parts(
         path: PathBuf,
         header: SessionHeader,
@@ -850,16 +859,14 @@ fn decode_mutation(
 fn decode_mutations_parallel(
     lines: &[&[u8]],
     source: &Arc<Vec<u8>>,
+    mode: ReadMode,
 ) -> Vec<Result<SessionMutation, MutationDecodeError>> {
     let workers = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(PARALLEL_REPLAY_MAX_WORKERS)
         .min(lines.len());
     if workers <= 1 {
-        return lines
-            .iter()
-            .map(|line| decode_mutation(line, source))
-            .collect();
+        return lines.iter().map(|line| mode.decode(line, source)).collect();
     }
 
     let chunk_size = lines.len().div_ceil(workers);
@@ -871,7 +878,7 @@ fn decode_mutations_parallel(
                 scope.spawn(move || {
                     chunk
                         .iter()
-                        .map(|line| decode_mutation(line, &source))
+                        .map(|line| mode.decode(line, &source))
                         .collect::<Vec<_>>()
                 })
             })
@@ -912,6 +919,34 @@ fn replay_capacities(lines: &[&[u8]]) -> (usize, usize) {
 }
 
 fn load_file(path: &Path) -> Result<(SessionHeader, SessionState, TailRepair), HistoryError> {
+    load_file_for(path, ReadMode::Complete)
+}
+
+#[derive(Clone, Copy)]
+enum ReadMode {
+    Complete,
+    Transcript,
+}
+
+impl ReadMode {
+    fn decode(
+        self,
+        line: &[u8],
+        source: &Arc<Vec<u8>>,
+    ) -> Result<SessionMutation, MutationDecodeError> {
+        if matches!(self, Self::Transcript)
+            && let Ok(custom) = super::transcript::decode_custom_mutation(line)
+        {
+            return Ok(custom);
+        }
+        decode_mutation(line, source)
+    }
+}
+
+fn load_file_for(
+    path: &Path,
+    mode: ReadMode,
+) -> Result<(SessionHeader, SessionState, TailRepair), HistoryError> {
     let bytes = Arc::new(std::fs::read(path)?);
     if bytes.is_empty() {
         return Err(HistoryError::MissingHeader);
@@ -947,12 +982,12 @@ fn load_file(path: &Path) -> Result<(SessionHeader, SessionState, TailRepair), H
     let mut offset = header_line.len() + usize::from(lines.len() > 1 || terminated);
     let mut decoded = (lines.len().saturating_sub(1) >= PARALLEL_REPLAY_MIN_MUTATIONS
         && bytes.len() >= PARALLEL_REPLAY_MIN_BYTES)
-        .then(|| decode_mutations_parallel(&lines[1..], &bytes).into_iter());
+        .then(|| decode_mutations_parallel(&lines[1..], &bytes, mode).into_iter());
     for (index, line) in lines.iter().enumerate().skip(1) {
         let line_number = index + 1;
         let is_last = index == lines.len() - 1;
         let result = decoded.as_mut().map_or_else(
-            || decode_mutation(line, &bytes),
+            || mode.decode(line, &bytes),
             |decoded| {
                 decoded
                     .next()

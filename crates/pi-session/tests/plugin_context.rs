@@ -84,6 +84,57 @@ async fn ui_availability_requires_both_tui_mode_and_a_frontend_bridge() {
     assert!(!noninteractive.context().ui.is_available().unwrap());
 }
 
+/// A graphical frontend that answers yes/no natively but renders no plugin
+/// surfaces, as Desktop does in RPC presentation mode.
+struct SemanticConfirmBridge {
+    answer: bool,
+    asked: Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl PluginUiBridge for SemanticConfirmBridge {
+    async fn confirm(&self, title: String, message: String) -> Result<Option<bool>, String> {
+        self.asked.lock().unwrap().push((title, message));
+        Ok(Some(self.answer))
+    }
+
+    fn supports_confirm(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn rpc_frontends_answer_semantic_confirmations_without_plugin_surfaces() {
+    for answer in [true, false] {
+        let bridge = Arc::new(SemanticConfirmBridge {
+            answer,
+            asked: Mutex::new(Vec::new()),
+        });
+        let epoch = pi_plugin::PluginContextEpoch::new(Arc::new(
+            PiPluginContext::new(PresentationMode::Rpc, true, PluginContextBinding::new())
+                .with_ui_bridge(bridge.clone()),
+        ));
+        let ui = epoch.context().ui;
+        assert!(!ui.is_available().unwrap());
+        assert!(ui.can_confirm().unwrap());
+        assert_eq!(ui.confirm("Send?", "向张三发送").await.unwrap(), answer);
+        assert_eq!(
+            bridge.asked.lock().unwrap().as_slice(),
+            [("Send?".to_string(), "向张三发送".to_string())]
+        );
+    }
+
+    // Without a bridge, an RPC confirmation can never be answered yes.
+    let unbridged = pi_plugin::PluginContextEpoch::new(Arc::new(PiPluginContext::new(
+        PresentationMode::Rpc,
+        true,
+        PluginContextBinding::new(),
+    )));
+    let ui = unbridged.context().ui;
+    assert!(!ui.can_confirm().unwrap());
+    assert!(!ui.confirm("Send?", "x").await.unwrap());
+}
+
 #[pi_plugin::plugin]
 impl Plugin for NativeContextProbe {
     fn id(&self) -> pi_core::PluginId {

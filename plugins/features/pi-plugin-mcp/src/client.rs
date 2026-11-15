@@ -15,7 +15,10 @@ use pi_core::{
     ContentBlock, ImageContent, PluginId, TextContent, ToolCallId, ToolExecutionMode, ToolResult,
     ToolSpec,
 };
-use pi_plugin::{Plugin, RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink};
+use pi_plugin::{
+    AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, Plugin, PluginError,
+    RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink,
+};
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, ClientRequest, ContentBlock as McpContentBlock,
     ServerResult, Tool as McpToolSpec,
@@ -195,6 +198,7 @@ struct McpPool {
 
 struct ConnectedServer {
     name: String,
+    instructions: Option<String>,
     peer: Peer<RoleClient>,
     service: Mutex<Option<RunningService<RoleClient, ()>>>,
 }
@@ -237,9 +241,7 @@ impl McpToolSet {
 
     /// Returns a fresh plugin wrapper backed by the connected client pool.
     pub fn plugin(&self) -> Arc<dyn Plugin> {
-        Arc::new(McpToolPlugin {
-            pool: Arc::clone(&self.inner),
-        })
+        Arc::new(McpToolPlugin { pool: self.clone() })
     }
 
     pub fn tools(&self) -> Vec<McpToolDescriptor> {
@@ -248,6 +250,32 @@ impl McpToolSet {
             .iter()
             .map(|tool| tool.descriptor.clone())
             .collect()
+    }
+
+    pub(crate) fn prompt_patch(&self, event: BeforeAgentStartEvent) -> BeforeAgentStartPatch {
+        let active: HashSet<_> = event.active_tools.iter().map(String::as_str).collect();
+        let mut prompt = event.system_prompt;
+        let mut changed = false;
+        for server in &self.inner.servers {
+            let Some(instructions) = &server.instructions else {
+                continue;
+            };
+            if !self.inner.tools.iter().any(|tool| {
+                Arc::ptr_eq(&tool.server, server) && active.contains(tool.descriptor.name.as_str())
+            }) {
+                continue;
+            }
+            prompt.push_str(&format!(
+                "\n\nInstructions for MCP tools with prefix `mcp__{}__`:\n{}",
+                identifier_component(&server.name),
+                instructions
+            ));
+            changed = true;
+        }
+        BeforeAgentStartPatch {
+            system_prompt: changed.then_some(prompt),
+            ..BeforeAgentStartPatch::default()
+        }
     }
 
     /// Closes all transports and waits for child-process cleanup.
@@ -344,8 +372,15 @@ async fn connect_once(
 }
 
 fn connected_server(name: String, service: RunningService<RoleClient, ()>) -> Arc<ConnectedServer> {
+    let instructions = service
+        .peer()
+        .peer_info()
+        .and_then(|info| info.instructions.clone())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     Arc::new(ConnectedServer {
         name,
+        instructions,
         peer: service.peer().clone(),
         service: Mutex::new(Some(service)),
     })
@@ -424,7 +459,7 @@ fn http_headers(
 }
 
 struct McpToolPlugin {
-    pool: Arc<McpPool>,
+    pool: McpToolSet,
 }
 
 #[pi_plugin::plugin]
@@ -434,10 +469,18 @@ impl Plugin for McpToolPlugin {
     }
 
     fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
-        for tool in &self.pool.tools {
+        for tool in &self.pool.inner.tools {
             context.register_tool(tool.clone())?;
         }
         Ok(())
+    }
+
+    async fn before_agent_start(
+        &self,
+        _context: AgentPluginContext,
+        event: BeforeAgentStartEvent,
+    ) -> Result<BeforeAgentStartPatch, PluginError> {
+        Ok(self.pool.prompt_patch(event))
     }
 }
 
@@ -445,10 +488,22 @@ struct McpTool {
     server: Arc<ConnectedServer>,
     remote_name: String,
     descriptor: McpToolDescriptor,
+    execution_mode: ToolExecutionMode,
 }
 
 impl McpTool {
     fn new(server: Arc<ConnectedServer>, remote: McpToolSpec) -> Self {
+        // Read-only hints affect scheduling only, never authorization. Unknown
+        // or mutating tools must finish before subsequent calls can observe them.
+        let execution_mode = if remote
+            .annotations
+            .as_ref()
+            .is_some_and(|annotations| annotations.read_only_hint == Some(true))
+        {
+            ToolExecutionMode::Parallel
+        } else {
+            ToolExecutionMode::Sequential
+        };
         let remote_name = remote.name.into_owned();
         let label = remote
             .title
@@ -476,6 +531,7 @@ impl McpTool {
             },
             server,
             remote_name,
+            execution_mode,
         }
     }
 }
@@ -488,7 +544,7 @@ impl Tool for McpTool {
             label: self.descriptor.label.clone(),
             description: self.descriptor.description.clone(),
             parameters: self.descriptor.parameters.clone(),
-            execution_mode: ToolExecutionMode::Parallel,
+            execution_mode: self.execution_mode,
             prompt_snippet: None,
             prompt_guidelines: Vec::new(),
         }
@@ -627,7 +683,9 @@ mod tests {
     #[tool_handler]
     impl ServerHandler for EchoServer {
         fn get_info(&self) -> ServerInfo {
-            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
+            info.instructions = Some("  Echo server usage guidance.  ".into());
+            info
         }
     }
 
@@ -644,11 +702,12 @@ mod tests {
         let tool = McpTool::new(Arc::clone(&connected), remote);
 
         assert_eq!(tool.spec().name, "mcp__fixture_server__echo");
+        assert_eq!(tool.spec().execution_mode, ToolExecutionMode::Sequential);
         let (_abort, signal) = pi_core::AbortHandle::new();
         let (updates, _receiver) = ToolUpdateSink::channel();
         let result = tool
             .execute(
-                ToolContext::standalone(PathBuf::from("/tmp"), signal),
+                ToolContext::standalone(PathBuf::from("/tmp"), signal.clone()),
                 "call-1".into(),
                 serde_json::json!({"text":"hello"}),
                 updates,
@@ -661,6 +720,44 @@ mod tests {
             vec![ContentBlock::Text(TextContent::new("hello"))]
         );
         assert!(!result.is_error);
+        let pool = McpToolSet {
+            inner: Arc::new(McpPool {
+                servers: vec![Arc::clone(&connected)],
+                tools: vec![Arc::new(tool)],
+            }),
+        };
+        let (driver, _) = pi_plugin::RegistriesBuilder::new()
+            .register_plugins(vec![pool.plugin()])
+            .unwrap();
+        for enabled in [true, true, false] {
+            let patch = driver
+                .before_agent_start(
+                    &pi_core::RunId::next(),
+                    std::path::Path::new("/tmp"),
+                    &signal,
+                    BeforeAgentStartEvent {
+                        system_prompt: "base".into(),
+                        input_messages: vec![],
+                        active_tools: if enabled {
+                            vec!["mcp__fixture_server__echo".into()]
+                        } else {
+                            vec![]
+                        },
+                        provider_id: pi_core::ProviderId::new("scripted"),
+                        model_id: pi_core::ModelId::new("test"),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                patch.system_prompt.as_deref(),
+                Some(if enabled {
+                    "base\n\nInstructions for MCP tools with prefix `mcp__fixture_server__`:\nEcho server usage guidance."
+                } else {
+                    "base"
+                })
+            );
+        }
         connected
             .service
             .lock()

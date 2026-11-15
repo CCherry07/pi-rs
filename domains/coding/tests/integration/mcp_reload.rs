@@ -10,7 +10,11 @@ use pi_session::PiSession;
 use serde_json::{Value, json};
 
 // A deterministic local provider drives the public Session tool-execution capability.
-async fn fixture_provider_response(axum::Json(request): axum::Json<Value>) -> impl IntoResponse {
+async fn fixture_provider_response(
+    axum::extract::State(requests): axum::extract::State<Arc<RwLock<Vec<Value>>>>,
+    axum::Json(request): axum::Json<Value>,
+) -> impl IntoResponse {
+    requests.write().unwrap().push(request.clone());
     let completed = request["messages"]
         .as_array()
         .unwrap()
@@ -56,6 +60,7 @@ struct McpFixture {
     session: PiSession,
     url: String,
     tool_name: Arc<RwLock<String>>,
+    requests: Arc<RwLock<Vec<Value>>>,
     server_task: tokio::task::JoinHandle<()>,
 }
 
@@ -84,7 +89,8 @@ impl McpFixture {
                             "initialize" => json!({
                                 "protocolVersion": "2025-03-26",
                                 "capabilities": {"tools": {}},
-                                "serverInfo": {"name": "reload-fixture", "version": "1"}
+                                "serverInfo": {"name": "reload-fixture", "version": "1"},
+                                "instructions": format!("Fixture guidance for {}.", tool_name.read().unwrap())
                             }),
                             "tools/list" => json!({"tools": [{
                                 "name": tool_name.read().unwrap().clone(),
@@ -101,10 +107,13 @@ impl McpFixture {
                 }
             }),
         );
-        let router = router.route(
-            "/v1/chat/completions",
-            axum::routing::post(fixture_provider_response),
-        );
+        let requests = Arc::new(RwLock::new(Vec::new()));
+        let router = router
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(fixture_provider_response),
+            )
+            .with_state(Arc::clone(&requests));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
         let server_task = tokio::spawn(async move {
@@ -152,6 +161,7 @@ impl McpFixture {
             session,
             url,
             tool_name,
+            requests,
             server_task,
         }
     }
@@ -254,6 +264,73 @@ impl Drop for McpFixture {
     fn drop(&mut self) {
         self.server_task.abort();
     }
+}
+
+#[tokio::test]
+async fn mcp_guidance_reaches_the_main_model_and_tracks_generation_replacement() {
+    let fixture = McpFixture::new(true).await;
+    let assert_guidance = |expected: Option<&str>| {
+        let requests = fixture.requests.read().unwrap();
+        let request = requests.last().expect("main provider request");
+        let prompt = request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| matches!(message["role"].as_str(), Some("system" | "developer")))
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            prompt.matches("Fixture guidance for").count(),
+            usize::from(expected.is_some())
+        );
+        if let Some(expected) = expected {
+            assert!(
+                prompt.contains(expected),
+                "missing current server instructions"
+            );
+            assert!(prompt.contains("mcp__fixture__"));
+        }
+    };
+
+    let pi_session::PromptOutcome::Agent(outcome) = fixture
+        .session
+        .current()
+        .prompt("Call the fixture MCP tool.")
+        .await
+        .unwrap()
+    else {
+        panic!("expected the main agent loop");
+    };
+    assert!(outcome.new_messages.iter().any(|message| matches!(message,
+        pi_core::Message::ToolResult(result) if result.tool_name == "mcp__fixture__echo" && !result.is_error
+    )));
+    assert_guidance(Some("Fixture guidance for echo."));
+
+    *fixture.tool_name.write().unwrap() = "renamed".into();
+    fixture.session.current().prompt("Continue.").await.unwrap();
+    // Instructions are a generation snapshot and do not accumulate between runs.
+    assert_guidance(Some("Fixture guidance for echo."));
+
+    fixture.session.reload().await.unwrap();
+    fixture
+        .session
+        .current()
+        .prompt("Continue after reload.")
+        .await
+        .unwrap();
+    assert_guidance(Some("Fixture guidance for renamed."));
+
+    fixture.set_enabled(false);
+    fixture.session.reload().await.unwrap();
+    fixture
+        .session
+        .current()
+        .prompt("Continue without MCP.")
+        .await
+        .unwrap();
+    assert_guidance(None);
+    fixture.shutdown().await;
 }
 
 #[tokio::test]

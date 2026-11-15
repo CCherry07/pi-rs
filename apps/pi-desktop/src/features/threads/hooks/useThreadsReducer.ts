@@ -22,6 +22,7 @@ type ThreadActivityStatus = {
 export type ThreadState = {
   activeThreadIdByWorkspace: Record<string, string | null>;
   itemsByThread: Record<string, ConversationItem[]>;
+  historyPreviewByThread: Record<string, boolean>;
   contextInheritanceByThread: Record<string, ThreadContextInheritance | null>;
   commandsByThread: Record<string, RuntimeCommand[]>;
   maxItemsPerThread: number | null;
@@ -40,6 +41,22 @@ export type ThreadState = {
 };
 
 export type ThreadAction =
+  | {
+      type: "hydrateThreadPreview";
+      threadId: string;
+      items: ConversationItem[];
+      contextInheritance: ThreadContextInheritance | null;
+    }
+  | {
+      type: "hydrateResumedThread";
+      threadId: string;
+      items: ConversationItem[];
+      contextInheritance: ThreadContextInheritance | null;
+      replaceLocal: boolean;
+      isProcessing: boolean;
+      timestamp: number;
+      turnId: string | null;
+    }
   | { type: "setActiveThreadId"; workspaceId: string; threadId: string | null }
   | {
       type: "replaceThread";
@@ -187,6 +204,7 @@ export type ThreadAction =
 const emptyItems: Record<string, ConversationItem[]> = {};
 
 export const initialState: ThreadState = {
+  historyPreviewByThread: {},
   activeThreadIdByWorkspace: {},
   itemsByThread: emptyItems,
   contextInheritanceByThread: {},
@@ -222,6 +240,74 @@ export function threadReducer(
   state: ThreadState,
   action: ThreadAction,
 ): ThreadState {
+  const next = reduceThread(state, action);
+  if (
+    action.type !== "hydrateThreadPreview" &&
+    action.type !== "addNotice" &&
+    "threadId" in action &&
+    action.threadId
+  ) {
+    const id = action.threadId;
+    const startedTurn =
+      (action.type === "markProcessing" && action.isProcessing) ||
+      (action.type === "setActiveTurnId" && action.turnId !== null);
+    if (
+      state.historyPreviewByThread[id] !== undefined &&
+      (startedTurn || next.itemsByThread[id] !== state.itemsByThread[id])
+    ) {
+      const historyPreviewByThread = { ...next.historyPreviewByThread };
+      delete historyPreviewByThread[id];
+      return { ...next, historyPreviewByThread };
+    }
+  }
+  return next;
+}
+
+function reduceThread(state: ThreadState, action: ThreadAction): ThreadState {
+  if (action.type === "hydrateThreadPreview") {
+    // A slow disk snapshot must never replace live/optimistic messages.
+    const current = state.itemsByThread[action.threadId] ?? [];
+    if (current.some((item) => item.kind !== "tool" || item.toolType !== "notice")) {
+      return state;
+    }
+    const next = reduceThreadItems(state, {
+      ...action,
+      type: "setThreadItems",
+      items: [...action.items, ...current],
+    });
+    return {
+      ...next,
+      historyPreviewByThread: {
+        ...next.historyPreviewByThread,
+        [action.threadId]: !(
+          state.threadStatusById[action.threadId]?.isProcessing ||
+          state.activeTurnIdByThread[action.threadId]
+        ),
+      },
+    };
+  }
+  if (action.type === "hydrateResumedThread") {
+    // Only a preview is replaceable automatically. Events arriving since the
+    // request began take precedence, even when React batches both updates.
+    if (
+      !action.replaceLocal &&
+      !state.historyPreviewByThread[action.threadId] &&
+      state.itemsByThread[action.threadId]?.length
+    ) {
+      return state;
+    }
+    const ids = new Set(action.items.map((item) => item.id));
+    const notices = (state.itemsByThread[action.threadId] ?? []).filter(
+      (item) => item.kind === "tool" && item.toolType === "notice" && !ids.has(item.id),
+    );
+    let next = reduceThreadItems(state, {
+      ...action,
+      type: "setThreadItems",
+      items: [...action.items, ...notices],
+    });
+    next = reduceThreadLifecycle(next, { ...action, type: "markProcessing" });
+    return reduceThreadLifecycle(next, { ...action, type: "setActiveTurnId" });
+  }
   if (action.type === "replaceThread") {
     // Keep transient notices on reload without duplicating persisted snapshot errors.
     const snapshotIds = new Set(action.items.map((item) => item.id));

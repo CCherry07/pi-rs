@@ -77,6 +77,16 @@ session replacement; native commands may also use the runtime reload/navigation 
 
 ## Session lists and rendering
 
+Opening a saved conversation reads and displays its history while the runtime and MCP tools
+prepare in parallel. History inspection runs off the async executor and never creates a runtime,
+connects tools, or modifies the session file. Session ID discovery reads JSONL headers rather than
+replaying unrelated conversations. The ready runtime supplies commands, model state and the
+authoritative transcript; late history responses cannot overwrite it or newer live messages.
+If preparation fails, the saved conversation remains visible with an error and can be retried.
+Ordinary saved conversations use the native transcript reader: it skips opaque plugin-state
+payloads and full operation-log copies, while retaining displayed messages, branch selection,
+compaction/context edits and usage. The source JSONL and runtime restoration keep complete state.
+
 Session listing batches all requested Projects in one native scan. The native index reuses JSONL
 summaries when the path, modification time and size are unchanged, and refreshes changed or moved
 files. Lists follow the stored Project identity, so editing a Project's directories does not hide

@@ -40,6 +40,15 @@ pub trait PluginUiBridge: Send + Sync {
     ) -> Result<pi_plugin::UiSurfaceEvent, String> {
         Err("extension surfaces unavailable".into())
     }
+    /// Semantic yes/no prompt for frontends that do not render declarative
+    /// plugin surfaces (Desktop in RPC mode). `None` means unsupported.
+    async fn confirm(&self, _title: String, _message: String) -> Result<Option<bool>, String> {
+        Ok(None)
+    }
+    /// True when `confirm` reaches a person.
+    fn supports_confirm(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]

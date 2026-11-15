@@ -3,7 +3,7 @@ import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PiEvent, WorkspaceInfo } from "@/types";
 import { subscribePiEvents } from "@/services/events";
-import { prepareThread, resumeThread, startThread } from "@services/tauri";
+import { prepareThread, readThread, resumeThread, startThread } from "@services/tauri";
 import { useThreads } from "./useThreads";
 
 vi.mock("@/services/events", () => ({
@@ -161,6 +161,12 @@ describe("useThreads selected conversation", () => {
 
   it("discards a pending resume after an authoritative same-ID replacement", async () => {
     let resolve!: (response: Record<string, unknown>) => void;
+    let resolveHistory!: (response: Record<string, unknown>) => void;
+    vi.mocked(readThread).mockReturnValueOnce(
+      new Promise((complete) => {
+        resolveHistory = complete;
+      }),
+    );
     vi.mocked(resumeThread).mockReturnValueOnce(
       new Promise((complete) => {
         resolve = complete;
@@ -188,6 +194,7 @@ describe("useThreads selected conversation", () => {
         },
       });
       resolve({ thread: { ...child, contextOrigin, inheritedContext } });
+      resolveHistory({ thread: { ...child, contextOrigin, inheritedContext } });
     });
     expect(result.current.activeContextInheritance).toBeNull();
     expect(result.current.activeItems).toEqual([
