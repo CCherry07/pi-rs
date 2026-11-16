@@ -48,10 +48,7 @@ impl BuiltinProviderSet {
         dynamic: Option<&crate::dynamic_providers::DynamicProviderCandidate>,
     ) -> Result<Self, RuntimeError> {
         let mut providers = Self::prepare(config)?;
-        let mut options = pi_plugin_models::ModelsPluginOptions::for_agent_dir(&config.agent_dir);
-        if let Some(key) = &config.api_key {
-            options = options.runtime_api_key(config.provider.clone(), key.clone());
-        }
+        let mut options = providers.model_options(config);
         if let Some(dynamic) = dynamic {
             for (id, value) in dynamic.provider_configs() {
                 options = options.extension_provider_config(id, value);
@@ -202,6 +199,58 @@ impl BuiltinProviderSet {
             stored_bedrock,
             codex_credentials,
         })
+    }
+
+    /// Coding supplies credential sources; the provider plugin owns typed catalogs and protocols.
+    pub(crate) fn model_options(&self, config: &Config) -> pi_plugin_models::ModelsPluginOptions {
+        use pi_provider::CredentialKind;
+        use std::collections::BTreeMap;
+
+        let mut options = pi_plugin_models::ModelsPluginOptions::for_agent_dir(&config.agent_dir)
+            .with_builtin_specialized_models();
+        let mut environments = BTreeMap::from([
+            ("openai".to_owned(), vec!["OPENAI_API_KEY"]),
+            ("openrouter".to_owned(), vec!["OPENROUTER_API_KEY"]),
+            ("typesafe".to_owned(), vec!["TYPESAFE_API_KEY"]),
+            (
+                "cloudflare-workers-ai".to_owned(),
+                vec!["CLOUDFLARE_API_TOKEN"],
+            ),
+        ]);
+        for id in self.stored_credentials.keys() {
+            environments.entry(id.clone()).or_default();
+        }
+        environments.entry(config.provider.clone()).or_default();
+        for (id, variables) in environments {
+            let explicit = selected_api_key(config, &id);
+            // Match the host's availability snapshot without running secret commands
+            // or refreshing OAuth. Specialized builtins require API-key credentials.
+            let available = explicit.as_ref().is_some_and(|key| !key.trim().is_empty())
+                || variables
+                    .iter()
+                    .any(|key| std::env::var(key).is_ok_and(|value| !value.trim().is_empty()))
+                || self.stored_credentials.get(&id).is_some_and(|credential| {
+                    !credential.is_oauth() && credential.secret().is_some()
+                });
+            let environment = variables
+                .into_iter()
+                .map(|key| (key.to_owned(), CredentialKind::ApiKey))
+                .collect();
+            options = options.credential_source(
+                id.clone(),
+                Arc::new(StoredCredentialSource::new(
+                    &config.agent_dir,
+                    &id,
+                    explicit,
+                    environment,
+                )),
+                available,
+            );
+        }
+        if let Some(key) = &config.api_key {
+            options = options.runtime_api_key(config.provider.clone(), key.clone());
+        }
+        options
     }
 
     pub(crate) fn models_snapshot(&self) -> Option<pi_plugin_models::ModelsPlugin> {

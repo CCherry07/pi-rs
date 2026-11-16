@@ -535,6 +535,12 @@ async fn run_loop(
                 last_batch_terminated = batch.terminate;
                 tool_results = batch.messages;
                 for result in &tool_results {
+                    if !result.is_error
+                        && let Some(names) = &result.added_tool_names
+                    {
+                        let additions = registries.tool_additions(names, &context.active_tools);
+                        Arc::make_mut(&mut context).active_tools.extend(additions);
+                    }
                     let message = Message::tool_result(result.clone());
                     Arc::make_mut(&mut context).messages.push(message.clone());
                     Arc::make_mut(&mut new_messages).push(message);
@@ -644,7 +650,11 @@ async fn stream_assistant_response(
     let request = ProviderRequest {
         model: config.model_id.clone(),
         model_spec,
-        system_prompt: context.system_prompt.clone(),
+        system_prompt: crate::namespace_prompt::with_instructions(
+            &context.system_prompt,
+            &registries,
+            &context.active_tools,
+        ),
         messages: request_messages,
         tools,
         thinking_level: config.thinking_level,
@@ -655,6 +665,7 @@ async fn stream_assistant_response(
         session_id: config.session_id.clone(),
     };
 
+    events.record_context_request(&request);
     let call_context = ProviderCallContext::new(
         generation,
         config.cwd.clone(),

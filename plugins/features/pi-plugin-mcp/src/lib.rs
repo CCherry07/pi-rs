@@ -7,9 +7,15 @@
 //! and prepares a plugin with discovered tools plus `/mcp`, using the caller's trust decision.
 
 mod client;
+mod client_handler;
 pub mod config;
+mod directory;
 mod library;
+mod naming;
 mod plugin;
+mod policy;
+mod resources;
+mod result;
 
 pub use client::{
     McpError, McpServerConfig, McpToolDescriptor, McpToolSet, McpTransport, validate_configs,

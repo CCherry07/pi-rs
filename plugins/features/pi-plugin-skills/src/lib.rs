@@ -450,11 +450,12 @@ impl Plugin for SkillsPlugin {
             |projector| projector.project(&event, &self.catalog),
         );
         let catalog = format_skills_for_prompt(projection.skills());
-        if catalog.is_empty() {
+        if catalog.prompt.is_empty() {
             return Ok(BeforeAgentStartPatch::default());
         }
         Ok(BeforeAgentStartPatch {
-            system_prompt: Some(format!("{}{catalog}", event.system_prompt)),
+            prompt_contributions: catalog.contributions,
+            system_prompt: Some(format!("{}{}", event.system_prompt, catalog.prompt)),
             messages: Vec::new(),
         })
     }
@@ -712,27 +713,45 @@ fn parse_skill_document(
     }))
 }
 
-fn format_skills_for_prompt(skills: &[SkillInfo]) -> String {
+#[derive(Default)]
+struct FormattedSkillPrompt {
+    prompt: String,
+    contributions: Vec<pi_core::PromptContribution>,
+}
+
+fn format_skills_for_prompt(skills: &[SkillInfo]) -> FormattedSkillPrompt {
     let visible = skills
         .iter()
         .filter(|skill| !skill.disable_model_invocation)
         .collect::<Vec<_>>();
     if visible.is_empty() {
-        return String::new();
+        return FormattedSkillPrompt::default();
     }
     let mut prompt = String::from(
         "\n\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nWhen a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.\n\n<available_skills>\n",
     );
+    let mut contributions = Vec::with_capacity(visible.len());
     for skill in visible {
-        prompt.push_str(&format!(
+        let entry = format!(
             "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n    <location>{}</location>\n  </skill>\n",
             escape_xml(&skill.name),
             escape_xml(&skill.description),
             escape_xml(&slash_path(&skill.file_path))
-        ));
+        );
+        prompt.push_str(&entry);
+        contributions.push(pi_core::PromptContribution {
+            category: pi_core::ContextCategory::Skills,
+            name: skill.name.clone(),
+            text: entry,
+        });
     }
     prompt.push_str("</available_skills>");
-    prompt
+    // Shared catalog instructions and delimiters remain in System prompt.
+    // Skill rows measure only the advertised name, description and location.
+    FormattedSkillPrompt {
+        prompt,
+        contributions,
+    }
 }
 
 #[cfg(test)]
@@ -898,7 +917,15 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(patch.prompt_contributions.len(), 1);
+        assert_eq!(patch.prompt_contributions[0].name, "visible");
+        assert!(
+            !patch.prompt_contributions[0]
+                .text
+                .contains("visible content")
+        );
         let prompt = patch.system_prompt.unwrap();
+        assert!(prompt.contains(&patch.prompt_contributions[0].text));
         assert!(prompt.starts_with("base"));
         assert!(prompt.contains("<name>visible</name>"));
         assert!(!prompt.contains("<name>hidden</name>"));
@@ -906,7 +933,7 @@ mod tests {
 
     #[test]
     fn model_visible_catalog_escapes_every_xml_field_and_preserves_order() {
-        let prompt = format_skills_for_prompt(&[
+        let catalog = format_skills_for_prompt(&[
             SkillInfo {
                 name: "a&b".into(),
                 description: "Use <this> & \"that\" 'now'".into(),
@@ -930,6 +957,22 @@ mod tests {
             },
         ]);
 
+        let prompt = &catalog.prompt;
+        assert_eq!(
+            catalog
+                .contributions
+                .iter()
+                .map(|part| part.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a&b", "second"]
+        );
+        for part in &catalog.contributions {
+            assert_eq!(part.category, pi_core::ContextCategory::Skills);
+            assert!(prompt.contains(&part.text));
+            assert!(part.text.starts_with("  <skill>\n"));
+            assert!(part.text.ends_with("  </skill>\n"));
+            assert!(!part.text.contains("<available_skills>"));
+        }
         assert!(prompt.contains("<name>a&amp;b</name>"));
         assert!(prompt.contains(
             "<description>Use &lt;this&gt; &amp; &quot;that&quot; &apos;now&apos;</description>"

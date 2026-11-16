@@ -134,6 +134,26 @@ use the ephemeral Agent entry instead.
 runtime generation, including retirement; argument compatibility shims can therefore use the same
 typed product capabilities as execution without a separate adapter context.
 
+`ToolContext::nested_tools()` lists active direct and exposed deferred tools within the invocation's
+scope. `execute_tool(name, arguments, signal).await` runs one through the normal tool pipeline without
+adding an independent transcript message. The first version permits one nested level; nested child
+contexts have no further executor. Parent completion retires this capability and cancels outstanding
+calls. Started pipelines have a one-second grace period for interruption hooks before remaining async
+tasks are aborted and joined. `Tool::model_only()` excludes tools from scripts, and `Tool::structured_output(&result)` opts
+into structured nested output after result hooks; ordinary tools return joined text. Native plugins
+must rebuild for these trait and context changes under the existing exact-build fingerprint.
+
+`ModelsContext` also exposes typed chat/classifier/image catalog queries and the async `classify`
+and `generate_images` operations. `ProviderRegisterContext` registers or replaces typed catalogs;
+`Provider` may implement these operations without implementing chat streaming. The frozen
+`ModelRuntime` remains generation-local. Existing chat model selection and session wire data stay
+unchanged. Model IDs resolve against host metadata; plugins never receive resolved credentials from
+catalog queries. `ToolContext::record_usage(&Usage)` attributes completed side-call usage to an
+interrupted invocation; normal tool results must still carry their own aggregate usage. The ledger
+is inactive outside an invocation and retires with it. Native plugins must rebuild against this SDK
+for the extended provider/context traits and typed values; the existing exact-build fingerprint
+rejects previous artifacts before constructor resolution. Descriptor and loading policy are unchanged.
+
 Registered commands receive the stronger `CommandContext`; session replacement and navigation are
 unavailable on ordinary hooks and tools:
 
@@ -304,6 +324,16 @@ unification in a host workspace cannot silently change that Rust-ABI type's layo
 The current contract is native ABI **35**. Messages now include a typed `System` variant,
 and assistant/response metadata carry optional `providerThinkingLevel`. Rebuild native plugins
 against this SDK; older descriptors are rejected before constructors are resolved.
+
+The current source fingerprint also covers `BeforeAgentStartPatch::prompt_contributions` and
+`ToolDiscovery::origin`. Source fragments are optional accounting metadata; they do not change
+prompt text or tool exposure. Rebuild native plugins against the exact SDK after these layout changes.
+
+The current source fingerprint also covers `Tool::reaches_tools` and the Session capability query
+and active-selection setter. Tools that execute or activate other tools should opt into the marker;
+ordinary tools default to false. Retained Session capabilities reject selection/query calls after
+generation retirement. Rebuild native plugins against this exact SDK after these contract changes;
+the existing constructor symbols and process-long library pinning are unchanged.
 
 ABI 34 introduced shared context snapshots. Context events and boundary-preview entry/message vectors
 use shared `Arc<Vec<_>>` snapshots. Read through the shared view; use `Arc::unwrap_or_clone` or

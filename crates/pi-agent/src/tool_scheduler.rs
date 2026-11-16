@@ -13,6 +13,10 @@ use pi_plugin::{
 
 use crate::AgentEventSink;
 
+mod nested;
+
+use nested::{InvocationLifetime, InvocationNestedExecutor};
+
 #[derive(Debug, thiserror::Error)]
 pub enum SchedulerError {
     #[error("event dispatch failed: {0}")]
@@ -31,6 +35,7 @@ enum PreparedToolCall {
         tool: Arc<dyn Tool>,
         context: ToolContext,
         args: serde_json::Value,
+        lifetime: InvocationLifetime,
     },
     Immediate {
         source_index: usize,
@@ -45,11 +50,17 @@ struct FinalizedToolCall {
     result: ToolResult,
 }
 
+#[derive(Clone)]
 pub struct ToolScheduler {
     registries: Arc<FrozenRegistries>,
     plugins: Arc<PluginDriver>,
     cwd: PathBuf,
     max_parallel_tools: usize,
+    nested_gate: Arc<tokio::sync::RwLock<()>>,
+    parent_call_id: Option<pi_core::ToolCallId>,
+    sequential_nested: bool,
+    nested_catalog: Option<Arc<Vec<pi_plugin::ToolInfo>>>,
+    nested_assistant: Option<Arc<AssistantMessage>>,
 }
 
 impl ToolScheduler {
@@ -64,6 +75,14 @@ impl ToolScheduler {
             plugins,
             cwd,
             max_parallel_tools: max_parallel_tools.max(1),
+            nested_gate: Arc::new(tokio::sync::RwLock::with_max_readers(
+                (),
+                max_parallel_tools.clamp(1, (u32::MAX >> 3) as usize) as u32,
+            )),
+            parent_call_id: None,
+            sequential_nested: false,
+            nested_catalog: None,
+            nested_assistant: None,
         }
     }
 
@@ -86,28 +105,39 @@ impl ToolScheduler {
                     .is_some_and(|tool| tool.spec().execution_mode == ToolExecutionMode::Sequential)
             });
 
+        let scheduler = Self {
+            sequential_nested: mode == ToolExecutionMode::Sequential,
+            nested_catalog: Some(Arc::new(
+                self.registries.nested_tools(&context.active_tools),
+            )),
+            nested_assistant: Some(Arc::new(assistant.clone())),
+            ..self.clone()
+        };
+
         if force_sequential {
-            self.execute_sequential(
-                run_id,
-                assistant,
-                &context,
-                calls,
-                signal,
-                events,
-                timestamp_ms,
-            )
-            .await
+            scheduler
+                .execute_sequential(
+                    run_id,
+                    assistant,
+                    &context,
+                    calls,
+                    signal,
+                    events,
+                    timestamp_ms,
+                )
+                .await
         } else {
-            self.execute_parallel(
-                run_id,
-                assistant,
-                &context,
-                calls,
-                signal,
-                events,
-                timestamp_ms,
-            )
-            .await
+            scheduler
+                .execute_parallel(
+                    run_id,
+                    assistant,
+                    &context,
+                    calls,
+                    signal,
+                    events,
+                    timestamp_ms,
+                )
+                .await
         }
     }
 
@@ -124,11 +154,21 @@ impl ToolScheduler {
     ) -> Result<ExecutedToolBatch, SchedulerError> {
         let mut messages = Vec::with_capacity(calls.len());
         let mut all_terminate = !calls.is_empty();
+        let mut discovery_active = context.active_tools.clone();
 
         for (source_index, call) in calls.into_iter().enumerate() {
             self.emit_start(&call, &signal, Arc::clone(&events)).await?;
             let prepared = self
-                .prepare_call(run_id, assistant, context, source_index, call, &signal)
+                .prepare_call(
+                    run_id,
+                    assistant,
+                    context,
+                    &discovery_active,
+                    source_index,
+                    call,
+                    &signal,
+                    Arc::clone(&events),
+                )
                 .await;
             let finalized = self
                 .execute_prepared(
@@ -143,10 +183,15 @@ impl ToolScheduler {
             self.emit_end(&finalized, &signal, Arc::clone(&events))
                 .await?;
             all_terminate &= finalized.result.terminate;
-            messages.push(
-                self.emit_result_message(&finalized, &signal, Arc::clone(&events), timestamp_ms)
-                    .await?,
-            );
+            let message = self
+                .emit_result_message(&finalized, &signal, Arc::clone(&events), timestamp_ms)
+                .await?;
+            if !message.is_error
+                && let Some(names) = &message.added_tool_names
+            {
+                discovery_active.extend(self.registries.tool_additions(names, &discovery_active));
+            }
+            messages.push(message);
 
             if signal.is_aborted() {
                 break;
@@ -180,7 +225,16 @@ impl ToolScheduler {
         for (source_index, call) in calls.into_iter().enumerate() {
             self.emit_start(&call, &signal, Arc::clone(&events)).await?;
             let prepared = self
-                .prepare_call(run_id, assistant, context, source_index, call, &signal)
+                .prepare_call(
+                    run_id,
+                    assistant,
+                    context,
+                    &context.active_tools,
+                    source_index,
+                    call,
+                    &signal,
+                    Arc::clone(&events),
+                )
                 .await;
             match prepared {
                 immediate @ PreparedToolCall::Immediate { .. } => {
@@ -321,14 +375,17 @@ impl ToolScheduler {
         Ok(Arc::unwrap_or_clone(message))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn prepare_call(
         &self,
         run_id: &RunId,
         assistant: &AssistantMessage,
         context: &Arc<AgentContext>,
+        discovery_active: &[String],
         source_index: usize,
         call: ToolCall,
         signal: &AbortSignal,
+        events: Arc<dyn AgentEventSink>,
     ) -> PreparedToolCall {
         if signal.is_aborted() {
             return PreparedToolCall::Immediate {
@@ -347,18 +404,43 @@ impl ToolScheduler {
             };
         };
 
-        let tool_context = ToolContext::with_plugin_context(
+        let lifetime = InvocationLifetime::new();
+        let mut tool_context = ToolContext::with_plugin_context(
             self.cwd.clone(),
-            signal.child(),
+            lifetime.signal(),
             self.plugins.context_parts(),
         )
-        .with_run_id(run_id.clone());
-        let args = match tool
-            .prepare_arguments(&tool_context, call.arguments.clone())
-            .await
-        {
+        .with_run_id(run_id.clone())
+        .with_discoverable_tools(self.registries.discoverable_tools(discovery_active));
+        // The first slice supports a model-issued compositor calling ordinary
+        // tools. Further nesting needs an explicit reentrant scheduling model;
+        // it must never silently bypass a sequential tool's exclusive lease.
+        if self.parent_call_id.is_none() {
+            let nested_tools = self.nested_catalog.clone().unwrap_or_default();
+            let executor = InvocationNestedExecutor::new(
+                self.clone(),
+                run_id.clone(),
+                self.nested_assistant
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(assistant.clone())),
+                Arc::clone(context),
+                call.clone(),
+                signal.clone(),
+                &lifetime,
+                events,
+                Arc::clone(&nested_tools),
+            );
+            tool_context = tool_context.with_nested_executor(nested_tools, Arc::new(executor));
+        }
+        let prepared = tokio::select! {
+            biased;
+            () = signal.wait() => Err(pi_plugin::ToolError::Aborted),
+            args = tool.prepare_arguments(&tool_context, call.arguments.clone()) => args,
+        };
+        let args = match prepared {
             Ok(args) => args,
             Err(error) => {
+                lifetime.settle().await;
                 return PreparedToolCall::Immediate {
                     source_index,
                     call,
@@ -367,6 +449,7 @@ impl ToolScheduler {
             }
         };
         if let Err(error) = tool.validate_arguments(&args) {
+            lifetime.settle().await;
             return PreparedToolCall::Immediate {
                 source_index,
                 call,
@@ -379,12 +462,21 @@ impl ToolScheduler {
             tool_call: call.clone(),
             validated_args: args.clone(),
             context: Arc::clone(context),
+            parent_tool_call_id: self.parent_call_id.clone(),
         };
-        match self
-            .plugins
-            .tool_call(run_id, &self.cwd, signal, event)
-            .await
-        {
+        let hook = tokio::select! {
+            biased;
+            () = signal.wait() => {
+                lifetime.settle().await;
+                return PreparedToolCall::Immediate {
+                    source_index,
+                    call,
+                    result: ToolResult::error("Operation aborted"),
+                };
+            },
+            hook = self.plugins.tool_call(run_id, &self.cwd, signal, event) => hook,
+        };
+        match hook {
             Ok(patch) => {
                 // Pi validates prepared provider arguments once, before the
                 // hook. Hook-owned replacements go directly to execution.
@@ -392,6 +484,7 @@ impl ToolScheduler {
                 if let Some(block) = patch.block {
                     let mut result = ToolResult::error(block.reason);
                     result.terminate = block.terminate;
+                    lifetime.settle().await;
                     PreparedToolCall::Immediate {
                         source_index,
                         call,
@@ -404,14 +497,20 @@ impl ToolScheduler {
                         tool,
                         context: tool_context,
                         args: patched_args,
+                        lifetime,
                     }
                 }
             }
-            Err(error) => PreparedToolCall::Immediate {
-                source_index,
-                call,
-                result: ToolResult::error(format!("Extension failed, blocking execution: {error}")),
-            },
+            Err(error) => {
+                lifetime.settle().await;
+                PreparedToolCall::Immediate {
+                    source_index,
+                    call,
+                    result: ToolResult::error(format!(
+                        "Extension failed, blocking execution: {error}"
+                    )),
+                }
+            }
         }
     }
 
@@ -443,14 +542,14 @@ impl ToolScheduler {
                 tool,
                 context,
                 args,
+                lifetime,
             } => {
                 let (updates, mut update_receiver) = ToolUpdateSink::channel();
-                let execution = tool.execute(context, call.id.clone(), args.clone(), updates);
-                tokio::pin!(execution);
+                let mut execution = tool.execute(context, call.id.clone(), args.clone(), updates);
                 let mut updates_open = true;
                 let mut interrupted = false;
 
-                let result = loop {
+                let mut result = loop {
                     tokio::select! {
                         biased;
                         () = signal.wait() => {
@@ -471,12 +570,24 @@ impl ToolScheduler {
                         }
                     }
                 };
+                // A cancelled compositor may own futures awaiting nested
+                // calls. Drop it first, then finish those tracked pipelines
+                // before the parent's result hook and terminal end event.
+                lifetime.close();
+                drop(execution);
+                let nested_usage = lifetime.settle().await;
+                if interrupted {
+                    result.usage = nested_usage;
+                }
                 // Dropping the execution future closes its update sink. Drain
                 // updates accepted before settlement; sends after settlement fail
                 // and are ignored by ToolUpdateSink.
                 while let Ok(update) = update_receiver.try_recv() {
                     Self::emit_update(&events, signal, &call, update).await;
                 }
+                // Retained contexts and unawaited nested calls lose their
+                // capability as soon as the owning tool settles.
+                drop(lifetime);
                 (source_index, call, args, result, true, interrupted)
             }
         };
@@ -495,6 +606,7 @@ impl ToolScheduler {
                         result,
                         context: Arc::clone(context),
                         interrupted,
+                        parent_tool_call_id: self.parent_call_id.clone(),
                     },
                 )
                 .await;
@@ -736,7 +848,7 @@ mod tests {
         }
     }
 
-    fn assistant() -> AssistantMessage {
+    pub(super) fn assistant() -> AssistantMessage {
         AssistantMessage {
             content: Vec::new(),
             api: "test".to_string(),

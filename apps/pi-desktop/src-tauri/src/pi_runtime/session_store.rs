@@ -89,6 +89,7 @@ impl LiveSession {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SessionTokenUsage {
+    pub(crate) context_breakdown: Option<pi_core::ContextBudget>,
     pub(crate) total_tokens: Option<u64>,
     pub(crate) context_tokens: Option<u64>,
     pub(crate) model_context_window: Option<u64>,
@@ -102,7 +103,9 @@ pub(crate) fn token_usage(session: &AgentSession) -> SessionTokenUsage {
             ..SessionTokenUsage::default()
         };
     };
-    document_token_usage(&document, model_context_window)
+    let mut usage = document_token_usage(&document, model_context_window);
+    usage.context_breakdown = session.context_budget();
+    usage
 }
 
 pub(crate) fn document_token_usage(
@@ -120,6 +123,7 @@ pub(crate) fn document_token_usage(
         current_session_context_tokens(&branch, &context.messages).map(|usage| usage.tokens)
     });
     SessionTokenUsage {
+        context_breakdown: None,
         total_tokens,
         context_tokens,
         model_context_window,

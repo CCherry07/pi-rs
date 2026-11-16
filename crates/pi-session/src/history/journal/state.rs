@@ -5,6 +5,7 @@ use crate::history::{
     BranchQuery, EntryOrder, EntryQuery, ForkOptions, ForkPosition, HistoryError, LanePointer,
     LaneRecord, LaneRecordEntry, LogItem, MAIN_LANE, RecordQuery, SessionContext, SessionDocument,
     SessionEntry, SessionFact, SessionHeader, SessionMutation, SessionRecord, SessionStats,
+    SessionUsage, UsageAttribution,
 };
 
 use super::validation::validate_record_query;
@@ -394,6 +395,9 @@ impl SessionState {
         if matches!(record.entry, SessionEntry::Message(_)) {
             self.stats.message_count = self.stats.message_count.saturating_add(1);
         }
+        if let Some(usage) = super::usage::session_entry_usage(&record.entry) {
+            self.add_usage(&SessionUsage::from(usage));
+        }
         let entry_index = self.entries.len();
         let entry_id = record.id.clone();
         if let Some(lane) = lane {
@@ -411,21 +415,12 @@ impl SessionState {
     fn apply_record(&mut self, seq: u64, record: LaneRecord) {
         self.sequence = seq;
         self.record_ids.insert(record.id.clone());
-        if let LaneRecordEntry::Usage(usage) = &record.record {
-            self.stats.cached_tokens = self
-                .stats
-                .cached_tokens
-                .saturating_add(usage.usage.cache_read);
-            self.stats.uncached_tokens = self
-                .stats
-                .uncached_tokens
-                .saturating_add(usage.usage.input)
-                .saturating_add(usage.usage.cache_write);
-            self.stats.total_tokens = self
-                .stats
-                .total_tokens
-                .saturating_add(usage.usage.total_tokens);
-            self.stats.cost_total += usage.usage.cost.total;
+        // Normal work is billed by its durable entry. Attributed records may
+        // mirror that usage; only detached adjustments add another charge.
+        if let LaneRecordEntry::Usage(usage) = &record.record
+            && matches!(usage.attribution, UsageAttribution::Adjustment { .. })
+        {
+            self.add_usage(&usage.usage);
         }
         let record_index = self.records.len();
         let started_lane = matches!(&record.record, LaneRecordEntry::OperationStarted { .. })
@@ -449,6 +444,17 @@ impl SessionState {
             open.retain(|index| self.records[*index].id != run_id);
         }
         self.log.push(StoredLogItem::Record { seq, record_index });
+    }
+
+    fn add_usage(&mut self, usage: &SessionUsage) {
+        self.stats.cached_tokens = self.stats.cached_tokens.saturating_add(usage.cache_read);
+        self.stats.uncached_tokens = self
+            .stats
+            .uncached_tokens
+            .saturating_add(usage.input)
+            .saturating_add(usage.cache_write);
+        self.stats.total_tokens = self.stats.total_tokens.saturating_add(usage.total_tokens);
+        self.stats.cost_total += usage.cost.total;
     }
 
     fn apply_lane(&mut self, seq: u64, lane: String, leaf_id: Option<String>) {

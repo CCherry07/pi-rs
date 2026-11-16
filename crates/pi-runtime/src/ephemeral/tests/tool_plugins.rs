@@ -216,6 +216,7 @@ impl Plugin for LifecyclePlugin {
         self.record(&context, "before");
         tokio::task::yield_now().await;
         Ok(BeforeAgentStartPatch {
+            prompt_contributions: Vec::new(),
             system_prompt: Some(format!("{}\nprivate:{}", event.system_prompt, self.name)),
             ..BeforeAgentStartPatch::default()
         })

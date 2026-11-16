@@ -19,6 +19,9 @@ pub struct EventError(pub String);
 
 #[async_trait]
 pub trait AgentEventSink: Send + Sync {
+    /// Observes the semantic request after context transforms and tool selection.
+    fn record_context_request(&self, _request: &pi_plugin::ProviderRequest) {}
+
     async fn emit(&self, event: AgentEvent, signal: AbortSignal) -> Result<AgentEvent, EventError>;
 }
 
@@ -46,6 +49,7 @@ pub(crate) struct AgentEventDispatcher {
     cwd: PathBuf,
     turn_index: AtomicU64,
     turn_control: Arc<dyn crate::AgentTurnControl>,
+    registries: Arc<pi_plugin::FrozenRegistries>,
 }
 
 impl AgentEventDispatcher {
@@ -56,6 +60,7 @@ impl AgentEventDispatcher {
         run_id: RunId,
         cwd: PathBuf,
         turn_control: Arc<dyn crate::AgentTurnControl>,
+        registries: Arc<pi_plugin::FrozenRegistries>,
     ) -> Self {
         Self {
             state,
@@ -65,6 +70,7 @@ impl AgentEventDispatcher {
             cwd,
             turn_index: AtomicU64::new(0),
             turn_control,
+            registries,
         }
     }
 
@@ -271,6 +277,21 @@ impl AgentEventDispatcher {
 
 #[async_trait]
 impl AgentEventSink for AgentEventDispatcher {
+    fn record_context_request(&self, request: &pi_plugin::ProviderRequest) {
+        let contributions = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prompt_contributions
+            .clone();
+        let usage =
+            crate::context_usage::estimate_request(request, &self.registries, &contributions);
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .context_request = Some(Arc::new(usage));
+    }
+
     async fn emit(
         &self,
         mut event: AgentEvent,
@@ -316,6 +337,24 @@ impl AgentEventSink for AgentEventDispatcher {
             {
                 *last = message.clone();
             }
+        }
+        // Discoveries take effect only after the final message hook. Keep the
+        // original result metadata intact, but activate only names permitted
+        // by the frozen execution scope.
+        if let AgentEvent::MessageEnd {
+            message: Message::ToolResult(message),
+        } = &event
+            && !message.is_error
+            && let Some(names) = &message.added_tool_names
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let additions = self
+                .registries
+                .tool_additions(names, &state.snapshot.active_tools);
+            state.snapshot.active_tools.extend(additions);
         }
         let listeners = self
             .listeners

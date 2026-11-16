@@ -8,6 +8,7 @@ use pi_core::{ModelId, ProviderId};
 use pi_js_plugin::JsPluginGeneration;
 use pi_plugin::{Plugin, PluginContext, PrepareContext, PrepareError};
 use pi_plugin_bash::{BashToolOptions, ConfiguredBashPlugin};
+use pi_plugin_codemode::CodemodePlugin;
 use pi_plugin_edit::EditPlugin;
 use pi_plugin_find::FindPlugin;
 use pi_plugin_grep::GrepPlugin;
@@ -15,7 +16,7 @@ use pi_plugin_hashline_edit::HashlineEditPlugin;
 use pi_plugin_ls::LsPlugin;
 use pi_plugin_manager::loader::NativePlugins;
 use pi_plugin_memory_hermes::{HermesMemoryPlugin, managed_skill_roots};
-use pi_plugin_models::{ModelsPlugin, ModelsPluginOptions};
+use pi_plugin_models::ModelsPlugin;
 use pi_plugin_prompts::{PromptTemplateLoaderOptions, PromptTemplatesPlugin};
 use pi_plugin_read::ConfiguredReadPlugin;
 use pi_plugin_schedule::{ScheduleOptions, SchedulePlugin};
@@ -38,7 +39,8 @@ use crate::dynamic_providers::DynamicProviderCandidate;
 use crate::features::FeaturesPlugin;
 use crate::{Config, expand_tilde_path};
 
-const BUILTIN_TOOL_NAMES: [&str; 17] = [
+const BUILTIN_TOOL_NAMES: [&str; 18] = [
+    "codemode",
     "read",
     "grep",
     "find",
@@ -89,7 +91,6 @@ impl GenerationComponents<'_> {
         let mut skill_activity_observer = None;
         let models_snapshot = builtin_providers.models_snapshot();
         let transport = builtin_providers.transport();
-        let effective_api_key = config.api_key.clone();
         let skill_options =
             crate::skills::runtime_skill_options(config, project_trusted, memory_enabled);
         if features.skills && memory_enabled {
@@ -105,10 +106,7 @@ impl GenerationComponents<'_> {
             .extend(config.settings_prompt_paths.iter().cloned());
         let mut subagent_options = SubagentLoaderOptions::new(&config.cwd, &config.agent_dir);
         subagent_options.project_trusted = project_trusted;
-        let mut model_options = ModelsPluginOptions::for_agent_dir(&config.agent_dir);
-        if let Some(api_key) = &effective_api_key {
-            model_options = model_options.runtime_api_key(config.provider.clone(), api_key.clone());
-        }
+        let mut model_options = builtin_providers.model_options(config);
         if let Some(dynamic_providers) = dynamic_providers {
             for (provider, provider_config) in dynamic_providers.provider_configs() {
                 model_options = model_options.extension_provider_config(provider, provider_config);
@@ -124,6 +122,7 @@ impl GenerationComponents<'_> {
         );
 
         let builder = PiRuntime::builder()
+            .plugin_factory(CodemodePlugin::default)
             .plugin_factory({
                 let features = self.features.clone();
                 move || features.clone()
@@ -284,7 +283,7 @@ impl GenerationComponents<'_> {
             .map_or_else(|| runtime.active_tools(), |configured| configured.clone());
         active_tools.retain(|tool| registered_tools.contains(tool));
         let mut seen = active_tools.iter().cloned().collect::<HashSet<_>>();
-        for spec in runtime.tool_specs() {
+        for spec in runtime.default_tool_specs() {
             if !BUILTIN_TOOL_NAMES.contains(&spec.name.as_str()) && seen.insert(spec.name.clone()) {
                 active_tools.push(spec.name);
             }

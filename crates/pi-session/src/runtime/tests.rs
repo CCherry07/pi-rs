@@ -604,6 +604,7 @@ impl Plugin for BeforeStartInjectionPlugin {
         event: BeforeAgentStartEvent,
     ) -> Result<BeforeAgentStartPatch, PluginError> {
         Ok(BeforeAgentStartPatch {
+            prompt_contributions: Vec::new(),
             system_prompt: Some(format!("{}|injected", event.system_prompt)),
             messages: vec![Message::custom(CustomMessage {
                 custom_type: "fixture-context".to_string(),
@@ -2706,4 +2707,66 @@ async fn manual_compaction_can_be_aborted_without_waiting_for_the_operation_gate
             .iter()
             .any(|record| matches!(record.entry, SessionEntry::Compaction(_)))
     );
+}
+
+#[tokio::test]
+async fn context_budget_uses_session_limits_and_clears_after_compaction_and_restore() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("context-budget.jsonl");
+    let runtime = scripted_runtime_in([ScriptedTurn::Text("answer".into())], directory.path());
+    let session = AgentSession::create(
+        runtime,
+        &path,
+        AgentSessionOptions {
+            context_window: Some(100_000),
+            compaction: CompactionSettings {
+                reserve_tokens: 7_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(session.context_budget().is_none());
+    assert!(!path.exists());
+    session.prompt("hello").await.unwrap();
+    let budget = session.context_budget().unwrap();
+    assert_eq!(budget.context_window, Some(100_000));
+    assert_eq!(budget.reserve_tokens, 7_000);
+    assert_eq!(
+        budget.free_tokens,
+        Some(93_000 - budget.request.estimated_tokens)
+    );
+    session.compaction_settings.write().unwrap().reserve_tokens = 200_000;
+    assert_eq!(session.context_budget().unwrap().free_tokens, Some(0));
+    session.set_auto_compaction_enabled(false);
+    let unreserved = session.context_budget().unwrap();
+    assert_eq!(unreserved.reserve_tokens, 0);
+    assert_eq!(
+        unreserved.free_tokens,
+        Some(100_000 - budget.request.estimated_tokens)
+    );
+    session
+        .append_compaction(CompactionEntry {
+            retained_entry_ids: Vec::new(),
+            summary: "short summary".into(),
+            retained_tail: Vec::new(),
+            tokens_before: 100,
+            details: None,
+            usage: None,
+        })
+        .await
+        .unwrap();
+    assert!(session.context_budget().is_none());
+    session.shutdown().await;
+    let reopened = AgentSession::open(
+        scripted_runtime_in([], directory.path()),
+        &path,
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    assert!(reopened.context_budget().is_none());
+    reopened.shutdown().await;
 }

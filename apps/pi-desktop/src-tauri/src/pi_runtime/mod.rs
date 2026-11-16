@@ -751,6 +751,7 @@ fn snapshot_from_context(
 
 fn thread_from_transcript(transcript: pi_session::SessionTranscript) -> Value {
     let usage = SessionTokenUsage {
+        context_breakdown: None,
         total_tokens: Some(transcript.usage.total_tokens),
         context_tokens: pi_session::current_session_context_tokens(
             &transcript.branch,
@@ -2642,6 +2643,10 @@ mod tests {
         );
         assert!(thread["tokenUsage"]["totalTokens"].as_u64().is_some());
         assert!(thread["tokenUsage"]["contextTokens"].as_u64().is_some());
+        let breakdown = &thread["tokenUsage"]["contextBreakdown"];
+        assert!(breakdown["request"]["estimatedTokens"].as_u64().is_some());
+        assert_eq!(breakdown["request"]["categories"].as_array().unwrap().len(), 6);
+
 
         let summaries = store.list(directory.path()).unwrap();
         assert_eq!(summaries.len(), 1);

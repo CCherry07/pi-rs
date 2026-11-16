@@ -7,8 +7,11 @@ license.workspace = true
 
 [dependencies]
 pi-plugin.workspace = true
+pi-plugin-tool-search.workspace = true
 async-trait.workspace = true
+base64 = "0.22.1"
 fs2 = "0.4.3"
+futures.workspace = true
 pi-core.workspace = true
 sha2 = "0.10"
 tempfile = "3.21.0"

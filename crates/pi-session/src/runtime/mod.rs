@@ -202,6 +202,32 @@ impl AgentSession {
         })
     }
 
+    /// Budget for the latest effective request. A fresh/restored or invalidated
+    /// session has no snapshot until its next model request. This is not billed usage.
+    pub fn context_budget(&self) -> Option<pi_core::ContextBudget> {
+        let request = self.runtime.agent().context_request_usage()?;
+        let settings = *self
+            .compaction_settings
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let reserve_tokens = if settings.enabled {
+            settings.reserve_tokens
+        } else {
+            0
+        };
+        let context_window = self.active_context_window().filter(|window| *window > 0);
+        Some(pi_core::ContextBudget {
+            free_tokens: context_window.map(|window| {
+                window
+                    .saturating_sub(request.estimated_tokens)
+                    .saturating_sub(reserve_tokens)
+            }),
+            request: (*request).clone(),
+            context_window,
+            reserve_tokens,
+        })
+    }
+
     pub(crate) fn store(&self) -> &SessionStore {
         &self.store
     }

@@ -232,7 +232,12 @@ impl Plugin for HermesMemoryPlugin {
         self.store
             .bind_project(context.cwd())
             .map_err(|error| hook_error(self, "before_agent_start", error))?;
-        let mut addition = self.store.legacy_global_context();
+        let prompt_contributions = self.store.global_context_contributions();
+        let mut addition = prompt_contributions
+            .iter()
+            .map(|part| part.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         if !addition.is_empty()
             && context.session.execution_origin()? == pi_plugin::SessionExecutionOrigin::Subagent
         {
@@ -244,6 +249,7 @@ impl Plugin for HermesMemoryPlugin {
             BeforeAgentStartPatch::default()
         } else {
             BeforeAgentStartPatch {
+                prompt_contributions,
                 system_prompt: Some(format!("{}\n\n{addition}", event.system_prompt)),
                 messages: Vec::new(),
             }

@@ -32,6 +32,56 @@ impl ModelsContextAccess for PiPluginContext {
         Ok(self.session()?.runtime().available_models())
     }
 
+    fn models_of_type(
+        &self,
+        model_type: pi_core::ModelType,
+        provider: Option<&ProviderId>,
+    ) -> Result<Vec<pi_core::AnyModelSpec>, PluginContextError> {
+        Ok(self
+            .session()?
+            .runtime()
+            .models_of_type(model_type, provider))
+    }
+
+    fn available_models_of_type(
+        &self,
+        model_type: pi_core::ModelType,
+        provider: Option<&ProviderId>,
+    ) -> Result<Vec<pi_core::AnyModelSpec>, PluginContextError> {
+        Ok(self
+            .session()?
+            .runtime()
+            .available_models_of_type(model_type, provider))
+    }
+
+    async fn classify_model(
+        &self,
+        provider: ProviderId,
+        model_id: ModelId,
+        request: pi_core::ClassifierContext,
+        signal: pi_core::AbortSignal,
+    ) -> Result<pi_core::ClassifierResult, PluginContextError> {
+        self.session()?
+            .runtime()
+            .classify(provider, model_id, request, signal)
+            .await
+            .map_err(context_failed)
+    }
+
+    async fn generate_model_images(
+        &self,
+        provider: ProviderId,
+        model_id: ModelId,
+        request: pi_core::ImagesContext,
+        signal: pi_core::AbortSignal,
+    ) -> Result<pi_core::ImagesResult, PluginContextError> {
+        self.session()?
+            .runtime()
+            .generate_images(provider, model_id, request, signal)
+            .await
+            .map_err(context_failed)
+    }
+
     fn provider_display_name(&self, provider: &ProviderId) -> Result<String, PluginContextError> {
         Ok(self
             .session()?

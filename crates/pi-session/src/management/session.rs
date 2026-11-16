@@ -117,6 +117,7 @@ impl PiSession {
         };
         let fresh_context = initial_context.is_none();
         let initial_state = resolve_isolated_initial_state(&parent, request.options)?;
+        let allowed_tools = isolated_tool_scope(&parent, &initial_state.active_tools);
         let path = isolated_session_path(&self.path());
         let acquired = Arc::clone(&manager)
             .acquire_with_guard(
@@ -128,7 +129,8 @@ impl PiSession {
                     ),
                     existing: ExistingSessionPolicy::Reject,
                     generation_overlay: SessionGenerationOverlay::default()
-                        .with_execution_origin(pi_plugin::SessionExecutionOrigin::Subagent),
+                        .with_execution_origin(pi_plugin::SessionExecutionOrigin::Subagent)
+                        .with_allowed_tools(allowed_tools),
                     initial_state: Some(initial_state),
                     initial_context,
                     unclaimed: UnclaimedSessionPolicy::Close,
@@ -187,14 +189,40 @@ impl PiSession {
                 .ok_or(MultiSessionManagerError::SessionAlreadyActive(comparable));
         }
 
+        let store = crate::SessionStore::open_handle(&path).map_err(SessionError::from)?;
+        let document = store.shared_document().map_err(SessionError::from)?;
+        let actual_parent = document
+            .isolated_parent_session_id()
+            .map_err(SessionError::from)?;
+        if actual_parent.as_deref() != Some(parent_session_id.as_str()) {
+            return Err(MultiSessionManagerError::InvalidIsolatedRequest(format!(
+                "restored child belongs to parent {:?}, not {:?}",
+                actual_parent, parent_session_id,
+            )));
+        }
+        // The first selection records the launch grant. Later changes only select
+        // within it; deselecting an entry point must not erase its permission.
+        let initial_tools = document
+            .entries
+            .iter()
+            .find_map(|record| match &record.entry {
+                crate::SessionEntry::ActiveToolsChange(entry) => {
+                    Some(entry.active_tool_names.as_slice())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        let allowed_tools = isolated_tool_scope(&self.current(), initial_tools);
+        drop(document);
         let acquired = Arc::clone(&manager)
             .acquire_with_guard(
                 operation,
                 SessionAcquisition {
-                    target: SessionTarget::open(&path),
+                    target: SessionTarget::Reuse { store },
                     existing: ExistingSessionPolicy::Reject,
                     generation_overlay: SessionGenerationOverlay::default()
-                        .with_execution_origin(pi_plugin::SessionExecutionOrigin::Subagent),
+                        .with_execution_origin(pi_plugin::SessionExecutionOrigin::Subagent)
+                        .with_allowed_tools(allowed_tools),
                     initial_state: None,
                     initial_context: None,
                     unclaimed: UnclaimedSessionPolicy::Close,
@@ -434,6 +462,27 @@ impl PiSession {
             .run(request)
             .await
     }
+}
+
+/// Keep selected tools and the parent's visible deferred catalog within a nonempty grant.
+/// Deferred tools need not be active to be called through a permitted discovery entry point.
+fn isolated_tool_scope(parent: &AgentSession, selected: &[String]) -> Vec<String> {
+    if selected.is_empty() {
+        return Vec::new();
+    }
+    parent
+        .runtime()
+        .agent()
+        .runtime()
+        .registries()
+        .tool_infos()
+        .into_iter()
+        .filter(|tool| {
+            selected.contains(&tool.spec.name)
+                || tool.discovery.exposure == pi_plugin::ToolExposure::Deferred
+        })
+        .map(|tool| tool.spec.name)
+        .collect()
 }
 
 fn resolve_isolated_initial_state(

@@ -52,6 +52,7 @@ impl Plugin for HistoryPlugin {
             return Ok(BeforeAgentStartPatch::default());
         }
         Ok(BeforeAgentStartPatch {
+            prompt_contributions: Vec::new(),
             messages: vec![Message::custom(CustomMessage {
                 custom_type: "history-fixture.context".to_string(),
                 content: CustomMessageContent::Text("saved plugin context".to_string()),

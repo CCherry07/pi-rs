@@ -641,7 +641,8 @@ corresponding feature-selection command.
 Reload requests include the previous generation's registered tool names, including inactive tools.
 Coding uses this neutral snapshot to activate newly available default tools when a feature is enabled,
 through the existing `additional_active_tools` policy. Previously registered built-in tools retain
-the user's selection, and managed children never gain additional tools through reload. Other restore
+the user's selection, and managed children do not gain new tool permissions through reload.
+Plugin activation may select an already permitted entry point such as codemode. Other restore
 paths retain the saved tool selection and existing plugin-tool activation policy.
 Beneath that interface, two public session
 Modules remain responsible for session behavior. `MultiSessionManager`
@@ -962,7 +963,8 @@ models absent from the catalog, instead of reapplying startup CLI model argument
 selections are intersected with the candidate registry. `pi-coding` supplies non-built-in tools to
 activate for user sessions through `AgentSessionOptions::additional_active_tools`; `pi-session`
 only merges and deduplicates these names. Managed subagents receive no such additions, preserving
-their active-tool ceiling. This follows current Pi's reload extension-tool activation while keeping
+their tool capability ceiling. MCP can reactivate an already permitted entry point on startup.
+This follows current Pi's reload extension-tool activation while keeping
 native and MCP registration behind the same generic seam. Disabled built-in choices remain intact.
 After all loaded-session initialization checks pass, resolved model/thinking overrides and tool
 changes are appended together using existing v4 configuration entries. This Rust persistence
@@ -1093,6 +1095,9 @@ implements those interfaces against the actual `AgentSession`, `PiSession`, and 
 transactions, semantic UI notices, and the injected frontend confirmation bridge. Retained
 contexts fail with `Retired` after their generation is replaced. `SessionContext` exposes typed
 active-tool, tool-catalogue, and command-catalogue reads in addition to coherent snapshots.
+`SessionContext::set_active_tools` uses the existing idle-session configuration transaction and
+ordinary v4 persistence. `tool_reaches_tools` queries the registered executable's `Tool::reaches_tools`
+capability; scoped denied tools cannot advertise this capability. Both operations honor epoch retirement.
 Successful create, fork, switch, and reload operations resolve a fresh
 `ReplacedSessionContext` from the newly active runtime generation rather than rebinding the old
 capability. ABI 4 added
@@ -1262,7 +1267,7 @@ separate future target rather than an alias for glibc.
 One tag produces two delivery adapters from the same Rust product:
 
 - GitHub Release archives contain the standalone `pi` binary. They support TUI, print, NDJSON, RPC,
-  and native plugins, but no JavaScript VM or JS/TS extensions.
+  native plugins, and restricted QuickJS codemode scripts. General JS/TS extensions require Node.
 - The `@pi-rs/cli` npm root contains only JavaScript and declarations. Exact-version optional
   packages such as `@pi-rs/cli-darwin-arm64` and `@pi-rs/cli-linux-x64-gnu` each contain one NAPI
   artifact selected by OS, CPU, and libc. Platform packages publish first and the root package
@@ -1533,10 +1538,27 @@ semantic `ProviderRequest`, so protocol modules apply merged compat, model limit
 controls, prompt caching, routing, deferred tools, and session affinity at serialization time. The
 provider overlay resolves credentials and headers only when sending the request and decorates
 terminal usage with Pi-compatible per-million and tiered cost calculation.
-Protocol serialization remains outside `ModelsPlugin`. `models_json_schema()` exposes the same
+Chat protocol serialization remains in the standalone provider modules. Specialized classifier/image
+protocol adapters live in `pi-plugin-models::operations`, sharing the existing HTTP transport and
+provider wire hooks. `models_json_schema()` exposes the same
 strict compat and catalog definitions for editors and tooling. A failed parse, validation, or
 active-provider compatibility check prevents publication of the new generation, so `/reload`
 retains the complete prior provider/catalog pair.
+
+Rust extends models.json entries with `type: "classifier" | "image"` (omitted means chat),
+while preserving existing chat configuration. The plugin registers these per-type catalogs and
+supports `typesafe-system-one`, `cloudflare-workers-ai-system-one`, `openai-decisions`,
+`llama-cpp-classify` and `openrouter-images`. Its optional built-in specialized catalog contains
+selected TypeSafe/OpenAI/OpenRouter entries. Coding enables that catalog and injects request-time
+`CredentialSource` adapters; environment or stored API keys can enable the entries without changing
+chat selection. OpenAI Decisions rejects OAuth credentials. Local llama.cpp can run without a key.
+Cloudflare requires an explicit account route; it has no default specialized entries.
+Provider errors preserve billed usage even if response parsing fails. The specialized paths reuse
+Rust's configured HTTP retry policy, rather than Pi's classifier-specific retry defaults and
+Decisions 504 exclusion. Availability remains a credential-configuration snapshot instead of Pi's
+async credential resolution on queries. Classifier maps retain Rust's deterministic key ordering,
+including llama.cpp label assignment, rather than JS insertion order. These are deliberate Rust
+configuration/transport/catalog differences; the script methods and provider payloads follow Pi.
 
 Radius is intentionally not projected through this static routing path. `oauth: "radius"` requires
 one provider-owned OAuth, persisted remote-catalog, and `pi-messages` lifecycle; until that deep
@@ -1778,7 +1800,7 @@ registers the plugin factory in each generation.
 
 Current `legacy/pi/packages/coding-agent/src/extensions/mcp` provides built-in MCP, with
 server instructions attached to tool namespaces and codemode/deferred/direct exposure.
-Rust deliberately retains direct tool registration and generation-based connection ownership;
+Rust uses Pi's codemode default while retaining generation-based connection ownership;
 it does not claim compatibility with Pi's asynchronous exposure or interactive MCP manager.
 The complete Rust implementation lives in
 `plugins/features/pi-plugin-mcp`, with client, config, library and product-plugin modules rather
@@ -1790,20 +1812,24 @@ scoped merging, revision-safe management and preparation of tools plus `/mcp` co
 a host-resolved trust decision and enforces it before project reads/writes; it has no dependency on
 `pi-coding`, `pi-acp`, `pi-session`, or terminal/frontend types. The Desktop adapter resolves shared
 project trust and calls that library directly. MCP does not live in `settings.json`.
-Documents contain `version: 1` and `mcpServers`, keyed by server name. Each entry has
+Documents use `mcpServers`, keyed by server name, with an optional `version: 1` marker. Each entry has
 `type: "stdio"` (command, args, env, cwd) or `type: "http"` (url, headers), and optional
-`enabled` (default true). Missing type is inferred from command/url for common MCP configs.
-Unknown fields survive management edits. Project entries replace a complete global entry by
-name, never accidentally inheriting credentials. `{ "enabled": false }` can disable an inherited
-server. Untrusted project files are neither read nor changed; `mcp.json` itself triggers trust.
+`enabled` (default true). The version marker and empty `mcpServers` object are optional; UTF-8 BOM
+is accepted. Missing type is inferred from URL before command, and `streamable-http` aliases HTTP.
+Unknown fields survive management edits. Full project transport entries replace a complete global
+entry by name. Entries without command/url/type may override only enabled/exposure/toolExposure
+of an existing global server, preserving that server's credentials without allowing project-defined
+credential fields. A standalone disabled global placeholder remains a Rust compatibility extension.
+Untrusted project files are neither read nor changed; `mcp.json` itself triggers trust.
 
 Disk reads and saves do not initialize sessions or connect. Saves validate the document, compare
 a content revision while holding an advisory lock, and atomically replace a private (0600 on Unix)
 file. Invalid JSON remains readable/editable. Authentication values should use `${VAR}`,
 `${env:VAR}` or whole-value `$VAR`; no shell evaluation occurs. Expansion happens only when a
-server connects, not when configuration is listed or saved. Relative explicit stdio cwd resolves
-from its configuration directory; omitted cwd uses the active session cwd. Transport debug/error
-surfaces omit header, argument and URL values. HTTP redirects are disabled by the SDK.
+server connects, not when configuration is listed or saved. Relative explicit stdio cwd now resolves
+from the active session cwd, matching Pi; omitted cwd uses that directory too. Existing configurations
+that intended a path relative to the configuration file should use an absolute path.
+Transport debug/error surfaces omit header, argument and URL values. HTTP redirects are disabled by the SDK.
 Child stderr is discarded rather than written outside the frontend renderer.
 
 `ProductSessionFactory` reloads files after trust resolution and prepares a fresh connected pool
@@ -1814,10 +1840,54 @@ the candidate without swapping the current generation. Pool ownership is referen
 retiring the last generation owner cancels its transports and child processes. Each server has
 30-second connection and discovery bounds. Request cancellation uses the SDK's negotiated
 notification/stream-close semantics. Server-returned tool content retains normal tool semantics.
-Text and images are projected into normal Pi tool results; the full structured result remains
-in result details. Negotiated server instructions are captured with the connection and appended
-once per run, only for servers with active tools. Both explicit-client and local-library plugins
-use the same prompt hook; the base prompt is unchanged and reload replaces the instructions.
+Text, images and embedded text/image resources are projected into normal Pi tool results; the full raw
+result remains in result details. Structured-only results fall back to JSON text, empty errors receive
+visible text, and binary resources are saved to private temporary files. Model-facing text over 20 KiB
+keeps its head and tail with the full text persisted for later read calls. Audio has a bounded text
+placeholder. The input adapter fills missing object type/properties without dropping schema keywords.
+Tool calls and resource requests have a 60-second idle timeout (configurable in local mcp.json); matched progress resets
+that timeout and reaches ToolUpdateSink. Abort/timeout use SDK cancellation. A concrete client handler
+also advertises the session cwd as a stable MCP root; it does not mutate registries. Discovery checks
+the tools capability before listing so resources-only servers can connect. Negotiated server
+instructions are captured as tool namespace metadata. Agent provider-request projection appends each
+active namespace once, so a newly discovered tool has instructions on its very next call without
+mutating the base or run-local hook prompt. Explicit-client and local-library plugins use the same
+metadata; reload replaces it. Shared resource tools carry the visible resource servers’ instructions.
+Local policy accepts direct/codemode/deferred/hidden exposure and ordered per-tool exact/wildcard overrides. Exact
+remote names win over the first matching pattern. Hidden tools are omitted from registration, since
+removing a name only from provider declarations is not an execution restriction. Omitted exposure
+defaults to codemode, matching Pi. Configurations that need direct declarations must explicitly set
+`exposure: "direct"`. Codemode (including its codemode-deferred alias) maps to generic deferred registration,
+matching Pi: scripts can call these tools without activating individual provider declarations.
+The coding product supplies codemode as a builtin. The MCP product plugin's `session_start` hook
+appends the capable codemode entry point to the restored active selection when enabled server
+configuration contains codemode exposure, including unmatched per-tool overrides. Top-level
+`autoEnableCodemode` defaults to true; a trusted project's explicit boolean overrides the global
+value, while omission inherits it. False only suppresses automatic addition and never removes an
+already active entry point. Deferred exposure similarly activates capable tool_search independently
+of this flag. A warning reports indirect tools when neither entry point is active. Activation
+requires `Tool::reaches_tools`, so same-named unrelated tools are not activated. Policy stays in
+MCP; generic runtimes only expose capability queries and ordinary selection mutation.
+Startup runs after selection restoration for fresh, reload, resume and fork generations; changes
+use the normal `ActiveToolsChange` records without forcing lazy session files to materialize.
+Managed child sessions use the same activation rules within their allowed tool catalog; the MCP
+plugin does not branch on execution origin. Connections still prepare before publication;
+asynchronous discovery is separate.
+Invalid flag types reject the candidate rather than accumulating per-entry Pi diagnostics. OAuth
+and auth remain unsupported. Description contributes a server summary.
+Transport-only public config resolution accepts only plain direct policy instead of silently dropping
+codemode (including omitted exposure) or other policy; explicit `McpToolSet::connect` callers such as
+ACP request direct tools without local discovery or script-entry activation.
+`parse_document` preserves optional document policy, while entry-only `parse_config` rejects explicit
+`autoEnableCodemode`. McpLibrary prepares the combined policy and transport. Global document repair does not depend on a
+valid project document; project policy overrides are validated against global definitions when saved.
+
+Canonical names match Pi's case-preserving normalization and 64-character limit; long names and all
+colliding names get an eight-hex SHA-256 suffix. Names are assigned before exposure filtering. No
+legacy aliases are registered: they could collide with another canonical tool. Stored messages remain
+unchanged, and old selected names missing from the new catalog follow existing unavailable-tool
+resume behavior. Explicit scripts and tool selections must migrate to the canonical names.
+
 MCP tools with `readOnlyHint: true` may run in parallel. All other tools are sequential so a
 mutation completes before subsequent calls; annotations affect scheduling, not authorization.
 
@@ -1835,20 +1905,144 @@ Some deployed legacy servers return an uncorrelated error to the modern `server/
 (DeepWiki uses the fixed id `server-error`). If automatic lifecycle negotiation fails, `pi-plugin-mcp`
 opens one fresh transport and attempts the stable `initialize` lifecycle. It never retries on the
 same ambiguous transport, and startup remains bounded by the existing connection timeout.
-This integration exposes MCP tools; resource/prompt browsers, sampling and elicitation UI remain
-outside the current product surface.
+A generation with visible resource-capable servers registers three shared resource tools:
+list_mcp_resources, list_mcp_resource_templates and read_mcp_resource. Server-wide hidden exposure
+excludes that server's resources even when an individual ordinary tool is direct. Named-server
+listings return one page; aggregate listings concurrently read all pages, preserve successful servers
+and report individual failures. Both list kinds reject a cursor without a server. Repeated cursors and
+Pi's 1000-page limit bound aggregate pagination. A missing resources/templates/list method is an
+empty catalog. Resource requests use the same private request/cancellation/progress adapter as
+server tool calls; no generic runtime command-name policy is introduced.
+
+Resource lists remove icons and transport _meta, and filter ui:// / profile=mcp-app UI resources.
+Explicit URI reads remain server-validated as in Pi, without a local listing allowlist. The result
+adapter labels multi-content reads, projects text/images and persists other blobs, retains full
+structured payloads in details, and strips per-resource _meta. Resource links point to the reader
+only when the calling tool's session exposes it and the server is resource-visible. Resource-only
+instructions use the same per-request namespace projection. Catalog registration and resource
+visibility remain generation snapshots; list/read data is fetched per call. Hiding the last eligible
+server removes these tools on reload, while stored history remains replayable. Aggregate ordering
+uses deterministic server names rather than JavaScript's host locale. MCP Apps rendering, prompts
+browsing, sampling and elicitation UI remain outside the current product surface.
 
 Desktop Settings exposes global/project scope, compact server forms and enable switches, a direct
 JSON editor for advanced fields, revision-safe saves, and explicit connection tests of saved
 configuration. No test runs automatically and no runtime registry is mutated by a save.
-`/mcp status` describes the generation snapshot; `/mcp paths` identifies configuration files;
+`/mcp status` describes the generation snapshot and resource availability; `/mcp paths` identifies configuration files;
 `/mcp test <name>` probes current saved configuration; `/mcp reload` rebuilds the whole managed
 session through the existing replacement transaction. These registered commands work in Desktop
 and TUI without transport policy in either frontend.
 
+## Deferred tool discovery
+
+`pi-plugin` owns immutable `ToolDiscovery` metadata beside executable tools: direct/deferred exposure
+and optional `ToolNamespace`. Ordinary registration remains direct. `register_tool_with_discovery`
+adds metadata during generation construction; publication never mutates the registry. Default tool
+selection excludes deferred tools, while explicit and restored selections may include them.
+`ToolContext::discoverable_tools` is a run-scoped snapshot of visible, inactive deferred tools supplied
+by the scheduler. Restricted/ephemeral registries exclude denied tools from discovery and activation;
+search cannot widen an inherited tool ceiling. Standalone contexts have no implicit catalog.
+
+`plugins/features/pi-plugin-tool-search` owns BM25 metadata search, local schema-reference traversal,
+NFC/identifier normalization and ICU dictionary segmentation. It has no MCP or Session dependency.
+Search returns ordinary `ToolResult.added_tool_names`; the final successful message hook determines
+the additions. Agent filters them through the immutable scope, deduplicates and updates the next
+request and live selection. Sequential calls refresh their discovery snapshot while retaining the
+shared hook context. Session appends the tool result and ordinary v4 `ActiveToolsChange` together;
+resume and tree navigation restore that selection rather than unioning historical result metadata.
+The session wire schema is unchanged. Native plugins must rebuild against the changed context layout
+through the existing exact-build fingerprint checks.
+
+MCP registers the generic search tool when enabled policy contains any deferred exposure, even an
+unmatched per-tool override. Its prompt hook adds a bounded server directory; namespace instructions
+are projected from the actually active tools on every provider request. Shared resource tools are
+direct if any visible resource server is direct, otherwise deferred. Hidden server resources remain
+unreachable. Coding applies ordinary default registration policy without MCP-name switches.
+
+Deliberate Rust differences remain: tool_search is supplied by the MCP plugin
+when needed rather than always registered inactive, and duplicate registration is rejected. Stable
+Rust catalog ordering replaces locale-sensitive tie ordering. Compiled ICU dictionaries can differ
+from the Node host's ICU version. New schemas and namespace instructions are available in the next
+request; generic base-prompt snippets are rerendered after the run, preserving the existing run-local
+hook prompt. A failed render prevents a subsequent run from using a stale base prompt.
+Asynchronous catalog registration remains future work. The script executor is described below.
+
+## Codemode execution
+
+`plugins/features/pi-plugin-codemode` provides the independent `CodemodePlugin`. The coding product
+registers it through a generation factory as a default builtin, and explicit `defaultTools` selections
+can omit it; MCP's configured auto-activation may append it at session startup as described above.
+The tool accepts `{ "code": "..." }`; scripts run as an async JavaScript function body
+with top-level `await` and `return`. Both standalone and Node delivery adapters use the same Rust
+host and embedded QuickJS engine. General JS/TS extensions still use the separate Node host.
+
+`pi-plugin::ToolContext` exposes a scoped nested catalog and `execute_tool` capability. The Agent
+scheduler supplies active direct tools and visible deferred tools from the captured immutable
+generation, excluding `Tool::model_only` tools. Scoped registries remain authoritative. Each nested
+call uses ordinary preparation, validation, `tool_call` and `tool_result` hooks; hooks carry the
+parent call ID. Invocation lifetime guards retire retained contexts and cancel descendants on
+settlement or drop. Each invocation owns its started nested tasks: cancelled calls receive a
+one-second result-hook cleanup window, then unfinished tasks are aborted and joined. On parent
+interruption, completed child usage is attached to its abort result; successful codemode results
+already aggregate that usage. No cancelled invocation starts queued work or detaches child tasks.
+The first version supports one nested level. A shared bounded gate permits
+parallel tools and gives sequential tools exclusive execution. Catalog and assistant snapshots are
+shared within the batch so ordinary tools do not each clone the full schema catalog.
+
+Nested calls emit parent tool updates, without adding standalone tool-result messages to history.
+Codemode retains bounded call summaries in the outer result's details and sums nested usage there.
+Only explicit script output enters model-visible content. The new `Tool::structured_output` method
+opts into a structured script result after hooks; the default joins text content. MCP opts in with
+the complete `CallToolResult` minus top-level `_meta`, including remote error objects. Transport,
+validation and blocked-call failures reject the script promise. Resource tools opt in with their
+listing/read payloads. This preserves existing private details and the Pi v4 session wire format.
+
+The feature owns `tools`, `ALL_TOOLS`, `searchTools`, `describeTool`, `describeNamespace`,
+`models`, `text`, `image`, `console`, `exit`, `store` and `load`. Search reuses the generic BM25 implementation;
+namespace descriptions expose negotiated instructions. Successful store changes append ordinary
+`codemode-store` custom entries (`set` and `delete`), reconstructed only from the selected branch.
+Failed or cancelled scripts keep partial output and do not commit their store changes. Reload
+rebuilds executable state; a fresh VM is used for every script.
+
+`models.getModelsOfType`, `getAvailableOfType` and `getModelOfType` query typed chat, classifier
+and image catalogs through generation-bound `ModelsContext`. The existing chat-only `ModelSpec`,
+selectors and session model values remain unchanged. `ClassifierModelSpec`, `ImageModelSpec` and
+`AnyModelSpec` are core values, registered through the existing `ProviderRegisterContext` and
+frozen in the same `ModelRuntime`. Typed catalog replacements validate before publication; there
+is no additional plugin lifecycle. Provider implementations may support `classify` and
+`generate_images` independently of chat streaming. Default implementations report unsupported
+operations. Credentials and headers remain inside provider adapters.
+
+Codemode's `models.classify` and `models.generateImages` validate structured input, resolve only
+the supplied provider/id against canonical host metadata, and call those provider capabilities.
+They do not register synthetic tools or trigger tool hooks. Provider wire hooks still run at the
+adapter's final-payload seam. Invalid arguments reject, whereas provider failures resolve typed
+error/aborted results. Four inference slots per script constrain parallel requests; queries do not
+use them. Call rows contain only model references, status/error and cost. Successful, failed and
+interrupted scripts retain completed inference usage through the ordinary outer ToolResult; the
+invocation-scoped `ToolContext::record_usage` ledger supplies completed usage when the scheduler
+replaces the parent with an abort result, without duplicating normal accounting. Generated image
+blocks require explicit `image(block)` output; otherwise the script result includes a reminder.
+
+The native QuickJS runtime runs in a blocking worker with heap/stack limits and an interrupt
+handler for cancellation and deadlines. It exposes no Node, filesystem, network, timer or module
+loader globals. A global two-worker admission limit and bounded source, output, call count,
+arguments, replies and store constrain host allocations as well as VM memory. Calls unawaited at
+script completion are cancelled. This is an embedded engine, not OS process or WASM isolation;
+interrupt-unaware native engine operations can delay worker cleanup. Worker permits remain held
+until cleanup finishes. The default script timeout is 60 seconds and may be overridden by a
+first-line `// @options:` directive.
+
+Deliberate first-version differences from current Pi are native QuickJS rather than QuickJS WASM,
+one nested level, fixed resource caps, JSON tool input rather than provider raw-source grammar,
+schema descriptions rather than complete TypeScript declarations, and bounded output without a
+full-output temporary file. Token budgets use an approximate UTF-8 byte allowance. Codemode
+loadout modes are not exposed.
+These limits are documented by the feature; generic runtimes contain no codemode/MCP name policy.
+
 ## Core contracts
 
-- `Provider`: accepts semantic `ProviderRequest` data plus a generation-local `ProviderCallContext`, invokes wire hooks when its final payload exists, and returns `Stream<Item = Result<StreamEvent, ProviderError>>`.
+- `Provider`: accepts semantic chat, classifier or image requests plus a generation-local `ProviderCallContext`, invokes wire hooks when its final payload exists, and returns a chat event stream or typed classifier/image result. Unsupported operations have default errors.
 - `Tool`: publishes `ToolSpec` and executes validated JSON arguments with an `AbortSignal` and `ToolUpdateSink`.
 - `Plugin`: registers tools/commands and participates in input, lifecycle, context, and tool hooks; its required hook-interest value is macro- or manifest-derived rather than author-maintained.
 - `ProviderPlugin`: registers providers, routing overlays, and model metadata and may implement `before_provider_request` without implementing a provider.
@@ -1859,6 +2053,37 @@ and TUI without transport policy in either frontend.
 - `TelemetryContext`: starts schema-typed spans through an injected sink; the no-op and in-memory
   sinks are adapters, not alternate event systems.
 - `AbortHandle` / `AbortSignal`: provide cooperative cancellation without exposing Tokio types in public signatures.
+
+## Context request accounting
+
+`pi-core::ContextRequestUsage` and `ContextBudget` are presentation-neutral estimates, separate
+from provider-reported usage and cumulative session billing. `pi-agent` records the most recent
+semantic `ProviderRequest` after context hooks, conversion, image filtering, active-tool selection,
+and namespace instructions. It estimates UTF-8 text/schema bytes at four bytes per token and uses
+a fixed image allowance; provider wire formatting and tokenizer differences are not billed counts.
+Categories sum to the estimated request total. Assistant output and later unsent input are excluded.
+
+Prepared prompt factories and `before_agent_start` patches may attach `PromptContribution` source
+fragments. Accounting attributes only non-overlapping occurrences in the final prompt, so replaced
+or omitted text is not counted and the remaining prompt is counted once. Coding tags injected
+project-context files; Skills tags each visible injected catalog entry by skill name (name,
+description and location only), while shared catalog instructions and delimiters remain in System
+prompt; Hermes tags its frozen visible memory blocks. Unannotated extension contributions remain
+system prompt. Skill bodies read through tools are ordinary messages. The reusable runtime remains
+independent of those source formats.
+`ToolDiscovery::origin` distinguishes MCP schemas without tool-name or plugin-name heuristics.
+Only declared schemas contribute tokens; undeclared MCP names are a separate permitted inventory.
+MCP directories and namespace instructions are counted only when included in the effective prompt.
+Accounting reads metadata without cloning the entire undeclared schema catalog or making requests.
+
+Snapshots live in Agent state and are never written to Pi v4 journals. New runs, explicit model/tool
+configuration, context replacement, reset, restore and generation replacement clear the old snapshot.
+`AgentSession::context_budget` adds the active session window and enabled compaction reserve with
+saturating free-space subtraction. Missing windows remain unknown; disabled auto-compaction reserves
+zero. Desktop exposes a localized expandable panel from the composer context indicator; CLI `/session`
+shows the same breakdown. Both label it as the last request estimate, distinct from cumulative tokens.
+This breakdown is an intentional pi-rs addition; legacy Pi's `getContextUsage` semantics, including
+unknown usage immediately after compaction, and existing compaction decisions remain unchanged.
 
 ## Session context edits and actionable boundaries
 
@@ -2706,8 +2931,17 @@ and passes it through the generation request for product-policy validation. `Ses
 applies that state before session construction, so the first provider request and the initial Pi v4
 model/thinking/tool records agree. The generation
 overlay also marks the child as `SessionExecutionOrigin::Subagent` before any hook runs. That
-transient origin survives live generation replacement and nested children, without changing Pi v4
-wire records or disabling ordinary plugin tools. The caller's
+transient origin survives live generation replacement and nested children. The overlay also carries
+an independent tool allowlist into `PiRuntimeBuilder::allowed_tools`: generation construction filters
+tool definitions, executable lookup, and discovery metadata while preserving commands and providers.
+Ordinary selection changes cannot widen that catalog. The child grant contains its selected tools
+plus the parent's currently visible deferred tools for a nonempty selection; an empty selection grants
+none. This lets codemode/tool_search reach deferred tools without enabling ungranted entry points.
+Live reload retains the grant even when the entry point is deselected. Isolated restore validates
+parent provenance before activation, reconstructs selected permissions from the initial v4
+`ActiveToolsChange`, and admits deferred tools from the current parent's visible catalog. No new
+session wire fields are introduced. Plugin activation, including MCP auto-enabling, then follows the
+same policy for user and child sessions within these catalogs. The caller's
 `PiSession` is never replaced. The manager registers
 the isolated handle like every other active session so path ownership, plugin-context binding, and
 shutdown remain centralized; frontends retain their explicitly returned primary `PiSession` rather
@@ -3035,9 +3269,10 @@ ordinary transcript. There is no nested task agent, candidate compiler, separate
 model, or in-process Cua SDK dependency. See [Computer Use setup](../plugins/features/pi-plugin-mcp/README.md#cua-driver).
 
 The server is configured in the existing global or trusted-project `mcp.json`; its official
-tool schemas become `mcp__cua_driver__*` when the configured name is `cua-driver`. Its
-negotiated usage instructions reach the calling model through the MCP plugin's run-local
-prompt hook. The official `get_guide` tool provides detailed instructions on demand, without
+tool schemas become `mcp__cua_driver__*` when the configured name is `cua-driver`. Default
+codemode exposure supplies a server directory; scripts inspect the schemas and negotiated instructions
+through `describeNamespace`. Explicit direct exposure declares the schemas to the model and adds
+namespace instructions to provider requests. The official `get_guide` tool provides details on demand, without
 copying or translating Cua's workflow into Pi-owned actions. Mutating or unannotated MCP
 tools run sequentially; tools explicitly annotated read-only may run in parallel. These are
 generic MCP rules, not switches on Cua tool names.

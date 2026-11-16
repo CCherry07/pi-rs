@@ -159,6 +159,39 @@ impl<'a> ProviderRegisterContext<'a> {
         self.registries.register_model(self.owner.clone(), model)
     }
 
+    pub fn register_classifier_model(&mut self, model: crate::ClassifierModelSpec) -> Result<()> {
+        self.registries
+            .register_model_of_type(self.owner.clone(), crate::AnyModelSpec::Classifier(model))
+    }
+
+    pub fn register_image_model(&mut self, model: crate::ImageModelSpec) -> Result<()> {
+        self.registries
+            .register_model_of_type(self.owner.clone(), crate::AnyModelSpec::Image(model))
+    }
+
+    pub fn base_models_of_type(
+        &self,
+        model_type: crate::ModelType,
+        provider: &ProviderId,
+    ) -> Vec<crate::AnyModelSpec> {
+        self.registries
+            .models_for_provider_of_type(model_type, provider)
+    }
+
+    pub fn replace_provider_models_of_type(
+        &mut self,
+        provider: ProviderId,
+        model_type: crate::ModelType,
+        models: Vec<crate::AnyModelSpec>,
+    ) -> Result<()> {
+        self.registries.replace_provider_models_of_type(
+            self.owner.clone(),
+            provider,
+            model_type,
+            models,
+        )
+    }
+
     /// Returns model metadata registered by earlier provider plugins for one
     /// provider. A later catalog overlay can use this immutable snapshot to
     /// compose explicit user configuration.

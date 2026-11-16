@@ -76,6 +76,8 @@ pub struct AgentStateSnapshot {
 }
 
 pub(crate) struct AgentState {
+    pub(crate) context_request: Option<Arc<pi_core::ContextRequestUsage>>,
+    pub(crate) prompt_contributions: Arc<Vec<pi_core::PromptContribution>>,
     pub(crate) snapshot: AgentStateSnapshot,
 }
 
@@ -165,6 +167,17 @@ impl PreparedAgentConfiguration<'_> {
 
     /// Publishes only prepared values; no validation or fallible work remains.
     pub fn commit(self) {
+        self.commit_with_activity_prompt(false);
+    }
+
+    /// Refreshes a base prompt after a run without discarding the activity's
+    /// hook-derived prompt used by retry/compaction continuations.
+    #[doc(hidden)]
+    pub fn commit_preserving_activity_prompt(self) {
+        self.commit_with_activity_prompt(true);
+    }
+
+    fn commit_with_activity_prompt(self, preserve_activity_prompt: bool) {
         let mut state = self
             .inner
             .state
@@ -176,11 +189,13 @@ impl PreparedAgentConfiguration<'_> {
                 .runtime
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = runtime;
-            *self
-                .inner
-                .effective_prompt
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            if !preserve_activity_prompt {
+                *self
+                    .inner
+                    .effective_prompt
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
         }
         if let Some(converter) = self.convert_to_llm {
             *self
@@ -188,6 +203,9 @@ impl PreparedAgentConfiguration<'_> {
                 .convert_to_llm
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = converter;
+        }
+        if !preserve_activity_prompt {
+            state.context_request = None;
         }
         state.snapshot = self.candidate;
     }
@@ -226,6 +244,7 @@ impl WeakAgent {
 /// A new value can be installed between runs so registries and plugin hooks
 /// always move together as one generation.
 pub struct AgentRuntime {
+    prompt_contributions: Arc<Vec<pi_core::PromptContribution>>,
     default_stream_fn: StreamFn,
     generation: u64,
     system_prompt: String,
@@ -244,12 +263,22 @@ impl AgentRuntime {
     ) -> Self {
         Self {
             generation,
+            prompt_contributions: Arc::default(),
             default_stream_fn: StreamFn::from_registries(Arc::clone(&registries)),
             system_prompt: system_prompt.into(),
             registries,
             plugins,
             provider_plugins,
         }
+    }
+
+    #[must_use]
+    pub fn with_prompt_contributions(
+        mut self,
+        contributions: Vec<pi_core::PromptContribution>,
+    ) -> Self {
+        self.prompt_contributions = Arc::new(contributions);
+        self
     }
 
     pub fn generation(&self) -> u64 {
@@ -285,6 +314,7 @@ impl AgentRuntime {
 
     fn with_system_prompt(&self, system_prompt: String) -> Self {
         Self {
+            prompt_contributions: self.prompt_contributions.clone(),
             default_stream_fn: self.default_stream_fn.clone(),
             generation: self.generation,
             system_prompt,
@@ -400,7 +430,11 @@ impl Agent {
         };
         Self {
             inner: Arc::new(AgentInner {
-                state: Arc::new(Mutex::new(AgentState { snapshot })),
+                state: Arc::new(Mutex::new(AgentState {
+                    snapshot,
+                    context_request: None,
+                    prompt_contributions: Arc::default(),
+                })),
                 run_gate: tokio::sync::Mutex::new(()),
                 active_run: Mutex::new(None),
                 steering: Arc::new(PendingMessageQueue::new(options.steering_mode)),
@@ -568,6 +602,16 @@ impl Agent {
             .clone()
     }
 
+    /// Most recent effective model request, without retaining its raw prompt or schemas.
+    pub fn context_request_usage(&self) -> Option<Arc<pi_core::ContextRequestUsage>> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .context_request
+            .clone()
+    }
+
     /// Last effective run prompt, including plugin contributions, without re-running hooks.
     pub fn effective_system_prompt(&self) -> String {
         let prompt = self
@@ -656,6 +700,7 @@ impl Agent {
             .runtime
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.context_request = None;
         state.snapshot.system_prompt = runtime.system_prompt().to_string();
         *published = runtime;
         *self
@@ -742,6 +787,7 @@ impl Agent {
         if state.snapshot.is_running {
             return Err(AgentError::ConfigureWhileRunning);
         }
+        state.context_request = None;
         state.snapshot.messages = Arc::new(messages);
         Ok(())
     }
@@ -789,6 +835,7 @@ impl Agent {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 Arc::new(runtime.with_system_prompt(system_prompt));
         }
+        state.context_request = None;
         state.snapshot = candidate;
         *self
             .inner
@@ -835,6 +882,7 @@ impl Agent {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.context_request = None;
         state.snapshot.messages = Arc::default();
         state.snapshot.streaming_message = None;
         state.snapshot.pending_tool_calls.clear();
@@ -931,6 +979,7 @@ impl Agent {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.context_request = None;
             state.snapshot.is_running = true;
             state.snapshot.streaming_message = None;
             state.snapshot.error_message = None;
@@ -966,10 +1015,21 @@ impl Agent {
             }
         } else {
             pi_plugin::BeforeAgentStartPatch {
+                prompt_contributions: Vec::new(),
                 system_prompt: Some(self.effective_system_prompt()),
                 messages: Vec::new(),
             }
         };
+        if prepare_input {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut contributions = runtime.prompt_contributions.as_ref().clone();
+            contributions.extend(hook.prompt_contributions);
+            state.prompt_contributions = Arc::new(contributions);
+        }
         let context = AgentContext {
             system_prompt: hook
                 .system_prompt
@@ -1087,6 +1147,7 @@ impl Agent {
             run_id,
             self.inner.config.cwd.clone(),
             self.active_turn_control(),
+            Arc::clone(self.runtime().registries()),
         ))
     }
 }

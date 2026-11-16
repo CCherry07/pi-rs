@@ -10,6 +10,67 @@ use crate::{
     ToolCallId, ToolResult, ToolSpec, ToolUpdate, UiContext,
 };
 
+/// Whether a tool is declared by default or loaded through discovery.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolExposure {
+    #[default]
+    Direct,
+    Deferred,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolNamespace {
+    pub name: String,
+    pub description: Option<String>,
+    pub instructions: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolOrigin {
+    #[default]
+    Local,
+    Mcp,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolDiscovery {
+    pub origin: ToolOrigin,
+    pub exposure: ToolExposure,
+    pub namespace: Option<ToolNamespace>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolInfo {
+    pub spec: ToolSpec,
+    pub discovery: ToolDiscovery,
+}
+
+/// A nested call does not create a model-visible tool-result message. The
+/// caller decides what to expose from the final, hook-processed result.
+#[derive(Debug, Clone)]
+pub struct NestedToolResult {
+    pub call_id: ToolCallId,
+    pub result: ToolResult,
+    /// Explicit structured output supplied by the tool, never inferred from
+    /// its private presentation details.
+    pub structured_content: Option<Value>,
+}
+
+/// Host-injected capability tied to one invocation and its immutable scope.
+#[async_trait]
+pub trait NestedToolExecutor: Send + Sync {
+    /// Accounts for work outside nested tool calls, so parent cancellation can
+    /// preserve usage even when it replaces the outer tool result.
+    fn record_usage(&self, _usage: &crate::Usage) {}
+
+    async fn execute(
+        &self,
+        name: &str,
+        arguments: Value,
+        signal: AbortSignal,
+    ) -> Result<NestedToolResult, ToolError>;
+}
+
 #[derive(Clone)]
 pub struct ToolUpdateSink {
     sender: mpsc::UnboundedSender<ToolUpdate>,
@@ -34,6 +95,9 @@ pub struct ToolContext {
     pub models: ModelsContext,
     pub ui: UiContext,
     run_id: Option<RunId>,
+    discoverable_tools: Vec<ToolInfo>,
+    nested_tools: Arc<Vec<ToolInfo>>,
+    nested_executor: Option<Arc<dyn NestedToolExecutor>>,
 }
 
 impl ToolContext {
@@ -58,6 +122,9 @@ impl ToolContext {
             models: context.models,
             ui: context.ui,
             run_id: None,
+            discoverable_tools: Vec::new(),
+            nested_tools: Arc::default(),
+            nested_executor: None,
         }
     }
 
@@ -77,6 +144,67 @@ impl ToolContext {
     /// tool calls have no Agent run; plugin-owned state is never stored here.
     pub fn run_id(&self) -> Option<&RunId> {
         self.run_id.as_ref()
+    }
+
+    /// Deferred tools available to this invocation and not yet declared.
+    /// Standalone contexts have an empty catalog.
+    pub fn discoverable_tools(&self) -> &[ToolInfo] {
+        &self.discoverable_tools
+    }
+
+    /// Active direct tools and visible deferred tools within this invocation's
+    /// execution scope. Model-only tools are excluded.
+    pub fn nested_tools(&self) -> &[ToolInfo] {
+        &self.nested_tools
+    }
+
+    /// Record supplemental provider work. Nested tool usage is recorded by the
+    /// executor already and must not be passed again. Normal tool results still
+    /// carry their total usage; this ledger is used only on parent interruption.
+    /// Standalone contexts have no parent ledger.
+    pub fn record_usage(&self, usage: &crate::Usage) {
+        if let Some(executor) = &self.nested_executor {
+            executor.record_usage(usage);
+        }
+    }
+
+    /// Runs through the host's preparation, validation and tool hooks. Tool
+    /// failures are returned as `result.is_error`; no transcript is appended.
+    /// The supplied signal can cancel this call without cancelling its parent.
+    /// The Agent host tracks started calls through cancellation and gives their
+    /// result hooks up to one second to settle before aborting cleanup.
+    /// The current Agent host supports one level: contexts of nested tools do
+    /// not receive another executor. Standalone contexts have no executor.
+    pub async fn execute_tool(
+        &self,
+        name: &str,
+        arguments: Value,
+        signal: AbortSignal,
+    ) -> Result<NestedToolResult, ToolError> {
+        if self.abort_signal.is_aborted() || signal.is_aborted() {
+            return Err(ToolError::Aborted);
+        }
+        let executor = self.nested_executor.as_ref().ok_or_else(|| {
+            ToolError::Execution("nested tool execution is unavailable in this context".into())
+        })?;
+        executor.execute(name, arguments, signal).await
+    }
+
+    #[doc(hidden)]
+    pub fn with_nested_executor(
+        mut self,
+        tools: impl Into<Arc<Vec<ToolInfo>>>,
+        executor: Arc<dyn NestedToolExecutor>,
+    ) -> Self {
+        self.nested_tools = tools.into();
+        self.nested_executor = Some(executor);
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_discoverable_tools(mut self, tools: Vec<ToolInfo>) -> Self {
+        self.discoverable_tools = tools;
+        self
     }
 
     #[doc(hidden)]
@@ -115,6 +243,18 @@ impl ScopedTool {
 impl Tool for ScopedTool {
     fn spec(&self) -> ToolSpec {
         self.inner.spec()
+    }
+
+    fn model_only(&self) -> bool {
+        self.inner.model_only()
+    }
+
+    fn reaches_tools(&self) -> bool {
+        self.allowed && self.inner.reaches_tools()
+    }
+
+    fn structured_output(&self, result: &ToolResult) -> Option<Value> {
+        self.inner.structured_output(result)
     }
 
     async fn prepare_arguments(
@@ -158,6 +298,24 @@ pub enum ToolError {
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
 
+    /// Tools that control model-visible execution are not callable by other
+    /// tools. This is enforced before preparation, including guessed names.
+    fn model_only(&self) -> bool {
+        false
+    }
+
+    /// Whether this tool can execute or activate other registered tools. Hosts
+    /// use this marker when making discovery entry points available.
+    fn reaches_tools(&self) -> bool {
+        false
+    }
+
+    /// Opt in to structured nested results. Ordinary tools expose text; their
+    /// internal `details` remain presentation data rather than a result schema.
+    fn structured_output(&self, _result: &ToolResult) -> Option<Value> {
+        None
+    }
+
     async fn prepare_arguments(
         &self,
         _context: &ToolContext,
@@ -183,4 +341,60 @@ pub trait Tool: Send + Sync {
         input: Value,
         updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ReachingTool;
+    #[async_trait]
+    impl Tool for ReachingTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "entry".into(),
+                label: "Entry".into(),
+                description: "Discovery entry point".into(),
+                parameters: serde_json::json!({"type":"object"}),
+                execution_mode: crate::ToolExecutionMode::Sequential,
+                prompt_snippet: None,
+                prompt_guidelines: vec![],
+            }
+        }
+        fn reaches_tools(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            _context: ToolContext,
+            _id: ToolCallId,
+            _input: Value,
+            _updates: ToolUpdateSink,
+        ) -> Result<ToolResult, ToolError> {
+            unreachable!("capability queries must not execute tools")
+        }
+    }
+
+    #[test]
+    fn denied_execution_scope_cannot_advertise_reaching_capability() {
+        let tool: Arc<dyn Tool> = Arc::new(ReachingTool);
+        let allowed: Arc<dyn Tool> = Arc::new(ScopedTool {
+            inner: tool.clone(),
+            allowed: true,
+            origin: "parent".into(),
+        });
+        assert!(allowed.reaches_tools());
+        let denied: Arc<dyn Tool> = Arc::new(ScopedTool {
+            inner: tool,
+            allowed: false,
+            origin: "parent".into(),
+        });
+        assert!(!denied.reaches_tools());
+        let wrapped = ScopedTool {
+            inner: denied,
+            allowed: true,
+            origin: "child".into(),
+        };
+        assert!(!wrapped.reaches_tools());
+    }
 }

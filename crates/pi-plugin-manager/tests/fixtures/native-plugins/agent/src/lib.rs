@@ -23,6 +23,7 @@ impl Plugin for FixtureAgentPlugin {
         _: BeforeAgentStartEvent,
     ) -> std::result::Result<BeforeAgentStartPatch, PluginError> {
         Ok(BeforeAgentStartPatch {
+            prompt_contributions: Vec::new(),
             system_prompt: Some(format!("started={}", self.started.load(Ordering::SeqCst))),
             ..BeforeAgentStartPatch::default()
         })

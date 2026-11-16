@@ -103,6 +103,7 @@ type OverlayPluginFactory = Arc<dyn Fn() -> Arc<dyn Plugin> + Send + Sync>;
 pub struct SessionGenerationOverlay {
     agent_plugins: Vec<OverlayPluginFactory>,
     execution_origin: pi_plugin::SessionExecutionOrigin,
+    allowed_tools: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for SessionGenerationOverlay {
@@ -111,6 +112,7 @@ impl std::fmt::Debug for SessionGenerationOverlay {
             .debug_struct("SessionGenerationOverlay")
             .field("agent_plugins", &self.agent_plugins.len())
             .field("execution_origin", &self.execution_origin)
+            .field("allowed_tools", &self.allowed_tools)
             .finish()
     }
 }
@@ -127,6 +129,12 @@ impl SessionGenerationOverlay {
         self
     }
 
+    /// A tool capability ceiling retained across live generation replacements.
+    pub fn with_allowed_tools(mut self, tools: Vec<String>) -> Self {
+        self.allowed_tools = Some(tools);
+        self
+    }
+
     /// Adds one session-local plugin that is rebuilt for every runtime generation.
     pub fn with_plugin<F>(mut self, plugin: F) -> Self
     where
@@ -139,6 +147,9 @@ impl SessionGenerationOverlay {
     /// Applies the opaque session-local additions to a product runtime builder.
     pub fn apply_to(&self, mut builder: PiRuntimeBuilder) -> PiRuntimeBuilder {
         builder = builder.execution_origin(self.execution_origin);
+        if let Some(tools) = &self.allowed_tools {
+            builder = builder.allowed_tools(tools.clone());
+        }
         for plugin in &self.agent_plugins {
             let plugin = Arc::clone(plugin);
             builder = builder.try_plugin_arc_factory(move || {

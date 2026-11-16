@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
+mod catalog;
 mod config;
+mod operations;
 mod provider;
 mod resolver;
 
@@ -24,11 +26,38 @@ pub fn models_json_schema() -> serde_json::Value {
     config::models_json_schema()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ModelsPluginOptions {
     pub path: PathBuf,
     pub runtime_api_keys: BTreeMap<ProviderId, String>,
     pub extension_provider_configs: BTreeMap<ProviderId, serde_json::Value>,
+    base_provider_configs: BTreeMap<ProviderId, serde_json::Value>,
+    credential_sources: BTreeMap<ProviderId, ModelCredentialSource>,
+}
+
+impl std::fmt::Debug for ModelsPluginOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModelsPluginOptions")
+            .field("path", &self.path)
+            .field(
+                "runtime_api_key_providers",
+                &self.runtime_api_keys.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "extension_providers",
+                &self.extension_provider_configs.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "base_providers",
+                &self.base_provider_configs.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "credential_providers",
+                &self.credential_sources.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 impl ModelsPluginOptions {
@@ -37,6 +66,8 @@ impl ModelsPluginOptions {
             path: path.into(),
             runtime_api_keys: BTreeMap::new(),
             extension_provider_configs: BTreeMap::new(),
+            base_provider_configs: BTreeMap::new(),
+            credential_sources: BTreeMap::new(),
         }
     }
 
@@ -55,6 +86,39 @@ impl ModelsPluginOptions {
         if !api_key.trim().is_empty() {
             self.runtime_api_keys.insert(provider.into(), api_key);
         }
+        self
+    }
+
+    /// Adds the built-in TypeSafe, OpenAI Decisions, and selected OpenRouter
+    /// classifier/image models below user configuration. No credentials are read.
+    pub fn with_builtin_specialized_models(mut self) -> Self {
+        for (provider, config) in catalog::builtin_model_configs() {
+            self.base_provider_configs
+                .entry(provider.into())
+                .or_insert(config);
+        }
+        self
+    }
+
+    /// Adds an immutable default catalog below models.json and extensions.
+    pub fn base_provider_config(
+        mut self,
+        provider: impl Into<ProviderId>,
+        config: serde_json::Value,
+    ) -> Self {
+        self.base_provider_configs.insert(provider.into(), config);
+        self
+    }
+
+    /// Binds request-time credentials with a credential-blind availability snapshot.
+    pub fn credential_source(
+        mut self,
+        provider: impl Into<ProviderId>,
+        source: Arc<dyn pi_provider::CredentialSource>,
+        available: bool,
+    ) -> Self {
+        self.credential_sources
+            .insert(provider.into(), ModelCredentialSource { source, available });
         self
     }
 
@@ -95,10 +159,18 @@ pub struct ModelsPlugin {
     providers: Vec<PreparedProviderLayers>,
     resolver: Arc<ConfigValueResolver>,
     transport: Arc<dyn HttpTransport>,
+    credential_sources: BTreeMap<ProviderId, ModelCredentialSource>,
+}
+
+#[derive(Clone)]
+struct ModelCredentialSource {
+    source: Arc<dyn pi_provider::CredentialSource>,
+    available: bool,
 }
 
 #[derive(Clone)]
 struct PreparedProviderLayers {
+    base: Option<PreparedProvider>,
     file: Option<PreparedProvider>,
     extension: Option<PreparedProvider>,
 }
@@ -118,16 +190,30 @@ impl ModelsPlugin {
             providers.insert(
                 provider.id.clone(),
                 PreparedProviderLayers {
+                    base: None,
                     file: Some(provider),
                     extension: None,
                 },
             );
+        }
+        for (id, config) in options.base_provider_configs {
+            let mut provider = compile_extension_provider(&id, config, &options.runtime_api_keys)?;
+            provider.replace_models = false;
+            providers
+                .entry(id)
+                .or_insert_with(|| PreparedProviderLayers {
+                    base: None,
+                    file: None,
+                    extension: None,
+                })
+                .base = Some(provider);
         }
         for (id, config) in options.extension_provider_configs {
             let provider = compile_extension_provider(&id, config, &options.runtime_api_keys)?;
             providers
                 .entry(id)
                 .or_insert_with(|| PreparedProviderLayers {
+                    base: None,
                     file: None,
                     extension: None,
                 })
@@ -137,6 +223,7 @@ impl ModelsPlugin {
             providers: providers.into_values().collect(),
             resolver: Arc::new(ConfigValueResolver::default()),
             transport,
+            credential_sources: options.credential_sources,
         })
     }
 
@@ -152,7 +239,10 @@ impl ModelsPlugin {
             let provider = match (&layers.file, &layers.extension) {
                 (Some(file), Some(extension)) => extension.overlay_on(file),
                 (Some(provider), None) | (None, Some(provider)) => provider.clone(),
-                (None, None) => continue,
+                (None, None) => match &layers.base {
+                    Some(base) => base.clone(),
+                    None => continue,
+                },
             };
             if &provider.id != id {
                 continue;
@@ -197,6 +287,7 @@ impl ModelsPlugin {
                     .extension
                     .as_ref()
                     .or(provider.file.as_ref())
+                    .or(provider.base.as_ref())
                     .map(|provider| provider.id.clone())
             })
             .collect()
@@ -215,46 +306,61 @@ impl ProviderPlugin for ModelsPlugin {
                 .extension
                 .as_ref()
                 .or(configured.file.as_ref())
+                .or(configured.base.as_ref())
                 .expect("a prepared provider layer must contain a definition")
                 .id
                 .clone();
             let fallback = context.base_provider(&id);
             let base_models = context.base_models(&id);
-            let base_ids = base_models
+            let mut base = base_models
+                .into_iter()
+                .map(pi_core::AnyModelSpec::Chat)
+                .collect::<Vec<_>>();
+            for kind in [pi_core::ModelType::Classifier, pi_core::ModelType::Image] {
+                base.extend(context.base_models_of_type(kind, &id));
+            }
+            let fallback_apis = base
                 .iter()
-                .map(|model| model.id.clone())
-                .collect::<std::collections::HashSet<_>>();
-            let fallback_apis = base_models
-                .iter()
-                .map(|model| model.api.clone())
-                .collect::<std::collections::HashSet<_>>();
+                .map(|model| match model {
+                    pi_core::AnyModelSpec::Chat(m) => m.api.clone(),
+                    pi_core::AnyModelSpec::Classifier(m) => m.api.clone(),
+                    pi_core::AnyModelSpec::Image(m) => m.api.clone(),
+                })
+                .collect();
+            let prepared_base = base
+                .into_iter()
+                .map(config::PreparedModel::from_catalog)
+                .collect::<Vec<_>>();
             let configured = configured
-                .compose(&base_models)
+                .compose_typed(&prepared_base)
                 .map_err(ProviderError::Failure)?;
-            context.register_provider_override(Arc::new(ModelsJsonProvider::with_transport(
-                configured.clone(),
-                fallback,
-                fallback_apis,
-                Arc::clone(&self.resolver),
-                Arc::clone(&self.transport),
-            )))?;
-            if configured.replace_models {
-                context.replace_provider_models(
+            context.register_provider_override(Arc::new(
+                ModelsJsonProvider::with_transport(
+                    configured.clone(),
+                    fallback,
+                    fallback_apis,
+                    Arc::clone(&self.resolver),
+                    Arc::clone(&self.transport),
+                )
+                .with_credentials(self.credential_sources.get(&id).cloned()),
+            ))?;
+            // The catalogs are separated by model type; classifier/image entries can
+            // never become a current chat model or populate the chat selector.
+            for kind in [
+                pi_core::ModelType::Chat,
+                pi_core::ModelType::Classifier,
+                pi_core::ModelType::Image,
+            ] {
+                context.replace_provider_models_of_type(
                     configured.id.clone(),
+                    kind,
                     configured
                         .models
                         .iter()
-                        .map(|model| model.spec.clone())
+                        .filter(|m| m.kind == kind)
+                        .map(config::PreparedModel::catalog)
                         .collect(),
                 )?;
-            } else {
-                for model in &configured.models {
-                    if base_ids.contains(&model.id) {
-                        context.register_model_override(model.spec.clone())?;
-                    } else {
-                        context.register_model(model.spec.clone())?;
-                    }
-                }
             }
         }
         Ok(())
@@ -262,21 +368,31 @@ impl ProviderPlugin for ModelsPlugin {
 }
 
 impl PreparedProviderLayers {
-    fn compose(
+    fn compose_typed(
         &self,
-        base_models: &[pi_core::ModelSpec],
+        base: &[config::PreparedModel],
     ) -> std::result::Result<PreparedProvider, String> {
+        let defaults = self
+            .base
+            .as_ref()
+            .map(|provider| provider.compose_prepared(base, true))
+            .transpose()?;
+        let base = defaults
+            .as_ref()
+            .map_or(base, |provider| provider.models.as_slice());
         match (&self.file, &self.extension) {
             (Some(file), Some(extension)) => {
-                let lower = file.compose_with_base_without_model_overrides(base_models)?;
+                let lower = file.compose_prepared(base, false)?;
                 let merged = extension.overlay_on(file);
                 let mut composed = merged.compose_with_prepared_base(&lower.models)?;
                 file.apply_model_overrides(&mut composed.models)?;
                 Ok(composed)
             }
-            (Some(file), None) => file.compose_with_base(base_models),
-            (None, Some(extension)) => extension.compose_with_base(base_models),
-            (None, None) => unreachable!("a prepared provider layer must contain a definition"),
+            (Some(file), None) => file.compose_prepared(base, true),
+            (None, Some(extension)) => extension.compose_prepared(base, true),
+            (None, None) => {
+                Ok(defaults.expect("a prepared provider layer must contain a definition"))
+            }
         }
     }
 }

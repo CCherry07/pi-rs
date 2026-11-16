@@ -184,7 +184,21 @@ impl SystemPromptFactory for CodingSystemPrompt {
         } else {
             None
         };
+        let contributions = options
+            .context_files
+            .iter()
+            .map(|file| pi_core::PromptContribution {
+                category: pi_core::ContextCategory::MemoryFiles,
+                name: slash_path(&file.path),
+                text: format!(
+                    "<project_instructions path=\"{}\">\n{}\n</project_instructions>\n\n",
+                    escape_xml(&slash_path(&file.path)),
+                    file.content
+                ),
+            })
+            .collect();
         let mut prepared = PreparedSystemPrompt::new(CodingPromptRenderer(options));
+        prepared.prompt_contributions = contributions;
         prepared.resource_options = resource_options;
         prepared.diagnostics = diagnostics;
         Ok(prepared)
@@ -237,7 +251,9 @@ mod generation_tests {
         std::fs::write(cwd.join(".pi/SYSTEM.md"), "untrusted project prompt").unwrap();
         std::fs::write(agent_dir.join("APPEND_SYSTEM.md"), "global addendum").unwrap();
         let runtime = PiRuntime::builder()
-            .provider_plugin(pi_test_support::ScriptedProviderPlugin::scripted([]))
+            .provider_plugin(pi_test_support::ScriptedProviderPlugin::scripted([
+                pi_test_support::ScriptedTurn::Text("done".into()),
+            ]))
             .plugin(pi_plugin_read::ReadPlugin)
             .plugin(pi_plugin_write::WritePlugin)
             .agent_options(AgentOptions {
@@ -288,6 +304,20 @@ mod generation_tests {
         assert!(prompt.contains("updated project rules"));
         assert!(!prompt.contains("original project rules"));
         assert!(prompt.contains("- write: Create or overwrite files"));
+        assert!(runtime.agent().context_request_usage().is_none());
+        runtime.prompt("inspect context").await.unwrap();
+        let usage = runtime.agent().context_request_usage().unwrap();
+        let memory = usage
+            .categories
+            .iter()
+            .find(|part| part.category == pi_core::ContextCategory::MemoryFiles)
+            .unwrap();
+        assert!(
+            memory
+                .items
+                .iter()
+                .any(|item| item.name.ends_with("AGENTS.md") && item.tokens > 0)
+        );
     }
 }
 

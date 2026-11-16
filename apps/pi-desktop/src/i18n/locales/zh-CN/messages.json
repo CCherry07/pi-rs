@@ -191,6 +191,26 @@
       "Skills": "技能",
       "Slash": "命令",
       "Prompts": "提示词"
+    },
+    "contextBreakdownTitle": "上下文用量",
+    "contextClose": "关闭上下文用量",
+    "contextEstimateNote": "最近一次模型请求 · {{model}} · 估算值",
+    "contextDetails": "展开明细（{{count}}）",
+    "contextOverBudget": "估算用量与预留预算之和已超过上下文窗口。",
+    "contextReserveNote": "自动压缩缓冲是预留容量，不是已消耗的 token。估算依据文本大小，图片与服务端格式可能带来差异。",
+    "contextUndeclaredTools": "未声明的 MCP 工具（{{count}}）",
+    "contextUndeclaredNote": "可通过工具发现或 codemode 访问，本次请求未计入其完整 schema。",
+    "contextNoSnapshot": "暂无请求快照。发送消息后可查看分类统计；上下文或配置变更后会清除旧快照。",
+    "contextCumulative": "会话累计：{{tokens}} tokens",
+    "contextCategories": {
+      "messages": "消息",
+      "mcpTools": "MCP 工具",
+      "systemTools": "系统工具",
+      "systemPrompt": "系统提示词",
+      "skills": "技能",
+      "memoryFiles": "记忆与上下文文件",
+      "reserve": "自动压缩预留",
+      "free": "剩余空间"
     }
   },
   "notices": {

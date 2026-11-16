@@ -1933,3 +1933,109 @@ async fn provider_requests_emit_typed_ai_telemetry_lifecycle() {
                 && attributes["pi.ai.stream.chunk_count"].as_u64().is_some_and(|count| count > 0)
     ));
 }
+
+struct ContextAccountingProbe;
+
+#[pi_plugin::plugin]
+impl Plugin for ContextAccountingProbe {
+    fn id(&self) -> PluginId {
+        PluginId::new("context-accounting-probe")
+    }
+
+    async fn before_agent_start(
+        &self,
+        _context: AgentPluginContext,
+        event: pi_plugin::BeforeAgentStartEvent,
+    ) -> Result<pi_plugin::BeforeAgentStartPatch, PluginError> {
+        use pi_core::{ContextCategory, PromptContribution};
+        Ok(pi_plugin::BeforeAgentStartPatch {
+            system_prompt: Some(format!("{}AAAABBBB", event.system_prompt)),
+            prompt_contributions: vec![
+                PromptContribution {
+                    category: ContextCategory::Skills,
+                    name: "catalog".into(),
+                    text: "AAAA".into(),
+                },
+                PromptContribution {
+                    category: ContextCategory::Skills,
+                    name: "duplicate".into(),
+                    text: "AAAA".into(),
+                },
+                PromptContribution {
+                    category: ContextCategory::MemoryFiles,
+                    name: "AGENTS.md".into(),
+                    text: "BBBB".into(),
+                },
+                PromptContribution {
+                    category: ContextCategory::MemoryFiles,
+                    name: "omitted".into(),
+                    text: "not in prompt".into(),
+                },
+            ],
+            messages: Vec::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn context_accounting_measures_final_request_without_duplicate_or_omitted_sources() {
+    use pi_core::ContextCategory;
+    let (agent, provider) = build_agent(
+        [
+            ScriptedTurn::Text("answer".into()),
+            ScriptedTurn::Text("second".into()),
+        ],
+        vec![
+            Arc::new(ContextAccountingProbe),
+            Arc::new(pi_test_support::TestToolsPlugin::new()),
+        ],
+        AgentOptions {
+            system_prompt: "base".into(),
+            active_tools: vec!["echo".into()],
+            convert_to_llm: crate::ConvertToLlm::new(|_| async {
+                vec![Message::User(UserMessage::text("sent", 1))]
+            }),
+            ..AgentOptions::default()
+        },
+    );
+    assert!(agent.context_request_usage().is_none());
+    agent
+        .prompt("this long original message must not be counted".repeat(100))
+        .await
+        .unwrap();
+    let usage = agent.context_request_usage().unwrap();
+    let category = |kind| {
+        usage
+            .categories
+            .iter()
+            .find(|part| part.category == kind)
+            .unwrap()
+    };
+    assert_eq!(category(ContextCategory::Messages).tokens, 1);
+    assert_eq!(category(ContextCategory::Skills).tokens, 1);
+    assert_eq!(category(ContextCategory::Skills).items.len(), 1);
+    assert_eq!(category(ContextCategory::MemoryFiles).tokens, 1);
+    assert_eq!(
+        category(ContextCategory::MemoryFiles).items[0].name,
+        "AGENTS.md"
+    );
+    assert_eq!(category(ContextCategory::SystemPrompt).tokens, 1);
+    assert_eq!(category(ContextCategory::SystemTools).items.len(), 1);
+    assert_eq!(category(ContextCategory::SystemTools).items[0].name, "echo");
+    assert_eq!(
+        usage.estimated_tokens,
+        usage.categories.iter().map(|part| part.tokens).sum::<u64>()
+    );
+    assert_eq!(provider.requests()[0].system_prompt, "baseAAAABBBB");
+    agent
+        .configure(AgentConfigurationPatch {
+            system_prompt: Some("new base".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(agent.context_request_usage().is_none());
+    agent.prompt("next").await.unwrap();
+    assert!(agent.context_request_usage().is_some());
+    agent.replace_context_messages(Vec::new()).unwrap();
+    assert!(agent.context_request_usage().is_none());
+}

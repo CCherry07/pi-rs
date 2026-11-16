@@ -1,0 +1,18 @@
+[package]
+name = "pi-plugin-codemode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64 = "0.22.1"
+futures.workspace = true
+pi-core.workspace = true
+pi-plugin.workspace = true
+pi-plugin-tool-search.workspace = true
+rquickjs = { version = "0.14.0", default-features = false, features = ["std"] }
+serde_json.workspace = true
+serde.workspace = true
+tokio.workspace = true

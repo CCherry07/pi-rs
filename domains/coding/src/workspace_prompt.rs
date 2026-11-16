@@ -36,6 +36,7 @@ impl Plugin for WorkspacePromptPlugin {
             .map_err(|error| PluginError::Failure(error.to_string()))?
             .join("\n");
         Ok(BeforeAgentStartPatch {
+            prompt_contributions: Vec::new(),
             system_prompt: Some(format!(
                 "{}\n\nWorking directory: {}\nWorkspace roots:\n{}\n\nRelative paths resolve from the working directory.",
                 event.system_prompt, cwd, roots

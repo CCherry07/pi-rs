@@ -1,0 +1,19 @@
+[package]
+name = "pi-plugin-tool-search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+pi-core.workspace = true
+pi-plugin.workspace = true
+serde_json.workspace = true
+# Match the workspace's ICU series and include dictionary segmentation for scripts without spaces.
+icu_segmenter = { version = "~2.3.0", default-features = false, features = ["compiled_data"] }
+regex = "1"
+unicode-normalization = "0.1.25"
+
+[dev-dependencies]
+tokio.workspace = true

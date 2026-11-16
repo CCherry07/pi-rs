@@ -1,3 +1,4 @@
+import { normalizeContextBudget } from "@/utils/contextUsage";
 import type {
   ThreadTokenUsage,
 } from "@/types";
@@ -64,6 +65,7 @@ export function normalizeTokenUsage(
 ): ThreadTokenUsage {
   const source = raw ?? {};
   return {
+    ...("contextBreakdown" in source ? { contextBreakdown: normalizeContextBudget(source.contextBreakdown) } : {}),
     totalTokens: (() => {
       const value = source.totalTokens ?? source.total_tokens;
       if (typeof value === "number") {

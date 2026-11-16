@@ -369,6 +369,7 @@ impl Plugin for EvalPromptPlugin {
             Ok(system_prompt) => {
                 capture.system_prompt = Some(system_prompt.clone());
                 Ok(BeforeAgentStartPatch {
+                    prompt_contributions: Vec::new(),
                     system_prompt: Some(system_prompt),
                     ..BeforeAgentStartPatch::default()
                 })

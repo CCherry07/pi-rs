@@ -12,16 +12,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_core::{
-    ContentBlock, ImageContent, PluginId, TextContent, ToolCallId, ToolExecutionMode, ToolResult,
-    ToolSpec,
+    ContentBlock, PluginId, TextContent, ToolCallId, ToolExecutionMode, ToolResult, ToolSpec,
+    ToolUpdate,
 };
 use pi_plugin::{
     AgentPluginContext, BeforeAgentStartEvent, BeforeAgentStartPatch, Plugin, PluginError,
-    RegisterContext, Tool, ToolContext, ToolError, ToolUpdateSink,
+    RegisterContext, Tool, ToolContext, ToolDiscovery, ToolError, ToolExposure, ToolNamespace,
+    ToolUpdateSink,
 };
 use rmcp::model::{
-    CallToolRequest, CallToolRequestParams, ClientRequest, ContentBlock as McpContentBlock,
-    ServerResult, Tool as McpToolSpec,
+    CallToolRequest, CallToolRequestParams, ClientRequest, ServerResult, Tool as McpToolSpec,
 };
 use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RunningService};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -30,6 +30,13 @@ use rmcp::{Peer, RoleClient};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
+
+use crate::client_handler::McpClientHandler;
+use crate::directory::render_servers_section;
+use crate::naming::{identifier_component, qualified_tool_name};
+use crate::policy::{McpExposure, McpServerPolicy};
+use crate::resources::{RESOURCE_TOOL_NAMES, create_resource_tools};
+use crate::result::{normalize_input_schema, project_result_with_resources};
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -151,6 +158,10 @@ pub enum McpError {
     EmptyServerName,
     #[error("duplicate MCP server name: {0}")]
     DuplicateServerName(String),
+    #[error("invalid MCP server name: {0} (use letters, digits, '_' and '-')")]
+    InvalidServerName(String),
+    #[error("MCP servers share the same namespace: {0}")]
+    DuplicateNamespace(String),
     #[error("MCP stdio command for server {0} must not be empty")]
     EmptyCommand(String),
     #[error("invalid MCP HTTP configuration for server {server}: {message}")]
@@ -194,48 +205,108 @@ impl std::fmt::Debug for McpToolSet {
 struct McpPool {
     servers: Vec<Arc<ConnectedServer>>,
     tools: Vec<Arc<McpTool>>,
+    resource_tools: Vec<Arc<dyn Tool>>,
 }
 
-struct ConnectedServer {
-    name: String,
+pub(crate) struct ConnectedServer {
+    pub(crate) name: String,
     instructions: Option<String>,
+    policy: McpServerPolicy,
+    handler: McpClientHandler,
     peer: Peer<RoleClient>,
-    service: Mutex<Option<RunningService<RoleClient, ()>>>,
+    service: Mutex<Option<RunningService<RoleClient, McpClientHandler>>>,
 }
 
 impl McpToolSet {
     /// Starts every configured server and discovers its complete tool catalog.
     /// If any server fails, already-started services are dropped and cancelled.
     pub async fn connect(configs: Vec<McpServerConfig>) -> Result<Self, McpError> {
-        validate_configs(&configs)?;
+        Self::connect_with_policies(
+            configs
+                .into_iter()
+                .map(|config| (config, McpServerPolicy::direct()))
+                .collect(),
+        )
+        .await
+    }
+
+    pub(crate) async fn connect_with_policies(
+        configs: Vec<(McpServerConfig, McpServerPolicy)>,
+    ) -> Result<Self, McpError> {
+        validate_configs(
+            &configs
+                .iter()
+                .map(|(config, _)| config.clone())
+                .collect::<Vec<_>>(),
+        )?;
         let mut servers = Vec::with_capacity(configs.len());
         let mut tools = Vec::new();
         let mut names = HashSet::new();
 
-        for config in configs {
+        for (config, policy) in configs {
             let name = config.name.clone();
-            let server = tokio::time::timeout(CONNECT_TIMEOUT, connect_server(config))
+            let server = tokio::time::timeout(CONNECT_TIMEOUT, connect_server(config, policy))
                 .await
                 .map_err(|_| McpError::Timeout(name.clone()))??;
-            let remote_tools = tokio::time::timeout(CONNECT_TIMEOUT, server.peer.list_all_tools())
-                .await
-                .map_err(|_| McpError::Timeout(name))?
-                .map_err(|_| McpError::ListTools {
-                    server: server.name.clone(),
-                    message: "server rejected discovery or the connection closed".into(),
-                })?;
+            let remote_tools = if server
+                .peer
+                .peer_info()
+                .is_some_and(|info| info.capabilities.tools.is_some())
+            {
+                tokio::time::timeout(CONNECT_TIMEOUT, server.peer.list_all_tools())
+                    .await
+                    .map_err(|_| McpError::Timeout(name))?
+                    .map_err(|_| McpError::ListTools {
+                        server: server.name.clone(),
+                        message: "server rejected discovery or the connection closed".into(),
+                    })?
+            } else {
+                Vec::new()
+            };
+            // Assign before filtering so hidden collision peers cannot change visible names.
+            let mut plain_counts = HashMap::new();
+            let mut remote_names = HashSet::new();
+            for remote in &remote_tools {
+                if !remote_names.insert(remote.name.to_string()) {
+                    return Err(McpError::DuplicateTool(format!(
+                        "{}/{}",
+                        server.name, remote.name
+                    )));
+                }
+                *plain_counts
+                    .entry(qualified_tool_name(&server.name, &remote.name, |_| false))
+                    .or_insert(0) += 1;
+            }
             for remote in remote_tools {
-                let tool = Arc::new(McpTool::new(Arc::clone(&server), remote));
+                let name = qualified_tool_name(&server.name, &remote.name, |candidate| {
+                    names.contains(candidate)
+                        || plain_counts.get(candidate).is_some_and(|count| *count > 1)
+                });
+                let hidden = server.policy.exposure_for(&remote.name) == McpExposure::Hidden;
+                let tool = Arc::new(McpTool::new(Arc::clone(&server), remote, name));
                 if !names.insert(tool.descriptor.name.clone()) {
                     return Err(McpError::DuplicateTool(tool.descriptor.name.clone()));
                 }
-                tools.push(tool);
+                if !hidden {
+                    tools.push(tool);
+                }
             }
             servers.push(server);
         }
 
+        let resource_tools = create_resource_tools(
+            servers
+                .iter()
+                .filter(|server| server.resources_visible())
+                .cloned()
+                .collect(),
+        );
         Ok(Self {
-            inner: Arc::new(McpPool { servers, tools }),
+            inner: Arc::new(McpPool {
+                servers,
+                tools,
+                resource_tools,
+            }),
         })
     }
 
@@ -244,6 +315,7 @@ impl McpToolSet {
         Arc::new(McpToolPlugin { pool: self.clone() })
     }
 
+    /// Descriptors of exposed server tools. Shared resource tools are registered by the plugin.
     pub fn tools(&self) -> Vec<McpToolDescriptor> {
         self.inner
             .tools
@@ -252,27 +324,156 @@ impl McpToolSet {
             .collect()
     }
 
+    pub(crate) fn tool_names(&self) -> Vec<String> {
+        self.inner
+            .tools
+            .iter()
+            .map(|tool| tool.descriptor.name.clone())
+            .chain(
+                self.inner
+                    .resource_tools
+                    .iter()
+                    .map(|tool| tool.spec().name),
+            )
+            .chain(self.needs_tool_search().then(|| "tool_search".to_string()))
+            .collect()
+    }
+
+    fn needs_tool_search(&self) -> bool {
+        self.inner
+            .servers
+            .iter()
+            .any(|server| server.policy.uses_deferred())
+    }
+
+    fn resource_discovery(&self) -> ToolDiscovery {
+        let direct = self.inner.servers.iter().any(|server| {
+            server.resources_visible() && server.policy.exposure == McpExposure::Direct
+        });
+        ToolDiscovery {
+            origin: pi_plugin::ToolOrigin::Mcp,
+            exposure: if direct {
+                ToolExposure::Direct
+            } else {
+                ToolExposure::Deferred
+            },
+            namespace: Some(ToolNamespace {
+                name: "mcp_resources".into(),
+                description: Some("Resources provided by MCP servers".into()),
+                instructions: Some(
+                    self.inner
+                        .servers
+                        .iter()
+                        .filter(|server| server.resources_visible())
+                        .filter_map(|server| {
+                            server.instructions.as_ref().map(|instructions| {
+                                format!(
+                                    "Instructions for MCP resources from `{}`:\n{instructions}",
+                                    server.name
+                                )
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n"),
+                ),
+            }),
+        }
+    }
+
+    pub(crate) fn has_resources(&self, name: &str) -> bool {
+        self.inner
+            .servers
+            .iter()
+            .any(|server| server.name == name && server.resources_visible())
+    }
+
+    pub(crate) fn tool_exposure_counts(&self, server: &str) -> (usize, usize, usize) {
+        let mut direct = 0;
+        let mut deferred = 0;
+        let mut codemode = 0;
+        for tool in self
+            .inner
+            .tools
+            .iter()
+            .filter(|tool| tool.server.name == server)
+        {
+            match tool.server.policy.exposure_for(&tool.remote_name) {
+                McpExposure::Direct => direct += 1,
+                McpExposure::Deferred => deferred += 1,
+                McpExposure::Codemode => codemode += 1,
+                McpExposure::Hidden => {}
+            }
+        }
+        (direct, deferred, codemode)
+    }
+
     pub(crate) fn prompt_patch(&self, event: BeforeAgentStartEvent) -> BeforeAgentStartPatch {
         let active: HashSet<_> = event.active_tools.iter().map(String::as_str).collect();
         let mut prompt = event.system_prompt;
+        let base_length = prompt.len();
         let mut changed = false;
+        if active.contains("tool_search") || active.contains("codemode") {
+            let section = render_servers_section(
+                self.inner
+                    .servers
+                    .iter()
+                    .filter(|server| {
+                        (active.contains("tool_search") && server.policy.uses_deferred())
+                            || (active.contains("codemode")
+                                && (server.policy.uses_codemode() || server.policy.uses_deferred()))
+                    })
+                    .map(|server| {
+                        (
+                            server.name.as_str(),
+                            server.policy.description.as_deref(),
+                            server.instructions.as_deref(),
+                            if server.policy.uses_codemode() || !active.contains("tool_search") {
+                                "codemode"
+                            } else {
+                                "tool_search"
+                            },
+                        )
+                    }),
+            );
+            if let Some(section) = section {
+                prompt.push_str(&format!("\n\n<mcp_servers>\n{section}\n</mcp_servers>"));
+                changed = true;
+            }
+        }
         for server in &self.inner.servers {
-            let Some(instructions) = &server.instructions else {
-                continue;
-            };
-            if !self.inner.tools.iter().any(|tool| {
-                Arc::ptr_eq(&tool.server, server) && active.contains(tool.descriptor.name.as_str())
-            }) {
+            let summary = server
+                .policy
+                .description
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.lines().next());
+            if summary.is_none() {
                 continue;
             }
-            prompt.push_str(&format!(
-                "\n\nInstructions for MCP tools with prefix `mcp__{}__`:\n{}",
-                identifier_component(&server.name),
-                instructions
-            ));
+            let has_active_tools = self.inner.tools.iter().any(|tool| {
+                Arc::ptr_eq(&tool.server, server) && active.contains(tool.descriptor.name.as_str())
+            });
+            let has_active_resources = server.resources_visible()
+                && RESOURCE_TOOL_NAMES.iter().any(|name| active.contains(name));
+            if !has_active_tools && !has_active_resources {
+                continue;
+            }
+            if let Some(summary) = summary {
+                prompt.push_str(&format!("\n\nMCP server {}: {summary}", server.name));
+            }
             changed = true;
         }
         BeforeAgentStartPatch {
+            prompt_contributions: if changed {
+                vec![pi_core::PromptContribution {
+                    category: pi_core::ContextCategory::McpTools,
+                    name: "MCP server directory".into(),
+                    text: prompt[base_length..].to_string(),
+                }]
+            } else {
+                Vec::new()
+            },
             system_prompt: changed.then_some(prompt),
             ..BeforeAgentStartPatch::default()
         }
@@ -305,30 +506,41 @@ impl McpToolSet {
     }
 }
 
-async fn connect_server(config: McpServerConfig) -> Result<Arc<ConnectedServer>, McpError> {
+async fn connect_server(
+    config: McpServerConfig,
+    policy: McpServerPolicy,
+) -> Result<Arc<ConnectedServer>, McpError> {
     let McpServerConfig { name, transport } = config;
+    let handler = McpClientHandler::new(policy.root.as_deref());
     let auto = ClientLifecycleMode::Auto {
         preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
         legacy_version: Some(rmcp::model::ProtocolVersion::LATEST),
     };
-    let service = match connect_once(&name, &transport, auto).await {
+    let service = match connect_once(&name, &transport, handler.clone(), auto).await {
         Ok(service) => service,
         // Some deployed legacy servers return an uncorrelated JSON-RPC error
         // to server/discover. A fresh transport can still complete the stable
         // initialize handshake; retrying cannot reuse ambiguous transport state.
         Err(McpError::Initialize { .. }) => {
-            connect_once(&name, &transport, ClientLifecycleMode::Initialize).await?
+            connect_once(
+                &name,
+                &transport,
+                handler.clone(),
+                ClientLifecycleMode::Initialize,
+            )
+            .await?
         }
         Err(error) => return Err(error),
     };
-    Ok(connected_server(name, service))
+    Ok(connected_server(name, policy, handler, service))
 }
 
 async fn connect_once(
     name: &str,
     config: &McpTransport,
+    handler: McpClientHandler,
     lifecycle: ClientLifecycleMode,
-) -> Result<RunningService<RoleClient, ()>, McpError> {
+) -> Result<RunningService<RoleClient, McpClientHandler>, McpError> {
     match config {
         McpTransport::Http { url, headers } => {
             // reqwest 0.13's no-provider feature requires an explicit default.
@@ -340,7 +552,7 @@ async fn connect_once(
             let transport = StreamableHttpClientTransport::from_config(
                 StreamableHttpClientTransportConfig::with_uri(url.clone()).custom_headers(headers),
             );
-            ().serve_with_lifecycle(transport, lifecycle).await
+            handler.serve_with_lifecycle(transport, lifecycle).await
         }
         McpTransport::Stdio {
             command,
@@ -362,7 +574,7 @@ async fn connect_once(
                     server: name.to_string(),
                     message: error.to_string(),
                 })?;
-            ().serve_with_lifecycle(transport, lifecycle).await
+            handler.serve_with_lifecycle(transport, lifecycle).await
         }
     }
     .map_err(|_| McpError::Initialize {
@@ -371,7 +583,12 @@ async fn connect_once(
     })
 }
 
-fn connected_server(name: String, service: RunningService<RoleClient, ()>) -> Arc<ConnectedServer> {
+fn connected_server(
+    name: String,
+    policy: McpServerPolicy,
+    handler: McpClientHandler,
+    service: RunningService<RoleClient, McpClientHandler>,
+) -> Arc<ConnectedServer> {
     let instructions = service
         .peer()
         .peer_info()
@@ -381,6 +598,8 @@ fn connected_server(name: String, service: RunningService<RoleClient, ()>) -> Ar
     Arc::new(ConnectedServer {
         name,
         instructions,
+        policy,
+        handler,
         peer: service.peer().clone(),
         service: Mutex::new(Some(service)),
     })
@@ -388,13 +607,24 @@ fn connected_server(name: String, service: RunningService<RoleClient, ()>) -> Ar
 
 pub fn validate_configs(configs: &[McpServerConfig]) -> Result<(), McpError> {
     let mut names = HashSet::new();
+    let mut namespaces = HashSet::new();
     for config in configs {
         let name = config.name.trim();
         if name.is_empty() {
             return Err(McpError::EmptyServerName);
         }
+        if config
+            .name
+            .bytes()
+            .any(|c| !c.is_ascii_alphanumeric() && c != b'_' && c != b'-')
+        {
+            return Err(McpError::InvalidServerName(config.name.clone()));
+        }
         if !names.insert(name.to_string()) {
             return Err(McpError::DuplicateServerName(name.to_string()));
+        }
+        if !namespaces.insert(identifier_component(name)) {
+            return Err(McpError::DuplicateNamespace(name.to_string()));
         }
         match &config.transport {
             McpTransport::Stdio { command, .. } if command.trim().is_empty() => {
@@ -470,7 +700,31 @@ impl Plugin for McpToolPlugin {
 
     fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
         for tool in &self.pool.inner.tools {
-            context.register_tool(tool.clone())?;
+            context.register_tool_with_discovery(
+                tool.clone(),
+                ToolDiscovery {
+                    origin: pi_plugin::ToolOrigin::Mcp,
+                    exposure: if matches!(
+                        tool.server.policy.exposure_for(&tool.remote_name),
+                        McpExposure::Deferred | McpExposure::Codemode
+                    ) {
+                        ToolExposure::Deferred
+                    } else {
+                        ToolExposure::Direct
+                    },
+                    namespace: Some(ToolNamespace {
+                        name: format!("mcp__{}", identifier_component(&tool.server.name)),
+                        description: tool.server.policy.description.clone(),
+                        instructions: tool.server.instructions.clone(),
+                    }),
+                },
+            )?;
+        }
+        for tool in &self.pool.inner.resource_tools {
+            context.register_tool_with_discovery(tool.clone(), self.pool.resource_discovery())?;
+        }
+        if self.pool.needs_tool_search() {
+            context.register_tool(pi_plugin_tool_search::tool_search_tool())?;
         }
         Ok(())
     }
@@ -492,7 +746,7 @@ struct McpTool {
 }
 
 impl McpTool {
-    fn new(server: Arc<ConnectedServer>, remote: McpToolSpec) -> Self {
+    fn new(server: Arc<ConnectedServer>, remote: McpToolSpec, name: String) -> Self {
         // Read-only hints affect scheduling only, never authorization. Unknown
         // or mutating tools must finish before subsequent calls can observe them.
         let execution_mode = if remote
@@ -518,8 +772,7 @@ impl McpTool {
             .description
             .map(|description| description.into_owned())
             .unwrap_or_else(|| format!("MCP tool {}/{}", server.name, remote_name));
-        let parameters = Value::Object((*remote.input_schema).clone());
-        let name = qualified_tool_name(&server.name, &remote_name);
+        let parameters = normalize_input_schema(Value::Object((*remote.input_schema).clone()));
         Self {
             descriptor: McpToolDescriptor {
                 server_name: server.name.clone(),
@@ -538,6 +791,14 @@ impl McpTool {
 
 #[async_trait]
 impl Tool for McpTool {
+    fn structured_output(&self, result: &ToolResult) -> Option<Value> {
+        // Scripts receive the complete, untruncated CallToolResult, including
+        // isError. Transport metadata remains private to the Rust result adapter.
+        let mut payload = result.details.as_ref()?.as_object()?.clone();
+        payload.remove("_meta");
+        Some(Value::Object(payload))
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: self.descriptor.name.clone(),
@@ -555,93 +816,140 @@ impl Tool for McpTool {
         context: ToolContext,
         _tool_call_id: ToolCallId,
         input: Value,
-        _updates: ToolUpdateSink,
+        updates: ToolUpdateSink,
     ) -> Result<ToolResult, ToolError> {
         let Value::Object(arguments) = input else {
             return Err(ToolError::InvalidArguments(
                 "arguments must be a JSON object".to_string(),
             ));
         };
-        context.signal().check().map_err(|_| ToolError::Aborted)?;
-        let failure = || {
-            ToolError::Execution(format!(
-                "MCP request failed for server {}",
-                self.server.name
-            ))
-        };
-        let mut request = self
+        let response = self
             .server
-            .peer
-            .send_cancellable_request(
+            .request(
+                &context,
                 ClientRequest::CallToolRequest(CallToolRequest::new(
                     CallToolRequestParams::new(self.remote_name.clone()).with_arguments(arguments),
                 )),
-                Default::default(),
+                &self.remote_name,
+                &updates,
             )
             .await
-            .map_err(|_| failure())?;
-        let response = tokio::select! {
-            result = &mut request.rx => result.map_err(|_| failure())?.map_err(|_| failure())?,
-            () = context.signal().wait() => {
-                // The SDK sends a legacy cancellation notification or closes the
-                // modern request stream, depending on the negotiated lifecycle.
-                let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, request.cancel(Some("cancelled by user".into()))).await;
-                return Err(ToolError::Aborted);
-            },
-        };
+            .map_err(|error| error.into_tool_error(&self.server.name))?;
         let ServerResult::CallToolResult(result) = response else {
-            return Err(failure());
+            return Err(
+                McpRequestError::Service(rmcp::service::ServiceError::UnexpectedResponse)
+                    .into_tool_error(&self.server.name),
+            );
         };
-        let details = serde_json::to_value(&result).ok();
-        let is_error = result.is_error.unwrap_or(false);
-        let content = result.content.into_iter().map(project_content).collect();
-        Ok(ToolResult {
-            content,
-            details,
-            usage: None,
-            added_tool_names: None,
-            is_error,
-            terminate: false,
-        })
+        let readable_resources = self.server.resources_visible()
+            && context
+                .session
+                .active_tools()
+                .is_ok_and(|tools| tools.iter().any(|name| name == "read_mcp_resource"));
+        Ok(project_result_with_resources(
+            &self.server.name,
+            &self.remote_name,
+            result,
+            readable_resources,
+        ))
     }
 }
 
-fn project_content(content: McpContentBlock) -> ContentBlock {
-    match content {
-        McpContentBlock::Text(text) => ContentBlock::Text(TextContent::new(text.text)),
-        McpContentBlock::Image(image) => ContentBlock::Image(ImageContent {
-            data: image.data,
-            mime_type: image.mime_type,
-        }),
-        other => ContentBlock::Text(TextContent::new(
-            serde_json::to_string(&other)
-                .unwrap_or_else(|_| "[unsupported MCP content]".to_string()),
-        )),
+/// Keep protocol classification private while omitting endpoint/credential details from errors.
+#[derive(Debug)]
+pub(crate) enum McpRequestError {
+    Aborted,
+    Timeout(Duration),
+    Service(rmcp::service::ServiceError),
+}
+
+impl McpRequestError {
+    pub(crate) fn is_method_not_found(&self) -> bool {
+        matches!(self, Self::Service(rmcp::service::ServiceError::McpError(error))
+            if error.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND)
     }
-}
 
-fn qualified_tool_name(server: &str, tool: &str) -> String {
-    format!(
-        "mcp__{}__{}",
-        identifier_component(server),
-        identifier_component(tool)
-    )
-}
-
-fn identifier_component(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    let mut previous_separator = false;
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() || character == '_' {
-            output.push(character.to_ascii_lowercase());
-            previous_separator = false;
-        } else if !previous_separator {
-            output.push('_');
-            previous_separator = true;
+    pub(crate) fn into_tool_error(self, server: &str) -> ToolError {
+        match self {
+            Self::Aborted => ToolError::Aborted,
+            Self::Timeout(timeout) => ToolError::Execution(format!(
+                "MCP request timed out for server {server} after {} seconds without progress",
+                timeout.as_secs_f64(),
+            )),
+            Self::Service(_) => {
+                ToolError::Execution(format!("MCP request failed for server {server}"))
+            }
         }
     }
-    output.trim_matches('_').to_string()
 }
+
+impl ConnectedServer {
+    fn resources_visible(&self) -> bool {
+        self.policy.exposure != McpExposure::Hidden
+            && self
+                .peer
+                .peer_info()
+                .is_some_and(|info| info.capabilities.resources.is_some())
+    }
+
+    pub(crate) async fn request(
+        &self,
+        context: &ToolContext,
+        request: ClientRequest,
+        tool: &str,
+        updates: &ToolUpdateSink,
+    ) -> Result<ServerResult, McpRequestError> {
+        context
+            .signal()
+            .check()
+            .map_err(|_| McpRequestError::Aborted)?;
+        // Subscribe before sending: a fast server may report progress immediately.
+        let mut progress = self.handler.progress.subscribe();
+        let timeout = self.policy.timeout;
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        let mut request = tokio::select! {
+            result = self.peer.send_cancellable_request(request, Default::default()) => result.map_err(McpRequestError::Service)?,
+            () = context.signal().wait() => return Err(McpRequestError::Aborted),
+            () = &mut deadline => return Err(McpRequestError::Timeout(timeout)),
+        };
+        loop {
+            tokio::select! {
+                biased;
+                () = context.signal().wait() => {
+                    let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, request.cancel(Some("cancelled by user".into()))).await;
+                    return Err(McpRequestError::Aborted);
+                }
+                result = &mut request.rx => return result
+                    .map_err(|_| McpRequestError::Service(rmcp::service::ServiceError::TransportClosed))?
+                    .map_err(McpRequestError::Service),
+                () = &mut deadline => {
+                    let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, request.cancel(Some("request timeout".into()))).await;
+                    return Err(McpRequestError::Timeout(timeout));
+                }
+                notification = progress.recv() => {
+                    if let Ok(notification) = notification
+                        && notification.progress_token == request.progress_token
+                    {
+                        deadline.as_mut().reset(tokio::time::Instant::now() + timeout);
+                        let text = notification.message.unwrap_or_else(|| match notification.total {
+                            Some(total) => format!("Progress {}/{total}", notification.progress),
+                            None => format!("Progress {}", notification.progress),
+                        });
+                        updates.send(ToolUpdate {
+                            content: vec![ContentBlock::Text(TextContent::new(text))],
+                            details: Some(serde_json::json!({"server": self.name, "tool": tool})),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "client_contract_tests.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {
@@ -696,10 +1004,20 @@ mod tests {
             let server = EchoServer::new().serve(server_io).await.unwrap();
             server.waiting().await.unwrap()
         });
-        let client = ().serve(client_io).await.unwrap();
-        let connected = connected_server("fixture server".to_string(), client);
+        let handler = McpClientHandler::new(None);
+        let client = handler.clone().serve(client_io).await.unwrap();
+        let connected = connected_server(
+            "fixture-server".to_string(),
+            McpServerPolicy::default(),
+            handler,
+            client,
+        );
         let remote = connected.peer.list_all_tools().await.unwrap().remove(0);
-        let tool = McpTool::new(Arc::clone(&connected), remote);
+        let tool = McpTool::new(
+            Arc::clone(&connected),
+            remote,
+            "mcp__fixture_server__echo".into(),
+        );
 
         assert_eq!(tool.spec().name, "mcp__fixture_server__echo");
         assert_eq!(tool.spec().execution_mode, ToolExecutionMode::Sequential);
@@ -724,11 +1042,22 @@ mod tests {
             inner: Arc::new(McpPool {
                 servers: vec![Arc::clone(&connected)],
                 tools: vec![Arc::new(tool)],
+                resource_tools: Vec::new(),
             }),
         };
-        let (driver, _) = pi_plugin::RegistriesBuilder::new()
+        let (driver, registry) = pi_plugin::RegistriesBuilder::new()
             .register_plugins(vec![pool.plugin()])
             .unwrap();
+        assert_eq!(
+            registry.tool_infos()[0]
+                .discovery
+                .namespace
+                .as_ref()
+                .unwrap()
+                .instructions
+                .as_deref(),
+            Some("Echo server usage guidance.")
+        );
         for enabled in [true, true, false] {
             let patch = driver
                 .before_agent_start(
@@ -749,14 +1078,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert_eq!(
-                patch.system_prompt.as_deref(),
-                Some(if enabled {
-                    "base\n\nInstructions for MCP tools with prefix `mcp__fixture_server__`:\nEcho server usage guidance."
-                } else {
-                    "base"
-                })
-            );
+            assert_eq!(patch.system_prompt.as_deref(), Some("base"));
         }
         connected
             .service
@@ -975,7 +1297,9 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let server = connect_server(config).await.unwrap();
+        let server = connect_server(config, McpServerPolicy::default())
+            .await
+            .unwrap();
         let tool = McpTool::new(
             server.clone(),
             McpToolSpec::new(
@@ -986,6 +1310,7 @@ mod tests {
                     Value::String("object".into()),
                 )])),
             ),
+            "mcp__probe__wait".into(),
         );
         let (abort, signal) = pi_core::AbortHandle::new();
         let (updates, _) = ToolUpdateSink::channel();

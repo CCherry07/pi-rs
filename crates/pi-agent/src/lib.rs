@@ -2,8 +2,10 @@
 
 mod agent;
 mod agent_loop;
+mod context_usage;
 mod event_dispatcher;
 mod llm_callbacks;
+mod namespace_prompt;
 mod pending_queue;
 mod stream_assembler;
 mod tool_scheduler;

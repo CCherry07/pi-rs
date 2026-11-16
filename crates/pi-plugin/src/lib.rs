@@ -4,10 +4,14 @@ extern crate self as pi_plugin;
 #[doc(hidden)]
 pub use async_trait::async_trait as __plugin_async_trait;
 pub use pi_core::{
-    AbortError, AbortHandle, AbortSignal, AgentContext, AgentEvent, AssistantMessage,
-    AssistantStream, AssistantStreamId, AssistantStreamView, ContentBlock, ContentMetadata,
-    CustomMessage, CustomMessageContent, CustomMessageInput, DeferredHandle, ImageContent, Message,
-    ModelCost, ModelCostTier, ModelId, ModelInput, ModelSelection, ModelSpec, PluginId, ProviderId,
+    AbortError, AbortHandle, AbortSignal, AgentContext, AgentEvent, AnyModelSpec, AssistantMessage,
+    AssistantStream, AssistantStreamId, AssistantStreamView, ClassifierAnswer,
+    ClassifierBoolCriteria, ClassifierContext, ClassifierModelSpec, ClassifierQuestion,
+    ClassifierResult, ContentBlock, ContentMetadata, ContextBudget, ContextCategory,
+    ContextCategoryUsage, ContextRequestUsage, ContextUsageItem, CustomMessage,
+    CustomMessageContent, CustomMessageInput, DeferredHandle, ImageContent, ImageModelSpec,
+    ImagesContext, ImagesResult, Message, ModelCallStopReason, ModelCost, ModelCostTier, ModelId,
+    ModelInput, ModelSelection, ModelSpec, ModelType, PluginId, PromptContribution, ProviderId,
     ResponseMetadata, ResponseMetadataPatch, RunId, StopReason, StreamEvent, SystemMessage,
     TextContent, ThinkingBudgets, ThinkingContent, ThinkingLevel, ToolCall, ToolCallId,
     ToolExecutionMode, ToolResult, ToolResultMessage, ToolSpec, ToolUpdate, Usage, UsageCost,
@@ -72,7 +76,10 @@ pub use provider::{
     ProviderStream, is_retryable_provider_error_message,
 };
 pub use registry::{FrozenRegistries, RegistriesBuilder};
-pub use tool::{Tool, ToolContext, ToolError, ToolUpdateSink};
+pub use tool::{
+    NestedToolExecutor, NestedToolResult, Tool, ToolContext, ToolDiscovery, ToolError,
+    ToolExposure, ToolInfo, ToolNamespace, ToolOrigin, ToolUpdateSink,
+};
 
 pub use prepare::{PrepareContext, PrepareError, PrepareResult};
 

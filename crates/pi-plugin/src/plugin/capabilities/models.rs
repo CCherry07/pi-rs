@@ -5,7 +5,10 @@ use serde_json::Value;
 
 use super::types::unbound;
 use super::{PluginContextHandle, PluginContextResult, PluginContextScope, ScopedModel};
-use crate::{ModelId, ModelSelection, ModelSpec, ProviderId, ThinkingLevel};
+use crate::{
+    AbortSignal, AnyModelSpec, ClassifierContext, ClassifierResult, ImagesContext, ImagesResult,
+    ModelId, ModelSelection, ModelSpec, ModelType, ProviderId, ThinkingLevel,
+};
 
 /// Model-catalogue and selection access implemented by the owning product layer.
 #[doc(hidden)]
@@ -28,6 +31,42 @@ pub trait ModelsContextAccess: Send + Sync {
     }
 
     fn available_models(&self) -> PluginContextResult<Vec<ModelSpec>> {
+        unbound()
+    }
+
+    fn models_of_type(
+        &self,
+        _model_type: ModelType,
+        _provider: Option<&ProviderId>,
+    ) -> PluginContextResult<Vec<AnyModelSpec>> {
+        unbound()
+    }
+
+    fn available_models_of_type(
+        &self,
+        _model_type: ModelType,
+        _provider: Option<&ProviderId>,
+    ) -> PluginContextResult<Vec<AnyModelSpec>> {
+        unbound()
+    }
+
+    async fn classify_model(
+        &self,
+        _provider: ProviderId,
+        _model_id: ModelId,
+        _request: ClassifierContext,
+        _signal: AbortSignal,
+    ) -> PluginContextResult<ClassifierResult> {
+        unbound()
+    }
+
+    async fn generate_model_images(
+        &self,
+        _provider: ProviderId,
+        _model_id: ModelId,
+        _request: ImagesContext,
+        _signal: AbortSignal,
+    ) -> PluginContextResult<ImagesResult> {
         unbound()
     }
 
@@ -102,6 +141,68 @@ macro_rules! impl_models_context {
 
             pub fn available(&self) -> PluginContextResult<Vec<ModelSpec>> {
                 self.handle.access()?.available_models()
+            }
+
+            pub fn models_of_type(
+                &self,
+                model_type: ModelType,
+                provider: Option<&ProviderId>,
+            ) -> PluginContextResult<Vec<AnyModelSpec>> {
+                self.handle.access()?.models_of_type(model_type, provider)
+            }
+
+            pub fn available_models_of_type(
+                &self,
+                model_type: ModelType,
+                provider: Option<&ProviderId>,
+            ) -> PluginContextResult<Vec<AnyModelSpec>> {
+                self.handle
+                    .access()?
+                    .available_models_of_type(model_type, provider)
+            }
+
+            pub fn model_of_type(
+                &self,
+                model_type: ModelType,
+                provider: &ProviderId,
+                model_id: &ModelId,
+            ) -> PluginContextResult<Option<AnyModelSpec>> {
+                Ok(self
+                    .models_of_type(model_type, Some(provider))?
+                    .into_iter()
+                    .find(|model| model.id() == model_id))
+            }
+
+            pub async fn classify(
+                &self,
+                provider: ProviderId,
+                model_id: ModelId,
+                request: ClassifierContext,
+                signal: AbortSignal,
+            ) -> PluginContextResult<ClassifierResult> {
+                let access = self.handle.access()?;
+                request
+                    .validate()
+                    .map_err(super::PluginContextError::Invalid)?;
+                access
+                    .classify_model(provider, model_id, request, signal)
+                    .await
+            }
+
+            pub async fn generate_images(
+                &self,
+                provider: ProviderId,
+                model_id: ModelId,
+                request: ImagesContext,
+                signal: AbortSignal,
+            ) -> PluginContextResult<ImagesResult> {
+                let access = self.handle.access()?;
+                request
+                    .validate()
+                    .map_err(super::PluginContextError::Invalid)?;
+                access
+                    .generate_model_images(provider, model_id, request, signal)
+                    .await
             }
 
             pub fn find(

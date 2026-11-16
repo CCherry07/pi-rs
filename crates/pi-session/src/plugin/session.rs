@@ -275,6 +275,17 @@ impl SessionContextAccess for PiPluginContext {
         Ok(self.session()?.runtime().active_tools())
     }
 
+    fn tool_reaches_tools(&self, name: &str) -> Result<bool, PluginContextError> {
+        Ok(self
+            .session()?
+            .runtime()
+            .agent()
+            .runtime()
+            .registries()
+            .tool(name)
+            .is_some_and(|tool| tool.reaches_tools()))
+    }
+
     fn all_tools(&self) -> Result<Vec<pi_core::ToolSpec>, PluginContextError> {
         Ok(self.session()?.runtime().tool_specs())
     }

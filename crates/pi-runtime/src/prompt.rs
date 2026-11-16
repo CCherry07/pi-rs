@@ -96,6 +96,8 @@ where
 }
 
 pub struct PreparedSystemPrompt {
+    /// Frozen source fragments, attributed only when present in the final request.
+    pub prompt_contributions: Vec<pi_core::PromptContribution>,
     renderer: Arc<dyn SystemPromptRenderer>,
     pub resource_options: Option<Value>,
     pub diagnostics: Vec<ResourceDiagnostic>,
@@ -105,6 +107,7 @@ impl PreparedSystemPrompt {
     pub fn new(renderer: impl SystemPromptRenderer + 'static) -> Self {
         Self {
             renderer: Arc::new(renderer),
+            prompt_contributions: Vec::new(),
             resource_options: None,
             diagnostics: Vec::new(),
         }

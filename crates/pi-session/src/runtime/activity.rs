@@ -360,8 +360,35 @@ impl SessionActivity {
 
     /// A pending item is acknowledged only after its final hook-patched message
     /// has committed. Provisioned identities and lazy materialization stay here.
-    pub(super) fn message_ended(&self, message: &Message) -> Result<MessageCommit, SessionError> {
+    pub(super) fn message_ended(
+        &self,
+        message: &Message,
+        active_tools: Option<&[String]>,
+    ) -> Result<MessageCommit, SessionError> {
         let mut state = self.lock();
+        let selection = active_tools
+            .map(|tools| {
+                let previous = self.store.find_entries_on_branch(&crate::BranchQuery {
+                    entries: crate::EntryQuery {
+                        entry_type: Some(crate::SessionEntryType::ActiveToolsChange),
+                        limit: Some(1),
+                        ..crate::EntryQuery::default()
+                    },
+                    ..crate::BranchQuery::default()
+                })?;
+                let unchanged = previous.first().is_some_and(|record| {
+                    matches!(&record.entry, SessionEntry::ActiveToolsChange(change)
+                        if change.active_tool_names == tools)
+                });
+                Ok::<_, SessionError>((!unchanged).then(|| {
+                    SessionEntry::ActiveToolsChange(crate::ActiveToolsEntry {
+                        active_tool_names: tools.to_vec(),
+                    })
+                }))
+            })
+            .transpose()?
+            .flatten();
+        let mut configuration = None;
         let matched = state.active_run.as_ref().and_then(|run| {
             run.pending
                 .iter()
@@ -401,12 +428,25 @@ impl SessionActivity {
                 Message::Custom(custom) => SessionEntry::custom_message(custom),
                 message => SessionEntry::message(message.clone()),
             };
-            (self.store.append_session_record(entry)?, None)
+            if let Some(selection) = selection {
+                // The tool result and loadout share the normal journal batch.
+                // A resumed or branched session restores the selection record,
+                // never an inferred union of historical tool-result metadata.
+                let mut records = self.store.append_batch_records(vec![entry, selection])?;
+                configuration = records.pop();
+                (records.pop().expect("message batch has a result"), None)
+            } else {
+                (self.store.append_session_record(entry)?, None)
+            }
         };
         if matches!(message, Message::Assistant(_)) {
             self.store.materialize()?;
         }
-        Ok(MessageCommit { entry, queue })
+        Ok(MessageCommit {
+            entry,
+            queue,
+            configuration,
+        })
     }
     /// Clears queued messages and returns their editor-ready text. The
     /// cancellation records make the same result survive process recovery.
@@ -750,6 +790,7 @@ impl RecoveredQueue {
 pub(super) struct MessageCommit {
     pub(super) entry: SessionRecord,
     pub(super) queue: Option<QueueSnapshot>,
+    pub(super) configuration: Option<SessionRecord>,
 }
 
 fn input_user_message(text: &str, images: &[ImageContent], timestamp_ms: i64) -> UserMessage {

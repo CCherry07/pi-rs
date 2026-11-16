@@ -2,6 +2,7 @@
 use pi_core::{WorkspaceSnapshot, WorkspaceSpec};
 
 mod ephemeral;
+mod models;
 mod prompt;
 
 pub use prompt::{
@@ -285,6 +286,7 @@ pub struct PiRuntimeBuilder {
     completion_retry_policy: Option<CompletionRetryPolicy>,
     plugin_context: Arc<dyn PluginContext>,
     execution_origin: pi_plugin::SessionExecutionOrigin,
+    allowed_tools: Option<Vec<String>>,
 }
 
 impl Default for PiRuntimeBuilder {
@@ -306,12 +308,23 @@ impl PiRuntimeBuilder {
             completion_retry_policy: None,
             plugin_context: Arc::new(pi_plugin::UnavailablePluginContext),
             execution_origin: pi_plugin::SessionExecutionOrigin::User,
+            allowed_tools: None,
         }
     }
 
     /// Transient host provenance. Plugins decide which policies apply to it.
     pub fn execution_origin(mut self, origin: pi_plugin::SessionExecutionOrigin) -> Self {
         self.execution_origin = origin;
+        self
+    }
+
+    /// Restricts tool registration for every generation, independently of the active selection.
+    /// Commands and providers remain available. Repeated scopes can only narrow access.
+    pub fn allowed_tools(mut self, mut tools: Vec<String>) -> Self {
+        if let Some(previous) = &self.allowed_tools {
+            tools.retain(|name| previous.contains(name));
+        }
+        self.allowed_tools = Some(tools);
         self
     }
 
@@ -518,7 +531,9 @@ impl PiRuntimeBuilder {
         self
     }
 
-    /// Selects every registered tool for the initial generation, in name order.
+    /// Selects every direct tool for the initial generation, in name order.
+    /// Deferred tools stay registered and can be selected explicitly or loaded
+    /// through discovery. The historical method name refers to default tools.
     /// Selection happens after registration and before the first prompt render.
     /// Later reloads retain the active selection, including explicitly disabled tools.
     /// Without this opt-in, `AgentOptions.active_tools` supplies the initial selection.
@@ -596,6 +611,7 @@ impl PiRuntimeBuilder {
             completion_retry_policy: self.completion_retry_policy,
             plugin_context: self.plugin_context,
             execution_origin: self.execution_origin,
+            allowed_tools: self.allowed_tools,
             workspace: workspace.clone(),
         });
         let (generation, active_tools) = build_generation(
@@ -628,10 +644,12 @@ struct RuntimeBlueprint {
     completion_retry_policy: Option<CompletionRetryPolicy>,
     plugin_context: Arc<dyn PluginContext>,
     execution_origin: pi_plugin::SessionExecutionOrigin,
+    allowed_tools: Option<Vec<String>>,
     workspace: WorkspaceSnapshot,
 }
 
 struct RuntimeGeneration {
+    discovery_prompt_dirty: std::sync::atomic::AtomicBool,
     agent: Arc<AgentRuntime>,
     prompt: Option<PreparedSystemPrompt>,
     prompt_options: Mutex<Option<serde_json::Value>>,
@@ -689,9 +707,9 @@ fn build_generation(
     let driver = Arc::new(driver);
     let provider_driver = Arc::new(provider_driver);
     let registries = Arc::new(registries);
-    let active_tools = match selection {
+    let mut active_tools = match selection {
         ToolSelection::AllRegistered => registries
-            .all_tool_specs()
+            .default_tool_specs()
             .into_iter()
             .map(|spec| spec.name)
             .collect(),
@@ -723,6 +741,14 @@ fn build_generation(
         .tool_specs(&active_tools)
         .map_err(|error| RuntimeError::Build(error.to_string()))?;
 
+    let registries = if let Some(allowed) = &blueprint.allowed_tools {
+        let scoped = Arc::new(registries.with_allowed_tools(allowed));
+        active_tools.retain(|name| scoped.tool(name).is_some());
+        scoped
+    } else {
+        registries
+    };
+
     let output = match (&blueprint.system_prompt, &prepared_prompt) {
         (_, Some(prompt)) => {
             assemble_prompt(prompt, &active_tools, &blueprint.workspace, &registries)?
@@ -732,13 +758,22 @@ fn build_generation(
     };
     Ok((
         RuntimeGeneration {
-            agent: Arc::new(AgentRuntime::new(
-                generation,
-                output.system_prompt,
-                registries,
-                driver,
-                Arc::clone(&provider_driver),
-            )),
+            discovery_prompt_dirty: std::sync::atomic::AtomicBool::new(false),
+            agent: Arc::new(
+                AgentRuntime::new(
+                    generation,
+                    output.system_prompt,
+                    registries,
+                    driver,
+                    Arc::clone(&provider_driver),
+                )
+                .with_prompt_contributions(
+                    prepared_prompt
+                        .as_ref()
+                        .map(|prompt| prompt.prompt_contributions.clone())
+                        .unwrap_or_default(),
+                ),
+            ),
             prompt: prepared_prompt,
             prompt_options: Mutex::new(output.options),
             resource_diagnostics: diagnostics,
@@ -963,6 +998,14 @@ impl PiRuntime {
             .agent
             .registries()
             .all_tool_specs()
+    }
+
+    /// Registered tools whose discovery exposure declares them by default.
+    pub fn default_tool_specs(&self) -> Vec<pi_core::ToolSpec> {
+        self.current_generation()
+            .agent
+            .registries()
+            .default_tool_specs()
     }
 
     /// Runs input hooks directly. Full text submissions dispatch registered
@@ -1400,19 +1443,27 @@ impl PiRuntime {
     /// compaction and transient provider failures.
     pub async fn continue_run(&self) -> Result<AgentLoopOutcome, RuntimeError> {
         let _reload_guard = self.reload_lock.lock().await;
-        self.agent
+        self.refresh_discovery_prompt()?;
+        let before = self.active_tools();
+        let result = self
+            .agent
             .continue_run()
             .await
-            .map_err(|error| RuntimeError::Agent(error.to_string()))
+            .map_err(|error| RuntimeError::Agent(error.to_string()));
+        self.finish_discovery(before, result)
     }
 
     /// Resume a session's current activity without repeating input preparation hooks.
     pub async fn continue_activity(&self) -> Result<AgentLoopOutcome, RuntimeError> {
         let _reload_guard = self.reload_lock.lock().await;
-        self.agent
+        self.refresh_discovery_prompt()?;
+        let before = self.active_tools();
+        let result = self
+            .agent
             .continue_activity()
             .await
-            .map_err(|error| RuntimeError::Agent(error.to_string()))
+            .map_err(|error| RuntimeError::Agent(error.to_string()));
+        self.finish_discovery(before, result)
     }
 
     /// Runs an isolated, tool-free provider completion without mutating the
@@ -1643,10 +1694,65 @@ impl PiRuntime {
     }
 
     async fn prompt_locked(&self, input: PromptInput) -> Result<AgentLoopOutcome, RuntimeError> {
-        self.agent
+        self.refresh_discovery_prompt()?;
+        let before = self.active_tools();
+        let result = self
+            .agent
             .prompt(input)
             .await
-            .map_err(|error| RuntimeError::Agent(error.to_string()))
+            .map_err(|error| RuntimeError::Agent(error.to_string()));
+        self.finish_discovery(before, result)
+    }
+
+    fn finish_discovery(
+        &self,
+        before: Vec<String>,
+        result: Result<AgentLoopOutcome, RuntimeError>,
+    ) -> Result<AgentLoopOutcome, RuntimeError> {
+        if before != self.active_tools() {
+            self.current_generation()
+                .discovery_prompt_dirty
+                .store(true, std::sync::atomic::Ordering::Release);
+            self.refresh_discovery_prompt()?;
+        }
+        result
+    }
+
+    /// A discovery changes declarations during the loop. Refresh the reusable
+    /// base only once that run has ended, preserving its hook-derived prompt.
+    /// A failed renderer remains dirty and is retried before any later run.
+    fn refresh_discovery_prompt(&self) -> Result<(), RuntimeError> {
+        let generation = self.current_generation();
+        if !generation
+            .discovery_prompt_dirty
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        if let Some(prompt) = &generation.prompt {
+            let active_tools = self.active_tools();
+            let output = assemble_prompt(
+                prompt,
+                &active_tools,
+                &self.workspace,
+                generation.agent.registries(),
+            )?;
+            self.agent
+                .prepare_configuration(AgentConfigurationPatch {
+                    system_prompt: Some(output.system_prompt),
+                    ..AgentConfigurationPatch::default()
+                })
+                .map_err(|error| RuntimeError::Agent(error.to_string()))?
+                .commit_preserving_activity_prompt();
+            *generation
+                .prompt_options
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = output.options;
+        }
+        generation
+            .discovery_prompt_dirty
+            .store(false, std::sync::atomic::Ordering::Release);
+        Ok(())
     }
 }
 
@@ -1662,6 +1768,37 @@ fn input_user_message(text: String, images: Vec<ImageContent>, timestamp_ms: i64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn allowed_tool_scope_survives_deselection_and_reload_without_widening() {
+        let runtime = PiRuntime::builder()
+            .provider_plugin(ScriptedProviderPlugin::scripted([]))
+            .plugin_factory(TestToolsPlugin::new)
+            .allowed_tools(vec!["echo".into()])
+            .allowed_tools(vec!["echo".into(), "delay".into()])
+            .agent_options(AgentOptions {
+                active_tools: vec!["echo".into(), "delay".into()],
+                ..AgentOptions::default()
+            })
+            .build()
+            .unwrap();
+        assert_eq!(runtime.active_tools(), ["echo"]);
+        assert_eq!(
+            runtime
+                .tool_specs()
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            ["echo"]
+        );
+        assert!(runtime.set_active_tools(["delay"]).is_err());
+        runtime.set_active_tools(Vec::<String>::new()).unwrap();
+        runtime.reload().await.unwrap();
+        assert!(runtime.active_tools().is_empty());
+        assert!(runtime.set_active_tools(["delay"]).is_err());
+        runtime.set_active_tools(["echo"]).unwrap();
+        assert_eq!(runtime.active_tools(), ["echo"]);
+    }
 
     #[tokio::test]
     async fn prepared_configuration_pins_generation_and_prompt_until_commit() {
@@ -2378,6 +2515,7 @@ mod tests {
             event: BeforeAgentStartEvent,
         ) -> Result<BeforeAgentStartPatch, PluginError> {
             Ok(BeforeAgentStartPatch {
+                prompt_contributions: Vec::new(),
                 system_prompt: Some(format!("{}|hook-{}", event.system_prompt, self.value)),
                 messages: Vec::new(),
             })
@@ -2448,6 +2586,7 @@ mod tests {
             event: BeforeAgentStartEvent,
         ) -> Result<BeforeAgentStartPatch, PluginError> {
             Ok(BeforeAgentStartPatch {
+                prompt_contributions: Vec::new(),
                 system_prompt: Some(format!("{}{}", event.system_prompt, self.suffix)),
                 messages: self
                     .inject

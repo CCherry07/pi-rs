@@ -202,12 +202,49 @@ pub trait Provider: Send + Sync {
         ProviderAvailability::Available
     }
 
+    /// Credential-blind availability for one typed catalog entry. Routing
+    /// overlays can distinguish per-model credentials without exposing them.
+    fn model_availability(&self, _model: &crate::AnyModelSpec) -> ProviderAvailability {
+        self.availability()
+    }
+
     async fn stream(
         &self,
         request: ProviderRequest,
         context: ProviderCallContext,
         signal: AbortSignal,
-    ) -> Result<ProviderStream, ProviderError>;
+    ) -> Result<ProviderStream, ProviderError> {
+        let _ = (request, context, signal);
+        Err(ProviderError::Protocol(
+            "provider does not support chat".into(),
+        ))
+    }
+
+    async fn classify(
+        &self,
+        model: crate::ClassifierModelSpec,
+        request: crate::ClassifierContext,
+        context: ProviderCallContext,
+        signal: AbortSignal,
+    ) -> Result<crate::ClassifierResult, ProviderError> {
+        let _ = (model, request, context, signal);
+        Err(ProviderError::Protocol(
+            "provider does not support classification".into(),
+        ))
+    }
+
+    async fn generate_images(
+        &self,
+        model: crate::ImageModelSpec,
+        request: crate::ImagesContext,
+        context: ProviderCallContext,
+        signal: AbortSignal,
+    ) -> Result<crate::ImagesResult, ProviderError> {
+        let _ = (model, request, context, signal);
+        Err(ProviderError::Protocol(
+            "provider does not support image generation".into(),
+        ))
+    }
 }
 
 /// Classifies transient provider/transport failure text using current Pi

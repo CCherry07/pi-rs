@@ -402,6 +402,8 @@ mod tests {
                 MAIN_LANE,
             )
             .unwrap();
+        assert_eq!(session.stats().total_tokens, 20);
+        assert_eq!(session.stats().cost_total, 10.0);
         session
             .append_record(NewLaneRecord {
                 id: "usage".to_string(),

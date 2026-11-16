@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { ContextUsagePopover } from "./ContextUsagePopover";
 import { BrainCog } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ThreadTokenUsage } from "../../../types";
@@ -152,18 +153,7 @@ export function ComposerMetaBar({
         <span className="composer-context-label" title={tokenUsageTooltip}>
           {tokenUsageLabel}
         </span>
-        <div
-          className="composer-context-ring"
-          data-tooltip={contextTooltip}
-          aria-label={contextTooltip}
-          style={
-            {
-              "--context-free": contextFreePercent ?? 0,
-            } as CSSProperties
-          }
-        >
-          <span className="composer-context-value">●</span>
-        </div>
+        <ContextUsagePopover usage={tokenUsage} freePercent={contextFreePercent} tooltip={contextTooltip} />
       </div>
     </div>
   );

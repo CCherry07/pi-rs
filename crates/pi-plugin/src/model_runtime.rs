@@ -16,14 +16,23 @@ pub struct ProviderStatus {
 pub struct ModelRuntime {
     providers: HashMap<ProviderId, (PluginId, Arc<dyn Provider>)>,
     models: HashMap<ModelKey, (PluginId, ModelSpec)>,
+    typed_models: HashMap<(crate::ModelType, ProviderId, ModelId), (PluginId, crate::AnyModelSpec)>,
 }
 
 impl ModelRuntime {
     pub(crate) fn new(
         providers: HashMap<ProviderId, (PluginId, Arc<dyn Provider>)>,
         models: HashMap<ModelKey, (PluginId, ModelSpec)>,
+        typed_models: HashMap<
+            (crate::ModelType, ProviderId, ModelId),
+            (PluginId, crate::AnyModelSpec),
+        >,
     ) -> Self {
-        Self { providers, models }
+        Self {
+            providers,
+            models,
+            typed_models,
+        }
     }
 
     pub fn provider(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
@@ -74,6 +83,64 @@ impl ModelRuntime {
         self.models()
             .into_iter()
             .filter(|model| self.model_is_available(model))
+            .collect()
+    }
+
+    pub fn model_of_type(
+        &self,
+        model_type: crate::ModelType,
+        provider: &ProviderId,
+        id: &ModelId,
+    ) -> Option<crate::AnyModelSpec> {
+        if model_type == crate::ModelType::Chat {
+            return self
+                .model(provider, id)
+                .cloned()
+                .map(crate::AnyModelSpec::Chat);
+        }
+        self.typed_models
+            .get(&(model_type, provider.clone(), id.clone()))
+            .map(|(_, model)| model.clone())
+    }
+
+    pub fn models_of_type(
+        &self,
+        model_type: crate::ModelType,
+        provider: Option<&ProviderId>,
+    ) -> Vec<crate::AnyModelSpec> {
+        let mut models = if model_type == crate::ModelType::Chat {
+            self.models()
+                .into_iter()
+                .map(crate::AnyModelSpec::Chat)
+                .collect::<Vec<_>>()
+        } else {
+            self.typed_models
+                .values()
+                .filter(|(_, model)| model.model_type() == model_type)
+                .map(|(_, model)| model.clone())
+                .collect()
+        };
+        models.retain(|model| provider.is_none_or(|provider| model.provider() == provider));
+        models.sort_by(|left, right| {
+            left.provider()
+                .cmp(right.provider())
+                .then_with(|| left.id().cmp(right.id()))
+        });
+        models
+    }
+
+    pub fn available_models_of_type(
+        &self,
+        model_type: crate::ModelType,
+        provider: Option<&ProviderId>,
+    ) -> Vec<crate::AnyModelSpec> {
+        self.models_of_type(model_type, provider)
+            .into_iter()
+            .filter(|model| {
+                self.providers
+                    .get(model.provider())
+                    .is_some_and(|(_, provider)| provider.model_availability(model).is_available())
+            })
             .collect()
     }
 

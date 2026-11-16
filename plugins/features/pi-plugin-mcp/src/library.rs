@@ -1,12 +1,13 @@
 //! Product-owned MCP configuration. Disk views never initialize a session or connect.
-//! Direct tool exposure and generation-owned connections are deliberate Rust product choices.
+//! Connections belong to a generation; local exposure defaults to codemode as in Pi.
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::config::{MAX_CONFIG_BYTES, McpConfigContext, McpConfigEntry, parse_config};
+use crate::config::{MAX_CONFIG_BYTES, McpConfigContext, McpConfigEntry, parse_document};
+use crate::policy::McpServerPolicy;
 use crate::{McpServerConfig, McpToolSet, McpTransport};
 use pi_plugin::Plugin;
 use serde::{Deserialize, Serialize};
@@ -82,18 +83,65 @@ impl McpLibrary {
     }
 
     fn entries(&self) -> Result<Vec<Entry>, String> {
-        let mut merged = BTreeMap::new();
+        self.configuration_replacing(None)
+            .map(|(entries, _)| entries)
+    }
+
+    /// Validate a proposed scope against the same inherited configuration used at startup.
+    /// No project file is read until the host has granted project trust.
+    fn configuration_replacing(
+        &self,
+        replacement: Option<(McpScope, &str)>,
+    ) -> Result<(Vec<Entry>, bool), String> {
+        let mut auto_enable_codemode = true;
+        let mut merged: BTreeMap<String, Entry> = BTreeMap::new();
         for scope in [McpScope::Global, McpScope::Project] {
             if scope == McpScope::Project && (!self.trusted || self.cwd.is_none()) {
                 continue;
             }
             let path = self.path(scope)?;
-            let content = read_document(&path)?.unwrap_or_else(|| EMPTY.into());
-            for config in parse_config(&content)? {
-                merged.insert(config.name().to_string(), Entry { scope, config });
+            let content = match replacement.filter(|(replaced_scope, _)| *replaced_scope == scope) {
+                Some((_, content)) => content.to_owned(),
+                None => read_document(&path)?.unwrap_or_else(|| EMPTY.into()),
+            };
+            let document = parse_document(&content)?;
+            if let Some(value) = document.auto_enable_codemode {
+                auto_enable_codemode = value;
+            }
+            for config in document.servers {
+                let name = config.name().to_string();
+                if scope == McpScope::Project && config.is_override() {
+                    let base = merged.get(&name).ok_or_else(|| {
+                        format!(
+                            "MCP server {name}: a project policy override needs a global server"
+                        )
+                    })?;
+                    let entry = Entry {
+                        scope: base.scope,
+                        config: config.apply_override(&base.config)?,
+                    };
+                    merged.insert(name, entry);
+                    continue;
+                }
+                // Keep existing standalone disabled placeholders as a Rust compatibility extension.
+                if config.is_override() && config.enabled() {
+                    return Err(format!(
+                        "MCP server {name}: enabled server needs command or url"
+                    ));
+                }
+                let namespace = name.replace('-', "_");
+                if let Some(previous) = merged
+                    .keys()
+                    .find(|previous| **previous != name && previous.replace('-', "_") == namespace)
+                {
+                    return Err(format!(
+                        "MCP server {name}: namespace conflicts with {previous}"
+                    ));
+                }
+                merged.insert(name, Entry { scope, config });
             }
         }
-        Ok(merged.into_values().collect())
+        Ok((merged.into_values().collect(), auto_enable_codemode))
     }
 
     pub fn read(&self, scope: McpScope) -> Result<McpDocument, String> {
@@ -117,6 +165,25 @@ impl McpLibrary {
         })
     }
 
+    fn validate_save(&self, scope: McpScope, content: &str) -> Result<(), String> {
+        let global = Self::new(&self.agent_dir, None, false);
+        if scope == McpScope::Global {
+            // A broken project must not prevent repairing global configuration.
+            return global
+                .configuration_replacing(Some((scope, content)))
+                .map(|_| ());
+        }
+        let candidate = parse_document(content)?.servers;
+        let needs_global = candidate.iter().any(McpConfigEntry::is_override);
+        if !needs_global && global.entries().is_err() {
+            // Independent project definitions (or an empty file) can be repaired even
+            // while the global file is broken. Preparation still validates both scopes.
+            return Ok(());
+        }
+        self.configuration_replacing(Some((scope, content)))
+            .map(|_| ())
+    }
+
     pub fn save(
         &self,
         scope: McpScope,
@@ -124,7 +191,7 @@ impl McpLibrary {
         content: &str,
     ) -> Result<McpDocument, String> {
         let path = self.path(scope)?;
-        parse_config(content)?;
+        self.validate_save(scope, content)?;
         let parent = path.parent().ok_or("Invalid MCP configuration path")?;
         fs::create_dir_all(parent).map_err(io_error)?;
         let mut options = OpenOptions::new();
@@ -141,6 +208,8 @@ impl McpLibrary {
         if revision(read_document(&path)?.as_deref()) != expected_revision {
             return Err("MCP configuration changed on disk; reload before saving".into());
         }
+        // Re-check inherited definitions after acquiring the target scope's save lock.
+        self.validate_save(scope, content)?;
         let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
         temp.write_all(content.as_bytes()).map_err(io_error)?;
         temp.as_file().sync_all().map_err(io_error)?;
@@ -161,11 +230,11 @@ impl McpLibrary {
         if !entry.config.enabled() {
             return Err("Enable and save the server before testing".into());
         }
-        let config = self.resolve(entry)?;
-        let pool = McpToolSet::connect(vec![config])
+        let config = self.resolve_with_policy(entry)?;
+        let pool = McpToolSet::connect_with_policies(vec![config])
             .await
             .map_err(|e| e.to_string())?;
-        let names = pool.tools().into_iter().map(|tool| tool.name).collect();
+        let names = pool.tool_names();
         pool.shutdown().await.map_err(|e| e.to_string())?;
         Ok(names)
     }
@@ -173,26 +242,44 @@ impl McpLibrary {
     /// Reads eligible configuration and connects before returning an immutable plugin.
     /// The host retains candidate ownership and publishes only after complete generation validation.
     pub async fn prepare(&self) -> Result<Arc<dyn Plugin>, String> {
-        let entries = self.entries()?;
+        let (entries, auto_enable_codemode) = self.configuration_replacing(None)?;
+        let needs_codemode = entries
+            .iter()
+            .any(|entry| entry.config.enabled() && entry.config.policy().uses_codemode());
+        let needs_tool_search = entries
+            .iter()
+            .any(|entry| entry.config.enabled() && entry.config.policy().uses_deferred());
         let rows = entries.iter().map(Entry::row).collect();
         let configs = entries
             .into_iter()
             .filter(|entry| entry.config.enabled())
-            .map(|entry| self.resolve(entry))
+            .map(|entry| self.resolve_with_policy(entry))
             .collect::<Result<Vec<_>, _>>()?;
-        let pool = McpToolSet::connect(configs)
+        let pool = McpToolSet::connect_with_policies(configs)
             .await
             .map_err(|e| e.to_string())?;
         Ok(Arc::new(McpProductPlugin {
             library: self.clone(),
             rows,
             pool,
+            auto_enable_codemode,
+            needs_codemode,
+            needs_tool_search,
         }))
+    }
+
+    fn resolve_with_policy(
+        &self,
+        entry: Entry,
+    ) -> Result<(McpServerConfig, McpServerPolicy), String> {
+        let mut policy = entry.config.policy().clone();
+        policy.root = Some(self.cwd.as_ref().unwrap_or(&self.agent_dir).clone());
+        Ok((self.resolve(entry)?, policy))
     }
 
     fn resolve(&self, entry: Entry) -> Result<McpServerConfig, String> {
         let path = self.path(entry.scope)?;
-        entry.config.resolve(McpConfigContext {
+        entry.config.resolve_transport(McpConfigContext {
             config_dir: path.parent().ok_or("Invalid MCP configuration path")?,
             default_cwd: self.cwd.as_ref().unwrap_or(&self.agent_dir),
         })
@@ -276,6 +363,204 @@ mod tests {
     }
 
     #[test]
+    fn auto_enable_codemode_merges_explicit_trusted_values_and_inherits_omissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        let project = dir.path().join("project");
+        fs::create_dir_all(&agent).unwrap();
+        fs::create_dir_all(project.join(".pi")).unwrap();
+        for global in [None, Some(false), Some(true)] {
+            for local in [None, Some(false), Some(true)] {
+                let content = |flag: Option<bool>| {
+                    flag.map_or_else(
+                        || "{}".into(),
+                        |value| serde_json::json!({"autoEnableCodemode":value}).to_string(),
+                    )
+                };
+                fs::write(agent.join("mcp.json"), content(global)).unwrap();
+                fs::write(project.join(".pi/mcp.json"), content(local)).unwrap();
+                for trusted in [false, true] {
+                    let library = McpLibrary::new(&agent, Some(&project), trusted);
+                    let (_, enabled) = library.configuration_replacing(None).unwrap();
+                    assert_eq!(
+                        enabled,
+                        if trusted { local.or(global) } else { global }.unwrap_or(true)
+                    );
+                }
+            }
+        }
+        fs::write(
+            project.join(".pi/mcp.json"),
+            r#"{"autoEnableCodemode":"invalid"}"#,
+        )
+        .unwrap();
+        assert!(
+            McpLibrary::new(&agent, Some(&project), false)
+                .entries()
+                .is_ok()
+        );
+        assert!(
+            McpLibrary::new(&agent, Some(&project), true)
+                .entries()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn saving_auto_enable_codemode_preserves_policy_and_rejects_invalid_replacements() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = McpLibrary::new(dir.path(), None, false);
+        let current = library.read(McpScope::Global).unwrap();
+        let content = r#"{"autoEnableCodemode":false,"mcpServers":{"docs":{"command":"server","enabled":false}}}"#;
+        let saved = library
+            .save(McpScope::Global, &current.revision, content)
+            .unwrap();
+        assert_eq!(saved.content, content);
+        assert!(saved.diagnostic.is_none());
+        assert_eq!(saved.servers.len(), 1);
+        assert!(!library.configuration_replacing(None).unwrap().1);
+        let error = library
+            .save(
+                McpScope::Global,
+                &saved.revision,
+                r#"{"autoEnableCodemode":"invalid"}"#,
+            )
+            .err()
+            .unwrap();
+        assert!(error.contains("must be a boolean"));
+        assert_eq!(library.read(McpScope::Global).unwrap().content, content);
+    }
+
+    #[test]
+    fn project_policy_overrides_keep_global_transport_and_replace_only_selected_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        let project = dir.path().join("project");
+        fs::create_dir_all(&agent).unwrap();
+        fs::create_dir_all(project.join(".pi")).unwrap();
+        fs::write(agent.join("mcp.json"), r#"{"mcpServers":{"server":{"command":"global","env":{"PRIVATE":"secret"},"enabled":false,"description":"Global tools","timeout":15,"exposure":"hidden","toolExposure":{"read*":"direct"}}}}"#).unwrap();
+        let library = McpLibrary::new(&agent, Some(&project), true);
+        let initial = library.read(McpScope::Project).unwrap();
+        library.save(McpScope::Project, &initial.revision, r#"{"mcpServers":{"server":{"enabled":true,"exposure":"direct","toolExposure":{"write*":"hidden"}}}}"#).unwrap();
+        let entry = library.entries().unwrap().pop().unwrap();
+        assert_eq!(entry.scope, McpScope::Global);
+        assert!(entry.config.enabled());
+        assert!(
+            matches!(entry.config.transport(), Some(McpTransport::Stdio { command, env, .. }) if command == "global" && env["PRIVATE"] == "secret")
+        );
+        assert_eq!(
+            entry.config.policy().description.as_deref(),
+            Some("Global tools")
+        );
+        assert_eq!(
+            entry.config.policy().timeout,
+            std::time::Duration::from_secs(15)
+        );
+        assert_eq!(
+            entry.config.policy().exposure_for("write-file"),
+            crate::policy::McpExposure::Hidden
+        );
+        assert_eq!(
+            entry.config.policy().exposure_for("read-file"),
+            crate::policy::McpExposure::Direct
+        );
+        let (_, policy) = library.resolve_with_policy(entry).unwrap();
+        assert_eq!(policy.root.as_deref(), Some(project.as_path()));
+
+        let current = library.read(McpScope::Project).unwrap();
+        library
+            .save(
+                McpScope::Project,
+                &current.revision,
+                r#"{"mcpServers":{"server":{"toolExposure":{}}}}"#,
+            )
+            .unwrap();
+        let entry = library.entries().unwrap().pop().unwrap();
+        assert!(!entry.config.enabled());
+        assert!(entry.config.policy().tool_exposure.is_empty());
+        assert_eq!(
+            entry.config.policy().exposure_for("read-file"),
+            crate::policy::McpExposure::Hidden
+        );
+    }
+
+    #[test]
+    fn invalid_scope_overrides_are_rejected_before_saving() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        let project = dir.path().join("project");
+        fs::create_dir_all(&agent).unwrap();
+        fs::create_dir_all(project.join(".pi")).unwrap();
+        fs::write(
+            agent.join("mcp.json"),
+            r#"{"mcpServers":{"global-server":{"command":"server"}}}"#,
+        )
+        .unwrap();
+        let library = McpLibrary::new(&agent, Some(&project), true);
+        for candidate in [
+            r#"{"mcpServers":{"missing":{"enabled":false}}}"#,
+            r#"{"mcpServers":{"global-server":{"enabled":true,"env":{"TOKEN":"secret"}}}}"#,
+            r#"{"mcpServers":{"global_server":{"command":"server"}}}"#,
+        ] {
+            let error = library
+                .save(McpScope::Project, "missing", candidate)
+                .err()
+                .unwrap();
+            assert!(!error.contains("secret"));
+            assert!(!project.join(".pi/mcp.json").exists());
+        }
+        library
+            .save(
+                McpScope::Project,
+                "missing",
+                r#"{"mcpServers":{"global-server":{"enabled":false}}}"#,
+            )
+            .unwrap();
+        let global = library.read(McpScope::Global).unwrap();
+        // Scoped editing can remove a global definition. The remaining project
+        // override becomes a preparation diagnostic instead of blocking that edit.
+        library
+            .save(McpScope::Global, &global.revision, EMPTY)
+            .unwrap();
+        assert!(library.entries().is_err());
+    }
+
+    #[test]
+    fn broken_scopes_can_be_repaired_independently_without_losing_raw_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent");
+        let project = dir.path().join("project");
+        fs::create_dir_all(&agent).unwrap();
+        fs::create_dir_all(project.join(".pi")).unwrap();
+        for first in [McpScope::Global, McpScope::Project] {
+            fs::write(agent.join("mcp.json"), "broken global").unwrap();
+            fs::write(project.join(".pi/mcp.json"), "broken project").unwrap();
+            let library = McpLibrary::new(&agent, Some(&project), true);
+            let second = if first == McpScope::Global {
+                McpScope::Project
+            } else {
+                McpScope::Global
+            };
+            for scope in [first, second] {
+                let doc = library.read(scope).unwrap();
+                library.save(scope, &doc.revision, "{}").unwrap();
+            }
+            assert!(library.entries().unwrap().is_empty());
+        }
+        let library = McpLibrary::new(&agent, Some(&project), true);
+        let doc = library.read(McpScope::Global).unwrap();
+        let raw = r#"{"mcpServers":{"off":{"enabled":false,"future":{"keep":true}}}}"#;
+        assert_eq!(
+            library
+                .save(McpScope::Global, &doc.revision, raw)
+                .unwrap()
+                .content,
+            raw
+        );
+        assert!(!library.entries().unwrap()[0].config.enabled());
+    }
+
+    #[test]
     fn scoped_resolution_supplies_configuration_and_session_directories() {
         let dir = tempfile::tempdir().unwrap();
         let agent = dir.path().join("agent");
@@ -295,8 +580,7 @@ mod tests {
         let library = McpLibrary::new(&agent, Some(&project), true);
         for entry in library.entries().unwrap() {
             let expected = match entry.config.name() {
-                "global" => agent.join("work"),
-                "project" => project.join(".pi/work"),
+                "global" | "project" => project.join("work"),
                 "default" => project.clone(),
                 name => panic!("unexpected entry {name}"),
             };
@@ -367,7 +651,7 @@ mod tests {
             .save(McpScope::Global, &doc.revision, EMPTY)
             .unwrap();
         assert!(
-            parse_config(
+            crate::config::parse_config(
                 r#"{"mcpServers":{"old":{"type":"sse","url":"https://example.com/sse"}}}"#,
             )
             .is_err()

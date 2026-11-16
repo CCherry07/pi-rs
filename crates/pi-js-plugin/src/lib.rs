@@ -2136,6 +2136,7 @@ impl Plugin for JsPlugin {
             }
         }
         Ok(BeforeAgentStartPatch {
+            prompt_contributions: Vec::new(),
             system_prompt: (system_prompt != original_system_prompt).then_some(system_prompt),
             messages,
         })

@@ -396,7 +396,22 @@ export type GitHubPullRequestComment = {
   author: GitHubUser | null;
 };
 
+export type ContextCategory = "messages" | "mcpTools" | "systemTools" | "systemPrompt" | "skills" | "memoryFiles";
+
+export type ContextBudget = {
+  request: {
+    model: string;
+    estimatedTokens: number;
+    categories: { category: ContextCategory; tokens: number; items: { name: string; tokens: number }[] }[];
+    undeclaredMcpTools: string[];
+  };
+  contextWindow: number | null;
+  reserveTokens: number;
+  freeTokens: number | null;
+};
+
 export type ThreadTokenUsage = {
+  contextBreakdown?: ContextBudget | null;
   totalTokens: number | null;
   contextTokens: number | null;
   modelContextWindow: number | null;

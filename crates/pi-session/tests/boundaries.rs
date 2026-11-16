@@ -49,6 +49,7 @@ impl Plugin for BoundaryPlugin {
     ) -> Result<pi_plugin::BeforeAgentStartPatch, PluginError> {
         let call = self.started.fetch_add(1, Ordering::SeqCst);
         Ok(pi_plugin::BeforeAgentStartPatch {
+            prompt_contributions: Vec::new(),
             system_prompt: Some(format!("{}|prepared-{call}", event.system_prompt)),
             messages: vec![],
         })

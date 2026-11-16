@@ -436,26 +436,47 @@ impl HermesMemoryStore {
     }
 
     pub(crate) fn legacy_global_context(&self) -> String {
+        self.global_context_contributions()
+            .iter()
+            .map(|part| part.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    pub(crate) fn global_context_contributions(&self) -> Vec<pi_core::PromptContribution> {
         let live = self
             .live
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut parts = Vec::new();
+        let mut add = |name: &str, text: String| {
+            parts.push(pi_core::PromptContribution {
+                category: pi_core::ContextCategory::MemoryFiles,
+                name: name.into(),
+                text,
+            })
+        };
         let memory = visible_entries(&live.frozen_global.memory);
         let user = visible_entries(&live.frozen_global.user);
         if !memory.is_empty() {
-            parts.push(fence_block(&render_block(
-                "MEMORY (your personal notes)",
-                &memory,
-                self.config.memory_char_limit,
-            )));
+            add(
+                MEMORY_FILE,
+                fence_block(&render_block(
+                    "MEMORY (your personal notes)",
+                    &memory,
+                    self.config.memory_char_limit,
+                )),
+            );
         }
         if !user.is_empty() {
-            parts.push(fence_block(&render_block(
-                "USER PROFILE (who the user is)",
-                &user,
-                self.config.user_char_limit,
-            )));
+            add(
+                USER_FILE,
+                fence_block(&render_block(
+                    "USER PROFILE (who the user is)",
+                    &user,
+                    self.config.user_char_limit,
+                )),
+            );
         }
         if self.config.failure_injection_enabled {
             let failures = recent_failures(
@@ -464,17 +485,20 @@ impl HermesMemoryStore {
                 self.config.failure_injection_max_entries,
             );
             if !failures.is_empty() {
-                parts.push(fence_block(&format!(
-                    "RECENT FAILURES & LESSONS (learn from these):\n{}",
-                    failures
-                        .iter()
-                        .map(|entry| format!("• {entry}"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                )));
+                add(
+                    FAILURE_FILE,
+                    fence_block(&format!(
+                        "RECENT FAILURES & LESSONS (learn from these):\n{}",
+                        failures
+                            .iter()
+                            .map(|entry| format!("• {entry}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )),
+                );
             }
         }
-        parts.join("\n\n")
+        parts
     }
 
     pub(crate) fn entries(&self, target: MemoryTarget) -> Result<Vec<String>, StoreError> {

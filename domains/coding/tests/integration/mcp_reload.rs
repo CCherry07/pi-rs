@@ -60,19 +60,27 @@ struct McpFixture {
     session: PiSession,
     url: String,
     tool_name: Arc<RwLock<String>>,
+    tool_calls: Arc<RwLock<Vec<String>>>,
     requests: Arc<RwLock<Vec<Value>>>,
     server_task: tokio::task::JoinHandle<()>,
 }
 
 impl McpFixture {
     async fn new(enabled: bool) -> Self {
+        Self::with_policy(enabled, json!({})).await
+    }
+
+    async fn with_policy(enabled: bool, policy: Value) -> Self {
         let tool_name = Arc::new(RwLock::new("echo".to_string()));
+        let tool_calls = Arc::new(RwLock::new(Vec::new()));
         let router = axum::Router::new().route(
             "/mcp",
             axum::routing::post({
                 let tool_name = Arc::clone(&tool_name);
+                let tool_calls = Arc::clone(&tool_calls);
                 move |axum::Json(request): axum::Json<Value>| {
                     let tool_name = Arc::clone(&tool_name);
+                    let tool_calls = Arc::clone(&tool_calls);
                     async move {
                         let id = &request["id"];
                         if id.is_null() {
@@ -96,9 +104,14 @@ impl McpFixture {
                                 "name": tool_name.read().unwrap().clone(),
                                 "inputSchema": {"type": "object"}
                             }]}),
-                            "tools/call" => json!({"content": [{
-                                "type": "text", "text": request["params"]["name"]
-                            }]}),
+                            "tools/call" => {
+                                tool_calls.write().unwrap().push(
+                                    request["params"]["name"].as_str().unwrap().to_string(),
+                                );
+                                json!({"content": [{
+                                    "type": "text", "text": request["params"]["name"]
+                                }]})
+                            }
                             method => panic!("unexpected MCP method {method}"),
                         };
                         axum::Json(json!({"jsonrpc": "2.0", "id": id, "result": result}))
@@ -129,7 +142,7 @@ impl McpFixture {
             r#"{"version":1,"enabled":false}"#,
         )
         .unwrap();
-        Self::write_servers(&agent.join("mcp.json"), &url, enabled);
+        Self::write_servers_with_policy(&agent.join("mcp.json"), &url, enabled, policy);
         fs::write(
             agent.join("models.json"),
             json!({"providers": {"fixture": {
@@ -161,6 +174,7 @@ impl McpFixture {
             session,
             url,
             tool_name,
+            tool_calls,
             requests,
             server_task,
         }
@@ -175,12 +189,23 @@ impl McpFixture {
     }
 
     fn write_servers(path: &std::path::Path, url: &str, enabled: bool) {
+        Self::write_servers_with_policy(path, url, enabled, json!({}));
+    }
+
+    fn set_policy(&self, policy: Value) {
+        Self::write_servers_with_policy(&self.config_path(), &self.url, true, policy);
+    }
+
+    fn write_servers_with_policy(path: &std::path::Path, url: &str, enabled: bool, policy: Value) {
+        let mut server =
+            json!({"type": "http", "url": url, "enabled": enabled, "exposure":"direct"});
+        server
+            .as_object_mut()
+            .unwrap()
+            .extend(policy.as_object().unwrap().clone());
         fs::write(
             path,
-            json!({"version": 1, "mcpServers": {"fixture": {
-                "type": "http", "url": url, "enabled": enabled
-            }}})
-            .to_string(),
+            json!({"version": 1, "mcpServers": {"fixture": server}}).to_string(),
         )
         .unwrap();
     }
@@ -213,27 +238,7 @@ impl McpFixture {
         let context = ContextParts::new(session.plugin_context(PluginContextScope::Base));
         let outcome = context
             .session
-            .run_ephemeral(
-                EphemeralSessionRequest {
-                    system_prompt: Some("Call the fixture tool once.".into()),
-                    origin: "mcp-reload-test".into(),
-                    inherit_history: false,
-                    history_tail: None,
-                    messages: vec![pi_core::Message::User(pi_core::UserMessage::text(
-                        "call", 1,
-                    ))],
-                    tools: vec![name.into()],
-                    plugins: Vec::new(),
-                    model: None,
-                    thinking_level: None,
-                    max_tool_iterations: 2,
-                    max_input_tokens: None,
-                    compaction: None,
-                    // The first request initializes the native certificate store as well as HTTP.
-                    timeout: std::time::Duration::from_secs(30),
-                },
-                AbortHandle::new().1,
-            )
+            .run_ephemeral(Self::invocation_request(name), AbortHandle::new().1)
             .await
             .unwrap();
         assert_eq!(
@@ -253,6 +258,42 @@ impl McpFixture {
             result.content,
             vec![ContentBlock::Text(TextContent::new(expected))]
         );
+    }
+
+    async fn assert_unavailable(&self, name: &str) {
+        let before_calls = self.tool_calls.read().unwrap().len();
+        let before_requests = self.requests.read().unwrap().len();
+        let session = self.session.current();
+        let context = ContextParts::new(session.plugin_context(PluginContextScope::Base));
+        let error = context
+            .session
+            .run_ephemeral(Self::invocation_request(name), AbortHandle::new().1)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(name), "{error}");
+        assert_eq!(self.tool_calls.read().unwrap().len(), before_calls);
+        assert_eq!(self.requests.read().unwrap().len(), before_requests);
+    }
+
+    fn invocation_request(name: &str) -> EphemeralSessionRequest {
+        EphemeralSessionRequest {
+            system_prompt: Some("Call the fixture tool once.".into()),
+            origin: "mcp-reload-test".into(),
+            inherit_history: false,
+            history_tail: None,
+            messages: vec![pi_core::Message::User(pi_core::UserMessage::text(
+                "call", 1,
+            ))],
+            tools: vec![name.into()],
+            plugins: Vec::new(),
+            model: None,
+            thinking_level: None,
+            max_tool_iterations: 2,
+            max_input_tokens: None,
+            compaction: None,
+            // The first request initializes the native certificate store as well as HTTP.
+            timeout: std::time::Duration::from_secs(30),
+        }
     }
 
     async fn shutdown(&self) {
@@ -289,7 +330,7 @@ async fn mcp_guidance_reaches_the_main_model_and_tracks_generation_replacement()
                 prompt.contains(expected),
                 "missing current server instructions"
             );
-            assert!(prompt.contains("mcp__fixture__"));
+            assert!(prompt.contains("namespace `mcp__fixture`"));
         }
     };
 
@@ -365,6 +406,73 @@ async fn mcp_reload_activates_a_newly_enabled_server() {
             .join("agent/session.jsonl")
             .exists()
     );
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn hidden_mcp_tools_are_not_registered_active_or_callable() {
+    let fixture = McpFixture::with_policy(true, json!({"exposure": "hidden"})).await;
+    fixture.assert_tool("mcp__fixture__echo", false);
+    fixture.assert_unavailable("mcp__fixture__echo").await;
+    assert!(fixture.tool_calls.read().unwrap().is_empty());
+    assert!(fixture.requests.read().unwrap().is_empty());
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_exact_direct_override_and_hidden_reload_preserve_session_usability() {
+    let fixture = McpFixture::with_policy(
+        true,
+        json!({"exposure": "hidden", "toolExposure": {"e*": "hidden", "echo": "direct"}}),
+    )
+    .await;
+    fixture.assert_tool("mcp__fixture__echo", true);
+    // Persist a real turn so the subsequent reload exercises restored tool selection too.
+    fixture
+        .session
+        .current()
+        .prompt("Call the explicitly exposed fixture tool.")
+        .await
+        .unwrap();
+    assert_eq!(fixture.tool_calls.read().unwrap().as_slice(), ["echo"]);
+
+    fixture.set_policy(json!({"exposure": "hidden"}));
+    fixture.session.reload().await.unwrap();
+    fixture.assert_tool("mcp__fixture__echo", false);
+    fixture.assert_unavailable("mcp__fixture__echo").await;
+    fixture
+        .session
+        .current()
+        .prompt("Continue after hiding the MCP tool.")
+        .await
+        .unwrap();
+    assert_eq!(fixture.tool_calls.read().unwrap().as_slice(), ["echo"]);
+    {
+        let requests = fixture.requests.read().unwrap();
+        let tools = requests.last().unwrap()["tools"].as_array().unwrap();
+        assert!(tools.iter().all(|tool| {
+            !tool["function"]["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("mcp__fixture__")
+        }));
+    }
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn invalid_mcp_exposure_reload_preserves_the_previous_connection() {
+    let fixture = McpFixture::new(true).await;
+    let before = fixture.session.current();
+    fixture.set_policy(json!({"exposure": "invalid-exposure"}));
+    let Err(error) = fixture.session.reload().await else {
+        panic!("invalid exposure must reject reload");
+    };
+    assert!(error.to_string().contains("exposure"), "{error}");
+    assert!(Arc::ptr_eq(&before, &fixture.session.current()));
+    fixture.assert_tool("mcp__fixture__echo", true);
+    fixture.invoke("mcp__fixture__echo", "echo").await;
+    assert_eq!(fixture.tool_calls.read().unwrap().as_slice(), ["echo"]);
     fixture.shutdown().await;
 }
 

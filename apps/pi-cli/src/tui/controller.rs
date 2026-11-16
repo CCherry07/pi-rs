@@ -1094,8 +1094,9 @@ pub(super) async fn run_effect(
             .name()
             .map(|name| format!("Name: {name}\n"))
             .unwrap_or_default();
+        let context = context_budget_text(session.context_budget().as_ref());
         return Ok(format!(
-            "Session Info\n\n{name}File: {}\nID: {}\nMessages: {}\nTokens: {} total ({} cached, {} uncached)\nCost: ${:.3}",
+            "Session Info\n\n{name}File: {}\nID: {}\nMessages: {}\nTokens: {} total ({} cached, {} uncached)\nCost: ${:.3}{context}",
             metadata.path.display(),
             metadata.id,
             stats.message_count,
@@ -1251,4 +1252,32 @@ async fn submit_session_input(
         PromptOutcome::Queued { kind, .. } => format!("Queued {kind:?}"),
         _ => "Ready".to_string(),
     })
+}
+
+fn context_budget_text(budget: Option<&pi_core::ContextBudget>) -> String {
+    let Some(budget) = budget else {
+        return "\n\nContext breakdown: unavailable until the next model request".into();
+    };
+    let mut text = format!(
+        "\n\nLast model request (estimated): {} tokens · {}",
+        budget.request.estimated_tokens, budget.request.model
+    );
+    for usage in &budget.request.categories {
+        let label = match usage.category {
+            pi_core::ContextCategory::Messages => "Messages",
+            pi_core::ContextCategory::McpTools => "MCP tools",
+            pi_core::ContextCategory::SystemTools => "System tools",
+            pi_core::ContextCategory::SystemPrompt => "System prompt",
+            pi_core::ContextCategory::Skills => "Skills",
+            pi_core::ContextCategory::MemoryFiles => "Memory files",
+        };
+        let percent = budget
+            .context_window
+            .map(|window| format!(" ({:.1}%)", usage.tokens as f64 / window as f64 * 100.0))
+            .unwrap_or_default();
+        text.push_str(&format!("\n{label}: {}{percent}", usage.tokens));
+    }
+    text.push_str(&format!("\nAutocompact buffer (reserved): {}\nFree space: {}\nUndeclared MCP tools (schemas excluded): {}",
+        budget.reserve_tokens, budget.free_tokens.map_or_else(|| "unknown".into(), |tokens| tokens.to_string()), budget.request.undeclared_mcp_tools.len()));
+    text
 }

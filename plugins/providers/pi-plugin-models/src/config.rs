@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use garde::Validate;
-use pi_core::{ModelCost, ModelCostTier, ModelId, ModelInput, ModelSpec, ProviderId};
+use pi_core::{
+    AnyModelSpec, ClassifierModelSpec, ImageModelSpec, ModelCost, ModelCostTier, ModelId,
+    ModelInput, ModelSpec, ModelType, ProviderId,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -36,6 +39,8 @@ pub(crate) struct PreparedProvider {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedModel {
+    pub kind: ModelType,
+    pub output: Vec<ModelInput>,
     pub id: ModelId,
     pub spec: ModelSpec,
     pub headers: BTreeMap<String, String>,
@@ -102,6 +107,9 @@ struct ProviderDefinition {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[garde(allow_unvalidated)]
 struct ModelDefinition {
+    #[serde(default, rename = "type")]
+    kind: ModelTypeConfig,
+    output: Option<Vec<ModelInputConfig>>,
     #[garde(length(min = 1), custom(non_blank))]
     id: String,
     #[garde(length(min = 1), custom(optional_non_blank))]
@@ -129,6 +137,25 @@ struct ModelDefinition {
     #[schemars(with = "Option<ProviderCompatSchema>")]
     #[garde(custom(optional_object_value))]
     compat: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum ModelTypeConfig {
+    #[default]
+    Chat,
+    Classifier,
+    Image,
+}
+
+impl From<ModelTypeConfig> for ModelType {
+    fn from(value: ModelTypeConfig) -> Self {
+        match value {
+            ModelTypeConfig::Chat => Self::Chat,
+            ModelTypeConfig::Classifier => Self::Classifier,
+            ModelTypeConfig::Image => Self::Image,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
@@ -229,6 +256,23 @@ enum ProviderCompatSchema {
     OpenAiCompletions(Box<OpenAiCompletionsCompatSchema>),
     OpenAiResponses(OpenAiResponsesCompatSchema),
     AnthropicMessages(AnthropicMessagesCompatSchema),
+    SystemOne(SystemOneCompatSchema),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct SystemOneCompatSchema {
+    image_input: Option<SystemOneImageInput>,
+    send_image_opt_in_header: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+enum SystemOneImageInput {
+    Assets,
+    Images,
+    StateImageUrls,
 }
 
 // Pi's TypeBox compat objects intentionally leave additional properties open.
@@ -627,17 +671,15 @@ enum ProviderModelComposition {
 }
 
 impl PreparedProvider {
-    /// Composes one models.json provider over model metadata registered by
-    /// earlier provider plugins, matching Pi's built-in/custom upsert order.
-    pub(crate) fn compose_with_base(&self, base_models: &[ModelSpec]) -> Result<Self, String> {
-        self.compose_with_base_without_overrides(base_models, true)
-    }
-
-    pub(crate) fn compose_with_base_without_model_overrides(
-        &self,
-        base_models: &[ModelSpec],
-    ) -> Result<Self, String> {
-        self.compose_with_base_without_overrides(base_models, false)
+    #[cfg(test)]
+    fn compose_with_base(&self, base_models: &[ModelSpec]) -> Result<Self, String> {
+        let base = base_models
+            .iter()
+            .cloned()
+            .map(AnyModelSpec::Chat)
+            .map(PreparedModel::from_catalog)
+            .collect::<Vec<_>>();
+        self.compose_prepared(&base, true)
     }
 
     pub(crate) fn compose_with_prepared_base(
@@ -687,29 +729,13 @@ impl PreparedProvider {
             model.headers = headers;
         }
         for model in models {
+            validate_model(model)?;
             validate_compat(&self.id, &model.spec)?;
         }
         Ok(())
     }
 
-    fn compose_with_base_without_overrides(
-        &self,
-        base_models: &[ModelSpec],
-        apply_model_overrides: bool,
-    ) -> Result<Self, String> {
-        let prepared = base_models
-            .iter()
-            .cloned()
-            .map(|spec| PreparedModel {
-                id: spec.id.clone(),
-                spec,
-                headers: BTreeMap::new(),
-            })
-            .collect::<Vec<_>>();
-        self.compose_prepared(&prepared, apply_model_overrides)
-    }
-
-    fn compose_prepared(
+    pub(crate) fn compose_prepared(
         &self,
         base_models: &[PreparedModel],
         apply_model_overrides: bool,
@@ -732,11 +758,13 @@ impl PreparedProvider {
         };
 
         for configured in &self.models {
-            let existing_index = models.iter().position(|model| model.id == configured.id);
+            let existing_index = models
+                .iter()
+                .position(|model| model.kind == configured.kind && model.id == configured.id);
             let default = defaults
                 .iter()
-                .find(|model| model.id == configured.id)
-                .or_else(|| defaults.first());
+                .find(|model| model.kind == configured.kind && model.id == configured.id)
+                .or_else(|| defaults.iter().find(|model| model.kind == configured.kind));
             let mut model = configured.clone();
             if model.spec.api.is_empty() {
                 model.spec.api = self
@@ -777,6 +805,7 @@ impl PreparedProvider {
             self.apply_model_overrides(&mut models)?;
         }
         for model in &models {
+            validate_model(model)?;
             validate_compat(&self.id, &model.spec)?;
         }
 
@@ -802,6 +831,9 @@ fn validate_compat(provider: &ProviderId, model: &ModelSpec) -> Result<(), Strin
         }
         ANTHROPIC_MESSAGES_API => {
             serde_json::from_value::<AnthropicMessagesCompatSchema>(compat.clone()).map(|_| ())
+        }
+        "typesafe-system-one" | "cloudflare-workers-ai-system-one" => {
+            serde_json::from_value::<SystemOneCompatSchema>(compat.clone()).map(|_| ())
         }
         _ => Ok(()),
     };
@@ -867,7 +899,7 @@ impl ProviderDefinition {
         let mut seen = HashSet::new();
         let mut models = Vec::with_capacity(definitions.len());
         for definition in definitions {
-            if !seen.insert(definition.id.clone()) {
+            if !seen.insert((ModelType::from(definition.kind), definition.id.clone())) {
                 return Err(format!(
                     "provider {id}: duplicate model id {:?}",
                     definition.id
@@ -952,6 +984,11 @@ impl ModelDefinition {
 
         let headers = definition.headers;
         Ok(PreparedModel {
+            kind: definition.kind.into(),
+            output: definition
+                .output
+                .map(|items| items.into_iter().map(Into::into).collect())
+                .unwrap_or_else(|| vec![ModelInput::Image]),
             id: spec.id.clone(),
             spec,
             headers,
@@ -1010,6 +1047,11 @@ fn normalize_api(provider: &str, model: Option<&str>, api: &str) -> Result<Strin
         MISTRAL_CONVERSATIONS_API => MISTRAL_CONVERSATIONS_API,
         AZURE_OPENAI_RESPONSES_API => AZURE_OPENAI_RESPONSES_API,
         BEDROCK_CONVERSE_STREAM_API => BEDROCK_CONVERSE_STREAM_API,
+        "typesafe-system-one"
+        | "cloudflare-workers-ai-system-one"
+        | "openai-decisions"
+        | "llama-cpp-classify"
+        | "openrouter-images" => api,
         other => {
             let target = model.map_or_else(
                 || format!("provider {provider}"),
@@ -1374,5 +1416,150 @@ mod tests {
         assert_eq!(merged["chatTemplateKwargs"]["override"], 2);
         assert!(merged["ordinary"].get("base").is_none());
         assert_eq!(merged["ordinary"]["override"], true);
+    }
+}
+
+impl PreparedModel {
+    pub(crate) fn catalog(&self) -> AnyModelSpec {
+        let m = &self.spec;
+        match self.kind {
+            ModelType::Chat => AnyModelSpec::Chat(m.clone()),
+            ModelType::Classifier => AnyModelSpec::Classifier(ClassifierModelSpec {
+                provider: m.provider.clone(),
+                id: m.id.clone(),
+                name: m.name.clone(),
+                api: m.api.clone(),
+                base_url: m.base_url.clone(),
+                input: m.input.clone(),
+                cost: m.cost.clone(),
+                context_window: m.context_window,
+                compat: m.compat.clone(),
+            }),
+            ModelType::Image => AnyModelSpec::Image(ImageModelSpec {
+                provider: m.provider.clone(),
+                id: m.id.clone(),
+                name: m.name.clone(),
+                api: m.api.clone(),
+                base_url: m.base_url.clone(),
+                input: m.input.clone(),
+                output: self.output.clone(),
+                cost: m.cost.clone(),
+            }),
+        }
+    }
+    pub(crate) fn from_catalog(value: AnyModelSpec) -> Self {
+        let kind = value.model_type();
+        let (spec, output) = match value {
+            AnyModelSpec::Chat(m) => (m, Vec::new()),
+            AnyModelSpec::Classifier(m) => {
+                let mut spec = ModelSpec::new(m.provider, m.id, m.name, m.api);
+                spec.base_url = m.base_url;
+                spec.input = m.input;
+                spec.cost = m.cost;
+                spec.context_window = m.context_window;
+                spec.compat = m.compat;
+                (spec, Vec::new())
+            }
+            AnyModelSpec::Image(m) => {
+                let mut spec = ModelSpec::new(m.provider, m.id, m.name, m.api);
+                spec.base_url = m.base_url;
+                spec.input = m.input;
+                spec.cost = m.cost;
+                (spec, m.output)
+            }
+        };
+        Self {
+            kind,
+            output,
+            id: spec.id.clone(),
+            spec,
+            headers: BTreeMap::new(),
+        }
+    }
+}
+
+fn validate_model(model: &PreparedModel) -> Result<(), String> {
+    let kind = match model.spec.api.as_str() {
+        "typesafe-system-one"
+        | "cloudflare-workers-ai-system-one"
+        | "openai-decisions"
+        | "llama-cpp-classify" => ModelType::Classifier,
+        "openrouter-images" => ModelType::Image,
+        _ => ModelType::Chat,
+    };
+    if model.kind != kind {
+        return Err(format!(
+            "provider {}, model {}: API {} is incompatible with model type {:?}",
+            model.spec.provider, model.id, model.spec.api, model.kind
+        ));
+    }
+    if model.kind == ModelType::Image
+        && (!model.output.contains(&ModelInput::Image) || model.output.is_empty())
+    {
+        return Err(format!(
+            "image model {} must include image output",
+            model.id
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod typed_model_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn model_types_have_independent_identity_and_inherit_their_own_api() {
+        let value = json!({"models":[
+            {"id":"same","type":"chat","api":"openai-completions","baseUrl":"http://chat"},
+            {"id":"same","type":"classifier","api":"typesafe-system-one","baseUrl":"http://classifier"},
+            {"id":"same","type":"image","api":"openrouter-images","baseUrl":"http://images","output":["image","text"]}
+        ]});
+        let provider = compile_extension_provider(&"mixed".into(), value, &BTreeMap::new())
+            .unwrap()
+            .compose_with_base(&[])
+            .unwrap();
+        assert_eq!(
+            provider.models.iter().map(|m| m.kind).collect::<Vec<_>>(),
+            vec![ModelType::Chat, ModelType::Classifier, ModelType::Image]
+        );
+        assert!(
+            matches!(provider.models[2].catalog(),AnyModelSpec::Image(m) if m.output==vec![ModelInput::Image,ModelInput::Text])
+        );
+        let overlay = compile_extension_provider(
+            &"mixed".into(),
+            json!({"models":[{"id":"new","type":"classifier"}]}),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let composed = overlay.compose_prepared(&provider.models, true).unwrap();
+        assert_eq!(composed.models[0].spec.api, "typesafe-system-one");
+        assert_eq!(
+            composed.models[0].spec.base_url.as_deref(),
+            Some("http://classifier")
+        );
+    }
+
+    #[test]
+    fn api_type_mismatch_and_duplicate_typed_identity_reject_generation() {
+        let invalid = compile_extension_provider(
+            &"mixed".into(),
+            json!({"baseUrl":"http://local","api":"typesafe-system-one","models":[{"id":"same"}]}),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(
+            invalid
+                .compose_with_base(&[])
+                .unwrap_err()
+                .contains("incompatible")
+        );
+        let result = compile_extension_provider(
+            &"mixed".into(),
+            json!({"models":[{"id":"same","type":"image"},{"id":"same","type":"image"}]}),
+            &BTreeMap::new(),
+        );
+        assert!(result.is_err());
     }
 }

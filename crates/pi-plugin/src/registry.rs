@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+mod typed_models;
+
 use crate::{
     Command, CoreError, ModelId, ModelRuntime, ModelSpec, Plugin, PluginContextEpoch, PluginDriver,
     PluginId, Provider, ProviderId, ProviderPlugin, ProviderPluginDriver, Result, Tool,
@@ -9,12 +11,15 @@ use crate::{
 #[derive(Default)]
 pub struct RegistriesBuilder {
     tools: HashMap<String, (PluginId, Arc<dyn Tool>)>,
+    tool_discovery: HashMap<String, crate::ToolDiscovery>,
     commands: HashMap<String, (PluginId, Arc<dyn Command>)>,
     providers: HashMap<ProviderId, (PluginId, Arc<dyn Provider>)>,
     provider_overrides: HashSet<ProviderId>,
     models: HashMap<(ProviderId, ModelId), (PluginId, ModelSpec)>,
     model_overrides: HashSet<(ProviderId, ModelId)>,
     model_catalog_replacements: HashSet<ProviderId>,
+    typed_models: HashMap<(crate::ModelType, ProviderId, ModelId), (PluginId, crate::AnyModelSpec)>,
+    typed_catalog_replacements: HashSet<(crate::ModelType, ProviderId)>,
 }
 
 impl RegistriesBuilder {
@@ -23,10 +28,20 @@ impl RegistriesBuilder {
     }
 
     pub fn register_tool(&mut self, owner: PluginId, tool: Arc<dyn Tool>) -> Result<()> {
+        self.register_tool_with_discovery(owner, tool, crate::ToolDiscovery::default())
+    }
+
+    pub fn register_tool_with_discovery(
+        &mut self,
+        owner: PluginId,
+        tool: Arc<dyn Tool>,
+        discovery: crate::ToolDiscovery,
+    ) -> Result<()> {
         let name = tool.spec().name;
         if self.tools.contains_key(&name) {
             return Err(CoreError::DuplicateTool(name));
         }
+        self.tool_discovery.insert(name.clone(), discovery);
         self.tools.insert(name, (owner, tool));
         Ok(())
     }
@@ -196,14 +211,16 @@ impl RegistriesBuilder {
     pub fn freeze(self) -> FrozenRegistries {
         FrozenRegistries {
             tools: self.tools,
+            tool_discovery: self.tool_discovery,
             commands: self.commands,
-            models: ModelRuntime::new(self.providers, self.models),
+            models: ModelRuntime::new(self.providers, self.models, self.typed_models),
         }
     }
 }
 
 pub struct FrozenRegistries {
     tools: HashMap<String, (PluginId, Arc<dyn Tool>)>,
+    tool_discovery: HashMap<String, crate::ToolDiscovery>,
     commands: HashMap<String, (PluginId, Arc<dyn Command>)>,
     models: ModelRuntime,
 }
@@ -222,6 +239,12 @@ impl FrozenRegistries {
         }
         Ok(Self {
             tools,
+            tool_discovery: self
+                .tool_discovery
+                .iter()
+                .filter(|(name, _)| names.contains(name))
+                .map(|(name, discovery)| (name.clone(), discovery.clone()))
+                .collect(),
             commands: HashMap::new(),
             models: self.models.clone(),
         })
@@ -229,6 +252,28 @@ impl FrozenRegistries {
 
     pub fn tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).map(|(_, tool)| Arc::clone(tool))
+    }
+
+    /// Narrows a generation's tool catalog while preserving commands and providers.
+    /// Missing names are ignored so a reload can withdraw formerly allowed tools.
+    pub fn with_allowed_tools(&self, names: &[String]) -> Self {
+        let allowed = names.iter().collect::<HashSet<_>>();
+        Self {
+            tools: self
+                .tools
+                .iter()
+                .filter(|(name, _)| allowed.contains(name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+            tool_discovery: self
+                .tool_discovery
+                .iter()
+                .filter(|(name, _)| allowed.contains(name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+            commands: self.commands.clone(),
+            models: self.models.clone(),
+        }
     }
 
     /// A new immutable registry with identical schemas and run-local dispatch guards.
@@ -246,6 +291,14 @@ impl FrozenRegistries {
                     });
                     (name.clone(), (owner.clone(), scoped))
                 })
+                .collect(),
+            // Denied tools retain their schema and execution guard, but cannot
+            // be discovered or activated from this scoped run.
+            tool_discovery: self
+                .tool_discovery
+                .iter()
+                .filter(|(name, _)| allowed.contains(name))
+                .map(|(name, discovery)| (name.clone(), discovery.clone()))
                 .collect(),
             commands: HashMap::new(),
             models: self.models.clone(),
@@ -268,6 +321,13 @@ impl FrozenRegistries {
         specs
     }
 
+    /// Source metadata without cloning schema bodies.
+    pub fn tool_discoveries(&self) -> impl Iterator<Item = (&str, &crate::ToolDiscovery)> {
+        self.tool_discovery
+            .iter()
+            .map(|(name, info)| (name.as_str(), info))
+    }
+
     pub fn all_tool_specs(&self) -> Vec<crate::ToolSpec> {
         let mut specs = self
             .tools
@@ -276,6 +336,87 @@ impl FrozenRegistries {
             .collect::<Vec<_>>();
         specs.sort_by(|left, right| left.name.cmp(&right.name));
         specs
+    }
+
+    pub fn default_tool_specs(&self) -> Vec<crate::ToolSpec> {
+        self.all_tool_specs()
+            .into_iter()
+            .filter(|tool| {
+                self.tool_discovery
+                    .get(&tool.name)
+                    .is_some_and(|discovery| discovery.exposure == crate::ToolExposure::Direct)
+            })
+            .collect()
+    }
+
+    /// The immutable generation catalog, including discovery metadata.
+    pub fn tool_infos(&self) -> Vec<crate::ToolInfo> {
+        self.all_tool_specs()
+            .into_iter()
+            .filter_map(|spec| {
+                let discovery = self.tool_discovery.get(&spec.name)?.clone();
+                Some(crate::ToolInfo { spec, discovery })
+            })
+            .collect()
+    }
+
+    pub fn discoverable_tools(&self, active: &[String]) -> Vec<crate::ToolInfo> {
+        let mut tools = self
+            .tool_discovery
+            .iter()
+            .filter(|(name, discovery)| {
+                discovery.exposure == crate::ToolExposure::Deferred && !active.contains(name)
+            })
+            .filter_map(|(name, discovery)| {
+                Some(crate::ToolInfo {
+                    spec: self.tool(name)?.spec(),
+                    discovery: discovery.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        tools.sort_by(|left, right| left.spec.name.cmp(&right.spec.name));
+        tools
+    }
+
+    /// Callable inventory for nested execution; denied metadata is absent in
+    /// scoped registries, so discovery cannot widen an execution ceiling.
+    pub fn nested_tools(&self, active: &[String]) -> Vec<crate::ToolInfo> {
+        let mut tools = self
+            .tool_discovery
+            .iter()
+            .filter(|(name, discovery)| {
+                discovery.exposure == crate::ToolExposure::Deferred || active.contains(name)
+            })
+            .filter_map(|(name, discovery)| {
+                let tool = self.tool(name)?;
+                (!tool.model_only()).then(|| crate::ToolInfo {
+                    spec: tool.spec(),
+                    discovery: discovery.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        tools.sort_by(|left, right| left.spec.name.cmp(&right.spec.name));
+        tools
+    }
+
+    /// Registration metadata visible within this immutable execution scope.
+    pub fn tool_discovery(&self, name: &str) -> Option<&crate::ToolDiscovery> {
+        self.tool_discovery.get(name)
+    }
+
+    /// Keep only deferred identities this immutable execution scope can load.
+    pub fn tool_additions(&self, names: &[String], active: &[String]) -> Vec<String> {
+        let mut seen: HashSet<_> = active.iter().cloned().collect();
+        names
+            .iter()
+            .filter(|name| {
+                self.tool_discovery
+                    .get(*name)
+                    .is_some_and(|discovery| discovery.exposure == crate::ToolExposure::Deferred)
+                    && seen.insert((*name).clone())
+            })
+            .cloned()
+            .collect()
     }
 
     pub fn provider(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {

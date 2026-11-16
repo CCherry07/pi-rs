@@ -190,6 +190,48 @@ fn access() -> Arc<StaticAccess> {
     })
 }
 
+#[tokio::test]
+async fn retired_model_operations_reject_before_validating_requests() {
+    let epoch = PluginContextEpoch::new(access());
+    let context = epoch.context();
+    let command = epoch.command_context();
+    epoch.retire();
+    let (_, signal) = AbortHandle::new();
+    let classifier = crate::ClassifierContext {
+        state: serde_json::Map::new(),
+        images: Vec::new(),
+        questions: BTreeMap::new(),
+    };
+    assert!(matches!(
+        context
+            .models
+            .classify(
+                ProviderId::new("test"),
+                ModelId::new("test"),
+                classifier,
+                signal.clone()
+            )
+            .await,
+        Err(PluginContextError::Retired)
+    ));
+    assert!(matches!(
+        command
+            .models
+            .generate_images(
+                ProviderId::new("test"),
+                ModelId::new("test"),
+                crate::ImagesContext { input: vec![] },
+                signal
+            )
+            .await,
+        Err(PluginContextError::Retired)
+    ));
+    assert!(matches!(
+        context.models.models_of_type(crate::ModelType::Image, None),
+        Err(PluginContextError::Retired)
+    ));
+}
+
 struct ReplacingAccess {
     old: Mutex<Option<PluginContextEpoch>>,
     next: PluginContextEpoch,
@@ -362,6 +404,25 @@ fn retired_epoch_rejects_stored_native_contexts() {
     assert_eq!(context.ui.mode().unwrap(), PresentationMode::Tui);
 
     epoch.retire();
+    assert!(matches!(
+        context.session.set_active_tools(vec!["read".into()]),
+        Err(PluginContextError::Retired)
+    ));
+    assert!(matches!(
+        context.session.tool_reaches_tools("codemode"),
+        Err(PluginContextError::Retired)
+    ));
+    assert!(matches!(
+        epoch.command_context().session.set_active_tools(vec![]),
+        Err(PluginContextError::Retired)
+    ));
+    assert!(matches!(
+        epoch
+            .command_context()
+            .session
+            .tool_reaches_tools("codemode"),
+        Err(PluginContextError::Retired)
+    ));
     assert!(matches!(
         context.ui.mode(),
         Err(PluginContextError::Retired)

@@ -2,10 +2,12 @@
 mod abort;
 mod agent_context;
 mod assistant_stream;
+mod context_usage;
 mod events;
 mod ids;
 mod message;
 mod model;
+mod model_operations;
 pub mod session;
 mod stream;
 mod tool;
@@ -14,6 +16,10 @@ mod workspace;
 pub use abort::{AbortError, AbortHandle, AbortSignal};
 pub use agent_context::AgentContext;
 pub use assistant_stream::{AssistantStream, AssistantStreamId, AssistantStreamView};
+pub use context_usage::{
+    ContextBudget, ContextCategory, ContextCategoryUsage, ContextRequestUsage, ContextUsageItem,
+    PromptContribution,
+};
 pub use events::AgentEvent;
 pub use ids::{ModelId, PluginId, ProviderId, RunId, ToolCallId};
 pub use message::{
@@ -24,6 +30,11 @@ pub use message::{
 pub use model::{
     ModelCost, ModelCostTier, ModelInput, ModelSelection, ModelSpec, ResponseMetadata, StopReason,
     ThinkingBudgets, ThinkingLevel,
+};
+pub use model_operations::{
+    AnyModelSpec, ClassifierAnswer, ClassifierBoolCriteria, ClassifierContext, ClassifierModelSpec,
+    ClassifierQuestion, ClassifierResult, ImageModelSpec, ImagesContext, ImagesResult,
+    ModelCallStopReason, ModelType,
 };
 pub use stream::{ContentMetadata, ResponseMetadataPatch, StreamEvent};
 pub use tool::{ToolExecutionMode, ToolResult, ToolSpec, ToolUpdate};

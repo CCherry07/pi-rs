@@ -63,8 +63,9 @@ npm install --prefix packages/pi
 ```
 
 `scripts/pi-dev` incrementally builds the current host NAPI library and explicitly selects it for
-the Node launcher. The standalone Rust adapter does not embed a JavaScript VM; when JavaScript
-extension configuration is active it exits with an actionable launcher error instead of silently
+the Node launcher. Both adapters embed a restricted QuickJS runtime for `codemode` tool scripts.
+General JavaScript/TypeScript extensions still require the Node launcher; when their
+configuration is active the standalone adapter exits with an actionable launcher error instead of silently
 omitting extensions. Use `cargo run -p pi-cli -- --no-extensions` for an intentional native-only
 run.
 
@@ -250,7 +251,7 @@ Common commands:
 | `/clone`                      | Clone the session at its current position                             |
 | `/tree`                       | Navigate the current session tree                                     |
 | `/name [name]`                | Show or set the session name                                          |
-| `/session`                    | Show session path, ID, messages, tokens, and cost                     |
+| `/session`                    | Show session details, usage, and the latest request’s estimated context breakdown                     |
 | `/reload`                     | Atomically rebuild plugins, models, resources, and session extensions |
 | `/features [global\|project]` | Select optional capabilities, save, and reload the current session    |
 | `/trust`                      | Review or change trust for the current project                        |

@@ -126,6 +126,7 @@ impl Plugin for SubagentsPlugin {
                     return Ok(BeforeAgentStartPatch::default());
                 }
                 return Ok(BeforeAgentStartPatch {
+                    prompt_contributions: Vec::new(),
                     system_prompt: Some(format!("{}\n\n{}", event.system_prompt, PARENT_GUIDANCE)),
                     messages: Vec::new(),
                 });
@@ -141,6 +142,7 @@ impl Plugin for SubagentsPlugin {
             prompt.push_str(PARENT_GUIDANCE);
         }
         Ok(BeforeAgentStartPatch {
+            prompt_contributions: Vec::new(),
             system_prompt: Some(prompt),
             messages: Vec::new(),
         })

@@ -186,6 +186,15 @@ impl<'a> RegisterContext<'a> {
         self.registries.register_tool(self.owner.clone(), tool)
     }
 
+    pub fn register_tool_with_discovery(
+        &mut self,
+        tool: Arc<dyn crate::Tool>,
+        discovery: crate::ToolDiscovery,
+    ) -> Result<()> {
+        self.registries
+            .register_tool_with_discovery(self.owner.clone(), tool, discovery)
+    }
+
     pub fn register_command(&mut self, command: Arc<dyn crate::Command>) -> Result<()> {
         self.registries
             .register_command(self.owner.clone(), command)
@@ -203,6 +212,7 @@ pub struct BeforeAgentStartEvent {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BeforeAgentStartPatch {
+    pub prompt_contributions: Vec<pi_core::PromptContribution>,
     pub system_prompt: Option<String>,
     pub messages: Vec<Message>,
 }
@@ -322,6 +332,8 @@ pub struct ToolCallEvent {
     pub tool_call: ToolCall,
     pub validated_args: Value,
     pub context: Arc<crate::AgentContext>,
+    /// The owning call for nested execution; absent for model-issued calls.
+    pub parent_tool_call_id: Option<ToolCallId>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -348,6 +360,7 @@ pub struct ToolResultEvent {
     /// The tool may still have had effects; it is the only reliable way to
     /// tell an interruption from a tool that reported the same text.
     pub interrupted: bool,
+    pub parent_tool_call_id: Option<ToolCallId>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1021,6 +1034,7 @@ impl PluginDriver {
         mut event: BeforeAgentStartEvent,
     ) -> std::result::Result<BeforeAgentStartPatch, PluginError> {
         let mut messages = Vec::new();
+        let mut prompt_contributions = Vec::new();
         for registered in self.interested_plugins(AgentHook::BeforeAgentStart) {
             let patch = match registered
                 .plugin
@@ -1039,9 +1053,11 @@ impl PluginDriver {
             if let Some(system_prompt) = patch.system_prompt {
                 event.system_prompt = system_prompt;
             }
+            prompt_contributions.extend(patch.prompt_contributions);
             messages.extend(patch.messages);
         }
         Ok(BeforeAgentStartPatch {
+            prompt_contributions,
             system_prompt: Some(event.system_prompt),
             messages,
         })
@@ -1160,6 +1176,7 @@ impl PluginDriver {
                         tool_call: event.tool_call.clone(),
                         validated_args: arguments.clone(),
                         context: Arc::clone(&event.context),
+                        parent_tool_call_id: event.parent_tool_call_id.clone(),
                     },
                 )
                 .await
@@ -1200,6 +1217,7 @@ impl PluginDriver {
                 result: result.clone(),
                 context: Arc::clone(&event.context),
                 interrupted: event.interrupted,
+                parent_tool_call_id: event.parent_tool_call_id.clone(),
             };
             match registered
                 .plugin

@@ -155,6 +155,13 @@ impl AgentSession {
             Ok(outcome) => self.finish_prompt_locked(outcome).await,
             Err(error) => Err(SessionError::from(error)),
         };
+        if let Err(original) = &result
+            && let Err(recovery) = self.restore_discovery_selection_after_failure()
+        {
+            result = Err(SessionError::Runtime(format!(
+                "{original}; restoring the saved tool selection failed: {recovery}"
+            )));
+        }
         if let Err(error) = self.context_updates.reconcile()
             && result.is_ok()
         {
@@ -188,6 +195,29 @@ impl AgentSession {
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error),
         }
+    }
+
+    /// Message listeners acknowledge persistence after Agent state reduction.
+    /// A failed result write must not leave its discovered selection active;
+    /// a batch that did commit remains authoritative even if a later listener
+    /// failed. This is an in-memory repair and appends no history entry.
+    fn restore_discovery_selection_after_failure(&self) -> Result<(), SessionError> {
+        let selected = self.store.find_entries_on_branch(&crate::BranchQuery {
+            entries: crate::EntryQuery {
+                entry_type: Some(crate::SessionEntryType::ActiveToolsChange),
+                limit: Some(1),
+                ..crate::EntryQuery::default()
+            },
+            ..crate::BranchQuery::default()
+        })?;
+        if let Some(record) = selected.first()
+            && let crate::SessionEntry::ActiveToolsChange(change) = &record.entry
+            && change.active_tool_names != self.runtime.active_tools()
+        {
+            self.runtime
+                .set_active_tools(change.active_tool_names.clone())?;
+        }
+        Ok(())
     }
 
     /// Queues a steering message for the active run after command/input-hook

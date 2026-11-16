@@ -39,6 +39,7 @@ pub(crate) struct ModelsJsonProvider {
     fallback_apis: HashSet<String>,
     resolver: Arc<ConfigValueResolver>,
     transport: Arc<dyn HttpTransport>,
+    credentials: Option<crate::ModelCredentialSource>,
 }
 
 struct ResolvedRequestConfig {
@@ -76,11 +77,20 @@ impl ModelsJsonProvider {
             fallback_apis,
             resolver,
             transport,
+            credentials: None,
         }
     }
 
+    pub(crate) fn with_credentials(mut self, source: Option<crate::ModelCredentialSource>) -> Self {
+        self.credentials = source;
+        self
+    }
+
     fn model(&self, id: &ModelId) -> Option<&PreparedModel> {
-        self.configured.models.iter().find(|model| &model.id == id)
+        self.configured
+            .models
+            .iter()
+            .find(|model| model.kind == pi_core::ModelType::Chat && &model.id == id)
     }
 
     fn model_override(&self, id: &ModelId) -> Option<&PreparedOverride> {
@@ -92,6 +102,7 @@ impl ModelsJsonProvider {
         model_id: &ModelId,
         model: Option<&PreparedModel>,
         model_override: Option<&PreparedOverride>,
+        use_credential_source: bool,
         signal: &AbortSignal,
     ) -> Result<ResolvedRequestConfig, ProviderError> {
         let mut headers = self
@@ -101,7 +112,7 @@ impl ModelsJsonProvider {
                 signal,
             )
             .await?;
-        let api_key = match &self.configured.runtime_api_key {
+        let mut api_key = match &self.configured.runtime_api_key {
             Some(api_key) => Some(api_key.clone()),
             None => match &self.configured.api_key {
                 Some(configured) => Some(
@@ -117,6 +128,22 @@ impl ModelsJsonProvider {
                 None => None,
             },
         };
+        if use_credential_source
+            && api_key.is_none()
+            && let Some(source) = &self.credentials
+        {
+            let credential = source.source.resolve(signal).await?;
+            if model.is_some_and(|model| model.spec.api == "openai-decisions")
+                && credential
+                    .as_ref()
+                    .is_some_and(|value| value.kind == pi_provider::CredentialKind::OAuth)
+            {
+                return Err(ProviderError::Failure(
+                    "OpenAI Decisions requires an API key; OAuth is not supported".into(),
+                ));
+            }
+            api_key = credential.map(|value| value.secret);
+        }
         if self.configured.auth_header.unwrap_or(false) && api_key.is_none() {
             return Err(ProviderError::Failure(format!(
                 "provider {}: authHeader requires a resolved API key",
@@ -162,6 +189,47 @@ impl ModelsJsonProvider {
             insert_header(&mut resolved, name, value);
         }
         Ok(resolved)
+    }
+
+    async fn operation_client<'a>(
+        &'a self,
+        kind: pi_core::ModelType,
+        id: &ModelId,
+        context: &'a ProviderCallContext,
+        signal: AbortSignal,
+    ) -> Result<crate::operations::OperationClient<'a>, ProviderError> {
+        let prepared = self
+            .configured
+            .models
+            .iter()
+            .find(|m| m.kind == kind && &m.id == id);
+        let resolved = self
+            .resolve_request_config(id, prepared, self.model_override(id), true, &signal)
+            .await?;
+        let key = resolved.api_key;
+        // llama-server supports unauthenticated deployments. All remote API
+        // protocols keep their existing API-key requirement.
+        let optional_auth = prepared.is_some_and(|model| model.spec.api == "llama-cpp-classify");
+        if key.is_none() && !optional_auth {
+            return Err(ProviderError::Failure(format!(
+                "No API key for provider: {}",
+                self.configured.id
+            )));
+        }
+        let mut headers = BTreeMap::new();
+        if let Some(key) = key {
+            insert_header(&mut headers, "Authorization", format!("Bearer {key}"));
+        }
+        insert_header(&mut headers, "Content-Type", "application/json");
+        for (name, value) in resolved.headers {
+            insert_header(&mut headers, name, value);
+        }
+        Ok(crate::operations::OperationClient {
+            transport: self.transport.as_ref(),
+            context,
+            headers,
+            signal,
+        })
     }
 
     fn apply_model_defaults(
@@ -225,6 +293,51 @@ impl Provider for ModelsJsonProvider {
         }
     }
 
+    fn model_availability(&self, model: &pi_core::AnyModelSpec) -> ProviderAvailability {
+        if model.model_type() == pi_core::ModelType::Chat {
+            return self.availability();
+        }
+        if matches!(model, pi_core::AnyModelSpec::Classifier(model)
+            if model.api == "llama-cpp-classify" && model.base_url.as_deref().is_some_and(|url| !url.is_empty()) && !self.configured.auth_header.unwrap_or(false))
+            || self.configured.runtime_api_key.is_some()
+            || self.configured.api_key.is_some()
+            || self
+                .credentials
+                .as_ref()
+                .is_some_and(|source| source.available)
+        {
+            ProviderAvailability::Available
+        } else {
+            ProviderAvailability::MissingCredentials
+        }
+    }
+
+    async fn classify(
+        &self,
+        model: pi_core::ClassifierModelSpec,
+        request: pi_core::ClassifierContext,
+        context: ProviderCallContext,
+        signal: AbortSignal,
+    ) -> Result<pi_core::ClassifierResult, ProviderError> {
+        let client = self
+            .operation_client(pi_core::ModelType::Classifier, &model.id, &context, signal)
+            .await?;
+        Ok(crate::operations::classify(model, request, client).await)
+    }
+
+    async fn generate_images(
+        &self,
+        model: pi_core::ImageModelSpec,
+        request: pi_core::ImagesContext,
+        context: ProviderCallContext,
+        signal: AbortSignal,
+    ) -> Result<pi_core::ImagesResult, ProviderError> {
+        let client = self
+            .operation_client(pi_core::ModelType::Image, &model.id, &context, signal)
+            .await?;
+        Ok(crate::operations::generate_images(model, request, client).await)
+    }
+
     async fn stream(
         &self,
         mut request: ProviderRequest,
@@ -239,7 +352,7 @@ impl Provider for ModelsJsonProvider {
         Self::apply_model_defaults(api, model, &mut request);
         let cost = model.map(|model| model.spec.cost.clone());
         let resolved = self
-            .resolve_request_config(&request.model, model, model_override, &signal)
+            .resolve_request_config(&request.model, model, model_override, false, &signal)
             .await?;
         let request_headers = std::mem::take(&mut request.headers);
         request.headers = resolved.headers;
@@ -629,6 +742,8 @@ mod tests {
             headers: BTreeMap::from([("X-Provider".to_string(), "provider".to_string())]),
             auth_header: Some(false),
             models: vec![PreparedModel {
+                kind: pi_core::ModelType::Chat,
+                output: Vec::new(),
                 id: ModelId::new("model"),
                 spec,
                 headers: BTreeMap::from([("X-Model".to_string(), "model".to_string())]),
@@ -712,6 +827,8 @@ mod tests {
             headers: BTreeMap::from([("X-Provider".to_string(), "provider".to_string())]),
             auth_header: Some(true),
             models: vec![PreparedModel {
+                kind: pi_core::ModelType::Chat,
+                output: Vec::new(),
                 id: ModelId::new("custom-claude"),
                 spec,
                 headers: BTreeMap::from([("X-Model".to_string(), "model".to_string())]),
@@ -797,6 +914,8 @@ mod tests {
             headers: BTreeMap::from([("X-Provider".to_string(), "provider".to_string())]),
             auth_header: Some(false),
             models: vec![PreparedModel {
+                kind: pi_core::ModelType::Chat,
+                output: Vec::new(),
                 id: ModelId::new("grok-custom"),
                 spec,
                 headers: BTreeMap::new(),
@@ -881,6 +1000,8 @@ mod tests {
             headers: BTreeMap::new(),
             auth_header: Some(false),
             models: vec![PreparedModel {
+                kind: pi_core::ModelType::Chat,
+                output: Vec::new(),
                 id: ModelId::new("gemma-4-31b-it"),
                 spec,
                 headers: BTreeMap::new(),
@@ -980,6 +1101,8 @@ mod tests {
                 headers: BTreeMap::new(),
                 auth_header: Some(false),
                 models: vec![PreparedModel {
+                    kind: pi_core::ModelType::Chat,
+                    output: Vec::new(),
                     id: ModelId::new("custom-model"),
                     spec,
                     headers: BTreeMap::new(),
@@ -1069,6 +1192,8 @@ mod tests {
             headers: BTreeMap::new(),
             auth_header: Some(false),
             models: vec![PreparedModel {
+                kind: pi_core::ModelType::Chat,
+                output: Vec::new(),
                 id: ModelId::new("model"),
                 spec,
                 headers: BTreeMap::new(),

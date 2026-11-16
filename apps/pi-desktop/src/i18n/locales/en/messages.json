@@ -191,6 +191,26 @@
       "Skills": "Skills",
       "Slash": "Commands",
       "Prompts": "Prompts"
+    },
+    "contextBreakdownTitle": "Context usage",
+    "contextClose": "Close context usage",
+    "contextEstimateNote": "Last model request · {{model}} · estimated",
+    "contextDetails": "Details ({{count}})",
+    "contextOverBudget": "Estimated usage and reserve exceed the context window.",
+    "contextReserveNote": "The compaction buffer is reserved capacity, not consumed tokens. Estimates use text size; images and provider formatting may differ.",
+    "contextUndeclaredTools": "Undeclared MCP tools ({{count}})",
+    "contextUndeclaredNote": "Available through discovery or codemode. Their full schemas are excluded from this request.",
+    "contextNoSnapshot": "No request snapshot yet. Send a message to calculate the breakdown. Snapshots are cleared on context or configuration changes.",
+    "contextCumulative": "Session total: {{tokens}} tokens",
+    "contextCategories": {
+      "messages": "Messages",
+      "mcpTools": "MCP tools",
+      "systemTools": "System tools",
+      "systemPrompt": "System prompt",
+      "skills": "Skills",
+      "memoryFiles": "Memory files",
+      "reserve": "Autocompact buffer",
+      "free": "Free space"
     }
   },
   "notices": {

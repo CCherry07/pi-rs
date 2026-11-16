@@ -731,6 +731,10 @@ pub trait SessionContextAccess: Send + Sync {
         unbound()
     }
 
+    fn tool_reaches_tools(&self, _name: &str) -> PluginContextResult<bool> {
+        Ok(false)
+    }
+
     fn all_tools(&self) -> PluginContextResult<Vec<ToolSpec>> {
         unbound()
     }
@@ -1040,6 +1044,16 @@ macro_rules! impl_session_context {
 
             pub fn active_tools(&self) -> PluginContextResult<Vec<String>> {
                 self.handle.access()?.active_tools()
+            }
+
+            /// Replaces the active selection through the host's ordinary session mutation path.
+            pub fn set_active_tools(&self, tools: Vec<String>) -> PluginContextResult<()> {
+                self.handle.access()?.set_active_tools(tools)
+            }
+
+            /// Whether the current generation has a capable, execution-allowed entry point.
+            pub fn tool_reaches_tools(&self, name: &str) -> PluginContextResult<bool> {
+                self.handle.access()?.tool_reaches_tools(name)
             }
 
             pub fn tools(&self) -> PluginContextResult<Vec<ToolSpec>> {

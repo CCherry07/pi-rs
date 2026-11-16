@@ -19,19 +19,22 @@ pub(super) fn attach(session: &AgentSession) {
             let activity = Arc::clone(&activity);
             let retry_settings = Arc::clone(&retry_settings);
             async move {
+                let Some(state) = agent.state() else {
+                    return Ok(());
+                };
                 let display = activity.display_text(&event);
                 let committed = if let AgentEvent::MessageEnd { message } = &event {
+                    let discovered = matches!(message, Message::ToolResult(result)
+                        if !result.is_error && result.added_tool_names.as_ref().is_some_and(|names| !names.is_empty()));
                     Some(
                         activity
-                            .message_ended(message)
+                            .message_ended(message, discovered.then_some(state.active_tools.as_slice()))
                             .map_err(|error| EventError(error.to_string()))?,
                     )
                 } else {
                     None
                 };
-                let Some(state) = agent.state() else {
-                    return Ok(());
-                };
+                let configuration_state = state.clone();
                 match project_product_user_event(event, display.as_deref()) {
                     AgentEvent::AgentEnd { messages } => {
                         let settings = *retry_settings
@@ -51,6 +54,9 @@ pub(super) fn attach(session: &AgentSession) {
                         events.publish_queue(queue);
                     }
                     events.publish_entry(committed.entry);
+                    if let Some(configuration) = committed.configuration {
+                        events.publish_initialized_context(configuration, configuration_state);
+                    }
                 }
                 Ok(())
             }

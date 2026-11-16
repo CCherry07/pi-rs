@@ -27,6 +27,8 @@ members = [
     "crates/pi-rpc",
     "crates/pi-acp",
     "plugins/features/pi-plugin-mcp",
+    "plugins/features/pi-plugin-tool-search",
+    "plugins/features/pi-plugin-codemode",
     "bindings/pi-napi",
     "plugins/features/pi-plugin-prompts",
     "plugins/features/pi-plugin-skills",
@@ -102,6 +104,8 @@ pi-telemetry = { path = "crates/pi-telemetry" }
 pi-rpc = { path = "crates/pi-rpc" }
 pi-acp = { path = "crates/pi-acp" }
 pi-plugin-mcp = { path = "plugins/features/pi-plugin-mcp" }
+pi-plugin-tool-search = { path = "plugins/features/pi-plugin-tool-search" }
+pi-plugin-codemode = { path = "plugins/features/pi-plugin-codemode" }
 pi-plugin-prompts = { path = "plugins/features/pi-plugin-prompts" }
 pi-plugin-skills = { path = "plugins/features/pi-plugin-skills" }
 pi-plugin-session-transfer = { path = "plugins/features/pi-plugin-session-transfer" }
