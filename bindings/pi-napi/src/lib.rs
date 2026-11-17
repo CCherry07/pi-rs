@@ -1,5 +1,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod pending_requests;
+
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -39,6 +41,7 @@ type DispatchFunction =
 pub struct NativeExtensionContext {
     handle: RwLock<PluginContextHandle>,
     updates: Option<ToolUpdateSink>,
+    pending_requests: pending_requests::PendingRequests,
 }
 
 impl NativeExtensionContext {
@@ -75,11 +78,39 @@ impl NativeExtensionContext {
     }
 
     #[napi]
-    pub async fn request(&self, operation: String) -> napi::Result<String> {
+    pub fn prepare_request(&self) -> napi::Result<String> {
+        self.pending_requests
+            .prepare()
+            .map_err(|message| napi::Error::new(Status::GenericFailure, message))
+    }
+
+    #[napi]
+    pub fn cancel_request(&self, request_id: String) {
+        self.pending_requests.cancel(&request_id);
+    }
+
+    #[napi]
+    pub async fn request(
+        &self,
+        operation: String,
+        request_id: Option<String>,
+    ) -> napi::Result<String> {
         let operation = decode_context_operation::<ExtensionContextRequest>(&operation, "request")?;
-        let result = execute_context_request(&self.current_handle(), operation)
-            .await
-            .map_err(context_error)?;
+        let handle = self.current_handle();
+        let request = execute_context_request(&handle, operation);
+        let result = if let Some(id) = request_id {
+            let Some(mut lease) = self.pending_requests.take(&id) else {
+                return Ok("null".into());
+            };
+            tokio::select! {
+                biased;
+                () = lease.cancelled() => return Ok("null".into()),
+                result = request => result,
+            }
+        } else {
+            request.await
+        }
+        .map_err(context_error)?;
         if let Some(replacement) = result.replacement {
             self.replace_handle(replacement);
         }
@@ -193,6 +224,7 @@ impl NativePiHost {
                 context.map(|handle| NativeExtensionContext {
                     handle: RwLock::new(handle),
                     updates,
+                    pending_requests: Default::default(),
                 }),
             )))
             .await
@@ -391,10 +423,10 @@ impl JsPluginHost for NativePiHost {
 /// Starts the Rust CLI/TUI while Node owns JavaScript extension loading and
 /// callback execution. `arguments` matches `process.argv.slice(2)`.
 #[napi]
-pub async fn run_pi(arguments: Vec<String>, dispatch: DispatchFunction) -> napi::Result<()> {
+pub async fn run_pi(arguments: Vec<String>, dispatch: DispatchFunction) -> napi::Result<i32> {
     dotenvy::dotenv().ok();
     let host = native_host(dispatch);
-    let result = pi_cli::run_with_js_host(arguments, host.clone()).await;
+    let result = pi_cli::run_with_js_host_and_exit_code(arguments, host.clone()).await;
     finish_native_run(result, host.flush_retirements().await)
 }
 
@@ -408,14 +440,14 @@ pub async fn run_pi_eval(arguments: Vec<String>, dispatch: DispatchFunction) -> 
     finish_native_run(result, host.flush_retirements().await)
 }
 
-fn finish_native_run(
-    result: Result<(), String>,
+fn finish_native_run<T>(
+    result: Result<T, String>,
     cleanup: Result<(), JsCallbackError>,
-) -> napi::Result<()> {
+) -> napi::Result<T> {
     match (result, cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(value), Ok(())) => Ok(value),
         (Err(message), Ok(())) => Err(napi::Error::new(Status::GenericFailure, message)),
-        (Ok(()), Err(error)) => Err(napi::Error::new(Status::GenericFailure, error.to_string())),
+        (Ok(_), Err(error)) => Err(napi::Error::new(Status::GenericFailure, error.to_string())),
         (Err(message), Err(error)) => Err(napi::Error::new(
             Status::GenericFailure,
             format!("{message}; JavaScript generation cleanup failed: {error}"),

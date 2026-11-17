@@ -124,6 +124,15 @@ pub enum ExtensionContextNotification {
     rename_all_fields = "camelCase"
 )]
 pub enum ExtensionContextRequest {
+    UiDialog {
+        request: pi_plugin::UiDialogRequest,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    UiConfirm {
+        title: String,
+        message: String,
+    },
     UiExchange {
         frame: pi_plugin::UiSurfaceFrame,
     },
@@ -307,6 +316,15 @@ pub async fn execute_context_request(
 ) -> Result<ExtensionContextRequestOutput, PluginContextError> {
     let access = context.access_for_adapter()?;
     match request {
+        ExtensionContextRequest::UiDialog {
+            request,
+            timeout_ms,
+        } => Ok(request_output(value(
+            access.ui_dialog(request, timeout_ms).await?,
+        )?)),
+        ExtensionContextRequest::UiConfirm { title, message } => Ok(request_output(value(
+            access.ui_confirm(title, message).await?.unwrap_or(false),
+        )?)),
         ExtensionContextRequest::UiExchange { frame } => Ok(request_output(value(
             access.ui_surface_exchange(frame).await?,
         )?)),
@@ -498,6 +516,107 @@ mod tests {
                 "level": "warning",
             })
         );
+    }
+
+    struct DialogContext {
+        requests: Mutex<Vec<(pi_plugin::UiDialogRequest, Option<u64>)>>,
+    }
+
+    impl ModelsContextAccess for DialogContext {}
+    impl SessionContextAccess for DialogContext {}
+
+    #[async_trait]
+    impl UiContextAccess for DialogContext {
+        async fn ui_dialog(
+            &self,
+            request: pi_plugin::UiDialogRequest,
+            timeout_ms: Option<u64>,
+        ) -> Result<Option<pi_plugin::UiDialogResponse>, PluginContextError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((request.clone(), timeout_ms));
+            Ok(Some(match request {
+                pi_plugin::UiDialogRequest::Confirm { .. } => {
+                    pi_plugin::UiDialogResponse::Confirmed(true)
+                }
+                pi_plugin::UiDialogRequest::Select { options, .. } => {
+                    pi_plugin::UiDialogResponse::Value(options[1].clone())
+                }
+                pi_plugin::UiDialogRequest::Input { .. } => {
+                    pi_plugin::UiDialogResponse::Value(String::new())
+                }
+                pi_plugin::UiDialogRequest::Editor { .. } => pi_plugin::UiDialogResponse::Cancelled,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn semantic_dialog_requests_keep_typed_results_across_the_javascript_boundary() {
+        let access = Arc::new(DialogContext {
+            requests: Mutex::default(),
+        });
+        let epoch = PluginContextEpoch::new(access.clone());
+        let handle = epoch.handle(PluginContextScope::Base);
+        for (request, expected) in [
+            (
+                json!({"method":"confirm","title":"Continue?","message":"x"}),
+                json!({"type":"confirmed","value":true}),
+            ),
+            (
+                json!({"method":"select","title":"Pick","options":["one","two"]}),
+                json!({"type":"value","value":"two"}),
+            ),
+            (
+                json!({"method":"input","title":"Name","placeholder":"optional"}),
+                json!({"type":"value","value":""}),
+            ),
+            (
+                json!({"method":"editor","title":"Notes","prefill":"line one\nline two"}),
+                json!({"type":"cancelled"}),
+            ),
+        ] {
+            let decoded: ExtensionContextRequest = serde_json::from_value(json!({
+                "type":"uiDialog", "request":request, "timeoutMs":250
+            }))
+            .unwrap();
+            let result = execute_context_request(&handle, decoded).await.unwrap();
+            assert_eq!(result.value, expected);
+            assert!(result.replacement.is_none());
+        }
+        assert_eq!(access.requests.lock().unwrap().len(), 4);
+        assert!(
+            access
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(_, timeout)| *timeout == Some(250))
+        );
+
+        let unsupported = PluginContextEpoch::new(Arc::new(ReplacementTarget));
+        let request = ExtensionContextRequest::UiDialog {
+            request: pi_plugin::UiDialogRequest::Input {
+                title: "Name".into(),
+                placeholder: String::new(),
+            },
+            timeout_ms: None,
+        };
+        assert_eq!(
+            execute_context_request(
+                &unsupported.handle(PluginContextScope::Base),
+                request.clone()
+            )
+            .await
+            .unwrap()
+            .value,
+            Value::Null
+        );
+        epoch.retire();
+        assert!(matches!(
+            execute_context_request(&handle, request).await,
+            Err(PluginContextError::Retired)
+        ));
     }
 
     #[tokio::test]

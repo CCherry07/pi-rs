@@ -39,6 +39,7 @@ pub(crate) struct ResolvedProjectTrust {
 pub(crate) struct InteractiveRequestReceivers {
     project_trust: mpsc::UnboundedReceiver<ProjectTrustPromptRequest>,
     plugin_surface: tui::extensions::SurfaceReceiver,
+    rpc_connection: Option<pi_rpc::ui::RpcConnection>,
 }
 
 impl ResolvedProjectTrust {
@@ -128,7 +129,12 @@ impl CLIMode {
 
 /// Runs the product using the process argument vector and only native Rust plugins.
 pub async fn run_from_env() -> Result<(), String> {
-    run(Cli::parse_pi(), None, BTreeMap::new()).await
+    completed_with_exit_code(run_from_env_with_exit_code().await?)
+}
+
+/// Runs the native CLI and preserves command-specific process exit codes.
+pub async fn run_from_env_with_exit_code() -> Result<i32, String> {
+    run_with_exit_code(Cli::parse_pi(), None, BTreeMap::new()).await
 }
 
 /// Runs the product as a Node-hosted application. `arguments` excludes the
@@ -137,6 +143,14 @@ pub async fn run_with_js_host(
     arguments: Vec<String>,
     js_host: Arc<dyn JsPluginHost>,
 ) -> Result<(), String> {
+    completed_with_exit_code(run_with_js_host_and_exit_code(arguments, js_host).await?)
+}
+
+/// Node-hosted CLI entry point preserving readiness command exit codes.
+pub async fn run_with_js_host_and_exit_code(
+    arguments: Vec<String>,
+    js_host: Arc<dyn JsPluginHost>,
+) -> Result<i32, String> {
     let (arguments, extension_flag_values) = split_extension_flags(arguments);
     let cli = match Cli::try_parse_pi_from(arguments) {
         Ok(cli) => cli,
@@ -147,11 +161,34 @@ pub async fn run_with_js_host(
             ) =>
         {
             print!("{error}");
-            return Ok(());
+            return Ok(0);
         }
         Err(error) => return Err(error.to_string()),
     };
-    run(cli, Some(js_host), extension_flag_values).await
+    run_with_exit_code(cli, Some(js_host), extension_flag_values).await
+}
+
+fn completed_with_exit_code(code: i32) -> Result<(), String> {
+    match code {
+        0 => Ok(()),
+        1 => Err("authentication is not ready".into()),
+        2 => Err("authentication configuration is invalid".into()),
+        code => Err(format!("command exited with status {code}")),
+    }
+}
+
+async fn run_with_exit_code(
+    cli: Cli,
+    js_host: Option<Arc<dyn JsPluginHost>>,
+    extension_flag_values: BTreeMap<String, serde_json::Value>,
+) -> Result<i32, String> {
+    if let Some(CliCommand::Auth {
+        command: command @ config::AuthCommand::Check { .. },
+    }) = &cli.command
+    {
+        return auth::check(&config::resolve_app_config(&cli)?, command).await;
+    }
+    run(cli, js_host, extension_flag_values).await.map(|()| 0)
 }
 
 async fn run(
@@ -213,8 +250,10 @@ async fn run(
                 .ok_or_else(|| "--name requires a non-empty value".to_string())
         })
         .transpose()?;
-    let mut create_session_id = None;
-    if let Some(session_id) = &cli.session_id {
+    let mut create_session_id = cli.no_session.then(|| cli.session_id.clone()).flatten();
+    if let Some(session_id) = &cli.session_id
+        && !cli.no_session
+    {
         let sessions_root = config
             .session_path
             .parent()
@@ -232,7 +271,7 @@ async fn run(
             }
         }
     }
-    let session_exists = !cli.acp && config.session_path.exists();
+    let session_exists = !cli.acp && !cli.no_session && config.session_path.exists();
     let resumed_store = if session_exists {
         let store =
             SessionStore::open_handle(&config.session_path).map_err(|error| error.to_string())?;
@@ -292,9 +331,17 @@ async fn run(
     plugin_surface_requests.theme = ui_settings.effective().theme.clone();
     plugin_surface_requests.external_editor = ui_settings.effective().external_editor.clone();
     plugin_surface_requests.show_images = ui_settings.effective().terminal.show_images;
+    let rpc_connection = matches!(cli_mode, CLIMode::Rpc).then(pi_rpc::ui::RpcConnection::stdio);
+    let rpc_ui = rpc_connection
+        .as_ref()
+        .map(|connection| connection.ui_bridge());
+    let plugin_ui: Arc<dyn pi_session::PluginUiBridge> = match &rpc_connection {
+        Some(connection) => connection.ui_bridge(),
+        None => Arc::new(plugin_ui),
+    };
     let mut factory = ProductSessionFactory::new(config, trust.service.clone(), settings)
         .with_plugin_context(cli_mode.presentation_mode(), plugin_context_binding.clone())
-        .with_plugin_ui_bridge(Arc::new(plugin_ui));
+        .with_plugin_ui_bridge(plugin_ui);
     if let Some(js_host) = js_host {
         factory = factory.with_js_plugin_host(js_host);
     }
@@ -325,6 +372,7 @@ async fn run(
             sessions
                 .create_session(pi_session::CreateSessionOptions {
                     session_id: create_session_id,
+                    in_memory: cli.no_session,
                     ..pi_session::CreateSessionOptions::new(&cwd, &session_path)
                 })
                 .await
@@ -340,45 +388,58 @@ async fn run(
             &mut plugin_surface_requests,
             cli.fullscreen_enabled(),
         )
-        .await?
+        .await
     } else {
-        startup.await?
+        startup.await
     };
-    if curator_command.is_some()
-        && !session
-            .current()
-            .catalog()
-            .command_specs()
-            .iter()
-            .any(|s| s.name == "curator")
+    if session.is_err()
+        && let Some(ui) = &rpc_ui
     {
-        let _ = sessions.shutdown().await;
-        return Err(
-            "Curator consolidation requires the Hermes memory provider to be enabled.".into(),
-        );
+        let _ = ui.flush().await;
     }
-    if let Some(name) = startup_name {
-        session
-            .current()
-            .set_name(Some(name))
-            .await
-            .map_err(|error| error.to_string())?;
+    let session = session?;
+    let result = async {
+        if curator_command.is_some()
+            && !session
+                .current()
+                .catalog()
+                .command_specs()
+                .iter()
+                .any(|s| s.name == "curator")
+        {
+            return Err(
+                "Curator consolidation requires the Hermes memory provider to be enabled.".into(),
+            );
+        }
+        if let Some(name) = startup_name {
+            session
+                .current()
+                .set_name(Some(name))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        run_cli_with_shutdown(
+            cli_mode,
+            session,
+            cli.fullscreen_enabled(),
+            trust.service,
+            InteractiveRequestReceivers {
+                project_trust: trust.requests,
+                plugin_surface: plugin_surface_requests,
+                rpc_connection,
+            },
+            agent_dir,
+            Some(plugin_context_binding),
+        )
+        .await
     }
-    let result = run_cli_with_shutdown(
-        cli_mode,
-        session,
-        cli.fullscreen_enabled(),
-        trust.service,
-        InteractiveRequestReceivers {
-            project_trust: trust.requests,
-            plugin_surface: plugin_surface_requests,
-        },
-        agent_dir,
-        Some(plugin_context_binding),
-    )
     .await;
     let shutdown = sessions.shutdown().await.map_err(|error| error.to_string());
-    finish_run(result, shutdown)
+    let flushed = match rpc_ui {
+        Some(ui) => ui.flush().await,
+        None => Ok(()),
+    };
+    finish_run(finish_run(result, shutdown), flushed)
 }
 
 fn split_extension_flags(
@@ -407,6 +468,7 @@ fn split_extension_flags(
         "no-fullscreen",
         "cwd",
         "session",
+        "no-session",
         "session-id",
         "session-dir",
         "name",
@@ -419,6 +481,7 @@ fn split_extension_flags(
         "plugin",
         "extension",
         "no-extensions",
+        "skill",
         "approve",
         "no-approve",
     ];
@@ -438,6 +501,7 @@ fn split_extension_flags(
         "agent-dir",
         "plugin",
         "extension",
+        "skill",
     ];
     let forces_prompt = arguments
         .iter()
@@ -595,7 +659,14 @@ async fn run_cli(
     match mode {
         CLIMode::Json { input } => output::run_json(session, input).await,
         CLIMode::Rpc => {
-            pi_rpc::rpc::run(session, pi_plugin_session_transfer::export::export_html).await
+            pi_rpc::rpc::run_connection(
+                session,
+                pi_plugin_session_transfer::export::export_html,
+                interactive_requests
+                    .rpc_connection
+                    .ok_or_else(|| "RPC connection unavailable".to_string())?,
+            )
+            .await
         }
         CLIMode::Acp => Err("ACP mode must start before creating a CLI session".to_string()),
         CLIMode::Print { input } => output::run_print(session, input).await,
@@ -788,6 +859,56 @@ mod tests {
             ]
         );
         assert!(values.is_empty());
+    }
+
+    #[test]
+    fn node_adapter_preserves_no_session_before_native_session_resolution() {
+        let input = [
+            "--mode",
+            "rpc",
+            "--no-session",
+            "--session",
+            "existing.jsonl",
+            "--fixture-enabled",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let (arguments, values) = split_extension_flags(input);
+        assert_eq!(
+            values,
+            BTreeMap::from([("fixture-enabled".into(), json!(true))])
+        );
+        let cli = Cli::try_parse_pi_from(arguments).unwrap();
+        assert!(cli.no_session);
+        assert_eq!(
+            cli.session.as_deref(),
+            Some(std::path::Path::new("existing.jsonl"))
+        );
+    }
+
+    #[test]
+    fn node_adapter_preserves_explicit_skill_paths_for_native_parsing() {
+        let input = [
+            "--mode",
+            "rpc",
+            "--skill",
+            "install",
+            "--skill=library with spaces/SKILL.md",
+            "--fixture-enabled",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let (arguments, values) = split_extension_flags(input);
+        assert_eq!(
+            values,
+            BTreeMap::from([("fixture-enabled".into(), json!(true))])
+        );
+        let cli = Cli::try_parse_pi_from(arguments).unwrap();
+        assert_eq!(cli.skills, ["install", "library with spaces/SKILL.md"]);
+        assert!(cli.prompt.is_empty());
+        assert!(Cli::try_parse_pi_from(vec!["--skill".into()]).is_err());
     }
 
     #[test]

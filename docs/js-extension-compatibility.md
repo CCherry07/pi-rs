@@ -128,9 +128,14 @@ the upstream terminal loop or install the Coding Agent npm runtime. Node 22.19+ 
 Stable node IDs preserve Rust editing state across description changes. Semantic controls edit
 locally; Pi components process their internal state in JS. Removed/replaced nodes cannot receive queued events; retained nodes keep valid queued
 submissions. Unmount, cancellation, host failure and generation retirement settle pending dialogs
-and release callbacks. Failed generation preparation preserves live UI. Print/JSON/RPC use inactive
-UI defaults (notifications remain active). The CLI TUI is the current renderer; Desktop reports UI
-unavailable until it provides its own semantic-surface adapter.
+and release callbacks. Failed generation preparation preserves live UI. Print/JSON use inactive
+UI defaults (notifications remain active). RPC exposes `ctx.hasUI` when its semantic bridge is
+installed and sends `confirm`, `select`, `input`, `editor` and `notify` requests over the Pi wire,
+including startup hooks. AbortSignal, timeout, generation retirement and disconnect release pending
+dialogs. Startup, reload and ordinary notifications use one ordered output channel and are emitted
+once. RPC leaves arbitrary custom terminal components, component widgets, headers and footers
+inactive, matching legacy Pi's RPC behavior. Status/text widgets/title/editor-text wire methods
+remain outside this bridge's supported subset.
 
 This adapter is a compatibility subset. Custom editor subclasses,
 complete theme configuration and arbitrary terminal operations are not supported. Use the existing

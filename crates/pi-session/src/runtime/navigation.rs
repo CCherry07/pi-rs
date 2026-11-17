@@ -1,13 +1,28 @@
 use super::AgentSession;
-use super::activity::ActivityPhase;
+use super::activity::{ActivityPhase, CancellationStage, SessionActivity};
 use crate::{
     AgentMessage, BranchSummaryEntry, SessionBeforeTreeEvent, SessionContext, SessionDocument,
     SessionError, SessionTreeEvent, TreePreparation, estimate_context_tokens, now_ms,
 };
-use pi_core::{AbortHandle, ContentBlock, Message, StopReason, UserMessage};
+use pi_core::{AbortHandle, AbortSignal, ContentBlock, Message, StopReason, UserMessage};
 use pi_runtime::RuntimeCompletionRequest;
 
+/// The operation gate owns this slot; every exit clears it, including errors.
+struct TreeCancellation<'a>(&'a SessionActivity);
+impl Drop for TreeCancellation<'_> {
+    fn drop(&mut self) {
+        self.0.clear_cancellation(CancellationStage::Boundary);
+    }
+}
+
 impl AgentSession {
+    fn tree_cancellation(&self) -> (TreeCancellation<'_>, AbortSignal) {
+        let (handle, signal) = AbortHandle::new();
+        self.activity
+            .register_cancellation(CancellationStage::Boundary, handle);
+        (TreeCancellation(&self.activity), signal)
+    }
+
     pub async fn checkout(&self, leaf_id: Option<&str>) -> Result<SessionContext, SessionError> {
         let _operation = self.activity.begin(ActivityPhase::Updating).await;
         self.ensure_open()?;
@@ -19,19 +34,18 @@ impl AgentSession {
         if previous_leaf.as_deref() == leaf_id {
             return Ok(context);
         }
-        let preparation = tree_preparation(&document, leaf_id, false)?;
-        let (_, signal) = AbortHandle::new();
+        let (_cancellation, signal) = self.tree_cancellation();
         let before = self
             .plugin_driver()
             .session_before_tree(
                 self.session_dispatch_context(),
                 &SessionBeforeTreeEvent {
-                    preparation,
-                    signal,
+                    preparation: tree_preparation(&document, leaf_id, false)?,
+                    signal: signal.clone(),
                 },
             )
             .await;
-        if before.as_ref().is_some_and(|result| result.cancel) {
+        if signal.is_aborted() || before.as_ref().is_some_and(|result| result.cancel) {
             return Err(SessionError::Cancelled("session tree navigation"));
         }
         self.context_updates.checkout(leaf_id, &context)?;
@@ -40,17 +54,7 @@ impl AgentSession {
         {
             self.store.set_label(target_id, Some(label))?;
         }
-        self.plugin_driver()
-            .session_tree(
-                self.session_dispatch_context(),
-                &SessionTreeEvent {
-                    new_leaf_id: self.store.leaf_id(),
-                    old_leaf_id: previous_leaf,
-                    summary_entry: None,
-                    from_extension: None,
-                },
-            )
-            .await;
+        self.finish_tree_change(previous_leaf, None, None).await?;
         Ok(context)
     }
 
@@ -65,19 +69,18 @@ impl AgentSession {
         self.store
             .context_at_with_options(leaf_id, self.context_updates.options())?;
         let previous_leaf = self.store.leaf_id();
-        let preparation = tree_preparation(&document, leaf_id, true)?;
-        let (_, signal) = AbortHandle::new();
+        let (_cancellation, signal) = self.tree_cancellation();
         let before = self
             .plugin_driver()
             .session_before_tree(
                 self.session_dispatch_context(),
                 &SessionBeforeTreeEvent {
-                    preparation,
-                    signal,
+                    preparation: tree_preparation(&document, leaf_id, true)?,
+                    signal: signal.clone(),
                 },
             )
             .await;
-        if before.as_ref().is_some_and(|result| result.cancel) {
+        if signal.is_aborted() || before.as_ref().is_some_and(|result| result.cancel) {
             return Err(SessionError::Cancelled("session tree navigation"));
         }
         let mut from_extension = false;
@@ -91,28 +94,12 @@ impl AgentSession {
             }
             label = result.label;
         }
-        summary.from_id = previous_leaf.clone().unwrap_or_else(|| "root".to_string());
-        let record = self
-            .context_updates
-            .branch(leaf_id, summary.clone(), label)?;
-        let id = record.id.clone();
-        self.plugin_driver()
-            .session_tree(
-                self.session_dispatch_context(),
-                &SessionTreeEvent {
-                    new_leaf_id: self.store.leaf_id(),
-                    old_leaf_id: previous_leaf,
-                    summary_entry: Some(summary),
-                    from_extension: Some(from_extension),
-                },
-            )
-            .await;
-        Ok(id)
+        self.commit_summary_branch(leaf_id, previous_leaf, summary, label, from_extension)
+            .await
     }
 
-    /// Generates an abandoned-branch summary with the selected
-    /// provider, checks out the target, and appends the summary as the new
-    /// leaf. Extension `session_before_tree` hooks may still replace it.
+    /// Generates a tool-free abandoned-branch summary under the same operation
+    /// gate as checkout. Hooks run before the provider and may replace or cancel it.
     pub async fn summarize_branch_and_checkout(
         &self,
         leaf_id: &str,
@@ -120,32 +107,94 @@ impl AgentSession {
         replace_instructions: bool,
         label: Option<String>,
     ) -> Result<String, SessionError> {
-        const PREAMBLE: &str = "The user explored a different conversation branch before returning here.\nSummary of that exploration:\n\n";
-
+        let _operation = self.activity.begin(ActivityPhase::Updating).await;
         self.ensure_open()?;
         let document = self.store.shared_document()?;
-        let preparation = tree_preparation(&document, Some(leaf_id), true)?;
+        self.store
+            .context_at_with_options(Some(leaf_id), self.context_updates.options())?;
+        let previous_leaf = self.store.leaf_id();
+        let mut preparation = tree_preparation(&document, Some(leaf_id), true)?;
+        preparation.custom_instructions = custom_instructions;
+        preparation.replace_instructions = replace_instructions;
+        preparation.label = label;
+        let (_cancellation, signal) = self.tree_cancellation();
+        let before = self
+            .plugin_driver()
+            .session_before_tree(
+                self.session_dispatch_context(),
+                &SessionBeforeTreeEvent {
+                    preparation: preparation.clone(),
+                    signal: signal.clone(),
+                },
+            )
+            .await;
+        if signal.is_aborted() || before.as_ref().is_some_and(|result| result.cancel) {
+            return Err(SessionError::Cancelled("session tree navigation"));
+        }
+        let before = before.unwrap_or_default();
+        let from_extension = before.summary.is_some();
+        if let Some(value) = before.custom_instructions {
+            preparation.custom_instructions = Some(value);
+        }
+        if let Some(value) = before.replace_instructions {
+            preparation.replace_instructions = value;
+        }
+        if let Some(value) = before.label {
+            preparation.label = Some(value);
+        }
+        let summary = if let Some(summary) = before.summary {
+            BranchSummaryEntry {
+                from_id: String::new(),
+                summary: summary.summary,
+                details: summary.details,
+                usage: summary.usage,
+            }
+        } else {
+            self.generate_branch_summary(&preparation, signal.clone())
+                .await?
+        };
+        if signal.is_aborted() {
+            return Err(SessionError::Cancelled("session tree navigation"));
+        }
+        self.commit_summary_branch(
+            Some(leaf_id),
+            previous_leaf,
+            summary,
+            preparation.label,
+            from_extension,
+        )
+        .await
+    }
+
+    async fn generate_branch_summary(
+        &self,
+        preparation: &TreePreparation,
+        signal: AbortSignal,
+    ) -> Result<BranchSummaryEntry, SessionError> {
+        const PREAMBLE: &str = "The user explored a different conversation branch before returning here.\nSummary of that exploration:\n\n";
         let context = crate::build_session_context(
             &preparation.entries_to_summarize,
             self.context_updates.options(),
         );
-        let summary_messages = branch_summary_input_messages(
+        let messages = branch_summary_input_messages(
             context.messages,
             self.active_context_window().unwrap_or(128_000),
             self.branch_summary_reserve_tokens,
         );
-        let (summary, usage) = if summary_messages.is_empty() {
+        let (summary, usage) = if messages.is_empty() {
             ("No content to summarize".to_string(), None)
         } else {
-            let conversation = serde_json::to_string_pretty(&summary_messages)
+            let conversation = serde_json::to_string_pretty(&messages)
                 .map_err(|error| SessionError::InvalidPayload(error.to_string()))?;
             let prompt = self.compaction_policy.branch_prompt();
-            let instructions = match (custom_instructions, replace_instructions) {
-                (Some(custom), true) => custom,
+            let instructions = match (
+                &preparation.custom_instructions,
+                preparation.replace_instructions,
+            ) {
+                (Some(custom), true) => custom.clone(),
                 (Some(custom), false) => format!("{prompt}\n\nAdditional focus: {custom}"),
                 (None, _) => prompt.to_string(),
             };
-            let (_, signal) = AbortHandle::new();
             let response = self
                 .runtime
                 .complete(
@@ -162,14 +211,17 @@ impl AgentSession {
                         thinking_budgets: self.runtime.agent().thinking_budgets(),
                         max_output_tokens: Some(2_048),
                     },
-                    signal,
+                    signal.clone(),
                 )
                 .await?;
+            if signal.is_aborted() || response.stop_reason == StopReason::Aborted {
+                return Err(SessionError::Cancelled("session tree navigation"));
+            }
             if response.stop_reason == StopReason::Error {
                 return Err(SessionError::Runtime(
                     response
                         .error_message
-                        .unwrap_or_else(|| "branch summarization failed".to_string()),
+                        .unwrap_or_else(|| "branch summarization failed".into()),
                 ));
             }
             if response
@@ -178,7 +230,7 @@ impl AgentSession {
                 .any(|block| matches!(block, ContentBlock::ToolCall(_)))
             {
                 return Err(SessionError::Runtime(
-                    "branch summarization attempted to call a tool".to_string(),
+                    "branch summarization attempted to call a tool".into(),
                 ));
             }
             let text = response
@@ -202,21 +254,53 @@ impl AgentSession {
                 Some(response.usage),
             )
         };
-        let id = self
-            .branch_with_summary(
-                Some(leaf_id),
-                BranchSummaryEntry {
-                    from_id: String::new(),
-                    summary,
-                    details: None,
-                    usage,
+        Ok(BranchSummaryEntry {
+            from_id: String::new(),
+            summary,
+            details: None,
+            usage,
+        })
+    }
+
+    async fn commit_summary_branch(
+        &self,
+        leaf_id: Option<&str>,
+        previous_leaf: Option<String>,
+        mut summary: BranchSummaryEntry,
+        label: Option<String>,
+        from_extension: bool,
+    ) -> Result<String, SessionError> {
+        summary.from_id = previous_leaf.clone().unwrap_or_else(|| "root".to_string());
+        let record = self
+            .context_updates
+            .branch(leaf_id, summary.clone(), label)?;
+        self.finish_tree_change(previous_leaf, Some(summary), Some(from_extension))
+            .await?;
+        Ok(record.id)
+    }
+
+    async fn finish_tree_change(
+        &self,
+        old_leaf_id: Option<String>,
+        summary_entry: Option<BranchSummaryEntry>,
+        from_extension: Option<bool>,
+    ) -> Result<(), SessionError> {
+        // Publish immutable native history on the ordered event stream. Command
+        // replies must never drive transcript replacement or revision cursors.
+        self.events
+            .publish_tree(self.store.shared_document()?, self.runtime.agent().state());
+        self.plugin_driver()
+            .session_tree(
+                self.session_dispatch_context(),
+                &SessionTreeEvent {
+                    new_leaf_id: self.store.leaf_id(),
+                    old_leaf_id,
+                    summary_entry,
+                    from_extension,
                 },
             )
-            .await?;
-        if let Some(label) = label {
-            self.set_label(&id, Some(label))?;
-        }
-        Ok(id)
+            .await;
+        Ok(())
     }
 }
 

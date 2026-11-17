@@ -180,6 +180,7 @@ async fn order_tool_continues_and_resumes_without_coding_resources() {
         .create_session(pi_session::CreateSessionOptions {
             workspace: workspace.clone(),
             path: path.clone(),
+            in_memory: false,
             session_id: None,
             metadata: None,
             generation_overlay: Default::default(),
@@ -254,6 +255,7 @@ async fn reload_rebuilds_plugins_and_retains_model_workspace_and_conversation() 
         .create_session(pi_session::CreateSessionOptions {
             workspace: workspace.clone(),
             path: directory.path().join("session.jsonl"),
+            in_memory: false,
             session_id: None,
             metadata: None,
             generation_overlay: Default::default(),

@@ -14,6 +14,8 @@ use crate::{
 
 #[derive(Clone, Default)]
 pub struct AgentSessionOptions {
+    /// Keep session history in memory for the lifetime of this session.
+    pub in_memory: bool,
     pub context: SessionContextBuildOptions,
     pub compaction: CompactionSettings,
     /// Optional domain summary policy. Without one, summaries use neutral

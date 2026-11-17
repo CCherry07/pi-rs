@@ -275,6 +275,7 @@ impl SessionStore {
             .create_session(pi_session::CreateSessionOptions {
                 workspace: scope.workspace.clone(),
                 path,
+                in_memory: false,
                 session_id: Some(session_id),
                 metadata: scope.metadata.clone(),
                 generation_overlay: Default::default(),

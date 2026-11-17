@@ -278,7 +278,7 @@ impl pi_provider::CredentialSource for StoredCredentialSource {
 }
 
 impl StoredCredentialSource {
-    async fn resolve_stored(
+    pub(crate) async fn resolve_stored(
         &self,
         signal: &pi_core::AbortSignal,
     ) -> Result<Option<StoredCredential>, String> {

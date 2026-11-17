@@ -3902,9 +3902,12 @@ dependencies = [
 name = "pi-rpc"
 version = "0.8.6"
 dependencies = [
+ "async-trait",
  "pi-agent",
  "pi-core",
+ "pi-plugin",
  "pi-session",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "tempfile",

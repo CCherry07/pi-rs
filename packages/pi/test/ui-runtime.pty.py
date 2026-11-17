@@ -95,6 +95,8 @@ class TerminalHarness:
                     "--agent-dir",
                     str(directory / "agent"),
                     "--no-extensions",
+                    "--provider", "openai-compatible",
+                    "--model", "gpt-4o-mini",
                     *[argument for extension in (extensions or [package / "test/fixtures/ui-runtime.ts"])
                       for argument in ("--extension", str(extension))],
                 ],
@@ -278,7 +280,7 @@ with tempfile.TemporaryDirectory(prefix="pi-ui-pty-") as temporary:
     server = ThreadingHTTPServer(("127.0.0.1", 0), ProviderHandler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
-    (agent / "models.json").write_text(json.dumps({"providers": {"openai": {
+    (agent / "models.json").write_text(json.dumps({"providers": {"openai-compatible": {
         "baseUrl": f"http://127.0.0.1:{server.server_address[1]}/v1",
         "apiKey": "ui-fixture-key", "api": "openai-completions",
         "models": [{"id": "gpt-4o-mini", "name": "Fixture", "contextWindow": 200000, "maxTokens": 8192}],

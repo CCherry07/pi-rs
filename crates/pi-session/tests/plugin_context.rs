@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use pi_core::{Usage, UsageCost};
 use pi_plugin::{
     CommandContextParts, InputContext, InputEvent, InputPatch, Plugin, PluginContext,
-    PluginContextScope, PluginError, PresentationMode, SessionEntryKind,
+    PluginContextScope, PluginError, PresentationMode, SessionEntryKind, UiDialogRequest,
+    UiDialogResponse,
 };
 use pi_runtime::PiRuntime;
 use pi_session::{
@@ -63,7 +64,7 @@ impl PluginUiBridge for RecordingUiBridge {
 }
 
 #[tokio::test]
-async fn ui_availability_requires_both_tui_mode_and_a_frontend_bridge() {
+async fn ui_availability_requires_a_frontend_capability_for_its_mode() {
     let without_bridge = pi_plugin::PluginContextEpoch::new(Arc::new(PiPluginContext::new(
         PresentationMode::Tui,
         true,
@@ -82,6 +83,18 @@ async fn ui_availability_requires_both_tui_mode_and_a_frontend_bridge() {
             .with_ui_bridge(Arc::new(RecordingUiBridge::default())),
     ));
     assert!(!noninteractive.context().ui.is_available().unwrap());
+
+    let rpc_without_confirmation = pi_plugin::PluginContextEpoch::new(Arc::new(
+        PiPluginContext::new(PresentationMode::Rpc, true, PluginContextBinding::new())
+            .with_ui_bridge(Arc::new(RecordingUiBridge::default())),
+    ));
+    assert!(
+        !rpc_without_confirmation
+            .context()
+            .ui
+            .is_available()
+            .unwrap()
+    );
 }
 
 /// A graphical frontend that answers yes/no natively but renders no plugin
@@ -115,8 +128,14 @@ async fn rpc_frontends_answer_semantic_confirmations_without_plugin_surfaces() {
                 .with_ui_bridge(bridge.clone()),
         ));
         let ui = epoch.context().ui;
-        assert!(!ui.is_available().unwrap());
+        assert!(ui.is_available().unwrap());
         assert!(ui.can_confirm().unwrap());
+        assert_eq!(
+            ui.select("Unsupported", vec!["Choice".into()])
+                .await
+                .unwrap(),
+            None
+        );
         assert_eq!(ui.confirm("Send?", "向张三发送").await.unwrap(), answer);
         assert_eq!(
             bridge.asked.lock().unwrap().as_slice(),
@@ -131,8 +150,220 @@ async fn rpc_frontends_answer_semantic_confirmations_without_plugin_surfaces() {
         PluginContextBinding::new(),
     )));
     let ui = unbridged.context().ui;
+    assert!(!ui.is_available().unwrap());
     assert!(!ui.can_confirm().unwrap());
     assert!(!ui.confirm("Send?", "x").await.unwrap());
+}
+
+struct SemanticDialogBridge {
+    answer: Mutex<UiDialogResponse>,
+    asked: Mutex<Vec<(UiDialogRequest, Option<u64>)>>,
+    notices: Mutex<Vec<(pi_plugin::NoticeLevel, String)>>,
+}
+
+#[async_trait::async_trait]
+impl PluginUiBridge for SemanticDialogBridge {
+    async fn dialog(
+        &self,
+        request: UiDialogRequest,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<UiDialogResponse>, String> {
+        self.asked.lock().unwrap().push((request, timeout_ms));
+        Ok(Some(self.answer.lock().unwrap().clone()))
+    }
+
+    fn supports_confirm(&self) -> bool {
+        true
+    }
+
+    fn notify(&self, level: pi_plugin::NoticeLevel, message: String) -> Result<bool, String> {
+        self.notices.lock().unwrap().push((level, message));
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn rpc_native_dialogs_preserve_results_and_notify_before_session_binding() {
+    let bridge = Arc::new(SemanticDialogBridge {
+        answer: Mutex::new(UiDialogResponse::Confirmed(true)),
+        asked: Mutex::default(),
+        notices: Mutex::default(),
+    });
+    let epoch = pi_plugin::PluginContextEpoch::new(Arc::new(
+        PiPluginContext::new(PresentationMode::Rpc, true, PluginContextBinding::new())
+            .with_ui_bridge(bridge.clone()),
+    ));
+    let ui = epoch.context().ui;
+    assert!(ui.confirm("Continue?", "启动").await.unwrap());
+    *bridge.answer.lock().unwrap() = UiDialogResponse::Value("Production".into());
+    assert_eq!(
+        ui.select("Environment", vec!["Test".into(), "Production".into()])
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    *bridge.answer.lock().unwrap() = UiDialogResponse::Value(String::new());
+    assert_eq!(
+        ui.input("Name", "可留空").await.unwrap(),
+        Some(String::new())
+    );
+    *bridge.answer.lock().unwrap() = UiDialogResponse::Value("一行\n二行".into());
+    assert_eq!(
+        ui.editor("Notes", "初始文本").await.unwrap().as_deref(),
+        Some("一行\n二行")
+    );
+    assert_eq!(
+        bridge.asked.lock().unwrap().as_slice(),
+        &[
+            (
+                UiDialogRequest::Confirm {
+                    title: "Continue?".into(),
+                    message: "启动".into()
+                },
+                None
+            ),
+            (
+                UiDialogRequest::Select {
+                    title: "Environment".into(),
+                    options: vec!["Test".into(), "Production".into()]
+                },
+                None
+            ),
+            (
+                UiDialogRequest::Input {
+                    title: "Name".into(),
+                    placeholder: "可留空".into()
+                },
+                None
+            ),
+            (
+                UiDialogRequest::Editor {
+                    title: "Notes".into(),
+                    prefill: "初始文本".into()
+                },
+                None
+            ),
+        ]
+    );
+
+    // A supported cancellation must complete instead of trying a terminal surface.
+    *bridge.answer.lock().unwrap() = UiDialogResponse::Cancelled;
+    assert!(!ui.confirm("Continue?", "x").await.unwrap());
+    assert_eq!(ui.select("Pick", vec!["One".into()]).await.unwrap(), None);
+    assert_eq!(ui.input("Name", "").await.unwrap(), None);
+    assert_eq!(ui.editor("Notes", "").await.unwrap(), None);
+    *bridge.answer.lock().unwrap() = UiDialogResponse::Value("not offered".into());
+    assert_eq!(ui.select("Pick", vec!["One".into()]).await.unwrap(), None);
+
+    ui.notify(pi_plugin::NoticeLevel::Warning, "startup notice")
+        .unwrap();
+    assert_eq!(
+        bridge.notices.lock().unwrap().as_slice(),
+        &[(pi_plugin::NoticeLevel::Warning, "startup notice".into())]
+    );
+}
+
+#[tokio::test]
+async fn retiring_semantic_dialogs_keeps_the_next_generations_requests_alive() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::{mpsc, oneshot};
+
+    struct PendingDialogs {
+        requests: mpsc::UnboundedSender<oneshot::Sender<UiDialogResponse>>,
+        active: Arc<AtomicUsize>,
+    }
+    struct ActiveDialog(Arc<AtomicUsize>);
+    impl Drop for ActiveDialog {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    #[async_trait::async_trait]
+    impl PluginUiBridge for PendingDialogs {
+        async fn dialog(
+            &self,
+            _request: UiDialogRequest,
+            _timeout_ms: Option<u64>,
+        ) -> Result<Option<UiDialogResponse>, String> {
+            self.active.fetch_add(1, Ordering::SeqCst);
+            let _active = ActiveDialog(self.active.clone());
+            let (sender, receiver) = oneshot::channel();
+            self.requests.send(sender).unwrap();
+            Ok(Some(receiver.await.unwrap_or(UiDialogResponse::Cancelled)))
+        }
+    }
+
+    let (requests, mut receiver) = mpsc::unbounded_channel();
+    let active = Arc::new(AtomicUsize::new(0));
+    let bridge = Arc::new(PendingDialogs {
+        requests,
+        active: active.clone(),
+    });
+    let make_epoch = || {
+        pi_plugin::PluginContextEpoch::new(Arc::new(
+            PiPluginContext::new(PresentationMode::Rpc, true, PluginContextBinding::new())
+                .with_ui_bridge(bridge.clone()),
+        ))
+    };
+    let old = make_epoch();
+    let next = make_epoch();
+    let old_ui = old.context().ui;
+    let next_ui = next.context().ui;
+    let old_task = tokio::spawn(async move { old_ui.input("Old", "").await });
+    let old_response = receiver.recv().await.unwrap();
+    let next_task = tokio::spawn(async move { next_ui.input("Next", "").await });
+    let next_response = receiver.recv().await.unwrap();
+    assert_eq!(active.load(Ordering::SeqCst), 2);
+    old.retire();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(3), old_task)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(pi_plugin::PluginContextError::Retired)
+    ));
+    assert_eq!(active.load(Ordering::SeqCst), 1);
+    assert!(old_response.is_closed());
+    assert!(!next_task.is_finished());
+    next_response
+        .send(UiDialogResponse::Value("next response".into()))
+        .unwrap();
+    assert_eq!(
+        next_task.await.unwrap().unwrap().as_deref(),
+        Some("next response")
+    );
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn semantic_dialog_reply_rechecks_retirement_after_polling_the_bridge() {
+    struct RetiringBridge(Mutex<Option<pi_plugin::PluginContextEpoch>>);
+
+    #[async_trait::async_trait]
+    impl PluginUiBridge for RetiringBridge {
+        async fn dialog(
+            &self,
+            _request: UiDialogRequest,
+            _timeout_ms: Option<u64>,
+        ) -> Result<Option<UiDialogResponse>, String> {
+            // The retirement waiter was polled before this ready response.
+            // Retiring here reproduces a reply racing with a generation swap.
+            let epoch = self.0.lock().unwrap().take().unwrap();
+            epoch.retire();
+            Ok(Some(UiDialogResponse::Confirmed(true)))
+        }
+    }
+
+    let bridge = Arc::new(RetiringBridge(Mutex::default()));
+    let epoch = pi_plugin::PluginContextEpoch::new(Arc::new(
+        PiPluginContext::new(PresentationMode::Rpc, true, PluginContextBinding::new())
+            .with_ui_bridge(bridge.clone()),
+    ));
+    *bridge.0.lock().unwrap() = Some(epoch.clone());
+    assert!(matches!(
+        epoch.context().ui.confirm("Continue?", "x").await,
+        Err(pi_plugin::PluginContextError::Retired)
+    ));
 }
 
 #[pi_plugin::plugin]

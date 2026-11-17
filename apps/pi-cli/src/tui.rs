@@ -1001,10 +1001,12 @@ impl App {
             AgentSessionEvent::QueueUpdate {
                 steering,
                 follow_up,
+                items,
             } => {
                 self.queue = QueueSnapshot {
                     steering,
                     follow_up,
+                    items,
                 };
             }
             AgentSessionEvent::CompactionStart { .. } => {
@@ -1471,6 +1473,7 @@ async fn run_loop(
     let InteractiveRequestReceivers {
         project_trust: mut trust_requests,
         plugin_surface: mut surface_requests,
+        ..
     } = interactive_requests;
     if let Some(selected) = surface_requests
         .theme
@@ -2329,6 +2332,7 @@ mod tests {
             queue: QueueSnapshot {
                 steering: Vec::new(),
                 follow_up: vec!["完成后跑完整测试".to_string()],
+                items: Vec::new(),
             },
             command_specs: vec![CommandSpec {
                 name: "skill:code-review".to_string(),

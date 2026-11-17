@@ -62,13 +62,13 @@ pub use plugin::{
     SessionTreeSummary, ToolCallBlock, ToolCallEvent, ToolCallPatch, ToolExecutionEndEvent,
     ToolExecutionStartEvent, ToolExecutionUpdateEvent, ToolResultEvent, ToolResultPatch,
     TreePreparation, TurnEndEvent, TurnStartEvent, UiAppAction, UiCommand, UiCompletion, UiContext,
-    UiContextAccess, UiFocusTarget, UiHostOperation, UiHostRequest, UiInteraction, UiMouseButton,
-    UiMouseEvent, UiMouseEventKind, UiMouseResult, UiMultiSelectAction, UiMultiSelectOption,
-    UiMultiSelectRequest, UiMultiSelectResponse, UiNode, UiNodeKind, UiOverlayAnchor,
-    UiOverlayMargin, UiOverlayOptions, UiOverlayPosition, UiProductCommand, UiRegion,
-    UiRegionBounds, UiRegionPlacement, UiRegionSnapshot, UiShortcut, UiSurfaceArea,
-    UiSurfaceCommand, UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot, UiTone, UiTranscriptItem,
-    UiTranscriptRender, UnavailablePluginContext,
+    UiContextAccess, UiDialogRequest, UiDialogResponse, UiFocusTarget, UiHostOperation,
+    UiHostRequest, UiInteraction, UiMouseButton, UiMouseEvent, UiMouseEventKind, UiMouseResult,
+    UiMultiSelectAction, UiMultiSelectOption, UiMultiSelectRequest, UiMultiSelectResponse, UiNode,
+    UiNodeKind, UiOverlayAnchor, UiOverlayMargin, UiOverlayOptions, UiOverlayPosition,
+    UiProductCommand, UiRegion, UiRegionBounds, UiRegionPlacement, UiRegionSnapshot, UiShortcut,
+    UiSurfaceArea, UiSurfaceCommand, UiSurfaceEvent, UiSurfaceFrame, UiSurfaceSnapshot, UiTone,
+    UiTranscriptItem, UiTranscriptRender, UnavailablePluginContext,
 };
 
 pub use provider::{

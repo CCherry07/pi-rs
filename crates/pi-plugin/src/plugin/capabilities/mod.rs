@@ -40,7 +40,7 @@ pub use types::{
     NewSessionOptions, NoticeLevel, PluginContextError, PluginContextResult, PluginContextScope,
     PresentationMode, ScopedModel, SendMessageOptions, SendUserMessageOptions,
 };
-pub use ui::{UiContext, UiContextAccess};
+pub use ui::{UiContext, UiContextAccess, UiDialogRequest, UiDialogResponse};
 
 /// Dependency-inward aggregate implemented by the Pi-owned context Adapter.
 ///

@@ -320,8 +320,10 @@ The recommended setup is to register models in `<agent-dir>/models.json`:
 ```
 
 Environment variables in `apiKey`, headers, and other string settings are resolved only when a
-request is sent. Shell-command values prefixed with `!` are also supported. Credentials are never
-copied into the public model catalog.
+request is sent. Shell-command values prefixed with `!` run afresh on each resolution, without
+caching credentials or failures across requests. Credentials are never copied into the public
+model catalog. See the [command-backed credentials guide](plugins/providers/pi-plugin-models/README.md)
+for external credential helpers, timeout behavior, and configuration guidance.
 
 Custom routes support eight wire APIs: `openai-completions`, `openai-responses`,
 `azure-openai-responses`, `mistral-conversations`, `anthropic-messages`,
@@ -609,39 +611,39 @@ Type `/` and use the arrow keys to select a command; press `Tab` to complete it.
 
 ## Architecture
 
-| Directory                                        | Responsibility                                                                           |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------- |
-| `apps/pi-cli`                                    | CLI, TUI, and terminal lifecycle Adapter                                                  |
-| `crates/pi-sdk`                                  | Explicit domain-neutral agent embedding and shared Project definitions                  |
-| `domains/coding`                                 | Coding defaults, resources, providers/tools and product generation assembly              |
-| `crates/pi-eval`                                 | Domain-neutral eval execution, grading, artifacts and comparisons                        |
-| `domains/coding/eval`                            | Coding eval configuration and isolated product preparation (`pi-coding-eval`)             |
-| `apps/pi-eval`                                   | Eval CLI, case catalog and result presentation                                            |
-| `examples/order-agent`                           | Deterministic non-Coding SDK example                                                     |
-| `crates/pi-plugin` | Plugin contracts, preparation, typed contexts, generation drivers, and optional native exports |
-| `crates/pi-core`                                 | Messages, models, tool data and shared session wire values                                 |
-| `crates/pi-media`                                | Shared image validation, resizing, and format conversion                               |
-| `crates/pi-agent`                                | Agent façade, agent loop, stream assembly, and tool scheduling                           |
-| `crates/pi-runtime`                              | Generation construction, prompt assembly, and atomic reload                              |
-| `crates/pi-session`                              | Session history, runtime, managed generations and observation, and plugin capability adapters |
-| `crates/pi-rpc`                                  | Pi JSON projection and stdin/stdout RPC                                                   |
-| `crates/pi-acp`                                | ACP stable-v1 session adapter                                                          |
-| `plugins/features/pi-plugin-mcp`               | MCP client/tools, local configuration management and `/mcp` commands                    |
-| `crates/pi-telemetry`                            | Typed provider/harness span schemas and sink adapters                                    |
-| `crates/pi-provider`                             | Provider-neutral HTTP transport and SSE                                                  |
-| `domains/coding/src/{prompt,resources}.rs`       | Private Coding prompt assembly and project context discovery                             |
-| `domains/coding/settings`                      | Shared Coding settings documents and persistence (`pi-settings`)                          |
-| `apps/pi-cli/src/markdown`                       | TUI-owned Markdown parsing, streaming repair, syntax highlighting, and Ratatui rendering |
-| `crates/pi-plugin-macros` | Static/native plugin procedural macros |
-| `crates/pi-plugin-manager` | Native loading, package installation/reconciliation, and optional build/publication tools |
-| `crates/pi-js-package-manager`                   | Pi-compatible JS/TS discovery and local/npm/git package management                       |
-| `crates/pi-js-plugin` / `bindings/pi-napi`       | Typed JS lifecycle adapters and the Node/NAPI boundary                                   |
-| `packages/pi`                                    | Node launcher, Pi extension discovery, Jiti loader, and callback generations             |
-| `plugins/`                                       | Prompt/skill features, provider catalog, and independent production tool plugins         |
-| `plugins/features/pi-plugin-memory-hermes`       | Persistent memory, background learning, and scoped skill curation                       |
-| `plugins/features/pi-plugin-schedule`            | Persistent scheduled prompts and isolated-session dispatch                              |
-| `legacy/pi`                                      | Current TypeScript Pi behavioral oracle                                                  |
-| `e2e`                                            | In-process runtime acceptance and example projects                          |
+| Directory                                  | Responsibility                                                                                 |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| `apps/pi-cli`                              | CLI, TUI, and terminal lifecycle Adapter                                                       |
+| `crates/pi-sdk`                            | Explicit domain-neutral agent embedding and shared Project definitions                         |
+| `domains/coding`                           | Coding defaults, resources, providers/tools and product generation assembly                    |
+| `crates/pi-eval`                           | Domain-neutral eval execution, grading, artifacts and comparisons                              |
+| `domains/coding/eval`                      | Coding eval configuration and isolated product preparation (`pi-coding-eval`)                  |
+| `apps/pi-eval`                             | Eval CLI, case catalog and result presentation                                                 |
+| `examples/order-agent`                     | Deterministic non-Coding SDK example                                                           |
+| `crates/pi-plugin`                         | Plugin contracts, preparation, typed contexts, generation drivers, and optional native exports |
+| `crates/pi-core`                           | Messages, models, tool data and shared session wire values                                     |
+| `crates/pi-media`                          | Shared image validation, resizing, and format conversion                                       |
+| `crates/pi-agent`                          | Agent façade, agent loop, stream assembly, and tool scheduling                                 |
+| `crates/pi-runtime`                        | Generation construction, prompt assembly, and atomic reload                                    |
+| `crates/pi-session`                        | Session history, runtime, managed generations and observation, and plugin capability adapters  |
+| `crates/pi-rpc`                            | Pi JSON projection and stdin/stdout RPC                                                        |
+| `crates/pi-acp`                            | ACP stable-v1 session adapter                                                                  |
+| `plugins/features/pi-plugin-mcp`           | MCP client/tools, local configuration management and `/mcp` commands                           |
+| `crates/pi-telemetry`                      | Typed provider/harness span schemas and sink adapters                                          |
+| `crates/pi-provider`                       | Provider-neutral HTTP transport and SSE                                                        |
+| `domains/coding/src/{prompt,resources}.rs` | Private Coding prompt assembly and project context discovery                                   |
+| `domains/coding/settings`                  | Shared Coding settings documents and persistence (`pi-settings`)                               |
+| `apps/pi-cli/src/markdown`                 | TUI-owned Markdown parsing, streaming repair, syntax highlighting, and Ratatui rendering       |
+| `crates/pi-plugin-macros`                  | Static/native plugin procedural macros                                                         |
+| `crates/pi-plugin-manager`                 | Native loading, package installation/reconciliation, and optional build/publication tools      |
+| `crates/pi-js-package-manager`             | Pi-compatible JS/TS discovery and local/npm/git package management                             |
+| `crates/pi-js-plugin` / `bindings/pi-napi` | Typed JS lifecycle adapters and the Node/NAPI boundary                                         |
+| `packages/pi`                              | Node launcher, Pi extension discovery, Jiti loader, and callback generations                   |
+| `plugins/`                                 | Prompt/skill features, provider catalog, and independent production tool plugins               |
+| `plugins/features/pi-plugin-memory-hermes` | Persistent memory, background learning, and scoped skill curation                              |
+| `plugins/features/pi-plugin-schedule`      | Persistent scheduled prompts and isolated-session dispatch                                     |
+| `legacy/pi`                                | Current TypeScript Pi behavioral oracle                                                        |
+| `e2e`                                      | In-process runtime acceptance and example projects                                             |
 
 Dependencies point inward: core contracts do not own terminal behavior, filesystem discovery,
 session storage, or vendor routing policy. See [docs/architecture.md](docs/architecture.md) for hook

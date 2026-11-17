@@ -15,7 +15,9 @@ import {
 export interface NativeExtensionContext {
   query(operation: string): string;
   notify(operation: string): void;
-  request(operation: string): Promise<string>;
+  request(operation: string, requestId?: string): Promise<string>;
+  prepareRequest?(): string;
+  cancelRequest?(requestId: string): void;
   update?(result: string): void;
 }
 
@@ -26,7 +28,7 @@ export interface NativeBinding {
       operation: string,
       context?: NativeExtensionContext,
     ) => Promise<string>,
-  ): Promise<void>;
+  ): Promise<number | void>;
   runPiEval(
     arguments_: string[],
     dispatch: (

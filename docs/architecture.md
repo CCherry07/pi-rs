@@ -183,6 +183,13 @@ reload, shutdown-hook checkpoint writes, ordered lifecycle hooks, and assistant/
 pairing before the next provider request. History performs pure interrupted-state reduction;
 Session Runtime applies accepted recovery writes. It does not replay external tool side effects.
 
+`SessionStore` distinguishes deferred persistent journals from explicitly in-memory journals.
+`AgentSessionOptions::in_memory` and `CreateSessionOptions::in_memory` select the latter; the CLI
+exposes it as `--no-session`. Memory journals validate and reduce the same v4 mutations but never
+materialize a file. Their internal path remains a routing identity. New-session replacements,
+reloads and forks preserve that mode. Explicitly opening saved history selects its persistent
+store. A deferred persistent draft still cannot be forked until its first assistant response.
+
 ## Workspace
 
 The product execution model is `Project → WorkspaceSpec → Session → Generation`.
@@ -805,6 +812,43 @@ adapter owns strict LF-delimited input, command correlation, synchronized stdout
 replacement subscription, queue/model/thinking/compaction/retry/shell/session commands, and a
 narrow injected HTML-export callback.
 
+The RPC adapter reports the intended persistent `sessionFile` before lazy materialization so a
+client can retain one stable resume path. In-memory sessions omit it. Session Runtime's
+`prompt_with_receipt` reports successful preparation as `Started`, `Queued` or `Handled`;
+`Started` follows durable-run admission and precedes provider execution. The prompt future still
+owns full settlement. RPC returns the corresponding disposition without waiting for that future,
+and reports preflight errors as failed command responses. Cancelling a request before its receipt
+cancels the pending prompt task; admitted work follows normal session cancellation and shutdown.
+
+Stdio RPC installs its semantic dialog bridge before session startup and keeps reading correlated
+UI responses while startup or command hooks await them. `confirm`, `select`, `input`, `editor`
+and `notify` use Pi's `extension_ui_request` wire methods. `pi-plugin` owns typed
+`UiDialogRequest`/`UiDialogResponse` capabilities, `pi-session` binds them to the frontend, and
+`pi-rpc` owns their wire projection. Native helpers preserve their existing return types and TUI
+fallback; a cancelled semantic dialog never opens a fallback surface. Unknown or retired response
+IDs are ignored. Cancellation, timeout, generation retirement and disconnect release pending
+questions; only a live affirmative response grants confirmation. The JS/NAPI capability reserves
+cancellable request IDs before async dispatch. Dialog retirement is generation-local, so dropping
+the old generation cannot cancel new-generation requests on the shared connection.
+
+Each incoming command starts with one poll in the input loop, matching Pi's eager async dispatch.
+Synchronous queries and parse errors enqueue their responses before the loop can reach stdin EOF;
+handlers that await output, hooks or other work then continue concurrently. EOF still cancels
+pending commands and running work, while the shared output flush preserves responses already
+enqueued. A one-shot `get_state` / `get_available_models` probe therefore receives both responses
+without keeping stdin open or waiting for unrelated extension commands to finish.
+
+RPC notifications go directly through the injected bridge, including during startup and reload.
+A bridge that accepts a notification owns its delivery; the session adapter publishes the ordinary
+transient notice event only when the bridge does not handle it. One FIFO stdout writer preserves
+synchronous notification order relative to subsequent dialogs and command responses. The app drains
+it after startup failure and session shutdown as well as at normal RPC loop exit. On Unix the writer
+retains partial-write offsets and waits for descriptor writability on the blocking pool. Node's
+nonblocking stdout therefore preserves large catalog responses and subsequent events under pipe
+backpressure without changing the host's descriptor flags. Notices remain
+outside persisted session history. Terminal surfaces stay in the app layer, and the exact-build
+native fingerprint requires plugins to be rebuilt for the extended UI capability contract.
+
 `pi-acp` is a sibling external adapter rather than an RPC submodule. It uses the official ACP SDK's
 stable-v1 schema and maps ACP connection/session capability negotiation onto
 `MultiSessionManager`/`PiSession`. Its multi-session ownership, asynchronous prompt responders,
@@ -1298,6 +1342,15 @@ modes. Extension callback generations remain in Node; provider, tool, trust, ses
 authority remain in Rust. `crates/pi-js-plugin` contains only semantic wire values and adapters and
 therefore has no NAPI, Node, Jiti, or terminal dependency.
 
+`runPi` returns the CLI exit code after generation cleanup. The Node executable uses
+`PiNodeHost::runWithExitCode`; the existing void Rust/Node entry points still report a nonzero
+command result as an error. `pi-coding::check_auth` owns credential readiness with exit codes
+0/1/2 for ready/not-ready/invalid. It constructs built-in providers and the local `models.json`
+catalog without creating sessions, discovering project plugins or refreshing remote model lists.
+API-key checks do not issue a model request; stored OAuth can refresh unless `--no-refresh` is set.
+Bare `auth check` checks the configured/default model selection, extending Pi's explicit-selector
+requirement for desktop discovery. Credential output requires the explicit `--credentials` option.
+
 `packages/pi` itself is authored in TypeScript, executed directly with `tsx` for development and
 compiled by `tsc` into publishable JavaScript plus declarations under `packages/pi/dist`. Zod owns
 runtime validation at the untyped Node seams: Rust host operations, generation manifests, dynamic
@@ -1499,8 +1552,9 @@ This is compatibility by explicit capability, not an unsafe claim that every Pi 
 portable. The current bridge supports registered tools and commands, the Rust agent lifecycle
 hooks, `before_provider_request`, the ten session hooks, session/model inspection, the explicit
 non-replacing controls, and the command-safe session operations described above. TUI contexts expose
-active dialogs/components; other modes retain inactive UI defaults. `notify` crosses the native
-context as a transient `AgentSessionEvent::PluginNotice`. Component frames and notices do not
+active dialogs/components; RPC exposes semantic dialogs and notifications. Print/JSON retain
+inactive dialog defaults. `notify` crosses the native context through the presentation bridge when
+handled, otherwise as a transient `AgentSessionEvent::PluginNotice`. Component frames and notices do not
 change the v4 session log. Remaining renderer/resource discovery gaps,
 and other recognized-but-inactive facilities do not fail generation construction; they produce an
 `inactive` generation diagnostic and contribute no runtime callback. A hook name known to current
@@ -1538,6 +1592,23 @@ semantic `ProviderRequest`, so protocol modules apply merged compat, model limit
 controls, prompt caching, routing, deferred tools, and session affinity at serialization time. The
 provider overlay resolves credentials and headers only when sending the request and decorates
 terminal usage with Pi-compatible per-million and tiered cost calculation.
+Command-backed API keys and headers are resolved afresh for each catalog/inference request,
+including within one generation. Neither successful output nor failures are cached. Loading the
+configuration and querying configured availability do not execute helpers. This follows current
+Pi's `provider-composer` / `resolveConfigValueOrThrow` uncached request path and lets external
+credential helpers own login and rotation without a new provider lifecycle. The existing shell,
+ten-second timeout and cancellation behavior remain; errors deliberately omit command text and
+output to avoid disclosing secrets, unlike upstream diagnostics. There is no background refresh
+or automatic 401 replay. See the [command-backed credentials guide](../plugins/providers/pi-plugin-models/README.md).
+
+The OpenAI Responses wire adapter automatically sends a `thread-id` HTTP header derived from
+the nonempty `ProviderRequest.session_id`, matching observed Codex client requests. This is a
+deliberate default-header difference from current legacy Pi, which sends cache-affinity headers
+but not this thread identity. It is independent of prompt-cache retention and credential rotation;
+there is no new configuration switch, provider-name/hostname check, authentication flow, or session
+persistence rule. Explicit request headers retain their case-insensitive override behavior.
+Thread identity must not be a shared static configuration value or a new random ID for each request. Request bodies and other protocol adapters remain unchanged.
+
 Chat protocol serialization remains in the standalone provider modules. Specialized classifier/image
 protocol adapters live in `pi-plugin-models::operations`, sharing the existing HTTP transport and
 provider wire hooks. `models_json_schema()` exposes the same
@@ -1787,6 +1858,12 @@ diagnostic on invalid metadata. Each registered `SkillCommand` owns its metadata
 command discovery, duplicate validation, and dispatch share one source of truth. Generic resource
 loading and prompt assembly contain no skill-specific policy. The plugin contributes its catalog
 through `before_agent_start`, which makes a separate `PromptContributor` trait unnecessary.
+
+The CLI accepts repeatable `--skill <path>` inputs for Markdown files and skill directories.
+Coding configuration resolves these explicit paths from the startup cwd (including `~` expansion)
+and retains them separately from settings and package discovery, so settings refresh and session
+replacement preserve the requested skills. The Node adapter keeps `--skill` in native CLI arguments;
+`SkillsPlugin` handles discovery and command expansion through its existing additional-root seam.
 
 `PromptTemplatesPlugin` owns the parallel prompt-template seam. It discovers trusted project,
 user, and explicit Markdown sources non-recursively; preserves visible symlink names and caller
@@ -2388,6 +2465,28 @@ the single write/sync. Runtime and Agent queues clear and one product update is 
 success. The wire format remains multiple ordinary v4 records; a failed or interrupted write can
 leave a valid prefix, which recovery applies individually. This is not a filesystem transaction.
 Run start, message ends, tool/results and run finish keep their existing separate durable cut points.
+
+Native queue snapshots additionally expose `QueuedMessageSnapshot { entry_id, kind, text }`;
+Pi-compatible JSON continues exposing only `steering` and `followUp`. IDs identify input even
+when two items have identical text and timestamps. `cancel_queued` and `move_queued` belong to
+Session activity. Live Agent queues retain these IDs and exclude consumption while the owner
+commits a queue edit; a stale/consumed identity rejects the edit before persistence. Clear uses
+the same exclusion for both live queues. No frontend clears and reconstructs queues itself.
+
+Ordering edits use one validated batch of existing v4 `QueueCancelled`/`QueueEnqueued` records,
+with new provisioned IDs for the reordered group. They retain the ordinary record-prefix recovery
+rule described above rather than claiming filesystem atomicity. A successful edit changes the
+Agent queue and publishes the native snapshot only after synchronization; preflight/write failure
+publishes no success event. Resumed inputs report native delivery `NextRun`, while legacy text
+queue projections retain their established shape.
+
+`queue_next_run` preprocesses input once with the queued follow-up input-hook contract, then
+durably parks it without injecting it into the active agent loop. `run_next_queued` explicitly
+admits the first parked item under the session operation gate, retaining its provisioned identity
+through `message_end`. Preparing a run reuses the stored processed content and images. Open,
+resume and reload never call it. Live follow-up input continues to use the agent's automatic
+continuation. Per-item queue editing and explicit
+next-run controls are deliberate native product additions to Pi's steer/follow-up/clear controls.
 
 Materialized session documents are revision-scoped immutable read views. The first document read
 after a successful mutation projects the current journal state; all later readers of the same
@@ -3383,13 +3482,18 @@ The upstream terminal loop is never started. Supported interfaces and remaining 
 described in [plugin UI](plugin-ui.md).
 
 Availability is a property of the complete presentation adapter, not the mode label alone:
-`hasUI` is true only for TUI mode with an installed `PluginUiBridge`. Print, JSON, RPC, ACP and the
-current Desktop adapter report it unavailable.
+`hasUI` is true for TUI mode with an installed `PluginUiBridge`, and for RPC mode with a bridge
+that supports semantic confirmation. The stdio RPC bridge supports confirmations, selection, text
+input, multiline editing and notifications, including startup hooks. It does not enable declarative
+terminal surfaces. Print, JSON and ACP report UI unavailable.
 
-Semantic yes/no confirmation is separate from declarative surfaces. A `PluginUiBridge` that reports
-`supports_confirm` answers `UiContext::confirm` directly, and `UiContext::can_confirm` reports that
-capability. Desktop installs such a bridge in RPC mode and answers with a native dialog; a dismissed
-or failed dialog is a refusal. Without a bridge, confirmations in non-TUI modes resolve to no.
+Semantic dialogs are separate from declarative surfaces. `PluginUiBridge::dialog` answers typed
+requests for both Rust and JavaScript plugins; `None` means unsupported and `Cancelled` means the
+user dismissed the dialog. Existing confirmation-only frontends retain their `confirm` and
+`supports_confirm` implementations through the default dialog adapter. `UiContext::can_confirm`
+reports that capability. A dismissed or failed confirmation is a refusal. Without a bridge,
+confirmations in non-TUI modes resolve to no. Legacy Pi likewise leaves arbitrary custom terminal
+components, component widgets, headers and footers inactive in RPC mode.
 
 `apps/pi-cli::tui::extensions::surface` owns layout, focus, per-node editing/selection/scroll state,
 completion selection, terminal input and rendering for both Rust and JavaScript plugins. Input and
@@ -3512,6 +3616,7 @@ Rust owns title, progress/program status, clipboard,
 suspend and external editor execution, including terminal restore/reacquisition. Built-in
 light/dark/system palette selection affects the shared renderer. Editor configuration stays in
 Rust; JS generation preparation no longer receives theme paths or external-editor configuration.
-Print/JSON/RPC use inactive UI defaults. The CLI TUI is currently the only shipped renderer;
-Desktop remains unavailable rather than claiming partial support and needs its own adapter before
-enabling this interface.
+Print and JSON use inactive UI defaults. RPC supports semantic confirmation, selection, text input,
+multiline editing and notifications.
+The CLI TUI is currently the renderer for declarative surfaces and Pi terminal components;
+other frontends need their own surface adapter before enabling those operations.

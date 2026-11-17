@@ -1,5 +1,6 @@
 //! Coding product composition for the shared Pi runtime and session framework.
 
+mod auth_check;
 mod builtin_providers;
 mod composition;
 mod configuration;
@@ -17,6 +18,7 @@ pub mod skills;
 #[cfg(test)]
 mod test_support;
 
+pub use auth_check::{AuthCheckOptions, AuthCheckResult, AuthCheckStatus, check_auth};
 pub use credentials::{
     StoredCredential, modify_credentials, read_credentials, read_stored_credential,
 };

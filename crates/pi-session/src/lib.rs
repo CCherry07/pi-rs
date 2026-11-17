@@ -32,13 +32,16 @@ pub use runtime::compaction::{
     estimate_context_tokens,
 };
 pub(crate) use runtime::compaction::{compact, estimate_session_context_tokens, estimate_tokens};
-pub use runtime::{AgentSession, PromptOutcome, SessionInput, ShellExecutionOptions};
+pub use runtime::{
+    AgentSession, PromptDisposition, PromptOutcome, SessionInput, ShellExecutionOptions,
+};
 
 pub use management::{IsolatedSessionObservation, IsolatedSessionUsageSnapshot};
 pub use management::{SessionObservation, SessionResetReason, SessionUpdate, SessionVersion};
 pub use runtime::events::{
     AgentSessionEvent, AgentSessionSnapshot, AgentSessionSubscription, AutoRetrySnapshot,
-    BashExecutionSnapshot, CompactionSnapshot, QueueSnapshot, RevisionedAgentSessionEvent,
+    BashExecutionSnapshot, CompactionSnapshot, QueueSnapshot, QueuedMessageSnapshot,
+    RevisionedAgentSessionEvent,
 };
 
 pub use management::{

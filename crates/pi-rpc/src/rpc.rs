@@ -3,47 +3,26 @@
 //! Commands and responses use strict LF-delimited JSON. Session events are
 //! projected by `pi_json_wire`, so JSON and RPC cannot drift independently.
 
+use std::future::{Future, poll_fn};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::task::Poll;
 
 use pi_agent::QueueMode;
 use pi_core::{ContentBlock, ImageContent, Message, ModelSpec, StopReason, ThinkingLevel};
 use pi_session::{
-    AgentMessage, AgentSession, AgentSessionReplacement, ForkPosition, PiSession, SessionDocument,
-    SessionEntry, SessionInput, SessionRecord, SessionResetReason, SessionUpdate,
-    ShellExecutionOptions, aggregate_document_usage, current_session_context_tokens,
+    AgentMessage, AgentSession, AgentSessionReplacement, ForkPosition, PiSession,
+    PromptDisposition, SessionDocument, SessionEntry, SessionInput, SessionRecord,
+    SessionResetReason, SessionUpdate, ShellExecutionOptions, aggregate_document_usage,
+    current_session_context_tokens,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 use crate::json_wire::{compaction_result_json, session_entry_json, session_event_json};
+use crate::output::RpcOutput;
 
-const MAX_RPC_LINE_BYTES: usize = 16 * 1024 * 1024;
-
-#[derive(Clone)]
-struct RpcOutput {
-    stdout: Arc<tokio::sync::Mutex<tokio::io::Stdout>>,
-}
-
-impl RpcOutput {
-    fn new() -> Self {
-        Self {
-            stdout: Arc::new(tokio::sync::Mutex::new(tokio::io::stdout())),
-        }
-    }
-
-    async fn emit(&self, value: Value) -> Result<(), String> {
-        let mut encoded = serde_json::to_vec(&value).map_err(|error| error.to_string())?;
-        encoded.push(b'\n');
-        let mut stdout = self.stdout.lock().await;
-        stdout
-            .write_all(&encoded)
-            .await
-            .map_err(|error| error.to_string())?;
-        stdout.flush().await.map_err(|error| error.to_string())
-    }
-}
+pub(crate) const MAX_RPC_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(
@@ -289,55 +268,85 @@ impl RpcCommand {
 pub type HtmlExporter = fn(&AgentSession, Option<&str>) -> Result<PathBuf, String>;
 
 pub async fn run(session: PiSession, export_html: HtmlExporter) -> Result<(), String> {
-    let output = RpcOutput::new();
-    let events = tokio::spawn(forward_events(session.clone(), output.clone()));
-    let stdin = tokio::io::stdin();
-    let mut reader = tokio::io::BufReader::new(stdin);
-    let mut line = Vec::new();
+    run_connection(session, export_html, crate::ui::RpcConnection::stdio()).await
+}
+
+/// Runs with the same connection whose UI bridge was installed before session construction.
+pub async fn run_connection(
+    session: PiSession,
+    export_html: HtmlExporter,
+    mut connection: crate::ui::RpcConnection,
+) -> Result<(), String> {
+    let output = connection.bridge.output.clone();
+    let events = EventForwarder(tokio::spawn(forward_events(
+        session.clone(),
+        output.clone(),
+    )));
     let mut commands = tokio::task::JoinSet::new();
-
-    loop {
-        line.clear();
-        let read = reader
-            .read_until(b'\n', &mut line)
-            .await
-            .map_err(|error| error.to_string())?;
-        if read == 0 {
-            break;
+    let result = async {
+        while let Some(line) = connection.commands.recv().await {
+            let mut line = line?;
+            if line.len() > MAX_RPC_LINE_BYTES {
+                output
+                    .emit(error_response(None, "parse", "RPC command exceeds 16 MiB"))
+                    .await?;
+                continue;
+            }
+            if line.last() == Some(&b'\n') {
+                line.pop();
+            }
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            let command_session = session.clone();
+            let command_output = output.clone();
+            let mut command = Box::pin(async move {
+                handle_line(command_session, command_output, &line, export_html).await
+            });
+            // Pi starts each async handler as its input line arrives. Poll once before
+            // spawning so synchronous queries enqueue their responses before EOF can
+            // cancel pending commands. The output flush below owns delivery; a handler
+            // waiting on output, a hook or a long operation remains concurrent.
+            match poll_fn(|cx| Poll::Ready(command.as_mut().poll(cx))).await {
+                Poll::Ready(result) => result?,
+                Poll::Pending => {
+                    commands.spawn(command);
+                }
+            }
         }
-        if line.len() > MAX_RPC_LINE_BYTES {
-            output
-                .emit(error_response(None, "parse", "RPC command exceeds 16 MiB"))
-                .await?;
-            continue;
-        }
-        if line.last() == Some(&b'\n') {
-            line.pop();
-        }
-        if line.last() == Some(&b'\r') {
-            line.pop();
-        }
-        let bytes = line.clone();
-        let command_session = session.clone();
-        let command_output = output.clone();
-        commands.spawn(async move {
-            handle_line(command_session, command_output, &bytes, export_html).await
-        });
+        Ok::<(), String>(())
     }
+    .await;
 
+    connection.bridge.cancel_pending();
     session.abort();
     session.current().abort_shell();
     commands.abort_all();
     while commands.join_next().await.is_some() {}
-    events.abort();
-    let mut stdout = output.stdout.lock().await;
-    stdout.flush().await.map_err(|error| error.to_string())
+    drop(events);
+    let flushed = output.flush().await;
+    result.and(flushed)
+}
+
+struct EventForwarder(tokio::task::JoinHandle<()>);
+
+impl Drop for EventForwarder {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 async fn forward_events(session: PiSession, output: RpcOutput) {
     let mut observation = session.observe();
     while let Some(update) = observation.recv().await {
         let value = match update {
+            SessionUpdate::Event {
+                event: pi_session::AgentSessionEvent::PluginNotice { message, level },
+                ..
+            } => Some(json!({
+                "type":"extension_ui_request", "id":uuid::Uuid::now_v7().to_string(),
+                "method":"notify", "message":message, "notifyType":level,
+            })),
             SessionUpdate::Event { event, .. } => {
                 match session_event_json(event, &observation.current()) {
                     Ok(value) => value,
@@ -410,8 +419,8 @@ pub async fn dispatch(
     export_html: HtmlExporter,
 ) -> Option<Value> {
     if parsed.get("type").and_then(Value::as_str) == Some("extension_ui_response") {
-        // The JS UI bridge is intentionally outside this P0 protocol change;
-        // unsolicited responses are ignored like Pi ignores unknown request IDs.
+        // The connection routes UI responses before command dispatch. Embedders using this
+        // command-only API own their UI transport; unsolicited responses remain ignored.
         return None;
     }
     let fallback_id = parsed.get("id").and_then(Value::as_str).map(str::to_string);
@@ -451,39 +460,39 @@ async fn handle_command(
             ..
         } => {
             let current = session.current();
-            if current.snapshot().agent.is_running {
+            let disposition = if current.snapshot().agent.is_running {
                 let behavior = streaming_behavior.ok_or_else(|| {
                     "Agent is streaming; specify streamingBehavior as steer or followUp".to_string()
                 })?;
-                queue_message(&current, message, images, behavior).await?;
+                queue_message(&current, message, images, behavior).await?
             } else {
-                spawn_prompt(current, message, images);
-            }
-            Ok(None)
+                start_prompt(current, message, images).await?
+            };
+            Ok(Some(disposition_json(disposition)))
         }
         RpcCommand::Steer {
             message, images, ..
         } => {
-            queue_message(
+            let disposition = queue_message(
                 &session.current(),
                 message,
                 images,
                 StreamingBehavior::Steer,
             )
             .await?;
-            Ok(None)
+            Ok(Some(disposition_json(disposition)))
         }
         RpcCommand::FollowUp {
             message, images, ..
         } => {
-            queue_message(
+            let disposition = queue_message(
                 &session.current(),
                 message,
                 images,
                 StreamingBehavior::FollowUp,
             )
             .await?;
-            Ok(None)
+            Ok(Some(disposition_json(disposition)))
         }
         RpcCommand::Abort { .. } => {
             session.abort();
@@ -793,10 +802,52 @@ async fn handle_command(
     }
 }
 
-fn spawn_prompt(session: Arc<AgentSession>, message: String, images: Vec<ImageContent>) {
-    tokio::spawn(async move {
-        let _ = session.prompt(session_input(message, images)).await;
+async fn start_prompt(
+    session: Arc<AgentSession>,
+    message: String,
+    images: Vec<ImageContent>,
+) -> Result<PromptDisposition, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let running = tokio::spawn(async move {
+        session
+            .prompt_with_receipt(session_input(message, images), move |disposition| {
+                let _ = sender.send(disposition);
+            })
+            .await
     });
+    // Admission belongs to this request. A disconnected client must not leave
+    // an unacknowledged command or input hook running in a detached task.
+    let mut pending = PendingPrompt(Some(running.abort_handle()));
+    match receiver.await {
+        Ok(disposition) => {
+            // Once admitted, the session owns settlement and cancellation.
+            pending.0.take();
+            Ok(disposition)
+        }
+        Err(_) => running
+            .await
+            .map_err(|error| error.to_string())?
+            .map(|outcome| outcome.disposition())
+            .map_err(|error| error.to_string()),
+    }
+}
+
+struct PendingPrompt(Option<tokio::task::AbortHandle>);
+
+impl Drop for PendingPrompt {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
+fn disposition_json(disposition: PromptDisposition) -> Value {
+    json!({"disposition": match disposition {
+        PromptDisposition::Started => "started",
+        PromptDisposition::Handled => "handled",
+        PromptDisposition::Queued => "queued",
+    }})
 }
 
 async fn queue_message(
@@ -804,14 +855,14 @@ async fn queue_message(
     text: String,
     images: Vec<ImageContent>,
     behavior: StreamingBehavior,
-) -> Result<(), String> {
+) -> Result<PromptDisposition, String> {
     let input = session_input(text, images);
     match behavior {
         StreamingBehavior::Steer => session.steer(input).await,
         StreamingBehavior::FollowUp => session.follow_up(input).await,
     }
-    .map_err(|error| error.to_string())?;
-    Ok(())
+    .map(|outcome| outcome.disposition())
+    .map_err(|error| error.to_string())
 }
 
 fn session_input(text: String, images: Vec<ImageContent>) -> SessionInput {
@@ -837,7 +888,7 @@ fn state_json(session: &AgentSession) -> Result<Value, String> {
         "isCompacting": snapshot.compaction.is_some(),
         "steeringMode": queue_mode_name(session.steering_mode()),
         "followUpMode": queue_mode_name(session.follow_up_mode()),
-        "sessionFile": session.history().is_materialized().then(|| session.history().path()),
+        "sessionFile": session.history().is_persistent().then(|| session.history().path()),
         "sessionId": session.history().header().id,
         "sessionName": snapshot.name,
         "autoCompactionEnabled": session.auto_compaction_enabled(),
@@ -947,7 +998,7 @@ fn session_stats_json(session: &AgentSession) -> Result<Value, String> {
     }
     let usage = aggregate_document_usage(&document);
     let mut value = json!({
-        "sessionFile":session.history().is_materialized().then(|| session.history().path()),
+        "sessionFile":session.history().is_persistent().then(|| session.history().path()),
         "sessionId":session.history().header().id,
         "userMessages":user_messages,
         "assistantMessages":assistant_messages,

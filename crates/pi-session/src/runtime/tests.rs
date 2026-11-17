@@ -1,4 +1,10 @@
 use crate::OperationIntent;
+#[path = "admission_tests.rs"]
+mod admission_tests;
+#[path = "navigation_tests.rs"]
+mod navigation_tests;
+#[path = "queue_tests.rs"]
+mod queue_tests;
 fn generic_system_prompt() -> SystemPrompt {
     SystemPrompt::dynamic(|_: &pi_core::WorkspaceSnapshot| {
         Ok(pi_runtime::PreparedSystemPrompt::new(

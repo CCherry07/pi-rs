@@ -56,6 +56,10 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) session: Option<PathBuf>,
 
+    /// Keep this session in memory without writing conversation history.
+    #[arg(long, conflicts_with = "acp")]
+    pub(crate) no_session: bool,
+
     /// Directory for new sessions and session-ID lookup, including ACP sessions.
     #[arg(long)]
     pub(crate) session_dir: Option<String>,
@@ -107,6 +111,10 @@ pub(crate) struct Cli {
     /// Disable automatic JavaScript/TypeScript extension discovery.
     #[arg(long)]
     pub(crate) no_extensions: bool,
+
+    /// Load skills from a Markdown file or directory. May be repeated.
+    #[arg(long = "skill", value_name = "PATH")]
+    pub(crate) skills: Vec<String>,
 
     /// Trust project-local settings and resources without prompting.
     #[arg(short = 'a', long, conflicts_with = "no_approve", global = true)]
@@ -209,6 +217,21 @@ pub(crate) enum CliCommand {
 
 #[derive(Debug, Clone, Subcommand)]
 pub(crate) enum AuthCommand {
+    /// Check the selected provider, model, or configured default without sending a model request.
+    Check {
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        json: bool,
+        /// Include the resolved credential in the output.
+        #[arg(long)]
+        credentials: bool,
+        /// Inspect stored OAuth credentials without refreshing them.
+        #[arg(long)]
+        no_refresh: bool,
+    },
     /// Store an API key or an existing OAuth access token.
     Login {
         /// Provider ID. Omit it to select from built-in and models.json providers.
@@ -395,6 +418,7 @@ pub(crate) fn resolve_app_config(cli: &Cli) -> Result<AppConfig, String> {
     config.native_plugins.clone_from(&cli.native_plugins);
     config.extensions.clone_from(&cli.extensions);
     config.discover_extensions = !cli.no_extensions;
+    config.set_skill_paths(cli.skills.iter().cloned());
     Ok(config)
 }
 
@@ -457,6 +481,53 @@ mod tests {
             assert!(!help.contains(&secret));
         }
         assert!(help.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn no_session_is_a_builtin_rpc_option() {
+        let cli = Cli::try_parse_from(["pi", "--mode", "rpc", "--no-session"])
+            .expect("Pi model discovery uses an ephemeral RPC session");
+        assert!(cli.no_session);
+        assert_eq!(cli.mode, Some(super::OutputMode::Rpc));
+        let cli =
+            Cli::try_parse_from(["pi", "--no-session", "--session", "existing.jsonl"]).unwrap();
+        assert!(cli.no_session);
+        assert_eq!(
+            cli.session.as_deref(),
+            Some(std::path::Path::new("existing.jsonl"))
+        );
+        let cli = Cli::try_parse_from(["pi", "--no-session", "--session-id", "probe-id"]).unwrap();
+        assert_eq!(cli.session_id.as_deref(), Some("probe-id"));
+    }
+
+    #[test]
+    fn explicit_skills_resolve_from_startup_cwd() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = std::fs::canonicalize(directory.path()).unwrap();
+        let absolute = cwd.join("external/SKILL.md");
+        let cli = Cli::try_parse_from([
+            "pi",
+            "--cwd",
+            cwd.to_str().unwrap(),
+            "--agent-dir",
+            cwd.to_str().unwrap(),
+            "--skill",
+            "library with spaces",
+            "--skill",
+            absolute.to_str().unwrap(),
+            "--skill",
+            "~/skills",
+        ])
+        .unwrap();
+        let config = resolve_app_config(&cli).unwrap();
+        let home_skill = std::env::var_os("HOME").map_or_else(
+            || cwd.join("~/skills"),
+            |home| PathBuf::from(home).join("skills"),
+        );
+        assert_eq!(
+            config.explicit_skill_paths,
+            [cwd.join("library with spaces"), absolute, home_skill]
+        );
     }
 
     #[test]
@@ -621,6 +692,7 @@ mod tests {
             no_fullscreen: false,
             cwd: directory.path().to_path_buf(),
             session: Some(session_path.clone()),
+            no_session: false,
             session_dir: None,
             session_id: None,
             name: None,
@@ -633,6 +705,7 @@ mod tests {
             native_plugins: Vec::new(),
             extensions: Vec::new(),
             no_extensions: false,
+            skills: Vec::new(),
             approve: false,
             no_approve: false,
         };
@@ -792,6 +865,12 @@ mod tests {
         );
         assert!(cli.no_extensions);
         assert_eq!(normalize_pi_arg(OsString::from("-ne")), "--no-extensions");
+    }
+
+    #[test]
+    fn auth_check_accepts_sikemux_probe() {
+        let result = Cli::try_parse_from(["pi", "auth", "check", "--json"]);
+        assert!(result.is_ok(), "Sikemux auth probe must parse: {result:?}");
     }
 
     #[test]

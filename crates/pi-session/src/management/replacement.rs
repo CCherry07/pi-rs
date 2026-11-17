@@ -24,6 +24,7 @@ pub(crate) enum SessionTarget {
         workspace: pi_core::WorkspaceSnapshot,
         metadata: Option<serde_json::Map<String, serde_json::Value>>,
         path: PathBuf,
+        in_memory: bool,
         parent_session_id: Option<String>,
         session_id: Option<String>,
     },
@@ -41,6 +42,7 @@ impl SessionTarget {
             workspace: pi_core::WorkspaceSpec::from_cwd(cwd).snapshot(),
             metadata: None,
             path: path.into(),
+            in_memory: false,
             parent_session_id: None,
             session_id: None,
         }
@@ -55,6 +57,7 @@ impl SessionTarget {
             workspace: pi_core::WorkspaceSpec::from_cwd(cwd).snapshot(),
             metadata: None,
             path: path.into(),
+            in_memory: false,
             parent_session_id: Some(parent_session_id),
             session_id: None,
         }
@@ -83,6 +86,16 @@ impl SessionTarget {
 
     fn reuse_store(store: SessionStore) -> Self {
         Self::Reuse { store }
+    }
+
+    fn with_in_memory(mut self, in_memory: bool) -> Self {
+        if let Self::Create {
+            in_memory: mode, ..
+        } = &mut self
+        {
+            *mode = in_memory;
+        }
+        self
     }
 
     pub(crate) fn path(&self) -> &std::path::Path {
@@ -338,6 +351,7 @@ impl Drop for CloseObservation<'_> {
 enum ResolvedSessionTarget {
     Create {
         path: PathBuf,
+        in_memory: bool,
         parent_session_id: Option<String>,
         session_id: Option<String>,
         metadata: Option<serde_json::Map<String, serde_json::Value>>,
@@ -365,6 +379,7 @@ impl ResolvedSessionTarget {
                 workspace,
                 metadata,
                 path,
+                in_memory,
                 parent_session_id,
                 session_id,
             } => {
@@ -382,6 +397,7 @@ impl ResolvedSessionTarget {
                 Ok((
                     Self::Create {
                         path,
+                        in_memory,
                         parent_session_id,
                         session_id,
                         metadata,
@@ -557,7 +573,8 @@ impl SessionSlot {
                 let target = match parent_session_id {
                     Some(parent) => SessionTarget::create_with_parent(cwd, &path, parent),
                     None => SessionTarget::create(cwd, &path),
-                };
+                }
+                .with_in_memory(!current.store().is_persistent());
                 let target = if inherit_workspace {
                     target.with_workspace(
                         current.runtime().workspace().spec().clone(),
@@ -649,6 +666,7 @@ impl SessionSlot {
                 position: Some(position),
             },
         )?;
+        let persistent_fork = fork.is_persistent();
         let previous_session_file = current.store().path().to_path_buf();
         let start_event = SessionStartEvent {
             reason: SessionStartReason::Fork,
@@ -666,7 +684,9 @@ impl SessionSlot {
         {
             Ok(prepared) => prepared,
             Err(error) => {
-                let _ = std::fs::remove_file(&path);
+                if persistent_fork {
+                    let _ = std::fs::remove_file(&path);
+                }
                 return Err(error);
             }
         };
@@ -804,11 +824,13 @@ impl SessionSlot {
         let prepared = match target {
             ResolvedSessionTarget::Create {
                 path,
+                in_memory,
                 parent_session_id,
                 session_id,
                 metadata,
             } => {
                 options.parent_session_id = parent_session_id;
+                options.in_memory = in_memory;
                 options.session_id = session_id;
                 options.header_metadata = metadata;
                 AgentSession::prepare_create(runtime, path, options)

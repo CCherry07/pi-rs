@@ -272,6 +272,7 @@ impl MultiSessionManager {
                 workspace: options.workspace.snapshot(),
                 metadata: options.metadata,
                 path: options.path,
+                in_memory: options.in_memory,
                 parent_session_id: None,
                 session_id: options.session_id,
             },

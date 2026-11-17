@@ -176,6 +176,7 @@ async fn multi_root_workspace_survives_execution_reload_resume_and_fork() {
         .create_session(pi_session::CreateSessionOptions {
             workspace: first_spec.clone(),
             path: path.clone(),
+            in_memory: false,
             session_id: Some("workspace-session".into()),
             metadata: Some(metadata),
             generation_overlay: pi_session::SessionGenerationOverlay::new()
@@ -187,6 +188,7 @@ async fn multi_root_workspace_survives_execution_reload_resume_and_fork() {
         .create_session(pi_session::CreateSessionOptions {
             workspace: second_spec.clone(),
             path: root.path().join("b.jsonl"),
+            in_memory: false,
             session_id: None,
             metadata: None,
             generation_overlay: Default::default(),

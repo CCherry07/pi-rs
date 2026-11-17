@@ -66,6 +66,14 @@ impl Default for ShellExecutionOptions {
     }
 }
 
+/// The result of input preparation, available before an admitted run completes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptDisposition {
+    Started,
+    Handled,
+    Queued,
+}
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum PromptOutcome {
@@ -75,6 +83,16 @@ pub enum PromptOutcome {
     Handled,
     /// The input was accepted into the active run's durable queue.
     Queued { kind: QueueKind, entry_id: String },
+}
+
+impl PromptOutcome {
+    pub fn disposition(&self) -> PromptDisposition {
+        match self {
+            Self::Agent(_) => PromptDisposition::Started,
+            Self::Handled => PromptDisposition::Handled,
+            Self::Queued { .. } => PromptDisposition::Queued,
+        }
+    }
 }
 
 /// Text and optional image attachments submitted through the session input
@@ -151,6 +169,7 @@ enum SessionSubmission {
         input: SessionInput,
     },
     Messages(Vec<Message>),
+    Queued,
 }
 
 enum PreparedSessionPrompt {

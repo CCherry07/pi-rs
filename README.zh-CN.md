@@ -237,8 +237,10 @@ pi remove npm:example-extension
 }
 ```
 
-`apiKey`、headers 和其他字符串配置在请求发送时才解析环境变量；也支持以 `!` 开头的
-shell command value。凭据不会进入公开的模型目录。
+`apiKey`、headers 和其他字符串配置在请求发送时才解析环境变量；以 `!` 开头的
+shell command value 会在每次解析时重新执行，不跨请求缓存凭据或失败结果。凭据不会
+进入公开的模型目录。外部凭据助手的使用方式与超时行为见
+[命令式凭据说明](plugins/providers/pi-plugin-models/README.md)。
 
 自定义路由支持 `openai-completions`、`openai-responses`、`azure-openai-responses`、
 `mistral-conversations`、`anthropic-messages`、`google-generative-ai`、`google-vertex` 和
@@ -488,39 +490,39 @@ Agent 状态。Manager 会选择准确的 host target、保留声明顺序、校
 
 ## 架构
 
-| 目录                                             | 职责                                                                |
-| ------------------------------------------------ | ------------------------------------------------------------------- |
-| `apps/pi-cli`                                    | CLI、TUI 和终端生命周期 Adapter                                    |
-| `crates/pi-sdk`                                  | 显式配置的通用 Agent 嵌入入口与共享 Project 定义                    |
-| `domains/coding`                                 | Coding 默认配置、项目资源、工具与产品 generation 装配               |
-| `crates/pi-eval`                                 | 通用评测执行、评分、产物和对比报告                                  |
-| `domains/coding/eval`                            | Coding 评测配置与隔离产品环境准备（`pi-coding-eval`）                |
-| `apps/pi-eval`                                   | 评测 CLI、用例目录与结果展示                                        |
-| `examples/order-agent`                           | 使用通用 SDK 的确定性订单查询示例                                   |
-| `crates/pi-plugin` | 统一 Plugin 接口、准备、强类型 context、generation driver 与可选 native 导出 |
-| `crates/pi-core`                                 | 消息、模型、工具数据与会话共享 wire 类型                         |
-| `crates/pi-media`                                | 共享图片校验、缩放和格式转换                                        |
-| `crates/pi-agent`                                | Agent façade、agent loop、stream assembly 和工具调度                |
-| `crates/pi-runtime`                              | generation 构建、prompt 装配和原子 reload                           |
-| `crates/pi-session`                              | Pi v4 JSONL、树/分支、压缩、恢复 reducer 和 session runtime         |
-| `crates/pi-rpc`                                  | Pi JSON 投影与 stdin/stdout RPC                                     |
-| `crates/pi-acp`                                | ACP stable-v1 会话适配器                                          |
-| `plugins/features/pi-plugin-mcp`               | MCP 客户端与工具、本地配置管理和 `/mcp` 命令                       |
-| `crates/pi-telemetry`                            | 强类型 Provider/harness span schema 与 sink adapter                 |
-| `crates/pi-provider`                             | Provider-neutral HTTP transport 与 SSE                              |
-| `domains/coding/src/{prompt,resources}.rs`       | Coding 内部的系统 prompt 组装与项目上下文发现                        |
-| `domains/coding/settings`                      | 独立的 Coding 设置格式与持久化 crate（`pi-settings`）                 |
-| `apps/pi-cli/src/markdown`                       | TUI 所有的 Markdown 解析、streaming mend、语法高亮和 Ratatui 渲染   |
-| `crates/pi-plugin-macros` | 静态与 native 插件过程宏 |
-| `crates/pi-plugin-manager` | Native 加载、安装与同步，以及可选的构建发布工具 |
-| `crates/pi-js-package-manager`                   | Pi 兼容的 JS/TS 发现与本地/npm/git package 管理                     |
-| `crates/pi-js-plugin` / `bindings/pi-napi`       | 强类型 JS lifecycle adapter 与 Node/NAPI 边界                       |
-| `packages/pi`                                    | Node 启动层、Pi extension 发现、Jiti loader 和 callback generations |
-| `plugins/`                                       | Prompt/Skill features、Provider catalog 和独立生产工具插件          |
-| `plugins/features/pi-plugin-memory-hermes`       | 持久化记忆、后台学习和分 Scope 的 Skill 整理                         |
-| `plugins/features/pi-plugin-schedule`            | 持久化定时 Prompt 与隔离会话调度                                    |
-| `legacy/pi`                                      | 当前 TypeScript Pi 行为参照                                         |
-| `e2e`                                            | runtime acceptance、黑盒产品 E2E 与示例项目                         |
+| 目录                                       | 职责                                                                         |
+| ------------------------------------------ | ---------------------------------------------------------------------------- |
+| `apps/pi-cli`                              | CLI、TUI 和终端生命周期 Adapter                                              |
+| `crates/pi-sdk`                            | 显式配置的通用 Agent 嵌入入口与共享 Project 定义                             |
+| `domains/coding`                           | Coding 默认配置、项目资源、工具与产品 generation 装配                        |
+| `crates/pi-eval`                           | 通用评测执行、评分、产物和对比报告                                           |
+| `domains/coding/eval`                      | Coding 评测配置与隔离产品环境准备（`pi-coding-eval`）                        |
+| `apps/pi-eval`                             | 评测 CLI、用例目录与结果展示                                                 |
+| `examples/order-agent`                     | 使用通用 SDK 的确定性订单查询示例                                            |
+| `crates/pi-plugin`                         | 统一 Plugin 接口、准备、强类型 context、generation driver 与可选 native 导出 |
+| `crates/pi-core`                           | 消息、模型、工具数据与会话共享 wire 类型                                     |
+| `crates/pi-media`                          | 共享图片校验、缩放和格式转换                                                 |
+| `crates/pi-agent`                          | Agent façade、agent loop、stream assembly 和工具调度                         |
+| `crates/pi-runtime`                        | generation 构建、prompt 装配和原子 reload                                    |
+| `crates/pi-session`                        | Pi v4 JSONL、树/分支、压缩、恢复 reducer 和 session runtime                  |
+| `crates/pi-rpc`                            | Pi JSON 投影与 stdin/stdout RPC                                              |
+| `crates/pi-acp`                            | ACP stable-v1 会话适配器                                                     |
+| `plugins/features/pi-plugin-mcp`           | MCP 客户端与工具、本地配置管理和 `/mcp` 命令                                 |
+| `crates/pi-telemetry`                      | 强类型 Provider/harness span schema 与 sink adapter                          |
+| `crates/pi-provider`                       | Provider-neutral HTTP transport 与 SSE                                       |
+| `domains/coding/src/{prompt,resources}.rs` | Coding 内部的系统 prompt 组装与项目上下文发现                                |
+| `domains/coding/settings`                  | 独立的 Coding 设置格式与持久化 crate（`pi-settings`）                        |
+| `apps/pi-cli/src/markdown`                 | TUI 所有的 Markdown 解析、streaming mend、语法高亮和 Ratatui 渲染            |
+| `crates/pi-plugin-macros`                  | 静态与 native 插件过程宏                                                     |
+| `crates/pi-plugin-manager`                 | Native 加载、安装与同步，以及可选的构建发布工具                              |
+| `crates/pi-js-package-manager`             | Pi 兼容的 JS/TS 发现与本地/npm/git package 管理                              |
+| `crates/pi-js-plugin` / `bindings/pi-napi` | 强类型 JS lifecycle adapter 与 Node/NAPI 边界                                |
+| `packages/pi`                              | Node 启动层、Pi extension 发现、Jiti loader 和 callback generations          |
+| `plugins/`                                 | Prompt/Skill features、Provider catalog 和独立生产工具插件                   |
+| `plugins/features/pi-plugin-memory-hermes` | 持久化记忆、后台学习和分 Scope 的 Skill 整理                                 |
+| `plugins/features/pi-plugin-schedule`      | 持久化定时 Prompt 与隔离会话调度                                             |
+| `legacy/pi`                                | 当前 TypeScript Pi 行为参照                                                  |
+| `e2e`                                      | runtime acceptance、黑盒产品 E2E 与示例项目                                  |
 
 依赖保持向内：核心 contracts 不拥有终端、文件发现、会话存储或厂商路由策略。详细设计、
 hook 顺序和持久化不变量见 [docs/architecture.md](docs/architecture.md)。

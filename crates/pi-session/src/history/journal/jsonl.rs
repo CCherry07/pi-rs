@@ -54,6 +54,7 @@ struct SessionStoreInner {
 enum SessionPersistence {
     Materialized(JournalWriter),
     Deferred { encoded_mutations: Vec<u8> },
+    Memory,
 }
 
 impl SessionStore {
@@ -99,6 +100,23 @@ impl SessionStore {
             SessionPersistence::Deferred {
                 encoded_mutations: Vec::new(),
             },
+        ))
+    }
+
+    /// Creates a validated session log that never writes a JSONL file. The path
+    /// remains an internal identity for managed-session routing only.
+    pub fn create_in_memory(
+        path: impl Into<PathBuf>,
+        header: SessionHeader,
+    ) -> Result<Self, HistoryError> {
+        validate_header(&header)?;
+        let modified_at = header.created_at as f64;
+        Ok(Self::from_parts(
+            path.into(),
+            header,
+            SessionState::default(),
+            modified_at,
+            SessionPersistence::Memory,
         ))
     }
 
@@ -211,6 +229,18 @@ impl SessionStore {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             SessionPersistence::Materialized(_)
+        )
+    }
+
+    /// Whether this log has a filesystem destination, including a deferred one.
+    pub fn is_persistent(&self) -> bool {
+        !matches!(
+            *self
+                .inner
+                .persistence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            SessionPersistence::Memory
         )
     }
 
@@ -621,18 +651,15 @@ impl SessionStore {
         header: SessionHeader,
         options: &ForkOptions,
     ) -> Result<Self, HistoryError> {
-        if !self.is_materialized() {
+        if self.is_persistent() && !self.is_materialized() {
             return Err(HistoryError::Storage(
                 "session has not been saved yet; wait for the first assistant response".to_string(),
             ));
         }
         validate_header(&header)?;
         let path = path.into();
-        if path.exists() {
+        if self.is_persistent() && path.exists() {
             return Err(HistoryError::AlreadyExists(path.display().to_string()));
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
         }
         let mut mutations = self.state().create_fork_mutations(options)?;
         for mutation in &mut mutations {
@@ -645,6 +672,19 @@ impl SessionStore {
         let mut validation_state = SessionState::default();
         for mutation in &mutations {
             validation_state.apply_mutation(mutation.clone())?;
+        }
+        if !self.is_persistent() {
+            let modified_at = header.created_at as f64;
+            return Ok(Self::from_parts(
+                path,
+                header,
+                validation_state,
+                modified_at,
+                SessionPersistence::Memory,
+            ));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
         let temporary = sibling_temporary_path(&path);
         let result = (|| {
@@ -735,6 +775,7 @@ impl SessionStore {
             SessionPersistence::Deferred { encoded_mutations } => {
                 encoded_mutations.extend_from_slice(&encoded);
             }
+            SessionPersistence::Memory => {}
         }
         Ok(())
     }
@@ -1243,7 +1284,7 @@ mod tests {
         let persistence = store.inner.persistence.lock().unwrap();
         match &*persistence {
             SessionPersistence::Materialized(writer) => (writer.has_handle(), writer.append_opens),
-            SessionPersistence::Deferred { .. } => (false, 0),
+            SessionPersistence::Deferred { .. } | SessionPersistence::Memory => (false, 0),
         }
     }
 

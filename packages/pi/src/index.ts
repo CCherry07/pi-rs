@@ -39,10 +39,16 @@ export class PiNodeHost {
   }
 
   async run(): Promise<void> {
+    const code = await this.runWithExitCode();
+    if (code !== 0) throw new Error(`Pi command exited with status ${code}`);
+  }
+
+  async runWithExitCode(): Promise<number> {
     const binding = this.nativeBinding ?? loadNativeBinding();
-    await binding.runPi(this.arguments, (operation, context) =>
+    const code = await binding.runPi(this.arguments, (operation, context) =>
       this.extensionHost.dispatch(operation, context),
     );
+    return code ?? 0;
   }
 }
 
@@ -52,6 +58,11 @@ export class PiEvalNodeHost extends PiNodeHost {
     await binding.runPiEval(this.arguments, (operation, context) =>
       this.extensionHost.dispatch(operation, context),
     );
+  }
+
+  override async runWithExitCode(): Promise<number> {
+    await this.run();
+    return 0;
   }
 }
 

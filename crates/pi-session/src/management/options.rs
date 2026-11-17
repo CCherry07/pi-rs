@@ -7,6 +7,8 @@ use std::path::PathBuf;
 pub struct CreateSessionOptions {
     pub workspace: pi_core::WorkspaceSpec,
     pub path: PathBuf,
+    /// Keep history in memory, including subsequent new-session replacements.
+    pub in_memory: bool,
     pub session_id: Option<String>,
     pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
     /// Transient factories rebuilt on every generation of the returned handle.
@@ -18,6 +20,7 @@ impl CreateSessionOptions {
         Self {
             workspace: pi_core::WorkspaceSpec::from_cwd(cwd),
             path: path.into(),
+            in_memory: false,
             session_id: None,
             metadata: None,
             generation_overlay: SessionGenerationOverlay::default(),

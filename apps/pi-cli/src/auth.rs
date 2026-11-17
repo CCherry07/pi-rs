@@ -40,6 +40,9 @@ pub(crate) fn logout_provider_catalog(agent_dir: &Path) -> Result<Vec<AuthProvid
 
 pub(crate) async fn run(agent_dir: &Path, command: &AuthCommand) -> Result<(), String> {
     match command {
+        AuthCommand::Check { .. } => {
+            return Err("auth check requires the exit-code-aware CLI entry point".into());
+        }
         AuthCommand::Login {
             provider,
             api_key,
@@ -192,6 +195,47 @@ pub(crate) async fn run(agent_dir: &Path, command: &AuthCommand) -> Result<(), S
         }
     }
     Ok(())
+}
+
+pub(crate) async fn check(
+    config: &pi_coding::Config,
+    command: &AuthCommand,
+) -> Result<i32, String> {
+    let AuthCommand::Check {
+        provider,
+        model,
+        json,
+        credentials,
+        no_refresh,
+    } = command
+    else {
+        return Err("expected auth check".into());
+    };
+    let result = pi_coding::check_auth(
+        config,
+        &pi_coding::AuthCheckOptions {
+            provider: provider.clone(),
+            model: model.clone(),
+            credentials: *credentials,
+            no_refresh: *no_refresh,
+        },
+    )
+    .await;
+    if *json {
+        println!(
+            "{}",
+            serde_json::to_string(&result).map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "{}",
+            result
+                .credentials
+                .as_deref()
+                .unwrap_or(result.status.as_str())
+        );
+    }
+    Ok(result.status.exit_code())
 }
 
 async fn run_anthropic_oauth() -> Result<StoredCredential, String> {

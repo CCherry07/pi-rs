@@ -320,6 +320,7 @@ async fn resume_prepares_current_domain_resources_in_the_saved_workspace_and_res
         .create_session(pi_session::CreateSessionOptions {
             workspace: workspace.clone(),
             path: path.clone(),
+            in_memory: false,
             session_id: None,
             metadata: None,
             generation_overlay: Default::default(),

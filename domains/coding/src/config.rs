@@ -28,6 +28,8 @@ pub struct Config {
     pub native_plugins: Vec<PathBuf>,
     pub extensions: Vec<String>,
     pub discover_extensions: bool,
+    /// Explicit skill files/directories, retained independently of discovered settings on reload.
+    pub explicit_skill_paths: Vec<PathBuf>,
     /// ACP clients supply their own transient MCP servers instead of local files.
     pub load_mcp_config: bool,
     pub extension_flag_values: BTreeMap<String, serde_json::Value>,
@@ -71,6 +73,7 @@ impl Config {
             native_plugins: Vec::new(),
             extensions: Vec::new(),
             discover_extensions: true,
+            explicit_skill_paths: Vec::new(),
             load_mcp_config: true,
             extension_flag_values: BTreeMap::new(),
             runtime_settings: pi_settings::SettingsValues::default(),
@@ -101,6 +104,15 @@ impl Config {
             explicit_sources: self.extensions.clone(),
             discover_extensions: self.discover_extensions,
         }
+    }
+
+    /// Resolve startup skill paths once so later sessions keep the same explicit resources.
+    pub fn set_skill_paths(&mut self, paths: impl IntoIterator<Item = String>) {
+        let cwd = pi_utils::path::absolute_from_current_dir(&self.cwd);
+        self.explicit_skill_paths = paths
+            .into_iter()
+            .map(|path| cwd.join(expand_tilde_path(&path)))
+            .collect();
     }
 
     /// Applies a startup-only global session directory unless the adapter

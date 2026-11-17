@@ -335,6 +335,12 @@ ordinary tools default to false. Retained Session capabilities reject selection/
 generation retirement. Rebuild native plugins against this exact SDK after these contract changes;
 the existing constructor symbols and process-long library pinning are unchanged.
 
+`UiContextAccess::ui_dialog` adds typed semantic confirmation, selection and text-entry requests.
+`UiContext` uses these capabilities in RPC frontends and retains declarative rendering in TUI
+frontends. Cancelled dialogs do not open a fallback surface. The extended trait is covered by the
+exact-build source fingerprint; rebuild native plugins against this SDK. Constructor symbols and
+library lifetime remain unchanged.
+
 ABI 34 introduced shared context snapshots. Context events and boundary-preview entry/message vectors
 use shared `Arc<Vec<_>>` snapshots. Read through the shared view; use `Arc::unwrap_or_clone` or
 `Arc::make_mut` when preparing an owned context replacement. `Plugin::context_hook_batch` optionally

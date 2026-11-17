@@ -194,6 +194,18 @@ impl SessionGenerationFactory for ProductSessionFactory {
             .settings
             .load(&SettingsContext::new(&config.cwd, project_trusted));
         apply_settings(&mut config, &settings);
+        let js_packages = JsPackageManager::with_settings(
+            config.javascript_resolve_request(project_trusted),
+            self.settings.clone(),
+        );
+        // Native-only frontends must not silently omit extensions or install
+        // packages before discovering that they cannot execute their code.
+        if self.js_plugin_host.is_none() && js_packages.requires_javascript_host() {
+            return Err(SessionError::Runtime(
+                "JavaScript extensions require a JavaScript host; this frontend is native-only"
+                    .to_string(),
+            ));
+        }
         let local_mcp = if config.load_mcp_config {
             Some(
                 pi_plugin_mcp::McpLibrary::new(
@@ -219,13 +231,10 @@ impl SessionGenerationFactory for ProductSessionFactory {
             .map_err(|error| SessionError::Runtime(error.to_string()))?;
         let configured_native_plugins =
             configured_native_plugin_ids(&package_reconciliations, &native_plugins);
-        let js_resolution = JsPackageManager::with_settings(
-            config.javascript_resolve_request(project_trusted),
-            self.settings.clone(),
-        )
-        .resolve()
-        .await
-        .map_err(|error| SessionError::Runtime(error.to_string()))?;
+        let js_resolution = js_packages
+            .resolve()
+            .await
+            .map_err(|error| SessionError::Runtime(error.to_string()))?;
         config
             .settings_skill_paths
             .extend(js_resolution.skill_paths.iter().cloned());
@@ -485,6 +494,149 @@ command = "fixture-command"
         )
         .unwrap();
         package
+    }
+
+    fn native_only_config(cwd: &Path, agent_dir: &Path) -> Config {
+        std::fs::create_dir_all(agent_dir).unwrap();
+        let mut config = app_config(agent_dir, None);
+        config.cwd = cwd.to_path_buf();
+        config.features = crate::Features::none();
+        config.load_mcp_config = false;
+        config.trust_override = Some(true);
+        config
+    }
+
+    #[tokio::test]
+    async fn no_host_rejects_explicit_javascript_before_native_preparation() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent_dir = directory.path().join("agent");
+        let mut config = native_only_config(directory.path(), &agent_dir);
+        config.discover_extensions = false;
+        config.extensions.push("./explicit.ts".into());
+        config
+            .native_plugins
+            .push(directory.path().join("missing-native-plugin"));
+        let pi = crate::Pi::builder(config).build().unwrap();
+        let error = pi
+            .sessions()
+            .create_session(pi_session::CreateSessionOptions::new(
+                directory.path(),
+                agent_dir.join("session.jsonl"),
+            ))
+            .await
+            .err()
+            .expect("missing JS host must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("JavaScript extensions require a JavaScript host")
+        );
+        assert!(!agent_dir.join("session.jsonl").exists());
+        pi.sessions().shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_host_applies_project_trust_before_extension_preflight() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path().join("project");
+        let extensions = cwd.join(".pi/extensions");
+        std::fs::create_dir_all(&extensions).unwrap();
+        std::fs::write(extensions.join("test.ts"), "export default () => {}; ").unwrap();
+        for trusted in [false, true] {
+            let agent_dir = directory.path().join(format!("agent-{trusted}"));
+            let mut config = native_only_config(&cwd, &agent_dir);
+            config.trust_override = Some(trusted);
+            let pi = crate::Pi::builder(config).build().unwrap();
+            let result = pi
+                .sessions()
+                .create_session(pi_session::CreateSessionOptions::new(
+                    &cwd,
+                    agent_dir.join("session.jsonl"),
+                ))
+                .await;
+            if trusted {
+                assert!(
+                    result
+                        .err()
+                        .unwrap()
+                        .to_string()
+                        .contains("JavaScript extensions require")
+                );
+            } else {
+                assert!(
+                    result.is_ok(),
+                    "untrusted extensions must not require a JS host"
+                );
+            }
+            pi.sessions().shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn no_host_uses_effective_extension_settings_without_installing() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent_dir = directory.path().join("agent");
+        let config = native_only_config(directory.path(), &agent_dir);
+        std::fs::create_dir_all(agent_dir.join("extensions")).unwrap();
+        std::fs::write(
+            agent_dir.join("extensions/test.ts"),
+            "export default () => {}; ",
+        )
+        .unwrap();
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            r#"{"extensions":["-extensions/test.ts"]}"#,
+        )
+        .unwrap();
+        let pi = crate::Pi::builder(config).build().unwrap();
+        let result = pi
+            .sessions()
+            .create_session(pi_session::CreateSessionOptions::new(
+                directory.path(),
+                agent_dir.join("session.jsonl"),
+            ))
+            .await;
+        assert!(
+            result.is_ok(),
+            "effective disabled extension should need no host: {:?}",
+            result.err()
+        );
+        pi.sessions().shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn no_host_failed_reload_keeps_the_previous_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent_dir = directory.path().join("agent");
+        let pi = crate::Pi::builder(native_only_config(directory.path(), &agent_dir))
+            .build()
+            .unwrap();
+        let session = pi
+            .sessions()
+            .create_session(pi_session::CreateSessionOptions::new(
+                directory.path(),
+                agent_dir.join("session.jsonl"),
+            ))
+            .await
+            .unwrap();
+        let previous = session.current();
+        std::fs::create_dir_all(agent_dir.join("extensions")).unwrap();
+        std::fs::write(
+            agent_dir.join("extensions/new.ts"),
+            "export default () => {}; ",
+        )
+        .unwrap();
+        assert!(
+            session
+                .reload()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("JavaScript extensions require")
+        );
+        assert!(Arc::ptr_eq(&previous, &session.current()));
+        assert!(!session.path().exists());
+        pi.sessions().shutdown().await.unwrap();
     }
 
     #[tokio::test]

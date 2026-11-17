@@ -532,6 +532,36 @@ impl Agent {
         self.inner.follow_up.enqueue(message);
     }
 
+    /// Session-owned identities allow editing undelivered input without matching text.
+    pub fn enqueue_identified(
+        &self,
+        id: String,
+        message: Message,
+        destination: crate::QueueDestination,
+    ) {
+        let queue = match destination {
+            crate::QueueDestination::Steering => &self.inner.steering,
+            crate::QueueDestination::FollowUp => &self.inner.follow_up,
+        };
+        queue.enqueue_with_id(Some(id), message);
+    }
+
+    /// Commits an owner transaction while excluding consumption of this queue.
+    /// Returns false if any expected item has already been consumed or replaced.
+    pub fn replace_identified_queue<E>(
+        &self,
+        destination: crate::QueueDestination,
+        expected: &[String],
+        replacement: Vec<(String, Message)>,
+        commit: impl FnOnce() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        let queue = match destination {
+            crate::QueueDestination::Steering => &self.inner.steering,
+            crate::QueueDestination::FollowUp => &self.inner.follow_up,
+        };
+        queue.replace_identified(expected, replacement, commit)
+    }
+
     /// Inspect pending steering followed by follow-up messages without consuming them.
     pub fn peek_queued_messages(&self) -> Vec<Message> {
         let mut messages = self.inner.steering.peek();

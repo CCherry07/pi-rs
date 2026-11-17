@@ -113,6 +113,10 @@ pi auth login google --api-key
 # Inspect credential metadata without printing secrets
 pi auth status
 
+# Check the configured default, or one provider, without a model request
+pi auth check --json
+pi auth check --provider anthropic --json --no-refresh
+
 # Remove only the stored credential for a provider
 pi auth logout anthropic
 ```
@@ -120,6 +124,11 @@ pi auth logout anthropic
 Credentials are stored in Pi-compatible `<agent-dir>/auth.json` with file locking, atomic
 replacement, and mode `0600` on Unix. `/logout` removes stored credentials only; environment
 variables and credentials declared in `models.json` remain unchanged.
+
+`auth check` returns `ready`/`not_ready`/`invalid` with exit code `0`/`1`/`2`.
+It checks the configured default target when no selector is given and prints credentials only
+with `--credentials`. OAuth may refresh unless `--no-refresh` is set; API keys are not tested
+against the provider. The query does not create a session or load project extensions.
 
 Environment variables are supported as an alternative, including `OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_CLOUD_API_KEY`, `XAI_API_KEY`, `MISTRAL_API_KEY`,
@@ -141,8 +150,17 @@ and a service-account file; Bedrock supports its AWS profile/static credential c
 
 `--json` writes the Pi coding-agent v3 session header followed by delta-only Pi session events.
 `--mode rpc` accepts strict LF-delimited JSON commands and emits correlated responses plus the same
-event projection. JavaScript extension UI request/response remains a separate compatibility gap;
-unsolicited `extension_ui_response` messages are currently ignored.
+event projection. Its Node host supports extension confirmations and notifications through
+`extension_ui_request` / `extension_ui_response`; custom terminal UI and other dialog kinds require
+the TUI frontend. Prompt receipts report `started`, `queued` or `handled` after input preparation.
+Persistent drafts expose their intended `sessionFile` before lazy first-response persistence.
+See [Sikemux integration](SIKEMUX.md) for executable selection and native-history boundaries.
+
+`--no-session` keeps the session in memory, including responses, new-session replacements, reloads
+and forks. It skips saved-history lookup for `--session` / `--session-id` and leaves no resume entry;
+an explicit `--session-id` can still name the fresh in-memory session.
+RPC clients may still explicitly switch to saved history afterward. `--mode rpc --no-session` is
+suitable for model discovery.
 
 Add `--acp-permissions` to request client authorization before each ACP tool call. The client may
 prompt the user or apply its configured policy. `--acp-permission-timeout` defaults to 300 seconds;

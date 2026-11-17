@@ -11,6 +11,23 @@ import {
 import type { NativeExtensionContext } from "./native-binding.js";
 
 export interface DialogOptions { signal?: AbortSignal; timeout?: number }
+type RpcDialogRequest =
+  | { method: "confirm"; title: string; message: string }
+  | { method: "select"; title: string; options: string[] }
+  | { method: "input"; title: string; placeholder: string }
+  | { method: "editor"; title: string; prefill: string };
+type RpcDialogResponse = { type: "confirmed"; value: boolean } | { type: "value"; value: string } | { type: "cancelled" };
+function rpcDialogResponse(value: unknown): RpcDialogResponse | undefined {
+  if (typeof value !== "object" || value === null || !("type" in value)) return;
+  if (value.type === "cancelled") return { type: "cancelled" };
+  if (!("value" in value)) return;
+  if (value.type === "confirmed" && typeof value.value === "boolean") return { type: "confirmed", value: value.value };
+  if (value.type === "value" && typeof value.value === "string") return { type: "value", value: value.value };
+}
+function rpcDialogTimeout(timeout: number): number {
+  // Match Node timers before crossing the integer native boundary, including fractional/overflow inputs.
+  return timeout >= 1 && timeout <= 2_147_483_647 ? Math.trunc(timeout) : 1;
+}
 export type UiTheme = "light" | "dark" | "system";
 export type SlotFactory = (tui: CustomTui, theme: PiTheme) => PiComponent;
 export type FooterFactory = (tui: CustomTui, theme: PiTheme, data: FooterDataProvider) => PiComponent;
@@ -106,14 +123,15 @@ export class ExtensionUI {
     });
   }
   #query() {
-    if (this.#native) this.#snapshot = uiSnapshotSchema.parse(JSON.parse(this.#native.query('{"type":"uiSnapshot"}')));
+    if (this.#native && !this.#isRpc()) this.#snapshot = uiSnapshotSchema.parse(JSON.parse(this.#native.query('{"type":"uiSnapshot"}')));
     return this.#snapshot;
   }
+  #isRpc() { return this.#native && JSON.parse(this.#native.query('{"type":"mode"}')) === "rpc"; }
   #command(command: UiCommand) {
-    if (!this.#retired) this.#native?.notify(JSON.stringify({ type: "uiCommand", owner: this.owner, command: uiCommandSchema.parse(command) }));
+    if (!this.#retired && !this.#isRpc()) this.#native?.notify(JSON.stringify({ type: "uiCommand", owner: this.owner, command: uiCommandSchema.parse(command) }));
   }
   #wake() {
-    if (this.#retired || !this.#native) return;
+    if (this.#retired || !this.#native || this.#isRpc()) return;
     this.#dirty = true;
     if (this.#running) this.#command({ channel: "surface", command: { type: "wake" } });
     else { this.#running = true; void this.#pump(); }
@@ -244,7 +262,7 @@ export class ExtensionUI {
   custom(node: UiNode, options?: MountOptions): Promise<unknown | undefined>;
   custom(node: UiNode | CustomFactory, options: MountOptions | CustomOptions = {}): Promise<unknown | undefined> {
     this.#assertActive();
-    if (options.signal?.aborted) return Promise.resolve(undefined);
+    if (options.signal?.aborted || this.#isRpc()) return Promise.resolve(undefined);
     return new Promise((resolve, reject) => {
       let mount: UiMount | undefined;
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -359,17 +377,67 @@ export class ExtensionUI {
     return this.custom({ id: "dialog", type: "panel", title: heading, child: { id: "body", type: "column", gap: 1, children } }, { ...opts, overlay: { width: 60 } });
   }
   async select(title: string, options: string[], opts?: DialogOptions): Promise<string | undefined> {
+    this.#assertActive();
+    if (this.#isRpc()) {
+      const response = await this.#rpcDialog({ method: "select", title, options }, opts);
+      return response?.type === "value" ? response.value : undefined;
+    }
     const result = await this.#dialog(title, { type: "select", id: "value", options }, "↑↓ move · enter select · esc cancel", opts);
     return typeof result === "number" && Number.isInteger(result) ? options[result] : undefined;
   }
   async confirm(title: string, message: string, opts?: DialogOptions): Promise<boolean> {
+    this.#assertActive();
+    if (this.#isRpc()) {
+      const response = await this.#rpcDialog({ method: "confirm", title, message }, opts);
+      return response?.type === "confirmed" && response.value;
+    }
     return await this.select(`${title}\n${message}`, ["Yes", "No"], opts) === "Yes";
   }
+  #rpcDialog(request: RpcDialogRequest, opts?: DialogOptions): Promise<RpcDialogResponse | undefined> {
+    const native = this.#native;
+    if (!native?.prepareRequest || !native.cancelRequest || opts?.signal?.aborted) return Promise.resolve(undefined);
+    const hasTimeout = request.method === "editor" ? opts?.timeout !== undefined : !!opts?.timeout;
+    const timeoutMs = hasTimeout ? rpcDialogTimeout(opts!.timeout!) : undefined;
+    // Reserve synchronously: an abort can arrive before the native async method is polled.
+    const id = native.prepareRequest();
+    return new Promise((resolve, reject) => {
+      let finished = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (answer?: RpcDialogResponse, error?: unknown) => {
+        if (finished) return;
+        finished = true;
+        if (timer) clearTimeout(timer);
+        opts?.signal?.removeEventListener("abort", cancel);
+        this.#pending.delete(cancel);
+        try { native.cancelRequest!(id); } catch (cleanupError) { error ??= cleanupError; }
+        if (error) reject(error); else resolve(answer);
+      };
+      const cancel = () => finish();
+      this.#pending.add(cancel);
+      opts?.signal?.addEventListener("abort", cancel, { once: true });
+      if (timeoutMs !== undefined) timer = setTimeout(cancel, timeoutMs);
+      if (opts?.signal?.aborted) { cancel(); return; }
+      try {
+        native.request(JSON.stringify({ type: "uiDialog", request, ...(request.method !== "editor" ? { timeoutMs } : {}) }), id)
+          .then(raw => { try { finish(rpcDialogResponse(JSON.parse(raw))); } catch (error) { finish(undefined, error); } }, error => finish(undefined, error));
+      } catch (error) { finish(undefined, error); }
+    });
+  }
   async input(title: string, placeholder = "", opts?: DialogOptions): Promise<string | undefined> {
+    this.#assertActive();
+    if (this.#isRpc()) {
+      const response = await this.#rpcDialog({ method: "input", title, placeholder }, opts);
+      return response?.type === "value" ? response.value : undefined;
+    }
     const result = await this.#dialog(title, { type: "input", id: "value", initialValue: "", placeholder }, "enter submit · esc cancel", opts);
     return typeof result === "string" ? result : undefined;
   }
   async editor(title: string, prefill = "", opts?: DialogOptions): Promise<string | undefined> {
+    this.#assertActive();
+    if (this.#isRpc()) {
+      const response = await this.#rpcDialog({ method: "editor", title, prefill }, opts);
+      return response?.type === "value" ? response.value : undefined;
+    }
     const result = await this.#dialog(title, { type: "editor", id: "value", initialValue: prefill }, "ctrl+enter submit · esc cancel", opts);
     return typeof result === "string" ? result : undefined;
   }
@@ -391,6 +459,7 @@ export class ExtensionUI {
   }
   #set(id: string, placement: Placement, content?: UiNode | string[] | SlotFactory | FooterFactory) {
     this.#assertActive();
+    if (this.#isRpc() && (typeof content === "function" || placement === "header" || placement === "footer")) return;
     if (typeof content !== "function") {
       const node = Array.isArray(content) ? { id: "slot-content", type: "custom", lines: content } : content;
       const parsed = node === undefined ? undefined : uiNodeSchema.parse(node);
@@ -470,6 +539,7 @@ export class ExtensionUI {
   setHiddenThinkingLabel(label?: string) { this.transcript.setHiddenThinkingLabel(label); }
   hostOperation(operation: UiHostOperation): Promise<string | undefined> {
     this.#assertActive();
+    if (this.#isRpc()) return Promise.resolve(undefined);
     if (!this.#native) return Promise.reject(new Error("Extension UI is unavailable"));
     return new Promise((resolve, reject) => {
       const id = ++this.#hostId;

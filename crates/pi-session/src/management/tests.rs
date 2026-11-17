@@ -185,6 +185,108 @@ fn test_manager_with_turns(turns: impl IntoIterator<Item = ScriptedTurn>) -> Mul
 }
 
 #[tokio::test]
+async fn in_memory_session_stays_in_memory_after_response_reload_fork_and_new_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("history/session.jsonl");
+    let manager = test_manager_with_turns([ScriptedTurn::Text("answer".into())]);
+    let session = manager
+        .create_session(CreateSessionOptions {
+            in_memory: true,
+            ..CreateSessionOptions::new(directory.path(), &path)
+        })
+        .await
+        .unwrap();
+
+    session.current().prompt("first request").await.unwrap();
+    let document = session.current().history().load().unwrap();
+    assert_eq!(document.messages().len(), 2);
+    assert!(!session.current().history().is_persistent());
+    assert!(!session.current().history().is_materialized());
+    assert!(!path.parent().unwrap().exists());
+    let first_user = document
+        .entries
+        .iter()
+        .find(|record| {
+            matches!(&record.entry,
+            crate::SessionEntry::Message(entry) if entry.message.role() == "user")
+        })
+        .unwrap()
+        .id
+        .clone();
+
+    session.reload().await.unwrap();
+    assert_eq!(
+        session.current().history().load().unwrap().messages().len(),
+        2
+    );
+    assert!(!session.current().history().is_persistent());
+    session
+        .fork_session(first_user, crate::ForkPosition::Before)
+        .await
+        .unwrap();
+    assert!(!session.current().history().is_persistent());
+    assert!(
+        session
+            .current()
+            .history()
+            .load()
+            .unwrap()
+            .messages()
+            .is_empty()
+    );
+    session.current().prompt("after fork").await.unwrap();
+    assert_eq!(
+        session.current().history().load().unwrap().messages().len(),
+        2
+    );
+
+    session
+        .new_session(directory.path(), directory.path().join("new/session.jsonl"))
+        .await
+        .unwrap();
+    assert!(!session.current().history().is_persistent());
+    assert!(
+        session
+            .current()
+            .history()
+            .load()
+            .unwrap()
+            .messages()
+            .is_empty()
+    );
+    session.current().prompt("after new session").await.unwrap();
+    assert_eq!(
+        session.current().history().load().unwrap().messages().len(),
+        2
+    );
+    manager.shutdown().await.unwrap();
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn in_memory_session_does_not_read_or_write_its_existing_identity_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("existing.jsonl");
+    let original = b"not a session: an existing file must stay untouched";
+    std::fs::write(&path, original).unwrap();
+    let manager = test_manager_with_turns([ScriptedTurn::Text("answer".into())]);
+    let session = manager
+        .create_session(CreateSessionOptions {
+            in_memory: true,
+            session_id: Some("requested-id".into()),
+            ..CreateSessionOptions::new(directory.path(), &path)
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(session.id(), "requested-id");
+    session.current().prompt("request").await.unwrap();
+    manager.shutdown().await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[tokio::test]
 async fn cancelling_launch_before_readiness_stops_the_unclaimed_child() {
     use std::future::Future;
     use std::task::Poll;

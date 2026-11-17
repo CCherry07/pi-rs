@@ -230,3 +230,148 @@ test("duplicate IDs and legacy render functions cannot cross the descriptor boun
   await assert.rejects(host.custom({ id: "invalid", type: "column", children: [{ id: "invalid", type: "input" }] }), /Duplicate/);
   host.retire();
 });
+
+function rpcFrontend(overrides: Partial<NativeExtensionContext> = {}) {
+  const ui = new ExtensionUI();
+  const calls: Record<string, any>[] = [];
+  const cancelled: string[] = [];
+  const notices: unknown[] = [];
+  const replies: Array<{ resolve(value: string): void; reject(error: Error): void }> = [];
+  let serial = 0;
+  ui.bind({
+    query: () => JSON.stringify("rpc"),
+    notify: raw => { notices.push(JSON.parse(raw)); },
+    prepareRequest: () => `question-${++serial}`,
+    cancelRequest: id => { cancelled.push(id); },
+    request: (raw, id) => {
+      calls.push({ ...JSON.parse(raw), id });
+      return new Promise((resolve, reject) => { replies.push({ resolve, reject }); });
+    },
+    ...overrides,
+  });
+  return { ui, calls, cancelled, notices, replies, answer(index: number, value: unknown) { replies[index]!.resolve(JSON.stringify(value)); } };
+}
+
+test("RPC dialogs retain their semantic fields and correlate out-of-order answers", async () => {
+  const app = rpcFrontend();
+  const confirmation = app.ui.confirm("sikemux-tool-permission", '{"toolName":"write"}', { timeout: 10_000 });
+  const selection = app.ui.select("环境", ["测试", "生产"], { timeout: 10_000 });
+  const input = app.ui.input("name", "请输入", { timeout: 10_000 });
+  const editor = app.ui.editor("draft", "first\nsecond", { timeout: 10_000 });
+  assert.deepEqual(app.calls, [
+    { type: "uiDialog", request: { method: "confirm", title: "sikemux-tool-permission", message: '{"toolName":"write"}' }, timeoutMs: 10_000, id: "question-1" },
+    { type: "uiDialog", request: { method: "select", title: "环境", options: ["测试", "生产"] }, timeoutMs: 10_000, id: "question-2" },
+    { type: "uiDialog", request: { method: "input", title: "name", placeholder: "请输入" }, timeoutMs: 10_000, id: "question-3" },
+    { type: "uiDialog", request: { method: "editor", title: "draft", prefill: "first\nsecond" }, id: "question-4" },
+  ]);
+  app.answer(3, { type: "value", value: "更新\n草稿" });
+  app.answer(2, { type: "value", value: "" });
+  app.answer(1, { type: "value", value: "生产" });
+  app.answer(0, { type: "confirmed", value: true });
+  assert.deepEqual(await Promise.all([confirmation, selection, input, editor]), [true, "生产", "", "更新\n草稿"]);
+  assert.deepEqual(app.cancelled, ["question-4", "question-3", "question-2", "question-1"]);
+  app.ui.retire();
+});
+
+test("RPC cancellation, timeout and retirement release every dialog's native request", async () => {
+  for (const method of ["confirm", "select", "input", "editor"] as const) {
+    for (const reason of ["abort", "timeout", "retire", "cancelled"] as const) {
+      const app = rpcFrontend();
+      const controller = new AbortController();
+      const opts = { signal: controller.signal, timeout: reason === "timeout" ? 1 : undefined };
+      const result = method === "select" ? app.ui.select("pick", ["one", "two"], opts)
+        : app.ui[method]("title", "text", opts);
+      if (reason === "abort") controller.abort();
+      if (reason === "retire") app.ui.retire();
+      if (reason === "cancelled") app.answer(0, { type: "cancelled" });
+      assert.equal(await result, method === "confirm" ? false : undefined);
+      assert.deepEqual(app.cancelled, ["question-1"]);
+      app.answer(0, method === "confirm" ? { type: "confirmed", value: true } : { type: "value", value: "late" });
+      await tick();
+      assert.deepEqual(app.cancelled, ["question-1"]);
+      app.ui.retire();
+      await assert.rejects(app.ui.input("late"), /retired/);
+    }
+  }
+});
+
+test("RPC abort before reservation and during reservation cannot dispatch a native request", async () => {
+  for (const stage of ["before", "reservation"] as const) {
+    const controller = new AbortController();
+    if (stage === "before") controller.abort();
+    let reservations = 0;
+    const app = rpcFrontend({
+      prepareRequest: () => { reservations++; controller.abort(); return "reservation"; },
+    });
+    assert.equal(await app.ui.input("name", "", { signal: controller.signal }), undefined);
+    assert.equal(reservations, stage === "before" ? 0 : 1);
+    assert.deepEqual(app.calls, []);
+    assert.deepEqual(app.cancelled, stage === "before" ? [] : ["reservation"]);
+    app.ui.retire();
+  }
+});
+
+test("RPC timeout values use Node timer precision across the unsigned native boundary", async () => {
+  for (const [timeout, expected] of [
+    [undefined, undefined], [0, undefined], [NaN, undefined], [12.9, 12], [0.5, 1],
+    [-5, 1], [Infinity, 1], [2_147_483_648, 1], [2_147_483_647, 2_147_483_647],
+  ] as const) {
+    const app = rpcFrontend();
+    const pending = app.ui.input("timeout", "", { timeout });
+    assert.equal(app.calls[0]!.timeoutMs, expected);
+    app.answer(0, { type: "value", value: "completed" });
+    assert.equal(await pending, "completed");
+    app.ui.retire();
+  }
+});
+
+test("RPC invocation cancellation and native errors release pending requests", async () => {
+  const app = rpcFrontend();
+  const invocation = new AbortController();
+  const ui = app.ui.forContext(invocation.signal) as ExtensionUI;
+  const pending = ui.editor("draft", "content");
+  invocation.abort();
+  assert.equal(await pending, undefined);
+  const failed = app.ui.input("name");
+  app.replies[1]!.reject(new Error("connection closed"));
+  await assert.rejects(failed, /connection closed/);
+  assert.deepEqual(app.cancelled, ["question-1", "question-2"]);
+  app.ui.retire();
+  const synchronous = rpcFrontend({ request: () => { throw new Error("request failed"); } });
+  await assert.rejects(synchronous.ui.input("name"), /request failed/);
+  assert.deepEqual(synchronous.cancelled, ["question-1"]);
+  synchronous.ui.retire();
+});
+
+test("RPC empty editor values remain distinct from cancelled and unsupported answers", async () => {
+  const app = rpcFrontend();
+  for (const [answer, expected] of [
+    [{ type: "value", value: "" }, ""], [{ type: "cancelled" }, undefined], [null, undefined],
+    [{ type: "confirmed", value: true }, undefined], [{ type: "value", value: 1 }, undefined],
+  ] as const) {
+    const pending = app.ui.editor("draft");
+    app.answer(app.calls.length - 1, answer);
+    assert.equal(await pending, expected);
+  }
+  app.ui.retire();
+});
+
+test("unsupported RPC surfaces leave semantic dialogs and notifications available", async () => {
+  const app = rpcFrontend();
+  let factoriesCalled = 0;
+  const component = () => { factoriesCalled++; return { render: () => [], invalidate() {} }; };
+  assert.equal(await app.ui.custom(component), undefined);
+  app.ui.setHeader(component);
+  app.ui.setFooter(component);
+  app.ui.setWidget("component", component);
+  assert.equal(factoriesCalled, 0);
+  app.ui.setStatus("status", "ready");
+  app.ui.setWidget("widget", ["text"]);
+  const confirmation = app.ui.confirm("permission", "write?");
+  app.answer(0, { type: "confirmed", value: true });
+  assert.equal(await confirmation, true);
+  app.ui.notify("ready");
+  assert.deepEqual(app.notices, [{ type: "uiNotify", message: "ready", level: "info" }]);
+  assert.equal(app.calls.length, 1);
+  app.ui.retire();
+});

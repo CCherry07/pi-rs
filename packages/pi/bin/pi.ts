@@ -3,7 +3,7 @@
 import { PiNodeHost } from "../src/index.js";
 
 try {
-  await new PiNodeHost().run();
+  process.exitCode = await new PiNodeHost().runWithExitCode();
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`pi: ${message}\n`);

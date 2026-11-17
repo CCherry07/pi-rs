@@ -192,6 +192,39 @@ async fn responses_affinity_uses_pi_header_names_and_respects_cache_disable_and_
 }
 
 #[tokio::test]
+async fn responses_thread_identity_is_automatic_stable_and_independent_of_prompt_caching() {
+    let Some(_mode) = cache_mode(
+        "responses_thread_identity_is_automatic_stable_and_independent_of_prompt_caching",
+    ) else {
+        return;
+    };
+    let mut request = request("custom", "https://gateway.example/v1");
+    for (session, key) in [
+        ("session-123", "first-key"),
+        ("session-123", "rotated-key"),
+        ("another-session", "rotated-key"),
+    ] {
+        request.session_id = Some(session.into());
+        let (headers, body) = capture(key, request.clone()).await;
+        assert_eq!(headers.get("thread-id").map(String::as_str), Some(session));
+        assert_eq!(headers["Authorization"], format!("Bearer {key}"));
+        assert!(body.get("thread_id").is_none());
+    }
+    for session in [None, Some(String::new())] {
+        request.session_id = session;
+        let (headers, _) = capture("gateway-key", request.clone()).await;
+        assert!(!headers.contains_key("thread-id"));
+    }
+    request.session_id = Some("session-123".into());
+    request
+        .headers
+        .insert("Thread-ID".into(), "explicit-thread".into());
+    let (headers, _) = capture("gateway-key", request).await;
+    assert_eq!(headers["Thread-ID"], "explicit-thread");
+    assert!(!headers.contains_key("thread-id"));
+}
+
+#[tokio::test]
 async fn responses_cache_policy_respects_modes_limits_and_chatgpt_grants() {
     let Some(mode) = cache_mode("responses_cache_policy_respects_modes_limits_and_chatgpt_grants")
     else {

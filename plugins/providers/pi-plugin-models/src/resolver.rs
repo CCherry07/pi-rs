@@ -1,9 +1,6 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use pi_core::AbortSignal;
-use tokio::sync::Mutex;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -15,10 +12,10 @@ pub(crate) enum ResolveError {
     Failed(String),
 }
 
+/// Request-time resolution. Commands may return rotating credentials, so neither
+/// successful output nor failures can be cached across calls (matching current Pi).
 #[derive(Default)]
-pub(crate) struct ConfigValueResolver {
-    command_cache: Arc<Mutex<HashMap<String, Option<String>>>>,
-}
+pub(crate) struct ConfigValueResolver {}
 
 impl ConfigValueResolver {
     pub async fn resolve(
@@ -28,9 +25,7 @@ impl ConfigValueResolver {
         signal: &AbortSignal,
     ) -> Result<String, ResolveError> {
         if let Some(command) = configured.strip_prefix('!') {
-            return self
-                .resolve_command(configured, command, description, signal)
-                .await;
+            return self.resolve_command(command, description, signal).await;
         }
         resolve_template(configured).map_err(|name| {
             ResolveError::Failed(format!(
@@ -41,19 +36,10 @@ impl ConfigValueResolver {
 
     async fn resolve_command(
         &self,
-        configured: &str,
         command: &str,
         description: &str,
         signal: &AbortSignal,
     ) -> Result<String, ResolveError> {
-        if let Some(cached) = self.command_cache.lock().await.get(configured).cloned() {
-            return cached.ok_or_else(|| {
-                ResolveError::Failed(format!(
-                    "failed to resolve {description} from shell command {command:?}"
-                ))
-            });
-        }
-
         let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
         let mut process = tokio::process::Command::new(shell);
         process
@@ -73,13 +59,11 @@ impl ConfigValueResolver {
             }
             _ => None,
         };
-        self.command_cache
-            .lock()
-            .await
-            .insert(configured.to_string(), resolved.clone());
         resolved.ok_or_else(|| {
+            // Commands can embed credentials, and helper output can contain secrets.
+            // Identify the configuration field without echoing any of those values.
             ResolveError::Failed(format!(
-                "failed to resolve {description} from shell command {command:?}"
+                "failed to resolve {description} from shell command"
             ))
         })
     }
@@ -156,6 +140,71 @@ fn environment_value(name: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_failure_does_not_disclose_command_or_output() {
+        let resolver = ConfigValueResolver::default();
+        let (_, signal) = pi_core::AbortHandle::new();
+        let error = resolver
+            .resolve(
+                "!printf 'stdout-secret'; printf 'stderr-secret' >&2; exit 7",
+                "API key for provider fixture",
+                &signal,
+            )
+            .await
+            .unwrap_err();
+        let displayed = format!("{error} {error:?}");
+        assert!(displayed.contains("API key for provider fixture"));
+        assert!(!displayed.contains("stdout-secret"));
+        assert!(!displayed.contains("stderr-secret"));
+        assert!(!displayed.contains("printf"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_empty_output_is_rejected() {
+        let resolver = ConfigValueResolver::default();
+        let (_, signal) = pi_core::AbortHandle::new();
+        assert!(matches!(
+            resolver
+                .resolve("!printf '  \\n'", "API key", &signal)
+                .await,
+            Err(ResolveError::Failed(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_resolution_remains_abortable() {
+        let resolver = ConfigValueResolver::default();
+        let (handle, signal) = pi_core::AbortHandle::new();
+        let resolution = resolver.resolve("!exec sleep 30", "API key", &signal);
+        let abort = async {
+            tokio::task::yield_now().await;
+            handle.abort();
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(resolution, abort)
+        })
+        .await
+        .expect("cancellation must not wait for the command timeout");
+        assert!(matches!(result, Err(ResolveError::Aborted)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_resolution_retains_the_timeout() {
+        let resolver = ConfigValueResolver::default();
+        let (_, signal) = pi_core::AbortHandle::new();
+        let result = tokio::time::timeout(
+            COMMAND_TIMEOUT + Duration::from_secs(5),
+            resolver.resolve("!exec sleep 30", "API key", &signal),
+        )
+        .await
+        .expect("credential helpers must have a bounded runtime");
+        assert!(matches!(result, Err(ResolveError::Failed(_))));
+    }
 
     #[test]
     fn templates_support_pi_escapes_without_requiring_environment_mutation() {

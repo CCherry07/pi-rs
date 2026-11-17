@@ -22,7 +22,7 @@ pub use agent_loop::{
 };
 pub use event_dispatcher::{AgentEventListener, AgentEventSink, EventError};
 pub use llm_callbacks::{AssistantResponse, ConvertToLlm, StreamFn, TransformContext};
-pub use pending_queue::{PendingMessageQueue, QueueMode};
+pub use pending_queue::{PendingMessageQueue, QueueDestination, QueueMode};
 pub use pi_core::AgentContext;
 pub use stream_assembler::{AssemblerError, StreamAssembler, StreamUpdate};
 pub use tool_scheduler::{ExecutedToolBatch, ToolScheduler};

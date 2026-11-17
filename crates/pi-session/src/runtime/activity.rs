@@ -14,6 +14,8 @@ use crate::{
 use pi_runtime::QueuedTextOutcome;
 use tokio::sync::watch;
 
+mod queue;
+
 use crate::{ProvisionedEntry, QueueKind, QueueSnapshot, SessionError};
 
 #[derive(Debug, Clone)]
@@ -258,7 +260,7 @@ impl SessionActivity {
     pub(super) fn enqueue_text(
         &self,
         agent: &Agent,
-        target: LiveDelivery,
+        target: Option<LiveDelivery>,
         kind: QueueKind,
         input: QueuedTextOutcome,
     ) -> Result<PromptOutcome, SessionError> {
@@ -271,7 +273,10 @@ impl SessionActivity {
         else {
             return Ok(PromptOutcome::Handled);
         };
-        if generation != target.generation {
+        if target
+            .as_ref()
+            .is_some_and(|target| generation != target.generation)
+        {
             return Err(SessionError::Busy);
         }
         let message = Message::User(input_user_message(&text, &images, now_ms()));
@@ -282,7 +287,7 @@ impl SessionActivity {
         };
         self.enqueue(
             agent,
-            Some(target),
+            target,
             QueuedInput {
                 kind,
                 display_text,
@@ -327,8 +332,16 @@ impl SessionActivity {
         // this already-durable item. Product queue state precedes consumption.
         self.events.publish_queue(state.queue_snapshot());
         match input.kind {
-            QueueKind::Steer => agent.steer(input.message),
-            QueueKind::FollowUp => agent.follow_up(input.message),
+            QueueKind::Steer => agent.enqueue_identified(
+                entry_id.clone(),
+                input.message,
+                pi_agent::QueueDestination::Steering,
+            ),
+            QueueKind::FollowUp => agent.enqueue_identified(
+                entry_id.clone(),
+                input.message,
+                pi_agent::QueueDestination::FollowUp,
+            ),
             QueueKind::NextRun => {}
         }
         Ok(PromptOutcome::Queued {
@@ -406,12 +419,12 @@ impl SessionActivity {
                     Message::Custom(custom) => SessionEntry::custom_message(custom),
                     message => SessionEntry::message(message.clone()),
                 };
-                if let Some(run_id) = &pending.run_id {
+                {
                     self.store.append_record(NewLaneRecord {
                         id: next_unique_id("message-replacement"),
                         lane: MAIN_LANE.to_string(),
                         record: LaneRecordEntry::WriteDeferred {
-                            run_id: run_id.clone(),
+                            run_id: run.id.clone(),
                             target: target.clone(),
                         },
                     })?;
@@ -452,6 +465,13 @@ impl SessionActivity {
     /// cancellation records make the same result survive process recovery.
     pub(super) fn clear_queue(&self, agent: &Agent) -> Result<QueueSnapshot, SessionError> {
         let mut activity = self.lock();
+        if activity.active_run.as_ref().is_some_and(|run| {
+            run.pending
+                .iter()
+                .any(|item| item.kind == Some(QueueKind::NextRun))
+        }) {
+            return Err(SessionError::Busy);
+        }
         let cleared = activity.queue_snapshot();
         let cancellations = activity
             .recovered_queue
@@ -471,14 +491,48 @@ impl SessionActivity {
                     entry_id: item.target.id.clone(),
                 },
             });
-        self.store.append_records_batch(cancellations)?;
+        let ids = |kind| {
+            activity
+                .active_run
+                .iter()
+                .flat_map(|run| &run.pending)
+                .filter(|item| item.kind == Some(kind))
+                .map(|item| item.target.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let steering = ids(QueueKind::Steer);
+        let follow_up = ids(QueueKind::FollowUp);
+        let committed = agent.replace_identified_queue(
+            pi_agent::QueueDestination::Steering,
+            &steering,
+            Vec::new(),
+            || {
+                let committed = agent.replace_identified_queue(
+                    pi_agent::QueueDestination::FollowUp,
+                    &follow_up,
+                    Vec::new(),
+                    || {
+                        self.store
+                            .append_records_batch(cancellations)
+                            .map(|_| ())
+                            .map_err(SessionError::from)
+                    },
+                )?;
+                if committed {
+                    Ok(())
+                } else {
+                    Err(SessionError::Busy)
+                }
+            },
+        )?;
+        if !committed {
+            return Err(SessionError::Busy);
+        }
         activity.recovered_queue.clear();
         if let Some(run) = &mut activity.active_run {
             run.pending.retain(|item| item.kind.is_none());
         }
-        agent.clear_all_queues();
         let snapshot = activity.queue_snapshot();
-        drop(activity);
         self.events.publish_queue(snapshot);
         Ok(cleared)
     }
@@ -945,6 +999,17 @@ fn recover_pending_queue(
 fn queue_snapshot<'a>(items: impl IntoIterator<Item = &'a PendingSessionMessage>) -> QueueSnapshot {
     let mut snapshot = QueueSnapshot::default();
     for item in items {
+        if let Some(kind) = item.kind {
+            snapshot.items.push(crate::QueuedMessageSnapshot {
+                entry_id: item.target.id.clone(),
+                kind: if item.run_id.is_none() {
+                    QueueKind::NextRun
+                } else {
+                    kind
+                },
+                text: item.display_text.clone(),
+            });
+        }
         match item.kind {
             Some(QueueKind::Steer) => snapshot.steering.push(item.display_text.clone()),
             Some(QueueKind::FollowUp | QueueKind::NextRun) => {

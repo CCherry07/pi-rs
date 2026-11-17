@@ -19,6 +19,9 @@ pub(crate) fn runtime_skill_options(
     options
         .additional_paths
         .extend(config.settings_skill_paths.iter().cloned());
+    options
+        .additional_paths
+        .extend(config.explicit_skill_paths.iter().cloned());
     if hermes {
         options.additional_paths.extend(managed_skill_roots(
             &config.agent_dir,
@@ -99,6 +102,30 @@ mod tests {
             runtime_skill_options(&config, false, true).additional_paths,
             expected
         );
+    }
+
+    #[test]
+    fn explicit_skills_survive_settings_refresh_and_session_cwd_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = std::path::PathBuf::from("project");
+        let agent_dir = dir.path().join("agent");
+        let mut config = Config::new(cwd.clone(), agent_dir.clone());
+        config.set_skill_paths(["extra-skills".into()]);
+        config.settings_skill_paths.push(cwd.join("old-settings"));
+        config.cwd = dir.path().join("next-project");
+        let settings =
+            SettingsManager::new(&agent_dir).load(&SettingsContext::new(&config.cwd, false));
+        crate::configuration::apply_settings(&mut config, &settings);
+
+        let options = runtime_skill_options(&config, false, false);
+        assert_eq!(
+            options.additional_paths,
+            [std::env::current_dir()
+                .unwrap()
+                .join("project/extra-skills")]
+        );
+        assert!(options.include_defaults);
+        assert!(!options.project_trusted);
     }
 
     #[test]

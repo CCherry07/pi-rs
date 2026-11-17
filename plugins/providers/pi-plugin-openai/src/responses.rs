@@ -147,6 +147,15 @@ impl OpenAiResponsesCompatibleProvider {
         for (name, value) in response_affinity_headers(request, cache_retention) {
             insert_header(&mut headers, name, value);
         }
+        // Match Codex client thread identity without a provider-specific switch.
+        // Unlike cache affinity, this stays present when prompt caching is off.
+        if let Some(session_id) = request
+            .session_id
+            .as_ref()
+            .filter(|id| !id.trim().is_empty())
+        {
+            insert_header(&mut headers, "thread-id", session_id.clone());
+        }
         for (name, value) in &request.headers {
             insert_header(&mut headers, name, value);
         }

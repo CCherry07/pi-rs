@@ -58,6 +58,7 @@ pub fn session_event_json(
         AgentSessionEvent::QueueUpdate {
             steering,
             follow_up,
+            ..
         } => json!({"type":"queue_update","steering":steering,"followUp":follow_up}),
         AgentSessionEvent::CompactionStart { reason } => {
             json!({"type":"compaction_start","reason":compaction_reason(reason)})
@@ -137,6 +138,16 @@ pub fn session_event_json(
         _ => return Ok(None),
     };
     Ok(Some(value))
+}
+
+/// Projects a read-only document for native frontends that reuse Pi's entry UI.
+/// This does not open a runtime, repair a journal, or change its v4 storage format.
+pub fn session_document_entries_json(document: &SessionDocument) -> Result<Vec<Value>, String> {
+    document
+        .entries
+        .iter()
+        .map(|record| session_entry_json(record, document))
+        .collect()
 }
 
 /// Projects one v4 tree record into the current coding-agent v3 SessionEntry

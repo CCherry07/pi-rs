@@ -133,7 +133,11 @@ impl AgentSession {
         header.set_workspace(runtime.workspace().spec())?;
         header.parent_session_id = options.parent_session_id.clone();
         runtime.agent().set_session_id(Some(header.id.clone()));
-        let store = SessionStore::create_deferred(path, header)?;
+        let store = if options.in_memory {
+            SessionStore::create_in_memory(path, header)?
+        } else {
+            SessionStore::create_deferred(path, header)?
+        };
 
         let initial_entries = vec![
             SessionEntry::ModelChange(ModelChangeEntry {

@@ -65,6 +65,7 @@ impl Pi {
             .create_session(pi_session::CreateSessionOptions {
                 workspace,
                 path: target.path,
+                in_memory: false,
                 session_id: Some(target.id),
                 metadata: Some(project.session_metadata()),
                 generation_overlay: Default::default(),

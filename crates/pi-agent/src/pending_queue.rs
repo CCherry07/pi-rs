@@ -10,10 +10,16 @@ pub enum QueueMode {
     OneAtATime,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueDestination {
+    Steering,
+    FollowUp,
+}
+
 #[derive(Debug, Default)]
 pub struct PendingMessageQueue {
     mode: RwLock<QueueMode>,
-    messages: Mutex<VecDeque<Message>>,
+    messages: Mutex<VecDeque<(Option<String>, Message)>>,
 }
 
 impl PendingMessageQueue {
@@ -39,10 +45,42 @@ impl PendingMessageQueue {
     }
 
     pub fn enqueue(&self, message: Message) {
+        self.enqueue_with_id(None, message);
+    }
+
+    pub(crate) fn enqueue_with_id(&self, id: Option<String>, message: Message) {
         self.messages
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_back(message);
+            .push_back((id, message));
+    }
+
+    /// Exclude draining while the owner commits and replaces a known queue.
+    /// A stale identity list never invokes the commit callback.
+    pub(crate) fn replace_identified<E>(
+        &self,
+        expected: &[String],
+        replacement: Vec<(String, Message)>,
+        commit: impl FnOnce() -> Result<(), E>,
+    ) -> Result<bool, E> {
+        let mut messages = self
+            .messages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if messages.len() != expected.len()
+            || !messages
+                .iter()
+                .zip(expected)
+                .all(|((id, _), expected)| id.as_ref() == Some(expected))
+        {
+            return Ok(false);
+        }
+        commit()?;
+        *messages = replacement
+            .into_iter()
+            .map(|(id, message)| (Some(id), message))
+            .collect();
+        Ok(true)
     }
 
     pub fn drain(&self) -> Vec<Message> {
@@ -51,8 +89,12 @@ impl PendingMessageQueue {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match self.mode() {
-            QueueMode::All => messages.drain(..).collect(),
-            QueueMode::OneAtATime => messages.pop_front().into_iter().collect(),
+            QueueMode::All => messages.drain(..).map(|(_, message)| message).collect(),
+            QueueMode::OneAtATime => messages
+                .pop_front()
+                .map(|(_, message)| message)
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -61,7 +103,7 @@ impl PendingMessageQueue {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .cloned()
+            .map(|(_, message)| message.clone())
             .collect()
     }
 
@@ -126,5 +168,27 @@ mod tests {
         queue.enqueue(user("three", 3));
         queue.clear();
         assert!(!queue.has_items());
+    }
+
+    #[test]
+    fn failed_or_stale_owner_transactions_never_replace_live_input() {
+        let queue = PendingMessageQueue::default();
+        queue.enqueue_with_id(Some("first".into()), user("identical", 1));
+        queue.enqueue_with_id(Some("second".into()), user("identical", 1));
+        let ids = vec!["first".into(), "second".into()];
+        assert_eq!(
+            queue.replace_identified(&ids, Vec::new(), || Err("persistence failed")),
+            Err("persistence failed")
+        );
+        assert_eq!(queue.peek().len(), 2);
+        queue.drain();
+        let mut committed = false;
+        let result = queue.replace_identified(&ids, Vec::new(), || {
+            committed = true;
+            Ok::<_, ()>(())
+        });
+        assert_eq!(result, Ok(false));
+        assert!(!committed);
+        assert_eq!(queue.peek(), vec![user("identical", 1)]);
     }
 }

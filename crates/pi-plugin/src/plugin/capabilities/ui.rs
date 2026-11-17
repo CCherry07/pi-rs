@@ -1,9 +1,29 @@
 //! Presentation-neutral UI capabilities exposed to plugins.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use super::types::unbound;
 use super::{NoticeLevel, PluginContextHandle, PluginContextResult, PresentationMode};
+
+/// A presentation-neutral dialog that a terminal or graphical frontend can answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "method", rename_all = "camelCase")]
+pub enum UiDialogRequest {
+    Confirm { title: String, message: String },
+    Select { title: String, options: Vec<String> },
+    Input { title: String, placeholder: String },
+    Editor { title: String, prefill: String },
+}
+
+/// A completed semantic dialog. Cancellation differs from an unsupported capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum UiDialogResponse {
+    Confirmed(bool),
+    Value(String),
+    Cancelled,
+}
 
 /// Product-presentation access implemented by the owning product layer.
 #[doc(hidden)]
@@ -35,6 +55,24 @@ pub trait UiContextAccess: Send + Sync {
 
     fn ui_notify(&self, _level: NoticeLevel, _message: String) -> PluginContextResult<()> {
         unbound()
+    }
+
+    /// Answers a semantic dialog. `None` permits a declarative UI fallback;
+    /// `Some(Cancelled)` completes the request without opening another dialog.
+    async fn ui_dialog(
+        &self,
+        request: UiDialogRequest,
+        _timeout_ms: Option<u64>,
+    ) -> PluginContextResult<Option<UiDialogResponse>> {
+        if let UiDialogRequest::Confirm { title, message } = request
+            && self.has_confirm()?
+        {
+            return Ok(self
+                .ui_confirm(title, message)
+                .await?
+                .map(UiDialogResponse::Confirmed));
+        }
+        Ok(None)
     }
 
     /// Answers a binary question through a semantic frontend prompt.
@@ -116,10 +154,17 @@ impl UiContext {
         let title = title.into();
         let message = message.into();
         let access = self.handle.access()?;
-        if access.has_confirm()?
-            && let Some(answer) = access.ui_confirm(title.clone(), message.clone()).await?
+        if let Some(answer) = access
+            .ui_dialog(
+                UiDialogRequest::Confirm {
+                    title: title.clone(),
+                    message: message.clone(),
+                },
+                None,
+            )
+            .await?
         {
-            return Ok(answer);
+            return Ok(matches!(answer, UiDialogResponse::Confirmed(true)));
         }
         Ok(self
             .select(
@@ -139,19 +184,31 @@ impl UiContext {
         title: impl Into<String>,
         options: Vec<String>,
     ) -> PluginContextResult<Option<usize>> {
-        self.handle.access()?;
+        let access = self.handle.access()?;
         if options.is_empty() {
             return Ok(None);
         }
+        let title = title.into();
+        if let Some(answer) = access
+            .ui_dialog(
+                UiDialogRequest::Select {
+                    title: title.clone(),
+                    options: options.clone(),
+                },
+                None,
+            )
+            .await?
+        {
+            return Ok(match answer {
+                UiDialogResponse::Value(value) => {
+                    options.iter().position(|option| option == &value)
+                }
+                _ => None,
+            });
+        }
         let (_, signal) = crate::AbortHandle::new();
-        self.custom(
-            crate::ui::Selection {
-                title: title.into(),
-                options,
-            },
-            signal,
-        )
-        .await
+        self.custom(crate::ui::Selection { title, options }, signal)
+            .await
     }
 
     /// Requests one line of text using the shared Rust-owned editor state.
@@ -160,12 +217,31 @@ impl UiContext {
         title: impl Into<String>,
         placeholder: impl Into<String>,
     ) -> PluginContextResult<Option<String>> {
+        let title = title.into();
+        let placeholder = placeholder.into();
+        if let Some(answer) = self
+            .handle
+            .access()?
+            .ui_dialog(
+                UiDialogRequest::Input {
+                    title: title.clone(),
+                    placeholder: placeholder.clone(),
+                },
+                None,
+            )
+            .await?
+        {
+            return Ok(match answer {
+                UiDialogResponse::Value(value) => Some(value),
+                _ => None,
+            });
+        }
         let (_, signal) = crate::AbortHandle::new();
         self.custom(
             crate::ui::TextEntry {
-                title: title.into(),
+                title,
                 prefill: String::new(),
-                placeholder: placeholder.into(),
+                placeholder,
                 multiline: false,
             },
             signal,
@@ -179,11 +255,30 @@ impl UiContext {
         title: impl Into<String>,
         prefill: impl Into<String>,
     ) -> PluginContextResult<Option<String>> {
+        let title = title.into();
+        let prefill = prefill.into();
+        if let Some(answer) = self
+            .handle
+            .access()?
+            .ui_dialog(
+                UiDialogRequest::Editor {
+                    title: title.clone(),
+                    prefill: prefill.clone(),
+                },
+                None,
+            )
+            .await?
+        {
+            return Ok(match answer {
+                UiDialogResponse::Value(value) => Some(value),
+                _ => None,
+            });
+        }
         let (_, signal) = crate::AbortHandle::new();
         self.custom(
             crate::ui::TextEntry {
-                title: title.into(),
-                prefill: prefill.into(),
+                title,
+                prefill,
                 placeholder: String::new(),
                 multiline: true,
             },

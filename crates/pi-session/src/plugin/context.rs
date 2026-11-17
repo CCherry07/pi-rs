@@ -1,7 +1,8 @@
 use crate::{AgentSession, AgentSessionReplacement, PiSession, SessionDocument, WeakPiSession};
 use async_trait::async_trait;
 use pi_plugin::{
-    NoticeLevel, PluginContextError, PluginContextReplacement, PluginContextScope, PresentationMode,
+    NoticeLevel, PluginContextError, PluginContextReplacement, PluginContextScope,
+    PresentationMode, UiDialogRequest, UiDialogResponse,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -28,6 +29,11 @@ pub trait PluginProviderMutationAccess: Send + Sync {
 /// graphical interaction remains outside this crate.
 #[async_trait]
 pub trait PluginUiBridge: Send + Sync {
+    /// Delivers a transient notice through the frontend, including during startup.
+    /// Returning false retains the session-event delivery path.
+    fn notify(&self, _level: NoticeLevel, _message: String) -> Result<bool, String> {
+        Ok(false)
+    }
     fn surface_snapshot(&self) -> Result<pi_plugin::UiSurfaceSnapshot, String> {
         Err("extension surfaces unavailable".into())
     }
@@ -39,6 +45,23 @@ pub trait PluginUiBridge: Send + Sync {
         _frame: pi_plugin::UiSurfaceFrame,
     ) -> Result<pi_plugin::UiSurfaceEvent, String> {
         Err("extension surfaces unavailable".into())
+    }
+    /// Semantic dialog independent of declarative component rendering.
+    /// `None` means unsupported; a cancelled supported dialog has an explicit response.
+    async fn dialog(
+        &self,
+        request: UiDialogRequest,
+        _timeout_ms: Option<u64>,
+    ) -> Result<Option<UiDialogResponse>, String> {
+        if let UiDialogRequest::Confirm { title, message } = request
+            && self.supports_confirm()
+        {
+            return Ok(self
+                .confirm(title, message)
+                .await?
+                .map(UiDialogResponse::Confirmed));
+        }
+        Ok(None)
     }
     /// Semantic yes/no prompt for frontends that do not render declarative
     /// plugin surfaces (Desktop in RPC mode). `None` means unsupported.
@@ -162,6 +185,7 @@ pub struct PiPluginContext {
     provider_mutations: Option<Arc<dyn PluginProviderMutationAccess>>,
     pub(super) ui_bridge: Option<Arc<dyn PluginUiBridge>>,
     pub(super) ui_owners: Mutex<std::collections::HashSet<String>>,
+    pub(super) ui_retired: watch::Sender<bool>,
     pub(super) provider_reload_gate: Arc<tokio::sync::Mutex<()>>,
     pub(super) model_scope_patterns: Vec<String>,
 }
@@ -181,6 +205,7 @@ impl PiPluginContext {
             provider_mutations: None,
             ui_bridge: None,
             ui_owners: Mutex::default(),
+            ui_retired: watch::channel(false).0,
             provider_reload_gate: Arc::new(tokio::sync::Mutex::new(())),
             model_scope_patterns: Vec::new(),
         }

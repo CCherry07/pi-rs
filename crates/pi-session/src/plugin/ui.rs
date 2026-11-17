@@ -1,10 +1,14 @@
 use super::context::{PiPluginContext, context_failed};
 use async_trait::async_trait;
-use pi_plugin::{NoticeLevel, PluginContextError, PresentationMode, UiContextAccess};
+use pi_plugin::{
+    NoticeLevel, PluginContextError, PresentationMode, UiContextAccess, UiDialogRequest,
+    UiDialogResponse,
+};
 
 #[async_trait]
 impl UiContextAccess for PiPluginContext {
     fn ui_retire(&self) {
+        self.ui_retired.send_replace(true);
         if let Some(bridge) = &self.ui_bridge {
             for owner in self
                 .ui_owners
@@ -83,7 +87,10 @@ impl UiContextAccess for PiPluginContext {
     }
 
     fn has_ui(&self) -> Result<bool, PluginContextError> {
-        Ok(matches!(self.mode, PresentationMode::Tui) && self.ui_bridge.is_some())
+        Ok(self.ui_bridge.as_ref().is_some_and(|bridge| {
+            matches!(self.mode, PresentationMode::Tui)
+                || (matches!(self.mode, PresentationMode::Rpc) && bridge.supports_confirm())
+        }))
     }
 
     fn has_confirm(&self) -> Result<bool, PluginContextError> {
@@ -98,16 +105,45 @@ impl UiContextAccess for PiPluginContext {
         title: String,
         message: String,
     ) -> Result<Option<bool>, PluginContextError> {
+        Ok(self
+            .ui_dialog(UiDialogRequest::Confirm { title, message }, None)
+            .await?
+            .map(|answer| matches!(answer, UiDialogResponse::Confirmed(true))))
+    }
+
+    async fn ui_dialog(
+        &self,
+        request: UiDialogRequest,
+        timeout_ms: Option<u64>,
+    ) -> Result<Option<UiDialogResponse>, PluginContextError> {
+        let mut retired = self.ui_retired.subscribe();
+        if *retired.borrow() {
+            return Err(PluginContextError::Retired);
+        }
         let Some(bridge) = &self.ui_bridge else {
             return Ok(None);
         };
-        if !bridge.supports_confirm() {
-            return Ok(None);
+        let answer = tokio::select! {
+            biased;
+            _ = retired.changed() => Err(PluginContextError::Retired),
+            answer = bridge.dialog(request, timeout_ms) => answer.map_err(context_failed),
+        };
+        // Retirement can race with a ready bridge response after select! has
+        // polled its first branch. Never expose that response to a stale plugin.
+        if *retired.borrow() {
+            return Err(PluginContextError::Retired);
         }
-        bridge.confirm(title, message).await.map_err(context_failed)
+        answer
     }
 
     fn ui_notify(&self, level: NoticeLevel, message: String) -> Result<(), PluginContextError> {
+        if let Some(bridge) = &self.ui_bridge
+            && bridge
+                .notify(level, message.clone())
+                .map_err(context_failed)?
+        {
+            return Ok(());
+        }
         self.session()?.notify_plugin(message, level);
         Ok(())
     }

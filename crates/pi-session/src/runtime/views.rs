@@ -170,6 +170,10 @@ impl<'a> SessionHistory<'a> {
         self.store.is_materialized()
     }
 
+    pub fn is_persistent(&self) -> bool {
+        self.store.is_persistent()
+    }
+
     pub fn load(&self) -> Result<SessionDocument, SessionError> {
         self.store.load().map_err(Into::into)
     }

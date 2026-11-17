@@ -30,6 +30,7 @@ pub enum AgentSessionEvent {
     QueueUpdate {
         steering: Vec<String>,
         follow_up: Vec<String>,
+        items: Vec<QueuedMessageSnapshot>,
     },
     CompactionStart {
         reason: CompactionReason,
@@ -59,6 +60,10 @@ pub enum AgentSessionEvent {
     },
     /// Detached provider usage was added to the session ledger without a
     /// corresponding conversation entry.
+    /// An explicit tree checkout/branch installed this immutable history.
+    TreeChanged {
+        document: Arc<crate::SessionDocument>,
+    },
     UsageRecorded {
         usage: Usage,
     },
@@ -93,6 +98,15 @@ pub enum AgentSessionEvent {
 pub struct QueueSnapshot {
     pub steering: Vec<String>,
     pub follow_up: Vec<String>,
+    pub items: Vec<QueuedMessageSnapshot>,
+}
+
+/// Stable native identity and actual delivery for a not-yet-consumed message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedMessageSnapshot {
+    pub entry_id: String,
+    pub kind: crate::QueueKind,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,6 +259,16 @@ impl AgentSessionEventHub {
         });
     }
 
+    pub(crate) fn publish_tree(
+        &self,
+        document: Arc<crate::SessionDocument>,
+        agent: AgentStateSnapshot,
+    ) {
+        self.publish(AgentSessionEvent::TreeChanged { document }, |snapshot| {
+            snapshot.agent = agent
+        });
+    }
+
     pub(crate) fn publish_usage(&self, usage: Usage) {
         self.publish(AgentSessionEvent::UsageRecorded { usage }, |_| {});
     }
@@ -268,6 +292,7 @@ impl AgentSessionEventHub {
             AgentSessionEvent::QueueUpdate {
                 steering: queue.steering.clone(),
                 follow_up: queue.follow_up.clone(),
+                items: queue.items.clone(),
             },
             |snapshot| snapshot.queue = queue,
         );
@@ -468,6 +493,7 @@ mod tests {
         hub.publish_queue(QueueSnapshot {
             steering: vec!["queued".to_string()],
             follow_up: Vec::new(),
+            items: Vec::new(),
         });
 
         let mut subscription = hub.subscribe();
@@ -514,6 +540,7 @@ mod tests {
         hub.publish_queue(QueueSnapshot {
             steering: vec!["queued".to_string()],
             follow_up: Vec::new(),
+            items: Vec::new(),
         });
         assert_eq!(hub.snapshot().queue.steering, ["queued"]);
 

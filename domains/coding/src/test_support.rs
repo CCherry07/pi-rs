@@ -19,6 +19,7 @@ pub(crate) fn app_config(agent_dir: &std::path::Path, model: Option<&str>) -> Co
         native_plugins: Vec::new(),
         extensions: Vec::new(),
         discover_extensions: true,
+        explicit_skill_paths: Vec::new(),
         load_mcp_config: true,
         extension_flag_values: std::collections::BTreeMap::new(),
         runtime_settings: pi_settings::SettingsValues::default(),

@@ -1,8 +1,8 @@
 use super::activity::{ActivityPhase, CancellationStage};
 use super::options::AutoRetrySettings;
 use super::{
-    AgentSession, CompactionActivation, PreparedSessionPrompt, PromptOutcome, SessionInput,
-    SessionSubmission,
+    AgentSession, CompactionActivation, PreparedSessionPrompt, PromptDisposition, PromptOutcome,
+    SessionInput, SessionSubmission,
 };
 use crate::{MAIN_LANE, QueueKind, QueueSnapshot, SessionError};
 use pi_agent::{AgentLoopOutcome, AgentLoopStop};
@@ -58,14 +58,39 @@ impl AgentSession {
         &self,
         input: impl Into<SessionInput>,
     ) -> Result<PromptOutcome, SessionError> {
+        self.prompt_with_receipt(input, |_| {}).await
+    }
+
+    /// Reports successful input preparation exactly once. A started receipt is
+    /// sent after admission commits and before provider execution; errors before
+    /// that point return without a receipt. The future still owns full settlement.
+    pub async fn prompt_with_receipt(
+        &self,
+        input: impl Into<SessionInput>,
+        receipt: impl FnOnce(PromptDisposition) + Send,
+    ) -> Result<PromptOutcome, SessionError> {
         let input = input.into();
         if self.accepts_live_messages() {
-            return self.queue_input(input, QueueKind::Steer).await;
+            let outcome = self.queue_input(input, QueueKind::Steer).await?;
+            receipt(outcome.disposition());
+            return Ok(outcome);
         }
         let Some(submission) = self.prepare_text_command(input).await? else {
+            receipt(PromptDisposition::Handled);
             return Ok(PromptOutcome::Handled);
         };
-        Ok(match self.run_submission(submission).await? {
+        let mut receipt = Some(receipt);
+        let result = self
+            .run_submission_with_receipt(submission, || {
+                if let Some(receipt) = receipt.take() {
+                    receipt(PromptDisposition::Started);
+                }
+            })
+            .await?;
+        if let Some(receipt) = receipt {
+            receipt(PromptDisposition::Handled);
+        }
+        Ok(match result {
             Some(outcome) => PromptOutcome::Agent(outcome),
             None => PromptOutcome::Handled,
         })
@@ -94,6 +119,14 @@ impl AgentSession {
     pub(super) async fn run_submission(
         &self,
         submission: SessionSubmission,
+    ) -> Result<Option<AgentLoopOutcome>, SessionError> {
+        self.run_submission_with_receipt(submission, || {}).await
+    }
+
+    async fn run_submission_with_receipt(
+        &self,
+        submission: SessionSubmission,
+        admitted: impl FnOnce() + Send,
     ) -> Result<Option<AgentLoopOutcome>, SessionError> {
         let _operation = self.activity.begin(ActivityPhase::Preparing).await;
         self.ensure_open()?;
@@ -132,7 +165,21 @@ impl AgentSession {
                     .begin_messages(prepared.generation(), prepared.messages())?;
                 (PreparedSessionPrompt::Messages(prepared), run_id)
             }
+            SessionSubmission::Queued => {
+                let Some((entry_id, message)) = self.activity.next_queued() else {
+                    return Ok(None);
+                };
+                let prepared = self.runtime.prepare_message_submission(vec![message]).await;
+                if self.activity.is_aborted() {
+                    return Err(SessionError::Cancelled("queued input"));
+                }
+                let run_id = self
+                    .activity
+                    .begin_queued(prepared.generation(), &entry_id)?;
+                (PreparedSessionPrompt::Messages(prepared), run_id)
+            }
         };
+        admitted();
         let telemetry = self.runtime.agent().telemetry_context();
         let run_span = telemetry.start_span::<RunSpan>(RunStart {
             operation: OperationStartAttributes {
@@ -257,6 +304,47 @@ impl AgentSession {
         self.activity.clear_queue(self.runtime.agent())
     }
 
+    /// Store preprocessed input for the next explicitly requested run, without
+    /// injecting it into the current agent loop or starting provider work.
+    pub async fn queue_next_run(
+        &self,
+        input: impl Into<SessionInput>,
+    ) -> Result<PromptOutcome, SessionError> {
+        self.ensure_open()?;
+        let input = input.into();
+        let prepared = self
+            .runtime
+            .process_queued_input(input.text, input.images, InputStreamingBehavior::FollowUp)
+            .await?;
+        self.ensure_open()?;
+        self.activity
+            .enqueue_text(self.runtime.agent(), None, QueueKind::NextRun, prepared)
+    }
+
+    /// Explicitly run one durable next-run item. Opening/resuming never calls this.
+    pub async fn run_next_queued(&self) -> Result<PromptOutcome, SessionError> {
+        Ok(
+            match self.run_submission(SessionSubmission::Queued).await? {
+                Some(outcome) => PromptOutcome::Agent(outcome),
+                None => PromptOutcome::Handled,
+            },
+        )
+    }
+
+    pub fn cancel_queued(&self, entry_id: &str) -> Result<(), SessionError> {
+        self.ensure_open()?;
+        self.activity
+            .edit_queue(self.runtime.agent(), entry_id, None)
+    }
+
+    /// Move inside one delivery queue; `None` means its end. Old IDs are rejected
+    /// when an agent has consumed input or another editor has already moved it.
+    pub fn move_queued(&self, entry_id: &str, before: Option<&str>) -> Result<(), SessionError> {
+        self.ensure_open()?;
+        self.activity
+            .edit_queue(self.runtime.agent(), entry_id, Some(before))
+    }
+
     /// Requests cancellation without waiting for the operation gate. Any
     /// undelivered queue items are retained for [`Self::clear_queue`].
     pub fn abort(&self) {
@@ -289,7 +377,7 @@ impl AgentSession {
             .process_queued_input(input.text, input.images, behavior)
             .await?;
         self.activity
-            .enqueue_text(self.runtime.agent(), expected, kind, prepared)
+            .enqueue_text(self.runtime.agent(), Some(expected), kind, prepared)
     }
 
     /// Runs a protocol-neutral, already-structured message batch.
