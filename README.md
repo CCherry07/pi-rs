@@ -434,9 +434,10 @@ Supported values are `ask`, `always`, and `never`.
 ## Runtime feature switches
 
 Global `~/.pi/agent/settings.json` and trusted project `.pi/settings.json` accept a `features`
-object with boolean `memory`, `subagents`, `schedule`, `skills`, `promptTemplates`, and
-`sessionTransfer` fields. All default to `true`; project fields override global fields individually.
-For example, `{"features":{"schedule":false}}` disables built-in scheduled tasks. Run `/reload`
+object with boolean `hashline`, `memory`, `subagents`, `schedule`, `skills`, `promptTemplates`, and
+`sessionTransfer` fields. `hashline`, `memory`, `subagents`, and `schedule` default to `false`;
+`skills`, `promptTemplates`, and `sessionTransfer` default to `true`. Project fields override global
+fields individually. For example, `{"features":{"schedule":true}}` enables built-in scheduled tasks. Run `/reload`
 in the TUI or start a new session to apply changes. Existing data is retained when disabling features.
 See [feature configuration](apps/pi-cli/README.md#runtime-feature-switches) for the complete example.
 

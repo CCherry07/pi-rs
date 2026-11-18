@@ -4,7 +4,7 @@ use std::path::Path;
 use garde::Validate;
 use pi_core::{
     AnyModelSpec, ClassifierModelSpec, ImageModelSpec, ModelCost, ModelCostTier, ModelId,
-    ModelInput, ModelSpec, ModelType, ProviderId,
+    ModelInput, ModelInputLimits, ModelSpec, ModelType, ProviderId,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -52,6 +52,7 @@ pub(crate) struct PreparedOverride {
     pub reasoning: Option<bool>,
     pub thinking_level_map: BTreeMap<String, Option<String>>,
     pub input: Option<Vec<ModelInput>>,
+    pub input_limits: Option<ModelInputLimits>,
     pub cost: Option<PreparedCostOverride>,
     pub context_window: Option<u64>,
     pub max_tokens: Option<u64>,
@@ -124,6 +125,9 @@ struct ModelDefinition {
     #[garde(custom(validate_thinking_level_map))]
     thinking_level_map: BTreeMap<String, Option<String>>,
     input: Option<Vec<ModelInputConfig>>,
+    #[schemars(with = "Option<ModelInputLimitsSchema>")]
+    #[garde(custom(validate_input_limits))]
+    input_limits: Option<ModelInputLimits>,
     cost: Option<ModelCostConfig>,
     #[garde(range(min = 1))]
     context_window: Option<u64>,
@@ -175,6 +179,9 @@ struct ModelOverride {
     #[garde(custom(validate_thinking_level_map))]
     thinking_level_map: BTreeMap<String, Option<String>>,
     input: Option<Vec<ModelInputConfig>>,
+    #[schemars(with = "Option<ModelInputLimitsSchema>")]
+    #[garde(custom(validate_input_limits))]
+    input_limits: Option<ModelInputLimits>,
     cost: Option<ModelCostOverride>,
     #[garde(range(min = 1))]
     context_window: Option<u64>,
@@ -188,6 +195,97 @@ struct ModelOverride {
     #[schemars(with = "Option<ProviderCompatSchema>")]
     #[garde(custom(optional_object_value))]
     compat: Option<Value>,
+}
+
+// Match Pi's open nested input-limit schemas; the core value retains the typed
+// metadata, while configuration owns validation and JSON Schema publication.
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ModelInputLimitsSchema {
+    #[schemars(range(min = 1))]
+    max_request_bytes: Option<u64>,
+    images: Option<ModelImageInputLimitsSchema>,
+}
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ModelImageInputLimitsSchema {
+    resize: Option<ModelImageResizeOptionsSchema>,
+    #[schemars(range(min = 1))]
+    max_per_message: Option<usize>,
+    #[schemars(range(min = 1))]
+    max_per_request: Option<usize>,
+}
+
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ModelImageResizeOptionsSchema {
+    #[schemars(range(min = 1))]
+    max_width: Option<u32>,
+    #[schemars(range(min = 1))]
+    max_height: Option<u32>,
+    #[schemars(range(min = 1))]
+    max_bytes: Option<usize>,
+    #[schemars(range(min = 1, max = 100))]
+    jpeg_quality: Option<u8>,
+}
+
+fn validate_input_limits(value: &Option<ModelInputLimits>, _context: &()) -> garde::Result {
+    let Some(limits) = value else { return Ok(()) };
+    let images = limits.images.unwrap_or_default();
+    let resize = images.resize.unwrap_or_default();
+    if limits.max_request_bytes == Some(0)
+        || images.max_per_message == Some(0)
+        || images.max_per_request == Some(0)
+        || resize.max_width == Some(0)
+        || resize.max_height == Some(0)
+        || resize.max_bytes == Some(0)
+        || resize
+            .jpeg_quality
+            .is_some_and(|quality| !(1..=100).contains(&quality))
+    {
+        return Err(garde::Error::new(
+            "input limits must be positive; JPEG quality must be 1..=100",
+        ));
+    }
+    Ok(())
+}
+
+fn merge_input_limits(
+    base: Option<ModelInputLimits>,
+    overrides: Option<ModelInputLimits>,
+) -> Option<ModelInputLimits> {
+    let Some(overrides) = overrides else {
+        return base;
+    };
+    let mut base = base.unwrap_or_default();
+    macro_rules! overlay {
+        ($base:ident, $overrides:ident, $($field:ident),+) => {
+            $( $base.$field = $overrides.$field.or($base.$field); )+
+        };
+    }
+    overlay!(base, overrides, max_request_bytes);
+    if let Some(images) = overrides.images {
+        let mut merged = base.images.unwrap_or_default();
+        overlay!(merged, images, max_per_message, max_per_request);
+        if let Some(resize) = images.resize {
+            let mut profile = merged.resize.unwrap_or_default();
+            overlay!(
+                profile,
+                resize,
+                max_width,
+                max_height,
+                max_bytes,
+                jpeg_quality
+            );
+            merged.resize = Some(profile);
+        }
+        base.images = Some(merged);
+    }
+    Some(base)
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
@@ -588,6 +686,7 @@ impl From<ModelOverride> for PreparedOverride {
             input: value
                 .input
                 .map(|input| input.into_iter().map(Into::into).collect()),
+            input_limits: value.input_limits,
             cost: value.cost.map(Into::into),
             context_window: value.context_window,
             max_tokens: value.max_tokens,
@@ -976,6 +1075,7 @@ impl ModelDefinition {
             || vec![ModelInput::Text],
             |input| input.into_iter().map(Into::into).collect(),
         );
+        spec.input_limits = definition.input_limits;
         spec.cost = definition.cost.map(Into::into).unwrap_or_default();
         spec.context_window = context_window;
         spec.max_tokens = max_tokens;
@@ -1008,6 +1108,7 @@ pub(crate) fn apply_override(spec: &mut ModelSpec, value: &PreparedOverride) {
     if let Some(input) = &value.input {
         spec.input.clone_from(input);
     }
+    spec.input_limits = merge_input_limits(spec.input_limits, value.input_limits);
     if let Some(cost) = &value.cost {
         if let Some(input) = cost.input {
             spec.cost.input = input;
@@ -1245,6 +1346,9 @@ mod tests {
         assert!(encoded.contains("allowedFallbackModels"));
         assert!(encoded.contains("preferred_min_throughput"));
         assert!(encoded.contains("thinking.budget"));
+        assert!(encoded.contains("inputLimits"));
+        assert!(encoded.contains("jpegQuality"));
+        assert!(encoded.contains("maxPerMessage"));
     }
 
     #[test]
@@ -1308,6 +1412,87 @@ mod tests {
         assert_eq!(model.input, vec![ModelInput::Text, ModelInput::Image]);
         assert_eq!(model.cost.input, 1.0);
         assert_eq!(model.cost.tiers[0].input_tokens_above, 100_000);
+    }
+
+    #[test]
+    fn input_limits_compile_and_overrides_deep_merge_the_image_profile() {
+        let input = serde_json::json!({"providers":{"custom":{
+            "baseUrl":"https://example.test", "api":"openai-completions",
+            "models":[{"id":"vision", "inputLimits":{
+                "maxRequestBytes":123456, "images":{"maxPerMessage":4, "maxPerRequest":10,
+                    "resize":{"maxWidth":1000,"maxHeight":800,"maxBytes":5000,"jpegQuality":80}}
+            }}],
+            "modelOverrides":{"vision":{"inputLimits":{"images":{"maxPerMessage":2,
+                "resize":{"maxWidth":640,"jpegQuality":55}}}}}
+        }}});
+        let parsed: ModelsFile = serde_json::from_value(input).unwrap();
+        let provider = parsed.compile(&BTreeMap::new()).unwrap().remove(0);
+        let mut model = provider.models[0].spec.clone();
+        assert_eq!(
+            model
+                .input_limits
+                .unwrap()
+                .images
+                .unwrap()
+                .resize
+                .unwrap()
+                .max_width,
+            Some(1000)
+        );
+        apply_override(
+            &mut model,
+            &provider.model_overrides[&ModelId::new("vision")],
+        );
+        assert_eq!(
+            serde_json::to_value(model.input_limits).unwrap(),
+            serde_json::json!({
+                "maxRequestBytes":123456, "images":{"maxPerMessage":2,"maxPerRequest":10,
+                    "resize":{"maxWidth":640,"maxHeight":800,"maxBytes":5000,"jpegQuality":55}}
+            })
+        );
+        let original = model.input_limits;
+        apply_override(&mut model, &PreparedOverride::default());
+        assert_eq!(model.input_limits, original);
+        let empty = serde_json::from_value(serde_json::json!({"images":{"resize":{}}})).unwrap();
+        assert_eq!(merge_input_limits(original, Some(empty)), original);
+    }
+
+    #[test]
+    fn input_limits_validate_model_definitions_and_overrides() {
+        for limits in [
+            serde_json::json!({"maxRequestBytes":0}),
+            serde_json::json!({"images":{"maxPerMessage":0}}),
+            serde_json::json!({"images":{"maxPerRequest":0}}),
+            serde_json::json!({"images":{"resize":{"maxWidth":0}}}),
+            serde_json::json!({"images":{"resize":{"maxHeight":0}}}),
+            serde_json::json!({"images":{"resize":{"maxBytes":0}}}),
+            serde_json::json!({"images":{"resize":{"jpegQuality":0}}}),
+            serde_json::json!({"images":{"resize":{"jpegQuality":101}}}),
+        ] {
+            for entry in [
+                serde_json::json!({"models":[{"id":"vision","inputLimits":limits}]}),
+                serde_json::json!({"modelOverrides":{"vision":{"inputLimits":limits}}}),
+            ] {
+                let parsed: ModelsFile =
+                    serde_json::from_value(serde_json::json!({"providers":{"custom":entry}}))
+                        .unwrap();
+                let error = parsed.compile(&BTreeMap::new()).unwrap_err();
+                assert!(error.contains("input_limits"), "{error}");
+            }
+        }
+        // Pi accepts even an impossible positive limit; media produces an omission.
+        assert!(
+            validate_input_limits(
+                &Some(
+                    serde_json::from_value(serde_json::json!({
+                        "images":{"resize":{"maxBytes":1,"jpegQuality":100}}
+                    }))
+                    .unwrap()
+                ),
+                &()
+            )
+            .is_ok()
+        );
     }
 
     #[test]

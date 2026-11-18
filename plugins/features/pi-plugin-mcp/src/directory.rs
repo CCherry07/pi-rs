@@ -1,6 +1,6 @@
 //! Bounded discovery hints for servers whose schemas are loaded on demand.
 
-const INTRO: &str = "MCP servers whose tools are not declared to you. Load the tools of `tool_search` servers with `tool_search`.";
+const INTRO: &str = "MCP servers whose tools are not declared to you.";
 const MAX_SECTION: usize = 4096;
 const MAX_SUMMARY: usize = 250;
 
@@ -12,13 +12,16 @@ pub(crate) fn render_servers_section<'a>(
     if servers.is_empty() {
         return None;
     }
-    let intro = if servers.iter().any(|(_, _, _, reach)| *reach == "codemode") {
-        format!(
-            "{INTRO} Call tools of `codemode` servers from codemode scripts; discover them with searchTools() and read instructions with describeNamespace()."
-        )
-    } else {
-        INTRO.to_string()
-    };
+    let mut intro = INTRO.to_string();
+    if servers.iter().any(|(_, _, _, reach)| *reach == "codemode") {
+        intro.push_str(" Call the tools of `codemode` servers from codemode scripts.");
+    }
+    if servers
+        .iter()
+        .any(|(_, _, _, reach)| *reach == "tool_search")
+    {
+        intro.push_str(" Load the tools of `tool_search` servers with `tool_search`.");
+    }
     let heads = servers
         .iter()
         .map(|(name, _, _, reach)| format!("- mcp__{} ({reach})", name.replace('-', "_")))
@@ -28,7 +31,7 @@ pub(crate) fn render_servers_section<'a>(
             String::new()
         } else {
             format!(
-                "\n- … {count} more server{}; use tool_search or codemode searchTools()",
+                "\n- … {count} more server{}; find their tools with searchTools()",
                 if count == 1 { "" } else { "s" }
             )
         }
@@ -125,7 +128,7 @@ mod tests {
         assert_eq!(
             section,
             format!(
-                "{INTRO}\n- mcp__a (tool_search): Configured summary\n- mcp__z_docs (tool_search): Documentation server"
+                "{INTRO} Load the tools of `tool_search` servers with `tool_search`.\n- mcp__a (tool_search): Configured summary\n- mcp__z_docs (tool_search): Documentation server"
             )
         );
         assert!(render_servers_section(std::iter::empty()).is_none());
@@ -137,9 +140,27 @@ mod tests {
             [("docs", Some("Reference library"), None, "codemode")].into_iter(),
         )
         .unwrap();
-        assert!(section.contains("mcp__docs (codemode): Reference library"));
-        assert!(section.contains("searchTools()"));
-        assert!(section.contains("describeNamespace()"));
+        assert_eq!(
+            section,
+            "MCP servers whose tools are not declared to you. Call the tools of `codemode` servers from codemode scripts.\n- mcp__docs (codemode): Reference library"
+        );
+        assert!(!section.contains("tool_search"));
+    }
+
+    #[test]
+    fn mixed_servers_explain_only_their_reaches_in_pi_order() {
+        let section = render_servers_section(
+            [
+                ("docs", None, None, "tool_search"),
+                ("app", None, None, "codemode"),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(
+            section,
+            "MCP servers whose tools are not declared to you. Call the tools of `codemode` servers from codemode scripts. Load the tools of `tool_search` servers with `tool_search`.\n- mcp__app (codemode)\n- mcp__docs (tool_search)"
+        );
     }
 
     #[test]
@@ -166,6 +187,6 @@ mod tests {
         }))
         .unwrap();
         assert!(utf16_len(&section) <= MAX_SECTION);
-        assert!(section.contains("more servers; use tool_search or codemode searchTools()"));
+        assert!(section.contains("more servers; find their tools with searchTools()"));
     }
 }

@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'legacy/pi/packages/ai/src/providers'
-FIELDS = set('provider id name api baseUrl reasoning input cost contextWindow maxTokens thinkingLevelMap samplingParams compat'.split())
+FIELDS = set('provider id name api baseUrl reasoning input inputLimits cost contextWindow maxTokens thinkingLevelMap samplingParams compat'.split())
 SPECIAL = {'anthropic', 'openai-codex', 'openai', 'google', 'google-vertex', 'mistral', 'azure', 'openrouter', 'github-copilot', 'amazon-bedrock', 'xai', 'radius', 'typesafe'}
 OWNERS = {'openai': 'openai', 'openai-codex': 'openai', 'anthropic':'anthropic', 'google':'google', 'google-vertex':'google', 'mistral':'mistral', 'azure':'azure-openai', 'openrouter':'openrouter', 'github-copilot':'copilot', 'amazon-bedrock':'bedrock', 'xai':'xai'}
 

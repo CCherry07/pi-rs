@@ -12,6 +12,7 @@ pub mod config;
 mod directory;
 mod library;
 mod naming;
+mod output_schema;
 mod plugin;
 mod policy;
 mod resources;

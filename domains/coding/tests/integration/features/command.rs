@@ -116,6 +116,7 @@ async fn interactive(config: Config, ui: Arc<SelectionUi>) -> (Pi, PiSession) {
 
 fn toggle_all(ui: &SelectionUi) {
     ui.select([
+        Toggle("Hashline"),
         Toggle("Memory"),
         Toggle("Subagents"),
         Toggle("Schedule"),
@@ -206,7 +207,9 @@ async fn selector_chooses_project_scope_and_patches_only_edited_flags() {
     assert_feature_registrations(
         &session.current(),
         &Features {
+            hashline: false,
             memory: false,
+            subagents: false,
             schedule: false,
             skills: false,
             ..Features::all()
@@ -222,6 +225,7 @@ async fn cancel_and_unchanged_save_leave_files_and_generation_untouched() {
     let root = tempfile::tempdir().unwrap();
     let config = fixture_config(root.path());
     let path = config.agent_dir.join("settings.json");
+    let original_settings = fs::read(&path).unwrap();
     let ui = Arc::new(SelectionUi::default());
     let (pi, session) = interactive(config, ui.clone()).await;
     let original = session.current();
@@ -235,7 +239,7 @@ async fn cancel_and_unchanged_save_leave_files_and_generation_untouched() {
     ui.select([Confirm]);
     original.prompt("/features global").await.unwrap();
     assert!(Arc::ptr_eq(&original, &session.current()));
-    assert!(!path.exists());
+    assert_eq!(fs::read(&path).unwrap(), original_settings);
     assert!(!original.history().is_materialized());
     assert_feature_registrations(&original, &Features::all());
     pi.sessions().shutdown().await.unwrap();
@@ -260,7 +264,10 @@ async fn selector_cannot_enable_host_disabled_features_or_persist_them_as_overri
     );
     let saved: Value =
         serde_json::from_slice(&fs::read(pi.agent_dir().join("settings.json")).unwrap()).unwrap();
-    assert_eq!(saved, json!({"features": {"subagents": false}}));
+    assert_eq!(
+        saved,
+        json!({"features": {"hashline":true, "memory":true, "subagents":false, "schedule":true, "skills":true, "promptTemplates":true, "sessionTransfer":true}})
+    );
     assert!(ui.screens.lock().unwrap()[0][0].starts_with("[ ] Memory"));
     assert!(ui.screens.lock().unwrap()[0][0].contains("disabled by host"));
     pi.sessions().shutdown().await.unwrap();
@@ -322,6 +329,7 @@ async fn unsupported_scope_and_noninteractive_use_do_not_write_settings() {
     let mut config = fixture_config(root.path());
     config.trust_override = Some(false);
     let path = config.agent_dir.join("settings.json");
+    let original_settings = fs::read(&path).unwrap();
     let project_path = config.cwd.join(".pi/settings.json");
     let ui = Arc::new(SelectionUi::default());
     let (pi, session) = interactive(config.clone(), ui.clone()).await;
@@ -339,7 +347,7 @@ async fn unsupported_scope_and_noninteractive_use_do_not_write_settings() {
     }
     assert!(ui.screens.lock().unwrap().is_empty());
     assert!(!project_path.exists());
-    assert!(!path.exists());
+    assert_eq!(fs::read(&path).unwrap(), original_settings);
     pi.sessions().shutdown().await.unwrap();
 
     let (pi, session) = create_session(config).await;
@@ -350,7 +358,7 @@ async fn unsupported_scope_and_noninteractive_use_do_not_write_settings() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("interactive TUI"), "{error}");
-    assert!(!path.exists());
+    assert_eq!(fs::read(&path).unwrap(), original_settings);
     assert!(!session.current().history().is_materialized());
     pi.sessions().shutdown().await.unwrap();
 }

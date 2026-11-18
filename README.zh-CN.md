@@ -332,9 +332,9 @@ project/
 ## 功能开关
 
 全局 `~/.pi/agent/settings.json` 和可信项目的 `.pi/settings.json` 支持 `features` 对象，
-包含布尔字段 `memory`、`subagents`、`schedule`、`skills`、`promptTemplates` 和
-`sessionTransfer`。默认全部开启，项目配置按字段覆盖全局配置。例如
-`{"features":{"schedule":false}}` 会关闭内置定时任务。修改后在 TUI 执行 `/reload`
+包含布尔字段 `hashline`、`memory`、`subagents`、`schedule`、`skills`、`promptTemplates` 和
+`sessionTransfer`。前四项默认关闭，后三项默认开启，项目配置按字段覆盖全局配置。例如
+`{"features":{"schedule":true}}` 会开启内置定时任务。修改后在 TUI 执行 `/reload`
 或创建新会话生效，关闭功能会保留已有数据。完整示例见[功能配置](apps/pi-cli/README.md#runtime-feature-switches)。
 
 ## 记忆与 Skill 整理

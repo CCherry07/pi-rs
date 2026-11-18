@@ -223,7 +223,7 @@ fn untrusted_project_settings_are_never_read_and_reads_do_not_create_pi_director
 }
 
 #[test]
-fn features_default_to_enabled_and_merge_only_trusted_project_overrides() {
+fn rust_extensions_default_off_and_merge_only_trusted_project_overrides() {
     let root = tempfile::tempdir().unwrap();
     let agent_dir = root.path().join("agent");
     let cwd = root.path().join("project");
@@ -232,9 +232,10 @@ fn features_default_to_enabled_and_merge_only_trusted_project_overrides() {
     assert_eq!(
         manager.load(&context).effective().features,
         FeatureSettings {
-            memory: true,
-            subagents: true,
-            schedule: true,
+            hashline: false,
+            memory: false,
+            subagents: false,
+            schedule: false,
             skills: true,
             prompt_templates: true,
             session_transfer: true,
@@ -259,6 +260,7 @@ fn features_default_to_enabled_and_merge_only_trusted_project_overrides() {
     assert_eq!(
         trusted.effective().features,
         FeatureSettings {
+            hashline: false,
             memory: true,
             subagents: false,
             schedule: false,

@@ -1,0 +1,1280 @@
+{
+  "oracleRevision": "05fd3fbda0bbb9a1c7a76e4bf92ab58ed77c8d94",
+  "tools": [
+    {
+      "name": "read",
+      "label": "read",
+      "description": "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path to the file to read (relative or absolute)"
+          },
+          "offset": {
+            "type": "number",
+            "description": "Line number to start reading from (1-indexed)"
+          },
+          "limit": {
+            "type": "number",
+            "description": "Maximum number of lines to read"
+          }
+        }
+      },
+      "outputSchema": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "object",
+            "required": [
+              "type",
+              "data",
+              "mimeType",
+              "note"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "image"
+              },
+              "data": {
+                "type": "string"
+              },
+              "mimeType": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "constrainedSampling": {
+        "type": "json_schema",
+        "strict": "prefer"
+      },
+      "promptSnippet": "Read file contents",
+      "promptGuidelines": [
+        "Use read to examine files instead of cat or sed."
+      ]
+    },
+    {
+      "name": "bash",
+      "label": "bash",
+      "description": "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Shell command to execute"
+          },
+          "timeout": {
+            "type": "number",
+            "description": "Timeout in seconds (optional, no default timeout)"
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "output",
+          "truncated",
+          "exit_code",
+          "wall_time_seconds"
+        ],
+        "properties": {
+          "output": {
+            "type": "string",
+            "description": "Combined stdout and stderr, possibly truncated"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "full_output_path": {
+            "type": "string",
+            "description": "Full output, when truncated"
+          },
+          "exit_code": {
+            "type": "number"
+          },
+          "wall_time_seconds": {
+            "type": "number"
+          }
+        }
+      },
+      "constrainedSampling": {
+        "type": "json_schema",
+        "strict": "prefer"
+      },
+      "promptSnippet": "Execute bash commands (ls, grep, find, etc.)",
+      "promptGuidelines": [
+        "You can inspect PI_* environment variables for current model and session details."
+      ]
+    },
+    {
+      "name": "powershell",
+      "label": "powershell",
+      "description": "Execute a PowerShell command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "command"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Shell command to execute"
+          },
+          "timeout": {
+            "type": "number",
+            "description": "Timeout in seconds (optional, no default timeout)"
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "output",
+          "truncated",
+          "exit_code",
+          "wall_time_seconds"
+        ],
+        "properties": {
+          "output": {
+            "type": "string",
+            "description": "Combined stdout and stderr, possibly truncated"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "full_output_path": {
+            "type": "string",
+            "description": "Full output, when truncated"
+          },
+          "exit_code": {
+            "type": "number"
+          },
+          "wall_time_seconds": {
+            "type": "number"
+          }
+        }
+      },
+      "constrainedSampling": {
+        "type": "json_schema",
+        "strict": "prefer"
+      },
+      "promptSnippet": "Execute PowerShell commands",
+      "promptGuidelines": [
+        "You can inspect PI_* environment variables for current model and session details."
+      ]
+    },
+    {
+      "name": "edit",
+      "label": "edit",
+      "description": "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes affect the same block or nearby lines, merge them into one edit instead of emitting overlapping edits. Do not include large unchanged regions just to connect distant changes.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "path",
+          "edits"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path to the file to edit (relative or absolute)"
+          },
+          "edits": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "oldText",
+                "newText"
+              ],
+              "properties": {
+                "oldText": {
+                  "type": "string",
+                  "description": "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."
+                },
+                "newText": {
+                  "type": "string",
+                  "description": "Replacement text for this targeted edit."
+                }
+              }
+            },
+            "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead."
+          }
+        }
+      },
+      "outputSchema": null,
+      "constrainedSampling": {
+        "type": "json_schema",
+        "strict": "prefer"
+      },
+      "promptSnippet": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+      "promptGuidelines": [
+        "Use edit for targeted changes. Batch changes to one file in a single call.",
+        "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+      ]
+    },
+    {
+      "name": "write",
+      "label": "write",
+      "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "path",
+          "content"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path to the file to write (relative or absolute)"
+          },
+          "content": {
+            "type": "string",
+            "description": "Content to write to the file"
+          }
+        }
+      },
+      "outputSchema": null,
+      "constrainedSampling": {
+        "type": "json_schema",
+        "strict": "prefer"
+      },
+      "promptSnippet": "Create or overwrite files",
+      "promptGuidelines": [
+        "Use write only for new files or complete rewrites."
+      ]
+    },
+    {
+      "name": "grep",
+      "label": "grep",
+      "description": "Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to 100 matches or 50KB (whichever is hit first). Long lines are truncated to 500 chars.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "pattern"
+        ],
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Search pattern (regex or literal string)"
+          },
+          "path": {
+            "type": "string",
+            "description": "Directory or file to search (default: current directory)"
+          },
+          "glob": {
+            "type": "string",
+            "description": "Filter files by glob pattern relative to path, e.g. 'src/**/*.ts'. Without '/', e.g. '*.ts', it matches file names at any depth"
+          },
+          "ignoreCase": {
+            "type": "boolean",
+            "description": "Case-insensitive search (default: false)"
+          },
+          "literal": {
+            "type": "boolean",
+            "description": "Treat pattern as literal string instead of regex (default: false)"
+          },
+          "context": {
+            "type": "number",
+            "description": "Number of lines to show before and after each match (default: 0)"
+          },
+          "limit": {
+            "type": "number",
+            "description": "Maximum number of matches to return (default: 100)"
+          }
+        }
+      },
+      "outputSchema": null,
+      "constrainedSampling": null,
+      "promptSnippet": "Search file contents for patterns (respects .gitignore)",
+      "promptGuidelines": []
+    },
+    {
+      "name": "find",
+      "label": "find",
+      "description": "Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to 1000 results or 50KB (whichever is hit first).",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "pattern"
+        ],
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Glob pattern relative to the search directory, e.g. 'src/**/*.ts'. Without '/', e.g. '*.ts', it matches file names at any depth"
+          },
+          "path": {
+            "type": "string",
+            "description": "Directory to search in (default: current directory)"
+          },
+          "limit": {
+            "type": "number",
+            "description": "Maximum number of results (default: 1000)"
+          }
+        }
+      },
+      "outputSchema": null,
+      "constrainedSampling": null,
+      "promptSnippet": "Find files by glob pattern (respects .gitignore)",
+      "promptGuidelines": []
+    },
+    {
+      "name": "ls",
+      "label": "ls",
+      "description": "List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to 500 entries or 50KB (whichever is hit first).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Directory to list (default: current directory)"
+          },
+          "limit": {
+            "type": "number",
+            "description": "Maximum number of entries to return (default: 500)"
+          }
+        }
+      },
+      "outputSchema": null,
+      "constrainedSampling": null,
+      "promptSnippet": "List directory contents",
+      "promptGuidelines": []
+    },
+    {
+      "name": "codemode",
+      "label": "codemode",
+      "description": "Run JavaScript that calls other tools. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS sandbox: top-level `await` and `return` work. No Node, file system, network, or timers.\n- `await tools.<name>({ ...args })` resolves to a string, or an object if the tool's declaration says so, and rejects with an Error on failure. A tool whose declaration returns an object resolves on failure too when it returned that object; check its fields. Calls still running when the script ends are cancelled.\n- Optional first line: `// @options: {\"max_output_tokens\": 10000, \"timeout_ms\": 60000}`\n\nGlobals:\n- `text(value)`, `image(dataUrlOrImageBlock)`, `console.log(...)`, and top-level `return` add output; `exit()` ends the script. With several text items, each starts with a `==> text N/M <==` line, and `console` lines follow the other output in one `<console_output>` block. `image()` also saves the image to a temp file and the result names its path.\n- `store(key, value)` and `load(key)` keep JSON values across codemode calls.\n- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.\n- `models`: classifiers and image generation. Read /pi/docs/codemode.md first.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Raw JavaScript source."
+          }
+        }
+      },
+      "outputSchema": null,
+      "constrainedSampling": {
+        "type": "grammar",
+        "variants": {
+          "openai_lark": "\nstart: options_source | plain_source\noptions_source: OPTIONS_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nOPTIONS_LINE: /[ \\t]*\\/\\/ @options:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n"
+        }
+      },
+      "promptSnippet": "Run JavaScript that calls other tools",
+      "promptGuidelines": [
+        "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+      ]
+    },
+    {
+      "name": "tool_search",
+      "label": "tool_search",
+      "description": "# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nSome of the tools, such as tools of MCP servers, may not have been provided to you upfront, and you should use this tool (`tool_search`) to search for the required tools. For MCP tool discovery, always use `tool_search`.",
+      "parameters": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query for deferred tools."
+          },
+          "limit": {
+            "type": "number",
+            "description": "Maximum number of tools to return. Defaults to 8."
+          }
+        }
+      },
+      "outputSchema": null,
+      "constrainedSampling": null,
+      "promptSnippet": "Search for tools that are not loaded yet and load the matches",
+      "promptGuidelines": []
+    }
+  ],
+  "prompts": [
+    {
+      "name": "default",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        }
+      },
+      "expected": "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call\n- write: Create or overwrite files\n\nAdditional tools may be available.\n</tools>\n\n<rules>\n- Use bash for file operations like ls, rg, find\n- Use read to examine files instead of cat or sed.\n- You can inspect PI_* environment variables for current model and session details.\n- Use edit for targeted changes. Batch changes to one file in a single call.\n- Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.\n- Use write only for new files or complete rewrites.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /pi/README.md\n- Additional docs: /pi/docs\n- Examples: /pi/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.\n</docs>\n\n<cwd>\n/project\n</cwd>"
+    },
+    {
+      "name": "all-tools",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "selectedTools": [
+          "read",
+          "bash",
+          "powershell",
+          "edit",
+          "write",
+          "grep",
+          "find",
+          "ls",
+          "codemode",
+          "tool_search"
+        ]
+      },
+      "expected": "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n- powershell: Execute PowerShell commands\n- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call\n- write: Create or overwrite files\n- grep: Search file contents for patterns (respects .gitignore)\n- find: Find files by glob pattern (respects .gitignore)\n- ls: List directory contents\n- codemode: Run JavaScript that calls other tools\n- tool_search: Search for tools that are not loaded yet and load the matches\n\nAdditional tools may be available.\n</tools>\n\n<rules>\n- Use read to examine files instead of cat or sed.\n- You can inspect PI_* environment variables for current model and session details.\n- Use edit for targeted changes. Batch changes to one file in a single call.\n- Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.\n- Use write only for new files or complete rewrites.\n- Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /pi/README.md\n- Additional docs: /pi/docs\n- Examples: /pi/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.\n</docs>\n\n<cwd>\n/project\n</cwd>"
+    },
+    {
+      "name": "read-only",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "selectedTools": [
+          "read",
+          "grep",
+          "find",
+          "ls"
+        ]
+      },
+      "expected": "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- read: Read file contents\n- grep: Search file contents for patterns (respects .gitignore)\n- find: Find files by glob pattern (respects .gitignore)\n- ls: List directory contents\n\nAdditional tools may be available.\n</tools>\n\n<rules>\n- Use read to examine files instead of cat or sed.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /pi/README.md\n- Additional docs: /pi/docs\n- Examples: /pi/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.\n</docs>\n\n<cwd>\n/project\n</cwd>"
+    },
+    {
+      "name": "powershell",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "selectedTools": [
+          "powershell"
+        ]
+      },
+      "expected": "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- powershell: Execute PowerShell commands\n\nAdditional tools may be available.\n</tools>\n\n<rules>\n- Use PowerShell for file operations like listing, searching, and finding files\n- You can inspect PI_* environment variables for current model and session details.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /pi/README.md\n- Additional docs: /pi/docs\n- Examples: /pi/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.\n</docs>\n\n<cwd>\n/project\n</cwd>"
+    },
+    {
+      "name": "both-shells",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "selectedTools": [
+          "bash",
+          "powershell"
+        ]
+      },
+      "expected": "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- bash: Execute bash commands (ls, grep, find, etc.)\n- powershell: Execute PowerShell commands\n\nAdditional tools may be available.\n</tools>\n\n<rules>\n- Use bash or PowerShell for file operations like listing, searching, and finding files\n- You can inspect PI_* environment variables for current model and session details.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /pi/README.md\n- Additional docs: /pi/docs\n- Examples: /pi/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.\n</docs>\n\n<cwd>\n/project\n</cwd>"
+    },
+    {
+      "name": "skills",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "skills": [
+          {
+            "name": "inspect",
+            "description": "Inspect <code> & files",
+            "filePath": "/skills/inspect/SKILL.md",
+            "baseDir": "/skills/inspect",
+            "sourceInfo": {},
+            "disableModelInvocation": false
+          },
+          {
+            "name": "manual-only",
+            "description": "Inspect <code> & files",
+            "filePath": "/skills/inspect/SKILL.md",
+            "baseDir": "/skills/inspect",
+            "sourceInfo": {},
+            "disableModelInvocation": true
+          }
+        ]
+      },
+      "expected": "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call\n- write: Create or overwrite files\n\nAdditional tools may be available.\n</tools>\n\n<rules>\n- Use bash for file operations like ls, rg, find\n- Use read to examine files instead of cat or sed.\n- You can inspect PI_* environment variables for current model and session details.\n- Use edit for targeted changes. Batch changes to one file in a single call.\n- Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.\n- Use write only for new files or complete rewrites.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /pi/README.md\n- Additional docs: /pi/docs\n- Examples: /pi/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.\n</docs>\n\n<skills>\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nResolve relative paths against the skill's directory (parent of SKILL.md). Use absolute paths in tool calls.\n\n<available_skills>\n  <skill>\n    <name>inspect</name>\n    <description>Inspect &lt;code&gt; &amp; files</description>\n    <location>/skills/inspect/SKILL.md</location>\n  </skill>\n</available_skills>\n</skills>\n\n<cwd>\n/project\n</cwd>"
+    },
+    {
+      "name": "bash-reader",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "selectedTools": [
+          "bash"
+        ],
+        "skills": [
+          {
+            "name": "inspect",
+            "description": "Inspect <code> & files",
+            "filePath": "/skills/inspect/SKILL.md",
+            "baseDir": "/skills/inspect",
+            "sourceInfo": {},
+            "disableModelInvocation": false
+          }
+        ]
+      },
+      "expected": "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- bash: Execute bash commands (ls, grep, find, etc.)\n\nAdditional tools may be available.\n</tools>\n\n<rules>\n- Use bash for file operations like ls, rg, find\n- You can inspect PI_* environment variables for current model and session details.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /pi/README.md\n- Additional docs: /pi/docs\n- Examples: /pi/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.\n</docs>\n\n<skills>\nThe following skills provide specialized instructions for specific tasks.\nUse bash to load a skill's file when the task matches its description.\nResolve relative paths against the skill's directory (parent of SKILL.md). Use absolute paths in tool calls.\n\n<available_skills>\n  <skill>\n    <name>inspect</name>\n    <description>Inspect &lt;code&gt; &amp; files</description>\n    <location>/skills/inspect/SKILL.md</location>\n  </skill>\n</available_skills>\n</skills>\n\n<cwd>\n/project\n</cwd>"
+    },
+    {
+      "name": "hidden-reader",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "selectedTools": [
+          "read",
+          "codemode"
+        ],
+        "hiddenTools": [
+          "read"
+        ],
+        "skills": [
+          {
+            "name": "inspect",
+            "description": "Inspect <code> & files",
+            "filePath": "/skills/inspect/SKILL.md",
+            "baseDir": "/skills/inspect",
+            "sourceInfo": {},
+            "disableModelInvocation": false
+          }
+        ]
+      },
+      "expected": "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- codemode: Run JavaScript that calls other tools\n\nAdditional tools may be available.\n</tools>\n\n<rules>\n- Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /pi/README.md\n- Additional docs: /pi/docs\n- Examples: /pi/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.\n</docs>\n\n<skills>\nThe following skills provide specialized instructions for specific tasks.\nLoad a skill's file when the task matches its description.\nResolve relative paths against the skill's directory (parent of SKILL.md). Use absolute paths in tool calls.\n\n<available_skills>\n  <skill>\n    <name>inspect</name>\n    <description>Inspect &lt;code&gt; &amp; files</description>\n    <location>/skills/inspect/SKILL.md</location>\n  </skill>\n</available_skills>\n</skills>\n\n<cwd>\n/project\n</cwd>"
+    },
+    {
+      "name": "no-reader",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "selectedTools": [],
+        "skills": [
+          {
+            "name": "inspect",
+            "description": "Inspect <code> & files",
+            "filePath": "/skills/inspect/SKILL.md",
+            "baseDir": "/skills/inspect",
+            "sourceInfo": {},
+            "disableModelInvocation": false
+          }
+        ]
+      },
+      "expected": "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n(none)\n\nAdditional tools may be available.\n</tools>\n\n<rules>\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /pi/README.md\n- Additional docs: /pi/docs\n- Examples: /pi/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.\n</docs>\n\n<cwd>\n/project\n</cwd>"
+    },
+    {
+      "name": "context-and-append",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "appendSystemPrompt": "Additional instructions",
+        "contextFiles": [
+          {
+            "path": "/project/AGENTS.md",
+            "content": "Repository instructions\nwith another line"
+          }
+        ],
+        "skills": [
+          {
+            "name": "inspect",
+            "description": "Inspect <code> & files",
+            "filePath": "/skills/inspect/SKILL.md",
+            "baseDir": "/skills/inspect",
+            "sourceInfo": {},
+            "disableModelInvocation": false
+          }
+        ]
+      },
+      "expected": "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call\n- write: Create or overwrite files\n\nAdditional tools may be available.\n</tools>\n\n<rules>\n- Use bash for file operations like ls, rg, find\n- Use read to examine files instead of cat or sed.\n- You can inspect PI_* environment variables for current model and session details.\n- Use edit for targeted changes. Batch changes to one file in a single call.\n- Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.\n- Use write only for new files or complete rewrites.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /pi/README.md\n- Additional docs: /pi/docs\n- Examples: /pi/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.\n</docs>\n\n<addendum>\nAdditional instructions\n</addendum>\n\n<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/project/AGENTS.md\">\nRepository instructions\nwith another line\n</project_instructions>\n</project_context>\n\n<skills>\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nResolve relative paths against the skill's directory (parent of SKILL.md). Use absolute paths in tool calls.\n\n<available_skills>\n  <skill>\n    <name>inspect</name>\n    <description>Inspect &lt;code&gt; &amp; files</description>\n    <location>/skills/inspect/SKILL.md</location>\n  </skill>\n</available_skills>\n</skills>\n\n<cwd>\n/project\n</cwd>"
+    },
+    {
+      "name": "custom",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "customPrompt": "Custom role",
+        "appendSystemPrompt": "Keep addendum",
+        "contextFiles": [
+          {
+            "path": "/project/CLAUDE.md",
+            "content": "Project rules"
+          }
+        ],
+        "skills": [
+          {
+            "name": "inspect",
+            "description": "Inspect <code> & files",
+            "filePath": "/skills/inspect/SKILL.md",
+            "baseDir": "/skills/inspect",
+            "sourceInfo": {},
+            "disableModelInvocation": false
+          }
+        ]
+      },
+      "expected": "Custom role\n\n<addendum>\nKeep addendum\n</addendum>\n\n<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path=\"/project/CLAUDE.md\">\nProject rules\n</project_instructions>\n</project_context>\n\n<skills>\nThe following skills provide specialized instructions for specific tasks.\nUse the read tool to load a skill's file when the task matches its description.\nResolve relative paths against the skill's directory (parent of SKILL.md). Use absolute paths in tool calls.\n\n<available_skills>\n  <skill>\n    <name>inspect</name>\n    <description>Inspect &lt;code&gt; &amp; files</description>\n    <location>/skills/inspect/SKILL.md</location>\n  </skill>\n</available_skills>\n</skills>\n\n<cwd>\n/project\n</cwd>"
+    },
+    {
+      "name": "empty-custom",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "customPrompt": ""
+      },
+      "expected": "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call\n- write: Create or overwrite files\n\nAdditional tools may be available.\n</tools>\n\n<rules>\n- Use bash for file operations like ls, rg, find\n- Use read to examine files instead of cat or sed.\n- You can inspect PI_* environment variables for current model and session details.\n- Use edit for targeted changes. Batch changes to one file in a single call.\n- Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.\n- Use write only for new files or complete rewrites.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /pi/README.md\n- Additional docs: /pi/docs\n- Examples: /pi/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.\n</docs>\n\n<cwd>\n/project\n</cwd>"
+    },
+    {
+      "name": "forced",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "forceSystemPrompt": "Exact replacement\n",
+        "appendSystemPrompt": "Not included",
+        "skills": [
+          {
+            "name": "inspect",
+            "description": "Inspect <code> & files",
+            "filePath": "/skills/inspect/SKILL.md",
+            "baseDir": "/skills/inspect",
+            "sourceInfo": {},
+            "disableModelInvocation": false
+          }
+        ],
+        "sections": {
+          "preamble": "invalid but ignored by force"
+        }
+      },
+      "expected": "Exact replacement\n"
+    },
+    {
+      "name": "forced-empty",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "forceSystemPrompt": "",
+        "skills": [
+          {
+            "name": "inspect",
+            "description": "Inspect <code> & files",
+            "filePath": "/skills/inspect/SKILL.md",
+            "baseDir": "/skills/inspect",
+            "sourceInfo": {},
+            "disableModelInvocation": false
+          }
+        ]
+      },
+      "expected": ""
+    },
+    {
+      "name": "sections",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "sections": {
+          "z_extra": "First extra",
+          "cwd": "Override cwd",
+          "a_extra": "Last extra",
+          "empty": ""
+        }
+      },
+      "expected": "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call\n- write: Create or overwrite files\n\nAdditional tools may be available.\n</tools>\n\n<rules>\n- Use bash for file operations like ls, rg, find\n- Use read to examine files instead of cat or sed.\n- You can inspect PI_* environment variables for current model and session details.\n- Use edit for targeted changes. Batch changes to one file in a single call.\n- Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.\n- Use write only for new files or complete rewrites.\n- Be concise in your responses\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /pi/README.md\n- Additional docs: /pi/docs\n- Examples: /pi/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.\n</docs>\n\n<cwd>\nOverride cwd\n</cwd>\n\n<z_extra>\nFirst extra\n</z_extra>\n\n<a_extra>\nLast extra\n</a_extra>"
+    },
+    {
+      "name": "rules",
+      "options": {
+        "cwd": "/project",
+        "toolSnippets": {
+          "read": "Read file contents",
+          "bash": "Execute bash commands (ls, grep, find, etc.)",
+          "powershell": "Execute PowerShell commands",
+          "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+          "write": "Create or overwrite files",
+          "grep": "Search file contents for patterns (respects .gitignore)",
+          "find": "Find files by glob pattern (respects .gitignore)",
+          "ls": "List directory contents",
+          "codemode": "Run JavaScript that calls other tools",
+          "tool_search": "Search for tools that are not loaded yet and load the matches"
+        },
+        "toolGuidelines": {
+          "read": [
+            "Use read to examine files instead of cat or sed."
+          ],
+          "bash": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "powershell": [
+            "You can inspect PI_* environment variables for current model and session details."
+          ],
+          "edit": [
+            "Use edit for targeted changes. Batch changes to one file in a single call.",
+            "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+          ],
+          "write": [
+            "Use write only for new files or complete rewrites."
+          ],
+          "grep": [],
+          "find": [],
+          "ls": [],
+          "codemode": [
+            "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+          ],
+          "tool_search": []
+        },
+        "selectedTools": [
+          "read",
+          "bash"
+        ],
+        "promptGuidelines": [
+          "  Be concise in your responses  ",
+          "",
+          "Extra rule",
+          "Extra rule"
+        ]
+      },
+      "expected": "You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.\n\n<tools>\n- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n\nAdditional tools may be available.\n</tools>\n\n<rules>\n- Use bash for file operations like ls, rg, find\n- Use read to examine files instead of cat or sed.\n- You can inspect PI_* environment variables for current model and session details.\n- Be concise in your responses\n- Extra rule\n- Show file paths clearly when working with files\n</rules>\n\n<docs>\nPi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):\n- Main documentation: /pi/README.md\n- Additional docs: /pi/docs\n- Examples: /pi/examples (extensions, custom tools, SDK)\n- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory\n- When asked about: extensions (docs/extensions.md, examples/extensions/), themes (docs/themes.md), skills (docs/skills.md), prompt templates (docs/prompt-templates.md), TUI components (docs/tui.md), keybindings (docs/keybindings.md), SDK integrations (docs/sdk.md), custom providers (docs/custom-provider.md), adding models (docs/models.md), packages (docs/packages.md), environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md), codemode scripts and non-LLM models such as classifiers and image models (docs/codemode.md)\n- Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.\n</docs>\n\n<cwd>\n/project\n</cwd>"
+    }
+  ]
+}

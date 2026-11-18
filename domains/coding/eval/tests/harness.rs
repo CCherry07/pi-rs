@@ -160,7 +160,7 @@ async fn product_run_uses_isolated_settings_and_persists_native_artifacts() {
         run.observation
             .system_prompt
             .unwrap()
-            .contains("Available tools:\n(none)")
+            .contains("<tools>\n(none)")
     );
     assert_eq!(
         run.artifacts
@@ -248,7 +248,7 @@ async fn documentation_treatment_preserves_append_and_context_across_reload() {
         assert!(!prompt.contains("Pi documentation (read only"));
         assert!(prompt.contains("Keep appended instructions."));
         assert!(prompt.contains("Keep project context."));
-        assert!(prompt.contains("Current working directory:"));
+        assert!(prompt.contains("<cwd>\n"));
     }
     let observed = run.observation.system_prompt.unwrap();
     assert!(observed.contains("Keep appended instructions."));

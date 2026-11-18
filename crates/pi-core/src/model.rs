@@ -94,6 +94,43 @@ impl ModelCost {
     }
 }
 
+/// Cache-safe image profile applied before an image enters conversation history.
+/// Missing fields use the media processor's defaults.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelImageResizeOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_height: Option<u32>,
+    /// Exclusive base64-encoded payload limit, not the source file size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jpeg_quality: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelImageInputLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resize: Option<ModelImageResizeOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_message: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_request: Option<usize>,
+}
+
+/// Provider-neutral input constraints contributed by the model catalog.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInputLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<ModelImageInputLimits>,
+}
+
 /// Immutable model metadata contributed by a provider/catalog plugin.
 ///
 /// Routing credentials and resolved headers deliberately stay inside the
@@ -108,6 +145,8 @@ pub struct ModelSpec {
     pub base_url: Option<String>,
     pub reasoning: bool,
     pub input: Vec<ModelInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_limits: Option<ModelInputLimits>,
     pub cost: ModelCost,
     pub context_window: u64,
     pub max_tokens: u64,
@@ -134,6 +173,7 @@ impl ModelSpec {
             base_url: None,
             reasoning: false,
             input: vec![ModelInput::Text],
+            input_limits: None,
             cost: ModelCost::default(),
             context_window: 128_000,
             max_tokens: 16_384,
@@ -212,6 +252,36 @@ mod cost_tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn input_limits_are_optional_and_round_trip_with_pi_field_names() {
+        let model = ModelSpec::new("test", "test", "Test", "test");
+        let mut value = serde_json::to_value(&model).unwrap();
+        assert!(value.get("inputLimits").is_none());
+        assert_eq!(
+            serde_json::from_value::<ModelSpec>(value.clone()).unwrap(),
+            model
+        );
+        let limits = serde_json::json!({
+            "maxRequestBytes": 20_000_000,
+            "images": {"maxPerMessage": 10, "maxPerRequest": 50,
+                "resize": {"maxWidth": 1568, "maxHeight": 1568, "maxBytes": 4_000_000, "jpegQuality": 85}}
+        });
+        value["inputLimits"] = limits.clone();
+        let model: ModelSpec = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            model
+                .input_limits
+                .unwrap()
+                .images
+                .unwrap()
+                .resize
+                .unwrap()
+                .max_width,
+            Some(1568)
+        );
+        assert_eq!(serde_json::to_value(model).unwrap()["inputLimits"], limits);
     }
 
     #[test]

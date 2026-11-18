@@ -11,16 +11,7 @@ use serde_json::json;
 
 mod command;
 
-const CORE_TOOLS: &[&str] = &[
-    "read",
-    "grep",
-    "find",
-    "ls",
-    "write",
-    "edit",
-    "hashline_edit",
-    "bash",
-];
+const CORE_TOOLS: &[&str] = &["read", "write", "edit", "bash"];
 const MEMORY_TOOLS: &[&str] = &[
     "memory",
     "memory_search",
@@ -39,8 +30,9 @@ const SUBAGENT_TOOLS: &[&str] = &[
 ];
 const SKILL_NAME: &str = "sdk-feature-skill";
 
-fn feature_values(features: &Features) -> [bool; 6] {
+fn feature_values(features: &Features) -> [bool; 7] {
     [
+        features.hashline,
         features.memory,
         features.subagents,
         features.schedule,
@@ -55,6 +47,7 @@ fn write_features(path: &Path, features: Features) {
     fs::write(
         path,
         json!({"features": {
+            "hashline": features.hashline,
             "memory": features.memory,
             "subagents": features.subagents,
             "schedule": features.schedule,
@@ -99,6 +92,9 @@ fn fixture_config(root: &Path) -> Config {
         r#"{"providers":{"features-fixture":{"baseUrl":"https://features.invalid/v1","api":"openai-completions","apiKey":"fixture-key","models":[{"id":"fixture-model"}]}}}"#,
     )
     .unwrap();
+    // These feature lifecycle cases explicitly opt in. Production defaults
+    // intentionally expose only Pi core tools, not Rust feature extensions.
+    write_features(&agent_dir.join("settings.json"), Features::all());
     let mut config = Config::new(cwd, agent_dir);
     config.provider = "features-fixture".to_string();
     config.model = Some("fixture-model".to_string());
@@ -145,6 +141,7 @@ fn assert_feature_registrations(session: &AgentSession, features: &Features) {
         .collect::<BTreeSet<_>>();
     for (names, enabled) in [
         (CORE_TOOLS, true),
+        (&["hashline_edit"][..], features.hashline),
         (MEMORY_TOOLS, features.memory),
         (SUBAGENT_TOOLS, features.subagents),
         (&["schedule"][..], features.schedule),
@@ -153,6 +150,17 @@ fn assert_feature_registrations(session: &AgentSession, features: &Features) {
             assert_eq!(tools.contains(*name), enabled, "registered tool {name}");
             assert_eq!(active.contains(*name), enabled, "active tool {name}");
         }
+    }
+    for name in [
+        "grep",
+        "find",
+        "ls",
+        "powershell",
+        "codemode",
+        "tool_search",
+    ] {
+        assert!(tools.contains(name), "registered inactive tool {name}");
+        assert!(!active.contains(name), "inactive tool {name}");
     }
     for (names, enabled) in [
         (
@@ -187,9 +195,9 @@ fn assert_feature_registrations(session: &AgentSession, features: &Features) {
     }
     let feature_plugins = [
         ("prompt-templates", features.prompt_templates),
+        ("skills", features.skills),
         ("memory-hermes", features.memory),
         ("subagents", features.subagents),
-        ("skills", features.skills),
         ("session-transfer", features.session_transfer),
         ("schedule", features.schedule),
     ];
@@ -251,18 +259,18 @@ async fn projected_prompt(session: &AgentSession) -> String {
 
 #[test]
 fn features_default_and_all_enable_every_feature_and_none_disables_every_feature() {
-    assert_eq!(feature_values(&Features::default()), [true; 6]);
-    assert_eq!(feature_values(&Features::all()), [true; 6]);
-    assert_eq!(feature_values(&Features::none()), [false; 6]);
+    assert_eq!(feature_values(&Features::default()), [true; 7]);
+    assert_eq!(feature_values(&Features::all()), [true; 7]);
+    assert_eq!(feature_values(&Features::none()), [false; 7]);
     let root = tempfile::tempdir().unwrap();
     assert_eq!(
         feature_values(&fixture_config(root.path()).features),
-        [true; 6]
+        [true; 7]
     );
 }
 
 #[tokio::test]
-async fn default_features_retain_existing_product_registrations_and_skill_prompt() {
+async fn explicitly_enabled_features_retain_registrations_and_skill_prompt() {
     let root = tempfile::tempdir().unwrap();
     let (pi, session) = create_session(fixture_config(root.path())).await;
     assert_feature_registrations(&session.current(), &Features::all());
@@ -578,12 +586,8 @@ async fn settings_features_can_be_reenabled_without_mutating_other_sessions_or_d
         } else {
             Features::none()
         };
-        if enabled {
-            // Removing an override restores defaults, including after a previous reload.
-            fs::write(&settings_path, "{}").unwrap();
-        } else {
-            write_features(&settings_path, expected);
-        }
+        // Rust feature extensions require an explicit opt-in even after reload.
+        write_features(&settings_path, expected);
         assert_eq!(session.current().catalog().plugin_order(), previous_plugins);
         session.reload().await.unwrap();
         assert!(!Arc::ptr_eq(&previous, &session.current()));

@@ -29,6 +29,7 @@ pub struct McpLibrary {
     agent_dir: PathBuf,
     cwd: Option<PathBuf>,
     trusted: bool,
+    pub(crate) register_tool_search: bool,
 }
 
 #[derive(Serialize)]
@@ -65,7 +66,16 @@ impl McpLibrary {
             agent_dir: agent_dir.into(),
             cwd: cwd.map(Path::to_path_buf),
             trusted,
+            register_tool_search: true,
         }
+    }
+
+    /// Controls the standalone deferred-discovery helper. Defaults to enabled.
+    /// Hosts that register their own `ToolSearchPlugin` disable this to keep one owner per tool.
+    /// MCP session-start activation of an available search entry point is unchanged.
+    pub fn with_tool_search_registration(mut self, enabled: bool) -> Self {
+        self.register_tool_search = enabled;
+        self
     }
 
     pub(crate) fn path(&self, scope: McpScope) -> Result<PathBuf, String> {

@@ -59,6 +59,7 @@ async fn abort_during_compaction_notification_prevents_the_overflow_retry() {
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let provider = ScriptedProviderPlugin::scripted([
+        ScriptedTurn::Text("previous response".into()),
         ScriptedTurn::Error("context window token length exceeded".into()),
         ScriptedTurn::Text("unexpected retry".into()),
     ]);
@@ -81,6 +82,9 @@ async fn abort_during_compaction_notification_prevents_the_overflow_retry() {
     )
     .await
     .unwrap();
+    // Overflow compaction needs prior history; the current unsent user request
+    // alone must not be compacted away.
+    session.prompt("seed prior history").await.unwrap();
     let running = session.clone();
     let run = tokio::spawn(async move { running.prompt("recover this request").await });
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
@@ -99,6 +103,6 @@ async fn abort_during_compaction_notification_prevents_the_overflow_retry() {
         panic!("expected an agent run");
     };
     assert_eq!(outcome.stop, AgentLoopStop::Aborted);
-    assert_eq!(requests.requests().len(), 1);
+    assert_eq!(requests.requests().len(), 2);
     assert!(session.is_idle());
 }

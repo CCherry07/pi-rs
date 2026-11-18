@@ -22,7 +22,9 @@ impl Plugin for McpProductPlugin {
         PluginId::new("mcp")
     }
     fn register(&self, context: &mut RegisterContext<'_>) -> pi_plugin::Result<()> {
-        self.pool.plugin().register(context)?;
+        self.pool
+            .plugin_with_tool_search_registration(self.library.register_tool_search)
+            .register(context)?;
         context.register_command(Arc::new(McpCommand {
             library: self.library.clone(),
             rows: self.rows.clone(),

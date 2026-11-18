@@ -223,6 +223,8 @@ async fn failed_in_run_compaction_is_best_effort_and_does_not_stop_the_agent() {
     };
     let requests = provider.requests();
 
+    // Pi stops a split summary when history summarization fails; the prefix
+    // is not requested and the ordinary tool loop continues.
     assert_eq!(requests.len(), 4);
     assert_eq!(
         requests[2].system_prompt,

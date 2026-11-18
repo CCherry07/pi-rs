@@ -111,7 +111,7 @@ fn enforces_encoded_limit_and_rejects_impossible_limits() {
 fn rejects_corrupt_and_excluded_formats_without_panicking() {
     assert!(matches!(
         process_image(b"GIF broken", &ImagePolicy::default()),
-        Err(MediaError::InvalidImage)
+        Err(MediaError::ImageSizeLimit)
     ));
     assert_eq!(detect_mime_type(b"not an image.png"), None);
     assert_eq!(detect_mime_type(&[0xff, 0xd8, 0xff, 0xf7]), None);
@@ -123,6 +123,185 @@ fn rejects_corrupt_and_excluded_formats_without_panicking() {
     let mut bmp = fixture(ImageFormat::Bmp, 1, 1);
     bmp[14..18].copy_from_slice(&u32::MAX.to_le_bytes());
     assert_eq!(detect_mime_type(&bmp), None);
+}
+
+fn noisy_png(width: u32, height: u32) -> Vec<u8> {
+    let mut state = 7_u32;
+    let pixels = (0..width * height * 3)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    let image = image::RgbImage::from_raw(width, height, pixels).unwrap();
+    let mut bytes = Cursor::new(Vec::new());
+    image.write_to(&mut bytes, ImageFormat::Png).unwrap();
+    bytes.into_inner()
+}
+
+fn jpeg(bytes: &[u8], quality: u8) -> Vec<u8> {
+    let image = image::load_from_memory(bytes).unwrap().to_rgb8();
+    let mut encoded = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, quality)
+        .encode_image(&image)
+        .unwrap();
+    encoded
+}
+
+#[test]
+fn prefers_smaller_jpeg_and_notes_reencoding_without_dimension_changes() {
+    let bytes = noisy_png(96, 96);
+    let result = process_image(
+        &bytes,
+        &ImagePolicy {
+            max_encoded_bytes: STANDARD.encode(&bytes).len(),
+            ..ImagePolicy::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(result.content.mime_type, "image/jpeg");
+    assert_eq!(
+        STANDARD.decode(&result.content.data).unwrap(),
+        jpeg(&bytes, 80)
+    );
+    assert_eq!(
+        result.hints,
+        [
+            "[Image: original 96x96, displayed at 96x96. Multiply coordinates by 1.00 to map to original image.]"
+        ]
+    );
+}
+
+#[test]
+fn quality_ladder_uses_exclusive_base64_limit_before_shrinking() {
+    let bytes = noisy_png(96, 96);
+    let limit = STANDARD.encode(jpeg(&bytes, 80)).len();
+    assert!(STANDARD.encode(jpeg(&bytes, 85)).len() >= limit);
+    assert!(STANDARD.encode(jpeg(&bytes, 70)).len() < limit);
+    let result = process_image(
+        &bytes,
+        &ImagePolicy {
+            max_encoded_bytes: limit,
+            ..ImagePolicy::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        STANDARD.decode(&result.content.data).unwrap(),
+        jpeg(&bytes, 70)
+    );
+    let custom = process_image(
+        &bytes,
+        &ImagePolicy {
+            jpeg_quality: 40,
+            max_encoded_bytes: limit,
+            ..ImagePolicy::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        STANDARD.decode(&custom.content.data).unwrap(),
+        jpeg(&bytes, 40)
+    );
+}
+
+#[test]
+fn prefers_png_when_smaller_and_only_normalization_gets_conversion_hint() {
+    let bytes = fixture(ImageFormat::Png, 64, 64);
+    let mut padded = bytes.clone();
+    padded.extend([0; 10_000]);
+    let result = process_image(
+        &padded,
+        &ImagePolicy {
+            max_encoded_bytes: 1_000,
+            ..ImagePolicy::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(result.content.mime_type, "image/png");
+    assert_eq!(result.hints.len(), 1);
+    assert!(result.hints[0].contains("displayed at 64x64"));
+    let result = process_image(
+        &fixture(ImageFormat::Jpeg, 64, 64),
+        &ImagePolicy {
+            max_width: 32,
+            ..ImagePolicy::default()
+        },
+    )
+    .unwrap();
+    assert!(result.hints.iter().all(|hint| !hint.contains("converted")));
+}
+
+#[test]
+fn shrinking_preserves_pi_sequential_dimension_rounding() {
+    // Width-first rounding followed by height rounding gives 1x2, whereas
+    // a single min-ratio fit would give 2x2.
+    let bytes = fixture(ImageFormat::Png, 3, 4);
+    let result = process_image(
+        &bytes,
+        &ImagePolicy {
+            max_width: 2,
+            max_height: 2,
+            ..ImagePolicy::default()
+        },
+    )
+    .unwrap();
+    let decoded = image::load_from_memory(&STANDARD.decode(result.content.data).unwrap()).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (1, 2));
+}
+
+#[test]
+fn exif_orientation_is_applied_before_limits_and_coordinate_notes() {
+    let mut bytes = fixture(ImageFormat::Jpeg, 4, 2);
+    // JPEG APP1 containing little-endian TIFF orientation 6 (90 degrees).
+    let exif = [
+        0xff, 0xe1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0, b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0,
+        0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    bytes.splice(2..2, exif);
+    let preserved = process_image(
+        &bytes,
+        &ImagePolicy {
+            max_width: 2,
+            max_height: 4,
+            ..ImagePolicy::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(STANDARD.decode(preserved.content.data).unwrap(), bytes);
+    let resized = process_image(
+        &bytes,
+        &ImagePolicy {
+            max_width: 1,
+            ..ImagePolicy::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        resized.hints,
+        [
+            "[Image: original 2x4, displayed at 1x2. Multiply coordinates by 2.00 to map to original image.]"
+        ]
+    );
+}
+
+#[test]
+fn resize_disabled_ignores_invalid_resize_limits() {
+    let bytes = fixture(ImageFormat::Png, 2, 2);
+    let result = process_image(
+        &bytes,
+        &ImagePolicy {
+            auto_resize: false,
+            max_width: 0,
+            max_encoded_bytes: 0,
+            jpeg_quality: 0,
+            ..ImagePolicy::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(STANDARD.decode(result.content.data).unwrap(), bytes);
 }
 
 #[test]

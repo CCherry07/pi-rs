@@ -2,8 +2,8 @@
 use std::io::Cursor;
 
 use base64::Engine as _;
-use image::{DynamicImage, ImageFormat, RgbaImage};
-use pi_core::ImageContent;
+use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, RgbaImage};
+use pi_core::{ImageContent, ModelImageResizeOptions};
 
 use crate::MediaError;
 
@@ -15,6 +15,7 @@ pub struct ImagePolicy {
     pub max_width: u32,
     pub max_height: u32,
     pub max_encoded_bytes: usize,
+    pub jpeg_quality: u8,
 }
 
 impl Default for ImagePolicy {
@@ -24,7 +25,27 @@ impl Default for ImagePolicy {
             max_width: 2_000,
             max_height: 2_000,
             max_encoded_bytes: 4_718_592,
+            jpeg_quality: 80,
         }
+    }
+}
+
+impl ImagePolicy {
+    /// Overlay one model or fallback profile on the processor defaults.
+    pub fn with_resize_options(mut self, options: ModelImageResizeOptions) -> Self {
+        if let Some(value) = options.max_width {
+            self.max_width = value;
+        }
+        if let Some(value) = options.max_height {
+            self.max_height = value;
+        }
+        if let Some(value) = options.max_bytes {
+            self.max_encoded_bytes = value;
+        }
+        if let Some(value) = options.jpeg_quality {
+            self.jpeg_quality = value;
+        }
+        self
     }
 }
 
@@ -37,52 +58,69 @@ pub struct ProcessedImage {
 /// Identify, normalize and encode one image. This performs CPU work synchronously;
 /// async callers should run it on a blocking worker.
 pub fn process_image(bytes: &[u8], policy: &ImagePolicy) -> Result<ProcessedImage, MediaError> {
-    if policy.max_width == 0 || policy.max_height == 0 || policy.max_encoded_bytes <= 4 {
+    let source_mime = detect_mime_type(bytes).ok_or(MediaError::InvalidImage)?;
+    // Normalize BMP before applying inline limits, even with resizing disabled.
+    let converted = if source_mime == "image/bmp" {
+        let image = decode_image(bytes).map_err(|_| MediaError::InvalidImage)?;
+        Some(encode_image_png(&image).map_err(|_| MediaError::InvalidImage)?)
+    } else {
+        None
+    };
+    let bytes = converted.as_deref().unwrap_or(bytes);
+    let mime = if converted.is_some() {
+        "image/png"
+    } else {
+        source_mime
+    };
+    let hints = |output_mime: &str| {
+        if converted.is_some() {
+            vec![format!(
+                "[Image converted from {source_mime} to {output_mime}.]"
+            )]
+        } else {
+            Vec::new()
+        }
+    };
+    if !policy.auto_resize {
+        return Ok(processed(bytes, mime, hints(mime)));
+    }
+    if policy.max_width == 0
+        || policy.max_height == 0
+        || policy.max_encoded_bytes == 0
+        || !(1..=100).contains(&policy.jpeg_quality)
+    {
         return Err(MediaError::InvalidImagePolicy);
     }
-    let mime = detect_mime_type(bytes).ok_or(MediaError::InvalidImage)?;
-    if !policy.auto_resize && mime != "image/bmp" {
-        return Ok(processed(bytes, mime, Vec::new()));
-    }
-    let decoded = image::load_from_memory(bytes).map_err(|_| MediaError::InvalidImage)?;
+    // Pi treats decode failures during resize as an inline-size omission, not a
+    // normalization failure. EXIF orientation is measured before dimension limits.
+    let decoded = decode_image(bytes).map_err(|_| MediaError::ImageSizeLimit)?;
     let original_width = decoded.width();
     let original_height = decoded.height();
-    if mime != "image/bmp"
-        && original_width <= policy.max_width
+    if original_width <= policy.max_width
         && original_height <= policy.max_height
         && base64_size(bytes.len()) < policy.max_encoded_bytes
     {
-        return Ok(processed(bytes, mime, Vec::new()));
+        return Ok(processed(bytes, mime, hints(mime)));
     }
-    let (mut width, mut height) = if policy.auto_resize {
-        fit_dimensions(
-            original_width,
-            original_height,
-            policy.max_width,
-            policy.max_height,
-        )
-    } else {
-        (original_width, original_height)
-    };
+    let (mut width, mut height) = fit_dimensions(
+        original_width,
+        original_height,
+        policy.max_width,
+        policy.max_height,
+    );
+    if width == 0 || height == 0 {
+        return Err(MediaError::ImageSizeLimit);
+    }
     loop {
-        let resized = if width == original_width && height == original_height {
-            decoded.clone()
-        } else {
-            decoded.resize_exact(width, height, image::imageops::FilterType::Lanczos3)
-        };
-        let encoded = encode_image_png(&resized)?;
-        if !policy.auto_resize || base64_size(encoded.len()) < policy.max_encoded_bytes {
-            let mut hints = Vec::new();
-            if mime != "image/png" {
-                hints.push(format!("[Image converted from {mime} to image/png.]"));
-            }
-            if width != original_width || height != original_height {
-                let scale = f64::from(original_width) / f64::from(width);
-                hints.push(format!(
-                    "[Image: original {original_width}x{original_height}, displayed at {width}x{height}. Multiply coordinates by {scale:.2} to map to original image.]"
-                ));
-            }
-            return Ok(processed(&encoded, "image/png", hints));
+        let resized = decoded.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
+        if let Some((encoded, output_mime)) = encode_within_limit(&resized, policy)? {
+            let mut hints = hints(output_mime);
+            let scale = f64::from(original_width) / f64::from(width);
+            // Any re-encoding sets wasResized in Pi, even when dimensions did not change.
+            hints.push(format!(
+                "[Image: original {original_width}x{original_height}, displayed at {width}x{height}. Multiply coordinates by {scale:.2} to map to original image.]"
+            ));
+            return Ok(processed(&encoded, output_mime, hints));
         }
         if width == 1 && height == 1 {
             return Err(MediaError::ImageSizeLimit);
@@ -90,6 +128,58 @@ pub fn process_image(bytes: &[u8], policy: &ImagePolicy) -> Result<ProcessedImag
         width = (width.saturating_mul(3) / 4).max(1);
         height = (height.saturating_mul(3) / 4).max(1);
     }
+}
+
+fn decode_image(bytes: &[u8]) -> image::ImageResult<DynamicImage> {
+    let mut decoder = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()?
+        .into_decoder()?;
+    let orientation = if matches!(detect_mime_type(bytes), Some("image/jpeg" | "image/webp")) {
+        decoder
+            .orientation()
+            .unwrap_or(image::metadata::Orientation::NoTransforms)
+    } else {
+        image::metadata::Orientation::NoTransforms
+    };
+    let mut image = DynamicImage::from_decoder(decoder)?;
+    image.apply_orientation(orientation);
+    Ok(DynamicImage::ImageRgba8(image.into_rgba8()))
+}
+
+fn encode_image_jpeg(image: &DynamicImage, quality: u8) -> Result<Vec<u8>, MediaError> {
+    let mut output = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, quality)
+        .encode_image(&image.to_rgb8())
+        .map_err(|_| MediaError::ImageSizeLimit)?;
+    Ok(output)
+}
+
+fn encode_within_limit(
+    image: &DynamicImage,
+    policy: &ImagePolicy,
+) -> Result<Option<(Vec<u8>, &'static str)>, MediaError> {
+    let png = encode_image_png(image)?;
+    let jpeg = encode_image_jpeg(image, policy.jpeg_quality)?;
+    // Compare the encoded payload, not raw bytes: ties prefer PNG.
+    let (preferred, mime) = if base64_size(jpeg.len()) < base64_size(png.len()) {
+        (jpeg, "image/jpeg")
+    } else {
+        (png, "image/png")
+    };
+    if base64_size(preferred.len()) < policy.max_encoded_bytes {
+        return Ok(Some((preferred, mime)));
+    }
+    // This is Pi's ordered, deduplicated ladder, not a descending sort.
+    for quality in [85, 70, 55, 40] {
+        if quality == policy.jpeg_quality {
+            continue;
+        }
+        let jpeg = encode_image_jpeg(image, quality)?;
+        if base64_size(jpeg.len()) < policy.max_encoded_bytes {
+            return Ok(Some((jpeg, "image/jpeg")));
+        }
+    }
+    Ok(None)
 }
 
 /// Encode native clipboard RGBA pixels as PNG without resizing them.
@@ -125,13 +215,16 @@ fn base64_size(bytes: usize) -> usize {
 }
 
 fn fit_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
-    let scale = (f64::from(max_width) / f64::from(width))
-        .min(f64::from(max_height) / f64::from(height))
-        .min(1.0);
-    (
-        (f64::from(width) * scale).round().max(1.0) as u32,
-        (f64::from(height) * scale).round().max(1.0) as u32,
-    )
+    let (mut width, mut height) = (width, height);
+    if width > max_width {
+        height = (f64::from(height) * f64::from(max_width) / f64::from(width)).round() as u32;
+        width = max_width;
+    }
+    if height > max_height {
+        width = (f64::from(width) * f64::from(max_height) / f64::from(height)).round() as u32;
+        height = max_height;
+    }
+    (width, height)
 }
 
 /// Detect supported image bytes using current Pi's magic-byte rules, independent

@@ -130,6 +130,10 @@ impl Fixture {
                                     remote_calls.lock().unwrap().push(request.clone());
                                     json!({"resources":[{"uri":"doc://guide","name":"guide"}]})
                                 }
+                                "resources/templates/list" => {
+                                    remote_calls.lock().unwrap().push(request.clone());
+                                    json!({"resourceTemplates":[{"uriTemplate":"doc://guide/{id}","name":"guide"}]})
+                                }
                                 "resources/read" => {
                                     remote_calls.lock().unwrap().push(request.clone());
                                     json!({"contents":[{"uri":"doc://guide","text":"Deferred resource contents."}]})
@@ -646,6 +650,71 @@ async fn auto_codemode_appends_before_first_request_and_executes_mcp_without_dec
                 .iter()
                 .all(|request| !declares(request, SEARCH))
         );
+    }
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn codemode_resource_declarations_match_their_structured_returns() {
+    let fixture = Fixture::configured(true, json!({}), None, Some(&["read"])).await;
+    fixture.set_script([("codemode", json!({"code":r#"
+        const cases = [
+            ['list_mcp_resources', {}, 'resources', 'uri'],
+            ['list_mcp_resource_templates', {}, 'resourceTemplates', 'uriTemplate'],
+            ['read_mcp_resource', {server: 'docs', uri: 'doc://guide'}, 'contents', 'text']
+        ];
+        for (const [name, args, field, itemField] of cases) {
+            const declaration = await describeTool(name);
+            if (!declaration.includes('Promise<{') || !declaration.includes(field + ':') || !declaration.includes(itemField + ':')) {
+                throw new Error('Incorrect resource return declaration: ' + declaration);
+            }
+            const value = await tools[name](args);
+            if (!Array.isArray(value[field]) || value[field].length !== 1 || typeof value[field][0][itemField] !== 'string') {
+                throw new Error('Resource return does not match its declaration: ' + JSON.stringify(value));
+            }
+            text({name, value});
+        }
+    "#}))]);
+    let PromptOutcome::Agent(outcome) = fixture
+        .session
+        .current()
+        .prompt("Inspect the resource tools and use them.")
+        .await
+        .unwrap()
+    else {
+        panic!("expected agent run");
+    };
+    let result = outcome
+        .new_messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) if result.tool_name == "codemode" => Some(result),
+            _ => None,
+        })
+        .expect("codemode executed");
+    assert!(!result.is_error, "{:?}", result.content);
+    let content = serde_json::to_string(&result.content).unwrap();
+    for expected in [
+        "resources",
+        "resourceTemplates",
+        "contents",
+        "Deferred resource contents.",
+    ] {
+        assert!(content.contains(expected), "missing {expected}: {content}");
+    }
+    assert_eq!(fixture.remote_calls.lock().unwrap().len(), 3);
+    fixture.assert_active("tool_search", false);
+    {
+        let script = fixture.script.lock().unwrap();
+        assert!(
+            script
+                .requests
+                .iter()
+                .all(|request| RESOURCE_TOOLS.iter().all(|name| !declares(request, name)))
+        );
+        let messages = script.requests[0]["messages"].to_string();
+        assert!(messages.contains("Call the tools of `codemode` servers from codemode scripts."));
+        assert!(!messages.contains("Load the tools of `tool_search` servers"));
     }
     fixture.shutdown().await;
 }

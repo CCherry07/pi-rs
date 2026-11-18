@@ -1,0 +1,194 @@
+[
+  {
+    "schema": null,
+    "expected": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "enum": [
+                  "text",
+                  "image",
+                  "audio",
+                  "resource_link",
+                  "resource"
+                ]
+              },
+              "text": {
+                "type": "string"
+              },
+              "data": {
+                "type": "string"
+              },
+              "mimeType": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "structuredContent": {},
+        "isError": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "additionalProperties": true
+    }
+  },
+  {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "answer": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "answer"
+      ]
+    },
+    "expected": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "enum": [
+                  "text",
+                  "image",
+                  "audio",
+                  "resource_link",
+                  "resource"
+                ]
+              },
+              "text": {
+                "type": "string"
+              },
+              "data": {
+                "type": "string"
+              },
+              "mimeType": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "structuredContent": {
+          "type": "object",
+          "properties": {
+            "answer": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "answer"
+          ]
+        },
+        "isError": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "additionalProperties": true
+    }
+  },
+  {
+    "schema": {
+      "$defs": {
+        "Item": {
+          "type": "string"
+        }
+      },
+      "properties": {
+        "$ref": {
+          "$ref": "#/$defs/Item"
+        },
+        "self": {
+          "$ref": "#"
+        }
+      },
+      "const": {
+        "$ref": "#/literal"
+      }
+    },
+    "expected": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "enum": [
+                  "text",
+                  "image",
+                  "audio",
+                  "resource_link",
+                  "resource"
+                ]
+              },
+              "text": {
+                "type": "string"
+              },
+              "data": {
+                "type": "string"
+              },
+              "mimeType": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "structuredContent": {
+          "$defs": {
+            "Item": {
+              "type": "string"
+            }
+          },
+          "properties": {
+            "$ref": {
+              "$ref": "#/properties/structuredContent/$defs/Item"
+            },
+            "self": {
+              "$ref": "#/properties/structuredContent"
+            }
+          },
+          "const": {
+            "$ref": "#/literal"
+          }
+        },
+        "isError": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "additionalProperties": true
+    }
+  }
+]

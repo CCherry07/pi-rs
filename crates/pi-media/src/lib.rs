@@ -15,7 +15,7 @@ pub enum MediaError {
     #[error("[Image omitted: could not be resized below the inline image size limit.]")]
     ImageSizeLimit,
     #[error(
-        "image limits must have positive dimensions and an encoded byte limit greater than four"
+        "image limits must have positive dimensions and encoded byte limit, and JPEG quality from 1 to 100"
     )]
     InvalidImagePolicy,
 }

@@ -443,6 +443,120 @@ async fn deferred_config_activates_discovery_even_when_no_tool_matches() {
 }
 
 #[tokio::test]
+async fn server_directory_uses_configured_exposure_without_active_entry_points_or_extra_summaries()
+{
+    let server = Server::new(Options::default()).await;
+    let directory = tempfile::tempdir().unwrap();
+    for (exposure, reach, instruction) in [
+        (
+            "codemode",
+            "codemode",
+            "Call the tools of `codemode` servers from codemode scripts.",
+        ),
+        (
+            "deferred",
+            "tool_search",
+            "Load the tools of `tool_search` servers with `tool_search`.",
+        ),
+        ("direct", "", ""),
+    ] {
+        fs::write(
+            directory.path().join("mcp.json"),
+            json!({"mcpServers":{
+                "docs":{"url":server.url,"exposure":exposure,"description":"Reference library"}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let plugin = McpLibrary::new(directory.path(), None, false)
+            .prepare()
+            .await
+            .unwrap();
+        let (driver, registry) = RegistriesBuilder::new()
+            .register_plugins(vec![plugin])
+            .unwrap();
+        assert!(registry.tool_infos().iter().any(|tool| {
+            tool.discovery.namespace.as_ref().is_some_and(|namespace| {
+                namespace
+                    .instructions
+                    .as_deref()
+                    .is_some_and(|instructions| {
+                        instructions.contains("Use the fixture resource catalogue.")
+                    })
+            })
+        }));
+        for active_tools in [Vec::new(), vec!["read_mcp_resource".to_string()]] {
+            let patch = driver
+                .before_agent_start(
+                    &pi_core::RunId::next(),
+                    directory.path(),
+                    &AbortHandle::new().1,
+                    pi_plugin::BeforeAgentStartEvent {
+                        system_prompt: "base".into(),
+                        prompt_state: None,
+                        input_messages: Vec::new(),
+                        active_tools,
+                        provider_id: "scripted".into(),
+                        model_id: "test".into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let expected = if exposure == "direct" {
+                "base".to_string()
+            } else {
+                format!(
+                    "base\n\n<mcp_servers>\nMCP servers whose tools are not declared to you. {instruction}\n- mcp__docs ({reach}): Reference library\n</mcp_servers>"
+                )
+            };
+            assert_eq!(patch.system_prompt.as_deref(), Some(expected.as_str()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn host_supplied_tool_search_does_not_duplicate_the_standalone_helper() {
+    let server = Server::new(Options::default()).await;
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("mcp.json"),
+        json!({"mcpServers":{
+            "docs":{"url":server.url,"exposure":"deferred"}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let library =
+        McpLibrary::new(directory.path(), None, false).with_tool_search_registration(false);
+    let plugin = library.prepare().await.unwrap();
+    let (_, mcp_only) = RegistriesBuilder::new()
+        .register_plugins(vec![plugin.clone()])
+        .unwrap();
+    assert!(mcp_only.tool("tool_search").is_none());
+    for host_first in [false, true] {
+        let search: Arc<dyn pi_plugin::Plugin> = Arc::new(pi_plugin_tool_search::ToolSearchPlugin);
+        let plugins = if host_first {
+            vec![search, plugin.clone()]
+        } else {
+            vec![plugin.clone(), search]
+        };
+        let (_, registry) = RegistriesBuilder::new().register_plugins(plugins).unwrap();
+        assert_eq!(
+            registry
+                .tool_infos()
+                .iter()
+                .filter(|tool| tool.spec.name == "tool_search")
+                .count(),
+            1
+        );
+        assert!(registry.tool("tool_search").unwrap().reaches_tools());
+        for name in RESOURCE_TOOLS {
+            assert!(registry.tool(name).is_some());
+        }
+    }
+}
+
+#[tokio::test]
 async fn resource_timeout_and_abort_cancel_remote_reads() {
     for abort_call in [false, true] {
         let server = Server::new(Options {

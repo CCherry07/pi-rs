@@ -149,17 +149,16 @@ fn prepare_target(
 
 fn remove_pi_documentation(system_prompt: &str) -> Result<String, String> {
     let documentation_start = system_prompt
-        .find("\nPi documentation (read only")
+        .find("\n\n<docs>\nPi documentation (read only")
         .ok_or_else(|| "default system prompt has no Pi documentation section".to_string())?;
-    // Coding appends configured instructions and project context after this final docs line.
-    // Ending at the cwd marker would also remove those independent prompt contributions.
-    const DOCUMENTATION_END: &str = "\n- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)";
+    // Remove only the structured docs section, not the independent addendum or context.
+    const DOCUMENTATION_END: &str = "\n</docs>";
     let documentation_end = system_prompt[documentation_start..]
         .find(DOCUMENTATION_END)
         .map(|offset| documentation_start + offset + DOCUMENTATION_END.len())
         .filter(|&end| system_prompt[end..].starts_with('\n'))
         .ok_or_else(|| "default system prompt has no Pi documentation end marker".to_string())?;
-    if !system_prompt[documentation_end..].contains("\nCurrent working directory:") {
+    if !system_prompt[documentation_end..].contains("\n<cwd>\n") {
         return Err(
             "default system prompt has no current-working-directory marker after Pi documentation"
                 .to_string(),
@@ -235,8 +234,9 @@ mod tests {
 
     #[test]
     fn documentation_removal_preserves_append_and_project_context() {
-        let docs = "\nPi documentation (read only):\n- Main documentation: README.md\n- Always read pi .md files completely and follow links to related docs (e.g., tui.md for TUI API details)";
-        let suffix = "\n\nAppend instructions\n\n<project_context>Keep this context</project_context>\nCurrent working directory: /tmp";
+        let docs =
+            "\n\n<docs>\nPi documentation (read only):\n- Main documentation: README.md\n</docs>";
+        let suffix = "\n\n<addendum>\nAppend instructions\n</addendum>\n\n<project_context>Keep this context</project_context>\n\n<cwd>\n/tmp\n</cwd>";
         assert_eq!(
             remove_pi_documentation(&format!("before{docs}{suffix}")).unwrap(),
             format!("before{suffix}")
@@ -244,7 +244,7 @@ mod tests {
         assert!(remove_pi_documentation("before").is_err());
         assert!(
             remove_pi_documentation(
-                "before\nPi documentation (read only):\nCurrent working directory: /tmp"
+                "before\n\n<docs>\nPi documentation (read only):\n<cwd>\n/tmp\n</cwd>"
             )
             .is_err()
         );
