@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.9.0](https://github.com/CCherry07/pi-rs/compare/v0.8.6...v0.9.0) (2026-11-18)
+
+
+### Features
+
+* Add comprehensive tests and enhancements for UI command handling and session transfer ([f12552b](https://github.com/CCherry07/pi-rs/commit/f12552b88164554171b72fa597d5c3f5ab3c5a9e))
+* add PowerShell plugin and enhance existing tools ([a04d677](https://github.com/CCherry07/pi-rs/commit/a04d677970a08c5f8ee7cd38f652f3a12571783d))
+* add tests and implement functionality for new model operations ([f09db38](https://github.com/CCherry07/pi-rs/commit/f09db389616d461802bee3481cbc1cbca5128278))
+* enhance context handling in extension host and plugins ([4a78bb5](https://github.com/CCherry07/pi-rs/commit/4a78bb565d778432618076d05d5a403f5134252b))
+* Enhance Extension UI with Pi Component Integration ([75f99c3](https://github.com/CCherry07/pi-rs/commit/75f99c3f8bfe43becd8618a3adf78413fee41a56))
+* Enhance OpenRouter plugin with model catalog and support for Anthropics API ([e74d283](https://github.com/CCherry07/pi-rs/commit/e74d2830e02b85d90ea7b9f2e0994257e7f907e8))
+* enhance RPC integration, session controls and auth checks ([1fcf29a](https://github.com/CCherry07/pi-rs/commit/1fcf29a2af360e7f50768c070667e9f4d06d7ca1))
+* Implement Codex authentication with token rotation and update OAuth handling ([4e08084](https://github.com/CCherry07/pi-rs/commit/4e08084bba404b47e80836ec6de6c8d64d4cbcfc))
+* improve desktop history, dynamic hooks, and MCP integration ([303fe1e](https://github.com/CCherry07/pi-rs/commit/303fe1eb1c880925f979ae8998515aeef80eac8b))
+* Introduce xAI provider with dynamic model loading ([e74d283](https://github.com/CCherry07/pi-rs/commit/e74d2830e02b85d90ea7b9f2e0994257e7f907e8))
+* js plugin ([#21](https://github.com/CCherry07/pi-rs/issues/21)) ([8df724b](https://github.com/CCherry07/pi-rs/commit/8df724bff3271cc2141eeb6b583b9cb1862926a2))
+* Refactor AgentHarnessBuilder to own configuration and implement SessionGenerationFactory ([4fc85f7](https://github.com/CCherry07/pi-rs/commit/4fc85f7b6db35b6562aebcbe69ea6c84757da9e6))
+* Refactor code for improved readability and maintainability across multiple files ([b9f873a](https://github.com/CCherry07/pi-rs/commit/b9f873ae2d3efaa9fe584ede5639380cca9735ae))
+* Refactor subagent desktop functionality and remove unused code ([1c9f5fd](https://github.com/CCherry07/pi-rs/commit/1c9f5fda5e4165b8db1100483f4e91c09f45936f))
+
+
+### Bug Fixes
+
+* align coding prompts and tools with current Pi ([469b923](https://github.com/CCherry07/pi-rs/commit/469b923f26097141e5e08f4dee3773ea624976b5))
+* preserve owned prompt and tool conformance components ([c88e3bb](https://github.com/CCherry07/pi-rs/commit/c88e3bb787b6cd7c5178e1dd354841c5417a42a5))
+
 ## [0.8.6](https://github.com/CCherry07/pi-rs/compare/v0.8.5...v0.8.6) (2026-10-01)
 
 
