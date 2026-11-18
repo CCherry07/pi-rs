@@ -154,6 +154,7 @@ pub async fn execute(request: ShellRequest) -> Result<ShellResult, ShellError> {
         exit_code: status.code(),
         cancelled,
         timed_out,
+        shell_exit_after: shell_exit_after.filter(|_| timed_out),
         truncated,
         truncation,
         full_output_path: capture.full_output_path,

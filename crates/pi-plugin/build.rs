@@ -56,7 +56,11 @@ fn main() {
         .filter(|path| path.is_file())
         .collect::<Vec<_>>();
     for root in ABI_SOURCE_ROOTS {
-        collect_abi_inputs(&workspace.join(root), &mut inputs);
+        let root = workspace.join(root);
+        // Watch additions/removals too: listing only existing files can leave
+        // one feature build with an old hash after a new SDK source/test appears.
+        println!("cargo:rerun-if-changed={}", root.display());
+        collect_abi_inputs(&root, &mut inputs);
     }
     inputs.sort();
     inputs.dedup();

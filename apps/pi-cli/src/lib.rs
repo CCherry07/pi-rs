@@ -610,6 +610,11 @@ fn javascript_host_required(
     .requires_javascript_host()
 }
 
+struct CliShutdown<'a> {
+    binding: Option<PluginContextBinding>,
+    rpc_signals: Option<&'a rpc_signals::RpcSignals>,
+}
+
 async fn run_cli_with_shutdown(
     mode: CLIMode,
     session: PiSession,
@@ -617,7 +622,7 @@ async fn run_cli_with_shutdown(
     project_trust: ProjectTrustService,
     interactive_requests: InteractiveRequestReceivers,
     agent_dir: std::path::PathBuf,
-    shutdown: Option<PluginContextBinding>,
+    shutdown: CliShutdown<'_>,
 ) -> Result<(), String> {
     if let Some(shutdown) = shutdown {
         let abort_session = session.clone();

@@ -74,6 +74,13 @@ impl Tool for LsTool {
             context.signal().check().map_err(|_| ToolError::Aborted)?;
             entries.push((entry.file_name(), entry.path()));
         }
+        // Pi lowercases names before localeCompare. Use the oracle's default
+        // English ICU collation rather than approximating accents/punctuation.
+        let collator = icu_collator::Collator::try_new(
+            icu_locale::locale!("en-US").into(),
+            Default::default(),
+        )
+        .map_err(|error| execution(format!("Could not initialize filename collation: {error}")))?;
         entries.sort_by(|(left, _), (right, _)| {
             left.to_string_lossy()
                 .to_lowercase()

@@ -2641,9 +2641,17 @@ Retained pre-compaction usage is ignored for subsequent threshold decisions so i
 immediate compaction loop. It is also excluded from product context reporting: context usage is
 unknown immediately after compaction and becomes known again only after a later successful
 assistant response. Assistant usage is a valid estimate anchor only when its timestamp is not older
-than a prefix message inserted before it, such as a compaction summary. Each summary request is also
-constrained by the active generation's `ModelSpec`: non-reasoning models force thinking off, and the
-configured summary budget is clamped to the model's maximum output tokens.
+than a prefix message inserted before it, such as a compaction summary. Summary thinking still follows
+the active model's capabilities, but Pi-compatible summary requests leave `max_output_tokens` unset
+rather than deriving a cap from the retained-context reserve. Length-limited responses and tool calls
+are rejected as incomplete summaries. Conversation serialization omits assistant thinking, preserves
+Pi's text-block joining and UTF-16 truncation rules, and uses the same text serializer for branch
+summaries rather than pretty JSON. `SessionCompactionPolicy::prepare_branch` defaults to `prepare`;
+Coding overrides it to accumulate previous branch file-operation metadata and then uses `finalize`.
+File/tool-name policy remains in Coding, not the generic session algorithm. System messages remain
+prompt state and are excluded from compactable conversation input. When trailing tool results exceed
+the retained budget, the cut falls back to their closest valid assistant call, never the first message;
+this allows in-run compaction while keeping call/result pairs intact.
 
 Normal assistant turns classify provider failures with the same current Pi transient/terminal
 rules. Numeric statuses and socket codes retain identifier boundaries, and subscription/plan quota

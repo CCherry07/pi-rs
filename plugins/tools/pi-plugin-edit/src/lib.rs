@@ -518,6 +518,88 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn fuzzy_edit_preserves_untouched_lines_and_mixed_line_endings() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("a");
+        std::fs::write(
+            &p,
+            "\u{feff}keep ‘smart’  \r\nold\u{00a0}value  \nkeep—dash\r\n",
+        )
+        .unwrap();
+        run(
+            &p,
+            json!({"path":"a","edits":[{"oldText":"old value","newText":"new\nvalue"}]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "\u{feff}keep ‘smart’  \r\nnew\nvalue\nkeep—dash\r\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_match_still_rejects_fuzzy_equivalent_duplicates() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("a");
+        let before = "say 'hello'\nsay ‘hello’";
+        std::fs::write(&path, before).unwrap();
+        let error = run(
+            &path,
+            json!({"path":"a", "edits":[{"oldText":"say 'hello'", "newText":"changed"}]}),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Found 2 occurrences"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_follows_symlinks_preserves_hardlinks_and_decodes_utf8_lossily() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("target");
+        let alias = root.path().join("a");
+        let hardlink = root.path().join("hardlink");
+        std::fs::write(&path, b"before\n\xff\n").unwrap();
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        std::fs::hard_link(&path, &hardlink).unwrap();
+        run(
+            &alias,
+            json!({"path":"a", "edits":[{"oldText":"before", "newText":"after"}]}),
+        )
+        .await
+        .unwrap();
+        assert!(
+            std::fs::symlink_metadata(&alias)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(hardlink).unwrap(),
+            "after\n\u{fffd}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_preserves_classic_mac_endings_and_cr_lf_seams() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("a");
+        std::fs::write(&path, "keep\rchange\rtail\r").unwrap();
+        run(
+            &path,
+            json!({"path":"a", "edits":[{"oldText":"change", "newText":"changed\nsecond"}]}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "keep\rchanged\rsecond\rtail\r"
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_overlap() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("a");

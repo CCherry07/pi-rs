@@ -461,6 +461,8 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
         .set_name(Some("Snapshot DX".to_string()))
         .await
         .unwrap();
+    // Like Pi's _appendEntry, label/name metadata also advances the current leaf.
+    let leaf_id = session.history().leaf_id().unwrap();
 
     let state = session.snapshot().agent;
     let (provider_id, model_id) = (state.provider_id, state.model_id);
@@ -504,7 +506,7 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
     );
     assert_eq!(
         replacement_context.session.leaf_entry().unwrap().unwrap()["id"],
-        entry_id
+        leaf_id
     );
     assert_eq!(
         replacement_context.session.header().unwrap()["id"],
@@ -541,10 +543,10 @@ async fn pi_plugin_context_binds_the_direct_native_plugin_view() {
     assert_eq!(snapshot.id(), session.history().header().id);
     assert_eq!(snapshot.cwd(), session.history().header().cwd);
     assert_eq!(snapshot.name(), Some("Snapshot DX"));
-    assert_eq!(snapshot.leaf_id(), Some(entry_id.as_str()));
+    assert_eq!(snapshot.leaf_id(), Some(leaf_id.as_str()));
     assert_eq!(snapshot.label(&entry_id), Some("checkpoint"));
     assert_eq!(snapshot.leaf().unwrap().kind(), &SessionEntryKind::Custom);
-    assert_eq!(snapshot.branch().last().unwrap().id(), entry_id);
+    assert_eq!(snapshot.branch().last().unwrap().id(), leaf_id);
     assert_eq!(
         snapshot.entry(&entry_id).unwrap().raw()["data"]["kept"],
         true

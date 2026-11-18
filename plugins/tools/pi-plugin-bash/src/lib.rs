@@ -182,7 +182,15 @@ async fn execute_bash(
         let seconds = input
             .get("timeout")
             .map_or_else(|| "unknown".to_string(), Value::to_string);
-        output.push_str(&format!("\n\nCommand timed out after {seconds} seconds"));
+        let mut status = format!("Command timed out after {seconds} seconds");
+        if let (Some(exit_code), Some(after)) = (result.exit_code, result.shell_exit_after) {
+            let after_seconds = (after.as_secs_f64() * 10.0).round() / 10.0;
+            status.push_str(&format!(". The shell exited with code {exit_code} after {after_seconds} seconds, but background processes it started kept writing output until the timeout."));
+        }
+        if !output.is_empty() {
+            output.push_str("\n\n");
+        }
+        output.push_str(&status);
         return Err(execution(output));
     }
     if let Some(code) = result.exit_code.filter(|code| *code != 0) {
@@ -403,6 +411,61 @@ mod tests {
                 .pointer("/properties/timeout/type"),
             Some(&Value::String("number".to_string()))
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_reports_shell_exit_when_descendants_keep_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_, signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let error = tokio::time::timeout(
+            Duration::from_secs(3),
+            BashTool.execute(
+                ToolContext::standalone(directory.path().into(), signal),
+                ToolCallId::new("background"),
+                // Builtins avoid making post-exit output depend on interpreter
+                // startup or spawning a sleep process before the 100ms grace.
+                json!({"command":"(: > started; i=0; while [ $i -lt 500 ]; do printf tick; j=0; while [ $j -lt 1000 ]; do j=$((j+1)); done; i=$((i+1)); done) & while [ ! -f started ]; do :; done; exit 7", "timeout":0.3}),
+                updates,
+            ),
+        )
+        .await
+        .expect("timeout must remain active while draining descendant output")
+        .unwrap_err();
+        let ToolError::Execution(message) = error else {
+            panic!("expected an execution error")
+        };
+        assert!(message.contains("tick"));
+        assert!(
+            message.contains(
+                "Command timed out after 0.3 seconds. The shell exited with code 7 after "
+            )
+        );
+        assert!(message.ends_with(
+            "seconds, but background processes it started kept writing output until the timeout."
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn empty_timeout_feedback_does_not_claim_no_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_, signal) = AbortHandle::new();
+        let (updates, _) = ToolUpdateSink::channel();
+        let error = BashTool
+            .execute(
+                ToolContext::standalone(directory.path().into(), signal),
+                ToolCallId::new("timeout"),
+                json!({"command":"sleep 1", "timeout":0.05}),
+                updates,
+            )
+            .await
+            .unwrap_err();
+        let ToolError::Execution(message) = error else {
+            panic!("expected an execution error")
+        };
+        assert_eq!(message, "Command timed out after 0.05 seconds");
     }
 
     #[tokio::test]
